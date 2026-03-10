@@ -226,4 +226,4 @@ audio = [
 ## Estado
 
 - [ ] En progreso
-- [ ] Completado
+- [x] Completado

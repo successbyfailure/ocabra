@@ -40,7 +40,11 @@ async def lifespan(app: FastAPI):
     # Stream 1-B: Worker Pool + Model Manager
     from ocabra.core.worker_pool import WorkerPool
     from ocabra.core.model_manager import ModelManager
+    from ocabra.backends.whisper_backend import WhisperBackend
+    from ocabra.backends.tts_backend import TTSBackend
     worker_pool = WorkerPool()
+    worker_pool.register_backend("whisper", WhisperBackend())
+    worker_pool.register_backend("tts", TTSBackend())
     model_manager = ModelManager(worker_pool, gpu_manager, gpu_scheduler)
     app.state.worker_pool = worker_pool
     app.state.model_manager = model_manager
