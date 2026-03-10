@@ -1,32 +1,127 @@
-// Stub — Stream 1-D implements the full logic.
-// Structure is defined here so other streams can import it.
 import { useEffect, useRef, useState } from "react"
-import type { WSEvent } from "@/types"
+import type { GPUState, ModelStatus, WSEvent } from "@/types"
+import { useGpuStore } from "@/stores/gpuStore"
+import { useModelStore } from "@/stores/modelStore"
+import { useDownloadStore } from "@/stores/downloadStore"
 
-const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ocabra/ws`
+const getWebSocketUrl = () =>
+  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
+
+function normalizeGpuStats(rawData: unknown): GPUState[] | null {
+  if (!Array.isArray(rawData)) {
+    return null
+  }
+
+  return rawData.map((gpu) => {
+    const data = (gpu ?? {}) as Record<string, unknown>
+    return {
+      index: Number(data.index ?? 0),
+      name: String(data.name ?? "GPU"),
+      totalVramMb: Number(data.total_vram_mb ?? data.totalVramMb ?? 0),
+      freeVramMb: Number(data.free_vram_mb ?? data.freeVramMb ?? 0),
+      usedVramMb: Number(data.used_vram_mb ?? data.usedVramMb ?? 0),
+      utilizationPct: Number(data.utilization_pct ?? data.utilizationPct ?? 0),
+      temperatureC: Number(data.temperature_c ?? data.temperatureC ?? 0),
+      powerDrawW: Number(data.power_draw_w ?? data.powerDrawW ?? 0),
+      powerLimitW: Number(data.power_limit_w ?? data.powerLimitW ?? 0),
+      lockedVramMb: Number(data.locked_vram_mb ?? data.lockedVramMb ?? 0),
+    }
+  })
+}
+
+function normalizeEvent(rawEvent: unknown): WSEvent | null {
+  if (typeof rawEvent !== "object" || rawEvent === null) {
+    return null
+  }
+
+  const maybeEvent = rawEvent as Record<string, unknown>
+  if (typeof maybeEvent.type !== "string") {
+    return null
+  }
+
+  if (maybeEvent.type === "model_event") {
+    const data = maybeEvent.data as Record<string, unknown>
+    if (data && typeof data.model_id === "string") {
+      return {
+        type: "model_event",
+        data: {
+          event: String(data.event ?? "status_changed"),
+          modelId: data.model_id,
+          status: String(data.status ?? data.new_status ?? "configured") as ModelStatus,
+        },
+      }
+    }
+  }
+
+  if (maybeEvent.type === "download_progress") {
+    const data = maybeEvent.data as Record<string, unknown>
+    if (data && typeof data.job_id === "string") {
+      return {
+        type: "download_progress",
+        data: {
+          jobId: data.job_id,
+          pct: Number(data.pct ?? 0),
+          speedMbS: Number(data.speed_mb_s ?? data.speedMbS ?? 0),
+        },
+      }
+    }
+  }
+
+  if (maybeEvent.type === "gpu_stats") {
+    const data = normalizeGpuStats(maybeEvent.data)
+    if (!data) {
+      return null
+    }
+    return {
+      type: "gpu_stats",
+      data,
+    }
+  }
+
+  return maybeEvent as WSEvent
+}
 
 export function useWebSocket() {
   const [connected, setConnected] = useState(false)
   const [lastEvent, setLastEvent] = useState<WSEvent | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const retryDelay = useRef(1000)
+  const reconnectDelayMs = useRef(1000)
+  const reconnectTimer = useRef<number | null>(null)
+
+  const setGpus = useGpuStore((state) => state.setGpus)
+  const updateModel = useModelStore((state) => state.updateModel)
+  const updateJob = useDownloadStore((state) => state.updateJob)
 
   useEffect(() => {
     let cancelled = false
 
     function connect() {
       if (cancelled) return
-      const ws = new WebSocket(WS_URL)
+      const ws = new WebSocket(getWebSocketUrl())
       wsRef.current = ws
 
       ws.onopen = () => {
         setConnected(true)
-        retryDelay.current = 1000
+        reconnectDelayMs.current = 1000
       }
 
       ws.onmessage = (e) => {
         try {
-          const event = JSON.parse(e.data) as WSEvent
+          const event = normalizeEvent(JSON.parse(e.data))
+          if (!event) return
+
+          if (event.type === "gpu_stats") {
+            setGpus(event.data)
+          } else if (event.type === "model_event") {
+            updateModel(event.data.modelId, { status: event.data.status })
+          } else if (event.type === "download_progress") {
+            updateJob(event.data.jobId, {
+              progressPct: event.data.pct,
+              speedMbS: event.data.speedMbS,
+              status: event.data.pct >= 100 ? "completed" : "downloading",
+            })
+          }
+
           setLastEvent(event)
         } catch {
           // ignore malformed messages
@@ -36,8 +131,8 @@ export function useWebSocket() {
       ws.onclose = () => {
         setConnected(false)
         if (!cancelled) {
-          setTimeout(connect, retryDelay.current)
-          retryDelay.current = Math.min(retryDelay.current * 2, 30_000)
+          reconnectTimer.current = window.setTimeout(connect, reconnectDelayMs.current)
+          reconnectDelayMs.current = Math.min(reconnectDelayMs.current * 2, 30_000)
         }
       }
     }
@@ -45,9 +140,12 @@ export function useWebSocket() {
     connect()
     return () => {
       cancelled = true
+      if (reconnectTimer.current !== null) {
+        window.clearTimeout(reconnectTimer.current)
+      }
       wsRef.current?.close()
     }
-  }, [])
+  }, [setGpus, updateJob, updateModel])
 
   return { connected, lastEvent }
 }

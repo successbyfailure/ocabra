@@ -55,6 +55,13 @@ export interface ModelState {
   loadedAt: string | null
 }
 
+export interface ModelPatchRequest {
+  loadPolicy?: LoadPolicy
+  preferredGpu?: number | null
+  autoReload?: boolean
+  displayName?: string
+}
+
 export interface DownloadJob {
   jobId: string
   source: "huggingface" | "ollama"
@@ -67,6 +74,9 @@ export interface DownloadJob {
   startedAt: string
   completedAt: string | null
 }
+
+export type DownloadSource = "huggingface" | "ollama"
+export type DownloadStatus = "queued" | "downloading" | "completed" | "failed" | "cancelled"
 
 export interface HFModelCard {
   repoId: string
@@ -144,6 +154,20 @@ export interface PerformanceStats {
     errorCount: number
     uptimePct: number
   }[]
+}
+
+export interface GPUStatHistoryPoint {
+  timestamp: string
+  usedVramMb: number
+  utilizationPct: number
+  temperatureC: number
+  powerDrawW: number
+}
+
+export interface GPUStatHistory {
+  gpuIndex: number
+  window: string
+  points: GPUStatHistoryPoint[]
 }
 
 // WebSocket events

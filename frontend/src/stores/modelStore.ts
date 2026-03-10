@@ -20,7 +20,35 @@ export const useModelStore = create<ModelStore>((set) => ({
     set((state) => ({
       models: {
         ...state.models,
-        [modelId]: { ...state.models[modelId], ...patch },
+        [modelId]: state.models[modelId]
+          ? { ...state.models[modelId], ...patch }
+          : {
+              modelId,
+              displayName: modelId,
+              backendType: "vllm",
+              status: "configured",
+              loadPolicy: "on_demand",
+              autoReload: false,
+              preferredGpu: null,
+              currentGpu: [],
+              vramUsedMb: 0,
+              capabilities: {
+                chat: false,
+                completion: false,
+                tools: false,
+                vision: false,
+                embeddings: false,
+                reasoning: false,
+                imageGeneration: false,
+                audioTranscription: false,
+                tts: false,
+                streaming: false,
+                contextLength: 0,
+              },
+              lastRequestAt: null,
+              loadedAt: null,
+              ...patch,
+            },
       },
     })),
   loadModel: async (modelId) => {
@@ -31,5 +59,14 @@ export const useModelStore = create<ModelStore>((set) => ({
   },
   unloadModel: async (modelId) => {
     await api.models.unload(modelId)
+    set((state) => ({
+      models: {
+        ...state.models,
+        [modelId]: {
+          ...state.models[modelId],
+          status: "unloaded",
+        },
+      },
+    }))
   },
 }))
