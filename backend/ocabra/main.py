@@ -73,10 +73,11 @@ app.include_router(health_router)
 # app.include_router(models_router, prefix="/ocabra")
 
 # Stream 1-C: Registry + Downloads
-# from ocabra.api.internal.registry import router as registry_router
-# from ocabra.api.internal.downloads import router as downloads_router
-# app.include_router(registry_router, prefix="/ocabra")
-# app.include_router(downloads_router, prefix="/ocabra")
+from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
+from ocabra.api.internal.registry import router as registry_router  # noqa: E402
+
+app.include_router(registry_router, prefix="/ocabra")
+app.include_router(downloads_router, prefix="/ocabra")
 
 # Stream 3-A: OpenAI API
 # from ocabra.api.openai import router as openai_router
