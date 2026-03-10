@@ -233,4 +233,4 @@ Todos los datos son en tiempo real vía WebSocket.
 ## Estado
 
 - [ ] En progreso
-- [ ] Completado
+- [x] Completado

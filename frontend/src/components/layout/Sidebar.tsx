@@ -9,6 +9,11 @@ import {
 } from "lucide-react"
 import { clsx } from "clsx"
 
+interface SidebarProps {
+  open: boolean
+  onClose: () => void
+}
+
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard",  icon: LayoutDashboard },
   { to: "/models",    label: "Models",     icon: Boxes },
@@ -18,9 +23,14 @@ const NAV_ITEMS = [
   { to: "/settings",  label: "Settings",   icon: Settings },
 ]
 
-export function Sidebar() {
+export function Sidebar({ open, onClose }: SidebarProps) {
   return (
-    <aside className="w-56 flex flex-col border-r border-border bg-card">
+    <aside
+      className={clsx(
+        "fixed inset-y-0 left-0 z-30 w-56 -translate-x-full flex-col border-r border-border bg-card transition-transform lg:static lg:translate-x-0",
+        open && "translate-x-0",
+      )}
+    >
       {/* Logo */}
       <div className="flex items-center gap-2 px-5 py-5 border-b border-border">
         <span className="text-xl font-bold tracking-tight text-foreground">oCabra</span>
@@ -33,6 +43,7 @@ export function Sidebar() {
           <NavLink
             key={to}
             to={to}
+            onClick={onClose}
             className={({ isActive }) =>
               clsx(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",

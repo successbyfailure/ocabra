@@ -31,5 +31,14 @@ export const useModelStore = create<ModelStore>((set) => ({
   },
   unloadModel: async (modelId) => {
     await api.models.unload(modelId)
+    set((state) => ({
+      models: {
+        ...state.models,
+        [modelId]: {
+          ...state.models[modelId],
+          status: "unloaded",
+        },
+      },
+    }))
   },
 }))
