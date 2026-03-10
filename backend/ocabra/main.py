@@ -27,14 +27,23 @@ async def lifespan(app: FastAPI):
     await init_redis()
     logger.info("redis_connected")
 
-    # GPU Manager and Model Manager are initialized here when implemented
-    # (Streams 1-A and 1-B). Stubs for now.
+    # Stream 1-A: GPU Manager + Scheduler
+    from ocabra.core.gpu_manager import GPUManager
+    from ocabra.core.scheduler import GPUScheduler
+    gpu_manager = GPUManager()
+    await gpu_manager.start()
+    gpu_scheduler = GPUScheduler(gpu_manager)
+    app.state.gpu_manager = gpu_manager
+    app.state.gpu_scheduler = gpu_scheduler
+    logger.info("gpu_manager_ready")
 
     logger.info("ocabra_ready")
     yield
 
     # ── Shutdown ─────────────────────────────────────────────
     logger.info("shutting_down_ocabra")
+
+    await gpu_manager.stop()
 
     from ocabra.redis_client import close_redis
     await close_redis()
@@ -65,8 +74,8 @@ from ocabra.api.health import router as health_router  # noqa: E402
 app.include_router(health_router)
 
 # Stream 1-A: GPU Manager
-# from ocabra.api.internal.gpus import router as gpus_router
-# app.include_router(gpus_router, prefix="/ocabra")
+from ocabra.api.internal.gpus import router as gpus_router
+app.include_router(gpus_router, prefix="/ocabra")
 
 # Stream 1-B: Model Manager
 # from ocabra.api.internal.models import router as models_router
