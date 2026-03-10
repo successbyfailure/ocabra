@@ -47,6 +47,11 @@ async def lifespan(app: FastAPI):
     await model_manager.start()
     logger.info("model_manager_ready")
 
+    # Stream 2-A: vLLM backend registration
+    from ocabra.backends.vllm_backend import VLLMBackend
+    worker_pool.register_backend("vllm", VLLMBackend())
+    logger.info("vllm_backend_registered")
+
     logger.info("ocabra_ready")
     yield
 
