@@ -53,6 +53,7 @@ export interface ModelState {
   capabilities: ModelCapabilities
   lastRequestAt: string | null
   loadedAt: string | null
+  schedules?: EvictionSchedule[]
 }
 
 export interface ModelPatchRequest {
@@ -60,6 +61,15 @@ export interface ModelPatchRequest {
   preferredGpu?: number | null
   autoReload?: boolean
   displayName?: string
+  schedules?: EvictionSchedule[]
+}
+
+export interface EvictionSchedule {
+  id: string
+  days: number[]
+  start: string
+  end: string
+  enabled: boolean
 }
 
 export interface DownloadJob {
@@ -122,6 +132,10 @@ export interface ServerConfig {
   litellmAdminKey: string
   litellmAutoSync: boolean
   energyCostEurKwh: number
+  modelsDir?: string
+  downloadDir?: string
+  maxTemperatureC?: number
+  globalSchedules?: EvictionSchedule[]
 }
 
 export interface StatsParams {
@@ -154,6 +168,12 @@ export interface PerformanceStats {
     errorCount: number
     uptimePct: number
   }[]
+}
+
+export interface TokenStats {
+  totalInputTokens: number
+  totalOutputTokens: number
+  series: { timestamp: string; inputTokens: number; outputTokens: number }[]
 }
 
 export interface GPUStatHistoryPoint {
