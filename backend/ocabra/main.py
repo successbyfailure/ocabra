@@ -37,6 +37,16 @@ async def lifespan(app: FastAPI):
     app.state.gpu_scheduler = gpu_scheduler
     logger.info("gpu_manager_ready")
 
+    # Stream 1-B: Worker Pool + Model Manager
+    from ocabra.core.worker_pool import WorkerPool
+    from ocabra.core.model_manager import ModelManager
+    worker_pool = WorkerPool()
+    model_manager = ModelManager(worker_pool, gpu_manager, gpu_scheduler)
+    app.state.worker_pool = worker_pool
+    app.state.model_manager = model_manager
+    await model_manager.start()
+    logger.info("model_manager_ready")
+
     logger.info("ocabra_ready")
     yield
 
@@ -77,9 +87,11 @@ app.include_router(health_router)
 from ocabra.api.internal.gpus import router as gpus_router
 app.include_router(gpus_router, prefix="/ocabra")
 
-# Stream 1-B: Model Manager
-# from ocabra.api.internal.models import router as models_router
-# app.include_router(models_router, prefix="/ocabra")
+# Stream 1-B: Model Manager + WebSocket
+from ocabra.api.internal.models import router as models_router
+from ocabra.api.internal.ws import router as ws_router
+app.include_router(models_router, prefix="/ocabra")
+app.include_router(ws_router, prefix="/ocabra")
 
 # Stream 1-C: Registry + Downloads
 # from ocabra.api.internal.registry import router as registry_router
