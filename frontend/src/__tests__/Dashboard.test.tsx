@@ -6,9 +6,11 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 
-const listGpus = vi.fn()
-const listModels = vi.fn()
-const listDownloads = vi.fn()
+const { listGpus, listModels, listDownloads } = vi.hoisted(() => ({
+  listGpus: vi.fn(),
+  listModels: vi.fn(),
+  listDownloads: vi.fn(),
+}))
 
 vi.mock("@/hooks/useWebSocket", () => ({
   useWebSocket: () => ({ connected: true, lastEvent: null }),

@@ -1,11 +1,33 @@
 import { useEffect, useRef, useState } from "react"
-import type { ModelStatus, WSEvent } from "@/types"
+import type { GPUState, ModelStatus, WSEvent } from "@/types"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useDownloadStore } from "@/stores/downloadStore"
 
 const getWebSocketUrl = () =>
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
+
+function normalizeGpuStats(rawData: unknown): GPUState[] | null {
+  if (!Array.isArray(rawData)) {
+    return null
+  }
+
+  return rawData.map((gpu) => {
+    const data = (gpu ?? {}) as Record<string, unknown>
+    return {
+      index: Number(data.index ?? 0),
+      name: String(data.name ?? "GPU"),
+      totalVramMb: Number(data.total_vram_mb ?? data.totalVramMb ?? 0),
+      freeVramMb: Number(data.free_vram_mb ?? data.freeVramMb ?? 0),
+      usedVramMb: Number(data.used_vram_mb ?? data.usedVramMb ?? 0),
+      utilizationPct: Number(data.utilization_pct ?? data.utilizationPct ?? 0),
+      temperatureC: Number(data.temperature_c ?? data.temperatureC ?? 0),
+      powerDrawW: Number(data.power_draw_w ?? data.powerDrawW ?? 0),
+      powerLimitW: Number(data.power_limit_w ?? data.powerLimitW ?? 0),
+      lockedVramMb: Number(data.locked_vram_mb ?? data.lockedVramMb ?? 0),
+    }
+  })
+}
 
 function normalizeEvent(rawEvent: unknown): WSEvent | null {
   if (typeof rawEvent !== "object" || rawEvent === null) {
@@ -25,7 +47,7 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
         data: {
           event: String(data.event ?? "status_changed"),
           modelId: data.model_id,
-          status: String(data.status ?? "configured") as ModelStatus,
+          status: String(data.status ?? data.new_status ?? "configured") as ModelStatus,
         },
       }
     }
@@ -42,6 +64,17 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
           speedMbS: Number(data.speed_mb_s ?? data.speedMbS ?? 0),
         },
       }
+    }
+  }
+
+  if (maybeEvent.type === "gpu_stats") {
+    const data = normalizeGpuStats(maybeEvent.data)
+    if (!data) {
+      return null
+    }
+    return {
+      type: "gpu_stats",
+      data,
     }
   }
 

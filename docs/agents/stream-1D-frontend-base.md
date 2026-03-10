@@ -232,5 +232,4 @@ Todos los datos son en tiempo real vía WebSocket.
 
 ## Estado
 
-- [ ] En progreso
 - [x] Completado
