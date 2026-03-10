@@ -88,6 +88,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Stream 3-A: Stats middleware for /v1/* endpoints
+from ocabra.stats.collector import StatsMiddleware  # noqa: E402
+app.add_middleware(StatsMiddleware)
+
 # ── ROUTERS ──────────────────────────────────────────────────
 # Each stream adds its router here. Do not remove this comment.
 from ocabra.api.health import router as health_router  # noqa: E402
@@ -112,8 +116,8 @@ app.include_router(registry_router, prefix="/ocabra")
 app.include_router(downloads_router, prefix="/ocabra")
 
 # Stream 3-A: OpenAI API
-# from ocabra.api.openai import router as openai_router
-# app.include_router(openai_router, prefix="/v1")
+from ocabra.api.openai import router as openai_router  # noqa: E402
+app.include_router(openai_router, prefix="/v1")
 
 # Stream 3-B: Ollama API
 # from ocabra.api.ollama import router as ollama_router
