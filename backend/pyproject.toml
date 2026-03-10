@@ -40,9 +40,7 @@ vllm = [
 diffusers = [
     "diffusers>=0.31",
     "accelerate>=1.2",
-    "transformers>=4.47",
     "Pillow>=11.0",
-    "sentencepiece>=0.2",
 ]
 audio = [
     "faster-whisper>=1.1",

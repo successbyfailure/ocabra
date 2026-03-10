@@ -154,4 +154,4 @@ diffusers = [
 ## Estado
 
 - [ ] En progreso
-- [ ] Completado
+- [x] Completado
