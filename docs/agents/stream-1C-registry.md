@@ -173,5 +173,4 @@ class LocalScanner:
 
 ## Estado
 
-- [ ] En progreso
-- [ ] Completado
+- [x] Completado
