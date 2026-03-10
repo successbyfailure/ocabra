@@ -1,0 +1,74 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# === Node / Frontend ===
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# === Environment ===
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# === Docker ===
+docker-compose.override.yml
+
+# === Modelos de IA (archivos grandes) ===
+*.gguf
+*.ggml
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+models/
+model_cache/
+hf_cache/
+
+# === Bases de datos locales ===
+*.sqlite3
+*.db
+data/
+
+# === Logs y temporales ===
+logs/
+*.log
+tmp/
+temp/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# === Alembic ===
+backend/alembic/versions/__pycache__/
+
+# === Secretos y certificados ===
+*.pem
+*.key
+*.crt
+secrets/
