@@ -169,5 +169,5 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 ## Estado
 
-- [ ] En progreso
-- [ ] Completado
+- [x] En progreso
+- [x] Completado — mergeado en `main` (commit 80c71d7)
