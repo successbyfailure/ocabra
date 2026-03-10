@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "ocabra"
+version = "0.1.0"
+description = "Multi-GPU AI model server with OpenAI and Ollama API compatibility"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "redis[asyncio]>=5.2",
+    "httpx>=0.28",
+    "pynvml>=11.5",
+    "apscheduler>=3.10",
+    "structlog>=24.4",
+    "huggingface-hub>=0.27",
+    "python-multipart>=0.0.20",
+    "prometheus-client>=0.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
+    "ruff>=0.8",
+]
+vllm = [
+    "vllm>=0.6",
+    "torch>=2.5",
+]
+diffusers = [
+    "diffusers>=0.31",
+    "accelerate>=1.2",
+    "transformers>=4.47",
+    "Pillow>=11.0",
+    "sentencepiece>=0.2",
+]
+audio = [
+    "faster-whisper>=1.1",
+    "soundfile>=0.12",
+    "transformers>=4.47",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ocabra*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["ocabra"]
+omit = ["tests/*"]
