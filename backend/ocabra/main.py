@@ -120,8 +120,8 @@ from ocabra.api.openai import router as openai_router  # noqa: E402
 app.include_router(openai_router, prefix="/v1")
 
 # Stream 3-B: Ollama API
-# from ocabra.api.ollama import router as ollama_router
-# app.include_router(ollama_router)
+from ocabra.api.ollama import router as ollama_router  # noqa: E402
+app.include_router(ollama_router)
 
 # Stream 5: Metrics
 # from ocabra.api.metrics import router as metrics_router

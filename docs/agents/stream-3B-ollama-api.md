@@ -177,4 +177,4 @@ OPTION_MAP = {
 ## Estado
 
 - [ ] En progreso
-- [ ] Completado
+- [x] Completado

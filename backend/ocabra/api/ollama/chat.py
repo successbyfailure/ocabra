@@ -1,0 +1,153 @@
+"""
+POST /api/chat — Ollama chat compatibility endpoint.
+"""
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Request
+from starlette.responses import StreamingResponse
+
+from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
+
+from ._mapper import OllamaNameMapper
+from .generate import OPTION_MAP, _iter_sse_payloads
+
+router = APIRouter()
+_mapper = OllamaNameMapper()
+
+
+@router.post("/chat", summary="Create chat completion")
+async def chat(request: Request):
+    """
+    Create a chat completion in Ollama format.
+
+    Request fields include model, messages, stream, and options.
+    Streaming responses are translated from OpenAI SSE to Ollama NDJSON.
+    """
+    body = await request.json()
+    ollama_model = str(body.get("model", ""))
+    model_id = _mapper.to_internal(ollama_model)
+    stream = bool(body.get("stream", True))
+
+    model_manager = get_model_manager(request)
+    state = await ensure_loaded(model_manager, model_id)
+    check_capability(state, "chat", "chat")
+
+    worker_pool = request.app.state.worker_pool
+    vllm_body = _build_vllm_chat_body(body, model_id, stream)
+
+    if stream:
+        return StreamingResponse(
+            _stream_chat(worker_pool, model_id, ollama_model, vllm_body),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    started_ns = time.monotonic_ns()
+    result = await worker_pool.forward_request(model_id, "/v1/chat/completions", vllm_body)
+    message = _extract_chat_message(result)
+    total_duration = time.monotonic_ns() - started_ns
+    usage = result.get("usage") or {}
+    return {
+        "model": ollama_model,
+        "created_at": _now_iso_z(),
+        "message": {"role": "assistant", "content": message},
+        "done": True,
+        "total_duration": total_duration,
+        "load_duration": 0,
+        "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
+        "eval_count": int(usage.get("completion_tokens") or 0),
+        "eval_duration": total_duration,
+    }
+
+
+def _build_vllm_chat_body(payload: dict, model_id: str, stream: bool) -> dict:
+    body: dict = {
+        "model": model_id,
+        "messages": payload.get("messages", []),
+        "stream": stream,
+    }
+
+    for key in ("tools", "tool_choice", "response_format", "temperature", "top_p", "stop", "seed"):
+        if key in payload:
+            body[key] = payload[key]
+
+    options = payload.get("options") or {}
+    if isinstance(options, dict):
+        for key, value in options.items():
+            mapped = OPTION_MAP.get(key)
+            if mapped:
+                body[mapped] = value
+
+    return body
+
+
+async def _stream_chat(
+    worker_pool,
+    model_id: str,
+    ollama_model: str,
+    body: dict,
+) -> AsyncIterator[bytes]:
+    started_ns = time.monotonic_ns()
+    prompt_eval_count = 0
+    eval_count = 0
+
+    async for payload in _iter_sse_payloads(
+        worker_pool.forward_stream(model_id, "/v1/chat/completions", body)
+    ):
+        if payload == "[DONE]":
+            total_duration = time.monotonic_ns() - started_ns
+            done_payload = {
+                "model": ollama_model,
+                "created_at": _now_iso_z(),
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "total_duration": total_duration,
+                "load_duration": 0,
+                "prompt_eval_count": prompt_eval_count,
+                "eval_count": eval_count,
+                "eval_duration": total_duration,
+            }
+            yield (json.dumps(done_payload) + "\n").encode("utf-8")
+            return
+
+        if not isinstance(payload, dict):
+            continue
+
+        usage = payload.get("usage") or {}
+        if usage:
+            prompt_eval_count = int(usage.get("prompt_tokens") or prompt_eval_count)
+            eval_count = int(usage.get("completion_tokens") or eval_count)
+
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+
+        delta = choices[0].get("delta") or {}
+        token = str(delta.get("content") or "")
+        if token == "":
+            continue
+
+        chunk = {
+            "model": ollama_model,
+            "created_at": _now_iso_z(),
+            "message": {"role": "assistant", "content": token},
+            "done": False,
+        }
+        yield (json.dumps(chunk) + "\n").encode("utf-8")
+
+
+def _extract_chat_message(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "")
+
+
+def _now_iso_z() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
