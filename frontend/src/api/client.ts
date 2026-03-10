@@ -17,6 +17,7 @@ import type {
   RequestStats,
   EnergyStats,
   PerformanceStats,
+  TokenStats,
   StatsParams,
 } from "@/types"
 
@@ -63,6 +64,19 @@ function toGpuState(raw: unknown): GPUState {
 
 function toModelState(raw: unknown): ModelState {
   const data = isRecord(raw) ? raw : {}
+  const schedulesRaw = data.schedules
+  const schedules = Array.isArray(schedulesRaw)
+    ? schedulesRaw.map((schedule, idx) => {
+        const s = isRecord(schedule) ? schedule : {}
+        return {
+          id: String(s.id ?? `schedule-${idx}`),
+          days: Array.isArray(s.days) ? s.days.map((d) => Number(d)).filter((d) => Number.isFinite(d)) : [],
+          start: String(s.start ?? "00:00"),
+          end: String(s.end ?? "00:00"),
+          enabled: Boolean(s.enabled ?? true),
+        }
+      })
+    : undefined
   return {
     modelId: String(data.model_id ?? data.modelId ?? ""),
     displayName: String(data.display_name ?? data.displayName ?? data.model_id ?? data.modelId ?? "Unknown model"),
@@ -78,6 +92,7 @@ function toModelState(raw: unknown): ModelState {
     capabilities: toModelCapabilities(data.capabilities),
     lastRequestAt: (data.last_request_at ?? data.lastRequestAt ?? null) as string | null,
     loadedAt: (data.loaded_at ?? data.loadedAt ?? null) as string | null,
+    schedules,
   }
 }
 
@@ -193,6 +208,10 @@ export const api = {
     energy: (params: StatsParams) => {
       const query = buildQuery({ from: params.from, to: params.to })
       return request<EnergyStats>("GET", `/ocabra/stats/energy${query}`)
+    },
+    tokens: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
+      return request<TokenStats>("GET", `/ocabra/stats/tokens${query}`)
     },
     performance: (modelId?: string) => {
       const query = buildQuery({ model_id: modelId })

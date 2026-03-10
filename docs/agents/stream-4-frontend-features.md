@@ -196,7 +196,7 @@ frontend/src/components/settings/GlobalSchedules.tsx
 
 ## Estado
 
-- [ ] 4-A en progreso
-- [ ] 4-B en progreso
-- [ ] 4-C en progreso
-- [ ] 4-D en progreso
+- [x] 4-A completado
+- [x] 4-B completado
+- [x] 4-C completado
+- [x] 4-D completado
