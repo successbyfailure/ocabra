@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ocabra.config import settings
@@ -13,11 +13,15 @@ async def health() -> JSONResponse:
 
 
 @router.get("/ready")
-async def ready() -> JSONResponse:
-    """Readiness check. Returns 200 only when all dependencies are healthy."""
+async def ready(request: Request) -> JSONResponse:
+    """
+    Readiness check. Returns 200 only when all dependencies are healthy.
+
+    Checks: postgres, redis, gpu_manager. Also reports count of loaded models.
+    """
     from ocabra.redis_client import get_redis
 
-    checks: dict[str, str] = {}
+    checks: dict[str, object] = {}
 
     # Check Redis
     try:
@@ -35,7 +39,29 @@ async def ready() -> JSONResponse:
     except Exception as e:
         checks["postgres"] = f"error: {e}"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    # Check GPU Manager
+    try:
+        gpu_manager = request.app.state.gpu_manager
+        if gpu_manager and gpu_manager._running:
+            checks["gpu_manager"] = "ok"
+        else:
+            checks["gpu_manager"] = "error: not running"
+    except Exception as e:
+        checks["gpu_manager"] = f"error: {e}"
+
+    # Count loaded models
+    try:
+        from ocabra.core.model_manager import ModelStatus
+        model_manager = request.app.state.model_manager
+        states = await model_manager.list_states()
+        checks["models_loaded"] = sum(
+            1 for s in states if s.status == ModelStatus.LOADED
+        )
+    except Exception:
+        checks["models_loaded"] = 0
+
+    string_checks = {k: v for k, v in checks.items() if isinstance(v, str)}
+    all_ok = all(v == "ok" for v in string_checks.values())
     status_code = 200 if all_ok else 503
 
     return JSONResponse(
