@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from httpx import AsyncClient
 
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.local_scanner import LocalScanner
@@ -123,3 +124,48 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert any(model.model_ref == "hf-model" for model in models)
     assert any(model.model_ref == "tiny" for model in models)
     assert any(model.model_ref == "ollama-model" for model in models)
+
+
+@pytest.mark.asyncio
+async def test_registry_hf_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(query: str, task: str | None, limit: int):
+        _ = query, task, limit
+        return [
+            {
+                "repo_id": "org/model",
+                "model_name": "model",
+                "task": "text-generation",
+                "downloads": 1,
+                "likes": 2,
+                "size_gb": None,
+                "tags": [],
+                "gated": False,
+            }
+        ]
+
+    monkeypatch.setattr("ocabra.api.internal.registry._hf_registry.search", fake_search)
+    response = await async_client.get("/ocabra/registry/hf", params={"q": "model"})
+
+    assert response.status_code == 200
+    assert response.json()[0]["repo_id"] == "org/model"
+
+
+@pytest.mark.asyncio
+async def test_registry_ollama_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(query: str):
+        _ = query
+        return [
+            {
+                "name": "llama3.2:3b",
+                "description": "Test",
+                "tags": ["latest"],
+                "size_gb": 1.2,
+                "pulls": 100,
+            }
+        ]
+
+    monkeypatch.setattr("ocabra.api.internal.registry._ollama_registry.search", fake_search)
+    response = await async_client.get("/ocabra/registry/ollama", params={"q": "llama"})
+
+    assert response.status_code == 200
+    assert response.json()[0]["name"] == "llama3.2:3b"

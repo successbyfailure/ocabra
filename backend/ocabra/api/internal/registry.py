@@ -16,6 +16,7 @@ _local_scanner = LocalScanner()
 
 
 @router.get("/registry/hf/search", response_model=list[HFModelCard])
+@router.get("/registry/hf", response_model=list[HFModelCard])
 async def search_hf_models(
     q: str = Query(default="", description="Text query"),
     task: str | None = Query(default=None, description="HF pipeline task"),
@@ -30,6 +31,7 @@ async def get_hf_model_detail(repo_id: str) -> HFModelDetail:
 
 
 @router.get("/registry/ollama/search", response_model=list[OllamaModelCard])
+@router.get("/registry/ollama", response_model=list[OllamaModelCard])
 async def search_ollama_models(
     q: str = Query(default="", description="Text query"),
 ) -> list[OllamaModelCard]:
