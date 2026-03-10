@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
 
 import structlog
@@ -8,11 +10,29 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ocabra.config import settings
 
-# Configure structlog early
+# ── Structlog configuration ───────────────────────────────────
+_is_prod = os.getenv("OCABRA_ENV", "development").lower() == "production"
+
+_processors = [
+    structlog.contextvars.merge_contextvars,
+    structlog.stdlib.add_log_level,
+    structlog.stdlib.add_logger_name,
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.processors.StackInfoRenderer(),
+]
+
+if _is_prod:
+    _processors.append(structlog.processors.JSONRenderer())
+else:
+    _processors.append(structlog.dev.ConsoleRenderer(colors=True))
+
 structlog.configure(
+    processors=_processors,
     wrapper_class=structlog.make_filtering_bound_logger(
         logging.getLevelName(settings.log_level)
     ),
+    logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+    cache_logger_on_first_use=True,
 )
 
 logger = structlog.get_logger(__name__)
@@ -57,6 +77,13 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.vllm_backend import VLLMBackend
     worker_pool.register_backend("vllm", VLLMBackend())
     logger.info("vllm_backend_registered")
+
+    # Stream 5: LiteLLM auto-sync hook
+    if settings.litellm_auto_sync:
+        from ocabra.integrations.litellm_sync import LiteLLMSync
+        litellm_syncer = LiteLLMSync(model_manager)
+        app.state.litellm_syncer = litellm_syncer
+        logger.info("litellm_sync_enabled")
 
     logger.info("ocabra_ready")
     yield
@@ -123,7 +150,11 @@ app.include_router(openai_router, prefix="/v1")
 # from ocabra.api.ollama import router as ollama_router
 # app.include_router(ollama_router)
 
-# Stream 5: Metrics
-# from ocabra.api.metrics import router as metrics_router
-# app.include_router(metrics_router)
+# Stream 5: Metrics, Config, Stats
+from ocabra.api.metrics import router as metrics_router  # noqa: E402
+from ocabra.api.internal.config import router as config_router  # noqa: E402
+from ocabra.api.internal.stats import router as stats_router  # noqa: E402
+app.include_router(metrics_router)
+app.include_router(config_router, prefix="/ocabra")
+app.include_router(stats_router, prefix="/ocabra")
 # ─────────────────────────────────────────────────────────────
