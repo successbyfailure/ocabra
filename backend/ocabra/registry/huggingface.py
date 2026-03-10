@@ -92,7 +92,7 @@ class HuggingFaceRegistry:
         target_dir: Path,
         progress_callback: Callable[[float, float | None], None],
     ) -> Path:
-        target_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
 
         class _ProgressTqdm:
             def __init__(self, *args, **kwargs):
