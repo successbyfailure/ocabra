@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=70", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocabra"
@@ -34,7 +34,7 @@ dev = [
     "ruff>=0.8",
 ]
 vllm = [
-    "vllm>=0.6",
+    "vllm==0.17.1",
     "torch>=2.5",
 ]
 diffusers = [

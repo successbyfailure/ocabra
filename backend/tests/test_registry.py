@@ -37,7 +37,7 @@ async def test_hf_search_with_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cards[0].repo_id == "meta-llama/Llama-3.2-3B-Instruct"
     assert cards[0].task == "text-generation"
     assert captured["search"] == "llama"
-    assert captured["task"] == "text-generation"
+    assert captured["pipeline_tag"] == "text-generation"
     assert captured["limit"] == 5
 
 
@@ -64,34 +64,86 @@ async def test_hf_detail_infers_vllm_backend(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
-async def test_ollama_pull_parses_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeStdout:
-        def __init__(self) -> None:
-            self._lines = [
-                json.dumps({"status": "pulling", "completed": 50, "total": 100}).encode() + b"\n",
-                json.dumps({"status": "pulling", "completed": 100, "total": 100}).encode() + b"\n",
-                b"",
-            ]
-
-        async def readline(self) -> bytes:
-            await asyncio.sleep(0)
-            return self._lines.pop(0)
-
-    class FakeProc:
-        def __init__(self) -> None:
-            self.stdout = FakeStdout()
-
-        async def wait(self) -> int:
-            return 0
-
-    async def fake_create_subprocess_exec(*_args, **_kwargs):
-        return FakeProc()
-
-    monkeypatch.setattr("ocabra.registry.ollama_registry.shutil.which", lambda _cmd: "/usr/bin/ollama")
-    monkeypatch.setattr(
-        "ocabra.registry.ollama_registry.asyncio.create_subprocess_exec",
-        fake_create_subprocess_exec,
+async def test_hf_detail_infers_ollama_backend_for_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="bartowski/Qwen2.5-7B-Instruct-GGUF",
+        pipeline_tag=None,
+        downloads=1000,
+        likes=200,
+        tags=["gguf"],
+        gated=False,
+        siblings=[SimpleNamespace(rfilename="qwen2.5-7b-instruct-q4_k_m.gguf", size=4 * 1024**3)],
     )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("bartowski/Qwen2.5-7B-Instruct-GGUF")
+
+    assert detail.suggested_backend == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_hf_variants_exposes_standard_and_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="org/mixed-model",
+        siblings=[
+            SimpleNamespace(rfilename="model-00001-of-00002.safetensors", size=2 * 1024**3),
+            SimpleNamespace(rfilename="model-00002-of-00002.safetensors", size=2 * 1024**3),
+            SimpleNamespace(rfilename="model.safetensors.index.json", size=1000),
+            SimpleNamespace(rfilename="model-q4_k_m.gguf", size=1 * 1024**3),
+            SimpleNamespace(rfilename="model-q8_0.gguf", size=2 * 1024**3),
+        ],
+    )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    registry = HuggingFaceRegistry()
+    variants = await registry.get_variants("org/mixed-model")
+
+    assert any(v.variant_id == "standard" and v.backend_type == "vllm" for v in variants)
+    assert any(v.artifact == "model-q4_k_m.gguf" and v.backend_type == "ollama" for v in variants)
+
+
+@pytest.mark.asyncio
+async def test_ollama_pull_parses_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStreamResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            lines = [
+                json.dumps({"status": "pulling", "completed": 50, "total": 100}),
+                json.dumps({"status": "pulling", "completed": 100, "total": 100}),
+                json.dumps({"status": "success"}),
+            ]
+            for line in lines:
+                await asyncio.sleep(0)
+                yield line
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return False
+
+        def stream(self, method: str, url: str, json: dict):
+            _ = method, url, json
+            return FakeStreamContext()
+
+    monkeypatch.setattr("ocabra.registry.ollama_registry.httpx.AsyncClient", FakeClient)
 
     updates: list[float] = []
     registry = OllamaRegistry()
@@ -100,6 +152,127 @@ async def test_ollama_pull_parses_progress(monkeypatch: pytest.MonkeyPatch) -> N
     assert updates
     assert any(pct >= 50 for pct in updates)
     assert updates[-1] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_ollama_search_scrapes_library_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    html = """
+    <a href="/library/llama3.1">Llama</a>
+    <a href="/library/gemma3">Gemma</a>
+    <a href="/library/llama3.1">Duplicate</a>
+    """
+
+    class FakeResponse:
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return False
+
+        async def get(self, url: str, params: dict):
+            _ = url, params
+            return FakeResponse()
+
+    monkeypatch.setattr("ocabra.registry.ollama_registry.httpx.AsyncClient", FakeClient)
+
+    registry = OllamaRegistry()
+    cards = await registry.search("llama")
+    names = [card.name for card in cards]
+    assert "llama3.1" in names
+    assert "gemma3" not in names
+
+
+@pytest.mark.asyncio
+async def test_ollama_list_installed_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "models": [
+            {"name": "gemma3:4b", "size": 3338801804, "modified_at": "2026-03-11T15:26:31Z"},
+            {"model": "llama3.1:8b", "size": 4920753328, "modified_at": "2026-03-11T15:28:30Z"},
+        ]
+    }
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return False
+
+        async def get(self, url: str):
+            _ = url
+            return FakeResponse()
+
+    monkeypatch.setattr("ocabra.registry.ollama_registry.httpx.AsyncClient", FakeClient)
+
+    registry = OllamaRegistry()
+    details = await registry.list_installed_details()
+    assert details[0]["name"] == "gemma3:4b"
+    assert details[0]["size"] == 3338801804
+    assert details[1]["name"] == "llama3.1:8b"
+
+
+@pytest.mark.asyncio
+async def test_ollama_get_variants_parses_tags_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    html = """
+    <a href="/library/gemma3:4b" class="x">
+      <span class="font-mono">abc</span> • 3.3GB • 128K context window • Text input • 2 months ago
+    </a>
+    <a href="/library/gemma3:4b-it-q4_K_M" class="x">
+      <span class="font-mono">def</span> • 3.1GB • 128K context window • Text input • 2 months ago
+    </a>
+    """
+
+    class FakeResponse:
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return False
+
+        async def get(self, url: str):
+            _ = url
+            return FakeResponse()
+
+    monkeypatch.setattr("ocabra.registry.ollama_registry.httpx.AsyncClient", FakeClient)
+
+    registry = OllamaRegistry()
+    variants = await registry.get_variants("gemma3")
+    names = [v.name for v in variants]
+    assert "gemma3:4b" in names
+    q4 = next(v for v in variants if v.name == "gemma3:4b-it-q4_K_M")
+    assert q4.quantization == "Q4_K_M"
+    assert q4.parameter_size == "4b"
 
 
 @pytest.mark.asyncio
@@ -124,6 +297,7 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert any(model.model_ref == "hf-model" for model in models)
     assert any(model.model_ref == "tiny" for model in models)
     assert any(model.model_ref == "ollama-model" for model in models)
+    assert any(model.model_ref == "ollama-model" and model.backend_type == "ollama" for model in models)
 
 
 @pytest.mark.asyncio
@@ -151,6 +325,29 @@ async def test_registry_hf_endpoint(async_client: AsyncClient, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_registry_hf_variants_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_variants(repo_id: str):
+        _ = repo_id
+        return [
+            {
+                "variant_id": "gguf:model-q4_k_m.gguf",
+                "label": "model-q4_k_m.gguf",
+                "artifact": "model-q4_k_m.gguf",
+                "size_gb": 1.2,
+                "format": "gguf",
+                "quantization": "Q4_K_M",
+                "backend_type": "ollama",
+                "is_default": True,
+            }
+        ]
+
+    monkeypatch.setattr("ocabra.api.internal.registry._hf_registry.get_variants", fake_variants)
+    response = await async_client.get("/ocabra/registry/hf/org/model/variants")
+    assert response.status_code == 200
+    assert response.json()[0]["artifact"] == "model-q4_k_m.gguf"
+
+
+@pytest.mark.asyncio
 async def test_registry_ollama_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_search(query: str):
         _ = query
@@ -169,3 +366,27 @@ async def test_registry_ollama_endpoint(async_client: AsyncClient, monkeypatch: 
 
     assert response.status_code == 200
     assert response.json()[0]["name"] == "llama3.2:3b"
+
+
+@pytest.mark.asyncio
+async def test_registry_ollama_variants_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_variants(model_name: str):
+        _ = model_name
+        return [
+            {
+                "name": "gemma3:4b-it-q4_K_M",
+                "tag": "4b-it-q4_K_M",
+                "size_gb": 3.3,
+                "parameter_size": "4b",
+                "quantization": "Q4_K_M",
+                "context_window": "128K",
+                "modality": "text",
+                "updated_hint": "2 months ago",
+            }
+        ]
+
+    monkeypatch.setattr("ocabra.api.internal.registry._ollama_registry.get_variants", fake_variants)
+    response = await async_client.get("/ocabra/registry/ollama/gemma3/variants")
+
+    assert response.status_code == 200
+    assert response.json()[0]["name"] == "gemma3:4b-it-q4_K_M"

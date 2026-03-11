@@ -6,7 +6,14 @@ from ocabra.config import settings
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.local_scanner import LocalScanner
 from ocabra.registry.ollama_registry import OllamaRegistry
-from ocabra.schemas.registry import HFModelCard, HFModelDetail, LocalModel, OllamaModelCard
+from ocabra.schemas.registry import (
+    HFModelCard,
+    HFModelDetail,
+    HFModelVariant,
+    LocalModel,
+    OllamaModelCard,
+    OllamaModelVariant,
+)
 
 router = APIRouter(tags=["registry"])
 
@@ -25,6 +32,11 @@ async def search_hf_models(
     return await _hf_registry.search(query=q, task=task, limit=limit)
 
 
+@router.get("/registry/hf/{repo_id:path}/variants", response_model=list[HFModelVariant])
+async def get_hf_variants(repo_id: str) -> list[HFModelVariant]:
+    return await _hf_registry.get_variants(repo_id)
+
+
 @router.get("/registry/hf/{repo_id:path}", response_model=HFModelDetail)
 async def get_hf_model_detail(repo_id: str) -> HFModelDetail:
     return await _hf_registry.get_model_detail(repo_id)
@@ -36,6 +48,11 @@ async def search_ollama_models(
     q: str = Query(default="", description="Text query"),
 ) -> list[OllamaModelCard]:
     return await _ollama_registry.search(query=q)
+
+
+@router.get("/registry/ollama/{model_name}/variants", response_model=list[OllamaModelVariant])
+async def get_ollama_variants(model_name: str) -> list[OllamaModelVariant]:
+    return await _ollama_registry.get_variants(model_name=model_name)
 
 
 @router.get("/registry/local", response_model=list[LocalModel])

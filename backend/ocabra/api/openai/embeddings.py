@@ -5,9 +5,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 
-from ._deps import check_capability, ensure_loaded, get_model_manager
+from ._deps import (
+    check_capability,
+    ensure_loaded,
+    get_model_manager,
+    raise_upstream_http_error,
+)
 
 router = APIRouter()
 
@@ -26,4 +32,7 @@ async def embeddings(request: Request) -> Any:
     check_capability(state, "embeddings", "embeddings")
 
     worker_pool = request.app.state.worker_pool
-    return await worker_pool.forward_request(model_id, "/v1/embeddings", body)
+    try:
+        return await worker_pool.forward_request(model_id, "/v1/embeddings", body)
+    except httpx.HTTPStatusError as exc:
+        raise_upstream_http_error(exc)

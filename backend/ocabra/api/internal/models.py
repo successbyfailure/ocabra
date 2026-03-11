@@ -1,7 +1,14 @@
+import asyncio
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ocabra.config import settings
+from ocabra.registry.ollama_registry import OllamaRegistry
+
 router = APIRouter(tags=["models"])
+_ollama_registry = OllamaRegistry()
 
 
 class ModelPatch(BaseModel):
@@ -25,7 +32,13 @@ async def list_models(request: Request) -> list[dict]:
     """List all configured models and their runtime state."""
     mm = request.app.state.model_manager
     states = await mm.list_states()
-    return [s.to_dict() for s in states]
+    ollama_sizes = await _get_ollama_sizes_bytes()
+    payloads = []
+    for state in states:
+        item = state.to_dict()
+        item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, state.backend_type, ollama_sizes)
+        payloads.append(item)
+    return payloads
 
 
 @router.get("/models/{model_id:path}")
@@ -35,7 +48,10 @@ async def get_model(model_id: str, request: Request) -> dict:
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-    return state.to_dict()
+    item = state.to_dict()
+    ollama_sizes = await _get_ollama_sizes_bytes() if state.backend_type == "ollama" else {}
+    item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, state.backend_type, ollama_sizes)
+    return item
 
 
 @router.post("/models")
@@ -61,9 +77,15 @@ async def load_model(model_id: str, request: Request) -> dict:
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     from ocabra.core.model_manager import ModelStatus
+    from ocabra.core.scheduler import InsufficientVRAMError
     if state.status == ModelStatus.LOADED:
         raise HTTPException(status_code=409, detail="Model is already loaded")
-    updated = await mm.load(model_id)
+    try:
+        updated = await mm.load(model_id)
+    except InsufficientVRAMError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return updated.to_dict()
 
 
@@ -100,3 +122,80 @@ async def delete_model(model_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     await mm.delete_model(model_id)
     return {"ok": True}
+
+
+async def _get_ollama_sizes_bytes() -> dict[str, int]:
+    try:
+        details = await _ollama_registry.list_installed_details()
+    except Exception:
+        return {}
+    size_map: dict[str, int] = {}
+    for item in details:
+        name = str(item.get("name") or "").strip().lower()
+        if not name:
+            continue
+        size_map[name] = int(item.get("size") or 0)
+    return size_map
+
+
+async def _resolve_disk_size_bytes(
+    model_id: str,
+    backend_type: str,
+    ollama_sizes: dict[str, int],
+) -> int | None:
+    if backend_type == "ollama":
+        return ollama_sizes.get(model_id.strip().lower())
+
+    path = _resolve_local_model_path(model_id)
+    if path is None or not path.exists():
+        return None
+    return await asyncio.to_thread(_compute_path_size_bytes, path)
+
+
+def _resolve_local_model_path(model_id: str) -> Path | None:
+    base = Path(settings.models_dir)
+    direct = base / model_id
+    if direct.exists():
+        return direct
+
+    # Hugging Face local layout: /data/models/huggingface/org--repo[--artifact-stem]
+    if "::" in model_id:
+        repo_id, variant_stem = model_id.split("::", 1)
+        hf_dir_name = f"{repo_id.replace('/', '--')}--{variant_stem}"
+    else:
+        hf_dir_name = model_id.replace("/", "--")
+    hf_layout = base / "huggingface" / hf_dir_name
+    if hf_layout.exists():
+        return hf_layout
+
+    # Optional HF cache layout fallback.
+    hf_cache_dir = (settings.hf_cache_dir or "").strip()
+    if hf_cache_dir:
+        cache_root = Path(hf_cache_dir) / "hub" / f"models--{model_id.split('::', 1)[0].replace('/', '--')}"
+        snapshots_dir = cache_root / "snapshots"
+        if snapshots_dir.exists() and snapshots_dir.is_dir():
+            refs_main = cache_root / "refs" / "main"
+            if refs_main.exists():
+                try:
+                    commit = refs_main.read_text(encoding="utf-8").strip()
+                except Exception:
+                    commit = ""
+                if commit:
+                    candidate = snapshots_dir / commit
+                    if candidate.exists():
+                        return candidate
+            candidates = [p for p in snapshots_dir.iterdir() if p.is_dir()]
+            if candidates:
+                return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    return None
+
+
+def _compute_path_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_file():
+            total += child.stat().st_size
+    return total

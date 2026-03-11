@@ -137,5 +137,4 @@ HF_HOME=/data/hf_cache
 
 ## Estado
 
-- [ ] En progreso
-- [ ] Completado
+- [x] Completado — mergeado en main (commit a39f2b2)

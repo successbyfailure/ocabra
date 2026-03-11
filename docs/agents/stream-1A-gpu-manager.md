@@ -1,5 +1,6 @@
 # Briefing: Stream 1-A — GPU Manager & Scheduler
 
+**Estado: [x] Completado — mergeado en main (commit 1aac628)**
 **Prerequisito: Fase 0 completada.**
 **Rama:** `feat/1-A-gpu-manager`
 

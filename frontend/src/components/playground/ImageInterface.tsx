@@ -14,11 +14,6 @@ interface ImageInterfaceProps {
   params: PlaygroundParams
 }
 
-function createPlaceholder(prompt: string, seed: number, width: number, height: number): string {
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${width}' height='${height}'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='#0ea5e9'/><stop offset='100%' stop-color='#14b8a6'/></linearGradient></defs><rect width='100%' height='100%' fill='url(#g)'/><text x='24' y='48' fill='white' font-family='monospace' font-size='20'>${prompt.slice(0, 52)}</text><text x='24' y='80' fill='white' font-family='monospace' font-size='13'>seed ${seed}</text></svg>`
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
-}
-
 export function ImageInterface({ modelId, params }: ImageInterfaceProps) {
   const [prompt, setPrompt] = useState("")
   const [negativePrompt, setNegativePrompt] = useState("")
@@ -28,13 +23,60 @@ export function ImageInterface({ modelId, params }: ImageInterfaceProps) {
   const [height, setHeight] = useState(1024)
   const [seed, setSeed] = useState(42)
   const [results, setResults] = useState<ImageResult[]>([])
+  const [generating, setGenerating] = useState(false)
 
-  const generate = () => {
-    if (!prompt.trim()) return
-    const id = `img-${Date.now()}`
-    const url = createPlaceholder(prompt, seed, width, height)
-    setResults((prev) => [{ id, url, prompt }, ...prev])
-    toast.success(`Imagen generada con ${modelId} (${params.responseFormat})`)
+  const generate = async () => {
+    if (!modelId) {
+      toast.error("Selecciona un modelo")
+      return
+    }
+    if (!prompt.trim()) {
+      toast.error("El prompt no puede estar vacio")
+      return
+    }
+    setGenerating(true)
+    try {
+      const response = await fetch("/v1/images/generations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: modelId,
+          prompt: prompt.trim(),
+          negative_prompt: negativePrompt.trim() || undefined,
+          size: `${width}x${height}`,
+          n: 1,
+          num_inference_steps: steps,
+          guidance_scale: guidance,
+          seed,
+        }),
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(String(err?.error?.message ?? err?.detail ?? `HTTP ${response.status}`))
+      }
+      const payload = await response.json()
+      const images = Array.isArray(payload?.data) ? payload.data : []
+      const next = images
+        .map((item: { b64_json?: string }, idx: number) => {
+          const b64 = item?.b64_json
+          if (!b64) return null
+          return {
+            id: `img-${Date.now()}-${idx}`,
+            url: `data:image/png;base64,${b64}`,
+            prompt: prompt.trim(),
+          }
+        })
+        .filter((item: ImageResult | null): item is ImageResult => item !== null)
+      if (next.length === 0) {
+        throw new Error("El backend no devolvio imagenes")
+      }
+      setResults((prev) => [...next, ...prev])
+      toast.success(`Imagen generada con ${modelId} (${params.responseFormat})`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error generando imagen")
+    } finally {
+      setGenerating(false)
+    }
   }
 
   return (
@@ -107,10 +149,11 @@ export function ImageInterface({ modelId, params }: ImageInterfaceProps) {
         </button>
         <button
           type="button"
-          onClick={generate}
+          onClick={() => void generate()}
+          disabled={generating || !modelId}
           className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
         >
-          Generar
+          {generating ? "Generando..." : "Generar"}
         </button>
       </div>
 

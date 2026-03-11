@@ -55,7 +55,11 @@ class WorkerPool:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
-        url = f"http://127.0.0.1:{worker.port}{path}"
+        if worker.backend_type == "ollama":
+            base = settings.ollama_base_url.rstrip("/")
+            url = f"{base}{path}"
+        else:
+            url = f"http://127.0.0.1:{worker.port}{path}"
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(url, json=body)
             resp.raise_for_status()
@@ -67,7 +71,11 @@ class WorkerPool:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
-        url = f"http://127.0.0.1:{worker.port}{path}"
+        if worker.backend_type == "ollama":
+            base = settings.ollama_base_url.rstrip("/")
+            url = f"{base}{path}"
+        else:
+            url = f"http://127.0.0.1:{worker.port}{path}"
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, json=body) as resp:
                 async for chunk in resp.aiter_bytes():

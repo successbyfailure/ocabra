@@ -35,9 +35,18 @@ export function Playground() {
       try {
         const data = await api.models.list()
         if (!active) return
-        const loadedFirst = data.find((item) => item.status === "loaded")
-        setModels(data)
-        setSelectedModelId((prev) => prev || loadedFirst?.modelId || data[0]?.modelId || "")
+        const sorted = [...data].sort((a, b) => {
+          const aLoaded = a.status === "loaded" ? 0 : 1
+          const bLoaded = b.status === "loaded" ? 0 : 1
+          if (aLoaded !== bLoaded) return aLoaded - bLoaded
+          return a.displayName.localeCompare(b.displayName)
+        })
+        const loadedFirst = sorted.find((item) => item.status === "loaded")
+        setModels(sorted)
+        setSelectedModelId((prev) => {
+          if (prev && sorted.some((item) => item.modelId === prev)) return prev
+          return loadedFirst?.modelId || sorted[0]?.modelId || ""
+        })
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "No se pudieron cargar los modelos")
       } finally {
@@ -78,9 +87,20 @@ export function Playground() {
       ) : (
         <>
           <ModelSelector models={models} selectedModelId={selectedModelId} onSelect={setSelectedModelId} />
+          {selectedModel && selectedModel.status !== "loaded" && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+              El modelo seleccionado no esta cargado ({selectedModel.status}). Las llamadas pueden tardar mientras se carga.
+            </div>
+          )}
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
             <section>
-              {mode === "chat" && <ChatInterface modelId={selectedModelId} params={params} />}
+              {mode === "chat" && (
+                <ChatInterface
+                  modelId={selectedModelId}
+                  backendType={selectedModel?.backendType ?? null}
+                  params={params}
+                />
+              )}
               {mode === "image" && <ImageInterface modelId={selectedModelId} params={params} />}
               {mode === "audio" && <AudioInterface modelId={selectedModelId} params={params} />}
             </section>

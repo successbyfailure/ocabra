@@ -62,6 +62,7 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
 
 _STARTUP_TIMEOUT_S = 120
 _SHUTDOWN_TIMEOUT_S = 30
+_MIN_VLLM_VRAM_MB = 2048
 
 
 class VLLMBackend(BackendInterface):
@@ -91,8 +92,6 @@ class VLLMBackend(BackendInterface):
         Returns:
             WorkerInfo describing the running process.
         """
-        from ocabra.core.worker_pool import WorkerPool  # avoid circular at module level
-
         # Port must be pre-assigned by WorkerPool before calling load().
         # Callers (ModelManager) are expected to call worker_pool.assign_port()
         # and pass it via kwargs.
@@ -100,24 +99,28 @@ class VLLMBackend(BackendInterface):
         if port == 0:
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
-        model_path = str(Path(settings.models_dir) / model_id)
+        model_target = self._resolve_model_target(model_id)
 
         cuda_devices = ",".join(str(i) for i in gpu_indices)
         tensor_parallel = len(gpu_indices)
 
         cmd = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
-            "--model", model_path,
+            "--model", model_target,
             "--tensor-parallel-size", str(tensor_parallel),
-            "--gpu-memory-utilization", "0.90",
+            "--gpu-memory-utilization", str(settings.vllm_gpu_memory_utilization),
             "--port", str(port),
             "--host", "127.0.0.1",
             "--served-model-name", model_id,
-            "--disable-log-requests",
         ]
+        if settings.vllm_enforce_eager:
+            cmd.append("--enforce-eager")
+        if settings.vllm_attention_backend:
+            cmd.extend(["--attention-backend", settings.vllm_attention_backend])
 
         env = {
             **os.environ,
+            "CUDA_DEVICE_ORDER": settings.cuda_device_order,
             "CUDA_VISIBLE_DEVICES": cuda_devices,
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "HF_HOME": settings.hf_cache_dir,
@@ -184,11 +187,25 @@ class VLLMBackend(BackendInterface):
         """
         Infer capabilities from local config.json and tokenizer_config.json.
 
-        Falls back to ``{"chat": True, "completion": True, "streaming": True}``
-        for unknown architectures.
+        Uses conservative defaults for unknown/undetected models to avoid
+        over-reporting unsupported capabilities.
         """
-        model_path = Path(settings.models_dir) / model_id
+        model_path = self._resolve_local_model_dir(model_id)
         caps: dict[str, Any] = {"streaming": True, "completion": True}
+        if model_path is None:
+            return BackendCapabilities(
+                chat=False,
+                completion=True,
+                tools=False,
+                vision=False,
+                embeddings=False,
+                reasoning=False,
+                image_generation=False,
+                audio_transcription=False,
+                tts=False,
+                streaming=True,
+                context_length=0,
+            )
 
         config_path = model_path / "config.json"
         if config_path.exists():
@@ -205,9 +222,6 @@ class VLLMBackend(BackendInterface):
                 if arch_caps:
                     caps.update(arch_caps)
                     break
-            else:
-                # Unknown architecture — assume basic chat
-                caps["chat"] = True
 
             # Context length
             for key in ("max_position_embeddings", "max_seq_len", "model_max_length"):
@@ -255,7 +269,9 @@ class VLLMBackend(BackendInterface):
 
         Falls back to 0 if the directory does not exist yet.
         """
-        model_path = Path(settings.models_dir) / model_id
+        model_path = self._resolve_local_model_dir(model_id)
+        if model_path is None:
+            return 0
         total_bytes = sum(
             p.stat().st_size
             for p in model_path.rglob("*.safetensors")
@@ -268,7 +284,9 @@ class VLLMBackend(BackendInterface):
                 for p in model_path.rglob("*.bin")
                 if p.is_file()
             )
-        return int(total_bytes / 1024 / 1024 * 1.2)
+        estimated = int(total_bytes / 1024 / 1024 * 1.2)
+        # Reserve a practical baseline for runtime memory (KV cache, graph capture, kernels).
+        return max(_MIN_VLLM_VRAM_MB, estimated)
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         """Proxy a request to the vLLM worker."""
@@ -311,9 +329,15 @@ class VLLMBackend(BackendInterface):
             entry = self._processes.get(model_id)
             if entry and entry[0].returncode is not None:
                 rc = entry[0].returncode
+                stderr_tail = await self._read_stderr_tail(entry[0])
+                err_suffix = f" stderr={stderr_tail}" if stderr_tail else ""
                 if rc == -signal.SIGKILL or rc == 137:
-                    raise MemoryError(f"vLLM process for '{model_id}' OOM-killed (rc={rc})")
-                raise RuntimeError(f"vLLM process for '{model_id}' exited with rc={rc}")
+                    raise MemoryError(
+                        f"vLLM process for '{model_id}' OOM-killed (rc={rc}).{err_suffix}"
+                    )
+                raise RuntimeError(
+                    f"vLLM process for '{model_id}' exited with rc={rc}.{err_suffix}"
+                )
 
             try:
                 async with httpx.AsyncClient(timeout=3.0) as client:
@@ -351,3 +375,85 @@ class VLLMBackend(BackendInterface):
             await proc.wait()
         except ProcessLookupError:
             pass
+
+    async def _read_stderr_tail(
+        self, proc: asyncio.subprocess.Process, limit: int = 4000
+    ) -> str:
+        if proc.stderr is None:
+            return ""
+        try:
+            stderr_data = await asyncio.wait_for(proc.stderr.read(), timeout=0.3)
+        except Exception:
+            return ""
+        if not stderr_data:
+            return ""
+        text = stderr_data.decode("utf-8", errors="replace").strip()
+        if len(text) <= limit:
+            return text
+        head = text[: limit // 2]
+        tail = text[-(limit // 2) :]
+        return f"{head}\n...[truncated]...\n{tail}"
+
+    def _resolve_local_model_dir(self, model_id: str) -> Path | None:
+        base = Path(settings.models_dir)
+        direct = base / model_id
+        if direct.exists() and direct.is_dir():
+            return direct
+
+        hf_layout = base / "huggingface" / model_id.replace("/", "--")
+        if hf_layout.exists() and hf_layout.is_dir():
+            return hf_layout
+
+        cached = self._resolve_hf_cache_snapshot_dir(model_id)
+        if cached is not None:
+            return cached
+
+        return None
+
+    def _resolve_hf_cache_snapshot_dir(self, model_id: str) -> Path | None:
+        """
+        Resolve a model snapshot directory from the Hugging Face cache layout.
+
+        Expected structure:
+        <hf_cache_dir>/hub/models--org--repo/{refs,snapshots}/...
+        """
+        hf_cache_dir = getattr(settings, "hf_cache_dir", "")
+        if not hf_cache_dir:
+            return None
+
+        model_cache_root = (
+            Path(hf_cache_dir) / "hub" / f"models--{model_id.replace('/', '--')}"
+        )
+        snapshots_dir = model_cache_root / "snapshots"
+        if not snapshots_dir.exists() or not snapshots_dir.is_dir():
+            return None
+
+        ref_main = model_cache_root / "refs" / "main"
+        if ref_main.exists():
+            try:
+                commit = ref_main.read_text(encoding="utf-8").strip()
+            except Exception:
+                commit = ""
+            if commit:
+                snap = snapshots_dir / commit
+                if snap.exists() and snap.is_dir():
+                    return snap
+
+        candidates = [p for p in snapshots_dir.iterdir() if p.is_dir()]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def _resolve_model_target(self, model_id: str) -> str:
+        """
+        Resolve model target for vLLM.
+
+        Priority:
+        1. Local legacy layout: <models_dir>/<model_id>
+        2. Local HF layout: <models_dir>/huggingface/<repo-with--separators>
+        3. Fallback to raw model_id (remote repo resolution by vLLM/HF)
+        """
+        local_dir = self._resolve_local_model_dir(model_id)
+        if local_dir:
+            return str(local_dir)
+        return model_id

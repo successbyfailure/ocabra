@@ -5,10 +5,7 @@ All tests mock subprocess creation — no real vLLM or GPU required.
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import signal
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -125,10 +122,32 @@ class TestGetCapabilities:
 
         with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
             mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = str(tmp_model_dir / "_hf_cache")
             backend = VLLMBackend()
             caps = await backend.get_capabilities("unknown-model")
 
-        # Should fall back to basic chat
+        # Unknown architectures must stay conservative unless there is explicit chat evidence.
+        assert caps.chat is False
+        assert caps.completion is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_architecture_with_chat_template(self, tmp_model_dir: Path):
+        _make_model(
+            tmp_model_dir,
+            "future-chat",
+            {"architectures": ["SomeFutureCausalLM"]},
+            {"chat_template": "{% for msg in messages %}{{ msg['content'] }}{% endfor %}"},
+        )
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = str(tmp_model_dir / "_hf_cache")
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("future-chat")
+
+        # chat_template is explicit evidence that /chat/completions is supported.
         assert caps.chat is True
 
     @pytest.mark.asyncio
@@ -140,11 +159,47 @@ class TestGetCapabilities:
 
         with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
             mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = str(tmp_model_dir / "_hf_cache")
             backend = VLLMBackend()
             caps = await backend.get_capabilities("no-config")
 
         # No config → no caps inferred except streaming/completion defaults
         assert caps.streaming is True
+        assert caps.completion is True
+        assert caps.chat is False
+
+    @pytest.mark.asyncio
+    async def test_resolves_capabilities_from_hf_cache_snapshot(self, tmp_model_dir: Path):
+        hf_cache = tmp_model_dir / "_hf_cache"
+        snapshot = (
+            hf_cache
+            / "hub"
+            / "models--acme--demo-chat"
+            / "snapshots"
+            / "abc123"
+        )
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text(
+            json.dumps({"architectures": ["LlamaForCausalLM"], "max_position_embeddings": 4096})
+        )
+        (snapshot / "tokenizer_config.json").write_text(
+            json.dumps({"chat_template": "{% for msg in messages %}...{% endfor %}"})
+        )
+        refs = hf_cache / "hub" / "models--acme--demo-chat" / "refs"
+        refs.mkdir(parents=True)
+        (refs / "main").write_text("abc123")
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir / "models")
+            mock_settings.hf_cache_dir = str(hf_cache)
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("acme/demo-chat")
+
+        assert caps.chat is True
+        assert caps.tools is True
+        assert caps.context_length == 4096
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +222,8 @@ class TestGetVramEstimate:
             backend = VLLMBackend()
             estimate = await backend.get_vram_estimate_mb("my-model")
 
-        # 1000 bytes * 1.2 / (1024*1024) ≈ 0 MB (rounds down) — just check no error
-        assert estimate >= 0
+        # Very small models still reserve a minimum baseline for vLLM runtime overhead.
+        assert estimate >= 2048
 
     @pytest.mark.asyncio
     async def test_empty_directory(self, tmp_model_dir: Path):
@@ -182,7 +237,7 @@ class TestGetVramEstimate:
             backend = VLLMBackend()
             estimate = await backend.get_vram_estimate_mb("empty")
 
-        assert estimate == 0
+        assert estimate >= 2048
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +407,28 @@ class TestHealthCheck:
         backend = VLLMBackend()
         result = await backend.health_check("ghost-model")
         assert result is False
+
+
+class TestModelPathResolution:
+    def test_resolve_hf_layout(self, tmp_model_dir: Path):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        hf_dir = tmp_model_dir / "huggingface" / "facebook--opt-125m"
+        hf_dir.mkdir(parents=True)
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            resolved = backend._resolve_model_target("facebook/opt-125m")
+
+        assert resolved == str(hf_dir)
+
+    def test_resolve_remote_fallback(self, tmp_model_dir: Path):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            resolved = backend._resolve_model_target("Qwen/Qwen2.5-0.5B-Instruct")
+
+        assert resolved == "Qwen/Qwen2.5-0.5B-Instruct"

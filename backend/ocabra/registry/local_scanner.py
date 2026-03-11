@@ -47,7 +47,7 @@ class LocalScanner:
                         model_ref=path.parent.name,
                         path=str(path.parent),
                         source="ollama",
-                        backend_type="vllm",
+                        backend_type="ollama",
                         size_gb=size,
                     )
                 )

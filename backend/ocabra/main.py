@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from contextlib import suppress
 
 import structlog
 from fastapi import FastAPI
@@ -16,7 +17,6 @@ _is_prod = os.getenv("OCABRA_ENV", "development").lower() == "production"
 _processors = [
     structlog.contextvars.merge_contextvars,
     structlog.stdlib.add_log_level,
-    structlog.stdlib.add_logger_name,
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.StackInfoRenderer(),
 ]
@@ -36,6 +36,26 @@ structlog.configure(
 )
 
 logger = structlog.get_logger(__name__)
+
+
+async def _idle_eviction_loop(model_manager, stop_event: asyncio.Event) -> None:
+    interval_s = max(1, int(settings.idle_eviction_check_interval_seconds))
+    logger.info(
+        "idle_eviction_loop_started",
+        interval_s=interval_s,
+        idle_timeout_seconds=settings.idle_timeout_seconds,
+    )
+    while not stop_event.is_set():
+        try:
+            await model_manager.check_idle_evictions()
+        except Exception as exc:
+            logger.warning("idle_eviction_loop_error", error=str(exc))
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    logger.info("idle_eviction_loop_stopped")
 
 
 @asynccontextmanager
@@ -61,10 +81,12 @@ async def lifespan(app: FastAPI):
     from ocabra.core.worker_pool import WorkerPool
     from ocabra.core.model_manager import ModelManager
     from ocabra.backends.diffusers_backend import DiffusersBackend
+    from ocabra.backends.ollama_backend import OllamaBackend
     from ocabra.backends.whisper_backend import WhisperBackend
     from ocabra.backends.tts_backend import TTSBackend
     worker_pool = WorkerPool()
     worker_pool.register_backend("diffusers", DiffusersBackend())
+    worker_pool.register_backend("ollama", OllamaBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
     worker_pool.register_backend("tts", TTSBackend())
     model_manager = ModelManager(worker_pool, gpu_manager, gpu_scheduler)
@@ -72,6 +94,12 @@ async def lifespan(app: FastAPI):
     app.state.model_manager = model_manager
     await model_manager.start()
     logger.info("model_manager_ready")
+
+    idle_eviction_stop = asyncio.Event()
+    idle_eviction_task = asyncio.create_task(
+        _idle_eviction_loop(model_manager, idle_eviction_stop),
+        name="idle-eviction-loop",
+    )
 
     # Stream 2-A: vLLM backend registration
     from ocabra.backends.vllm_backend import VLLMBackend
@@ -90,6 +118,11 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────
     logger.info("shutting_down_ocabra")
+
+    idle_eviction_stop.set()
+    idle_eviction_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await idle_eviction_task
 
     await gpu_manager.stop()
 

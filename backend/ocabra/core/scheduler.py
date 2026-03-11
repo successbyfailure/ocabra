@@ -17,16 +17,29 @@ class GPUScheduler:
         self,
         vram_needed_mb: int,
         preferred_gpu: int | None = None,
+        enforce_vllm_headroom: bool = False,
     ) -> list[int]:
         preferred = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
         states = await self._gpu_manager.get_all_states()
         gpu_indices = list(range(len(states)))
+        free_per_gpu = {
+            i: await self._gpu_manager.get_free_vram(i)
+            for i in gpu_indices
+        }
+        state_by_gpu = {state.index: state for state in states}
+
+        def _has_vllm_headroom(gpu_idx: int) -> bool:
+            if not enforce_vllm_headroom:
+                return True
+            state = state_by_gpu[gpu_idx]
+            required_free_mb = int(state.total_vram_mb * settings.vllm_gpu_memory_utilization)
+            return state.free_vram_mb >= required_free_mb
 
         # Try preferred first, then others
         ordered = [preferred] + [i for i in gpu_indices if i != preferred]
         for gpu_idx in ordered:
-            free = await self._gpu_manager.get_free_vram(gpu_idx)
-            if free >= vram_needed_mb:
+            free = free_per_gpu[gpu_idx]
+            if free >= vram_needed_mb and _has_vllm_headroom(gpu_idx):
                 logger.info(
                     "gpu_assigned",
                     gpu=gpu_idx,
@@ -35,18 +48,17 @@ class GPUScheduler:
                 )
                 return [gpu_idx]
 
-        # Try tensor parallelism across all GPUs
-        total_free = sum(
-            await self._gpu_manager.get_free_vram(i) for i in gpu_indices
-        )
+        # Try tensor parallelism across eligible GPUs only.
+        tp_candidates = [i for i in gpu_indices if _has_vllm_headroom(i)]
+        total_free = sum(free_per_gpu[i] for i in tp_candidates)
         if total_free >= vram_needed_mb:
             logger.info(
                 "tensor_parallel_assigned",
-                gpus=gpu_indices,
+                gpus=tp_candidates,
                 vram_needed_mb=vram_needed_mb,
                 total_free_mb=total_free,
             )
-            return gpu_indices
+            return tp_candidates
 
         raise InsufficientVRAMError(
             f"Need {vram_needed_mb} MB VRAM, only {total_free} MB available across all GPUs"

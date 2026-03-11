@@ -19,6 +19,14 @@ function modelType(model: ModelState): string {
   return "llm"
 }
 
+function formatDiskSize(bytes: number | null): string {
+  if (bytes == null || bytes <= 0) return "-"
+  const gb = bytes / (1024 ** 3)
+  if (gb >= 1) return `${gb.toFixed(2)} GB`
+  const mb = bytes / (1024 ** 2)
+  return `${mb.toFixed(0)} MB`
+}
+
 export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfigure, onDelete }: ModelCardProps) {
   const isLoaded = model.status === "loaded" || model.status === "loading"
   const isUnloaded = model.status === "unloaded" || model.status === "unloading"
@@ -37,6 +45,7 @@ export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfig
         {model.currentGpu.join(", ") || (model.preferredGpu ?? "-")}
       </td>
       <td className="px-3 py-3 text-muted-foreground">{model.vramUsedMb.toLocaleString()} MB</td>
+      <td className="px-3 py-3 text-muted-foreground">{formatDiskSize(model.diskSizeBytes)}</td>
       <td className="px-3 py-3">
         <ModelStatusBadge status={model.status} />
       </td>

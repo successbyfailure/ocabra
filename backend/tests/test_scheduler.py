@@ -31,6 +31,31 @@ def make_gpu_manager(free_by_gpu: dict[int, int]):
     return gm
 
 
+def make_gpu_manager_with_totals(free_by_gpu: dict[int, int], total_by_gpu: dict[int, int]):
+    from ocabra.core.gpu_manager import GPUState
+
+    states = [
+        GPUState(
+            index=i,
+            name=f"GPU-{i}",
+            total_vram_mb=total_by_gpu[i],
+            free_vram_mb=free,
+            used_vram_mb=0,
+            utilization_pct=0,
+            temperature_c=40,
+            power_draw_w=50,
+            power_limit_w=370,
+            locked_vram_mb=0,
+        )
+        for i, free in free_by_gpu.items()
+    ]
+
+    gm = AsyncMock()
+    gm.get_all_states = AsyncMock(return_value=states)
+    gm.get_free_vram = AsyncMock(side_effect=lambda i: free_by_gpu[i])
+    return gm
+
+
 @pytest.mark.asyncio
 async def test_assign_preferred_gpu():
     """Model fits on preferred GPU (1) → assigns [1]."""
@@ -79,3 +104,42 @@ async def test_uses_default_gpu_when_no_preferred():
     with patch.object(config.settings, "default_gpu_index", 1):
         result = await scheduler.find_gpu_for_model(8000, preferred_gpu=None)
     assert result == [1]
+
+
+@pytest.mark.asyncio
+async def test_tensor_parallel_skips_gpu_without_vllm_headroom():
+    """With vLLM headroom policy, low-free GPU is excluded from TP candidates."""
+    # GPU0 (12GB total, 6GB free) fails vLLM 0.6 threshold (~7.2GB).
+    # GPU1 (24GB total, 16GB free) passes threshold (~14.4GB).
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 6000, 1: 16000},
+        total_by_gpu={0: 12000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+    with patch("ocabra.core.scheduler.settings.vllm_gpu_memory_utilization", 0.6):
+        result = await scheduler.find_gpu_for_model(
+            12000,
+            preferred_gpu=None,
+            enforce_vllm_headroom=True,
+        )
+    assert result == [1]
+
+
+@pytest.mark.asyncio
+async def test_vllm_headroom_can_trigger_insufficient_even_if_raw_sum_fits():
+    """
+    Raw free sum can be enough, but if no eligible GPUs satisfy vLLM headroom,
+    scheduler must fail early.
+    """
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 6000, 1: 9000},
+        total_by_gpu={0: 12000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+    with patch("ocabra.core.scheduler.settings.vllm_gpu_memory_utilization", 0.6):
+        with pytest.raises(InsufficientVRAMError):
+            await scheduler.find_gpu_for_model(
+                12000,
+                preferred_gpu=None,
+                enforce_vllm_headroom=True,
+            )

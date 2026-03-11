@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from dataclasses import asdict
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,11 +42,12 @@ def gpu_manager():
 @pytest.mark.asyncio
 async def test_start_detects_gpus():
     patches = _make_mock_nvml(gpu_count=2)
-    with (
-        patch("ocabra.core.gpu_manager.publish", new=AsyncMock()),
-        patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()),
-        *[patch(k, v) for k, v in patches.items()],
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
         gm = GPUManager()
         gm._poll_task = MagicMock()  # prevent real task
         # Start manually without the poll loop
@@ -66,11 +68,12 @@ async def test_start_detects_gpus():
 @pytest.mark.asyncio
 async def test_lock_vram_reduces_free():
     patches = _make_mock_nvml(free_mb=20000, used_mb=4000)
-    with (
-        patch("ocabra.core.gpu_manager.publish", new=AsyncMock()),
-        patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()),
-        *[patch(k, v) for k, v in patches.items()],
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
         gm = GPUManager()
         gm._locks = {0: {}}
         gm._states[0] = gm._read_gpu(0)
@@ -85,11 +88,12 @@ async def test_lock_vram_reduces_free():
 @pytest.mark.asyncio
 async def test_unlock_vram_restores_free():
     patches = _make_mock_nvml(free_mb=20000, used_mb=4000)
-    with (
-        patch("ocabra.core.gpu_manager.publish", new=AsyncMock()),
-        patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()),
-        *[patch(k, v) for k, v in patches.items()],
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
         gm = GPUManager()
         gm._locks = {0: {}}
         gm._states[0] = gm._read_gpu(0)
@@ -108,11 +112,12 @@ async def test_vram_buffer_always_reserved():
     from ocabra.config import settings
 
     patches = _make_mock_nvml(free_mb=10000, used_mb=0)
-    with (
-        patch("ocabra.core.gpu_manager.publish", new=AsyncMock()),
-        patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()),
-        *[patch(k, v) for k, v in patches.items()],
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
         gm = GPUManager()
         gm._locks = {0: {}}
         gm._states[0] = gm._read_gpu(0)

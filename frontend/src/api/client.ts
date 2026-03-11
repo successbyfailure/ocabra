@@ -11,7 +11,9 @@ import type {
   DownloadSource,
   HFModelCard,
   HFModelDetail,
+  HFModelVariant,
   OllamaModelCard,
+  OllamaModelVariant,
   LocalModel,
   ServerConfig,
   RequestStats,
@@ -89,6 +91,10 @@ function toModelState(raw: unknown): ModelState {
       ? ((data.current_gpu ?? data.currentGpu) as unknown[]).map((gpu) => Number(gpu))
       : [],
     vramUsedMb: Number(data.vram_used_mb ?? data.vramUsedMb ?? 0),
+    diskSizeBytes:
+      data.disk_size_bytes == null && data.diskSizeBytes == null
+        ? null
+        : Number(data.disk_size_bytes ?? data.diskSizeBytes ?? 0),
     capabilities: toModelCapabilities(data.capabilities),
     lastRequestAt: (data.last_request_at ?? data.lastRequestAt ?? null) as string | null,
     loadedAt: (data.loaded_at ?? data.loadedAt ?? null) as string | null,
@@ -102,6 +108,7 @@ function toDownloadJob(raw: unknown): DownloadJob {
     jobId: String(data.job_id ?? data.jobId ?? ""),
     source: String(data.source ?? "huggingface") as DownloadSource,
     modelRef: String(data.model_ref ?? data.modelRef ?? ""),
+    artifact: (data.artifact ?? null) as string | null,
     status: String(data.status ?? "queued") as DownloadJob["status"],
     progressPct: Number(data.progress_pct ?? data.progressPct ?? 0),
     speedMbS: data.speed_mb_s === null || data.speedMbS === null ? null : Number(data.speed_mb_s ?? data.speedMbS ?? 0),
@@ -109,6 +116,71 @@ function toDownloadJob(raw: unknown): DownloadJob {
     error: (data.error ?? null) as string | null,
     startedAt: String(data.started_at ?? data.startedAt ?? new Date(0).toISOString()),
     completedAt: (data.completed_at ?? data.completedAt ?? null) as string | null,
+  }
+}
+
+function toHFModelCard(raw: unknown): HFModelCard {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    repoId: String(data.repo_id ?? data.repoId ?? ""),
+    modelName: String(data.model_name ?? data.modelName ?? ""),
+    task: (data.task ?? null) as string | null,
+    downloads: Number(data.downloads ?? 0),
+    likes: Number(data.likes ?? 0),
+    sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
+    tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
+    gated: Boolean(data.gated),
+  }
+}
+
+function toHFModelDetail(raw: unknown): HFModelDetail {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    ...toHFModelCard(raw),
+    siblings: Array.isArray(data.siblings) ? (data.siblings as Record<string, unknown>[]) : [],
+    readmeExcerpt: (data.readme_excerpt ?? data.readmeExcerpt ?? null) as string | null,
+    suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelDetail["suggestedBackend"],
+    estimatedVramGb: data.estimated_vram_gb != null ? Number(data.estimated_vram_gb) : (data.estimatedVramGb != null ? Number(data.estimatedVramGb) : null),
+  }
+}
+
+function toHFModelVariant(raw: unknown): HFModelVariant {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    variantId: String(data.variant_id ?? data.variantId ?? ""),
+    label: String(data.label ?? ""),
+    artifact: (data.artifact ?? null) as string | null,
+    sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
+    format: String(data.format ?? "unknown"),
+    quantization: (data.quantization ?? null) as string | null,
+    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as HFModelVariant["backendType"],
+    isDefault: Boolean(data.is_default ?? data.isDefault),
+  }
+}
+
+function toLocalModel(raw: unknown): LocalModel {
+  const data = isRecord(raw) ? raw : {}
+  const modelRef = String(data.model_ref ?? data.modelRef ?? data.model_id ?? data.modelId ?? "")
+  return {
+    modelId: modelRef,
+    path: String(data.path ?? ""),
+    sizeGb: Number(data.size_gb ?? data.sizeGb ?? 0),
+    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as LocalModel["backendType"],
+    configured: Boolean(data.configured ?? false),
+  }
+}
+
+function toOllamaVariant(raw: unknown): OllamaModelVariant {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    name: String(data.name ?? ""),
+    tag: String(data.tag ?? ""),
+    sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
+    parameterSize: (data.parameter_size ?? data.parameterSize ?? null) as string | null,
+    quantization: (data.quantization ?? null) as string | null,
+    contextWindow: (data.context_window ?? data.contextWindow ?? null) as string | null,
+    modality: (data.modality ?? null) as string | null,
+    updatedHint: (data.updated_hint ?? data.updatedHint ?? null) as string | null,
   }
 }
 
@@ -180,24 +252,37 @@ export const api = {
 
   downloads: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/downloads")).map(toDownloadJob),
-    enqueue: (source: DownloadSource, modelRef: string) =>
-      request<unknown>("POST", "/ocabra/downloads", { source, model_ref: modelRef }).then(toDownloadJob),
+    enqueue: (source: DownloadSource, modelRef: string, artifact?: string | null) =>
+      request<unknown>("POST", "/ocabra/downloads", { source, model_ref: modelRef, artifact: artifact ?? null }).then(
+        toDownloadJob,
+      ),
     cancel: (jobId: string) => request<void>("DELETE", `/ocabra/downloads/${encodeURIComponent(jobId)}`),
+    clearHistory: (status = "failed,cancelled,completed") =>
+      request<{ deleted: number }>("DELETE", `/ocabra/downloads?status=${encodeURIComponent(status)}`),
     streamProgress: (jobId: string): EventSource =>
       new EventSource(`/ocabra/downloads/${jobId}/stream`),
   },
 
   registry: {
-    searchHF: (q: string, task?: string, limit = 20) => {
+    searchHF: async (q: string, task?: string, limit = 20): Promise<HFModelCard[]> => {
       const params = new URLSearchParams({ q, limit: String(limit) })
       if (task) params.set("task", task)
-      return request<HFModelCard[]>("GET", `/ocabra/registry/hf/search?${params}`)
+      const raw = await request<unknown[]>("GET", `/ocabra/registry/hf/search?${params}`)
+      return raw.map(toHFModelCard)
     },
-    getHFDetail: (repoId: string) =>
-      request<HFModelDetail>("GET", `/ocabra/registry/hf/${encodeURIComponent(repoId)}`),
+    getHFDetail: async (repoId: string): Promise<HFModelDetail> =>
+      toHFModelDetail(await request<unknown>("GET", `/ocabra/registry/hf/${encodeURIComponent(repoId)}`)),
+    getHFVariants: async (repoId: string): Promise<HFModelVariant[]> =>
+      (await request<unknown[]>("GET", `/ocabra/registry/hf/${encodeURIComponent(repoId)}/variants`)).map(
+        toHFModelVariant,
+      ),
     searchOllama: (q: string) =>
       request<OllamaModelCard[]>("GET", `/ocabra/registry/ollama/search?q=${encodeURIComponent(q)}`),
-    listLocal: () => request<LocalModel[]>("GET", "/ocabra/registry/local"),
+    getOllamaVariants: async (modelName: string): Promise<OllamaModelVariant[]> =>
+      (await request<unknown[]>("GET", `/ocabra/registry/ollama/${encodeURIComponent(modelName)}/variants`)).map(
+        toOllamaVariant,
+      ),
+    listLocal: async () => (await request<unknown[]>("GET", "/ocabra/registry/local")).map(toLocalModel),
   },
 
   stats: {

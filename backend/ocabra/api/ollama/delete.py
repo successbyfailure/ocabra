@@ -6,10 +6,13 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ocabra.registry.ollama_registry import OllamaRegistry
+
 from ._mapper import OllamaNameMapper
 
 router = APIRouter()
 _mapper = OllamaNameMapper()
+_registry = OllamaRegistry()
 
 
 class DeleteRequest(BaseModel):
@@ -31,8 +34,13 @@ async def delete_model(body: DeleteRequest, request: Request) -> dict:
     model_manager = request.app.state.model_manager
 
     state = await model_manager.get_state(model_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail={"error": f"model '{body.name}' not found"})
+    if state is not None:
+        await model_manager.delete_model(model_id)
 
-    await model_manager.delete_model(model_id)
+    try:
+        await _registry.delete(body.name)
+    except Exception as exc:
+        if state is None:
+            raise HTTPException(status_code=404, detail={"error": f"model '{body.name}' not found"}) from exc
+
     return {"status": "success"}

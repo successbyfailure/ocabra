@@ -18,6 +18,7 @@ async def get_config() -> dict:
     return {
         "defaultGpuIndex": settings.default_gpu_index,
         "idleTimeoutSeconds": settings.idle_timeout_seconds,
+        "idleEvictionCheckIntervalSeconds": settings.idle_eviction_check_interval_seconds,
         "vramBufferMb": settings.vram_buffer_mb,
         "vramPressureThresholdPct": settings.vram_pressure_threshold_pct,
         "logLevel": settings.log_level,

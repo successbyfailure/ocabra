@@ -195,6 +195,7 @@ export function Models() {
                 <th className="px-3 py-2">Policy</th>
                 <th className="px-3 py-2">GPU</th>
                 <th className="px-3 py-2">VRAM</th>
+                <th className="px-3 py-2">Tamaño</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Acciones</th>
               </tr>

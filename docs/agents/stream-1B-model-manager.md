@@ -1,5 +1,6 @@
 # Briefing: Stream 1-B — Model Manager & Worker Pool
 
+**Estado: [x] Completado — mergeado en main (commit 94398a9)**
 **Prerequisito: Fase 0 completada.**
 **Rama:** `feat/1-B-model-manager`
 

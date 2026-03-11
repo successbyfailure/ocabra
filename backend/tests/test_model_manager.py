@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ocabra.backends._mock import MockBackend
+from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
 from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
 from ocabra.core.worker_pool import WorkerPool
 
@@ -128,3 +129,69 @@ async def test_concurrent_load_only_loads_once(model_manager):
         )
 
     assert load_count == 1
+
+
+class _PortRequiredBackend(BackendInterface):
+    def __init__(self) -> None:
+        self.received_port = None
+
+    async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
+        port = kwargs.get("port", 0)
+        if not port:
+            raise ValueError("port is required")
+        self.received_port = int(port)
+        return WorkerInfo(
+            backend_type="portreq",
+            model_id=model_id,
+            gpu_indices=gpu_indices,
+            port=self.received_port,
+            pid=1234,
+            vram_used_mb=1024,
+        )
+
+    async def unload(self, model_id: str) -> None:
+        return None
+
+    async def health_check(self, model_id: str) -> bool:
+        return True
+
+    async def get_capabilities(self, model_id: str) -> BackendCapabilities:
+        return BackendCapabilities(chat=True, completion=True, streaming=True)
+
+    async def get_vram_estimate_mb(self, model_id: str) -> int:
+        return 1024
+
+    async def forward_request(self, model_id: str, path: str, body: dict):
+        return {}
+
+    async def forward_stream(self, model_id: str, path: str, body: dict):
+        if False:
+            yield b""
+
+
+@pytest.mark.asyncio
+async def test_load_assigns_port_for_backend_that_requires_it():
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    wp.register_backend("portreq", backend)
+    mm = ModelManager(wp)
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+        from ocabra.core.model_manager import ModelState
+
+        mm._states["test/port-required"] = ModelState(
+            model_id="test/port-required",
+            display_name="test/port-required",
+            backend_type="portreq",
+            load_policy=LoadPolicy.ON_DEMAND,
+        )
+        mm._load_locks["test/port-required"] = asyncio.Lock()
+
+        state = await mm.load("test/port-required")
+
+    assert state.status == ModelStatus.LOADED
+    assert backend.received_port is not None
+    worker = wp.get_worker("test/port-required")
+    assert worker is not None
+    assert worker.port == backend.received_port

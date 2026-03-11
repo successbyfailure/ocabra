@@ -168,3 +168,45 @@ async def get_performance_stats(model_id: str | None = None) -> dict:
         })
 
     return {"byModel": summaries}
+
+
+async def get_token_stats(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+    model_id: str | None = None,
+) -> dict:
+    """
+    Return token usage totals and a simple per-request time series.
+    """
+    if to_dt is None:
+        to_dt = datetime.now(timezone.utc)
+    if from_dt is None:
+        from_dt = to_dt - timedelta(hours=24)
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+        )
+        if model_id:
+            q = q.where(RequestStat.model_id == model_id)
+        q = q.order_by(RequestStat.started_at.asc())
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    total_input = sum(r.input_tokens or 0 for r in rows)
+    total_output = sum(r.output_tokens or 0 for r in rows)
+    series = [
+        {
+            "timestamp": r.started_at.isoformat() if r.started_at else "",
+            "inputTokens": int(r.input_tokens or 0),
+            "outputTokens": int(r.output_tokens or 0),
+        }
+        for r in rows
+    ]
+
+    return {
+        "totalInputTokens": int(total_input),
+        "totalOutputTokens": int(total_output),
+        "series": series,
+    }

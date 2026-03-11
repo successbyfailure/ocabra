@@ -6,10 +6,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from ._deps import check_capability, ensure_loaded, get_model_manager
+from ._deps import (
+    check_capability,
+    ensure_loaded,
+    get_model_manager,
+    raise_upstream_http_error,
+)
 
 router = APIRouter()
 
@@ -36,7 +42,10 @@ async def completions(request: Request) -> Any:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    result = await worker_pool.forward_request(model_id, "/v1/completions", body)
+    try:
+        result = await worker_pool.forward_request(model_id, "/v1/completions", body)
+    except httpx.HTTPStatusError as exc:
+        raise_upstream_http_error(exc)
     return result
 
 

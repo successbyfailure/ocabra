@@ -22,6 +22,17 @@ class HFModelDetail(HFModelCard):
     estimated_vram_gb: float | None
 
 
+class HFModelVariant(BaseModel):
+    variant_id: str
+    label: str
+    artifact: str | None
+    size_gb: float | None
+    format: str
+    quantization: str | None
+    backend_type: Literal["vllm", "diffusers", "whisper", "tts", "ollama"]
+    is_default: bool = False
+
+
 class OllamaModelCard(BaseModel):
     name: str
     description: str
@@ -30,11 +41,22 @@ class OllamaModelCard(BaseModel):
     pulls: int
 
 
+class OllamaModelVariant(BaseModel):
+    name: str
+    tag: str
+    size_gb: float | None
+    parameter_size: str | None
+    quantization: str | None
+    context_window: str | None
+    modality: str | None
+    updated_hint: str | None
+
+
 class LocalModel(BaseModel):
     model_ref: str
     path: str
     source: Literal["huggingface", "gguf", "ollama"]
-    backend_type: Literal["vllm", "diffusers", "whisper", "tts"]
+    backend_type: Literal["vllm", "diffusers", "whisper", "tts", "ollama"]
     size_gb: float | None
 
 
@@ -42,6 +64,7 @@ class DownloadJob(BaseModel):
     job_id: str
     source: Literal["huggingface", "ollama"]
     model_ref: str
+    artifact: str | None = None
     status: Literal["queued", "downloading", "completed", "failed", "cancelled"]
     progress_pct: float
     speed_mb_s: float | None

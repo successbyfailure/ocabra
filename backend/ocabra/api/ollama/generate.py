@@ -48,8 +48,22 @@ async def generate(request: Request):
     check_capability(state, "completion", "text generation")
 
     vllm_body = _build_vllm_generate_body(body, model_id, stream)
-
     worker_pool = request.app.state.worker_pool
+    if state.backend_type == "ollama":
+        upstream_body = {
+            "model": ollama_model,
+            "prompt": body.get("prompt", ""),
+            "stream": stream,
+            "options": body.get("options", {}) if isinstance(body.get("options"), dict) else {},
+        }
+        if stream:
+            return StreamingResponse(
+                worker_pool.forward_stream(model_id, "/api/generate", upstream_body),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return await worker_pool.forward_request(model_id, "/api/generate", upstream_body)
+
     if stream:
         return StreamingResponse(
             _stream_generate(worker_pool, model_id, ollama_model, vllm_body),

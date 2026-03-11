@@ -25,16 +25,26 @@ class Settings(BaseSettings):
     models_dir: str = "/data/models"
     hf_cache_dir: str = "/data/hf_cache"
     hf_token: str = ""
+    ollama_base_url: str = "http://ollama:11434"
+    ollama_keep_alive: str = "30m"
 
     # GPU scheduling
     default_gpu_index: int = 1
     worker_port_range_start: int = 18000
     worker_port_range_end: int = 19000
+    vllm_gpu_memory_utilization: float = 0.60
+    # Helps keep torch/vLLM GPU index mapping aligned with NVML/pynvml.
+    cuda_device_order: str = "PCI_BUS_ID"
+    # Runtime-stability knobs for vLLM on mixed consumer GPUs.
+    vllm_enforce_eager: bool = True
+    # Leave unset by default; vLLM will auto-pick a backend supported by runtime.
+    vllm_attention_backend: str | None = None
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0
 
     # Model lifecycle
     idle_timeout_seconds: int = 300
+    idle_eviction_check_interval_seconds: int = 15
 
     # LiteLLM
     litellm_base_url: str = "http://litellm:4000"

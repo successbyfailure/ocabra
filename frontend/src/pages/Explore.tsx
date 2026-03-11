@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Tabs from "@radix-ui/react-tabs"
 import { toast } from "sonner"
@@ -8,12 +8,20 @@ import { HFModelCard } from "@/components/explore/HFModelCard"
 import { OllamaModelCard } from "@/components/explore/OllamaModelCard"
 import { SearchFilters } from "@/components/explore/SearchFilters"
 import { useDownloadStore } from "@/stores/downloadStore"
-import type { DownloadJob, DownloadSource, HFModelCard as HFCardType, OllamaModelCard as OllamaCardType } from "@/types"
+import type {
+  DownloadJob,
+  DownloadSource,
+  HFModelCard as HFCardType,
+  HFModelVariant,
+  OllamaModelCard as OllamaCardType,
+  OllamaModelVariant,
+} from "@/types"
 
 interface InstallTarget {
   source: DownloadSource
   modelRef: string
   title: string
+  ollamaBase?: string
 }
 
 export function Explore() {
@@ -27,6 +35,11 @@ export function Explore() {
   const [ollamaResults, setOllamaResults] = useState<OllamaCardType[]>([])
   const [loading, setLoading] = useState(false)
   const [installTarget, setInstallTarget] = useState<InstallTarget | null>(null)
+  const [ollamaVariants, setOllamaVariants] = useState<OllamaModelVariant[]>([])
+  const [hfVariants, setHfVariants] = useState<HFModelVariant[]>([])
+  const [selectedHFVariantId, setSelectedHFVariantId] = useState("")
+  const [selectedVariant, setSelectedVariant] = useState("")
+  const [variantLoading, setVariantLoading] = useState(false)
   const [targetDir, setTargetDir] = useState("/models")
   const [loadPolicy, setLoadPolicy] = useState("on_demand")
 
@@ -101,15 +114,79 @@ export function Explore() {
     }
   }, [activeTab, debouncedQuery, gatedFilter, sizeFilter, taskFilter])
 
-  const activeDownloads = useMemo(
-    () => jobs.filter((job) => job.status === "queued" || job.status === "downloading"),
-    [jobs],
-  )
+  useEffect(() => {
+    const target = installTarget
+    if (!target) {
+      setOllamaVariants([])
+      setSelectedVariant("")
+      setHfVariants([])
+      setSelectedHFVariantId("")
+      setVariantLoading(false)
+      return
+    }
+
+    if (target.source === "huggingface") {
+      let active = true
+      setVariantLoading(true)
+      setHfVariants([])
+      setSelectedHFVariantId("")
+
+      void api.registry
+        .getHFVariants(target.modelRef)
+        .then((variants) => {
+          if (!active) return
+          setHfVariants(variants)
+          const preferred = variants.find((v) => v.isDefault) ?? variants[0]
+          if (preferred) setSelectedHFVariantId(preferred.variantId)
+        })
+        .catch((err) => {
+          if (!active) return
+          toast.error(err instanceof Error ? err.message : "No se pudieron cargar variantes HF")
+        })
+        .finally(() => {
+          if (active) setVariantLoading(false)
+        })
+
+      return () => {
+        active = false
+      }
+    }
+
+    let active = true
+    setVariantLoading(true)
+    setOllamaVariants([])
+    setSelectedVariant(target.modelRef)
+
+    void api.registry
+      .getOllamaVariants(target.ollamaBase ?? target.modelRef.split(":", 1)[0])
+      .then((variants) => {
+        if (!active) return
+        setOllamaVariants(variants)
+        const preferred = variants.find((v) => v.tag === "latest") ?? variants[0]
+        if (preferred) setSelectedVariant(preferred.name)
+      })
+      .catch((err) => {
+        if (!active) return
+        toast.error(err instanceof Error ? err.message : "No se pudieron cargar variantes")
+      })
+      .finally(() => {
+        if (active) setVariantLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [installTarget])
 
   const install = async () => {
     if (!installTarget) return
+    const modelRef = installTarget.source === "ollama" ? (selectedVariant || installTarget.modelRef) : installTarget.modelRef
+    const selectedHFVariant = installTarget.source === "huggingface"
+      ? hfVariants.find((v) => v.variantId === selectedHFVariantId) ?? null
+      : null
+    const artifact = selectedHFVariant?.artifact ?? null
     try {
-      const job = await api.downloads.enqueue(installTarget.source, installTarget.modelRef)
+      const job = await api.downloads.enqueue(installTarget.source, modelRef, artifact)
       addJob(job)
       toast.success(`Descarga iniciada en ${targetDir} (${loadPolicy})`)
       setInstallTarget(null)
@@ -125,6 +202,16 @@ export function Explore() {
       toast.success("Descarga cancelada")
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No se pudo cancelar")
+    }
+  }
+
+  const clearHistory = async () => {
+    try {
+      const result = await api.downloads.clearHistory()
+      setJobs(jobs.filter((j) => j.status === "queued" || j.status === "downloading"))
+      toast.success(`${result.deleted} jobs eliminados`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo limpiar historial")
     }
   }
 
@@ -210,6 +297,7 @@ export function Explore() {
                       source: "ollama",
                       modelRef: item.name,
                       title: item.name,
+                      ollamaBase: item.name,
                     })
                   }
                 />
@@ -219,7 +307,17 @@ export function Explore() {
         </Tabs.Content>
       </Tabs.Root>
 
-      {activeDownloads.length > 0 && <p className="text-xs text-muted-foreground">Descargas activas: {activeDownloads.length}</p>}
+      {jobs.some((j) => j.status === "failed" || j.status === "cancelled" || j.status === "completed") && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => void clearHistory()}
+            className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted"
+          >
+            Limpiar historial
+          </button>
+        </div>
+      )}
 
       <Dialog.Root open={Boolean(installTarget)} onOpenChange={(next) => !next && setInstallTarget(null)}>
         <Dialog.Portal>
@@ -231,6 +329,57 @@ export function Explore() {
             </Dialog.Description>
 
             <div className="mt-4 space-y-3">
+              {installTarget?.source === "ollama" && (
+                <label className="block text-sm text-muted-foreground">
+                  Variante (billones / quant)
+                  <select
+                    value={selectedVariant}
+                    disabled={variantLoading}
+                    onChange={(event) => setSelectedVariant(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+                  >
+                    {variantLoading ? (
+                      <option value="">Cargando variantes...</option>
+                    ) : ollamaVariants.length === 0 ? (
+                      <option value={installTarget.modelRef}>{installTarget.modelRef}</option>
+                    ) : (
+                      ollamaVariants.map((variant) => (
+                        <option key={variant.name} value={variant.name}>
+                          {variant.name}
+                          {variant.sizeGb ? ` · ${variant.sizeGb.toFixed(1)} GB` : ""}
+                          {variant.quantization ? ` · ${variant.quantization}` : ""}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              )}
+              {installTarget?.source === "huggingface" && (
+                <label className="block text-sm text-muted-foreground">
+                  Variante HF
+                  <select
+                    value={selectedHFVariantId}
+                    disabled={variantLoading}
+                    onChange={(event) => setSelectedHFVariantId(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+                  >
+                    {variantLoading ? (
+                      <option value="">Cargando variantes...</option>
+                    ) : hfVariants.length === 0 ? (
+                      <option value="">Default</option>
+                    ) : (
+                      hfVariants.map((variant) => (
+                        <option key={variant.variantId} value={variant.variantId}>
+                          {variant.label}
+                          {variant.sizeGb ? ` · ${variant.sizeGb.toFixed(1)} GB` : ""}
+                          {variant.quantization ? ` · ${variant.quantization}` : ""}
+                          {variant.backendType ? ` · ${variant.backendType}` : ""}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              )}
               <label className="block text-sm text-muted-foreground">
                 Carpeta destino
                 <input

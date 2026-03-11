@@ -3,45 +3,58 @@ import { Copy, ImagePlus, Send } from "lucide-react"
 import { toast } from "sonner"
 import { MessageBubble, type ChatMessage } from "@/components/playground/MessageBubble"
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
+import type { BackendType } from "@/types"
 
 interface ChatInterfaceProps {
   modelId: string
+  backendType: BackendType | null
   params: PlaygroundParams
 }
 
-export function ChatInterface({ modelId, params }: ChatInterfaceProps) {
+export function ChatInterface({ modelId, backendType, params }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
-  const [streamingId, setStreamingId] = useState<string | null>(null)
+  const [sending, setSending] = useState(false)
   const [dragImage, setDragImage] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  const buildOpenAIMessages = (userText: string) => {
+    const history = messages.map((msg) => {
+      if (msg.role === "assistant") {
+        return { role: "assistant" as const, content: msg.content }
+      }
+      return { role: "user" as const, content: msg.content }
+    })
+    const userContent = dragImage
+      ? [
+          { type: "text", text: userText || "Describe la imagen" },
+          { type: "image_url", image_url: { url: dragImage } },
+        ]
+      : userText
+    return [
+      { role: "system" as const, content: params.systemPrompt },
+      ...history,
+      { role: "user" as const, content: userContent },
+    ]
+  }
 
   const curlPreview = useMemo(
     () =>
       `curl -X POST http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '${JSON.stringify({
         model: modelId,
-        messages: [{ role: "user", content: input || "Hello" }],
+        messages: buildOpenAIMessages(input || "Hello"),
         temperature: params.temperature,
         max_tokens: params.maxTokens,
         top_p: params.topP,
       })}'`,
-    [input, modelId, params.maxTokens, params.temperature, params.topP],
+    [input, modelId, params.maxTokens, params.systemPrompt, params.temperature, params.topP, messages, dragImage],
   )
 
-  const streamAssistant = (content: string, base: ChatMessage) => {
-    setStreamingId(base.id)
-    let index = 0
-    const timer = window.setInterval(() => {
-      index += 2
-      setMessages((prev) => prev.map((msg) => (msg.id === base.id ? { ...msg, content: content.slice(0, index) } : msg)))
-      if (index >= content.length) {
-        window.clearInterval(timer)
-        setStreamingId(null)
-      }
-    }, 22)
-  }
-
-  const sendMessage = () => {
+  const sendMessage = async () => {
+    if (!modelId) {
+      toast.error("Selecciona un modelo")
+      return
+    }
     const text = input.trim()
     if (!text && !dragImage) return
 
@@ -52,35 +65,67 @@ export function ChatInterface({ modelId, params }: ChatInterfaceProps) {
       image: dragImage ?? undefined,
     }
 
-    const assistantMessage: ChatMessage = {
-      id: `msg-${Date.now()}-assistant`,
-      role: "assistant",
-      content: "",
-    }
-
-    const withTool = text.toLowerCase().includes("tool")
-    const response = withTool
-      ? "He ejecutado una llamada de herramienta y este es el resultado."
-      : `Respuesta simulada de **${modelId}** con temperature=${params.temperature.toFixed(2)}.`
-
-    setMessages((prev) => [
-      ...prev,
-      userMessage,
-      {
-        ...assistantMessage,
-        toolCall: withTool
-          ? {
-              name: "search_local_models",
-              args: '{"limit": 5}',
-              result: '["mistral-7b", "llama3-8b"]',
-            }
-          : undefined,
-      },
-    ])
-
-    streamAssistant(response, assistantMessage)
+    setMessages((prev) => [...prev, userMessage])
     setInput("")
-    setDragImage(null)
+    setSending(true)
+    try {
+      const useOllama = backendType === "ollama"
+      const response = await fetch(useOllama ? "/api/chat" : "/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          useOllama
+            ? {
+                model: modelId,
+                stream: false,
+                messages: buildOpenAIMessages(text),
+                options: {
+                  temperature: params.temperature,
+                  top_p: params.topP,
+                  num_predict: params.maxTokens,
+                },
+              }
+            : {
+                model: modelId,
+                messages: buildOpenAIMessages(text),
+                temperature: params.temperature,
+                max_tokens: params.maxTokens,
+                top_p: params.topP,
+                stream: false,
+              },
+        ),
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(String(err?.error?.message ?? err?.detail ?? `HTTP ${response.status}`))
+      }
+      const data = await response.json()
+      const content = useOllama
+        ? String(data?.message?.content ?? "")
+        : extractOpenAIContent(data)
+      const choice = data?.choices?.[0]?.message
+      const toolCall = Array.isArray(choice?.tool_calls) ? choice.tool_calls[0] : undefined
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `msg-${Date.now()}-assistant`,
+          role: "assistant",
+          content: content || "(sin contenido)",
+          toolCall: toolCall
+            ? {
+                name: String(toolCall.function?.name ?? "tool"),
+                args: String(toolCall.function?.arguments ?? "{}"),
+                result: "(pendiente de resultado)",
+              }
+            : undefined,
+        },
+      ])
+      setDragImage(null)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error en chat")
+    } finally {
+      setSending(false)
+    }
   }
 
   const onDropImage = (file: File) => {
@@ -109,7 +154,7 @@ export function ChatInterface({ modelId, params }: ChatInterfaceProps) {
           <p className="text-sm text-muted-foreground">Escribe un prompt o arrastra una imagen para vision.</p>
         )}
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} streaming={streamingId === message.id} />
+          <MessageBubble key={message.id} message={message} />
         ))}
       </div>
 
@@ -152,10 +197,11 @@ export function ChatInterface({ modelId, params }: ChatInterfaceProps) {
           </div>
           <button
             type="button"
-            onClick={sendMessage}
+            onClick={() => void sendMessage()}
+            disabled={sending || !modelId}
             className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
           >
-            <Send size={14} /> Enviar
+            <Send size={14} /> {sending ? "Enviando..." : "Enviar"}
           </button>
         </div>
       </div>
@@ -172,4 +218,17 @@ export function ChatInterface({ modelId, params }: ChatInterfaceProps) {
       />
     </div>
   )
+}
+
+function extractOpenAIContent(data: unknown): string {
+  const payload = (data ?? {}) as { choices?: Array<{ message?: { content?: unknown } }> }
+  const choice = payload.choices?.[0]?.message
+  const contentRaw = choice?.content
+  if (typeof contentRaw === "string") return contentRaw
+  if (!Array.isArray(contentRaw)) return ""
+  return contentRaw
+    .map((part: { text?: string; type?: string }) =>
+      part?.type === "text" && typeof part.text === "string" ? part.text : "",
+    )
+    .join("\n")
 }

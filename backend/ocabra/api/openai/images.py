@@ -6,9 +6,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 
-from ._deps import check_capability, ensure_loaded, get_model_manager
+from ._deps import (
+    check_capability,
+    ensure_loaded,
+    get_model_manager,
+    raise_upstream_http_error,
+)
 
 router = APIRouter()
 
@@ -45,7 +51,10 @@ async def image_generations(request: Request) -> Any:
     }
 
     worker_pool = request.app.state.worker_pool
-    result = await worker_pool.forward_request(model_id, "/generate", worker_body)
+    try:
+        result = await worker_pool.forward_request(model_id, "/generate", worker_body)
+    except httpx.HTTPStatusError as exc:
+        raise_upstream_http_error(exc)
 
     # Translate back to OpenAI format
     images = result.get("images", [])

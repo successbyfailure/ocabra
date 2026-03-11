@@ -136,15 +136,44 @@ class ModelManager:
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
                 vram_needed = await backend.get_vram_estimate_mb(model_id)
+                gpu_managed = state.backend_type != "ollama"
+                assigned_port = await self._worker_pool.assign_port() if gpu_managed else 0
+                backend_loaded = False
 
-                if self._gpu_scheduler:
+                if not gpu_managed:
+                    gpu_indices = []
+                elif self._gpu_scheduler:
                     gpu_indices = await self._gpu_scheduler.find_gpu_for_model(
-                        vram_needed, force_gpu or state.preferred_gpu
+                        vram_needed,
+                        force_gpu or state.preferred_gpu,
+                        enforce_vllm_headroom=(state.backend_type == "vllm"),
                     )
                 else:
                     gpu_indices = [settings.default_gpu_index]
 
-                worker_info = await backend.load(model_id, gpu_indices)
+                # vLLM checks against a fraction of total VRAM, not only model weights.
+                if state.backend_type == "vllm" and self._gpu_manager:
+                    from ocabra.core.scheduler import InsufficientVRAMError
+
+                    for gpu_idx in gpu_indices:
+                        gpu_state = await self._gpu_manager.get_state(gpu_idx)
+                        required_free_mb = int(
+                            gpu_state.total_vram_mb * settings.vllm_gpu_memory_utilization
+                        )
+                        if gpu_state.free_vram_mb < required_free_mb:
+                            raise InsufficientVRAMError(
+                                "GPU "
+                                f"{gpu_idx} has {gpu_state.free_vram_mb} MB free, "
+                                f"vLLM requires at least {required_free_mb} MB free "
+                                f"(vllm_gpu_memory_utilization={settings.vllm_gpu_memory_utilization})."
+                            )
+
+                worker_info = await backend.load(
+                    model_id,
+                    gpu_indices,
+                    port=assigned_port,
+                )
+                backend_loaded = True
                 capabilities = await backend.get_capabilities(model_id)
 
                 state.worker_info = worker_info
@@ -155,7 +184,7 @@ class ModelManager:
                 state.loaded_at = datetime.now(timezone.utc)
                 state.error_message = None
 
-                if self._gpu_manager:
+                if gpu_managed and self._gpu_manager:
                     for gpu_idx in gpu_indices:
                         await self._gpu_manager.lock_vram(
                             gpu_idx, worker_info.vram_used_mb, model_id
@@ -172,6 +201,18 @@ class ModelManager:
             except Exception as e:
                 state.status = ModelStatus.ERROR
                 state.error_message = str(e)
+                # Ensure no leaked subprocess/port after partial load failures.
+                try:
+                    if "backend_loaded" in locals() and backend_loaded:
+                        await backend.unload(model_id)
+                except Exception:
+                    logger.warning(
+                        "model_load_cleanup_failed",
+                        model_id=model_id,
+                    )
+                self._worker_pool.remove_worker(model_id)
+                if "assigned_port" in locals() and assigned_port:
+                    self._worker_pool.release_port(assigned_port)
                 await self._publish_event(model_id, "load_failed")
                 logger.error("model_load_failed", model_id=model_id, error=str(e))
                 raise
@@ -256,6 +297,8 @@ class ModelManager:
             raise RuntimeError(f"Model '{model_id}' is in error state: {state.error_message}")
 
     async def check_idle_evictions(self) -> None:
+        if settings.idle_timeout_seconds <= 0:
+            return
         now = datetime.now(timezone.utc)
         for model_id, state in list(self._states.items()):
             if state.status != ModelStatus.LOADED:

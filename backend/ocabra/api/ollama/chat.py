@@ -38,6 +38,21 @@ async def chat(request: Request):
     check_capability(state, "chat", "chat")
 
     worker_pool = request.app.state.worker_pool
+    if state.backend_type == "ollama":
+        upstream_body = {
+            "model": ollama_model,
+            "messages": body.get("messages", []),
+            "stream": stream,
+            "options": body.get("options", {}) if isinstance(body.get("options"), dict) else {},
+        }
+        if stream:
+            return StreamingResponse(
+                worker_pool.forward_stream(model_id, "/api/chat", upstream_body),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return await worker_pool.forward_request(model_id, "/api/chat", upstream_body)
+
     vllm_body = _build_vllm_chat_body(body, model_id, stream)
 
     if stream:

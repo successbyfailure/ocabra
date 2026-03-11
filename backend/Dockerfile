@@ -4,30 +4,40 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-dev \
-    python3-pip \
+    build-essential \
+    software-properties-common \
+    gnupg \
     curl \
     git \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
-    && ln -sf /usr/bin/python3 /usr/bin/python
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && python -m pip install --upgrade pip setuptools wheel
 
 WORKDIR /app
 
 # --- dev target ---
 FROM base AS dev
 COPY pyproject.toml .
-RUN pip install -e ".[dev]"
+RUN python -m pip install -e ".[dev,vllm]" \
+    && python -m pip uninstall -y triton || true
 COPY . .
 
 # --- production target ---
 FROM base AS production
 COPY pyproject.toml .
-RUN pip install .
+RUN python -m pip install ".[vllm]" \
+    && python -m pip uninstall -y triton || true
 COPY . .
 
 EXPOSE 8000

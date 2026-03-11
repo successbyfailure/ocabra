@@ -22,6 +22,7 @@ QUEUE_NAME = "queue:download"
 class DownloadCreateRequest(BaseModel):
     source: Literal["huggingface", "ollama"]
     model_ref: str
+    artifact: str | None = None
 
 
 class DownloadManager:
@@ -30,11 +31,25 @@ class DownloadManager:
         self._ollama_registry = OllamaRegistry()
         self._worker_task: asyncio.Task | None = None
         self._active_cancel_flags: dict[str, asyncio.Event] = {}
+        self._app = None
 
-    async def start(self) -> None:
+    async def start(self, app=None) -> None:
+        self._app = app
         if self._worker_task and not self._worker_task.done():
             return
+        await self._cleanup_stale_jobs()
+
         self._worker_task = asyncio.create_task(self._worker_loop(), name="download-manager-worker")
+
+    async def _cleanup_stale_jobs(self) -> None:
+        """Mark jobs left in 'downloading' state as failed (server was killed mid-download)."""
+        jobs = await self.list_jobs()
+        for job in jobs:
+            if job.status == "downloading":
+                failed = job.model_copy(
+                    update={"status": "failed", "error": "interrupted (server restart)", "completed_at": datetime.now(UTC)}
+                )
+                await self._save_and_publish(failed)
 
     async def stop(self) -> None:
         if not self._worker_task:
@@ -44,7 +59,7 @@ class DownloadManager:
             await self._worker_task
         self._worker_task = None
 
-    async def enqueue(self, source: str, model_ref: str) -> DownloadJob:
+    async def enqueue(self, source: str, model_ref: str, artifact: str | None = None) -> DownloadJob:
         if source not in {"huggingface", "ollama"}:
             raise ValueError("source must be 'huggingface' or 'ollama'")
 
@@ -53,6 +68,7 @@ class DownloadManager:
             job_id=uuid.uuid4().hex,
             source=source,
             model_ref=model_ref,
+            artifact=artifact,
             status="queued",
             progress_pct=0.0,
             speed_mb_s=None,
@@ -119,6 +135,7 @@ class DownloadManager:
     async def _execute_job(self, job: DownloadJob) -> None:
         cancel_flag = asyncio.Event()
         self._active_cancel_flags[job.job_id] = cancel_flag
+        loop = asyncio.get_event_loop()
 
         downloading = job.model_copy(update={"status": "downloading"})
         await self._save_and_publish(downloading)
@@ -127,9 +144,12 @@ class DownloadManager:
             def _progress(pct: float, speed_mb_s: float | None) -> None:
                 if cancel_flag.is_set():
                     raise asyncio.CancelledError
+                # Skip 100% update — _execute_job handles completed status to avoid race
+                if pct >= 100:
+                    return
 
                 eta = None
-                if speed_mb_s and speed_mb_s > 0 and pct < 100:
+                if speed_mb_s and speed_mb_s > 0:
                     remaining_mb = max(0.0, 1.0 - pct / 100.0) * 1024
                     eta = int(remaining_mb / speed_mb_s)
 
@@ -140,14 +160,23 @@ class DownloadManager:
                         "eta_seconds": eta,
                     }
                 )
-                asyncio.create_task(self._save_and_publish(updated))
+                try:
+                    asyncio.get_running_loop()
+                    asyncio.create_task(self._save_and_publish(updated))
+                except RuntimeError:
+                    loop.call_soon_threadsafe(loop.create_task, self._save_and_publish(updated))
 
             target_dir = Path(settings.models_dir)
             if downloading.source == "huggingface":
+                folder_suffix = ""
+                if downloading.artifact:
+                    stem = Path(downloading.artifact).stem.replace("/", "_")
+                    folder_suffix = f"--{stem}"
                 await self._hf_registry.download(
                     repo_id=downloading.model_ref,
-                    target_dir=target_dir / "huggingface" / downloading.model_ref.replace("/", "--"),
+                    target_dir=target_dir / "huggingface" / (downloading.model_ref.replace("/", "--") + folder_suffix),
                     progress_callback=_progress,
+                    artifact=downloading.artifact,
                 )
             else:
                 await self._ollama_registry.pull(
@@ -171,6 +200,7 @@ class DownloadManager:
                 }
             )
             await self._save_and_publish(completed)
+            await self._auto_register_model(downloading)
         except asyncio.CancelledError:
             cancelled = downloading.model_copy(
                 update={"status": "cancelled", "completed_at": datetime.now(UTC)}
@@ -188,6 +218,50 @@ class DownloadManager:
         finally:
             self._active_cancel_flags.pop(job.job_id, None)
 
+    async def _auto_register_model(self, job: DownloadJob) -> None:
+        """Register downloaded model in the model manager if not already configured."""
+        if not self._app:
+            return
+        try:
+            mm = self._app.state.model_manager
+            model_id = self._job_model_id(job)
+            existing = await mm.get_state(model_id)
+            if existing:
+                return
+            if job.source == "ollama":
+                backend_type = "ollama"
+            else:
+                backend_type = await self._hf_registry.infer_backend_for_repo(job.model_ref, artifact=job.artifact)
+            await mm.add_model(
+                model_id=model_id,
+                backend_type=backend_type,
+                display_name=model_id.split("/")[-1] if "/" in model_id else model_id,
+                load_policy="on_demand",
+            )
+        except Exception:
+            pass  # Non-fatal: model can be registered manually
+
+    def _job_model_id(self, job: DownloadJob) -> str:
+        if job.source != "huggingface" or not job.artifact:
+            return job.model_ref
+        stem = Path(job.artifact).stem
+        return f"{job.model_ref}::{stem}"
+
+    async def clear_jobs(self, statuses: set[str] | None = None) -> int:
+        """Delete jobs by status from Redis. Returns count deleted."""
+        redis = get_redis_safe()
+        keys = await redis.keys("download:job:*")
+        deleted = 0
+        for key in keys:
+            payload = await get_key(key)
+            if not payload:
+                continue
+            job_status = payload.get("status", "")
+            if statuses is None or job_status in statuses:
+                await redis.delete(key)
+                deleted += 1
+        return deleted
+
     async def _save_and_publish(self, job: DownloadJob) -> None:
         await set_key(f"download:job:{job.job_id}", job.model_dump(mode="json"))
         await publish(f"download:progress:{job.job_id}", job.model_dump(mode="json"))
@@ -203,7 +277,7 @@ download_manager = DownloadManager()
 
 
 async def _lifespan(_app) -> AsyncGenerator[None, None]:
-    await download_manager.start()
+    await download_manager.start(app=_app)
     yield
     await download_manager.stop()
 
@@ -219,9 +293,27 @@ async def list_downloads() -> list[DownloadJob]:
 @router.post("/downloads", response_model=DownloadJob)
 async def enqueue_download(request: DownloadCreateRequest) -> DownloadJob:
     try:
-        return await download_manager.enqueue(source=request.source, model_ref=request.model_ref)
+        return await download_manager.enqueue(source=request.source, model_ref=request.model_ref, artifact=request.artifact)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/downloads/{job_id}", response_model=DownloadJob)
+async def get_download(job_id: str) -> DownloadJob:
+    """Get a single download job by ID."""
+    job = await download_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Download job not found")
+    return job
+
+
+@router.delete("/downloads")
+async def clear_downloads(status: str = "failed,cancelled,completed") -> dict[str, int]:
+    """Delete historical download jobs by status (comma-separated). Active jobs are not affected."""
+    requested = {s.strip() for s in status.split(",")}
+    safe = requested - {"queued", "downloading"}  # never delete active jobs
+    deleted = await download_manager.clear_jobs(statuses=safe)
+    return {"deleted": deleted}
 
 
 @router.delete("/downloads/{job_id}")
@@ -249,7 +341,7 @@ async def stream_download_progress(job_id: str) -> StreamingResponse:
                 data = message.get("data")
                 if not isinstance(data, str):
                     continue
-                yield f"event: progress\\ndata: {data}\\n\\n"
+                yield f"data: {data}\n\n"
 
     return StreamingResponse(
         event_stream(),

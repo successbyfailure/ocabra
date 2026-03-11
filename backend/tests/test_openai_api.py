@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -212,6 +213,107 @@ class TestChatCompletions:
             "messages": [{"role": "user", "content": "Hi"}],
         })
         app.state.model_manager.load.assert_called_once_with("lazy-model")
+
+    def test_loaded_request_updates_last_request_timestamp(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="test-model",
+            display_name="Test",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+        )
+        assert state.last_request_at is None
+        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert resp.status_code == 200
+        assert state.last_request_at is not None
+
+    def test_upstream_400_is_propagated_not_500(self):
+        app = _make_app()
+        req = httpx.Request("POST", "http://127.0.0.1:18000/v1/chat/completions")
+        upstream_payload = {
+            "error": {
+                "message": "chat template missing",
+                "type": "BadRequestError",
+                "code": 400,
+            }
+        }
+        resp = httpx.Response(400, request=req, json=upstream_payload)
+        app.state.worker_pool.forward_request = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Client error '400 Bad Request'",
+                request=req,
+                response=resp,
+            )
+        )
+        client = TestClient(app)
+
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert r.status_code == 400
+        assert r.json()["detail"]["error"]["message"] == "chat template missing"
+
+    def test_on_demand_load_insufficient_vram_returns_409(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.scheduler import InsufficientVRAMError
+
+        configured_state = ModelState(
+            model_id="lazy-model",
+            display_name="Lazy",
+            backend_type="vllm",
+            status=ModelStatus.CONFIGURED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+        )
+        app = _make_app(model_state=configured_state)
+        app.state.model_manager.get_state = AsyncMock(return_value=configured_state)
+        app.state.model_manager.load = AsyncMock(
+            side_effect=InsufficientVRAMError("GPU 0 has low free memory")
+        )
+        client = TestClient(app)
+
+        r = client.post("/v1/chat/completions", json={
+            "model": "lazy-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert r.status_code == 409
+        assert r.json()["detail"]["error"]["code"] == "insufficient_vram"
+
+    def test_on_demand_load_generic_failure_returns_503(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+
+        configured_state = ModelState(
+            model_id="lazy-model",
+            display_name="Lazy",
+            backend_type="vllm",
+            status=ModelStatus.CONFIGURED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+        )
+        app = _make_app(model_state=configured_state)
+        app.state.model_manager.get_state = AsyncMock(return_value=configured_state)
+        app.state.model_manager.load = AsyncMock(side_effect=RuntimeError("boom"))
+        client = TestClient(app)
+
+        r = client.post("/v1/chat/completions", json={
+            "model": "lazy-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert r.status_code == 503
+        assert r.json()["detail"]["error"]["code"] == "model_load_failed"
 
 
 # ---------------------------------------------------------------------------

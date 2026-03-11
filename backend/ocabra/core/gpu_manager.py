@@ -31,15 +31,22 @@ class GPUManager:
         self._locks: dict[int, dict[str, int]] = {}  # gpu_index → {model_id: vram_mb}
         self._poll_task: asyncio.Task | None = None
         self._poll_history: dict[int, list[dict]] = {}
+        self._running: bool = False
 
     async def start(self) -> None:
-        pynvml.nvmlInit()
+        try:
+            pynvml.nvmlInit()
+        except pynvml.NVMLError as e:
+            logger.warning("nvml_unavailable", error=str(e), detail="GPU monitoring disabled")
+            self._running = True
+            return
         count = pynvml.nvmlDeviceGetCount()
         for i in range(count):
             self._locks[i] = {}
             self._poll_history[i] = []
             self._states[i] = self._read_gpu(i)
         self._poll_task = asyncio.create_task(self._poll_loop())
+        self._running = True
         logger.info("gpu_manager_started", gpu_count=count)
 
     async def stop(self) -> None:

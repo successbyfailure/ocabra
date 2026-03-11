@@ -4,13 +4,16 @@ Shared dependencies for OpenAI API endpoints.
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 from fastapi import HTTPException, Request
 
 if TYPE_CHECKING:
-    from ocabra.core.model_manager import ModelManager, ModelState, ModelStatus
+    from ocabra.core.model_manager import ModelManager, ModelState
 
 logger = structlog.get_logger(__name__)
 
@@ -31,11 +34,11 @@ def _openai_error(message: str, error_type: str, param: str | None = None, code:
     )
 
 
-def get_model_manager(request: Request) -> "ModelManager":
+def get_model_manager(request: Request) -> ModelManager:
     return request.app.state.model_manager
 
 
-async def ensure_loaded(model_manager: "ModelManager", model_id: str) -> "ModelState":
+async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelState:
     """
     Ensure a model is LOADED before forwarding a request.
     Triggers on-demand loading if CONFIGURED or UNLOADED.
@@ -54,13 +57,33 @@ async def ensure_loaded(model_manager: "ModelManager", model_id: str) -> "ModelS
         )
 
     if state.status == ModelStatus.LOADED:
+        state.last_request_at = datetime.now(UTC)
         return state
 
     if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED):
-        await model_manager.load(model_id)
+        try:
+            await model_manager.load(model_id)
+        except Exception as exc:
+            # Surface resource/scheduler failures as clear client-visible errors.
+            from ocabra.core.scheduler import InsufficientVRAMError
+
+            if isinstance(exc, InsufficientVRAMError):
+                raise _openai_error(
+                    str(exc),
+                    "invalid_request_error",
+                    code="insufficient_vram",
+                    status_code=409,
+                ) from exc
+            raise _openai_error(
+                f"Failed to load model '{model_id}': {exc}",
+                "server_error",
+                code="model_load_failed",
+                status_code=503,
+            ) from exc
         # Verify it loaded
         state = await model_manager.get_state(model_id)
         if state and state.status == ModelStatus.LOADED:
+            state.last_request_at = datetime.now(UTC)
             return state
 
     if state and state.status == ModelStatus.LOADING:
@@ -68,6 +91,7 @@ async def ensure_loaded(model_manager: "ModelManager", model_id: str) -> "ModelS
             await asyncio.sleep(1)
             state = await model_manager.get_state(model_id)
             if state and state.status == ModelStatus.LOADED:
+                state.last_request_at = datetime.now(UTC)
                 return state
         raise _openai_error(
             f"Model '{model_id}' did not finish loading in time.",
@@ -84,7 +108,7 @@ async def ensure_loaded(model_manager: "ModelManager", model_id: str) -> "ModelS
     )
 
 
-def check_capability(state: "ModelState", capability: str, endpoint: str) -> None:
+def check_capability(state: ModelState, capability: str, endpoint: str) -> None:
     """Raise 400 if the model lacks the required capability."""
     if not getattr(state.capabilities, capability, False):
         raise _openai_error(
@@ -93,3 +117,31 @@ def check_capability(state: "ModelState", capability: str, endpoint: str) -> Non
             param="model",
             code="model_not_capable",
         )
+
+
+def raise_upstream_http_error(exc: httpx.HTTPStatusError) -> None:
+    """
+    Translate worker HTTP errors into OpenAI-compatible API errors.
+
+    Preserves upstream status code and error payload when possible.
+    """
+    status_code = exc.response.status_code
+    body_text = exc.response.text
+
+    try:
+        parsed = json.loads(body_text) if body_text else None
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        if "detail" in parsed:
+            raise HTTPException(status_code=status_code, detail=parsed["detail"])
+        if "error" in parsed:
+            raise HTTPException(status_code=status_code, detail=parsed)
+
+    message = body_text.strip() if body_text else str(exc)
+    raise _openai_error(
+        message,
+        "invalid_request_error" if 400 <= status_code < 500 else "server_error",
+        status_code=status_code,
+    )

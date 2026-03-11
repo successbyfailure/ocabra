@@ -24,7 +24,7 @@ export type ModelStatus =
   | "error"
 
 export type LoadPolicy = "pin" | "warm" | "on_demand"
-export type BackendType = "vllm" | "diffusers" | "whisper" | "tts"
+export type BackendType = "vllm" | "diffusers" | "whisper" | "tts" | "ollama"
 
 export interface ModelCapabilities {
   chat: boolean
@@ -50,6 +50,7 @@ export interface ModelState {
   preferredGpu: number | null
   currentGpu: number[]
   vramUsedMb: number
+  diskSizeBytes: number | null
   capabilities: ModelCapabilities
   lastRequestAt: string | null
   loadedAt: string | null
@@ -76,6 +77,7 @@ export interface DownloadJob {
   jobId: string
   source: "huggingface" | "ollama"
   modelRef: string
+  artifact?: string | null
   status: "queued" | "downloading" | "completed" | "failed" | "cancelled"
   progressPct: number
   speedMbS: number | null
@@ -106,12 +108,34 @@ export interface HFModelDetail extends HFModelCard {
   estimatedVramGb: number | null
 }
 
+export interface HFModelVariant {
+  variantId: string
+  label: string
+  artifact: string | null
+  sizeGb: number | null
+  format: string
+  quantization: string | null
+  backendType: BackendType
+  isDefault: boolean
+}
+
 export interface OllamaModelCard {
   name: string
   description: string
   tags: string[]
   sizeGb: number | null
   pulls: number
+}
+
+export interface OllamaModelVariant {
+  name: string
+  tag: string
+  sizeGb: number | null
+  parameterSize: string | null
+  quantization: string | null
+  contextWindow: string | null
+  modality: string | null
+  updatedHint: string | null
 }
 
 export interface LocalModel {

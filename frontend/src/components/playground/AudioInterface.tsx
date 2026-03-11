@@ -20,12 +20,15 @@ const FALLBACK_TTS_AUDIO =
 export function AudioInterface({ modelId, params }: AudioInterfaceProps) {
   const [recording, setRecording] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null)
   const [transcript, setTranscript] = useState("")
   const [segments, setSegments] = useState<TranscriptionSegment[]>([])
   const [ttsText, setTtsText] = useState("Hola desde oCabra")
   const [voice, setVoice] = useState("alloy")
   const [speed, setSpeed] = useState(1)
   const [ttsAudioUrl, setTtsAudioUrl] = useState<string | null>(null)
+  const [runningTranscription, setRunningTranscription] = useState(false)
+  const [runningTTS, setRunningTTS] = useState(false)
 
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -46,6 +49,7 @@ export function AudioInterface({ modelId, params }: AudioInterfaceProps) {
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: "audio/webm" })
         setAudioUrl(URL.createObjectURL(blob))
+        setAudioBlob(blob)
         setRecording(false)
       }
 
@@ -61,27 +65,89 @@ export function AudioInterface({ modelId, params }: AudioInterfaceProps) {
     recorderRef.current?.stream.getTracks().forEach((track) => track.stop())
   }
 
-  const transcribe = () => {
-    if (!audioUrl) {
+  const transcribe = async () => {
+    if (!modelId) {
+      toast.error("Selecciona un modelo")
+      return
+    }
+    if (!audioBlob) {
       toast.error("Sube o graba un audio primero")
       return
     }
-    const text = `Transcripcion simulada por ${modelId} en formato ${params.responseFormat}.`
-    setTranscript(text)
-    if (params.responseFormat === "verbose_json") {
-      setSegments([
-        { start: "00:00", end: "00:03", text: "Hola, este es un ejemplo." },
-        { start: "00:03", end: "00:07", text: "Incluye timestamps en verbose_json." },
-      ])
-    } else {
-      setSegments([])
+    setRunningTranscription(true)
+    try {
+      const form = new FormData()
+      form.append("file", audioBlob, "audio.webm")
+      form.append("model", modelId)
+      form.append("response_format", params.responseFormat)
+      form.append("temperature", String(params.temperature))
+
+      const response = await fetch("/v1/audio/transcriptions", {
+        method: "POST",
+        body: form,
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(String(err?.error?.message ?? err?.detail ?? `HTTP ${response.status}`))
+      }
+
+      if (params.responseFormat === "text") {
+        setTranscript(await response.text())
+        setSegments([])
+      } else {
+        const payload = await response.json()
+        setTranscript(String(payload?.text ?? ""))
+        if (params.responseFormat === "verbose_json" && Array.isArray(payload?.segments)) {
+          setSegments(
+            payload.segments.map((segment: { start?: number; end?: number; text?: string }) => ({
+              start: String(segment?.start ?? ""),
+              end: String(segment?.end ?? ""),
+              text: String(segment?.text ?? ""),
+            })),
+          )
+        } else {
+          setSegments([])
+        }
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error en transcripcion")
+    } finally {
+      setRunningTranscription(false)
     }
   }
 
-  const generateTTS = () => {
+  const generateTTS = async () => {
+    if (!modelId) {
+      toast.error("Selecciona un modelo")
+      return
+    }
     if (!ttsText.trim()) return
-    setTtsAudioUrl(FALLBACK_TTS_AUDIO)
-    toast.success(`TTS generado con voz ${voice} a velocidad ${speed.toFixed(2)}`)
+    setRunningTTS(true)
+    try {
+      const response = await fetch("/v1/audio/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: modelId,
+          input: ttsText.trim(),
+          voice,
+          speed,
+          response_format: "mp3",
+        }),
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(String(err?.error?.message ?? err?.detail ?? `HTTP ${response.status}`))
+      }
+      const blob = await response.blob()
+      setTtsAudioUrl(URL.createObjectURL(blob))
+      toast.success(`TTS generado con voz ${voice} a velocidad ${speed.toFixed(2)}`)
+    } catch {
+      setTtsAudioUrl(FALLBACK_TTS_AUDIO)
+      toast.error("Fallo TTS real, mostrando audio fallback")
+    } finally {
+      setRunningTTS(false)
+    }
   }
 
   return (
@@ -117,17 +183,20 @@ export function AudioInterface({ modelId, params }: AudioInterfaceProps) {
               className="hidden"
               onChange={(event) => {
                 const file = event.target.files?.[0]
-                if (file) setAudioUrl(URL.createObjectURL(file))
+                if (!file) return
+                setAudioUrl(URL.createObjectURL(file))
+                setAudioBlob(file)
               }}
             />
           </label>
 
           <button
             type="button"
-            onClick={transcribe}
+            onClick={() => void transcribe()}
+            disabled={runningTranscription || !modelId}
             className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
           >
-            Transcribir
+            {runningTranscription ? "Transcribiendo..." : "Transcribir"}
           </button>
         </div>
 
@@ -190,10 +259,11 @@ export function AudioInterface({ modelId, params }: AudioInterfaceProps) {
 
         <button
           type="button"
-          onClick={generateTTS}
+          onClick={() => void generateTTS()}
+          disabled={runningTTS || !modelId}
           className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
         >
-          Generar TTS
+          {runningTTS ? "Generando..." : "Generar TTS"}
         </button>
 
         {ttsAudioUrl && <audio controls src={ttsAudioUrl} className="w-full" />}

@@ -41,8 +41,8 @@ async def test_download_manager_enqueue_progress_complete(monkeypatch: pytest.Mo
     async def fake_publish(channel: str, data: dict) -> None:
         published.append((channel, data))
 
-    async def fake_hf_download(repo_id: str, target_dir: Path, progress_callback):
-        _ = repo_id, target_dir
+    async def fake_hf_download(repo_id: str, target_dir: Path, progress_callback, artifact=None):
+        _ = repo_id, target_dir, artifact
         progress_callback(25.0, 10.0)
         await asyncio.sleep(0)
         progress_callback(80.0, 8.0)
@@ -65,6 +65,7 @@ async def test_download_manager_enqueue_progress_complete(monkeypatch: pytest.Mo
     assert stored is not None
     assert stored.status == "completed"
     assert stored.progress_pct == 100.0
+    assert stored.artifact is None
     assert any(ch == f"download:progress:{job.job_id}" for ch, _ in published)
 
 

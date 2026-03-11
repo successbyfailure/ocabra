@@ -37,7 +37,7 @@ class TestModelLifecycle:
         with (
             patch("ocabra.core.model_manager.publish", new=AsyncMock()),
             patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
-            patch("ocabra.core.model_manager.AsyncSessionLocal"),
+            patch("ocabra.database.AsyncSessionLocal"),
         ):
             await model_manager.add_model(
                 model_id="test/model",
@@ -57,7 +57,7 @@ class TestModelLifecycle:
         with (
             patch("ocabra.core.model_manager.publish", new=AsyncMock()),
             patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
-            patch("ocabra.core.model_manager.AsyncSessionLocal"),
+            patch("ocabra.database.AsyncSessionLocal"),
         ):
             await model_manager.add_model(
                 model_id="on-demand/model",
@@ -77,10 +77,10 @@ class TestModelLifecycle:
         with (
             patch("ocabra.core.model_manager.publish", new=AsyncMock()),
             patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
-            patch("ocabra.core.model_manager.AsyncSessionLocal"),
+            patch("ocabra.database.AsyncSessionLocal"),
             patch("ocabra.core.model_manager.settings") as mock_settings,
         ):
-            mock_settings.idle_timeout_seconds = 0  # immediate eviction
+            mock_settings.idle_timeout_seconds = 1
             mock_settings.default_gpu_index = 0
 
             await model_manager.add_model(
