@@ -6,7 +6,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from ._mapper import OllamaNameMapper
+from ._mapper import OllamaNameMapper, resolve_model
 
 router = APIRouter()
 _mapper = OllamaNameMapper()
@@ -27,13 +27,14 @@ async def show_model(body: ShowRequest, request: Request) -> dict:
     Response:
       - modelfile, parameters, template, details, model_info
     """
-    model_id = _mapper.to_internal(body.name)
     model_manager = request.app.state.model_manager
-    state = await model_manager.get_state(model_id)
+    model_id, state = await resolve_model(model_manager, body.name)
+    if state is None:
+        state = await model_manager.get_state(model_id)
     if state is None:
         raise HTTPException(status_code=404, detail={"error": f"model '{body.name}' not found"})
 
-    ollama_name = _mapper.to_ollama(state.model_id)
+    ollama_name = state.model_id if state.backend_type == "ollama" else _mapper.to_ollama(state.model_id)
     family = ollama_name.split(":", 1)[0]
 
     return {

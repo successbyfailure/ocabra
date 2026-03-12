@@ -93,6 +93,13 @@ async def lifespan(app: FastAPI):
     app.state.worker_pool = worker_pool
     app.state.model_manager = model_manager
     await model_manager.start()
+    from ocabra.registry.ollama_registry import OllamaRegistry
+    try:
+        installed_ollama = await OllamaRegistry().list_installed()
+    except Exception:
+        installed_ollama = []
+    if installed_ollama:
+        await model_manager.sync_ollama_models(installed_ollama)
     logger.info("model_manager_ready")
 
     idle_eviction_stop = asyncio.Event()

@@ -29,16 +29,17 @@ WORKDIR /app
 # --- dev target ---
 FROM base AS dev
 COPY pyproject.toml .
-RUN python -m pip install -e ".[dev,vllm]" \
-    && python -m pip uninstall -y triton || true
+RUN python -m pip install -e ".[dev,vllm]"
 COPY . .
+RUN chmod +x /app/docker-entrypoint.sh
 
 # --- production target ---
 FROM base AS production
 COPY pyproject.toml .
-RUN python -m pip install ".[vllm]" \
-    && python -m pip uninstall -y triton || true
+RUN python -m pip install ".[vllm]"
 COPY . .
+RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8000
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "ocabra.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

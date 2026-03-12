@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -88,8 +89,6 @@ async def test_on_request_loads_unloaded_model(model_manager):
 @pytest.mark.asyncio
 async def test_idle_eviction(model_manager):
     """on_demand model idle > timeout is evicted."""
-    from datetime import datetime, timedelta, timezone
-
     with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
          patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
          patch.object(model_manager._worker_pool._backends["mock"], "unload", new=AsyncMock()):
@@ -129,6 +128,64 @@ async def test_concurrent_load_only_loads_once(model_manager):
         )
 
     assert load_count == 1
+
+
+@pytest.mark.asyncio
+async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
+    mm = ModelManager(worker_pool, gpu_scheduler=AsyncMock())
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
+         patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
+        requested = await add_test_model(mm, model_id="test/requested")
+        candidate = await add_test_model(mm, model_id="test/candidate", load_policy="on_demand")
+        candidate.status = ModelStatus.LOADED
+        candidate.current_gpu = [0]
+        candidate.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        candidate.last_request_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        from ocabra.core.scheduler import InsufficientVRAMError
+
+        mm._gpu_scheduler.find_gpu_for_model = AsyncMock(
+            side_effect=[
+                InsufficientVRAMError("full"),
+                [1],
+            ]
+        )
+
+        state = await mm.load("test/requested")
+
+    assert state.status == ModelStatus.LOADED
+    unload_mock.assert_awaited_once_with("test/candidate", reason="pressure")
+    assert requested.current_gpu == [1]
+
+
+@pytest.mark.asyncio
+async def test_pressure_eviction_prefers_on_demand_then_warm_then_pin(worker_pool):
+    mm = ModelManager(worker_pool)
+
+    now = datetime.now(timezone.utc)
+    on_demand = await add_test_model(mm, model_id="test/on-demand", load_policy="on_demand")
+    warm = await add_test_model(mm, model_id="test/warm", load_policy="warm")
+    pin = await add_test_model(mm, model_id="test/pin", load_policy="pin")
+
+    on_demand.status = ModelStatus.LOADED
+    on_demand.current_gpu = [0]
+    on_demand.last_request_at = now - timedelta(minutes=3)
+
+    warm.status = ModelStatus.LOADED
+    warm.current_gpu = [1]
+    warm.last_request_at = now - timedelta(minutes=30)
+
+    pin.status = ModelStatus.LOADED
+    pin.current_gpu = [0]
+    pin.last_request_at = now - timedelta(hours=1)
+
+    assert mm._get_pressure_eviction_candidates("test/requested") == [
+        "test/on-demand",
+        "test/warm",
+        "test/pin",
+    ]
 
 
 class _PortRequiredBackend(BackendInterface):

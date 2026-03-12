@@ -12,17 +12,35 @@ from ocabra.schemas.registry import HFModelCard, HFModelDetail, HFModelVariant
 
 _BACKEND_BY_TASK = {
     "text-generation": "vllm",
+    "text2text-generation": "vllm",
+    "image-text-to-text": "vllm",
+    "feature-extraction": "vllm",
+    "sentence-similarity": "vllm",
     "image-to-image": "diffusers",
     "text-to-image": "diffusers",
+    "image-to-video": "diffusers",
+    "text-to-video": "diffusers",
     "automatic-speech-recognition": "whisper",
     "text-to-speech": "tts",
+}
+
+_BACKEND_BY_LIBRARY = {
+    "diffusers": "diffusers",
+    "transformers": "vllm",
+    "sentence-transformers": "vllm",
+    "adapter-transformers": "vllm",
+    "qwen-tts": "tts",
+    "parler-tts": "tts",
+    "bark": "tts",
+    "coqui": "tts",
+    "kokoro": "tts",
 }
 
 
 class HuggingFaceRegistry:
     async def infer_backend_for_repo(self, repo_id: str, artifact: str | None = None) -> str:
         if artifact and artifact.lower().endswith(".gguf"):
-            return "ollama"
+            raise ValueError("HF GGUF artifacts are not supported; use the Ollama registry flow instead")
         info = await asyncio.to_thread(
             lambda: model_info(repo_id=repo_id, files_metadata=False, token=settings.hf_token or None)
         )
@@ -30,7 +48,13 @@ class HuggingFaceRegistry:
             {"rfilename": s.rfilename, "size": getattr(s, "size", None)}
             for s in (info.siblings or [])
         ]
-        return self._infer_backend(task=getattr(info, "pipeline_tag", None), siblings=siblings)
+        return self._infer_backend(
+            task=getattr(info, "pipeline_tag", None),
+            siblings=siblings,
+            tags=list(getattr(info, "tags", []) or []),
+            library_name=getattr(info, "library_name", None),
+            repo_id=repo_id,
+        )
 
     async def search(self, query: str, task: str | None, limit: int) -> list[HFModelCard]:
         def _run() -> list[Any]:
@@ -56,6 +80,13 @@ class HuggingFaceRegistry:
                     size_gb=None,
                     tags=list(getattr(model, "tags", []) or []),
                     gated=bool(getattr(model, "gated", False)),
+                    suggested_backend=self._infer_backend(
+                        task=getattr(model, "pipeline_tag", None),
+                        siblings=[],
+                        tags=list(getattr(model, "tags", []) or []),
+                        library_name=getattr(model, "library_name", None),
+                        repo_id=model.id,
+                    ),
                 )
             )
         return cards
@@ -80,7 +111,13 @@ class HuggingFaceRegistry:
         )
 
         task = getattr(info, "pipeline_tag", None)
-        suggested_backend = self._infer_backend(task=task, siblings=siblings)
+        suggested_backend = self._infer_backend(
+            task=task,
+            siblings=siblings,
+            tags=list(getattr(info, "tags", []) or []),
+            library_name=getattr(info, "library_name", None),
+            repo_id=repo_id,
+        )
 
         return HFModelDetail(
             repo_id=info.id,
@@ -129,29 +166,6 @@ class HuggingFaceRegistry:
                 )
             )
 
-        gguf_items = [
-            i for i in items
-            if i["name"].lower().endswith(".gguf")
-            and "mmproj" not in i["name"].lower()
-            and "imatrix" not in i["name"].lower()
-        ]
-        for gguf in sorted(gguf_items, key=lambda i: i["size"]):
-            name = gguf["name"]
-            size = gguf["size"]
-            quant = self._extract_quant_from_filename(name)
-            variants.append(
-                HFModelVariant(
-                    variant_id=f"gguf:{name}",
-                    label=name.split("/")[-1],
-                    artifact=name,
-                    size_gb=(size / (1024**3)) if size > 0 else None,
-                    format="gguf",
-                    quantization=quant,
-                    backend_type="ollama",
-                    is_default=(quant == "Q4_K_M"),
-                )
-            )
-
         if not variants:
             variants.append(
                 HFModelVariant(
@@ -175,13 +189,23 @@ class HuggingFaceRegistry:
         progress_callback: Callable[[float, float | None], None],
         artifact: str | None = None,
     ) -> Path:
-        await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
-        backend_hint = await self.infer_backend_for_repo(repo_id, artifact=artifact)
+        if artifact and artifact.lower().endswith(".gguf"):
+            raise ValueError("HF GGUF artifacts are not supported; use the Ollama registry flow instead")
 
+        await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
         info = await asyncio.to_thread(
             lambda: model_info(repo_id=repo_id, files_metadata=False, token=settings.hf_token or None)
         )
         sibling_names = [s.rfilename for s in (info.siblings or [])]
+        backend_hint = self._infer_backend(
+            task=getattr(info, "pipeline_tag", None),
+            siblings=[{"rfilename": name} for name in sibling_names],
+            tags=list(getattr(info, "tags", []) or []),
+            library_name=getattr(info, "library_name", None),
+            repo_id=repo_id,
+        )
+        if not self._has_supported_hf_payload(sibling_names, backend_hint):
+            raise ValueError("This Hugging Face repo does not expose supported native weights for oCabra")
         allow_patterns = self._download_allow_patterns(sibling_names, backend_hint, artifact=artifact)
 
         from tqdm.auto import tqdm as _BaseTqdm
@@ -212,16 +236,92 @@ class HuggingFaceRegistry:
         progress_callback(100.0, None)
         return Path(downloaded)
 
-    def _infer_backend(self, task: str | None, siblings: list[dict]) -> str:
+    def _infer_backend(
+        self,
+        task: str | None,
+        siblings: list[dict],
+        tags: list[str] | None = None,
+        library_name: str | None = None,
+        repo_id: str | None = None,
+    ) -> str:
+        normalized_task = (task or "").strip().lower()
+        normalized_library = (library_name or "").strip().lower()
+        normalized_tags = {str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()}
+
+        if normalized_task in _BACKEND_BY_TASK:
+            return _BACKEND_BY_TASK[normalized_task]
+
+        if normalized_library in _BACKEND_BY_LIBRARY:
+            return _BACKEND_BY_LIBRARY[normalized_library]
+
+        if "diffusers" in normalized_tags:
+            return "diffusers"
+        if normalized_tags & {"text-to-speech", "tts"}:
+            return "tts"
+        if normalized_tags & {"automatic-speech-recognition", "asr", "whisper"}:
+            return "whisper"
+
         if task in _BACKEND_BY_TASK:
             return _BACKEND_BY_TASK[task]
 
         names = [str(s.get("rfilename", "")).lower() for s in siblings]
-        if any(name.endswith(".gguf") for name in names):
-            return "ollama"
-        if any("model_index.json" in name for name in names):
+        repo_name = (repo_id or "").lower()
+
+        if self._looks_like_diffusers_repo(names, normalized_task, normalized_library, normalized_tags, repo_name):
             return "diffusers"
+        if self._looks_like_tts_repo(repo_name, normalized_tags, normalized_library, names):
+            return "tts"
         return "vllm"
+
+    def _has_supported_hf_payload(self, names: list[str], backend_hint: str) -> bool:
+        lowered = [name.lower() for name in names]
+        if backend_hint == "diffusers":
+            return "model_index.json" in lowered
+        if backend_hint == "tts":
+            return any(name.endswith((".safetensors", ".bin")) for name in lowered)
+        if backend_hint == "whisper":
+            return any(name.endswith((".safetensors", ".bin", ".pt")) for name in lowered)
+        return any(name.endswith((".safetensors", ".bin")) for name in lowered)
+
+    def _looks_like_diffusers_repo(
+        self,
+        names: list[str],
+        task: str,
+        library_name: str,
+        tags: set[str],
+        repo_name: str,
+    ) -> bool:
+        if library_name == "diffusers" or "diffusers" in tags:
+            return True
+        if task in {"text-to-image", "image-to-image", "text-to-video", "image-to-video"}:
+            return True
+        if "model_index.json" not in names:
+            return False
+
+        diffusers_dirs = ("unet/", "vae/", "scheduler/", "text_encoder/", "text_encoder_2/", "transformer/")
+        diffusers_files = {"scheduler_config.json", "feature_extractor/preprocessor_config.json"}
+        if any(name.startswith(diffusers_dirs) for name in names):
+            return True
+        if any(name in diffusers_files for name in names):
+            return True
+        if any(token in repo_name for token in ("stable-diffusion", "sdxl", "flux", "wan", "kolors")):
+            return True
+        return False
+
+    def _looks_like_tts_repo(
+        self,
+        repo_name: str,
+        tags: set[str],
+        library_name: str,
+        names: list[str],
+    ) -> bool:
+        if library_name in {"qwen-tts", "parler-tts", "bark", "coqui", "kokoro"}:
+            return True
+        if tags & {"text-to-speech", "tts"}:
+            return True
+        if any(token in repo_name for token in ("tts", "parler", "kokoro", "bark")):
+            return True
+        return "model_index.json" in names and any("voice" in name for name in names)
 
     def _download_allow_patterns(
         self,
@@ -230,8 +330,6 @@ class HuggingFaceRegistry:
         artifact: str | None = None,
     ) -> list[str] | None:
         names = [name.lower() for name in siblings]
-        ggufs = [name for name in siblings if name.lower().endswith(".gguf")]
-
         if artifact:
             return [
                 artifact,
@@ -244,11 +342,6 @@ class HuggingFaceRegistry:
                 "README*",
                 "LICENSE*",
             ]
-
-        if ggufs or backend_hint == "ollama":
-            selected = self._pick_preferred_gguf(ggufs)
-            if selected:
-                return [selected, "*.json", "README*", "LICENSE*"]
 
         if backend_hint == "diffusers" or any("model_index.json" in name for name in names):
             return None
@@ -266,17 +359,6 @@ class HuggingFaceRegistry:
             "README*",
             "LICENSE*",
         ]
-
-    def _pick_preferred_gguf(self, ggufs: list[str]) -> str | None:
-        if not ggufs:
-            return None
-        preference = ["q4_k_m", "q5_k_m", "q8_0", "f16"]
-        normalized = {name.lower(): name for name in ggufs}
-        for token in preference:
-            for low, original in normalized.items():
-                if token in low:
-                    return original
-        return sorted(ggufs)[0]
 
     def _extract_quant_from_filename(self, filename: str) -> str | None:
         low = filename.lower()

@@ -38,6 +38,7 @@ export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfig
         <div className="text-xs text-muted-foreground">{model.modelId}</div>
       </td>
       <td className="px-3 py-3 text-muted-foreground">{modelType(model)}</td>
+      <td className="px-3 py-3 text-muted-foreground">{model.backendType}</td>
       <td className="px-3 py-3">
         <LoadPolicyBadge policy={model.loadPolicy} />
       </td>

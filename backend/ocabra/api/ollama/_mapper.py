@@ -84,3 +84,25 @@ def _normalize_size_tag(value: str) -> str:
     if numeric.is_integer():
         return str(int(numeric))
     return str(numeric).rstrip("0").rstrip(".")
+
+
+async def resolve_model(model_manager, requested_name: str) -> tuple[str, object | None]:
+    """
+    Resolve a requested Ollama model name to an internal model id.
+
+    Native Ollama model ids win over compatibility aliases so preinstalled
+    Ollama models remain addressable even when a mapper rule exists.
+    """
+    exact_name = requested_name.strip()
+    if exact_name:
+        exact_state = await model_manager.get_state(exact_name)
+        if exact_state is not None:
+            return exact_name, exact_state
+
+    mapper = OllamaNameMapper()
+    model_id = mapper.to_internal(requested_name)
+    if model_id == exact_name:
+        return model_id, None
+
+    mapped_state = await model_manager.get_state(model_id)
+    return model_id, mapped_state

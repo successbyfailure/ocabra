@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     default_gpu_index: int = 1
     worker_port_range_start: int = 18000
     worker_port_range_end: int = 19000
-    vllm_gpu_memory_utilization: float = 0.60
+    vllm_gpu_memory_utilization: float = 0.50
     # Helps keep torch/vLLM GPU index mapping aligned with NVML/pynvml.
     cuda_device_order: str = "PCI_BUS_ID"
     # Runtime-stability knobs for vLLM on mixed consumer GPUs.

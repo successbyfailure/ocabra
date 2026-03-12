@@ -13,11 +13,10 @@ from starlette.responses import StreamingResponse
 
 from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
 
-from ._mapper import OllamaNameMapper
+from ._mapper import resolve_model
 from .generate import OPTION_MAP, _iter_sse_payloads
 
 router = APIRouter()
-_mapper = OllamaNameMapper()
 
 
 @router.post("/chat", summary="Create chat completion")
@@ -30,10 +29,10 @@ async def chat(request: Request):
     """
     body = await request.json()
     ollama_model = str(body.get("model", ""))
-    model_id = _mapper.to_internal(ollama_model)
     stream = bool(body.get("stream", True))
 
     model_manager = get_model_manager(request)
+    model_id, _ = await resolve_model(model_manager, ollama_model)
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "chat", "chat")
 

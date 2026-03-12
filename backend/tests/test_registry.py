@@ -9,6 +9,7 @@ from httpx import AsyncClient
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.local_scanner import LocalScanner
 from ocabra.registry.ollama_registry import OllamaRegistry
+from ocabra.core.model_manager import ModelManager
 
 
 @pytest.mark.asyncio
@@ -36,6 +37,7 @@ async def test_hf_search_with_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(cards) == 1
     assert cards[0].repo_id == "meta-llama/Llama-3.2-3B-Instruct"
     assert cards[0].task == "text-generation"
+    assert cards[0].suggested_backend == "vllm"
     assert captured["search"] == "llama"
     assert captured["pipeline_tag"] == "text-generation"
     assert captured["limit"] == 5
@@ -45,6 +47,7 @@ async def test_hf_search_with_filters(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_hf_detail_infers_vllm_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_info = SimpleNamespace(
         id="meta-llama/Llama-3.2-3B-Instruct",
+        library_name="transformers",
         pipeline_tag="text-generation",
         downloads=1000,
         likes=200,
@@ -64,9 +67,10 @@ async def test_hf_detail_infers_vllm_backend(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
-async def test_hf_detail_infers_ollama_backend_for_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hf_detail_gguf_only_repo_is_not_treated_as_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_info = SimpleNamespace(
         id="bartowski/Qwen2.5-7B-Instruct-GGUF",
+        library_name=None,
         pipeline_tag=None,
         downloads=1000,
         likes=200,
@@ -80,11 +84,86 @@ async def test_hf_detail_infers_ollama_backend_for_gguf(monkeypatch: pytest.Monk
     registry = HuggingFaceRegistry()
     detail = await registry.get_model_detail("bartowski/Qwen2.5-7B-Instruct-GGUF")
 
-    assert detail.suggested_backend == "ollama"
+    assert detail.suggested_backend == "vllm"
 
 
 @pytest.mark.asyncio
-async def test_hf_variants_exposes_standard_and_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hf_detail_prefers_transformers_metadata_over_model_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="Qwen/Qwen3-8B",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation", "transformers"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="model_index.json", size=1_000),
+            SimpleNamespace(rfilename="model-00001-of-00002.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("Qwen/Qwen3-8B")
+
+    assert detail.suggested_backend == "vllm"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_detects_qwen_tts_from_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="Qwen/Qwen3-TTS-1.7B",
+        library_name="qwen-tts",
+        pipeline_tag="text-to-speech",
+        downloads=1000,
+        likes=200,
+        tags=["text-to-speech"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=2 * 1024**3),
+        ],
+    )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("Qwen/Qwen3-TTS-1.7B")
+
+    assert detail.suggested_backend == "tts"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_detects_diffusers_from_repo_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="black-forest-labs/FLUX.1-schnell",
+        library_name=None,
+        pipeline_tag=None,
+        downloads=1000,
+        likes=200,
+        tags=[],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="model_index.json", size=1_000),
+            SimpleNamespace(rfilename="transformer/config.json", size=10_000),
+            SimpleNamespace(rfilename="vae/config.json", size=10_000),
+            SimpleNamespace(rfilename="scheduler/scheduler_config.json", size=10_000),
+        ],
+    )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("black-forest-labs/FLUX.1-schnell")
+
+    assert detail.suggested_backend == "diffusers"
+
+
+@pytest.mark.asyncio
+async def test_hf_variants_exposes_standard_only(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_info = SimpleNamespace(
         id="org/mixed-model",
         siblings=[
@@ -101,7 +180,20 @@ async def test_hf_variants_exposes_standard_and_gguf(monkeypatch: pytest.MonkeyP
     variants = await registry.get_variants("org/mixed-model")
 
     assert any(v.variant_id == "standard" and v.backend_type == "vllm" for v in variants)
-    assert any(v.artifact == "model-q4_k_m.gguf" and v.backend_type == "ollama" for v in variants)
+    assert not any(v.artifact == "model-q4_k_m.gguf" for v in variants)
+
+
+@pytest.mark.asyncio
+async def test_hf_download_rejects_gguf_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry = HuggingFaceRegistry()
+
+    with pytest.raises(ValueError, match="GGUF"):
+        await registry.download(
+            repo_id="org/model",
+            target_dir=tmp_path / "model",
+            progress_callback=lambda *_args: None,
+            artifact="model-q4_k_m.gguf",
+        )
 
 
 @pytest.mark.asyncio
@@ -230,6 +322,18 @@ async def test_ollama_list_installed_details(monkeypatch: pytest.MonkeyPatch) ->
     assert details[0]["name"] == "gemma3:4b"
     assert details[0]["size"] == 3338801804
     assert details[1]["name"] == "llama3.1:8b"
+
+
+@pytest.mark.asyncio
+async def test_model_manager_syncs_native_ollama_inventory() -> None:
+    manager = ModelManager(worker_pool=object())
+
+    added = await manager.sync_ollama_models(["gemma3:4b", "llama3.2:3b", "gemma3:4b"])
+
+    assert added == 2
+    states = await manager.list_states()
+    assert sorted(state.model_id for state in states) == ["gemma3:4b", "llama3.2:3b"]
+    assert all(state.backend_type == "ollama" for state in states)
 
 
 @pytest.mark.asyncio

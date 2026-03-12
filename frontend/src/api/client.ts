@@ -130,6 +130,7 @@ function toHFModelCard(raw: unknown): HFModelCard {
     sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
     gated: Boolean(data.gated),
+    suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelCard["suggestedBackend"],
   }
 }
 

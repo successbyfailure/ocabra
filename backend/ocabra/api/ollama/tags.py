@@ -43,8 +43,11 @@ async def list_tags(request: Request) -> dict:
         ollama_name = str(item.get("name") or "")
         if not ollama_name:
             continue
-        model_id = _mapper.to_internal(ollama_name)
-        state = by_id.get(model_id)
+        state = by_id.get(ollama_name)
+        model_id = ollama_name
+        if state is None:
+            model_id = _mapper.to_internal(ollama_name)
+            state = by_id.get(model_id)
         remote_modified = str(item.get("modified_at") or "")
         modified_at = _to_iso_z(state.loaded_at if state else None) if state and state.loaded_at else (remote_modified or _to_iso_z(None))
         family = ollama_name.split(":", 1)[0]

@@ -13,6 +13,7 @@ class HFModelCard(BaseModel):
     size_gb: float | None
     tags: list[str]
     gated: bool
+    suggested_backend: str
 
 
 class HFModelDetail(HFModelCard):

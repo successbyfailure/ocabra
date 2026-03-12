@@ -31,6 +31,7 @@ class AddModelRequest(BaseModel):
 async def list_models(request: Request) -> list[dict]:
     """List all configured models and their runtime state."""
     mm = request.app.state.model_manager
+    await _sync_ollama_inventory(mm)
     states = await mm.list_states()
     ollama_sizes = await _get_ollama_sizes_bytes()
     payloads = []
@@ -136,6 +137,14 @@ async def _get_ollama_sizes_bytes() -> dict[str, int]:
             continue
         size_map[name] = int(item.get("size") or 0)
     return size_map
+
+
+async def _sync_ollama_inventory(model_manager) -> None:
+    try:
+        installed = await _ollama_registry.list_installed()
+    except Exception:
+        return
+    await model_manager.sync_ollama_models(installed)
 
 
 async def _resolve_disk_size_bytes(

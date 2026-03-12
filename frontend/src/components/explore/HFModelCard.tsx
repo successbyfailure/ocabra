@@ -26,7 +26,7 @@ export function HFModelCard({ model, onInstall }: HFModelCardProps) {
         <span className="rounded bg-muted px-2 py-0.5">downloads {model.downloads.toLocaleString()}</span>
         <span className="rounded bg-muted px-2 py-0.5">task {model.task ?? "unknown"}</span>
         <span className="rounded bg-muted px-2 py-0.5">size {model.sizeGb ? `${model.sizeGb} GB` : "?"}</span>
-        <span className="rounded bg-muted px-2 py-0.5">backend {model.task?.includes("image") ? "diffusers" : "vllm"}</span>
+        <span className="rounded bg-muted px-2 py-0.5">backend {model.suggestedBackend}</span>
         {model.gated && <span className="rounded bg-amber-500/20 px-2 py-0.5 text-amber-200">gated</span>}
       </div>
     </article>

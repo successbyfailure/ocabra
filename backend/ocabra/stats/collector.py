@@ -1,12 +1,13 @@
 """
-Stats middleware — records request metrics for all /v1/* endpoints.
+Stats middleware — records inference request metrics.
 
-Writes to the request_stats table: model_id, gpu_index, duration_ms,
-prompt_tokens, completion_tokens, energy_wh.
+Tracks OpenAI-compatible `/v1/*` and Ollama-compatible inference routes under
+`/api/*` so the stats page reflects real usage regardless of client protocol.
 """
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from collections.abc import Callable
 
 import structlog
@@ -15,6 +16,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 logger = structlog.get_logger(__name__)
+
+_TRACKED_API_PATHS = {
+    "/api/chat",
+    "/api/generate",
+    "/api/embeddings",
+}
 
 
 class StatsMiddleware(BaseHTTPMiddleware):
@@ -30,34 +37,68 @@ class StatsMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if not request.url.path.startswith("/v1/"):
+        if not _should_track(request.url.path):
             return await call_next(request)
 
         start = time.monotonic()
-        response = await call_next(request)
-        duration_ms = (time.monotonic() - start) * 1000
+        started_at = datetime.now(timezone.utc)
+        request_payload = await _extract_request_payload(request)
 
-        model_id = await _extract_model_id(request)
+        error_message: str | None = None
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            error_message = str(exc)
+            model_id = _extract_model_id_from_payload(request_payload)
+            if model_id:
+                import asyncio
+                asyncio.create_task(
+                    _record_stat(request, model_id, started_at, (time.monotonic() - start) * 1000, error_message)
+                )
+            raise
+        duration_ms = (time.monotonic() - start) * 1000
+        if response.status_code >= 400:
+            error_message = f"HTTP {response.status_code}"
+
+        model_id = _extract_model_id_from_payload(request_payload)
         if model_id:
-            # Fire-and-forget stats write
             import asyncio
             asyncio.create_task(
-                _record_stat(request, model_id, duration_ms)
+                _record_stat(request, model_id, started_at, duration_ms, error_message)
             )
 
         return response
 
 
-async def _extract_model_id(request: Request) -> str | None:
-    """Try to extract model ID from a cached request body."""
+def _should_track(path: str) -> bool:
+    if path.startswith("/v1/"):
+        return True
+    return path in _TRACKED_API_PATHS
+
+
+async def _extract_request_payload(request: Request) -> dict | None:
+    """Read and cache the request JSON body if present."""
     try:
         body = await request.json()
-        return body.get("model")
+        return body if isinstance(body, dict) else None
     except Exception:
         return None
 
 
-async def _record_stat(request: Request, model_id: str, duration_ms: float) -> None:
+def _extract_model_id_from_payload(body: dict | None) -> str | None:
+    if not body:
+        return None
+    model_id = body.get("model")
+    return str(model_id) if model_id else None
+
+
+async def _record_stat(
+    request: Request,
+    model_id: str,
+    started_at: datetime,
+    duration_ms: float,
+    error_message: str | None = None,
+) -> None:
     """Write a RequestStat row to the database."""
     try:
         gpu_index: int | None = None
@@ -76,7 +117,9 @@ async def _record_stat(request: Request, model_id: str, duration_ms: float) -> N
             stat = RequestStat(
                 model_id=model_id,
                 gpu_index=gpu_index,
+                started_at=started_at,
                 duration_ms=int(duration_ms),
+                error=error_message,
             )
             session.add(stat)
             await session.commit()

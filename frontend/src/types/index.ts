@@ -99,6 +99,7 @@ export interface HFModelCard {
   sizeGb: number | null
   tags: string[]
   gated: boolean
+  suggestedBackend: BackendType
 }
 
 export interface HFModelDetail extends HFModelCard {

@@ -8,10 +8,9 @@ from pydantic import BaseModel
 
 from ocabra.registry.ollama_registry import OllamaRegistry
 
-from ._mapper import OllamaNameMapper
+from ._mapper import resolve_model
 
 router = APIRouter()
-_mapper = OllamaNameMapper()
 _registry = OllamaRegistry()
 
 
@@ -30,10 +29,9 @@ async def delete_model(body: DeleteRequest, request: Request) -> dict:
     Response:
       - {"status": "success"}
     """
-    model_id = _mapper.to_internal(body.name)
     model_manager = request.app.state.model_manager
+    model_id, state = await resolve_model(model_manager, body.name)
 
-    state = await model_manager.get_state(model_id)
     if state is not None:
         await model_manager.delete_model(model_id)
 

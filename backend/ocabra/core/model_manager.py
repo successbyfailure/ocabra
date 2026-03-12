@@ -143,9 +143,10 @@ class ModelManager:
                 if not gpu_managed:
                     gpu_indices = []
                 elif self._gpu_scheduler:
-                    gpu_indices = await self._gpu_scheduler.find_gpu_for_model(
-                        vram_needed,
-                        force_gpu or state.preferred_gpu,
+                    gpu_indices = await self._assign_gpus_for_load(
+                        model_id=model_id,
+                        vram_needed=vram_needed,
+                        preferred_gpu=force_gpu or state.preferred_gpu,
                         enforce_vllm_headroom=(state.backend_type == "vllm"),
                     )
                 else:
@@ -218,6 +219,85 @@ class ModelManager:
                 raise
 
         return state
+
+    async def _assign_gpus_for_load(
+        self,
+        model_id: str,
+        vram_needed: int,
+        preferred_gpu: int | None,
+        enforce_vllm_headroom: bool,
+    ) -> list[int]:
+        from ocabra.core.scheduler import InsufficientVRAMError
+
+        if not self._gpu_scheduler:
+            return [settings.default_gpu_index]
+
+        try:
+            return await self._gpu_scheduler.find_gpu_for_model(
+                vram_needed,
+                preferred_gpu,
+                enforce_vllm_headroom=enforce_vllm_headroom,
+            )
+        except InsufficientVRAMError as initial_exc:
+            last_exc = initial_exc
+            candidates = self._get_pressure_eviction_candidates(model_id)
+            logger.info(
+                "pressure_eviction_candidates",
+                requested_model_id=model_id,
+                candidates=candidates,
+            )
+            for candidate_id in candidates:
+                logger.info(
+                    "pressure_eviction_attempt",
+                    requested_model_id=model_id,
+                    evicting_model_id=candidate_id,
+                )
+                evicted_vram_mb = self._states.get(candidate_id).vram_used_mb if self._states.get(candidate_id) else 0
+                await self.unload(candidate_id, reason="pressure")
+                await self._wait_for_vram_released(evicted_vram_mb)
+                try:
+                    return await self._gpu_scheduler.find_gpu_for_model(
+                        vram_needed,
+                        preferred_gpu,
+                        enforce_vllm_headroom=enforce_vllm_headroom,
+                    )
+                except InsufficientVRAMError as exc:
+                    last_exc = exc
+                    continue
+            raise last_exc
+
+    def _get_pressure_eviction_candidates(self, requested_model_id: str) -> list[str]:
+        policy_order = {
+            LoadPolicy.ON_DEMAND: 0,
+            LoadPolicy.WARM: 1,
+            LoadPolicy.PIN: 2,
+        }
+        fallback_time = datetime.min.replace(tzinfo=timezone.utc)
+
+        candidates = [
+            state
+            for state in self._states.values()
+            if state.model_id != requested_model_id
+            and state.status == ModelStatus.LOADED
+        ]
+        candidates.sort(
+            key=lambda state: (
+                policy_order.get(state.load_policy, 99),
+                state.last_request_at or state.loaded_at or fallback_time,
+            )
+        )
+        if candidates:
+            return [state.model_id for state in candidates]
+        return [
+            model_id
+            for model_id, worker in self._worker_pool._workers.items()
+            if model_id != requested_model_id and worker.backend_type != "ollama"
+        ]
+
+    async def _wait_for_vram_released(self, released_vram_mb: int) -> None:
+        if not self._gpu_manager or released_vram_mb <= 0:
+            return
+        await asyncio.sleep(2.5)
 
     async def load(
         self, model_id: str, force_gpu: int | None = None
@@ -317,6 +397,22 @@ class ModelManager:
 
     async def list_states(self) -> list["ModelState"]:
         return list(self._states.values())
+
+    async def sync_ollama_models(self, model_ids: list[str]) -> int:
+        """Ensure native Ollama models are present in the internal inventory."""
+        added = 0
+        for model_id in model_ids:
+            normalized = model_id.strip()
+            if not normalized or normalized in self._states:
+                continue
+            await self.add_model(
+                model_id=normalized,
+                backend_type="ollama",
+                display_name=normalized,
+                load_policy="on_demand",
+            )
+            added += 1
+        return added
 
     async def add_model(
         self,

@@ -40,18 +40,6 @@ class LocalScanner:
                 )
                 continue
 
-            if path.is_file() and path.name == "Modelfile":
-                size = self._dir_size(path.parent)
-                models.append(
-                    LocalModel(
-                        model_ref=path.parent.name,
-                        path=str(path.parent),
-                        source="ollama",
-                        backend_type="ollama",
-                        size_gb=size,
-                    )
-                )
-
         unique: dict[str, LocalModel] = {model.path: model for model in models}
         return sorted(unique.values(), key=lambda m: m.model_ref)
 

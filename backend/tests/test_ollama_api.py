@@ -55,6 +55,27 @@ def test_name_mapper_round_trip() -> None:
     assert mapper.to_ollama(internal) == "llama3.2:3b"
 
 
+def test_name_resolution_prefers_native_ollama_model() -> None:
+    import asyncio
+
+    from ocabra.api.ollama._mapper import resolve_model
+
+    native_state = object()
+    mapped_state = object()
+
+    class FakeModelManager:
+        async def get_state(self, model_id: str):
+            if model_id == "llama3.2:3b":
+                return native_state
+            if model_id == "meta-llama/Llama-3.2-3B-Instruct":
+                return mapped_state
+            return None
+
+    model_id, state = asyncio.run(resolve_model(FakeModelManager(), "llama3.2:3b"))
+    assert model_id == "llama3.2:3b"
+    assert state is native_state
+
+
 def test_pull_delegates_to_download_manager() -> None:
     app = _make_app()
     client = TestClient(app)

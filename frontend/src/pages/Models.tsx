@@ -192,6 +192,7 @@ export function Models() {
               <tr>
                 <th className="px-3 py-2">Nombre</th>
                 <th className="px-3 py-2">Tipo</th>
+                <th className="px-3 py-2">Backend</th>
                 <th className="px-3 py-2">Policy</th>
                 <th className="px-3 py-2">GPU</th>
                 <th className="px-3 py-2">VRAM</th>
