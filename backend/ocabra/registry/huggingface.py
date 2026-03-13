@@ -1,11 +1,13 @@
 import asyncio
+import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import list_models, model_info, snapshot_download
+from huggingface_hub import hf_hub_download, list_models, model_info, snapshot_download
 
 from ocabra.config import settings
 from ocabra.schemas.registry import HFModelCard, HFModelDetail, HFModelVariant
@@ -35,6 +37,18 @@ _BACKEND_BY_LIBRARY = {
     "coqui": "tts",
     "kokoro": "tts",
 }
+
+_UNSUPPORTED_TOKENIZER_CLASSES = {"tokenizersbackend", "tokenizersbackendfast"}
+
+
+@dataclass
+class _CompatibilityAssessment:
+    compatibility: str = "unknown"
+    reason: str | None = None
+
+    @property
+    def installable(self) -> bool:
+        return self.compatibility != "unsupported"
 
 
 class HuggingFaceRegistry:
@@ -70,6 +84,13 @@ class HuggingFaceRegistry:
         models = await asyncio.to_thread(_run)
         cards: list[HFModelCard] = []
         for model in models:
+            siblings = list(getattr(model, "siblings", []) or [])
+            size_bytes = sum(
+                int(getattr(s, "size", 0) or 0)
+                for s in siblings
+                if str(getattr(s, "rfilename", "")).endswith(".safetensors")
+                or str(getattr(s, "rfilename", "")).endswith(".bin")
+            )
             cards.append(
                 HFModelCard(
                     repo_id=model.id,
@@ -77,16 +98,24 @@ class HuggingFaceRegistry:
                     task=getattr(model, "pipeline_tag", None),
                     downloads=int(getattr(model, "downloads", 0) or 0),
                     likes=int(getattr(model, "likes", 0) or 0),
-                    size_gb=None,
+                    size_gb=(size_bytes / (1024**3)) if size_bytes > 0 else None,
                     tags=list(getattr(model, "tags", []) or []),
                     gated=bool(getattr(model, "gated", False)),
                     suggested_backend=self._infer_backend(
                         task=getattr(model, "pipeline_tag", None),
-                        siblings=[],
+                        siblings=[
+                            {
+                                "rfilename": getattr(s, "rfilename", ""),
+                                "size": getattr(s, "size", None),
+                            }
+                            for s in siblings
+                        ],
                         tags=list(getattr(model, "tags", []) or []),
                         library_name=getattr(model, "library_name", None),
                         repo_id=model.id,
                     ),
+                    compatibility="unknown",
+                    compatibility_reason=None,
                 )
             )
         return cards
@@ -118,6 +147,11 @@ class HuggingFaceRegistry:
             library_name=getattr(info, "library_name", None),
             repo_id=repo_id,
         )
+        compatibility = await self._assess_repo_compatibility(
+            repo_id=repo_id,
+            backend_hint=suggested_backend,
+            sibling_names=[str(s.get("rfilename", "")) for s in siblings],
+        )
 
         return HFModelDetail(
             repo_id=info.id,
@@ -132,6 +166,8 @@ class HuggingFaceRegistry:
             readme_excerpt=None,
             suggested_backend=suggested_backend,
             estimated_vram_gb=(safetensors_bytes / (1024**3) * 1.3) if safetensors_bytes > 0 else None,
+            compatibility=compatibility.compatibility,
+            compatibility_reason=compatibility.reason,
         )
 
     async def get_variants(self, repo_id: str) -> list[HFModelVariant]:
@@ -145,6 +181,11 @@ class HuggingFaceRegistry:
         ]
         names = [i["name"] for i in items]
         variants: list[HFModelVariant] = []
+        compatibility = await self._assess_repo_compatibility(
+            repo_id=repo_id,
+            backend_hint="vllm",
+            sibling_names=names,
+        )
 
         # Standard vLLM variant (download config + safetensors/bin tokenizer files).
         has_standard = any(n.endswith(".safetensors") or n.endswith(".bin") for n in names)
@@ -163,6 +204,9 @@ class HuggingFaceRegistry:
                     quantization=None,
                     backend_type="vllm",
                     is_default=True,
+                    installable=compatibility.installable,
+                    compatibility=compatibility.compatibility,
+                    compatibility_reason=compatibility.reason,
                 )
             )
 
@@ -177,6 +221,9 @@ class HuggingFaceRegistry:
                     quantization=None,
                     backend_type=await self.infer_backend_for_repo(repo_id),
                     is_default=True,
+                    installable=compatibility.installable,
+                    compatibility=compatibility.compatibility,
+                    compatibility_reason=compatibility.reason,
                 )
             )
 
@@ -206,6 +253,16 @@ class HuggingFaceRegistry:
         )
         if not self._has_supported_hf_payload(sibling_names, backend_hint):
             raise ValueError("This Hugging Face repo does not expose supported native weights for oCabra")
+        compatibility = await self._assess_repo_compatibility(
+            repo_id=repo_id,
+            backend_hint=backend_hint,
+            sibling_names=sibling_names,
+        )
+        if not compatibility.installable:
+            raise ValueError(
+                compatibility.reason
+                or "This Hugging Face repo is not compatible with the current vLLM stack"
+            )
         allow_patterns = self._download_allow_patterns(sibling_names, backend_hint, artifact=artifact)
 
         from tqdm.auto import tqdm as _BaseTqdm
@@ -369,4 +426,79 @@ class HuggingFaceRegistry:
             return "BF16"
         if "fp16" in low or "f16" in low:
             return "FP16"
+        return None
+
+    async def _assess_repo_compatibility(
+        self,
+        repo_id: str,
+        backend_hint: str,
+        sibling_names: list[str],
+    ) -> _CompatibilityAssessment:
+        if backend_hint != "vllm":
+            return _CompatibilityAssessment(compatibility="compatible")
+
+        lowered = {name.lower() for name in sibling_names}
+        tokenizer_config = await self._load_repo_json(repo_id, "tokenizer_config.json", lowered)
+        config = await self._load_repo_json(repo_id, "config.json", lowered)
+        quantize_config = await self._load_repo_json(repo_id, "quantize_config.json", lowered)
+
+        tokenizer_class = str((tokenizer_config or {}).get("tokenizer_class") or "").strip()
+        if tokenizer_class.lower() in _UNSUPPORTED_TOKENIZER_CLASSES:
+            return _CompatibilityAssessment(
+                compatibility="unsupported",
+                reason=(
+                    "Este repo declara tokenizer_class="
+                    f"{tokenizer_class}, que la combinacion actual de transformers/vLLM no puede importar."
+                ),
+            )
+
+        quant_method = self._extract_quant_method(config=config, quantize_config=quantize_config)
+        if quant_method == "gptq":
+            return _CompatibilityAssessment(
+                compatibility="warning",
+                reason="Repo GPTQ detectado. Puede funcionar, pero algunos GPTQ custom fallan en vLLM.",
+            )
+
+        return _CompatibilityAssessment(compatibility="compatible")
+
+    async def _load_repo_json(
+        self,
+        repo_id: str,
+        filename: str,
+        sibling_names: set[str],
+    ) -> dict[str, Any] | None:
+        if filename.lower() not in sibling_names:
+            return None
+        return await asyncio.to_thread(self._load_repo_json_sync, repo_id, filename)
+
+    def _load_repo_json_sync(self, repo_id: str, filename: str) -> dict[str, Any] | None:
+        try:
+            path = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                token=settings.hf_token or None,
+                cache_dir=settings.hf_cache_dir or None,
+            )
+        except Exception:
+            return None
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _extract_quant_method(
+        self,
+        config: dict[str, Any] | None,
+        quantize_config: dict[str, Any] | None,
+    ) -> str | None:
+        for payload in (config or {}, quantize_config or {}):
+            quant_cfg = payload.get("quantization_config") if isinstance(payload, dict) else None
+            if isinstance(quant_cfg, dict):
+                method = str(quant_cfg.get("quant_method") or quant_cfg.get("format") or "").strip().lower()
+                if method:
+                    return method
+            if isinstance(payload, dict):
+                method = str(payload.get("quant_method") or payload.get("format") or "").strip().lower()
+                if method:
+                    return method
         return None

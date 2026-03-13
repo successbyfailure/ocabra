@@ -42,6 +42,9 @@ export function Explore() {
   const [variantLoading, setVariantLoading] = useState(false)
   const [targetDir, setTargetDir] = useState("/models")
   const [loadPolicy, setLoadPolicy] = useState("on_demand")
+  const selectedHFVariant = installTarget?.source === "huggingface"
+    ? hfVariants.find((v) => v.variantId === selectedHFVariantId) ?? null
+    : null
 
   const jobs = useDownloadStore((state) => state.jobs)
   const setJobs = useDownloadStore((state) => state.setJobs)
@@ -180,10 +183,11 @@ export function Explore() {
 
   const install = async () => {
     if (!installTarget) return
+    if (selectedHFVariant && selectedHFVariant.installable === false) {
+      toast.error(selectedHFVariant.compatibilityReason ?? "Esta variante no es compatible con el stack actual")
+      return
+    }
     const modelRef = installTarget.source === "ollama" ? (selectedVariant || installTarget.modelRef) : installTarget.modelRef
-    const selectedHFVariant = installTarget.source === "huggingface"
-      ? hfVariants.find((v) => v.variantId === selectedHFVariantId) ?? null
-      : null
     const artifact = selectedHFVariant?.artifact ?? null
     try {
       const job = await api.downloads.enqueue(installTarget.source, modelRef, artifact)
@@ -355,30 +359,46 @@ export function Explore() {
                 </label>
               )}
               {installTarget?.source === "huggingface" && (
-                <label className="block text-sm text-muted-foreground">
-                  Variante HF
-                  <select
-                    value={selectedHFVariantId}
-                    disabled={variantLoading}
-                    onChange={(event) => setSelectedHFVariantId(event.target.value)}
-                    className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-                  >
-                    {variantLoading ? (
-                      <option value="">Cargando variantes...</option>
-                    ) : hfVariants.length === 0 ? (
-                      <option value="">Default</option>
-                    ) : (
-                      hfVariants.map((variant) => (
-                        <option key={variant.variantId} value={variant.variantId}>
-                          {variant.label}
-                          {variant.sizeGb ? ` · ${variant.sizeGb.toFixed(1)} GB` : ""}
-                          {variant.quantization ? ` · ${variant.quantization}` : ""}
-                          {variant.backendType ? ` · ${variant.backendType}` : ""}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
+                <>
+                  <label className="block text-sm text-muted-foreground">
+                    Variante HF
+                    <select
+                      value={selectedHFVariantId}
+                      disabled={variantLoading}
+                      onChange={(event) => setSelectedHFVariantId(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+                    >
+                      {variantLoading ? (
+                        <option value="">Cargando variantes...</option>
+                      ) : hfVariants.length === 0 ? (
+                        <option value="">Default</option>
+                      ) : (
+                        hfVariants.map((variant) => (
+                          <option key={variant.variantId} value={variant.variantId}>
+                            {variant.label}
+                            {variant.sizeGb ? ` · ${variant.sizeGb.toFixed(1)} GB` : ""}
+                            {variant.quantization ? ` · ${variant.quantization}` : ""}
+                            {variant.backendType ? ` · ${variant.backendType}` : ""}
+                            {variant.installable === false ? " · incompatible" : ""}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  {selectedHFVariant?.compatibilityReason && (
+                    <div
+                      className={`rounded-md border px-3 py-2 text-sm ${
+                        selectedHFVariant.installable === false
+                          ? "border-red-500/30 bg-red-500/10 text-red-200"
+                          : selectedHFVariant.compatibility === "warning"
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                            : "border-border bg-background text-muted-foreground"
+                      }`}
+                    >
+                      {selectedHFVariant.compatibilityReason}
+                    </div>
+                  )}
+                </>
               )}
               <label className="block text-sm text-muted-foreground">
                 Carpeta destino
@@ -409,6 +429,7 @@ export function Explore() {
               <button
                 type="button"
                 onClick={() => void install()}
+                disabled={selectedHFVariant?.installable === false}
                 className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
               >
                 Iniciar descarga

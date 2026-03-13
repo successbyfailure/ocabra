@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from urllib.parse import urlparse
 
 import structlog
 
@@ -44,6 +45,7 @@ class ModelState:
     loaded_at: datetime | None = None
     worker_info: WorkerInfo | None = None
     error_message: str | None = None
+    extra_config: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -62,6 +64,7 @@ class ModelState:
             ),
             "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
             "error_message": self.error_message,
+            "extra_config": self.extra_config,
         }
 
 
@@ -104,6 +107,7 @@ class ModelManager:
                 load_policy=LoadPolicy(cfg.load_policy),
                 auto_reload=cfg.auto_reload,
                 preferred_gpu=cfg.preferred_gpu,
+                extra_config=cfg.extra_config or {},
             )
             self._load_locks[cfg.model_id] = asyncio.Lock()
 
@@ -173,6 +177,7 @@ class ModelManager:
                     model_id,
                     gpu_indices,
                     port=assigned_port,
+                    extra_config=state.extra_config,
                 )
                 backend_loaded = True
                 capabilities = await backend.get_capabilities(model_id)
@@ -414,6 +419,64 @@ class ModelManager:
             added += 1
         return added
 
+    async def sync_ollama_inventory(
+        self,
+        installed_model_ids: list[str],
+        loaded_model_ids: list[str] | None = None,
+    ) -> int:
+        added = await self.sync_ollama_models(installed_model_ids)
+        installed_set = {model_id.strip() for model_id in installed_model_ids if model_id.strip()}
+        loaded_set = {model_id.strip() for model_id in (loaded_model_ids or []) if model_id.strip()}
+        parsed = urlparse(settings.ollama_base_url)
+        ollama_port = int(parsed.port or 11434)
+        changed: list[str] = []
+        try:
+            ollama_backend = await self._worker_pool.get_backend("ollama")
+        except Exception:
+            ollama_backend = None
+
+        for model_id, state in self._states.items():
+            if state.backend_type != "ollama":
+                continue
+            if model_id not in installed_set:
+                continue
+            if ollama_backend is not None:
+                state.capabilities = await ollama_backend.get_capabilities(model_id)
+
+            if model_id in loaded_set:
+                if state.status != ModelStatus.LOADED:
+                    state.status = ModelStatus.LOADED
+                    state.loaded_at = state.loaded_at or datetime.now(timezone.utc)
+                    state.error_message = None
+                    state.current_gpu = []
+                    state.vram_used_mb = 0
+                    state.worker_info = WorkerInfo(
+                        backend_type="ollama",
+                        model_id=model_id,
+                        gpu_indices=[],
+                        port=ollama_port,
+                        pid=0,
+                        vram_used_mb=0,
+                    )
+                    self._worker_pool.set_worker(model_id, state.worker_info)
+                    changed.append(model_id)
+                continue
+
+            if state.status in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}:
+                state.status = ModelStatus.UNLOADED
+                state.current_gpu = []
+                state.vram_used_mb = 0
+                state.worker_info = None
+                state.loaded_at = None
+                state.error_message = None
+                self._worker_pool.remove_worker(model_id)
+                changed.append(model_id)
+
+        for model_id in changed:
+            await self._publish_event(model_id, "status_changed")
+
+        return added
+
     async def add_model(
         self,
         model_id: str,
@@ -447,6 +510,7 @@ class ModelManager:
             load_policy=LoadPolicy(load_policy),
             auto_reload=auto_reload,
             preferred_gpu=preferred_gpu,
+            extra_config=extra_config or {},
         )
         self._states[model_id] = state
         self._load_locks[model_id] = asyncio.Lock()

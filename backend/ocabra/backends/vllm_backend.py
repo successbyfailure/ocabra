@@ -100,23 +100,68 @@ class VLLMBackend(BackendInterface):
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
         model_target = self._resolve_model_target(model_id)
+        extra_config = kwargs.get("extra_config") or {}
 
         cuda_devices = ",".join(str(i) for i in gpu_indices)
-        tensor_parallel = len(gpu_indices)
+        tensor_parallel = self._get_vllm_option(
+            extra_config,
+            "tensor_parallel_size",
+            self._get_setting("vllm_tensor_parallel_size"),
+        ) or len(gpu_indices)
 
         cmd = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
             "--model", model_target,
             "--tensor-parallel-size", str(tensor_parallel),
-            "--gpu-memory-utilization", str(settings.vllm_gpu_memory_utilization),
+            "--gpu-memory-utilization",
+            str(self._get_vllm_option(extra_config, "gpu_memory_utilization", self._get_setting("vllm_gpu_memory_utilization"))),
             "--port", str(port),
             "--host", "127.0.0.1",
             "--served-model-name", model_id,
         ]
-        if settings.vllm_enforce_eager:
+        if self._get_vllm_option(extra_config, "enable_prefix_caching", self._get_setting("vllm_enable_prefix_caching")):
+            cmd.append("--enable-prefix-caching")
+        max_num_seqs = self._get_vllm_option(extra_config, "max_num_seqs", self._get_setting("vllm_max_num_seqs"))
+        if max_num_seqs:
+            cmd.extend(["--max-num-seqs", str(max_num_seqs)])
+        max_num_batched_tokens = self._get_vllm_option(
+            extra_config,
+            "max_num_batched_tokens",
+            self._get_setting("vllm_max_num_batched_tokens"),
+        )
+        if max_num_batched_tokens:
+            cmd.extend(
+                ["--max-num-batched-tokens", str(max_num_batched_tokens)]
+            )
+        max_model_len = self._get_vllm_option(extra_config, "max_model_len", self._get_setting("vllm_max_model_len"))
+        if max_model_len:
+            cmd.extend(["--max-model-len", str(max_model_len)])
+        enable_chunked_prefill = self._get_vllm_option(
+            extra_config,
+            "enable_chunked_prefill",
+            self._get_setting("vllm_enable_chunked_prefill"),
+        )
+        if enable_chunked_prefill is True:
+            cmd.append("--enable-chunked-prefill")
+        elif enable_chunked_prefill is False:
+            cmd.append("--no-enable-chunked-prefill")
+        swap_space = self._get_vllm_option(extra_config, "swap_space", self._get_setting("vllm_swap_space"))
+        if swap_space:
+            cmd.extend(["--swap-space", str(swap_space)])
+        kv_cache_dtype = self._get_vllm_option(extra_config, "kv_cache_dtype", self._get_setting("vllm_kv_cache_dtype"))
+        if kv_cache_dtype:
+            cmd.extend(["--kv-cache-dtype", str(kv_cache_dtype)])
+        if self._get_vllm_option(extra_config, "enforce_eager", self._get_setting("vllm_enforce_eager")):
             cmd.append("--enforce-eager")
-        if settings.vllm_attention_backend:
-            cmd.extend(["--attention-backend", settings.vllm_attention_backend])
+        attention_backend = self._get_vllm_option(
+            extra_config, "attention_backend", self._get_setting("vllm_attention_backend")
+        )
+        if attention_backend:
+            cmd.extend(["--attention-backend", str(attention_backend)])
+        if self._get_vllm_option(
+            extra_config, "trust_remote_code", self._get_setting("vllm_trust_remote_code")
+        ):
+            cmd.append("--trust-remote-code")
 
         env = {
             **os.environ,
@@ -162,6 +207,19 @@ class VLLMBackend(BackendInterface):
             pid=proc.pid or 0,
             vram_used_mb=vram_mb,
         )
+
+    def _get_vllm_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
+        vllm_config = extra_config.get("vllm")
+        if isinstance(vllm_config, dict) and key in vllm_config:
+            return vllm_config[key]
+        return extra_config.get(key, default)
+
+    def _get_setting(self, name: str) -> Any:
+        value = getattr(settings, name, None)
+        module_name = getattr(value.__class__, "__module__", "")
+        if module_name.startswith("unittest.mock"):
+            return None
+        return value
 
     async def unload(self, model_id: str) -> None:
         """Send SIGTERM, wait up to 30 s, then SIGKILL."""

@@ -42,6 +42,61 @@ def parse_args() -> argparse.Namespace:
         default=0.90,
         help="vLLM GPU memory utilization (0-1)",
     )
+    p.add_argument(
+        "--enable-prefix-caching",
+        action="store_true",
+        help="Enable automatic prefix caching",
+    )
+    p.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help="Maximum concurrent sequences per iteration",
+    )
+    p.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=None,
+        help="Maximum batched tokens per iteration",
+    )
+    p.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=None,
+        help="Tensor parallel degree override",
+    )
+    p.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Maximum model context length override",
+    )
+    p.add_argument(
+        "--enable-chunked-prefill",
+        action="store_true",
+        help="Enable chunked prefill explicitly",
+    )
+    p.add_argument(
+        "--swap-space",
+        type=float,
+        default=None,
+        help="CPU swap space per GPU in GiB",
+    )
+    p.add_argument(
+        "--kv-cache-dtype",
+        default=None,
+        help="KV cache dtype override, e.g. fp8",
+    )
+    p.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graphs and force eager execution",
+    )
+    p.add_argument(
+        "--attention-backend",
+        default=None,
+        help="Optional attention backend override",
+    )
     return p.parse_args()
 
 
@@ -50,7 +105,7 @@ def main() -> None:
 
     model_path = str(Path(args.models_dir) / args.model_id)
     cuda_devices = ",".join(str(g) for g in args.gpu)
-    tensor_parallel = len(args.gpu)
+    tensor_parallel = args.tensor_parallel_size or len(args.gpu)
 
     env = {
         **os.environ,
@@ -77,6 +132,24 @@ def main() -> None:
         args.model_id,
         "--disable-log-requests",
     ]
+    if args.enable_prefix_caching:
+        cmd.append("--enable-prefix-caching")
+    if args.max_num_seqs:
+        cmd.extend(["--max-num-seqs", str(args.max_num_seqs)])
+    if args.max_num_batched_tokens:
+        cmd.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
+    if args.max_model_len:
+        cmd.extend(["--max-model-len", str(args.max_model_len)])
+    if args.enable_chunked_prefill:
+        cmd.append("--enable-chunked-prefill")
+    if args.swap_space:
+        cmd.extend(["--swap-space", str(args.swap_space)])
+    if args.kv_cache_dtype:
+        cmd.extend(["--kv-cache-dtype", args.kv_cache_dtype])
+    if args.enforce_eager:
+        cmd.append("--enforce-eager")
+    if args.attention_backend:
+        cmd.extend(["--attention-backend", args.attention_backend])
 
     print(
         f"[vllm_worker] Starting model={args.model_id} port={args.port} "

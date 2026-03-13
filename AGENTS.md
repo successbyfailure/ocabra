@@ -3,6 +3,16 @@
 Este fichero es leído por cualquier agente de IA (Claude, GPT-4o, Gemini, etc.)
 que trabaje en este repositorio.
 
+## Lectura obligatoria al iniciar
+
+Antes de analizar, proponer o modificar nada en este repositorio:
+
+1. Lee `CLAUDE.md` completo.
+2. Usa `CLAUDE.md` como instrucciones operativas base para trabajar en oCabra.
+3. Después vuelve a este `AGENTS.md` para aplicar las reglas de colaboración multi-agente y los límites por stream.
+
+Si hay conflicto entre instrucciones, prioriza primero la seguridad y el alcance pedido por el usuario, luego `CLAUDE.md`, y después este `AGENTS.md`.
+
 ## Proyecto
 
 **oCabra** es un servidor de modelos de IA multi-GPU con las siguientes características:

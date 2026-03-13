@@ -31,6 +31,50 @@ function isRecord(value: unknown): value is AnyRecord {
   return typeof value === "object" && value !== null
 }
 
+function toVLLMConfig(raw: unknown): ModelState["extraConfig"] {
+  const data = isRecord(raw) ? raw : {}
+  const vllmRaw = data.vllm
+  const vllm = isRecord(vllmRaw) ? vllmRaw : {}
+
+  return {
+    ...data,
+    vllm: {
+      maxNumSeqs:
+        vllm.max_num_seqs == null && vllm.maxNumSeqs == null
+          ? null
+          : Number(vllm.max_num_seqs ?? vllm.maxNumSeqs ?? 0),
+      maxNumBatchedTokens:
+        vllm.max_num_batched_tokens == null && vllm.maxNumBatchedTokens == null
+          ? null
+          : Number(vllm.max_num_batched_tokens ?? vllm.maxNumBatchedTokens ?? 0),
+      tensorParallelSize:
+        vllm.tensor_parallel_size == null && vllm.tensorParallelSize == null
+          ? null
+          : Number(vllm.tensor_parallel_size ?? vllm.tensorParallelSize ?? 0),
+      maxModelLen:
+        vllm.max_model_len == null && vllm.maxModelLen == null
+          ? null
+          : Number(vllm.max_model_len ?? vllm.maxModelLen ?? 0),
+      gpuMemoryUtilization:
+        vllm.gpu_memory_utilization == null && vllm.gpuMemoryUtilization == null
+          ? null
+          : Number(vllm.gpu_memory_utilization ?? vllm.gpuMemoryUtilization ?? 0),
+      enablePrefixCaching: Boolean(vllm.enable_prefix_caching ?? vllm.enablePrefixCaching),
+      enableChunkedPrefill:
+        vllm.enable_chunked_prefill == null && vllm.enableChunkedPrefill == null
+          ? null
+          : Boolean(vllm.enable_chunked_prefill ?? vllm.enableChunkedPrefill),
+      enforceEager: Boolean(vllm.enforce_eager ?? vllm.enforceEager),
+      trustRemoteCode: Boolean(vllm.trust_remote_code ?? vllm.trustRemoteCode),
+      swapSpace:
+        vllm.swap_space == null && vllm.swapSpace == null
+          ? null
+          : Number(vllm.swap_space ?? vllm.swapSpace ?? 0),
+      kvCacheDtype: (vllm.kv_cache_dtype ?? vllm.kvCacheDtype ?? null) as string | null,
+    },
+  }
+}
+
 function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
   const data = isRecord(raw) ? raw : {}
   return {
@@ -98,7 +142,9 @@ function toModelState(raw: unknown): ModelState {
     capabilities: toModelCapabilities(data.capabilities),
     lastRequestAt: (data.last_request_at ?? data.lastRequestAt ?? null) as string | null,
     loadedAt: (data.loaded_at ?? data.loadedAt ?? null) as string | null,
+    errorMessage: (data.error_message ?? data.errorMessage ?? null) as string | null,
     schedules,
+    extraConfig: toVLLMConfig(data.extra_config ?? data.extraConfig),
   }
 }
 
@@ -131,6 +177,8 @@ function toHFModelCard(raw: unknown): HFModelCard {
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
     gated: Boolean(data.gated),
     suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelCard["suggestedBackend"],
+    compatibility: String(data.compatibility ?? "unknown"),
+    compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
   }
 }
 
@@ -156,6 +204,9 @@ function toHFModelVariant(raw: unknown): HFModelVariant {
     quantization: (data.quantization ?? null) as string | null,
     backendType: String(data.backend_type ?? data.backendType ?? "vllm") as HFModelVariant["backendType"],
     isDefault: Boolean(data.is_default ?? data.isDefault),
+    installable: data.installable == null ? true : Boolean(data.installable),
+    compatibility: String(data.compatibility ?? "unknown"),
+    compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
   }
 }
 

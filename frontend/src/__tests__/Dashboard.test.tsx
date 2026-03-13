@@ -72,6 +72,32 @@ describe("Dashboard", () => {
         lastRequestAt: null,
         loadedAt: null,
       },
+      {
+        modelId: "qwen-14b",
+        displayName: "Qwen 14B",
+        backendType: "vllm",
+        status: "loading",
+        loadPolicy: "on_demand",
+        autoReload: false,
+        preferredGpu: 1,
+        currentGpu: [1],
+        vramUsedMb: 0,
+        capabilities: {
+          chat: true,
+          completion: true,
+          tools: true,
+          vision: false,
+          embeddings: false,
+          reasoning: true,
+          imageGeneration: false,
+          audioTranscription: false,
+          tts: false,
+          streaming: true,
+          contextLength: 32768,
+        },
+        lastRequestAt: null,
+        loadedAt: null,
+      },
     ])
 
     listDownloads.mockResolvedValue([
@@ -96,6 +122,7 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByText("RTX 3090")).toBeTruthy()
       expect(screen.getByText("Mistral 7B")).toBeTruthy()
+      expect(screen.getByText("Qwen 14B")).toBeTruthy()
       expect(screen.getByText("meta-llama/Llama-3.1-8B")).toBeTruthy()
     })
 

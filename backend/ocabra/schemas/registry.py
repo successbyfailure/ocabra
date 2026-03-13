@@ -14,6 +14,8 @@ class HFModelCard(BaseModel):
     tags: list[str]
     gated: bool
     suggested_backend: str
+    compatibility: str = "unknown"
+    compatibility_reason: str | None = None
 
 
 class HFModelDetail(HFModelCard):
@@ -32,6 +34,9 @@ class HFModelVariant(BaseModel):
     quantization: str | None
     backend_type: Literal["vllm", "diffusers", "whisper", "tts", "ollama"]
     is_default: bool = False
+    installable: bool = True
+    compatibility: str = "unknown"
+    compatibility_reason: str | None = None
 
 
 class OllamaModelCard(BaseModel):

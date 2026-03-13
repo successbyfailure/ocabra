@@ -274,6 +274,120 @@ class TestLoadUnload:
         assert info.backend_type == "vllm"
 
     @pytest.mark.asyncio
+    async def test_load_passes_vllm_tuning_flags(self, tmp_model_dir: Path):
+        (tmp_model_dir / "test-llm").mkdir()
+        proc = _fake_proc(returncode=None)
+        create_subprocess = AsyncMock(return_value=proc)
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with (
+            patch("ocabra.backends.vllm_backend.settings") as mock_settings,
+            patch("asyncio.create_subprocess_exec", new=create_subprocess),
+            patch.object(VLLMBackend, "_wait_for_startup", new=AsyncMock()),
+            patch.object(VLLMBackend, "get_vram_estimate_mb", new=AsyncMock(return_value=8192)),
+        ):
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = "/tmp/hf_cache"
+            mock_settings.hf_token = ""
+            mock_settings.cuda_device_order = "PCI_BUS_ID"
+            mock_settings.vllm_gpu_memory_utilization = 0.85
+            mock_settings.vllm_enable_prefix_caching = True
+            mock_settings.vllm_max_num_seqs = 16
+            mock_settings.vllm_max_num_batched_tokens = 8192
+            mock_settings.vllm_tensor_parallel_size = None
+            mock_settings.vllm_max_model_len = None
+            mock_settings.vllm_enable_chunked_prefill = None
+            mock_settings.vllm_swap_space = None
+            mock_settings.vllm_kv_cache_dtype = "fp8"
+            mock_settings.vllm_enforce_eager = False
+            mock_settings.vllm_attention_backend = None
+            backend = VLLMBackend()
+            await backend.load("test-llm", gpu_indices=[1], port=18001)
+
+        cmd = list(create_subprocess.await_args.args)
+        assert "--enable-prefix-caching" in cmd
+        assert "--max-num-seqs" in cmd
+        assert "16" in cmd
+        assert "--max-num-batched-tokens" in cmd
+        assert "8192" in cmd
+        assert "--tensor-parallel-size" in cmd
+        assert "--max-model-len" not in cmd
+        assert "--swap-space" not in cmd
+        assert "--kv-cache-dtype" in cmd
+        assert "fp8" in cmd
+        assert "--enforce-eager" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_load_prefers_model_vllm_overrides(self, tmp_model_dir: Path):
+        (tmp_model_dir / "test-llm").mkdir()
+        proc = _fake_proc(returncode=None)
+        create_subprocess = AsyncMock(return_value=proc)
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with (
+            patch("ocabra.backends.vllm_backend.settings") as mock_settings,
+            patch("asyncio.create_subprocess_exec", new=create_subprocess),
+            patch.object(VLLMBackend, "_wait_for_startup", new=AsyncMock()),
+            patch.object(VLLMBackend, "get_vram_estimate_mb", new=AsyncMock(return_value=8192)),
+        ):
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = "/tmp/hf_cache"
+            mock_settings.hf_token = ""
+            mock_settings.cuda_device_order = "PCI_BUS_ID"
+            mock_settings.vllm_gpu_memory_utilization = 0.85
+            mock_settings.vllm_enable_prefix_caching = True
+            mock_settings.vllm_max_num_seqs = 16
+            mock_settings.vllm_max_num_batched_tokens = 8192
+            mock_settings.vllm_tensor_parallel_size = None
+            mock_settings.vllm_max_model_len = None
+            mock_settings.vllm_enable_chunked_prefill = None
+            mock_settings.vllm_swap_space = None
+            mock_settings.vllm_kv_cache_dtype = "fp8"
+            mock_settings.vllm_enforce_eager = False
+            mock_settings.vllm_attention_backend = None
+            backend = VLLMBackend()
+            await backend.load(
+                "test-llm",
+                gpu_indices=[1],
+                port=18001,
+                extra_config={
+                    "vllm": {
+                        "enable_prefix_caching": False,
+                        "tensor_parallel_size": 2,
+                        "max_model_len": 32768,
+                        "max_num_seqs": 4,
+                        "max_num_batched_tokens": 2048,
+                        "enable_chunked_prefill": True,
+                        "swap_space": 8,
+                        "kv_cache_dtype": None,
+                        "enforce_eager": True,
+                        "attention_backend": "FLASH_ATTN",
+                    }
+                },
+            )
+
+        cmd = list(create_subprocess.await_args.args)
+        assert "--enable-prefix-caching" not in cmd
+        assert "--tensor-parallel-size" in cmd
+        assert "2" in cmd
+        assert "--max-model-len" in cmd
+        assert "32768" in cmd
+        assert "--max-num-seqs" in cmd
+        assert "4" in cmd
+        assert "16" not in cmd
+        assert "--max-num-batched-tokens" in cmd
+        assert "2048" in cmd
+        assert "--enable-chunked-prefill" in cmd
+        assert "--swap-space" in cmd
+        assert "8" in cmd
+        assert "--kv-cache-dtype" not in cmd
+        assert "--enforce-eager" in cmd
+        assert "--attention-backend" in cmd
+        assert "FLASH_ATTN" in cmd
+
+    @pytest.mark.asyncio
     async def test_load_raises_without_port(self):
         from ocabra.backends.vllm_backend import VLLMBackend
 

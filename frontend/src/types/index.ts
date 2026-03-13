@@ -54,7 +54,23 @@ export interface ModelState {
   capabilities: ModelCapabilities
   lastRequestAt: string | null
   loadedAt: string | null
+  errorMessage?: string | null
   schedules?: EvictionSchedule[]
+  extraConfig?: Record<string, unknown>
+}
+
+export interface VLLMConfig {
+  maxNumSeqs?: number | null
+  maxNumBatchedTokens?: number | null
+  tensorParallelSize?: number | null
+  maxModelLen?: number | null
+  gpuMemoryUtilization?: number | null
+  enablePrefixCaching?: boolean
+  enableChunkedPrefill?: boolean | null
+  enforceEager?: boolean
+  trustRemoteCode?: boolean
+  swapSpace?: number | null
+  kvCacheDtype?: string | null
 }
 
 export interface ModelPatchRequest {
@@ -63,6 +79,9 @@ export interface ModelPatchRequest {
   autoReload?: boolean
   displayName?: string
   schedules?: EvictionSchedule[]
+  extraConfig?: {
+    vllm?: VLLMConfig
+  }
 }
 
 export interface EvictionSchedule {
@@ -100,6 +119,8 @@ export interface HFModelCard {
   tags: string[]
   gated: boolean
   suggestedBackend: BackendType
+  compatibility?: string
+  compatibilityReason?: string | null
 }
 
 export interface HFModelDetail extends HFModelCard {
@@ -118,6 +139,9 @@ export interface HFModelVariant {
   quantization: string | null
   backendType: BackendType
   isDefault: boolean
+  installable?: boolean
+  compatibility?: string
+  compatibilityReason?: string | null
 }
 
 export interface OllamaModelCard {

@@ -7,7 +7,7 @@ import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
-import type { LoadPolicy, ModelState, ModelStatus } from "@/types"
+import type { LoadPolicy, ModelState, ModelStatus, VLLMConfig } from "@/types"
 
 function inferType(model: ModelState): "llm" | "image" | "audio" {
   if (model.capabilities.imageGeneration) return "image"
@@ -113,6 +113,9 @@ export function Models() {
       preferredGpu: number | null
       autoReload: boolean
       schedules: ModelState["schedules"]
+      extraConfig?: {
+        vllm?: VLLMConfig
+      }
     },
   ) => {
     await runAction(modelId, async () => {
@@ -121,6 +124,7 @@ export function Models() {
         preferredGpu: patch.preferredGpu,
         autoReload: patch.autoReload,
         schedules: patch.schedules,
+        extraConfig: patch.extraConfig,
       })
     })
   }

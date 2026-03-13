@@ -16,6 +16,7 @@ class ModelPatch(BaseModel):
     load_policy: str | None = None
     auto_reload: bool | None = None
     preferred_gpu: int | None = None
+    extra_config: dict | None = None
 
 
 class AddModelRequest(BaseModel):
@@ -25,6 +26,7 @@ class AddModelRequest(BaseModel):
     load_policy: str = "on_demand"
     auto_reload: bool = False
     preferred_gpu: int | None = None
+    extra_config: dict | None = None
 
 
 @router.get("/models")
@@ -66,6 +68,7 @@ async def add_model(body: AddModelRequest, request: Request) -> dict:
         load_policy=body.load_policy,
         auto_reload=body.auto_reload,
         preferred_gpu=body.preferred_gpu,
+        extra_config=body.extra_config,
     )
     return state.to_dict()
 
@@ -142,9 +145,10 @@ async def _get_ollama_sizes_bytes() -> dict[str, int]:
 async def _sync_ollama_inventory(model_manager) -> None:
     try:
         installed = await _ollama_registry.list_installed()
+        loaded = await _ollama_registry.list_loaded()
     except Exception:
         return
-    await model_manager.sync_ollama_models(installed)
+    await model_manager.sync_ollama_inventory(installed, loaded)
 
 
 async def _resolve_disk_size_bytes(

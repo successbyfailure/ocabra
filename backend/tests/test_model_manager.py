@@ -131,6 +131,41 @@ async def test_concurrent_load_only_loads_once(model_manager):
 
 
 @pytest.mark.asyncio
+async def test_load_passes_model_extra_config_to_backend():
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    backend.load = AsyncMock(
+        return_value=WorkerInfo(
+            backend_type="portreq",
+            model_id="test/overrides",
+            gpu_indices=[1],
+            port=18001,
+            pid=1234,
+            vram_used_mb=1024,
+        )
+    )
+    wp.register_backend("portreq", backend)
+    mm = ModelManager(wp)
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+        from ocabra.core.model_manager import ModelState
+
+        mm._states["test/overrides"] = ModelState(
+            model_id="test/overrides",
+            display_name="test/overrides",
+            backend_type="portreq",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={"vllm": {"max_num_seqs": 4}},
+        )
+        mm._load_locks["test/overrides"] = asyncio.Lock()
+
+        await mm.load("test/overrides")
+
+    assert backend.load.await_args.kwargs["extra_config"] == {"vllm": {"max_num_seqs": 4}}
+
+
+@pytest.mark.asyncio
 async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
     mm = ModelManager(worker_pool, gpu_scheduler=AsyncMock())
 

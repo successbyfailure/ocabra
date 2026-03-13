@@ -11,12 +11,24 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       MODELS_DIR: /data/models
       HF_CACHE_DIR: /data/hf_cache
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      VLLM_ENFORCE_EAGER: ${VLLM_ENFORCE_EAGER:-true}
+      VLLM_ATTENTION_BACKEND: ${VLLM_ATTENTION_BACKEND:-}
+      VLLM_ENABLE_PREFIX_CACHING: ${VLLM_ENABLE_PREFIX_CACHING:-true}
+      VLLM_MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS:-16}
+      VLLM_MAX_NUM_BATCHED_TOKENS: ${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
+      VLLM_TENSOR_PARALLEL_SIZE: ${VLLM_TENSOR_PARALLEL_SIZE:-}
+      VLLM_MAX_MODEL_LEN: ${VLLM_MAX_MODEL_LEN:-}
+      VLLM_ENABLE_CHUNKED_PREFILL: ${VLLM_ENABLE_CHUNKED_PREFILL:-}
+      VLLM_SWAP_SPACE: ${VLLM_SWAP_SPACE:-}
+      VLLM_KV_CACHE_DTYPE: ${VLLM_KV_CACHE_DTYPE:-}
+      VLLM_TRUST_REMOTE_CODE: ${VLLM_TRUST_REMOTE_CODE:-false}
     env_file: .env
-    ports:
-      - "8000:8000"
+#    ports:
+#      - "8000:8000"
     volumes:
-      - ${MODELS_DIR:-./data/models}:/data/models
-      - ${HF_CACHE_DIR:-./data/hf_cache}:/data/hf_cache
+      - /docker/ai-models/ocabra/models:/data/models
+      - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,7 +58,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ocabra}
       POSTGRES_DB: ${POSTGRES_DB:-ocabra}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./data/postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ocabra}"]
       interval: 5s
@@ -56,8 +68,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    volumes:
-      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -73,28 +83,20 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       OLLAMA_HOST: 0.0.0.0:11434
     volumes:
-      - ollama_data:/root/.ollama
-    expose:
-      - "11434"
+      - /docker/ai-models/ollama:/root/.ollama
+    ports:
+      - "7869:11434"
     restart: unless-stopped
 
   caddy:
     image: caddy:2-alpine
     ports:
-      - "80:80"
-      - "443:443"
+      - "8484:80"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./caddy/caddy_data:/data
+      - ./caddy/caddy_config:/config
     depends_on:
       - api
       - frontend
     restart: unless-stopped
-
-volumes:
-  postgres_data:
-  redis_data:
-  ollama_data:
-  caddy_data:
-  caddy_config:

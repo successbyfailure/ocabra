@@ -24,7 +24,7 @@ export function Dashboard() {
   const setJobs = useDownloadStore((state) => state.setJobs)
 
   const activeModels = useMemo(
-    () => Object.values(models).filter((model) => model.status === "loaded"),
+    () => Object.values(models).filter((model) => model.status === "loaded" || model.status === "loading"),
     [models],
   )
   const activeDownloads = useMemo(
@@ -97,13 +97,15 @@ export function Dashboard() {
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void unloadModel(model.modelId)}
-                className="rounded-md border border-red-500/40 px-3 py-1 text-sm text-red-200 hover:bg-red-500/20"
-              >
-                Unload
-              </button>
+              {model.status === "loaded" && (
+                <button
+                  type="button"
+                  onClick={() => void unloadModel(model.modelId)}
+                  className="rounded-md border border-red-500/40 px-3 py-1 text-sm text-red-200 hover:bg-red-500/20"
+                >
+                  Unload
+                </button>
+              )}
             </div>
           ))}
           {activeModels.length === 0 && (

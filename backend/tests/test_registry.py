@@ -184,6 +184,75 @@ async def test_hf_variants_exposes_standard_only(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_hf_variants_marks_unsupported_tokenizer_as_not_installable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/bad-tokenizer",
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=1_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=1_000),
+            SimpleNamespace(rfilename="model.safetensors", size=2 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "tokenizer_config.json":
+            return {"tokenizer_class": "TokenizersBackendFast"}
+        if filename == "config.json":
+            return {"model_type": "qwen3_5"}
+        return None
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+
+    registry = HuggingFaceRegistry()
+    variants = await registry.get_variants("org/bad-tokenizer")
+
+    assert variants[0].installable is False
+    assert variants[0].compatibility == "unsupported"
+    assert "TokenizersBackendFast" in (variants[0].compatibility_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_hf_download_rejects_incompatible_tokenizer_repo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/bad-tokenizer",
+        pipeline_tag="text-generation",
+        library_name="transformers",
+        tags=[],
+        siblings=[
+            SimpleNamespace(rfilename="config.json"),
+            SimpleNamespace(rfilename="tokenizer_config.json"),
+            SimpleNamespace(rfilename="model.safetensors"),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "tokenizer_config.json":
+            return {"tokenizer_class": "TokenizersBackend"}
+        if filename == "config.json":
+            return {"model_type": "mistral"}
+        return None
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+
+    registry = HuggingFaceRegistry()
+    with pytest.raises(ValueError, match="tokenizer_class=TokenizersBackend"):
+        await registry.download(
+            repo_id="org/bad-tokenizer",
+            target_dir=tmp_path / "model",
+            progress_callback=lambda *_args: None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_hf_download_rejects_gguf_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     registry = HuggingFaceRegistry()
 
@@ -334,6 +403,37 @@ async def test_model_manager_syncs_native_ollama_inventory() -> None:
     states = await manager.list_states()
     assert sorted(state.model_id for state in states) == ["gemma3:4b", "llama3.2:3b"]
     assert all(state.backend_type == "ollama" for state in states)
+
+
+@pytest.mark.asyncio
+async def test_model_manager_syncs_ollama_loaded_runtime_state() -> None:
+    class DummyWorkerPool:
+        def __init__(self) -> None:
+            self.workers: dict[str, object] = {}
+
+        def set_worker(self, model_id: str, worker_info) -> None:
+            self.workers[model_id] = worker_info
+
+        def remove_worker(self, model_id: str) -> None:
+            self.workers.pop(model_id, None)
+
+    manager = ModelManager(worker_pool=DummyWorkerPool())
+    manager._publish_event = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
+
+    await manager.sync_ollama_inventory(["qwen3:32b"], ["qwen3:32b"])
+    state = await manager.get_state("qwen3:32b")
+
+    assert state is not None
+    assert state.status.value == "loaded"
+    assert state.loaded_at is not None
+    assert state.worker_info is not None
+
+    await manager.sync_ollama_inventory(["qwen3:32b"], [])
+    state = await manager.get_state("qwen3:32b")
+
+    assert state is not None
+    assert state.status.value == "unloaded"
+    assert state.worker_info is None
 
 
 @pytest.mark.asyncio

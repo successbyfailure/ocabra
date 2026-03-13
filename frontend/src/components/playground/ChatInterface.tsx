@@ -15,6 +15,7 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [dragImage, setDragImage] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -68,8 +69,19 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
     setMessages((prev) => [...prev, userMessage])
     setInput("")
     setSending(true)
+    const assistantId = `msg-${Date.now()}-assistant`
     try {
       const useOllama = backendType === "ollama"
+      setStreamingMessageId(assistantId)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+        },
+      ])
+
       const response = await fetch(useOllama ? "/api/chat" : "/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -77,7 +89,7 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
           useOllama
             ? {
                 model: modelId,
-                stream: false,
+                stream: true,
                 messages: buildOpenAIMessages(text),
                 options: {
                   temperature: params.temperature,
@@ -91,7 +103,7 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
                 temperature: params.temperature,
                 max_tokens: params.maxTokens,
                 top_p: params.topP,
-                stream: false,
+                stream: true,
               },
         ),
       })
@@ -99,32 +111,28 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
         const err = await response.json().catch(() => ({}))
         throw new Error(String(err?.error?.message ?? err?.detail ?? `HTTP ${response.status}`))
       }
-      const data = await response.json()
       const content = useOllama
-        ? String(data?.message?.content ?? "")
-        : extractOpenAIContent(data)
-      const choice = data?.choices?.[0]?.message
-      const toolCall = Array.isArray(choice?.tool_calls) ? choice.tool_calls[0] : undefined
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `msg-${Date.now()}-assistant`,
-          role: "assistant",
-          content: content || "(sin contenido)",
-          toolCall: toolCall
-            ? {
-                name: String(toolCall.function?.name ?? "tool"),
-                args: String(toolCall.function?.arguments ?? "{}"),
-                result: "(pendiente de resultado)",
-              }
-            : undefined,
-        },
-      ])
+        ? await readOllamaChatStream(response, (chunk) => {
+            setMessages((prev) => updateAssistantMessage(prev, assistantId, chunk))
+          })
+        : await readOpenAIChatStream(response, (chunk) => {
+            setMessages((prev) => updateAssistantMessage(prev, assistantId, chunk))
+          })
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? { ...msg, content: msg.content || content || "(sin contenido)" }
+            : msg,
+        ),
+      )
       setDragImage(null)
     } catch (err) {
+      setMessages((prev) => prev.filter((msg) => msg.id !== assistantId))
       toast.error(err instanceof Error ? err.message : "Error en chat")
     } finally {
       setSending(false)
+      setStreamingMessageId(null)
     }
   }
 
@@ -154,7 +162,11 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
           <p className="text-sm text-muted-foreground">Escribe un prompt o arrastra una imagen para vision.</p>
         )}
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageBubble
+            key={message.id}
+            message={message}
+            streaming={message.id === streamingMessageId}
+          />
         ))}
       </div>
 
@@ -220,10 +232,117 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
   )
 }
 
-function extractOpenAIContent(data: unknown): string {
-  const payload = (data ?? {}) as { choices?: Array<{ message?: { content?: unknown } }> }
-  const choice = payload.choices?.[0]?.message
-  const contentRaw = choice?.content
+function updateAssistantMessage(messages: ChatMessage[], assistantId: string, chunk: string): ChatMessage[] {
+  return messages.map((msg) =>
+    msg.id === assistantId
+      ? { ...msg, content: `${msg.content}${chunk}` }
+      : msg,
+  )
+}
+
+async function readOpenAIChatStream(
+  response: Response,
+  onChunk: (chunk: string) => void,
+): Promise<string> {
+  if (!response.body) throw new Error("Streaming no soportado por el navegador")
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let fullText = ""
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    let boundary = buffer.indexOf("\n\n")
+    while (boundary !== -1) {
+      const rawEvent = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      boundary = buffer.indexOf("\n\n")
+
+      const dataLines = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+
+      if (dataLines.length === 0) continue
+      const payload = dataLines.join("\n")
+      if (payload === "[DONE]") {
+        return fullText
+      }
+
+      const parsed = JSON.parse(payload) as {
+        choices?: Array<{
+          delta?: { content?: unknown }
+          message?: { content?: unknown }
+        }>
+        error?: { message?: string }
+      }
+
+      if (parsed.error?.message) throw new Error(parsed.error.message)
+
+      const choice = parsed.choices?.[0]
+      const content =
+        typeof choice?.delta?.content === "string"
+          ? choice.delta.content
+          : extractMessageContent(choice?.message?.content)
+
+      if (content) {
+        fullText += content
+        onChunk(content)
+      }
+    }
+  }
+
+  return fullText
+}
+
+async function readOllamaChatStream(
+  response: Response,
+  onChunk: (chunk: string) => void,
+): Promise<string> {
+  if (!response.body) throw new Error("Streaming no soportado por el navegador")
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let fullText = ""
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    let newline = buffer.indexOf("\n")
+    while (newline !== -1) {
+      const line = buffer.slice(0, newline).trim()
+      buffer = buffer.slice(newline + 1)
+      newline = buffer.indexOf("\n")
+      if (!line) continue
+
+      const parsed = JSON.parse(line) as {
+        error?: string
+        done?: boolean
+        message?: { content?: unknown }
+      }
+
+      if (parsed.error) throw new Error(parsed.error)
+      if (parsed.done) return fullText
+
+      const content = typeof parsed.message?.content === "string" ? parsed.message.content : ""
+      if (content) {
+        fullText += content
+        onChunk(content)
+      }
+    }
+  }
+
+  return fullText
+}
+
+function extractMessageContent(contentRaw: unknown): string {
   if (typeof contentRaw === "string") return contentRaw
   if (!Array.isArray(contentRaw)) return ""
   return contentRaw

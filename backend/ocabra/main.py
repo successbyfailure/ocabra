@@ -58,6 +58,27 @@ async def _idle_eviction_loop(model_manager, stop_event: asyncio.Event) -> None:
     logger.info("idle_eviction_loop_stopped")
 
 
+async def _ollama_inventory_loop(model_manager, stop_event: asyncio.Event) -> None:
+    from ocabra.registry.ollama_registry import OllamaRegistry
+
+    interval_s = max(5, int(settings.ollama_inventory_sync_interval_seconds))
+    registry = OllamaRegistry()
+    logger.info("ollama_inventory_loop_started", interval_s=interval_s)
+    while not stop_event.is_set():
+        try:
+            installed = await registry.list_installed()
+            loaded = await registry.list_loaded()
+            await model_manager.sync_ollama_inventory(installed, loaded)
+        except Exception as exc:
+            logger.warning("ollama_inventory_loop_error", error=str(exc))
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    logger.info("ollama_inventory_loop_stopped")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────
@@ -96,16 +117,23 @@ async def lifespan(app: FastAPI):
     from ocabra.registry.ollama_registry import OllamaRegistry
     try:
         installed_ollama = await OllamaRegistry().list_installed()
+        loaded_ollama = await OllamaRegistry().list_loaded()
     except Exception:
         installed_ollama = []
-    if installed_ollama:
-        await model_manager.sync_ollama_models(installed_ollama)
+        loaded_ollama = []
+    if installed_ollama or loaded_ollama:
+        await model_manager.sync_ollama_inventory(installed_ollama, loaded_ollama)
     logger.info("model_manager_ready")
 
     idle_eviction_stop = asyncio.Event()
     idle_eviction_task = asyncio.create_task(
         _idle_eviction_loop(model_manager, idle_eviction_stop),
         name="idle-eviction-loop",
+    )
+    ollama_inventory_stop = asyncio.Event()
+    ollama_inventory_task = asyncio.create_task(
+        _ollama_inventory_loop(model_manager, ollama_inventory_stop),
+        name="ollama-inventory-loop",
     )
 
     # Stream 2-A: vLLM backend registration
@@ -130,6 +158,11 @@ async def lifespan(app: FastAPI):
     idle_eviction_task.cancel()
     with suppress(asyncio.CancelledError):
         await idle_eviction_task
+
+    ollama_inventory_stop.set()
+    ollama_inventory_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await ollama_inventory_task
 
     await gpu_manager.stop()
 
