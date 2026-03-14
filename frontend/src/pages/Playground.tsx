@@ -6,12 +6,14 @@ import { ChatInterface } from "@/components/playground/ChatInterface"
 import { ImageInterface } from "@/components/playground/ImageInterface"
 import { ModelSelector } from "@/components/playground/ModelSelector"
 import { ParamsPanel, type PlaygroundParams } from "@/components/playground/ParamsPanel"
+import { PoolingInterface } from "@/components/playground/PoolingInterface"
 import type { ModelState } from "@/types"
 
-function detectMode(model: ModelState | null): "chat" | "image" | "audio" {
+function detectMode(model: ModelState | null): "chat" | "image" | "audio" | "pooling" {
   if (!model) return "chat"
   if (model.capabilities.imageGeneration) return "image"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
+  if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
   return "chat"
 }
 
@@ -76,7 +78,7 @@ export function Playground() {
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-semibold">Playground</h1>
-        <p className="text-muted-foreground">Prueba chat, imagen y audio por capacidad del modelo.</p>
+        <p className="text-muted-foreground">Prueba chat, pooling, imagen y audio por capacidad del modelo.</p>
       </div>
 
       {loading ? (
@@ -99,6 +101,14 @@ export function Playground() {
                   modelId={selectedModelId}
                   backendType={selectedModel?.backendType ?? null}
                   params={params}
+                />
+              )}
+              {mode === "pooling" && (
+                <PoolingInterface
+                  modelId={selectedModelId}
+                  scoreCapable={Boolean(selectedModel?.capabilities.score)}
+                  rerankCapable={Boolean(selectedModel?.capabilities.rerank)}
+                  classificationCapable={Boolean(selectedModel?.capabilities.classification)}
                 />
               )}
               {mode === "image" && <ImageInterface modelId={selectedModelId} params={params} />}

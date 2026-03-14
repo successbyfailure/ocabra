@@ -11,6 +11,10 @@ class BackendCapabilities:
     tools: bool = False
     vision: bool = False
     embeddings: bool = False
+    pooling: bool = False
+    rerank: bool = False
+    classification: bool = False
+    score: bool = False
     reasoning: bool = False
     image_generation: bool = False
     audio_transcription: bool = False
@@ -25,6 +29,10 @@ class BackendCapabilities:
             "tools": self.tools,
             "vision": self.vision,
             "embeddings": self.embeddings,
+            "pooling": self.pooling,
+            "rerank": self.rerank,
+            "classification": self.classification,
+            "score": self.score,
             "reasoning": self.reasoning,
             "image_generation": self.image_generation,
             "audio_transcription": self.audio_transcription,

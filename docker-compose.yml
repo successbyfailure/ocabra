@@ -88,15 +88,97 @@ services:
       - "7869:11434"
     restart: unless-stopped
 
+  hunyuan:
+    build:
+      context: ./Hunyuan3D-2.1
+      dockerfile: docker/Dockerfile
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      IDLE_TIMEOUT_SECONDS: ${HUNYUAN_IDLE_UNLOAD_SECONDS:-300}
+      IDLE_CHECK_INTERVAL_SECONDS: 30
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+    volumes:
+      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
+      - /docker/ai-models/ocabra/models/hunyuan3d:/workspace/Hunyuan3D-2.1/gradio_cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
+
+  comfyui:
+    build:
+      context: ./services/comfyui
+      dockerfile: Dockerfile
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+    volumes:
+      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
+      - /docker/ai-models/ocabra/models/image/checkpoints:/opt/ComfyUI/models/checkpoints
+      - /docker/ai-models/ocabra/models/image/vae:/opt/ComfyUI/models/vae
+      - /docker/ai-models/ocabra/models/image/loras:/opt/ComfyUI/models/loras
+      - /docker/ai-models/ocabra/models/image/embeddings:/opt/ComfyUI/models/embeddings
+      - /docker/ai-models/ocabra/models/image/controlnet:/opt/ComfyUI/models/controlnet
+      - /docker/ai-models/ocabra/models/image/upscalers:/opt/ComfyUI/models/upscale_models
+      - /docker/ai-models/ocabra/models/comfyui:/opt/ComfyUI/user
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8188/"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+
+  a1111:
+    build:
+      context: ./services/a1111
+      dockerfile: Dockerfile
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+      COMMANDLINE_ARGS: --listen --api --port 7860 --skip-torch-cuda-test
+    volumes:
+      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
+      - /docker/ai-models/ocabra/models/image/checkpoints:/opt/stable-diffusion-webui/models/Stable-diffusion
+      - /docker/ai-models/ocabra/models/image/vae:/opt/stable-diffusion-webui/models/VAE
+      - /docker/ai-models/ocabra/models/image/loras:/opt/stable-diffusion-webui/models/Lora
+      - /docker/ai-models/ocabra/models/image/embeddings:/opt/stable-diffusion-webui/embeddings
+      - /docker/ai-models/ocabra/models/image/upscalers:/opt/stable-diffusion-webui/models/ESRGAN
+      - /docker/ai-models/ocabra/models/a1111:/opt/stable-diffusion-webui/config_states
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/sdapi/v1/memory"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     ports:
       - "8484:80"
+      - "${SERVICES_PORTAL_PORT:-8485}:${SERVICES_PORTAL_INTERNAL_PORT:-81}"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/services:/srv/services:ro
       - ./caddy/caddy_data:/data
       - ./caddy/caddy_config:/config
     depends_on:
       - api
       - frontend
+      - hunyuan
+      - comfyui
+      - a1111
     restart: unless-stopped

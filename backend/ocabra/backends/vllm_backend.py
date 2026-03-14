@@ -4,6 +4,7 @@ vLLM backend — one subprocess per loaded model.
 Each model gets an isolated vLLM OpenAI-compatible API server on a dedicated
 port in the range configured by settings.worker_port_range_*.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,11 +54,16 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
     "GPTNeoXForCausalLM": {"chat": True, "completion": True},
     "GPT2LMHeadModel": {"completion": True},
     # Embeddings
-    "BertModel": {"embeddings": True},
-    "RobertaModel": {"embeddings": True},
-    "XLMRobertaModel": {"embeddings": True},
-    "DistilBertModel": {"embeddings": True},
-    "E5Model": {"embeddings": True},
+    "BertModel": {"embeddings": True, "pooling": True, "score": True},
+    "RobertaModel": {"embeddings": True, "pooling": True, "score": True},
+    "XLMRobertaModel": {"embeddings": True, "pooling": True, "score": True},
+    "DistilBertModel": {"embeddings": True, "pooling": True, "score": True},
+    "E5Model": {"embeddings": True, "pooling": True, "score": True},
+    "BertForSequenceClassification": {"classification": True, "score": True},
+    "RobertaForSequenceClassification": {"classification": True, "score": True},
+    "XLMRobertaForSequenceClassification": {"classification": True, "score": True},
+    "DistilBertForSequenceClassification": {"classification": True, "score": True},
+    "DebertaV2ForSequenceClassification": {"classification": True, "score": True},
 }
 
 _STARTUP_TIMEOUT_S = 120
@@ -110,18 +116,43 @@ class VLLMBackend(BackendInterface):
         ) or len(gpu_indices)
 
         cmd = [
-            "python", "-m", "vllm.entrypoints.openai.api_server",
-            "--model", model_target,
-            "--tensor-parallel-size", str(tensor_parallel),
+            "python",
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            model_target,
+            "--tensor-parallel-size",
+            str(tensor_parallel),
             "--gpu-memory-utilization",
-            str(self._get_vllm_option(extra_config, "gpu_memory_utilization", self._get_setting("vllm_gpu_memory_utilization"))),
-            "--port", str(port),
-            "--host", "127.0.0.1",
-            "--served-model-name", model_id,
+            str(
+                self._get_vllm_option(
+                    extra_config,
+                    "gpu_memory_utilization",
+                    self._get_setting("vllm_gpu_memory_utilization"),
+                )
+            ),
+            "--port",
+            str(port),
+            "--host",
+            "127.0.0.1",
+            "--served-model-name",
+            model_id,
         ]
-        if self._get_vllm_option(extra_config, "enable_prefix_caching", self._get_setting("vllm_enable_prefix_caching")):
+        model_impl = self._get_vllm_option(
+            extra_config, "model_impl", self._get_setting("vllm_model_impl")
+        )
+        if model_impl:
+            cmd.extend(["--model-impl", str(model_impl)])
+        runner = self._get_vllm_option(extra_config, "runner", self._get_setting("vllm_runner"))
+        if runner:
+            cmd.extend(["--runner", str(runner)])
+        if self._get_vllm_option(
+            extra_config, "enable_prefix_caching", self._get_setting("vllm_enable_prefix_caching")
+        ):
             cmd.append("--enable-prefix-caching")
-        max_num_seqs = self._get_vllm_option(extra_config, "max_num_seqs", self._get_setting("vllm_max_num_seqs"))
+        max_num_seqs = self._get_vllm_option(
+            extra_config, "max_num_seqs", self._get_setting("vllm_max_num_seqs")
+        )
         if max_num_seqs:
             cmd.extend(["--max-num-seqs", str(max_num_seqs)])
         max_num_batched_tokens = self._get_vllm_option(
@@ -130,10 +161,10 @@ class VLLMBackend(BackendInterface):
             self._get_setting("vllm_max_num_batched_tokens"),
         )
         if max_num_batched_tokens:
-            cmd.extend(
-                ["--max-num-batched-tokens", str(max_num_batched_tokens)]
-            )
-        max_model_len = self._get_vllm_option(extra_config, "max_model_len", self._get_setting("vllm_max_model_len"))
+            cmd.extend(["--max-num-batched-tokens", str(max_num_batched_tokens)])
+        max_model_len = self._get_vllm_option(
+            extra_config, "max_model_len", self._get_setting("vllm_max_model_len")
+        )
         if max_model_len:
             cmd.extend(["--max-model-len", str(max_model_len)])
         enable_chunked_prefill = self._get_vllm_option(
@@ -145,13 +176,19 @@ class VLLMBackend(BackendInterface):
             cmd.append("--enable-chunked-prefill")
         elif enable_chunked_prefill is False:
             cmd.append("--no-enable-chunked-prefill")
-        swap_space = self._get_vllm_option(extra_config, "swap_space", self._get_setting("vllm_swap_space"))
+        swap_space = self._get_vllm_option(
+            extra_config, "swap_space", self._get_setting("vllm_swap_space")
+        )
         if swap_space:
             cmd.extend(["--swap-space", str(swap_space)])
-        kv_cache_dtype = self._get_vllm_option(extra_config, "kv_cache_dtype", self._get_setting("vllm_kv_cache_dtype"))
+        kv_cache_dtype = self._get_vllm_option(
+            extra_config, "kv_cache_dtype", self._get_setting("vllm_kv_cache_dtype")
+        )
         if kv_cache_dtype:
             cmd.extend(["--kv-cache-dtype", str(kv_cache_dtype)])
-        if self._get_vllm_option(extra_config, "enforce_eager", self._get_setting("vllm_enforce_eager")):
+        if self._get_vllm_option(
+            extra_config, "enforce_eager", self._get_setting("vllm_enforce_eager")
+        ):
             cmd.append("--enforce-eager")
         attention_backend = self._get_vllm_option(
             extra_config, "attention_backend", self._get_setting("vllm_attention_backend")
@@ -162,6 +199,61 @@ class VLLMBackend(BackendInterface):
             extra_config, "trust_remote_code", self._get_setting("vllm_trust_remote_code")
         ):
             cmd.append("--trust-remote-code")
+        hf_overrides = self._get_vllm_option(
+            extra_config, "hf_overrides", self._get_setting("vllm_hf_overrides")
+        )
+        if hf_overrides:
+            cmd.extend(["--hf-overrides", self._encode_vllm_json_option(hf_overrides)])
+        chat_template = self._get_vllm_option(
+            extra_config, "chat_template", self._get_setting("vllm_chat_template")
+        )
+        if chat_template:
+            cmd.extend(["--chat-template", str(chat_template)])
+        chat_template_content_format = self._get_vllm_option(
+            extra_config,
+            "chat_template_content_format",
+            self._get_setting("vllm_chat_template_content_format"),
+        )
+        if chat_template_content_format:
+            cmd.extend(["--chat-template-content-format", str(chat_template_content_format)])
+        generation_config = self._get_vllm_option(
+            extra_config, "generation_config", self._get_setting("vllm_generation_config")
+        )
+        if generation_config:
+            cmd.extend(["--generation-config", str(generation_config)])
+        override_generation_config = self._get_vllm_option(
+            extra_config,
+            "override_generation_config",
+            self._get_setting("vllm_override_generation_config"),
+        )
+        if override_generation_config:
+            cmd.extend(
+                [
+                    "--override-generation-config",
+                    self._encode_vllm_json_option(override_generation_config),
+                ]
+            )
+        tool_call_parser = self._get_vllm_option(
+            extra_config, "tool_call_parser", self._get_setting("vllm_tool_call_parser")
+        )
+        if tool_call_parser:
+            cmd.extend(["--tool-call-parser", str(tool_call_parser), "--enable-auto-tool-choice"])
+        tool_parser_plugin = self._get_vllm_option(
+            extra_config, "tool_parser_plugin", self._get_setting("vllm_tool_parser_plugin")
+        )
+        if tool_parser_plugin:
+            cmd.extend(["--tool-parser-plugin", str(tool_parser_plugin)])
+        reasoning_parser = self._get_vllm_option(
+            extra_config, "reasoning_parser", self._get_setting("vllm_reasoning_parser")
+        )
+        if reasoning_parser:
+            cmd.extend(["--reasoning-parser", str(reasoning_parser)])
+        if self._get_vllm_option(
+            extra_config,
+            "language_model_only",
+            self._get_setting("vllm_language_model_only"),
+        ):
+            cmd.append("--language-model-only")
 
         env = {
             **os.environ,
@@ -214,6 +306,11 @@ class VLLMBackend(BackendInterface):
             return vllm_config[key]
         return extra_config.get(key, default)
 
+    def _encode_vllm_json_option(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(value)
+
     def _get_setting(self, name: str) -> Any:
         value = getattr(settings, name, None)
         module_name = getattr(value.__class__, "__module__", "")
@@ -257,6 +354,10 @@ class VLLMBackend(BackendInterface):
                 tools=False,
                 vision=False,
                 embeddings=False,
+                pooling=False,
+                rerank=False,
+                classification=False,
+                score=False,
                 reasoning=False,
                 image_generation=False,
                 audio_transcription=False,
@@ -280,6 +381,19 @@ class VLLMBackend(BackendInterface):
                 if arch_caps:
                     caps.update(arch_caps)
                     break
+
+            if any(str(arch).endswith("ForSequenceClassification") for arch in architectures):
+                caps["classification"] = True
+
+            num_labels = config.get("num_labels")
+            id2label = config.get("id2label")
+            if (
+                isinstance(num_labels, int)
+                and num_labels > 1
+                or isinstance(id2label, dict)
+                and len(id2label) > 1
+            ):
+                caps["classification"] = True
 
             # Context length
             for key in ("max_position_embeddings", "max_seq_len", "model_max_length"):
@@ -307,12 +421,23 @@ class VLLMBackend(BackendInterface):
             except Exception:
                 pass
 
+        model_hint = model_id.lower()
+        if "cross-encoder" in model_hint or "rerank" in model_hint or "re-rank" in model_hint:
+            caps["rerank"] = True
+            caps["score"] = True
+        if "classifier" in model_hint or "classification" in model_hint:
+            caps["classification"] = True
+
         return BackendCapabilities(
             chat=caps.get("chat", False),
             completion=caps.get("completion", False),
             tools=caps.get("tools", False),
             vision=caps.get("vision", False),
             embeddings=caps.get("embeddings", False),
+            pooling=caps.get("pooling", caps.get("embeddings", False)),
+            rerank=caps.get("rerank", False),
+            classification=caps.get("classification", False),
+            score=caps.get("score", caps.get("embeddings", False)),
             reasoning=caps.get("reasoning", False),
             image_generation=False,
             audio_transcription=False,
@@ -331,17 +456,11 @@ class VLLMBackend(BackendInterface):
         if model_path is None:
             return 0
         total_bytes = sum(
-            p.stat().st_size
-            for p in model_path.rglob("*.safetensors")
-            if p.is_file()
+            p.stat().st_size for p in model_path.rglob("*.safetensors") if p.is_file()
         )
         if total_bytes == 0:
             # Try .bin (older format)
-            total_bytes = sum(
-                p.stat().st_size
-                for p in model_path.rglob("*.bin")
-                if p.is_file()
-            )
+            total_bytes = sum(p.stat().st_size for p in model_path.rglob("*.bin") if p.is_file())
         estimated = int(total_bytes / 1024 / 1024 * 1.2)
         # Reserve a practical baseline for runtime memory (KV cache, graph capture, kernels).
         return max(_MIN_VLLM_VRAM_MB, estimated)
@@ -358,9 +477,7 @@ class VLLMBackend(BackendInterface):
             resp.raise_for_status()
             return resp.json()
 
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
+    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         """Stream a request to the vLLM worker, yielding raw byte chunks."""
         entry = self._processes.get(model_id)
         if not entry:
@@ -425,7 +542,7 @@ class VLLMBackend(BackendInterface):
                 proc.terminate()  # SIGTERM
                 await asyncio.wait_for(proc.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
                 return
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except (TimeoutError, ProcessLookupError):
                 logger.warning("vllm_sigterm_timeout", model_id=model_id)
 
         try:
@@ -434,9 +551,7 @@ class VLLMBackend(BackendInterface):
         except ProcessLookupError:
             pass
 
-    async def _read_stderr_tail(
-        self, proc: asyncio.subprocess.Process, limit: int = 4000
-    ) -> str:
+    async def _read_stderr_tail(self, proc: asyncio.subprocess.Process, limit: int = 4000) -> str:
         if proc.stderr is None:
             return ""
         try:
@@ -479,9 +594,7 @@ class VLLMBackend(BackendInterface):
         if not hf_cache_dir:
             return None
 
-        model_cache_root = (
-            Path(hf_cache_dir) / "hub" / f"models--{model_id.replace('/', '--')}"
-        )
+        model_cache_root = Path(hf_cache_dir) / "hub" / f"models--{model_id.replace('/', '--')}"
         snapshots_dir = model_cache_root / "snapshots"
         if not snapshots_dir.exists() or not snapshots_dir.is_dir():
             return None

@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.14",
     "redis[asyncio]>=5.2",
     "httpx>=0.28",
+    "websockets>=13.0",
     "pynvml>=11.5",
     "apscheduler>=3.10",
     "structlog>=24.4",

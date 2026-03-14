@@ -5,6 +5,120 @@ Codex puede lanzar múltiples instancias en paralelo. Las tareas marcadas con el
 
 ---
 
+## TAREA S-1 — Portal y proxy de servicios de generación IA MKS
+
+**Estado:** EN PROGRESO
+**Rama:** `feat/services-portal`
+**Dependencias:** coordinación explícita por tocar ficheros compartidos (`docker-compose.yml`, `caddy/Caddyfile`)
+
+### Objetivo
+
+Añadir una segunda entrada HTTP para servicios interactivos de generación:
+- landing `MKS AI Generation Services`
+- proxy para `Hunyuan3D`, `ComfyUI` y `Automatic1111`
+- seguimiento de actividad vía proxy para poder descargar VRAM por inactividad
+
+Reglas cerradas para esta implementación:
+- OpenAI `/v1/images/*` sigue resolviendo únicamente con `DiffusersBackend`
+- `Hunyuan3D`, `ComfyUI` y `A1111` se ejecutarán como servicios separados
+- el almacenamiento común parte de `/docker/ai-models`
+- para oCabra se respetará la raíz existente `/docker/ai-models/ocabra`
+- los pesos compartidos de imagen vivirán bajo `/docker/ai-models/ocabra/models/image/...`
+
+### Layout de almacenamiento acordado
+
+```text
+/docker/ai-models/
+├── ocabra/
+│   ├── hf_cache/
+│   └── models/
+│       ├── huggingface/
+│       ├── image/
+│       │   ├── checkpoints/
+│       │   ├── vae/
+│       │   ├── loras/
+│       │   ├── embeddings/
+│       │   ├── controlnet/
+│       │   └── upscalers/
+│       ├── comfyui/
+│       ├── a1111/
+│       └── hunyuan3d/
+├── ollama/
+├── whisper/
+└── localai-models/
+```
+
+### Plan por fases
+
+**Fase 1 — Base compartida**
+- [x] Añadir variables nuevas a `.env.example`
+- [x] Añadir segundo puerto público en `docker-compose.yml`
+- [x] Añadir landing y segundo site en `caddy/Caddyfile`
+- [x] Crear carpeta estática para la landing del portal
+
+**Fase 2 — Contratos y orquestación**
+- [x] Documentar `ServiceState` y API interna `/ocabra/services/*` en `docs/CONTRACTS.md`
+- [x] Implementar `ServiceManager` en backend
+- [x] Registrar actividad por proxy y gestionar idle unload
+
+**Fase 3 — Servicios interactivos**
+- [x] Añadir servicio Docker `hunyuan`
+- [x] Añadir servicio Docker `comfyui`
+- [x] Añadir servicio Docker `a1111`
+- [x] Montar rutas compartidas y específicas de modelos/config
+
+**Fase 4 — Adaptadores de descarga de VRAM**
+- [ ] Integrar unload de checkpoint para `A1111`
+- [ ] Integrar free/unload para `ComfyUI`
+- [x] Integrar unload de runtime para `Hunyuan3D`
+
+### Orden de implementación
+
+1. Portal y proxy base
+2. Variables/configuración compartida
+3. Contratos backend de servicios
+4. Servicios Docker
+5. Idle unload y scheduler
+
+### Avances
+
+- [x] Estructura real de `/docker/ai-models` revisada y plan ajustado a la organización actual
+- [x] Variables y rutas base documentadas
+- [x] Segundo puerto y landing implementados
+- [x] Servicios interactivos añadidos a `docker-compose.yml`
+- [x] Backend base de orquestación implementado
+- [x] Endpoints de runtime añadidos a Hunyuan3D
+- [x] Tracking automático de actividad HTTP desde el proxy
+- [x] Tracking de actividad WebSocket para ComfyUI
+
+### Validación
+
+- [x] `docker compose config`
+- [x] `Caddyfile` validado con imagen `caddy:2-alpine`
+- [x] `Caddyfile.dev` validado con imagen `caddy:2-alpine`
+- [x] `python3 -m compileall` sobre backend y Hunyuan tocados
+- [x] `python3 -m compileall` sobre proxy HTTP de servicios
+- [x] `python3 -m compileall` sobre proxy WebSocket de servicios
+- [x] Portal en `:8485` accesible con landing `MKS AI Generation Services`
+- [x] Proxy HTTP de Hunyuan validado extremo a extremo en runtime
+- [x] UI raíz de Hunyuan accesible desde `:8485/hunyuan/`
+- [x] `POST /runtime/unload` de Hunyuan sincroniza estado con `ServiceManager`
+- [ ] ComfyUI validado en runtime
+- [ ] A1111 validado en runtime
+
+### Notas de implementación
+
+- `DiffusersBackend` seguirá siendo el único backend para `/v1/images/*`.
+- `ComfyUI` y `A1111` compartirán assets de imagen en disco, no memoria VRAM.
+- `Hunyuan3D` irá separado en `/docker/ai-models/ocabra/models/hunyuan3d`.
+- La UI de cada servicio debe permanecer accesible incluso cuando `runtime_loaded=false`.
+- El tracking automático ya cubre tráfico HTTP proxied y el WebSocket `/comfy/ws*` pasando por oCabra.
+- En validación real se corrigió la reescritura del portal para preservar subrutas `/hunyuan/*`, `/comfy/*` y `/a1111/*`.
+- El proxy backend ya sanea cabeceras `Location` de upstream para no filtrar hosts internos como `http://hunyuan:8080`.
+- En este host no se ha podido validar `ComfyUI` ni `A1111` porque sus contenedores no están levantados de forma funcional todavía.
+
+---
+
 ## TAREA X-1 — Stream 1-C: Model Registry & Download Manager
 
 **Estado:** ESPERAR a que `feat/0-foundation` esté mergeada en `main`

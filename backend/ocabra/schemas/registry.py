@@ -1,7 +1,60 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class HFVLLMRuntimeProbe(BaseModel):
+    status: Literal[
+        "supported_native",
+        "supported_transformers_backend",
+        "supported_pooling",
+        "needs_remote_code",
+        "missing_chat_template",
+        "missing_tool_parser",
+        "missing_reasoning_parser",
+        "needs_hf_overrides",
+        "unsupported_tokenizer",
+        "unsupported_architecture",
+        "unavailable",
+        "unknown",
+    ] = "unknown"
+    reason: str | None = None
+    recommended_model_impl: Literal["auto", "vllm", "transformers"] | None = None
+    recommended_runner: Literal["generate", "pooling"] | None = None
+    tokenizer_load: bool | None = None
+    config_load: bool | None = None
+    observed_at: datetime | None = None
+
+
+class HFVLLMSupport(BaseModel):
+    classification: Literal[
+        "native_vllm",
+        "transformers_backend",
+        "pooling",
+        "unsupported",
+        "unknown",
+    ] = "unknown"
+    label: str = "unknown"
+    model_impl: Literal["auto", "vllm", "transformers"] | None = None
+    runner: Literal["generate", "pooling"] | None = None
+    task_mode: (
+        Literal[
+            "generate",
+            "multimodal_generate",
+            "pooling",
+            "multimodal_pooling",
+        ]
+        | None
+    ) = None
+    required_overrides: list[str] = Field(default_factory=list)
+    recipe_id: str | None = None
+    recipe_notes: list[str] = Field(default_factory=list)
+    recipe_model_impl: Literal["auto", "vllm", "transformers"] | None = None
+    recipe_runner: Literal["generate", "pooling"] | None = None
+    suggested_config: dict[str, Any] = Field(default_factory=dict)
+    suggested_tuning: dict[str, Any] = Field(default_factory=dict)
+    runtime_probe: HFVLLMRuntimeProbe | None = None
 
 
 class HFModelCard(BaseModel):
@@ -16,6 +69,7 @@ class HFModelCard(BaseModel):
     suggested_backend: str
     compatibility: str = "unknown"
     compatibility_reason: str | None = None
+    vllm_support: HFVLLMSupport | None = None
 
 
 class HFModelDetail(HFModelCard):
@@ -37,6 +91,7 @@ class HFModelVariant(BaseModel):
     installable: bool = True
     compatibility: str = "unknown"
     compatibility_reason: str | None = None
+    vllm_support: HFVLLMSupport | None = None
 
 
 class OllamaModelCard(BaseModel):
@@ -71,6 +126,7 @@ class DownloadJob(BaseModel):
     source: Literal["huggingface", "ollama"]
     model_ref: str
     artifact: str | None = None
+    register_config: dict[str, Any] | None = None
     status: Literal["queued", "downloading", "completed", "failed", "cancelled"]
     progress_pct: float
     speed_mb_s: float | None

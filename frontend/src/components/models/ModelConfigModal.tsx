@@ -3,6 +3,7 @@ import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { X } from "lucide-react"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
+import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import type { EvictionSchedule, GPUState, LoadPolicy, ModelState, VLLMConfig } from "@/types"
 
 interface ModelConfigModalProps {
@@ -44,6 +45,17 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [schedules, setSchedules] = useState<EvictionSchedule[]>([])
   const [tensorParallelSize, setTensorParallelSize] = useState("")
   const [maxModelLen, setMaxModelLen] = useState("")
+  const [modelImpl, setModelImpl] = useState<"auto" | "vllm" | "transformers" | "">("")
+  const [runner, setRunner] = useState<"generate" | "pooling" | "">("")
+  const [hfOverrides, setHfOverrides] = useState("")
+  const [chatTemplate, setChatTemplate] = useState("")
+  const [chatTemplateContentFormat, setChatTemplateContentFormat] = useState("")
+  const [generationConfig, setGenerationConfig] = useState("")
+  const [overrideGenerationConfig, setOverrideGenerationConfig] = useState("")
+  const [toolCallParser, setToolCallParser] = useState("")
+  const [toolParserPlugin, setToolParserPlugin] = useState("")
+  const [reasoningParser, setReasoningParser] = useState("")
+  const [languageModelOnly, setLanguageModelOnly] = useState<"inherit" | "on" | "off">("inherit")
   const [maxNumSeqs, setMaxNumSeqs] = useState("")
   const [maxNumBatchedTokens, setMaxNumBatchedTokens] = useState("")
   const [gpuMemoryUtilization, setGpuMemoryUtilization] = useState("")
@@ -54,6 +66,17 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [swapSpace, setSwapSpace] = useState("")
   const [enforceEager, setEnforceEager] = useState(false)
   const [saving, setSaving] = useState(false)
+  const recipeId = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeId ?? null
+  const recipeNotes = ((model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeNotes ?? []) as string[]
+  const recipeModelImpl = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeModelImpl ?? null
+  const recipeRunner = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeRunner ?? null
+  const recipeSuggestedConfig = ((model?.extraConfig?.vllm as VLLMConfig | undefined)?.suggestedConfig ?? {}) as Record<string, unknown>
+  const recipeSuggestedTuning = ((model?.extraConfig?.vllm as VLLMConfig | undefined)?.suggestedTuning ?? {}) as Record<string, unknown>
+  const probeStatus = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeStatus ?? null
+  const probeReason = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeReason ?? null
+  const probeObservedAt = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeObservedAt ?? null
+  const probeRecommendedModelImpl = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeRecommendedModelImpl ?? null
+  const probeRecommendedRunner = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeRecommendedRunner ?? null
 
   useEffect(() => {
     if (!model) return
@@ -62,6 +85,25 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setAutoReload(model.autoReload)
     setSchedules(model.schedules ?? [])
     const vllm = (model.extraConfig?.vllm as Record<string, unknown> | undefined) ?? {}
+    setModelImpl(vllm.modelImpl == null ? "" : (String(vllm.modelImpl) as "auto" | "vllm" | "transformers"))
+    setRunner(vllm.runner == null ? "" : (String(vllm.runner) as "generate" | "pooling"))
+    setHfOverrides(vllm.hfOverrides == null ? "" : typeof vllm.hfOverrides === "string" ? vllm.hfOverrides : JSON.stringify(vllm.hfOverrides))
+    setChatTemplate(vllm.chatTemplate == null ? "" : String(vllm.chatTemplate))
+    setChatTemplateContentFormat(vllm.chatTemplateContentFormat == null ? "" : String(vllm.chatTemplateContentFormat))
+    setGenerationConfig(vllm.generationConfig == null ? "" : String(vllm.generationConfig))
+    setOverrideGenerationConfig(
+      vllm.overrideGenerationConfig == null
+        ? ""
+        : typeof vllm.overrideGenerationConfig === "string"
+          ? vllm.overrideGenerationConfig
+          : JSON.stringify(vllm.overrideGenerationConfig),
+    )
+    setToolCallParser(vllm.toolCallParser == null ? "" : String(vllm.toolCallParser))
+    setToolParserPlugin(vllm.toolParserPlugin == null ? "" : String(vllm.toolParserPlugin))
+    setReasoningParser(vllm.reasoningParser == null ? "" : String(vllm.reasoningParser))
+    setLanguageModelOnly(
+      vllm.languageModelOnly == null ? "inherit" : vllm.languageModelOnly ? "on" : "off",
+    )
     setTensorParallelSize(vllm.tensorParallelSize == null ? "" : String(vllm.tensorParallelSize))
     setMaxModelLen(vllm.maxModelLen == null ? "" : String(vllm.maxModelLen))
     setMaxNumSeqs(vllm.maxNumSeqs == null ? "" : String(vllm.maxNumSeqs))
@@ -89,8 +131,33 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         extraConfig: model.backendType === "vllm"
           ? {
               vllm: {
+                recipeId,
+                recipeNotes,
+                recipeModelImpl,
+                recipeRunner,
+                suggestedConfig: recipeSuggestedConfig,
+                suggestedTuning: recipeSuggestedTuning,
+                probeStatus,
+                probeReason,
+                probeObservedAt,
+                probeRecommendedModelImpl,
+                probeRecommendedRunner,
                 tensorParallelSize: tensorParallelSize === "" ? null : Number(tensorParallelSize),
                 maxModelLen: maxModelLen === "" ? null : Number(maxModelLen),
+                modelImpl: modelImpl === "" ? null : modelImpl,
+                runner: runner === "" ? null : runner,
+                hfOverrides: hfOverrides === "" ? null : hfOverrides,
+                chatTemplate: chatTemplate === "" ? null : chatTemplate,
+                chatTemplateContentFormat:
+                  chatTemplateContentFormat === "" ? null : chatTemplateContentFormat,
+                generationConfig: generationConfig === "" ? null : generationConfig,
+                overrideGenerationConfig:
+                  overrideGenerationConfig === "" ? null : overrideGenerationConfig,
+                toolCallParser: toolCallParser === "" ? null : toolCallParser,
+                toolParserPlugin: toolParserPlugin === "" ? null : toolParserPlugin,
+                reasoningParser: reasoningParser === "" ? null : reasoningParser,
+                languageModelOnly:
+                  languageModelOnly === "inherit" ? null : languageModelOnly === "on",
                 maxNumSeqs: maxNumSeqs === "" ? null : Number(maxNumSeqs),
                 maxNumBatchedTokens: maxNumBatchedTokens === "" ? null : Number(maxNumBatchedTokens),
                 gpuMemoryUtilization: gpuMemoryUtilization === "" ? null : Number(gpuMemoryUtilization),
@@ -112,6 +179,78 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
       setSaving(false)
     }
   }
+
+  const applyRecipeSuggestedConfig = () => {
+    const suggested = recipeSuggestedConfig
+    if (modelImpl === "" && typeof (model?.extraConfig?.vllm as VLLMConfig | undefined)?.modelImpl === "string") {
+      setModelImpl((model?.extraConfig?.vllm as VLLMConfig).modelImpl as "auto" | "vllm" | "transformers")
+    }
+    if (runner === "" && typeof (model?.extraConfig?.vllm as VLLMConfig | undefined)?.runner === "string") {
+      setRunner((model?.extraConfig?.vllm as VLLMConfig).runner as "generate" | "pooling")
+    }
+    if (typeof suggested.toolCallParser === "string") setToolCallParser(suggested.toolCallParser)
+    if (typeof suggested.reasoningParser === "string") setReasoningParser(suggested.reasoningParser)
+    if (typeof suggested.reasoning_parser === "string") setReasoningParser(suggested.reasoning_parser)
+    if (typeof suggested.tool_call_parser === "string") setToolCallParser(suggested.tool_call_parser)
+    if (typeof suggested.chatTemplate === "string") setChatTemplate(suggested.chatTemplate)
+    if (typeof suggested.chat_template === "string") setChatTemplate(suggested.chat_template)
+    if (typeof suggested.hfOverrides === "string") setHfOverrides(suggested.hfOverrides)
+    if (typeof suggested.hf_overrides === "string") setHfOverrides(suggested.hf_overrides)
+    if (typeof suggested.hfOverrides === "object" && suggested.hfOverrides !== null) {
+      setHfOverrides(JSON.stringify(suggested.hfOverrides))
+    }
+    if (typeof suggested.hf_overrides === "object" && suggested.hf_overrides !== null) {
+      setHfOverrides(JSON.stringify(suggested.hf_overrides))
+    }
+  }
+
+  const applyRecipeSuggestedTuning = () => {
+    const tuning = recipeSuggestedTuning
+    if (typeof tuning.max_num_seqs === "number") setMaxNumSeqs(String(tuning.max_num_seqs))
+    if (typeof tuning.maxNumSeqs === "number") setMaxNumSeqs(String(tuning.maxNumSeqs))
+    if (typeof tuning.max_model_len === "number") setMaxModelLen(String(tuning.max_model_len))
+    if (typeof tuning.maxModelLen === "number") setMaxModelLen(String(tuning.maxModelLen))
+    if (typeof tuning.gpu_memory_utilization === "number") {
+      setGpuMemoryUtilization(String(tuning.gpu_memory_utilization))
+    }
+    if (typeof tuning.gpuMemoryUtilization === "number") {
+      setGpuMemoryUtilization(String(tuning.gpuMemoryUtilization))
+    }
+    if (typeof tuning.enable_prefix_caching === "boolean") setEnablePrefixCaching(tuning.enable_prefix_caching)
+    if (typeof tuning.enablePrefixCaching === "boolean") setEnablePrefixCaching(tuning.enablePrefixCaching)
+    if (typeof tuning.enable_chunked_prefill === "boolean") {
+      setEnableChunkedPrefillMode(tuning.enable_chunked_prefill ? "on" : "off")
+    }
+    if (typeof tuning.enableChunkedPrefill === "boolean") {
+      setEnableChunkedPrefillMode(tuning.enableChunkedPrefill ? "on" : "off")
+    }
+    if (typeof tuning.enforce_eager === "boolean") setEnforceEager(tuning.enforce_eager)
+    if (typeof tuning.enforceEager === "boolean") setEnforceEager(tuning.enforceEager)
+    if (typeof tuning.language_model_only === "boolean") {
+      setLanguageModelOnly(tuning.language_model_only ? "on" : "off")
+    }
+    if (typeof tuning.languageModelOnly === "boolean") {
+      setLanguageModelOnly(tuning.languageModelOnly ? "on" : "off")
+    }
+  }
+
+  const applyProbeRecommendation = () => {
+    if (probeRecommendedModelImpl != null) {
+      setModelImpl(probeRecommendedModelImpl)
+    }
+    if (probeRecommendedRunner != null) {
+      setRunner(probeRecommendedRunner)
+    }
+  }
+
+  const differsFromProbe =
+    (probeRecommendedModelImpl != null && modelImpl !== "" && probeRecommendedModelImpl !== modelImpl) ||
+    (probeRecommendedRunner != null && runner !== "" && probeRecommendedRunner !== runner)
+  const recipeDiffersFromProbe =
+    (recipeModelImpl != null && probeRecommendedModelImpl != null && recipeModelImpl !== probeRecommendedModelImpl) ||
+    (recipeRunner != null && probeRecommendedRunner != null && recipeRunner !== probeRecommendedRunner)
+  const probeStatusLabel = getProbeStatusLabel(probeStatus)
+  const probeOverrideHint = getProbeOverrideHint(probeStatus)
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -180,11 +319,144 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
 
             {model?.backendType === "vllm" && (
               <>
+                {recipeId && (
+                  <FieldSection
+                    title="Recipe"
+                    description="Sugerencias persistidas desde Explore para esta familia de modelo."
+                  >
+                    <div className="space-y-3 text-sm">
+                      <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-emerald-100">
+                        {`recipe=${recipeId}`}
+                        {recipeModelImpl ? ` · model_impl=${recipeModelImpl}` : ""}
+                        {recipeRunner ? ` · runner=${recipeRunner}` : ""}
+                      </div>
+                      {recipeNotes.length > 0 && (
+                        <div className="space-y-1 text-xs text-muted-foreground">
+                          {recipeNotes.map((note, index) => (
+                            <p key={`${recipeId}-note-${index}`}>{note}</p>
+                          ))}
+                        </div>
+                      )}
+                      {Object.keys(recipeSuggestedConfig).length > 0 && (
+                        <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                          {Object.entries(recipeSuggestedConfig)
+                            .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+                            .join(", ")}
+                        </div>
+                      )}
+                      {Object.keys(recipeSuggestedTuning).length > 0 && (
+                        <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                          tuning:{" "}
+                          {Object.entries(recipeSuggestedTuning)
+                            .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+                            .join(", ")}
+                        </div>
+                      )}
+                      <div>
+                        <button
+                          type="button"
+                          onClick={applyRecipeSuggestedConfig}
+                          className="rounded-md border border-emerald-500/40 px-3 py-2 text-xs text-emerald-100 hover:bg-emerald-500/10"
+                        >
+                          Reaplicar sugerencias de recipe
+                        </button>
+                        {Object.keys(recipeSuggestedTuning).length > 0 && (
+                          <button
+                            type="button"
+                            onClick={applyRecipeSuggestedTuning}
+                            className="ml-2 rounded-md border border-sky-500/40 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/10"
+                          >
+                            Aplicar tuning recomendado
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </FieldSection>
+                )}
+
+                {(probeStatus || probeRecommendedModelImpl || probeRecommendedRunner || probeReason || probeObservedAt) && (
+                  <FieldSection
+                    title="Probe"
+                    description="Recomendacion verificada por probe para esta instalacion."
+                  >
+                    <div className="space-y-3 text-sm">
+                      {probeStatusLabel && (
+                        <div className="rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-sky-100">
+                          {`probe=${probeStatusLabel}`}
+                        </div>
+                      )}
+                      {(probeRecommendedModelImpl || probeRecommendedRunner) && (
+                        <>
+                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                            {`recomendacion verificada`}
+                            {probeRecommendedModelImpl ? ` · model_impl=${probeRecommendedModelImpl}` : ""}
+                            {probeRecommendedRunner ? ` · runner=${probeRecommendedRunner}` : ""}
+                          </div>
+                          <div>
+                            <button
+                              type="button"
+                              onClick={applyProbeRecommendation}
+                              className="rounded-md border border-sky-500/40 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/10"
+                            >
+                              Aplicar recomendacion del probe
+                            </button>
+                          </div>
+                        </>
+                      )}
+                      {differsFromProbe && (
+                        <p className="text-xs text-amber-300">
+                          La configuracion activa difiere de la recomendacion verificada por probe.
+                        </p>
+                      )}
+                      {recipeDiffersFromProbe && (
+                        <p className="text-xs text-amber-300">
+                          La recipe base y la recomendacion final del probe no coinciden.
+                        </p>
+                      )}
+                      {probeObservedAt && (
+                        <p className="text-xs text-muted-foreground">{`observado=${probeObservedAt}`}</p>
+                      )}
+                      {probeOverrideHint && (
+                        <p className="text-xs text-amber-300">{probeOverrideHint}</p>
+                      )}
+                      {probeReason && <p className="text-xs text-muted-foreground">{probeReason}</p>}
+                    </div>
+                  </FieldSection>
+                )}
                 <FieldSection
                   title="vLLM Basico"
                   description="Parametros con impacto directo en compatibilidad, reparto entre GPUs y limite de contexto."
                 >
                   <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Model impl</span>
+                      <select
+                        value={modelImpl}
+                        onChange={(event) => setModelImpl(event.target.value as "auto" | "vllm" | "transformers" | "")}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="">heredar / auto</option>
+                        <option value="auto">auto</option>
+                        <option value="vllm">vllm</option>
+                        <option value="transformers">transformers</option>
+                      </select>
+                      <FieldHint>`transformers` amplia cobertura; `vllm` fuerza la implementacion nativa si sabes que el modelo la soporta.</FieldHint>
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Runner</span>
+                      <select
+                        value={runner}
+                        onChange={(event) => setRunner(event.target.value as "generate" | "pooling" | "")}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="">autodetectar</option>
+                        <option value="generate">generate</option>
+                        <option value="pooling">pooling</option>
+                      </select>
+                      <FieldHint>`pooling` es para embeddings/rerank; no sirve chat generativo.</FieldHint>
+                    </label>
+
                     <label className="block text-sm">
                       <span className="mb-1 block text-muted-foreground">Tensor parallel size</span>
                       <input
@@ -212,6 +484,65 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </label>
                   </div>
 
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">HF overrides (JSON)</span>
+                      <textarea
+                        value={hfOverrides}
+                        onChange={(event) => setHfOverrides(event.target.value)}
+                        placeholder='{"architectures":["LlamaForCausalLM"]}'
+                        rows={4}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
+                      />
+                      <FieldHint>Escape hatch para compatibilidad puntual. Mantenerlo pequeno y especifico.</FieldHint>
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Chat template</span>
+                      <textarea
+                        value={chatTemplate}
+                        onChange={(event) => setChatTemplate(event.target.value)}
+                        placeholder="ruta a template o contenido inline"
+                        rows={4}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs"
+                      />
+                      <FieldHint>Util si el repo no trae `chat_template` o el prompting nativo no encaja bien.</FieldHint>
+                    </label>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Chat template content format</span>
+                      <input
+                        value={chatTemplateContentFormat}
+                        onChange={(event) => setChatTemplateContentFormat(event.target.value)}
+                        placeholder="auto, string, openai..."
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Generation config</span>
+                      <input
+                        value={generationConfig}
+                        onChange={(event) => setGenerationConfig(event.target.value)}
+                        placeholder="auto, vllm, ruta..."
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+                  </div>
+
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-muted-foreground">Override generation config (JSON)</span>
+                    <textarea
+                      value={overrideGenerationConfig}
+                      onChange={(event) => setOverrideGenerationConfig(event.target.value)}
+                      placeholder='{"temperature":0.2}'
+                      rows={3}
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
+                    />
+                  </label>
+
                   <div className="grid gap-3 md:grid-cols-2">
                     <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                       <input
@@ -229,6 +560,56 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         onChange={(event) => setTrustRemoteCode(event.target.checked)}
                       />
                       trust remote code
+                    </label>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Tool call parser</span>
+                      <input
+                        value={toolCallParser}
+                        onChange={(event) => setToolCallParser(event.target.value)}
+                        placeholder="hermes, qwen3_json, granite..."
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                      <FieldHint>Si lo rellenas, oCabra activa auto tool choice en el worker vLLM.</FieldHint>
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Reasoning parser</span>
+                      <input
+                        value={reasoningParser}
+                        onChange={(event) => setReasoningParser(event.target.value)}
+                        placeholder="deepseek_r1, qwen3..."
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                      <FieldHint>Necesario solo para familias que exponen reasoning con parser dedicado.</FieldHint>
+                    </label>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Tool parser plugin</span>
+                      <input
+                        value={toolParserPlugin}
+                        onChange={(event) => setToolParserPlugin(event.target.value)}
+                        placeholder="plugin Python opcional"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Language model only</span>
+                      <select
+                        value={languageModelOnly}
+                        onChange={(event) => setLanguageModelOnly(event.target.value as "inherit" | "on" | "off")}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="inherit">heredar</option>
+                        <option value="on">forzar on</option>
+                        <option value="off">forzar off</option>
+                      </select>
+                      <FieldHint>Para modelos multimodales: ahorra VRAM si solo quieres texto.</FieldHint>
                     </label>
                   </div>
                 </FieldSection>

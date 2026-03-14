@@ -6,10 +6,12 @@ from types import SimpleNamespace
 import pytest
 from httpx import AsyncClient
 
+from ocabra.backends.vllm_recipes import get_vllm_recipe
+from ocabra.core.model_manager import ModelManager
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.local_scanner import LocalScanner
 from ocabra.registry.ollama_registry import OllamaRegistry
-from ocabra.core.model_manager import ModelManager
+from ocabra.schemas.registry import HFVLLMRuntimeProbe
 
 
 @pytest.mark.asyncio
@@ -67,7 +69,521 @@ async def test_hf_detail_infers_vllm_backend(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
-async def test_hf_detail_gguf_only_repo_is_not_treated_as_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hf_detail_classifies_transformers_backend_and_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="Qwen/Qwen3-8B-Instruct",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["SomeFutureCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="supported_transformers_backend",
+            recommended_model_impl="transformers",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("Qwen/Qwen3-8B-Instruct")
+
+    assert detail.compatibility == "warning"
+    assert detail.vllm_support is not None
+    assert detail.vllm_support.classification == "transformers_backend"
+    assert detail.vllm_support.model_impl == "transformers"
+    assert "chat_template" in detail.vllm_support.required_overrides
+    assert "tool_call_parser" in detail.vllm_support.required_overrides
+    assert detail.vllm_support.recipe_id == "qwen3"
+    assert detail.vllm_support.runtime_probe is not None
+    assert detail.vllm_support.runtime_probe.status == "supported_transformers_backend"
+
+
+def test_vllm_recipe_detects_qwen3_defaults() -> None:
+    recipe = get_vllm_recipe(
+        repo_id="Qwen/Qwen3-8B-Instruct",
+        architectures=["Qwen3ForCausalLM"],
+        tokenizer_config={},
+    )
+
+    assert recipe is not None
+    assert recipe.recipe_id == "qwen3"
+    assert recipe.model_impl == "vllm"
+    assert recipe.runner == "generate"
+    assert recipe.suggested_config["tool_call_parser"] == "qwen3_json"
+    assert recipe.suggested_tuning["gpu_memory_utilization"] == 0.9
+    assert "reasoning_parser" in recipe.required_overrides
+
+
+def test_vllm_recipe_detects_qwen_vl_defaults() -> None:
+    recipe = get_vllm_recipe(
+        repo_id="Qwen/Qwen2.5-VL-7B-Instruct",
+        architectures=["Qwen2VLForConditionalGeneration"],
+        tokenizer_config={},
+    )
+
+    assert recipe is not None
+    assert recipe.recipe_id == "qwen-vl"
+    assert recipe.runner == "generate"
+    assert recipe.suggested_tuning["language_model_only"] is True
+    assert "chat_template" in recipe.required_overrides
+
+
+def test_vllm_recipe_detects_qwen3_moe_defaults() -> None:
+    recipe = get_vllm_recipe(
+        repo_id="Qwen/Qwen3-30B-A3B-MoE",
+        architectures=["Qwen3MoeForCausalLM"],
+        tokenizer_config={"chat_template": "{{ messages }}"},
+    )
+
+    assert recipe is not None
+    assert recipe.recipe_id == "qwen3-moe"
+    assert recipe.suggested_tuning["max_num_seqs"] == 8
+    assert "chat_template" not in recipe.required_overrides
+
+
+def test_vllm_recipe_detects_internvl_defaults() -> None:
+    recipe = get_vllm_recipe(
+        repo_id="OpenGVLab/InternVL3-8B",
+        architectures=["InternVLChatModel"],
+        tokenizer_config={"chat_template": "{{ messages }}"},
+    )
+
+    assert recipe is not None
+    assert recipe.recipe_id == "internvl-chat"
+    assert recipe.suggested_tuning["language_model_only"] is True
+
+
+def test_vllm_recipe_detects_llama4_multimodal_defaults() -> None:
+    recipe = get_vllm_recipe(
+        repo_id="meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        architectures=["Llama4ForConditionalGeneration"],
+        tokenizer_config={},
+    )
+
+    assert recipe is not None
+    assert recipe.recipe_id == "llama4-multimodal"
+    assert recipe.suggested_tuning["language_model_only"] is True
+    assert "chat_template" in recipe.required_overrides
+
+
+def test_vllm_recipe_detects_deepseek_r1_defaults() -> None:
+    recipe = get_vllm_recipe(
+        repo_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        architectures=["DeepseekR1ForCausalLM"],
+        tokenizer_config={"chat_template": "{{ messages }}"},
+    )
+
+    assert recipe is not None
+    assert recipe.recipe_id == "deepseek-r1"
+    assert recipe.suggested_config["reasoning_parser"] == "deepseek_r1"
+    assert "chat_template" not in recipe.required_overrides
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_exposes_recipe_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="Qwen/Qwen3-8B-Instruct",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["Qwen3ForCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="supported_native",
+            recommended_model_impl="vllm",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("Qwen/Qwen3-8B-Instruct")
+
+    assert detail.vllm_support is not None
+    assert detail.vllm_support.recipe_id == "qwen3"
+    assert detail.vllm_support.recipe_model_impl == "vllm"
+    assert detail.vllm_support.recipe_runner == "generate"
+    assert detail.vllm_support.suggested_config["tool_call_parser"] == "qwen3_json"
+    assert detail.vllm_support.suggested_tuning["gpu_memory_utilization"] == 0.9
+    assert "reasoning_parser" in detail.vllm_support.required_overrides
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_runtime_probe_remote_code_adds_required_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/fancy-custom-model",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["SomeFutureCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {"chat_template": "{{ messages }}"}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="needs_remote_code",
+            reason="Custom code required by config class",
+            recommended_model_impl="transformers",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("org/fancy-custom-model")
+
+    assert detail.compatibility == "warning"
+    assert detail.vllm_support is not None
+    assert "trust_remote_code" in detail.vllm_support.required_overrides
+    assert detail.vllm_support.runtime_probe is not None
+    assert detail.vllm_support.runtime_probe.status == "needs_remote_code"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_runtime_probe_missing_chat_template_adds_required_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/chat-model",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["Qwen3ForCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="missing_chat_template",
+            reason="Falta chat template",
+            recommended_model_impl="vllm",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("org/chat-model")
+
+    assert detail.compatibility == "warning"
+    assert detail.vllm_support is not None
+    assert "chat_template" in detail.vllm_support.required_overrides
+    assert detail.vllm_support.runtime_probe is not None
+    assert detail.vllm_support.runtime_probe.status == "missing_chat_template"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_runtime_probe_missing_tool_parser_adds_required_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/tool-model",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["Qwen3ForCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {"chat_template": "{{ messages }}"}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="missing_tool_parser",
+            reason="Falta tool_call_parser",
+            recommended_model_impl="vllm",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("org/tool-model")
+
+    assert detail.compatibility == "warning"
+    assert detail.vllm_support is not None
+    assert "tool_call_parser" in detail.vllm_support.required_overrides
+    assert detail.vllm_support.runtime_probe is not None
+    assert detail.vllm_support.runtime_probe.status == "missing_tool_parser"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_runtime_probe_missing_reasoning_parser_adds_required_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/reasoning-model",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["DeepseekR1ForCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {"chat_template": "{{ messages }}"}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="missing_reasoning_parser",
+            reason="Falta reasoning_parser",
+            recommended_model_impl="vllm",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("org/reasoning-model")
+
+    assert detail.compatibility == "warning"
+    assert detail.vllm_support is not None
+    assert "reasoning_parser" in detail.vllm_support.required_overrides
+    assert detail.vllm_support.runtime_probe is not None
+    assert detail.vllm_support.runtime_probe.status == "missing_reasoning_parser"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_runtime_probe_needs_hf_overrides_adds_required_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/qwen-variant",
+        library_name="transformers",
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=200,
+        tags=["text-generation"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["Qwen3ForCausalLM"]}
+        if filename == "tokenizer_config.json":
+            return {"chat_template": "{{ messages }}"}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="needs_hf_overrides",
+            reason="Hace falta hf_overrides para rope_scaling",
+            recommended_model_impl="vllm",
+            recommended_runner="generate",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("org/qwen-variant")
+
+    assert detail.compatibility == "warning"
+    assert detail.vllm_support is not None
+    assert "hf_overrides" in detail.vllm_support.required_overrides
+    assert detail.vllm_support.runtime_probe is not None
+    assert detail.vllm_support.runtime_probe.status == "needs_hf_overrides"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_runtime_probe_overrides_model_impl_and_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_info = SimpleNamespace(
+        id="org/custom-pooling-model",
+        library_name="transformers",
+        pipeline_tag="feature-extraction",
+        downloads=1000,
+        likes=200,
+        tags=["feature-extraction"],
+        gated=False,
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=10_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=10_000),
+            SimpleNamespace(rfilename="model.safetensors", size=4 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["SomeFuturePoolingModel"]}
+        if filename == "tokenizer_config.json":
+            return {}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="supported_pooling",
+            recommended_model_impl="transformers",
+            recommended_runner="pooling",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    detail = await registry.get_model_detail("org/custom-pooling-model")
+
+    assert detail.vllm_support is not None
+    assert detail.vllm_support.model_impl == "transformers"
+    assert detail.vllm_support.runner == "pooling"
+
+
+@pytest.mark.asyncio
+async def test_hf_detail_gguf_only_repo_is_not_treated_as_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_info = SimpleNamespace(
         id="bartowski/Qwen2.5-7B-Instruct-GGUF",
         library_name=None,
@@ -88,7 +604,9 @@ async def test_hf_detail_gguf_only_repo_is_not_treated_as_ollama(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_hf_detail_prefers_transformers_metadata_over_model_index(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hf_detail_prefers_transformers_metadata_over_model_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_info = SimpleNamespace(
         id="Qwen/Qwen3-8B",
         library_name="transformers",
@@ -137,7 +655,9 @@ async def test_hf_detail_detects_qwen_tts_from_metadata(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_hf_detail_detects_diffusers_from_repo_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hf_detail_detects_diffusers_from_repo_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_info = SimpleNamespace(
         id="black-forest-labs/FLUX.1-schnell",
         library_name=None,
@@ -181,6 +701,50 @@ async def test_hf_variants_exposes_standard_only(monkeypatch: pytest.MonkeyPatch
 
     assert any(v.variant_id == "standard" and v.backend_type == "vllm" for v in variants)
     assert not any(v.artifact == "model-q4_k_m.gguf" for v in variants)
+
+
+@pytest.mark.asyncio
+async def test_hf_variants_classifies_pooling_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="intfloat/e5-base-v2",
+        siblings=[
+            SimpleNamespace(rfilename="config.json", size=1_000),
+            SimpleNamespace(rfilename="tokenizer_config.json", size=1_000),
+            SimpleNamespace(rfilename="model.safetensors", size=2 * 1024**3),
+        ],
+    )
+
+    async def fake_load_repo_json(self, repo_id: str, filename: str, sibling_names: set[str]):
+        _ = repo_id, sibling_names
+        if filename == "config.json":
+            return {"architectures": ["BertModel"]}
+        if filename == "tokenizer_config.json":
+            return {}
+        return None
+
+    async def fake_probe(
+        self, repo_id: str, config: dict | None, tokenizer_config: dict | None, support
+    ):
+        _ = repo_id, config, tokenizer_config, support
+        return HFVLLMRuntimeProbe(
+            status="supported_pooling",
+            recommended_model_impl="transformers",
+            recommended_runner="pooling",
+            tokenizer_load=True,
+            config_load=True,
+        )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr(HuggingFaceRegistry, "_load_repo_json", fake_load_repo_json)
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_runtime_support", fake_probe)
+
+    registry = HuggingFaceRegistry()
+    variants = await registry.get_variants("intfloat/e5-base-v2")
+
+    assert variants[0].compatibility == "compatible"
+    assert variants[0].vllm_support is not None
+    assert variants[0].vllm_support.classification == "pooling"
+    assert variants[0].vllm_support.runner == "pooling"
 
 
 @pytest.mark.asyncio
@@ -253,7 +817,9 @@ async def test_hf_download_rejects_incompatible_tokenizer_repo(
 
 
 @pytest.mark.asyncio
-async def test_hf_download_rejects_gguf_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_hf_download_rejects_gguf_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     registry = HuggingFaceRegistry()
 
     with pytest.raises(ValueError, match="GGUF"):
@@ -501,11 +1067,15 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert any(model.model_ref == "hf-model" for model in models)
     assert any(model.model_ref == "tiny" for model in models)
     assert any(model.model_ref == "ollama-model" for model in models)
-    assert any(model.model_ref == "ollama-model" and model.backend_type == "ollama" for model in models)
+    assert any(
+        model.model_ref == "ollama-model" and model.backend_type == "ollama" for model in models
+    )
 
 
 @pytest.mark.asyncio
-async def test_registry_hf_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_registry_hf_endpoint(
+    async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fake_search(query: str, task: str | None, limit: int):
         _ = query, task, limit
         return [
@@ -518,6 +1088,7 @@ async def test_registry_hf_endpoint(async_client: AsyncClient, monkeypatch: pyte
                 "size_gb": None,
                 "tags": [],
                 "gated": False,
+                "suggested_backend": "vllm",
             }
         ]
 
@@ -529,7 +1100,9 @@ async def test_registry_hf_endpoint(async_client: AsyncClient, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_registry_hf_variants_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_registry_hf_variants_endpoint(
+    async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fake_variants(repo_id: str):
         _ = repo_id
         return [
@@ -552,7 +1125,9 @@ async def test_registry_hf_variants_endpoint(async_client: AsyncClient, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_registry_ollama_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_registry_ollama_endpoint(
+    async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fake_search(query: str):
         _ = query
         return [
@@ -573,7 +1148,9 @@ async def test_registry_ollama_endpoint(async_client: AsyncClient, monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_registry_ollama_variants_endpoint(async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_registry_ollama_variants_endpoint(
+    async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fake_variants(model_name: str):
         _ = model_name
         return [

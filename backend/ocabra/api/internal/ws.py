@@ -35,6 +35,7 @@ manager = ConnectionManager()
 CHANNEL_EVENT_MAP = {
     "gpu:stats": "gpu_stats",
     "model:events": "model_event",
+    "service:events": "service_event",
     "download:progress": "download_progress",
 }
 
@@ -43,7 +44,7 @@ CHANNEL_EVENT_MAP = {
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     pubsub = get_redis().pubsub()
-    await pubsub.subscribe("gpu:stats", "model:events")
+    await pubsub.subscribe("gpu:stats", "model:events", "service:events")
 
     async def redis_listener() -> None:
         async for message in pubsub.listen():

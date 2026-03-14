@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,6 +7,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        env_ignore_empty=True,
         extra="ignore",
     )
 
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
     # Models storage
     models_dir: str = "/data/models"
     hf_cache_dir: str = "/data/hf_cache"
+    ai_models_root: str = "/docker/ai-models"
     hf_token: str = ""
     ollama_base_url: str = "http://ollama:11434"
     ollama_keep_alive: str = "30m"
@@ -47,6 +50,17 @@ class Settings(BaseSettings):
     vllm_max_num_batched_tokens: int | None = 8192
     vllm_tensor_parallel_size: int | None = None
     vllm_max_model_len: int | None = None
+    vllm_model_impl: str | None = None
+    vllm_runner: str | None = None
+    vllm_hf_overrides: str | None = None
+    vllm_chat_template: str | None = None
+    vllm_chat_template_content_format: str | None = None
+    vllm_generation_config: str | None = None
+    vllm_override_generation_config: str | None = None
+    vllm_tool_call_parser: str | None = None
+    vllm_tool_parser_plugin: str | None = None
+    vllm_reasoning_parser: str | None = None
+    vllm_language_model_only: bool | None = None
     vllm_enable_chunked_prefill: bool | None = None
     vllm_swap_space: float | None = None
     # Quantized KV cache can increase effective context capacity on Ampere/Ada/Hopper.
@@ -61,6 +75,22 @@ class Settings(BaseSettings):
     idle_timeout_seconds: int = 300
     idle_eviction_check_interval_seconds: int = 15
 
+    # Interactive generation services
+    services_portal_port: int = 8485
+    services_portal_internal_port: int = 81
+    hunyuan_ui_base_path: str = "/hunyuan"
+    comfyui_ui_base_path: str = "/comfy"
+    a1111_ui_base_path: str = "/a1111"
+    hunyuan_base_url: str = "http://hunyuan:8080"
+    comfyui_base_url: str = "http://comfyui:8188"
+    a1111_base_url: str = "http://a1111:7860"
+    hunyuan_preferred_gpu: int = 1
+    comfyui_preferred_gpu: int = 1
+    a1111_preferred_gpu: int = 1
+    hunyuan_idle_unload_seconds: int = 300
+    comfyui_idle_unload_seconds: int = 600
+    a1111_idle_unload_seconds: int = 600
+
     # LiteLLM
     litellm_base_url: str = "http://litellm:4000"
     litellm_admin_key: str = ""
@@ -68,6 +98,32 @@ class Settings(BaseSettings):
 
     # Energy
     energy_cost_eur_kwh: float = 0.15
+
+    @field_validator(
+        "vllm_attention_backend",
+        "vllm_tensor_parallel_size",
+        "vllm_max_model_len",
+        "vllm_model_impl",
+        "vllm_runner",
+        "vllm_hf_overrides",
+        "vllm_chat_template",
+        "vllm_chat_template_content_format",
+        "vllm_generation_config",
+        "vllm_override_generation_config",
+        "vllm_tool_call_parser",
+        "vllm_tool_parser_plugin",
+        "vllm_reasoning_parser",
+        "vllm_language_model_only",
+        "vllm_enable_chunked_prefill",
+        "vllm_swap_space",
+        "vllm_kv_cache_dtype",
+        mode="before",
+    )
+    @classmethod
+    def _empty_string_to_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 settings = Settings()

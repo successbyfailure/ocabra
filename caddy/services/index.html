@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MKS AI Generation Services</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4efe4;
+        --panel: #fff8ec;
+        --ink: #1f1d1a;
+        --muted: #6b6257;
+        --line: #d6c4a7;
+        --accent: #9c5b2e;
+        --accent-strong: #6f3916;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(156, 91, 46, 0.16), transparent 28rem),
+          radial-gradient(circle at bottom right, rgba(111, 57, 22, 0.12), transparent 24rem),
+          var(--bg);
+      }
+
+      main {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 48px 20px 64px;
+      }
+
+      .hero {
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: linear-gradient(135deg, rgba(255, 248, 236, 0.96), rgba(244, 239, 228, 0.92));
+        box-shadow: 0 20px 60px rgba(71, 52, 31, 0.08);
+      }
+
+      .eyebrow {
+        margin: 0 0 10px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent-strong);
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(2.2rem, 4vw, 4.4rem);
+        line-height: 0.96;
+      }
+
+      .lede {
+        max-width: 48rem;
+        margin: 0;
+        font-size: 1.05rem;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 18px;
+        margin-top: 26px;
+      }
+
+      .card {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--panel);
+        text-decoration: none;
+        color: inherit;
+        transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+      }
+
+      .card:hover {
+        transform: translateY(-3px);
+        border-color: var(--accent);
+        box-shadow: 0 16px 38px rgba(111, 57, 22, 0.12);
+      }
+
+      .tag {
+        width: fit-content;
+        padding: 5px 10px;
+        border-radius: 999px;
+        background: rgba(156, 91, 46, 0.12);
+        color: var(--accent-strong);
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 1.45rem;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .cta {
+        margin-top: auto;
+        font-weight: 700;
+        color: var(--accent-strong);
+      }
+
+      .foot {
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">MKS AI Generation Services</p>
+        <h1>Servicios interactivos de generacion IA</h1>
+        <p class="lede">
+          Portal de entrada para interfaces de generacion visual y 3D. El acceso se realiza
+          siempre por proxy para que oCabra pueda monitorizar actividad, aplicar politicas
+          de descarga de VRAM por inactividad y mantener la UI disponible aunque el runtime
+          no tenga modelos cargados.
+        </p>
+        <div class="grid">
+          <a class="card" href="/hunyuan/">
+            <span class="tag">3D</span>
+            <h2>Hunyuan3D</h2>
+            <p>Generacion de activos 3D desde imagen con pipeline de shape y texturizado.</p>
+            <span class="cta">Entrar en Hunyuan3D</span>
+          </a>
+          <a class="card" href="/comfy/">
+            <span class="tag">Imagen</span>
+            <h2>ComfyUI</h2>
+            <p>Workflows visuales de generacion y postproceso sobre el almacen compartido.</p>
+            <span class="cta">Entrar en ComfyUI</span>
+          </a>
+          <a class="card" href="/a1111/">
+            <span class="tag">Imagen</span>
+            <h2>Automatic1111</h2>
+            <p>Interfaz clásica de Stable Diffusion con carga bajo demanda y descarga por idle.</p>
+            <span class="cta">Entrar en Automatic1111</span>
+          </a>
+        </div>
+        <p class="foot">
+          OpenAI `/v1/images/*` sigue resolviendo con Diffusers en oCabra; este portal es solo
+          para servicios interactivos.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

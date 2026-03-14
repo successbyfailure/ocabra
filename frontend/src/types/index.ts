@@ -32,6 +32,10 @@ export interface ModelCapabilities {
   tools: boolean
   vision: boolean
   embeddings: boolean
+  pooling: boolean
+  rerank: boolean
+  classification: boolean
+  score: boolean
   reasoning: boolean
   imageGeneration: boolean
   audioTranscription: boolean
@@ -60,6 +64,28 @@ export interface ModelState {
 }
 
 export interface VLLMConfig {
+  recipeId?: string | null
+  recipeNotes?: string[]
+  recipeModelImpl?: "auto" | "vllm" | "transformers" | null
+  recipeRunner?: "generate" | "pooling" | null
+  suggestedConfig?: Record<string, unknown>
+  suggestedTuning?: Record<string, unknown>
+  probeStatus?: HFVLLMRuntimeProbe["status"] | null
+  probeReason?: string | null
+  probeObservedAt?: string | null
+  probeRecommendedModelImpl?: HFVLLMRuntimeProbe["recommendedModelImpl"] | null
+  probeRecommendedRunner?: HFVLLMRuntimeProbe["recommendedRunner"] | null
+  modelImpl?: "auto" | "vllm" | "transformers" | null
+  runner?: "generate" | "pooling" | null
+  hfOverrides?: string | Record<string, unknown> | null
+  chatTemplate?: string | null
+  chatTemplateContentFormat?: string | null
+  generationConfig?: string | null
+  overrideGenerationConfig?: string | Record<string, unknown> | null
+  toolCallParser?: string | null
+  toolParserPlugin?: string | null
+  reasoningParser?: string | null
+  languageModelOnly?: boolean | null
   maxNumSeqs?: number | null
   maxNumBatchedTokens?: number | null
   tensorParallelSize?: number | null
@@ -71,6 +97,44 @@ export interface VLLMConfig {
   trustRemoteCode?: boolean
   swapSpace?: number | null
   kvCacheDtype?: string | null
+}
+
+export interface HFVLLMRuntimeProbe {
+  status:
+    | "supported_native"
+    | "supported_transformers_backend"
+    | "supported_pooling"
+    | "needs_remote_code"
+    | "missing_chat_template"
+    | "missing_tool_parser"
+    | "missing_reasoning_parser"
+    | "needs_hf_overrides"
+    | "unsupported_tokenizer"
+    | "unsupported_architecture"
+    | "unavailable"
+    | "unknown"
+  reason: string | null
+  recommendedModelImpl: "auto" | "vllm" | "transformers" | null
+  recommendedRunner: "generate" | "pooling" | null
+  tokenizerLoad: boolean | null
+  configLoad: boolean | null
+  observedAt: string | null
+}
+
+export interface HFVLLMSupport {
+  classification: "native_vllm" | "transformers_backend" | "pooling" | "unsupported" | "unknown"
+  label: string
+  modelImpl: "auto" | "vllm" | "transformers" | null
+  runner: "generate" | "pooling" | null
+  taskMode: "generate" | "multimodal_generate" | "pooling" | "multimodal_pooling" | null
+  requiredOverrides: string[]
+  recipeId: string | null
+  recipeNotes: string[]
+  recipeModelImpl: "auto" | "vllm" | "transformers" | null
+  recipeRunner: "generate" | "pooling" | null
+  suggestedConfig: Record<string, unknown>
+  suggestedTuning: Record<string, unknown>
+  runtimeProbe: HFVLLMRuntimeProbe | null
 }
 
 export interface ModelPatchRequest {
@@ -97,6 +161,15 @@ export interface DownloadJob {
   source: "huggingface" | "ollama"
   modelRef: string
   artifact?: string | null
+  registerConfig?: {
+    displayName?: string
+    loadPolicy?: LoadPolicy
+    autoReload?: boolean
+    preferredGpu?: number | null
+    extraConfig?: {
+      vllm?: VLLMConfig
+    }
+  } | null
   status: "queued" | "downloading" | "completed" | "failed" | "cancelled"
   progressPct: number
   speedMbS: number | null
@@ -121,6 +194,7 @@ export interface HFModelCard {
   suggestedBackend: BackendType
   compatibility?: string
   compatibilityReason?: string | null
+  vllmSupport?: HFVLLMSupport | null
 }
 
 export interface HFModelDetail extends HFModelCard {
@@ -128,6 +202,7 @@ export interface HFModelDetail extends HFModelCard {
   readmeExcerpt: string | null
   suggestedBackend: BackendType
   estimatedVramGb: number | null
+  vllmSupport?: HFVLLMSupport | null
 }
 
 export interface HFModelVariant {
@@ -142,6 +217,7 @@ export interface HFModelVariant {
   installable?: boolean
   compatibility?: string
   compatibilityReason?: string | null
+  vllmSupport?: HFVLLMSupport | null
 }
 
 export interface OllamaModelCard {

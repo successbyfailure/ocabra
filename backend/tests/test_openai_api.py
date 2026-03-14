@@ -5,14 +5,11 @@ Uses FastAPI TestClient with mocked ModelManager and WorkerPool.
 """
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Test app factory
@@ -22,7 +19,7 @@ def _make_app(model_state=None, worker_result=None):
     """Create a minimal FastAPI app with mocked state."""
     from ocabra.api.openai import router as openai_router
     from ocabra.backends.base import BackendCapabilities
-    from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
     app = FastAPI()
     app.include_router(openai_router, prefix="/v1")
@@ -74,7 +71,7 @@ async def _async_gen(items):
 class TestListModels:
     def test_returns_loaded_models(self):
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
         caps = BackendCapabilities(chat=True, streaming=True, context_length=4096)
         state = ModelState(
@@ -102,7 +99,7 @@ class TestListModels:
 
     def test_excludes_unloaded_models(self):
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
         state = ModelState(
             model_id="ghost-model",
@@ -156,7 +153,7 @@ class TestChatCompletions:
 
     def test_capability_check_fails_for_embedding_model(self):
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
         # Embedding model — no chat capability
         state = ModelState(
@@ -180,7 +177,7 @@ class TestChatCompletions:
     def test_on_demand_load_triggered(self):
         """A CONFIGURED model should be loaded on first request."""
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
         configured_state = ModelState(
             model_id="lazy-model",
@@ -208,7 +205,7 @@ class TestChatCompletions:
         app.state.model_manager.load = AsyncMock(return_value=loaded_state)
 
         client = TestClient(app)
-        resp = client.post("/v1/chat/completions", json={
+        client.post("/v1/chat/completions", json={
             "model": "lazy-model",
             "messages": [{"role": "user", "content": "Hi"}],
         })
@@ -264,9 +261,326 @@ class TestChatCompletions:
         assert r.status_code == 400
         assert r.json()["detail"]["error"]["message"] == "chat template missing"
 
+
+class TestPoolingEndpoints:
+    def test_pooling_forwards_request(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="e5-base",
+            display_name="E5",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, pooling=True, score=True),
+        )
+        app = _make_app(model_state=state, worker_result={"data": [{"object": "pooling"}]})
+        client = TestClient(app)
+
+        resp = client.post("/v1/pooling", json={"model": "e5-base", "input": "hola"})
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "e5-base", "/pooling", {"model": "e5-base", "input": "hola"}
+        )
+
+    def test_score_requires_capability(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="e5-base",
+            display_name="E5",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, pooling=True, score=False),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.post("/v1/score", json={"model": "e5-base", "text_1": "a", "text_2": "b"})
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
+
+    def test_score_normalizes_legacy_pair_aliases(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="e5-base",
+            display_name="E5",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, pooling=True, score=True),
+        )
+        app = _make_app(model_state=state, worker_result={"data": [{"score": 0.91}]})
+        client = TestClient(app)
+
+        resp = client.post("/v1/score", json={"model": "e5-base", "text_1": "a", "text_2": "b"})
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "e5-base", "/score", {"model": "e5-base", "queries": "a", "documents": "b"}
+        )
+
+    def test_score_accepts_batch_queries_and_documents(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="e5-base",
+            display_name="E5",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, pooling=True, score=True),
+        )
+        payload = {
+            "model": "e5-base",
+            "queries": ["q1", "q2"],
+            "documents": ["d1", "d2"],
+        }
+        app = _make_app(model_state=state, worker_result={"data": [{"score": 0.9}, {"score": 0.8}]})
+        client = TestClient(app)
+
+        resp = client.post("/v1/score", json=payload)
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "e5-base", "/score", payload
+        )
+
+    def test_score_rejects_mismatched_batch_lengths(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="e5-base",
+            display_name="E5",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, pooling=True, score=True),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/score",
+            json={"model": "e5-base", "queries": ["q1", "q2"], "documents": ["d1"]},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "mismatched_batch_length"
+
+    def test_score_rejects_mixed_scalar_and_batch_shapes(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="e5-base",
+            display_name="E5",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, pooling=True, score=True),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/score",
+            json={"model": "e5-base", "queries": "q1", "documents": ["d1"]},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "invalid_score_shape"
+
+    def test_rerank_forwards_request(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="bge-reranker",
+            display_name="BGE Reranker",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, rerank=True, score=True),
+        )
+        payload = {
+            "model": "bge-reranker",
+            "query": "best retrieval model",
+            "documents": ["alpha", "beta"],
+        }
+        app = _make_app(model_state=state, worker_result={"results": [{"index": 0, "relevance_score": 0.9}]})
+        client = TestClient(app)
+
+        resp = client.post("/v1/rerank", json=payload)
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "bge-reranker", "/rerank", payload
+        )
+
+    def test_rerank_normalizes_document_objects(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="bge-reranker",
+            display_name="BGE Reranker",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, rerank=True, score=True),
+        )
+        app = _make_app(model_state=state, worker_result={"results": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/rerank",
+            json={
+                "model": "bge-reranker",
+                "query": "best retrieval model",
+                "documents": [{"text": "alpha"}, {"text": "beta"}],
+                "top_n": 1,
+            },
+        )
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "bge-reranker",
+            "/rerank",
+            {
+                "model": "bge-reranker",
+                "query": "best retrieval model",
+                "documents": ["alpha", "beta"],
+                "top_n": 1,
+            },
+        )
+
+    def test_rerank_rejects_invalid_top_n(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="bge-reranker",
+            display_name="BGE Reranker",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, rerank=True, score=True),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/rerank",
+            json={
+                "model": "bge-reranker",
+                "query": "best retrieval model",
+                "documents": ["alpha", "beta"],
+                "top_n": 3,
+            },
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "invalid_top_n"
+
+    def test_classify_requires_capability(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="classifier",
+            display_name="Classifier",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, classification=False),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.post("/v1/classify", json={"model": "classifier", "input": "hola"})
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
+
+    def test_classify_forwards_request(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="classifier",
+            display_name="Classifier",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, classification=True),
+        )
+        payload = {"model": "classifier", "input": ["positivo", "negativo"]}
+        app = _make_app(model_state=state, worker_result={"data": [{"label": "positive"}]})
+        client = TestClient(app)
+
+        resp = client.post("/v1/classify", json=payload)
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "classifier", "/classify", payload
+        )
+
+    def test_classify_accepts_string_input(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="classifier",
+            display_name="Classifier",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, classification=True),
+        )
+        payload = {"model": "classifier", "input": "positivo"}
+        app = _make_app(model_state=state, worker_result={"data": [{"label": "positive"}]})
+        client = TestClient(app)
+
+        resp = client.post("/v1/classify", json=payload)
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "classifier", "/classify", payload
+        )
+
+    def test_classify_rejects_empty_input_list(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="classifier",
+            display_name="Classifier",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, classification=True),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.post("/v1/classify", json={"model": "classifier", "input": []})
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "invalid_input"
+
     def test_on_demand_load_insufficient_vram_returns_409(self):
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
         from ocabra.core.scheduler import InsufficientVRAMError
 
         configured_state = ModelState(
@@ -293,7 +607,7 @@ class TestChatCompletions:
 
     def test_on_demand_load_generic_failure_returns_503(self):
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
         configured_state = ModelState(
             model_id="lazy-model",
@@ -323,7 +637,7 @@ class TestChatCompletions:
 class TestEmbeddings:
     def test_embeddings_success(self):
         from ocabra.backends.base import BackendCapabilities
-        from ocabra.core.model_manager import ModelState, ModelStatus, LoadPolicy
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
         state = ModelState(
             model_id="bert-base",

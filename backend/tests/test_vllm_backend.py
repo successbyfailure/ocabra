@@ -3,6 +3,7 @@ Tests for VLLMBackend.
 
 All tests mock subprocess creation — no real vLLM or GPU required.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,6 +15,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def tmp_model_dir(tmp_path: Path) -> Path:
@@ -34,6 +36,7 @@ def _make_model(base: Path, model_id: str, config: dict, tok_cfg: dict | None = 
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _fake_proc(returncode: int | None = None) -> MagicMock:
     proc = MagicMock()
     proc.pid = 12345
@@ -47,6 +50,7 @@ def _fake_proc(returncode: int | None = None) -> MagicMock:
 # ---------------------------------------------------------------------------
 # get_capabilities
 # ---------------------------------------------------------------------------
+
 
 class TestGetCapabilities:
     @pytest.mark.asyncio
@@ -108,7 +112,53 @@ class TestGetCapabilities:
             caps = await backend.get_capabilities("bert-base")
 
         assert caps.embeddings is True
+        assert caps.pooling is True
+        assert caps.score is True
         assert caps.chat is False
+
+    @pytest.mark.asyncio
+    async def test_sequence_classification_model(self, tmp_model_dir: Path):
+        _make_model(
+            tmp_model_dir,
+            "acme/sentiment-classifier",
+            {
+                "architectures": ["XLMRobertaForSequenceClassification"],
+                "num_labels": 3,
+                "id2label": {"0": "negative", "1": "neutral", "2": "positive"},
+            },
+        )
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("acme/sentiment-classifier")
+
+        assert caps.classification is True
+        assert caps.score is True
+        assert caps.rerank is False
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_rerank_model(self, tmp_model_dir: Path):
+        _make_model(
+            tmp_model_dir,
+            "BAAI/bge-reranker-base",
+            {
+                "architectures": ["XLMRobertaForSequenceClassification"],
+                "num_labels": 1,
+            },
+        )
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("BAAI/bge-reranker-base")
+
+        assert caps.rerank is True
+        assert caps.score is True
 
     @pytest.mark.asyncio
     async def test_unknown_architecture_fallback(self, tmp_model_dir: Path):
@@ -171,13 +221,7 @@ class TestGetCapabilities:
     @pytest.mark.asyncio
     async def test_resolves_capabilities_from_hf_cache_snapshot(self, tmp_model_dir: Path):
         hf_cache = tmp_model_dir / "_hf_cache"
-        snapshot = (
-            hf_cache
-            / "hub"
-            / "models--acme--demo-chat"
-            / "snapshots"
-            / "abc123"
-        )
+        snapshot = hf_cache / "hub" / "models--acme--demo-chat" / "snapshots" / "abc123"
         snapshot.mkdir(parents=True)
         (snapshot / "config.json").write_text(
             json.dumps({"architectures": ["LlamaForCausalLM"], "max_position_embeddings": 4096})
@@ -205,6 +249,7 @@ class TestGetCapabilities:
 # ---------------------------------------------------------------------------
 # get_vram_estimate_mb
 # ---------------------------------------------------------------------------
+
 
 class TestGetVramEstimate:
     @pytest.mark.asyncio
@@ -243,6 +288,7 @@ class TestGetVramEstimate:
 # ---------------------------------------------------------------------------
 # load / unload
 # ---------------------------------------------------------------------------
+
 
 class TestLoadUnload:
     @pytest.mark.asyncio
@@ -388,6 +434,77 @@ class TestLoadUnload:
         assert "FLASH_ATTN" in cmd
 
     @pytest.mark.asyncio
+    async def test_load_passes_extended_compatibility_flags(self, tmp_model_dir: Path):
+        (tmp_model_dir / "test-llm").mkdir()
+        proc = _fake_proc(returncode=None)
+        create_subprocess = AsyncMock(return_value=proc)
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with (
+            patch("ocabra.backends.vllm_backend.settings") as mock_settings,
+            patch("asyncio.create_subprocess_exec", new=create_subprocess),
+            patch.object(VLLMBackend, "_wait_for_startup", new=AsyncMock()),
+            patch.object(VLLMBackend, "get_vram_estimate_mb", new=AsyncMock(return_value=8192)),
+        ):
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = "/tmp/hf_cache"
+            mock_settings.hf_token = ""
+            mock_settings.cuda_device_order = "PCI_BUS_ID"
+            mock_settings.vllm_gpu_memory_utilization = 0.85
+            mock_settings.vllm_enable_prefix_caching = True
+            mock_settings.vllm_model_impl = "auto"
+            mock_settings.vllm_runner = None
+            mock_settings.vllm_hf_overrides = None
+            mock_settings.vllm_chat_template = None
+            mock_settings.vllm_tool_call_parser = None
+            mock_settings.vllm_reasoning_parser = None
+            backend = VLLMBackend()
+            await backend.load(
+                "test-llm",
+                gpu_indices=[1],
+                port=18001,
+                extra_config={
+                    "vllm": {
+                        "model_impl": "transformers",
+                        "runner": "pooling",
+                        "hf_overrides": {"architectures": ["BertModel"]},
+                        "chat_template": "/tmp/chat-template.jinja",
+                        "chat_template_content_format": "openai",
+                        "generation_config": "vllm",
+                        "override_generation_config": {"temperature": 0.2},
+                        "tool_call_parser": "hermes",
+                        "tool_parser_plugin": "acme.plugin",
+                        "reasoning_parser": "deepseek_r1",
+                        "language_model_only": True,
+                    }
+                },
+            )
+
+        cmd = list(create_subprocess.await_args.args)
+        assert "--model-impl" in cmd
+        assert "transformers" in cmd
+        assert "--runner" in cmd
+        assert "pooling" in cmd
+        assert "--hf-overrides" in cmd
+        assert '{"architectures": ["BertModel"]}' in cmd
+        assert "--chat-template" in cmd
+        assert "/tmp/chat-template.jinja" in cmd
+        assert "--chat-template-content-format" in cmd
+        assert "openai" in cmd
+        assert "--generation-config" in cmd
+        assert "--override-generation-config" in cmd
+        assert '{"temperature": 0.2}' in cmd
+        assert "--tool-call-parser" in cmd
+        assert "hermes" in cmd
+        assert "--enable-auto-tool-choice" in cmd
+        assert "--tool-parser-plugin" in cmd
+        assert "acme.plugin" in cmd
+        assert "--reasoning-parser" in cmd
+        assert "deepseek_r1" in cmd
+        assert "--language-model-only" in cmd
+
+    @pytest.mark.asyncio
     async def test_load_raises_without_port(self):
         from ocabra.backends.vllm_backend import VLLMBackend
 
@@ -410,7 +527,11 @@ class TestLoadUnload:
         with (
             patch("ocabra.backends.vllm_backend.settings") as mock_settings,
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch.object(VLLMBackend, "_wait_for_startup", new=AsyncMock(side_effect=TimeoutError("startup timeout"))),
+            patch.object(
+                VLLMBackend,
+                "_wait_for_startup",
+                new=AsyncMock(side_effect=TimeoutError("startup timeout")),
+            ),
             patch.object(VLLMBackend, "_kill_process", new=AsyncMock()),
         ):
             mock_settings.models_dir = str(tmp_model_dir)
@@ -477,6 +598,7 @@ class TestLoadUnload:
 # ---------------------------------------------------------------------------
 # health_check
 # ---------------------------------------------------------------------------
+
 
 class TestHealthCheck:
     @pytest.mark.asyncio

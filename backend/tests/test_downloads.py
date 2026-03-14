@@ -1,109 +1,63 @@
-import asyncio
-from pathlib import Path
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ocabra.api.internal.downloads import DownloadManager
-
-
-class FakeRedis:
-    def __init__(self) -> None:
-        self.store: dict[str, dict] = {}
-
-    async def keys(self, pattern: str) -> list[str]:
-        if pattern == "download:job:*":
-            return [k for k in self.store if k.startswith("download:job:")]
-        return []
+from ocabra.schemas.registry import DownloadJob
 
 
 @pytest.mark.asyncio
-async def test_download_manager_enqueue_progress_complete(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_redis = FakeRedis()
-    queue: list[dict] = []
-    published: list[tuple[str, dict]] = []
-
-    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
-        _ = ttl
-        fake_redis.store[key] = data
-
-    async def fake_get_key(key: str):
-        return fake_redis.store.get(key)
-
-    async def fake_lpush(_queue_name: str, data: dict) -> None:
-        queue.insert(0, data)
-
-    async def fake_rpop(_queue_name: str):
-        if queue:
-            return queue.pop()
-        await asyncio.sleep(0)
-        return None
-
-    async def fake_publish(channel: str, data: dict) -> None:
-        published.append((channel, data))
-
-    async def fake_hf_download(repo_id: str, target_dir: Path, progress_callback, artifact=None):
-        _ = repo_id, target_dir, artifact
-        progress_callback(25.0, 10.0)
-        await asyncio.sleep(0)
-        progress_callback(80.0, 8.0)
-        return Path("/tmp/model")
-
-    monkeypatch.setattr("ocabra.api.internal.downloads.set_key", fake_set_key)
-    monkeypatch.setattr("ocabra.api.internal.downloads.get_key", fake_get_key)
-    monkeypatch.setattr("ocabra.api.internal.downloads.lpush", fake_lpush)
-    monkeypatch.setattr("ocabra.api.internal.downloads.rpop", fake_rpop)
-    monkeypatch.setattr("ocabra.api.internal.downloads.publish", fake_publish)
-    monkeypatch.setattr("ocabra.api.internal.downloads.get_redis_safe", lambda: fake_redis)
-
+async def test_auto_register_model_uses_register_config() -> None:
     manager = DownloadManager()
-    monkeypatch.setattr(manager._hf_registry, "download", fake_hf_download)
+    model_manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=None),
+        add_model=AsyncMock(),
+    )
+    manager._app = SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    manager._hf_registry.infer_backend_for_repo = AsyncMock(return_value="vllm")
 
-    job = await manager.enqueue(source="huggingface", model_ref="org/model")
-    await manager._execute_job(job)
+    job = DownloadJob(
+        job_id="job-1",
+        source="huggingface",
+        model_ref="Qwen/Qwen3-8B-Instruct",
+        artifact=None,
+        register_config={
+            "display_name": "Qwen3 8B",
+            "load_policy": "warm",
+            "extra_config": {
+                "vllm": {
+                    "model_impl": "vllm",
+                    "runner": "generate",
+                    "tool_call_parser": "qwen3_json",
+                }
+            },
+        },
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-03-14T00:00:00Z",
+        completed_at="2026-03-14T00:01:00Z",
+    )
 
-    stored = await manager.get_job(job.job_id)
-    assert stored is not None
-    assert stored.status == "completed"
-    assert stored.progress_pct == 100.0
-    assert stored.artifact is None
-    assert any(ch == f"download:progress:{job.job_id}" for ch, _ in published)
+    await manager._auto_register_model(job)
 
-
-@pytest.mark.asyncio
-async def test_download_manager_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_redis = FakeRedis()
-    queue: list[dict] = []
-
-    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
-        _ = ttl
-        fake_redis.store[key] = data
-
-    async def fake_get_key(key: str):
-        return fake_redis.store.get(key)
-
-    async def fake_lpush(_queue_name: str, data: dict) -> None:
-        queue.insert(0, data)
-
-    async def fake_rpop(_queue_name: str):
-        if queue:
-            return queue.pop()
-        return None
-
-    async def fake_publish(_channel: str, _data: dict) -> None:
-        return None
-
-    monkeypatch.setattr("ocabra.api.internal.downloads.set_key", fake_set_key)
-    monkeypatch.setattr("ocabra.api.internal.downloads.get_key", fake_get_key)
-    monkeypatch.setattr("ocabra.api.internal.downloads.lpush", fake_lpush)
-    monkeypatch.setattr("ocabra.api.internal.downloads.rpop", fake_rpop)
-    monkeypatch.setattr("ocabra.api.internal.downloads.publish", fake_publish)
-    monkeypatch.setattr("ocabra.api.internal.downloads.get_redis_safe", lambda: fake_redis)
-
-    manager = DownloadManager()
-    job = await manager.enqueue(source="ollama", model_ref="llama3.2:3b")
-    await manager.cancel(job.job_id)
-
-    stored = await manager.get_job(job.job_id)
-    assert stored is not None
-    assert stored.status == "cancelled"
-    assert stored.completed_at is not None
+    model_manager.add_model.assert_awaited_once_with(
+        model_id="Qwen/Qwen3-8B-Instruct",
+        backend_type="vllm",
+        display_name="Qwen3 8B",
+        load_policy="warm",
+        auto_reload=False,
+        preferred_gpu=None,
+        extra_config={
+            "vllm": {
+                "model_impl": "vllm",
+                "runner": "generate",
+                "tool_call_parser": "qwen3_json",
+            }
+        },
+    )

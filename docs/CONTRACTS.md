@@ -232,7 +232,58 @@ PATCH /ocabra/config           → ServerConfig
 POST  /ocabra/config/litellm/sync → {"synced_models": int}
 ```
 
-### 5.7 Tiempo real (WebSocket)
+### 5.7 Servicios interactivos
+
+```
+GET  /ocabra/services                    → list[ServiceState]
+GET  /ocabra/services/{service_id}       → ServiceState
+POST /ocabra/services/{service_id}/refresh → ServiceState
+POST /ocabra/services/{service_id}/touch   → ServiceState
+  body: {
+    runtime_loaded?: bool,
+    active_model_ref?: str|null,
+    detail?: str|null
+  }
+PATCH /ocabra/services/{service_id}/runtime → ServiceState
+  body: {
+    runtime_loaded: bool,
+    active_model_ref?: str|null,
+    detail?: str|null
+  }
+POST /ocabra/services/{service_id}/unload → ServiceState
+```
+
+`service_id` iniciales:
+- `hunyuan`
+- `comfyui`
+- `a1111`
+
+`ServiceState`:
+
+```python
+@dataclass
+class ServiceState:
+    service_id: str               # "hunyuan" | "comfyui" | "a1111"
+    service_type: str             # "hunyuan3d" | "comfyui" | "automatic1111"
+    display_name: str
+    base_url: str                 # URL interna Docker
+    ui_base_path: str             # path proxied, e.g. "/comfy"
+    health_path: str
+    unload_path: str | None
+    preferred_gpu: int | None
+    idle_unload_after_seconds: int
+    service_alive: bool           # proceso/UI accesible por healthcheck
+    runtime_loaded: bool          # hay runtime/pesos cargados en VRAM
+    status: str                   # "unknown" | "idle" | "active" | "unreachable"
+    active_model_ref: str | None
+    last_activity_at: datetime | None
+    last_health_check_at: datetime | None
+    last_unload_at: datetime | None
+    detail: str | None
+    extra: dict
+```
+
+### 5.8 Tiempo real (WebSocket)
 
 ```
 WS /ocabra/ws
@@ -242,6 +293,7 @@ Eventos emitidos por el servidor (JSON):
 ```json
 {"type": "gpu_stats",    "data": [GPUState, ...]}
 {"type": "model_event",  "data": {"event": str, "model_id": str, "status": str}}
+{"type": "service_event", "data": {"event": str, "service_id": str, "status": str, "service": ServiceState}}
 {"type": "download_progress", "data": {"job_id": str, "pct": float, "speed_mb_s": float}}
 {"type": "system_alert", "data": {"level": "warn"|"error", "message": str}}
 ```
@@ -254,10 +306,12 @@ Eventos emitidos por el servidor (JSON):
 # Canales pub/sub
 gpu:stats                   → GPUState[] cada 2s
 model:events                → ModelEvent en cada cambio
+service:events              → ServiceEvent en cada cambio de servicio
 download:progress:{job_id}  → DownloadProgress cada 500ms
 
 # Keys (state)
 model:state:{model_id}      → ModelState (JSON, TTL: none)
+service:state:{service_id}  → ServiceState (JSON, TTL: none)
 gpu:state:{index}           → GPUState (JSON, TTL: 5s)
 download:job:{job_id}       → DownloadJob (JSON)
 

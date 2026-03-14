@@ -48,7 +48,223 @@ Revisar estas secciones oficiales antes de implementar cada bloque:
 - Compatibility Matrix
   https://docs.vllm.ai/en/v0.9.2/features/compatibility_matrix.html
 
+## Handoff
+
+Si continúas este trabajo en otra iteración o con otro agente, usa:
+
+- `docs/tasks/vllm-max-support-handoff.md`
+
 ## Estado actual del repo
+
+## Seguimiento de implementación
+
+### Actualización 2026-03-13
+
+#### Sprint inicial ejecutado en esta iteración
+
+Estado: **parcialmente completado con el bloque de mayor valor entregado end-to-end**.
+
+Implementado:
+
+- `model_impl` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- `runner` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- `hf_overrides` en config global, override por modelo, backend `vLLM` y UI.
+- `chat_template` en config global, override por modelo, backend `vLLM` y UI.
+- `tool_call_parser` en config global, override por modelo, backend `vLLM` y UI.
+- `reasoning_parser` en config global, override por modelo, backend `vLLM` y UI.
+- Clasificación de compatibilidad `native_vllm` / `transformers_backend` / `pooling` / `unsupported` / `unknown` en registry HF.
+- Recomendación asociada de `model_impl`, `runner` y overrides requeridos en el payload de registry.
+- Probe runtime mínimo basado en carga de `AutoConfig` y `AutoTokenizer` sin descargar pesos.
+- UI de Explore actualizada para mostrar compatibilidad vLLM, overrides requeridos y estado del probe.
+- UI de configuración por modelo actualizada para exponer los nuevos flags críticos.
+- Manejo de variables `VLLM_*` opcionales vacías como `None` para evitar fallos de arranque en Docker.
+
+Validado:
+
+- Build de `frontend` dentro de Docker: OK.
+- Test frontend nuevo para `HFModelCard`: OK.
+- `ruff check` sobre los ficheros backend tocados: OK.
+- Tests backend dirigidos para registry/vLLM backend y nuevos flags: OK.
+- Reconstrucción y relanzado de servicios `api` y `frontend`: OK.
+- `api` sano tras el despliegue (`healthy`) y `frontend` arrancado correctamente.
+
+Pendiente dentro del sprint inicial:
+
+- `chat_template_content_format`.
+- `generation_config`.
+- `override_generation_config`.
+- `tool_parser_plugin`.
+- clasificación funcional completa de tareas `rerank` / `classification` / `score`.
+- probe runtime con arranque real de `vLLM` en lugar de probe ligero de config/tokenizer.
+
+Límites detectados:
+
+- La clasificación actual mejora mucho la decisión previa, pero sigue siendo híbrida: heurística + probe ligero.
+- El probe no garantiza que el worker `vLLM` vaya a arrancar realmente; solo reduce falsos positivos obvios.
+- La UI ya refleja compatibilidad y configuración, pero `Models` y `Playground` todavía no adaptan el flujo a modelos `pooling`.
+- Siguen existiendo fallos previos, fuera de este sprint, en algunos tests completos de registry/inventario local/Ollama.
+
+#### Segunda iteración del mismo día
+
+Estado: **avance material sobre Fase 2 y Fase 3, todavía no plan completo**.
+
+Implementado adicionalmente:
+
+- `chat_template_content_format` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- `generation_config` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- `override_generation_config` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- `tool_parser_plugin` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- `language_model_only` en config global, override por modelo, backend `vLLM`, worker wrapper y UI.
+- Extensión de `BackendCapabilities` para `pooling`, `rerank`, `classification` y `score`.
+- Detección operativa de modelos `pooling`/`score` en backend `vLLM`.
+- Endpoints OpenAI adicionales:
+  - `/v1/pooling`
+  - `/v1/score`
+- `Models` ya distingue `pooling` como tipo propio.
+- `Playground` deja de tratar modelos `pooling` como chat y expone una interfaz dedicada para `pooling` y `score`.
+
+Validado adicionalmente:
+
+- `ruff check` backend para los nuevos ficheros y tests OpenAI: OK.
+- `pytest tests/test_openai_api.py tests/test_vllm_backend.py -q`: OK.
+- Tests frontend nuevos para `PoolingInterface`: OK.
+- Build frontend en contenedor tras los cambios de `Playground`/`Models`: OK.
+- Reconstrucción y relanzado de `api` y `frontend` tras esta segunda iteración: OK.
+
+Pendiente relevante tras esta iteración:
+
+- `rerank` y `classification` siguen sin endpoint/UI dedicados.
+- El probe runtime sigue siendo ligero; falta arranque real de `vLLM`.
+- No existen recipes por familia.
+- No hay soporte explícito de structured outputs.
+- No hay matriz seria de quantization/hardware.
+
+#### Tercera iteración del mismo día
+
+Estado: **Fase 3 ampliada, Fase 5 subida a probe real con fallback y Fase 4 iniciada con recipes base**.
+
+Implementado adicionalmente:
+
+- Endpoints OpenAI adicionales sobre el bloque de pooling:
+  - `/v1/rerank`
+  - `/v1/classify`
+- Comprobación de capability antes de reenviar tráfico a worker para `rerank` y `classification`.
+- Normalización y validación temprana de payloads:
+  - `classification`: string o lista de strings no vacíos
+  - `rerank`: documentos como string o `{text: ...}` y validación de `top_n`
+  - `score`: `queries`/`documents` como strings o listas paralelas; alias legacy `text_1`/`text_2`
+- Detección más útil de capacidades en `VLLMBackend`:
+  - arquitecturas `*ForSequenceClassification` ahora activan `classification`
+  - `num_labels` / `id2label` permiten marcar modelos de clasificación aunque la arquitectura no esté en la tabla corta
+  - heurística de nombre para `cross-encoder` / `rerank` activa `rerank` y `score`
+- Playground ampliado para modelos de `pooling` con bloques dedicados de:
+  - `pooling`
+  - `score`
+  - `rerank`
+  - `classification`
+- Tests backend añadidos para:
+  - forwarding de `/v1/rerank`
+  - forwarding de `/v1/classify`
+  - rechazo cuando falta capability
+  - inferencia de capacidades para sequence classification y rerankers
+- Test frontend actualizado para reflejar los nuevos bloques del Playground.
+- Servicio nuevo de probe runtime real de `vLLM`:
+  - intenta arranque corto de `vLLM` contra artefactos locales o snapshots cacheados
+  - usa healthcheck real y captura stderr
+  - cachea resultados por repo
+  - cae al probe ligero anterior si no hay artefacto local o el entorno no permite probe real
+- `HuggingFaceRegistry` deja de concentrar toda la lógica del probe y delega en el servicio nuevo.
+- Módulo inicial de recipes por familia:
+  - `backend/ocabra/backends/vllm_recipes.py`
+  - recipes base para `Qwen3`, `DeepSeek-R1`, `Granite`, `GLM` y `FunctionGemma`
+  - el registry expone `recipe_id`, notas y `suggested_config` junto con overrides requeridos
+- Explore muestra la recipe sugerida y la configuración recomendada.
+- Explore envía una `register_config` junto a la descarga para que, al completarse, el modelo quede dado de alta con:
+  - `load_policy` elegido
+  - `display_name`
+  - `extra_config.vllm` prellenado desde la recipe (`model_impl`, `runner`, `suggested_config`)
+- La metadata de recipe queda persistida en `extra_config.vllm` y `ModelConfigModal` puede:
+  - mostrar la recipe activa
+  - enseñar notas/configuración sugerida
+  - reaplicar sugerencias sobre los campos editables
+- Las recipes distinguen ahora entre:
+  - `required_overrides`: compatibilidad obligatoria
+  - `suggested_config`: compatibilidad recomendada y preaplicable
+  - `suggested_tuning`: tuning recomendado, visible y aplicable manualmente
+- Refinamiento adicional de recipes por subfamilia:
+  - `Qwen-VL` con sugerencia explícita de `language_model_only`
+  - `Qwen3-MoE` con tuning más conservador de concurrencia
+  - detección específica de `DeepSeek-V3` y `GLM-4` antes de caer en variantes más genéricas
+- El registry traduce ahora un runtime probe `needs_remote_code` en `trust_remote_code` dentro de `required_overrides`, para que la UI y la instalación reflejen mejor ese requisito.
+
+Validado adicionalmente:
+
+- Backend:
+  - `python -m pytest tests/test_openai_api.py tests/test_vllm_backend.py -q` dentro de `ocabra-api:latest` con extras `.[dev,vllm]`: OK (`44 passed`)
+  - `python -m ruff check ...`: OK
+  - `python -m pytest tests/test_vllm_runtime_probe.py tests/test_registry.py -q -k "...probe..."`: OK (`5 passed`)
+  - `python -m pytest tests/test_registry.py -q -k "...recipe..."`: OK
+- Frontend:
+  - `vitest` dirigido para `PoolingInterface.test.tsx` con `--no-cache`: OK
+  - `npx tsc -b`: OK
+  - `vitest` dirigido para `HFModelCard.test.tsx` con `--no-cache`: OK
+  - `vitest` dirigido para `ModelConfigModal.test.tsx` con `--no-cache`: OK
+
+Límites detectados en esta iteración:
+
+- `rerank`, `classification` y `score` ya no son pass-through ciego: validan y normalizan entrada antes del worker, pero la respuesta final sigue dependiendo del contrato upstream de vLLM.
+- La detección de `rerank` sigue siendo parcialmente heurística; sirve para mejorar UX y gating, no como prueba definitiva de compatibilidad.
+- El build completo de frontend no se reutilizó como señal de aceptación porque en este entorno hay ruido de permisos/cargador alrededor de `.vite` y `vite.config.ts`; la validación útil aquí fue `vitest` dirigido + `tsc`.
+- El probe real solo se ejecuta si el modelo ya existe localmente o en snapshot cacheado; no descarga pesos nuevos ni intenta validar repos remotos desde cero.
+- Parte del suite amplio de `test_registry.py` sigue teniendo fallos previos ajenos a este bloque (DB real / local scanner), así que la validación de esta iteración se hizo con tests dirigidos.
+- Las recipes iniciales son conservadoras: recomiendan presets útiles, pero todavía no cubren exhaustivamente familias/variantes ni sustituyen una matriz de compatibilidad real.
+- La preconfiguración automática aplica solo sugerencias explícitas de la recipe; aunque el registry ya marque `trust_remote_code` cuando el probe lo detecta, ese override delicado sigue requiriendo decisión manual.
+- El tuning recomendado sigue siendo heurístico y opt-in; no se aplica automáticamente al registrar el modelo.
+
+#### Ajuste incremental 2026-03-14
+
+Estado: **refinamiento pequeño pero útil sobre Fase 4/Fase 5**.
+
+Implementado adicionalmente:
+
+- Recipes más finas para subfamilias de `vLLM`:
+  - `qwen-vl`
+  - `qwen3-moe`
+  - `internvl-chat`
+  - `llama4-multimodal`
+- Priorización de recipes específicas antes de las genéricas para evitar que ciertas variantes caigan en presets demasiado amplios.
+- Traducción directa del resultado de probe runtime `needs_remote_code` a `required_overrides += ["trust_remote_code"]` en el payload de soporte HF.
+- El runtime probe puede corregir ahora `model_impl` y `runner` expuestos por el registry cuando su recomendación es más fiable que la heurística inicial o la recipe base.
+- Explore y `ModelConfigModal` distinguen visualmente entre:
+  - recipe persistida
+  - recomendación verificada por probe
+  - diferencia entre configuración activa y recomendación del probe cuando existe
+- La metadata mínima del probe queda persistida en `extra_config.vllm` para no perder contexto al abrir la configuración manual tras instalar desde Explore.
+- `ModelConfigModal` ya ofrece un botón específico para aplicar la recomendación del probe sobre `model_impl` y `runner`, separado de la recipe y del tuning.
+- `Explore` muestra ahora un aviso explícito cuando la preconfiguración automática va a usar la recomendación verificada por probe.
+- El contrato/UI preservan también `recipe_model_impl` y `recipe_runner` para poder mostrar claramente la diferencia entre recipe base y recomendación final del probe.
+- `Explore` y `ModelConfigModal` muestran ya cuándo la recipe base no coincide con la recomendación final verificada por probe.
+- El runtime probe persiste además `observed_at` / `observedAt`, para que la UI pueda enseñar cuándo se observó por última vez esa recomendación.
+- El runtime probe clasifica ya más fallos reales de `vLLM` en señales accionables: `missing_chat_template`, `missing_tool_parser`, `missing_reasoning_parser` y `needs_hf_overrides`.
+- El registry traduce esas señales a `required_overrides` concretos (`chat_template`, `tool_call_parser`, `reasoning_parser`, `hf_overrides`) y las expone a UI/instalación como warnings accionables.
+- La UI ya no muestra solo `status` crudos del probe: cards, Explore y `ModelConfigModal` usan etiquetas legibles y hints directos del override sugerido.
+- Existe prueba de flujo frontend tipo E2E con Vitest/jsdom para `Explore`, cubriendo apertura de modal, avisos de recipe/probe e instalación con persistencia de metadata.
+- El repo ya incluye E2E de navegador con Playwright + Chrome para el flujo principal de `Explore`, además de una validación real ad hoc sobre la app levantada en `http://127.0.0.1:8484/explore`.
+- El E2E de navegador cubre ya dos escenarios: guidance de recipe vs probe y caso accionable donde el probe exige un override concreto.
+
+Validado adicionalmente:
+
+- `python -m pytest tests/test_registry.py -q -k "qwen_vl or qwen3_moe or remote_code_adds_required_override or exposes_recipe_metadata or classifies_transformers_backend_and_probe"` dentro de `ocabra-api` con extras `.[dev,vllm]`: OK (`5 passed`)
+- `python -m ruff check ocabra/backends/vllm_recipes.py ocabra/registry/huggingface.py tests/test_registry.py` dentro de `ocabra-api` con extras `.[dev,vllm]`: OK
+- `python -m pytest tests/test_registry.py -q -k "internvl or llama4_multimodal or overrides_model_impl_and_runner or classifies_transformers_backend_and_probe or qwen3_moe or qwen_vl"` dentro de `ocabra-api` con extras `.[dev,vllm]`: OK (`6 passed`)
+- `vitest --no-cache src/__tests__/HFModelCard.test.tsx src/__tests__/ModelConfigModal.test.tsx` en contenedor `node:20-alpine`: OK
+- `npx tsc -b` en contenedor `node:20-alpine`: OK
+- `vitest --no-cache src/__tests__/Explore.test.ts src/__tests__/HFModelCard.test.tsx src/__tests__/ModelConfigModal.test.tsx` en contenedor `node:20-alpine`: OK
+- `vitest --no-cache src/__tests__/Explore.test.ts src/__tests__/ExploreFlow.test.tsx src/__tests__/HFModelCard.test.tsx src/__tests__/ModelConfigModal.test.tsx && npx tsc -b` en contenedor `node:20-alpine`: OK
+- `./node_modules/.bin/playwright test --project=chrome` en `frontend/`: OK (`1 passed`)
+- Validación real ad hoc con `/usr/bin/google-chrome` headless contra `http://127.0.0.1:8484/explore` tras `docker compose up -d --build api frontend`: OK
+- `python -m pytest tests/test_vllm_runtime_probe.py tests/test_registry.py -q -k "remote_code or missing_chat_template or missing_tool_parser or missing_reasoning_parser or needs_hf_overrides"` en `ocabra-api` con extras `.[dev,vllm]`: OK (`9 passed`)
+- `python -m ruff check ocabra/schemas/registry.py ocabra/registry/huggingface.py ocabra/registry/vllm_runtime_probe.py tests/test_vllm_runtime_probe.py tests/test_registry.py` en `ocabra-api`: OK
 
 ### Lo que ya existe
 
@@ -75,11 +291,10 @@ Revisar estas secciones oficiales antes de implementar cada bloque:
 ### Lo que falta
 
 - Clasificación real de compatibilidad `vLLM`.
-- Soporte explícito para `Transformers backend`.
-- Soporte explícito para `pooling`, `rerank`, `classification`.
-- `hf_overrides`, `chat_template`, `model_impl`, `runner`.
-- `tool_call_parser`, `reasoning_parser`, `structured outputs`.
-- `language_model_only` y mejores flags multimodales.
+- Soporte explícito más sólido para `Transformers backend`.
+- Endurecer contratos y compatibilidad real de `pooling`, `rerank`, `classification` y `score`.
+- `structured outputs` end-to-end.
+- Mejoras multimodales adicionales sobre `language_model_only`.
 - Runtime probe real de compatibilidad.
 - Recipes por familia/modelo.
 - Matriz seria de quantization / compatibilidad por hardware.
@@ -102,7 +317,32 @@ Revisar estas secciones oficiales antes de implementar cada bloque:
 
 ## Roadmap recomendado
 
+### Estado del roadmap a 2026-03-13
+
+| Fase | Estado | Nota |
+|------|--------|------|
+| **Fase 1. Compatibilidad y serving mode** | **Parcial** | Clasificación y UI de Explore ya operativas. Falta afinar task coverage completa y estados multimodales/recipes. |
+| **Fase 2. Parámetros críticos de vLLM** | **Casi completa** | Ya están `model_impl`, `runner`, `hf_overrides`, `chat_template`, `chat_template_content_format`, `generation_config`, `override_generation_config`, `tool_call_parser`, `tool_parser_plugin`, `reasoning_parser`, `language_model_only`. Queda separar mejor presets/UX avanzada y validar más casos reales. |
+| **Fase 3. Tasks reales** | **Parcial** | `pooling`, `rerank`, `classification` y `score` ya tienen capacidad base, endpoints y Playground adaptado. Falta endurecer más la compatibilidad real y cubrir mejor las respuestas upstream. |
+| **Fase 4. Recipes por familia** | **Muy avanzada** | Ya existen recipes por familia/subfamilia, separación entre compatibilidad y tuning, preconfiguración automática y UI final diferenciando recipe base vs recomendación del probe. Queda ampliar cobertura fina. |
+| **Fase 5. Runtime probe** | **Avanzada** | Ya existe probe real con arranque corto de `vLLM` para modelos locales/cacheados, fallback al probe ligero y persistencia de `observed_at`. Falta enriquecer detección de recetas/overrides y cubrir más fallos reales. |
+| **Fase 6. Tool calling / reasoning / structured outputs** | **Pendiente** | Solo está resuelta la capa de flags y clasificación básica; no la cobertura funcional end-to-end. |
+| **Fase 7. Multimodal serio** | **Pendiente** | Sin `language_model_only` ni tuning MM específico. |
+| **Fase 8. LoRA y adaptadores** | **Pendiente** | No iniciado. |
+| **Fase 9. Quantization y hardware** | **Pendiente** | Solo warnings puntuales; sin matriz seria aún. |
+| **Fase 10. Presets y observabilidad** | **Pendiente** | No iniciado. |
+
+### Siguiente bloque recomendado
+
+Siguiente bloque de mayor valor, manteniendo continuidad con lo ya entregado:
+
+1. Terminar Fase 3 con `rerank`, `classification` y `score` más sólidos.
+2. Subir Fase 5 desde probe ligero a probe con arranque real de `vLLM` para modelos ya descargados.
+3. Empezar Fase 4 con recipes por familia para reducir configuración manual.
+
 ## Fase 1. Modelo de compatibilidad y serving mode
+
+**Estado actual:** Parcialmente completada.
 
 ### Objetivo
 
@@ -145,6 +385,8 @@ Añadir un modelo de compatibilidad con estados como:
   - incompatible
 
 ## Fase 2. Nuevos parámetros críticos de vLLM
+
+**Estado actual:** Casi completada.
 
 ### Objetivo
 
@@ -189,6 +431,8 @@ Exponer la capa de control mínima para llegar a más modelos.
 
 ## Fase 3. Tasks reales: generate, pooling, embeddings, rerank
 
+**Estado actual:** Parcialmente completada.
+
 ### Objetivo
 
 Que `oCabra` no trate todo como chat/completion.
@@ -226,6 +470,8 @@ Ampliar detección y capacidades para:
 - Un reranker/pooling model aparece y se sirve con el modo correcto.
 
 ## Fase 4. Recipes por familia
+
+**Estado actual:** Pendiente.
 
 ### Objetivo
 

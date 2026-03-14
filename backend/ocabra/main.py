@@ -79,6 +79,22 @@ async def _ollama_inventory_loop(model_manager, stop_event: asyncio.Event) -> No
     logger.info("ollama_inventory_loop_stopped")
 
 
+async def _service_idle_unload_loop(service_manager, stop_event: asyncio.Event) -> None:
+    interval_s = 15
+    logger.info("service_idle_unload_loop_started", interval_s=interval_s)
+    while not stop_event.is_set():
+        try:
+            await service_manager.check_idle_unloads()
+        except Exception as exc:
+            logger.warning("service_idle_unload_loop_error", error=str(exc))
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    logger.info("service_idle_unload_loop_stopped")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────
@@ -125,6 +141,12 @@ async def lifespan(app: FastAPI):
         await model_manager.sync_ollama_inventory(installed_ollama, loaded_ollama)
     logger.info("model_manager_ready")
 
+    from ocabra.core.service_manager import ServiceManager
+    service_manager = ServiceManager()
+    await service_manager.start()
+    app.state.service_manager = service_manager
+    logger.info("service_manager_ready")
+
     idle_eviction_stop = asyncio.Event()
     idle_eviction_task = asyncio.create_task(
         _idle_eviction_loop(model_manager, idle_eviction_stop),
@@ -134,6 +156,11 @@ async def lifespan(app: FastAPI):
     ollama_inventory_task = asyncio.create_task(
         _ollama_inventory_loop(model_manager, ollama_inventory_stop),
         name="ollama-inventory-loop",
+    )
+    service_idle_stop = asyncio.Event()
+    service_idle_task = asyncio.create_task(
+        _service_idle_unload_loop(service_manager, service_idle_stop),
+        name="service-idle-unload-loop",
     )
 
     # Stream 2-A: vLLM backend registration
@@ -163,6 +190,11 @@ async def lifespan(app: FastAPI):
     ollama_inventory_task.cancel()
     with suppress(asyncio.CancelledError):
         await ollama_inventory_task
+
+    service_idle_stop.set()
+    service_idle_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await service_idle_task
 
     await gpu_manager.stop()
 
@@ -211,9 +243,11 @@ app.include_router(ws_router, prefix="/ocabra")
 # Stream 1-C: Registry + Downloads
 from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
 from ocabra.api.internal.registry import router as registry_router  # noqa: E402
+from ocabra.api.internal.services import router as services_router  # noqa: E402
 
 app.include_router(registry_router, prefix="/ocabra")
 app.include_router(downloads_router, prefix="/ocabra")
+app.include_router(services_router, prefix="/ocabra")
 
 # Stream 3-A: OpenAI API
 from ocabra.api.openai import router as openai_router  # noqa: E402

@@ -23,6 +23,7 @@ class DownloadCreateRequest(BaseModel):
     source: Literal["huggingface", "ollama"]
     model_ref: str
     artifact: str | None = None
+    register_config: dict | None = None
 
 
 class DownloadManager:
@@ -59,7 +60,13 @@ class DownloadManager:
             await self._worker_task
         self._worker_task = None
 
-    async def enqueue(self, source: str, model_ref: str, artifact: str | None = None) -> DownloadJob:
+    async def enqueue(
+        self,
+        source: str,
+        model_ref: str,
+        artifact: str | None = None,
+        register_config: dict | None = None,
+    ) -> DownloadJob:
         if source not in {"huggingface", "ollama"}:
             raise ValueError("source must be 'huggingface' or 'ollama'")
 
@@ -69,6 +76,7 @@ class DownloadManager:
             source=source,
             model_ref=model_ref,
             artifact=artifact,
+            register_config=register_config,
             status="queued",
             progress_pct=0.0,
             speed_mb_s=None,
@@ -235,8 +243,12 @@ class DownloadManager:
             await mm.add_model(
                 model_id=model_id,
                 backend_type=backend_type,
-                display_name=model_id.split("/")[-1] if "/" in model_id else model_id,
-                load_policy="on_demand",
+                display_name=(job.register_config or {}).get("display_name")
+                or (model_id.split("/")[-1] if "/" in model_id else model_id),
+                load_policy=(job.register_config or {}).get("load_policy", "on_demand"),
+                auto_reload=bool((job.register_config or {}).get("auto_reload", False)),
+                preferred_gpu=(job.register_config or {}).get("preferred_gpu"),
+                extra_config=(job.register_config or {}).get("extra_config"),
             )
         except Exception:
             pass  # Non-fatal: model can be registered manually
@@ -293,7 +305,12 @@ async def list_downloads() -> list[DownloadJob]:
 @router.post("/downloads", response_model=DownloadJob)
 async def enqueue_download(request: DownloadCreateRequest) -> DownloadJob:
     try:
-        return await download_manager.enqueue(source=request.source, model_ref=request.model_ref, artifact=request.artifact)
+        return await download_manager.enqueue(
+            source=request.source,
+            model_ref=request.model_ref,
+            artifact=request.artifact,
+            register_config=request.register_config,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

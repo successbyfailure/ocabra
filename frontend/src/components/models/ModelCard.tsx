@@ -16,6 +16,7 @@ interface ModelCardProps {
 function modelType(model: ModelState): string {
   if (model.capabilities.imageGeneration) return "image"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
+  if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
   return "llm"
 }
 

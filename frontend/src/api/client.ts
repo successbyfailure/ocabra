@@ -39,6 +39,58 @@ function toVLLMConfig(raw: unknown): ModelState["extraConfig"] {
   return {
     ...data,
     vllm: {
+      recipeId: (vllm.recipe_id ?? vllm.recipeId ?? null) as string | null,
+      recipeNotes: Array.isArray(vllm.recipe_notes ?? vllm.recipeNotes)
+        ? ((vllm.recipe_notes ?? vllm.recipeNotes) as unknown[]).map(String)
+        : [],
+      recipeModelImpl: (vllm.recipe_model_impl ?? vllm.recipeModelImpl ?? null) as
+        | "auto"
+        | "vllm"
+        | "transformers"
+        | null,
+      recipeRunner: (vllm.recipe_runner ?? vllm.recipeRunner ?? null) as
+        | "generate"
+        | "pooling"
+        | null,
+      suggestedConfig: isRecord(vllm.suggested_config ?? vllm.suggestedConfig)
+        ? ((vllm.suggested_config ?? vllm.suggestedConfig) as Record<string, unknown>)
+        : {},
+      suggestedTuning: isRecord(vllm.suggested_tuning ?? vllm.suggestedTuning)
+        ? ((vllm.suggested_tuning ?? vllm.suggestedTuning) as Record<string, unknown>)
+        : {},
+      probeStatus: (vllm.probe_status ?? vllm.probeStatus ?? null) as import("@/types").HFVLLMRuntimeProbe["status"] | null,
+      probeReason: (vllm.probe_reason ?? vllm.probeReason ?? null) as string | null,
+      probeObservedAt: (vllm.probe_observed_at ?? vllm.probeObservedAt ?? null) as string | null,
+      probeRecommendedModelImpl:
+        (vllm.probe_recommended_model_impl ?? vllm.probeRecommendedModelImpl ?? null) as
+          | "auto"
+          | "vllm"
+          | "transformers"
+          | null,
+      probeRecommendedRunner:
+        (vllm.probe_recommended_runner ?? vllm.probeRecommendedRunner ?? null) as
+          | "generate"
+          | "pooling"
+          | null,
+      modelImpl: (vllm.model_impl ?? vllm.modelImpl ?? null) as string | null,
+      runner: (vllm.runner ?? null) as string | null,
+      hfOverrides: (vllm.hf_overrides ?? vllm.hfOverrides ?? null) as string | Record<string, unknown> | null,
+      chatTemplate: (vllm.chat_template ?? vllm.chatTemplate ?? null) as string | null,
+      chatTemplateContentFormat:
+        (vllm.chat_template_content_format ?? vllm.chatTemplateContentFormat ?? null) as string | null,
+      generationConfig: (vllm.generation_config ?? vllm.generationConfig ?? null) as string | null,
+      overrideGenerationConfig:
+        (vllm.override_generation_config ?? vllm.overrideGenerationConfig ?? null) as
+          | string
+          | Record<string, unknown>
+          | null,
+      toolCallParser: (vllm.tool_call_parser ?? vllm.toolCallParser ?? null) as string | null,
+      toolParserPlugin: (vllm.tool_parser_plugin ?? vllm.toolParserPlugin ?? null) as string | null,
+      reasoningParser: (vllm.reasoning_parser ?? vllm.reasoningParser ?? null) as string | null,
+      languageModelOnly:
+        vllm.language_model_only == null && vllm.languageModelOnly == null
+          ? null
+          : Boolean(vllm.language_model_only ?? vllm.languageModelOnly),
       maxNumSeqs:
         vllm.max_num_seqs == null && vllm.maxNumSeqs == null
           ? null
@@ -75,6 +127,91 @@ function toVLLMConfig(raw: unknown): ModelState["extraConfig"] {
   }
 }
 
+function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
+  const data = isRecord(raw) ? raw : null
+  if (!data) return null
+  const probeRaw = data.runtime_probe ?? data.runtimeProbe
+  const probe = isRecord(probeRaw)
+    ? {
+        status: String(probeRaw.status ?? "unknown") as
+          | "supported_native"
+          | "supported_transformers_backend"
+          | "supported_pooling"
+          | "needs_remote_code"
+          | "missing_chat_template"
+          | "missing_tool_parser"
+          | "missing_reasoning_parser"
+          | "needs_hf_overrides"
+          | "unsupported_tokenizer"
+          | "unsupported_architecture"
+          | "unavailable"
+          | "unknown",
+        reason: (probeRaw.reason ?? null) as string | null,
+        recommendedModelImpl: (probeRaw.recommended_model_impl ?? probeRaw.recommendedModelImpl ?? null) as
+          | "auto"
+          | "vllm"
+          | "transformers"
+          | null,
+        recommendedRunner: (probeRaw.recommended_runner ?? probeRaw.recommendedRunner ?? null) as
+          | "generate"
+          | "pooling"
+          | null,
+        tokenizerLoad:
+          probeRaw.tokenizer_load == null && probeRaw.tokenizerLoad == null
+            ? null
+            : Boolean(probeRaw.tokenizer_load ?? probeRaw.tokenizerLoad),
+        configLoad:
+          probeRaw.config_load == null && probeRaw.configLoad == null
+            ? null
+            : Boolean(probeRaw.config_load ?? probeRaw.configLoad),
+        observedAt: (probeRaw.observed_at ?? probeRaw.observedAt ?? null) as string | null,
+      }
+    : null
+
+  return {
+    classification: String(data.classification ?? "unknown") as
+      | "native_vllm"
+      | "transformers_backend"
+      | "pooling"
+      | "unsupported"
+      | "unknown",
+    label: String(data.label ?? "unknown"),
+    modelImpl: (data.model_impl ?? data.modelImpl ?? null) as "auto" | "vllm" | "transformers" | null,
+    runner: (data.runner ?? null) as "generate" | "pooling" | null,
+    taskMode: (data.task_mode ?? data.taskMode ?? null) as
+      | "generate"
+      | "multimodal_generate"
+      | "pooling"
+      | "multimodal_pooling"
+      | null,
+    requiredOverrides: Array.isArray(data.required_overrides ?? data.requiredOverrides)
+      ? ((data.required_overrides ?? data.requiredOverrides) as unknown[]).map(String)
+      : [],
+    recipeId: (data.recipe_id ?? data.recipeId ?? null) as string | null,
+    recipeNotes: Array.isArray(data.recipe_notes ?? data.recipeNotes)
+      ? ((data.recipe_notes ?? data.recipeNotes) as unknown[]).map(String)
+      : [],
+    recipeModelImpl: (data.recipe_model_impl ?? data.recipeModelImpl ?? null) as
+      | "auto"
+      | "vllm"
+      | "transformers"
+      | null,
+    recipeRunner: (data.recipe_runner ?? data.recipeRunner ?? null) as
+      | "generate"
+      | "pooling"
+      | null,
+    suggestedConfig:
+      isRecord(data.suggested_config ?? data.suggestedConfig)
+        ? ((data.suggested_config ?? data.suggestedConfig) as Record<string, unknown>)
+        : {},
+    suggestedTuning:
+      isRecord(data.suggested_tuning ?? data.suggestedTuning)
+        ? ((data.suggested_tuning ?? data.suggestedTuning) as Record<string, unknown>)
+        : {},
+    runtimeProbe: probe,
+  }
+}
+
 function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
   const data = isRecord(raw) ? raw : {}
   return {
@@ -83,6 +220,10 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     tools: Boolean(data.tools),
     vision: Boolean(data.vision),
     embeddings: Boolean(data.embeddings),
+    pooling: Boolean(data.pooling),
+    rerank: Boolean(data.rerank),
+    classification: Boolean(data.classification),
+    score: Boolean(data.score),
     reasoning: Boolean(data.reasoning),
     imageGeneration: Boolean(data.image_generation ?? data.imageGeneration),
     audioTranscription: Boolean(data.audio_transcription ?? data.audioTranscription),
@@ -150,11 +291,25 @@ function toModelState(raw: unknown): ModelState {
 
 function toDownloadJob(raw: unknown): DownloadJob {
   const data = isRecord(raw) ? raw : {}
+  const registerConfigRaw = isRecord(data.register_config ?? data.registerConfig)
+    ? ((data.register_config ?? data.registerConfig) as Record<string, unknown>)
+    : null
   return {
     jobId: String(data.job_id ?? data.jobId ?? ""),
     source: String(data.source ?? "huggingface") as DownloadSource,
     modelRef: String(data.model_ref ?? data.modelRef ?? ""),
     artifact: (data.artifact ?? null) as string | null,
+    registerConfig: registerConfigRaw
+      ? {
+          displayName: registerConfigRaw.display_name as string | undefined,
+          loadPolicy: (registerConfigRaw.load_policy ?? "on_demand") as "pin" | "warm" | "on_demand",
+          autoReload: Boolean(registerConfigRaw.auto_reload),
+          preferredGpu: (registerConfigRaw.preferred_gpu ?? null) as number | null,
+          extraConfig: isRecord(registerConfigRaw.extra_config)
+            ? (registerConfigRaw.extra_config as { vllm?: import("@/types").VLLMConfig })
+            : undefined,
+        }
+      : null,
     status: String(data.status ?? "queued") as DownloadJob["status"],
     progressPct: Number(data.progress_pct ?? data.progressPct ?? 0),
     speedMbS: data.speed_mb_s === null || data.speedMbS === null ? null : Number(data.speed_mb_s ?? data.speedMbS ?? 0),
@@ -179,6 +334,7 @@ function toHFModelCard(raw: unknown): HFModelCard {
     suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelCard["suggestedBackend"],
     compatibility: String(data.compatibility ?? "unknown"),
     compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
+    vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
   }
 }
 
@@ -190,6 +346,7 @@ function toHFModelDetail(raw: unknown): HFModelDetail {
     readmeExcerpt: (data.readme_excerpt ?? data.readmeExcerpt ?? null) as string | null,
     suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelDetail["suggestedBackend"],
     estimatedVramGb: data.estimated_vram_gb != null ? Number(data.estimated_vram_gb) : (data.estimatedVramGb != null ? Number(data.estimatedVramGb) : null),
+    vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
   }
 }
 
@@ -207,6 +364,7 @@ function toHFModelVariant(raw: unknown): HFModelVariant {
     installable: data.installable == null ? true : Boolean(data.installable),
     compatibility: String(data.compatibility ?? "unknown"),
     compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
+    vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
   }
 }
 
@@ -304,10 +462,18 @@ export const api = {
 
   downloads: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/downloads")).map(toDownloadJob),
-    enqueue: (source: DownloadSource, modelRef: string, artifact?: string | null) =>
-      request<unknown>("POST", "/ocabra/downloads", { source, model_ref: modelRef, artifact: artifact ?? null }).then(
-        toDownloadJob,
-      ),
+    enqueue: (
+      source: DownloadSource,
+      modelRef: string,
+      artifact?: string | null,
+      registerConfig?: DownloadJob["registerConfig"],
+    ) =>
+      request<unknown>("POST", "/ocabra/downloads", {
+        source,
+        model_ref: modelRef,
+        artifact: artifact ?? null,
+        register_config: registerConfig ?? null,
+      }).then(toDownloadJob),
     cancel: (jobId: string) => request<void>("DELETE", `/ocabra/downloads/${encodeURIComponent(jobId)}`),
     clearHistory: (status = "failed,cancelled,completed") =>
       request<{ deleted: number }>("DELETE", `/ocabra/downloads?status=${encodeURIComponent(status)}`),

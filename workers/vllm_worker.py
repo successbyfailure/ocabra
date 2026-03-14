@@ -72,6 +72,63 @@ def parse_args() -> argparse.Namespace:
         help="Maximum model context length override",
     )
     p.add_argument(
+        "--model-impl",
+        default=None,
+        choices=["auto", "vllm", "transformers"],
+        help="Model implementation selection",
+    )
+    p.add_argument(
+        "--runner",
+        default=None,
+        choices=["generate", "pooling"],
+        help="Runner selection for generative or pooling tasks",
+    )
+    p.add_argument(
+        "--hf-overrides",
+        default=None,
+        help="JSON string with Hugging Face config overrides",
+    )
+    p.add_argument(
+        "--chat-template",
+        default=None,
+        help="Path to an alternate chat template file or inline template",
+    )
+    p.add_argument(
+        "--chat-template-content-format",
+        default=None,
+        help="Chat template content format override",
+    )
+    p.add_argument(
+        "--generation-config",
+        default=None,
+        help="Generation config source or path",
+    )
+    p.add_argument(
+        "--override-generation-config",
+        default=None,
+        help="JSON generation config overrides",
+    )
+    p.add_argument(
+        "--tool-call-parser",
+        default=None,
+        help="Tool call parser name for automatic tool choice",
+    )
+    p.add_argument(
+        "--tool-parser-plugin",
+        default=None,
+        help="Optional tool parser plugin module",
+    )
+    p.add_argument(
+        "--reasoning-parser",
+        default=None,
+        help="Reasoning parser name for models that expose reasoning traces",
+    )
+    p.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Run multimodal models in language-only mode",
+    )
+    p.add_argument(
         "--enable-chunked-prefill",
         action="store_true",
         help="Enable chunked prefill explicitly",
@@ -140,6 +197,28 @@ def main() -> None:
         cmd.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
     if args.max_model_len:
         cmd.extend(["--max-model-len", str(args.max_model_len)])
+    if args.model_impl:
+        cmd.extend(["--model-impl", args.model_impl])
+    if args.runner:
+        cmd.extend(["--runner", args.runner])
+    if args.hf_overrides:
+        cmd.extend(["--hf-overrides", args.hf_overrides])
+    if args.chat_template:
+        cmd.extend(["--chat-template", args.chat_template])
+    if args.chat_template_content_format:
+        cmd.extend(["--chat-template-content-format", args.chat_template_content_format])
+    if args.generation_config:
+        cmd.extend(["--generation-config", args.generation_config])
+    if args.override_generation_config:
+        cmd.extend(["--override-generation-config", args.override_generation_config])
+    if args.tool_call_parser:
+        cmd.extend(["--tool-call-parser", args.tool_call_parser, "--enable-auto-tool-choice"])
+    if args.tool_parser_plugin:
+        cmd.extend(["--tool-parser-plugin", args.tool_parser_plugin])
+    if args.reasoning_parser:
+        cmd.extend(["--reasoning-parser", args.reasoning_parser])
+    if args.language_model_only:
+        cmd.append("--language-model-only")
     if args.enable_chunked_prefill:
         cmd.append("--enable-chunked-prefill")
     if args.swap_space:

@@ -7,14 +7,17 @@ import { DownloadQueue } from "@/components/downloads/DownloadQueue"
 import { HFModelCard } from "@/components/explore/HFModelCard"
 import { OllamaModelCard } from "@/components/explore/OllamaModelCard"
 import { SearchFilters } from "@/components/explore/SearchFilters"
+import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useDownloadStore } from "@/stores/downloadStore"
 import type {
   DownloadJob,
   DownloadSource,
   HFModelCard as HFCardType,
   HFModelVariant,
+  LoadPolicy,
   OllamaModelCard as OllamaCardType,
   OllamaModelVariant,
+  VLLMConfig,
 } from "@/types"
 
 interface InstallTarget {
@@ -22,6 +25,99 @@ interface InstallTarget {
   modelRef: string
   title: string
   ollamaBase?: string
+}
+
+export function getProbePreconfigurationNotice(variant: HFModelVariant | null): string | null {
+  const support = variant?.vllmSupport
+  const probe = support?.runtimeProbe
+  if (!support || !probe) return null
+  if (!probe.recommendedModelImpl && !probe.recommendedRunner) return null
+
+  return [
+    "La preconfiguracion automatica usara la recomendacion verificada por probe",
+    probe.recommendedModelImpl ? `model_impl=${probe.recommendedModelImpl}` : null,
+    probe.recommendedRunner ? `runner=${probe.recommendedRunner}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ")
+}
+
+export function getRecipeProbeDifferenceNotice(variant: HFModelVariant | null): string | null {
+  const support = variant?.vllmSupport
+  const probe = support?.runtimeProbe
+  if (!support || !probe) return null
+
+  const recipeModelImpl = support.recipeModelImpl
+  const recipeRunner = support.recipeRunner
+  const finalModelImpl = probe.recommendedModelImpl ?? support.modelImpl
+  const finalRunner = probe.recommendedRunner ?? support.runner
+
+  if (
+    (!recipeModelImpl || recipeModelImpl === finalModelImpl) &&
+    (!recipeRunner || recipeRunner === finalRunner)
+  ) {
+    return null
+  }
+
+  return [
+    "La recomendacion final del probe difiere de la recipe base",
+    recipeModelImpl ? `recipe model_impl=${recipeModelImpl}` : null,
+    recipeRunner ? `recipe runner=${recipeRunner}` : null,
+    finalModelImpl ? `final model_impl=${finalModelImpl}` : null,
+    finalRunner ? `final runner=${finalRunner}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ")
+}
+
+function toRecipeRegisterConfig(
+  title: string,
+  loadPolicy: LoadPolicy,
+  variant: HFModelVariant | null,
+) {
+  const support = variant?.vllmSupport
+  if (!support) {
+    return {
+      displayName: title,
+      loadPolicy,
+    }
+  }
+
+  const vllmConfig: VLLMConfig = {
+    recipeId: support.recipeId,
+    recipeNotes: support.recipeNotes,
+    recipeModelImpl: support.recipeModelImpl,
+    recipeRunner: support.recipeRunner,
+    suggestedConfig: support.suggestedConfig,
+    suggestedTuning: support.suggestedTuning,
+    probeStatus: support.runtimeProbe?.status ?? null,
+    probeReason: support.runtimeProbe?.reason ?? null,
+    probeObservedAt: support.runtimeProbe?.observedAt ?? null,
+    probeRecommendedModelImpl: support.runtimeProbe?.recommendedModelImpl ?? null,
+    probeRecommendedRunner: support.runtimeProbe?.recommendedRunner ?? null,
+    modelImpl: support.modelImpl,
+    runner: support.runner,
+  }
+
+  for (const [key, value] of Object.entries(support.suggestedConfig)) {
+    if (key === "tool_call_parser") vllmConfig.toolCallParser = String(value)
+    if (key === "reasoning_parser") vllmConfig.reasoningParser = String(value)
+    if (key === "chat_template") vllmConfig.chatTemplate = String(value)
+    if (key === "hf_overrides") {
+      vllmConfig.hfOverrides =
+        typeof value === "string" || (typeof value === "object" && value !== null)
+          ? (value as string | Record<string, unknown>)
+          : null
+    }
+  }
+
+  return {
+    displayName: title,
+    loadPolicy,
+    extraConfig: {
+      vllm: vllmConfig,
+    },
+  }
 }
 
 export function Explore() {
@@ -41,10 +137,14 @@ export function Explore() {
   const [selectedVariant, setSelectedVariant] = useState("")
   const [variantLoading, setVariantLoading] = useState(false)
   const [targetDir, setTargetDir] = useState("/models")
-  const [loadPolicy, setLoadPolicy] = useState("on_demand")
+  const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand")
   const selectedHFVariant = installTarget?.source === "huggingface"
     ? hfVariants.find((v) => v.variantId === selectedHFVariantId) ?? null
     : null
+  const probePreconfigurationNotice = getProbePreconfigurationNotice(selectedHFVariant)
+  const recipeProbeDifferenceNotice = getRecipeProbeDifferenceNotice(selectedHFVariant)
+  const probeStatusLabel = getProbeStatusLabel(selectedHFVariant?.vllmSupport?.runtimeProbe?.status)
+  const probeOverrideHint = getProbeOverrideHint(selectedHFVariant?.vllmSupport?.runtimeProbe?.status)
 
   const jobs = useDownloadStore((state) => state.jobs)
   const setJobs = useDownloadStore((state) => state.setJobs)
@@ -189,10 +289,22 @@ export function Explore() {
     }
     const modelRef = installTarget.source === "ollama" ? (selectedVariant || installTarget.modelRef) : installTarget.modelRef
     const artifact = selectedHFVariant?.artifact ?? null
+    const registerConfig =
+      installTarget.source === "huggingface"
+        ? toRecipeRegisterConfig(installTarget.title, loadPolicy, selectedHFVariant)
+        : {
+            displayName: installTarget.title,
+            loadPolicy,
+          }
     try {
-      const job = await api.downloads.enqueue(installTarget.source, modelRef, artifact)
+      const job = await api.downloads.enqueue(
+        installTarget.source,
+        modelRef,
+        artifact,
+        registerConfig,
+      )
       addJob(job)
-      toast.success(`Descarga iniciada en ${targetDir} (${loadPolicy})`)
+      toast.success(`Descarga iniciada en ${targetDir} (${loadPolicy}) con preconfiguracion`)
       setInstallTarget(null)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No se pudo iniciar descarga")
@@ -398,6 +510,67 @@ export function Explore() {
                       {selectedHFVariant.compatibilityReason}
                     </div>
                   )}
+                  {selectedHFVariant?.vllmSupport && (
+                    <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                      {`vLLM: ${selectedHFVariant.vllmSupport.label}`}
+                      {selectedHFVariant.vllmSupport.modelImpl
+                        ? ` · model_impl=${selectedHFVariant.vllmSupport.modelImpl}`
+                        : ""}
+                      {selectedHFVariant.vllmSupport.runner
+                        ? ` · runner=${selectedHFVariant.vllmSupport.runner}`
+                        : ""}
+                      {selectedHFVariant.vllmSupport.requiredOverrides.length > 0
+                        ? ` · requiere ${selectedHFVariant.vllmSupport.requiredOverrides.join(", ")}`
+                        : ""}
+                      {probeStatusLabel
+                        ? ` · probe=${probeStatusLabel}`
+                        : ""}
+                    </div>
+                  )}
+                  {selectedHFVariant?.vllmSupport?.runtimeProbe && (
+                    <div className="rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
+                      {`Recomendacion verificada por probe`}
+                      {selectedHFVariant.vllmSupport.runtimeProbe.recommendedModelImpl
+                        ? ` · model_impl=${selectedHFVariant.vllmSupport.runtimeProbe.recommendedModelImpl}`
+                        : ""}
+                      {selectedHFVariant.vllmSupport.runtimeProbe.recommendedRunner
+                        ? ` · runner=${selectedHFVariant.vllmSupport.runtimeProbe.recommendedRunner}`
+                        : ""}
+                      {selectedHFVariant.vllmSupport.runtimeProbe.reason
+                        ? ` · ${selectedHFVariant.vllmSupport.runtimeProbe.reason}`
+                        : ""}
+                      {selectedHFVariant.vllmSupport.runtimeProbe.observedAt
+                        ? ` · observado=${selectedHFVariant.vllmSupport.runtimeProbe.observedAt}`
+                        : ""}
+                      {probeOverrideHint ? ` · ${probeOverrideHint}` : ""}
+                    </div>
+                  )}
+                  {probePreconfigurationNotice && (
+                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                      {probePreconfigurationNotice}
+                    </div>
+                  )}
+                  {recipeProbeDifferenceNotice && (
+                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                      {recipeProbeDifferenceNotice}
+                    </div>
+                  )}
+                  {selectedHFVariant?.vllmSupport?.recipeId && (
+                    <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+                      {`Al completar la descarga se preconfigurara recipe=${selectedHFVariant.vllmSupport.recipeId}`}
+                      {selectedHFVariant.vllmSupport.recipeModelImpl
+                        ? ` · recipe_model_impl=${selectedHFVariant.vllmSupport.recipeModelImpl}`
+                        : ""}
+                      {selectedHFVariant.vllmSupport.recipeRunner
+                        ? ` · recipe_runner=${selectedHFVariant.vllmSupport.recipeRunner}`
+                        : ""}
+                      {Object.keys(selectedHFVariant.vllmSupport.suggestedConfig).length > 0
+                        ? ` · ${Object.entries(selectedHFVariant.vllmSupport.suggestedConfig)
+                            .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+                            .join(", ")}`
+                        : ""}
+                    </div>
+                  )}
                 </>
               )}
               <label className="block text-sm text-muted-foreground">
@@ -412,7 +585,7 @@ export function Explore() {
                 load_policy
                 <select
                   value={loadPolicy}
-                  onChange={(event) => setLoadPolicy(event.target.value)}
+                  onChange={(event) => setLoadPolicy(event.target.value as LoadPolicy)}
                   className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
                 >
                   <option value="on_demand">on_demand</option>

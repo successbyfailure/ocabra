@@ -9,9 +9,10 @@ import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import type { LoadPolicy, ModelState, ModelStatus, VLLMConfig } from "@/types"
 
-function inferType(model: ModelState): "llm" | "image" | "audio" {
+function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
   if (model.capabilities.imageGeneration) return "image"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
+  if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
   return "llm"
 }
 
@@ -20,7 +21,7 @@ export function Models() {
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<ModelStatus | "all">("all")
-  const [typeFilter, setTypeFilter] = useState<"all" | "llm" | "image" | "audio">("all")
+  const [typeFilter, setTypeFilter] = useState<"all" | "llm" | "image" | "audio" | "pooling">("all")
   const [gpuFilter, setGpuFilter] = useState<string>("all")
   const [busyModelId, setBusyModelId] = useState<string | null>(null)
   const [configModel, setConfigModel] = useState<ModelState | null>(null)
@@ -160,11 +161,12 @@ export function Models() {
 
         <select
           value={typeFilter}
-          onChange={(event) => setTypeFilter(event.target.value as "all" | "llm" | "image" | "audio")}
+          onChange={(event) => setTypeFilter(event.target.value as "all" | "llm" | "image" | "audio" | "pooling")}
           className="rounded-md border border-border bg-background px-3 py-2 text-sm"
         >
           <option value="all">Tipo: todos</option>
           <option value="llm">llm</option>
+          <option value="pooling">pooling</option>
           <option value="image">image</option>
           <option value="audio">audio</option>
         </select>
