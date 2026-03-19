@@ -138,6 +138,12 @@ class VLLMBackend(BackendInterface):
             "--served-model-name",
             model_id,
         ]
+        if self._get_vllm_option(
+            extra_config,
+            "disable_log_requests",
+            self._get_setting("vllm_disable_log_requests"),
+        ):
+            cmd.append("--disable-log-requests")
         model_impl = self._get_vllm_option(
             extra_config, "model_impl", self._get_setting("vllm_model_impl")
         )
@@ -486,6 +492,7 @@ class VLLMBackend(BackendInterface):
         url = f"http://127.0.0.1:{port}{path}"
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, json=body) as resp:
+                resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     yield chunk
 

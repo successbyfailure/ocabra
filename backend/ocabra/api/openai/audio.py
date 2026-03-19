@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import structlog
 from fastapi import APIRouter, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from ._deps import check_capability, ensure_loaded, get_model_manager
 
@@ -70,12 +70,12 @@ async def transcriptions(
             },
         )
         resp.raise_for_status()
-        result = resp.json()
 
     # OpenAI format: {"text": "..."}
-    if response_format == "text":
-        return result.get("text", "")
-    return result
+    normalized_format = str(response_format).lower()
+    if normalized_format in {"text", "srt", "vtt"}:
+        return PlainTextResponse(resp.text)
+    return resp.json()
 
 
 @router.post("/audio/speech", summary="Generate speech")

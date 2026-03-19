@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     vllm_kv_cache_dtype: str | None = None
     # Needed for some custom-tokenizer/custom-model repos on Hugging Face.
     vllm_trust_remote_code: bool = False
+    vllm_disable_log_requests: bool = True
+    # Diffusers worker tuning.
+    diffusers_torch_dtype: str = "auto"
+    diffusers_enable_torch_compile: bool = False
+    diffusers_enable_xformers: bool = False
+    diffusers_offload_mode: str = "none"
+    diffusers_allow_tf32: bool = True
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0
 
@@ -123,6 +130,14 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("diffusers_offload_mode")
+    @classmethod
+    def _validate_diffusers_offload_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "model", "sequential"}:
+            raise ValueError("diffusers_offload_mode must be one of: none, model, sequential")
+        return normalized
 
 
 settings = Settings()

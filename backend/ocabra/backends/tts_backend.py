@@ -1,6 +1,5 @@
 import asyncio
 import os
-import socket
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -79,7 +78,9 @@ class TTSBackend(BackendInterface):
         if not WORKER_PATH.exists():
             raise FileNotFoundError(f"tts_worker.py not found at '{WORKER_PATH}'")
 
-        port = int(kwargs.get("port") or _find_free_port())
+        port = int(kwargs.get("port") or 0)
+        if port == 0:
+            raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
         env = os.environ.copy()
         env.update(kwargs.get("env", {}))
         env["PYTHONUNBUFFERED"] = "1"
@@ -247,9 +248,3 @@ def _infer_tts_family(model_id: str) -> str:
 
 def _content_type_for_format(response_format: str) -> str:
     return FORMAT_CONTENT_TYPES.get(response_format.lower(), "audio/mpeg")
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])

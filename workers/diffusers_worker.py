@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import json
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -98,22 +99,33 @@ def resolve_pipeline_class(pipeline_type: str) -> type:
     return mapping[pipeline_type]
 
 
+def env_flag(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def select_torch_dtype() -> Any:
     if torch is None:
         raise RuntimeError("torch is required to run diffusers_worker")
 
-    if not torch.cuda.is_available():
+    dtype_override = str(os.getenv("DIFFUSERS_TORCH_DTYPE", "auto")).strip().lower()
+    if dtype_override in {"float16", "fp16"}:
+        return torch.float16
+    if dtype_override in {"bfloat16", "bf16"}:
+        return torch.bfloat16
+    if dtype_override in {"float32", "fp32"}:
         return torch.float32
 
-    gpu_name = torch.cuda.get_device_name(0).lower()
-    if "3090" in gpu_name:
-        return torch.bfloat16
+    if not torch.cuda.is_available():
+        return torch.float32
 
     return torch.float16
 
 
 def maybe_compile_pipeline(pipeline: Any) -> None:
     if torch is None:
+        return
+    if not env_flag("DIFFUSERS_ENABLE_TORCH_COMPILE", False):
         return
     if not hasattr(torch, "compile"):
         return
@@ -130,17 +142,33 @@ def maybe_compile_pipeline(pipeline: Any) -> None:
         return
 
 
+def maybe_enable_xformers_attention(pipeline: Any) -> None:
+    if not env_flag("DIFFUSERS_ENABLE_XFORMERS", False):
+        return
+    enable_xformers = getattr(pipeline, "enable_xformers_memory_efficient_attention", None)
+    if callable(enable_xformers):
+        try:
+            enable_xformers()
+        except Exception:
+            return
+
+
 def maybe_enable_cpu_offload(pipeline: Any) -> None:
     if torch is None:
         return
     if not torch.cuda.is_available():
         return
-    if not hasattr(pipeline, "enable_model_cpu_offload"):
+    offload_mode = str(os.getenv("DIFFUSERS_OFFLOAD_MODE", "none")).strip().lower()
+    if offload_mode == "model":
+        enable_model_offload = getattr(pipeline, "enable_model_cpu_offload", None)
+        if callable(enable_model_offload):
+            enable_model_offload()
         return
-
-    total_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    if total_gb <= 12.5:
-        pipeline.enable_model_cpu_offload()
+    if offload_mode == "sequential":
+        enable_sequential_offload = getattr(pipeline, "enable_sequential_cpu_offload", None)
+        if callable(enable_sequential_offload):
+            enable_sequential_offload()
+        return
 
 
 def load_pipeline(state: WorkerState) -> None:
@@ -150,10 +178,16 @@ def load_pipeline(state: WorkerState) -> None:
     pipeline_class = resolve_pipeline_class(state.pipeline_type)
     dtype = select_torch_dtype()
 
+    if torch.cuda.is_available() and env_flag("DIFFUSERS_ALLOW_TF32", True):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     pipeline = pipeline_class.from_pretrained(str(state.model_path), torch_dtype=dtype)
-    if torch.cuda.is_available():
+    offload_mode = str(os.getenv("DIFFUSERS_OFFLOAD_MODE", "none")).strip().lower()
+    if torch.cuda.is_available() and offload_mode == "none":
         pipeline = pipeline.to("cuda")
 
+    maybe_enable_xformers_attention(pipeline)
     maybe_enable_cpu_offload(pipeline)
     maybe_compile_pipeline(pipeline)
     state.pipeline = pipeline

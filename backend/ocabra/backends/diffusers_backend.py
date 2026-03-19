@@ -29,7 +29,6 @@ class DiffusersBackend(BackendInterface):
     def __init__(self) -> None:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._workers: dict[str, WorkerInfo] = {}
-        self._used_ports: set[int] = set()
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         if not gpu_indices:
@@ -39,12 +38,19 @@ class DiffusersBackend(BackendInterface):
         if not model_path.exists():
             raise FileNotFoundError(f"Model path not found: {model_path}")
 
-        port = int(kwargs.get("port") or await self._assign_port())
+        port = int(kwargs.get("port") or 0)
+        if port == 0:
+            raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
         gpu_index = gpu_indices[0]
 
         worker_script = self._worker_script_path()
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+        env["DIFFUSERS_TORCH_DTYPE"] = settings.diffusers_torch_dtype
+        env["DIFFUSERS_ENABLE_TORCH_COMPILE"] = str(settings.diffusers_enable_torch_compile).lower()
+        env["DIFFUSERS_ENABLE_XFORMERS"] = str(settings.diffusers_enable_xformers).lower()
+        env["DIFFUSERS_OFFLOAD_MODE"] = settings.diffusers_offload_mode
+        env["DIFFUSERS_ALLOW_TF32"] = str(settings.diffusers_allow_tf32).lower()
 
         cmd = [
             sys.executable,
@@ -68,7 +74,6 @@ class DiffusersBackend(BackendInterface):
             await self._wait_until_healthy(port=port, process=process, timeout_s=180)
         except Exception:
             await self._terminate_process(process)
-            self._used_ports.discard(port)
             raise
 
         vram_estimate = await self.get_vram_estimate_mb(model_id)
@@ -83,7 +88,6 @@ class DiffusersBackend(BackendInterface):
 
         self._processes[model_id] = process
         self._workers[model_id] = info
-        self._used_ports.add(port)
 
         logger.info(
             "diffusers_worker_loaded",
@@ -96,10 +100,7 @@ class DiffusersBackend(BackendInterface):
 
     async def unload(self, model_id: str) -> None:
         process = self._processes.pop(model_id, None)
-        worker = self._workers.pop(model_id, None)
-
-        if worker:
-            self._used_ports.discard(worker.port)
+        self._workers.pop(model_id, None)
 
         if process is None:
             return
@@ -161,13 +162,6 @@ class DiffusersBackend(BackendInterface):
 
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         raise RuntimeError("Diffusers backend does not support streaming")
-
-    async def _assign_port(self) -> int:
-        for port in range(settings.worker_port_range_start, settings.worker_port_range_end):
-            if port not in self._used_ports:
-                self._used_ports.add(port)
-                return port
-        raise RuntimeError("No available ports in worker port range")
 
     async def _wait_until_healthy(
         self,

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import socket
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -45,7 +44,9 @@ class WhisperBackend(BackendInterface):
         if not WORKER_PATH.exists():
             raise FileNotFoundError(f"whisper_worker.py not found at '{WORKER_PATH}'")
 
-        port = int(kwargs.get("port") or _find_free_port())
+        port = int(kwargs.get("port") or 0)
+        if port == 0:
+            raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
         env = os.environ.copy()
         env.update(kwargs.get("env", {}))
         env["PYTHONUNBUFFERED"] = "1"
@@ -177,13 +178,6 @@ class WhisperBackend(BackendInterface):
                 return True
             await asyncio.sleep(0.5)
         return False
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
 
 def _build_transcription_multipart(
     body: dict,
