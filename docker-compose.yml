@@ -23,12 +23,16 @@ services:
       VLLM_SWAP_SPACE: ${VLLM_SWAP_SPACE:-}
       VLLM_KV_CACHE_DTYPE: ${VLLM_KV_CACHE_DTYPE:-}
       VLLM_TRUST_REMOTE_CODE: ${VLLM_TRUST_REMOTE_CODE:-false}
+      HUNYUAN_UI_URL: ${HUNYUAN_UI_URL:-}
+      COMFYUI_UI_URL: ${COMFYUI_UI_URL:-}
+      A1111_UI_URL: ${A1111_UI_URL:-}
     env_file: .env
 #    ports:
 #      - "8000:8000"
     volumes:
       - /docker/ai-models/ocabra/models:/data/models
       - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,11 +102,15 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       IDLE_TIMEOUT_SECONDS: ${HUNYUAN_IDLE_UNLOAD_SECONDS:-300}
       IDLE_CHECK_INTERVAL_SECONDS: 30
+      HUNYUAN_ENABLE_CPU_OFFLOAD: ${HUNYUAN_ENABLE_CPU_OFFLOAD:-true}
+      MALLOC_TRIM_THRESHOLD_: 0
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
     volumes:
       - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
       - /docker/ai-models/ocabra/models/hunyuan3d:/workspace/Hunyuan3D-2.1/gradio_cache
+    ports:
+      - "${HUNYUAN_PORT:-8480}:8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 20s
@@ -130,6 +138,8 @@ services:
       - /docker/ai-models/ocabra/models/image/controlnet:/opt/ComfyUI/models/controlnet
       - /docker/ai-models/ocabra/models/image/upscalers:/opt/ComfyUI/models/upscale_models
       - /docker/ai-models/ocabra/models/comfyui:/opt/ComfyUI/user
+    ports:
+      - "${COMFYUI_PORT:-8188}:8188"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8188/"]
       interval: 20s
@@ -146,17 +156,22 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      HF_HOME: /root/.cache/huggingface
-      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
-      COMMANDLINE_ARGS: --listen --api --port 7860 --skip-torch-cuda-test
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /home/a1111/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /home/a1111/.cache/huggingface/hub
+      COMMANDLINE_ARGS: --listen --api --port 7860 --skip-torch-cuda-test --enable-insecure-extension-access
     volumes:
-      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
+      - /docker/ai-models/ocabra/hf_cache:/home/a1111/.cache/huggingface
+      - a1111_venv:/opt/stable-diffusion-webui/venv
       - /docker/ai-models/ocabra/models/image/checkpoints:/opt/stable-diffusion-webui/models/Stable-diffusion
       - /docker/ai-models/ocabra/models/image/vae:/opt/stable-diffusion-webui/models/VAE
       - /docker/ai-models/ocabra/models/image/loras:/opt/stable-diffusion-webui/models/Lora
       - /docker/ai-models/ocabra/models/image/embeddings:/opt/stable-diffusion-webui/embeddings
       - /docker/ai-models/ocabra/models/image/upscalers:/opt/stable-diffusion-webui/models/ESRGAN
       - /docker/ai-models/ocabra/models/a1111:/opt/stable-diffusion-webui/config_states
+      - ./services/a1111/ocabra-free-memory:/opt/stable-diffusion-webui/extensions/ocabra-free-memory
+    ports:
+      - "${A1111_PORT:-7860}:7860"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7860/sdapi/v1/memory"]
       interval: 20s
@@ -169,16 +184,15 @@ services:
     image: caddy:2-alpine
     ports:
       - "8484:80"
-      - "${SERVICES_PORTAL_PORT:-8485}:${SERVICES_PORTAL_INTERNAL_PORT:-81}"
+      - "${SERVICES_PORTAL_PORT:-8485}:80"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./caddy/services:/srv/services:ro
       - ./caddy/caddy_data:/data
       - ./caddy/caddy_config:/config
     depends_on:
       - api
       - frontend
-      - hunyuan
-      - comfyui
-      - a1111
     restart: unless-stopped
+
+volumes:
+  a1111_venv:

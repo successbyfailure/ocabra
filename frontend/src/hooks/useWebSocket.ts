@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react"
-import type { GPUState, ModelStatus, WSEvent } from "@/types"
+import type { GPUState, ModelStatus, ServiceStatus, WSEvent } from "@/types"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useDownloadStore } from "@/stores/downloadStore"
+import { useServiceStore } from "@/stores/serviceStore"
 
 const getWebSocketUrl = () =>
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
@@ -67,6 +68,36 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
     }
   }
 
+  if (maybeEvent.type === "service_event") {
+    const data = maybeEvent.data as Record<string, unknown>
+    if (data && typeof data.service_id === "string") {
+      const svc = (data.service ?? {}) as Record<string, unknown>
+      return {
+        type: "service_event",
+        data: {
+          event: String(data.event ?? ""),
+          serviceId: data.service_id,
+          status: String(data.status ?? "unknown") as ServiceStatus,
+          service: {
+            serviceId: String(svc.service_id ?? svc.serviceId ?? data.service_id),
+            serviceType: String(svc.service_type ?? svc.serviceType ?? ""),
+            displayName: String(svc.display_name ?? svc.displayName ?? ""),
+            uiUrl: String(svc.ui_url ?? svc.uiUrl ?? ""),
+            preferredGpu: svc.preferred_gpu == null && svc.preferredGpu == null ? null : Number(svc.preferred_gpu ?? svc.preferredGpu),
+            idleUnloadAfterSeconds: Number(svc.idle_unload_after_seconds ?? svc.idleUnloadAfterSeconds ?? 600),
+            serviceAlive: Boolean(svc.service_alive ?? svc.serviceAlive),
+            runtimeLoaded: Boolean(svc.runtime_loaded ?? svc.runtimeLoaded),
+            status: String(svc.status ?? "unknown") as ServiceStatus,
+            activeModelRef: (svc.active_model_ref ?? svc.activeModelRef ?? null) as string | null,
+            lastActivityAt: (svc.last_activity_at ?? svc.lastActivityAt ?? null) as string | null,
+            lastHealthCheckAt: (svc.last_health_check_at ?? svc.lastHealthCheckAt ?? null) as string | null,
+            detail: (svc.detail ?? null) as string | null,
+          },
+        },
+      }
+    }
+  }
+
   if (maybeEvent.type === "gpu_stats") {
     const data = normalizeGpuStats(maybeEvent.data)
     if (!data) {
@@ -91,6 +122,7 @@ export function useWebSocket() {
   const setGpus = useGpuStore((state) => state.setGpus)
   const updateModel = useModelStore((state) => state.updateModel)
   const updateJob = useDownloadStore((state) => state.updateJob)
+  const updateService = useServiceStore((state) => state.updateService)
 
   useEffect(() => {
     let cancelled = false
@@ -120,6 +152,8 @@ export function useWebSocket() {
               speedMbS: event.data.speedMbS,
               status: event.data.pct >= 100 ? "completed" : "downloading",
             })
+          } else if (event.type === "service_event") {
+            updateService(event.data.serviceId, event.data.service)
           }
 
           setLastEvent(event)
@@ -145,7 +179,7 @@ export function useWebSocket() {
       }
       wsRef.current?.close()
     }
-  }, [setGpus, updateJob, updateModel])
+  }, [setGpus, updateJob, updateModel, updateService])
 
   return { connected, lastEvent }
 }

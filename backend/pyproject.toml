@@ -24,6 +24,7 @@ dependencies = [
     "huggingface-hub>=0.27",
     "python-multipart>=0.0.20",
     "prometheus-client>=0.21",
+    "docker>=7.0",
 ]
 
 [project.optional-dependencies]

@@ -315,9 +315,28 @@ export interface GPUStatHistory {
   points: GPUStatHistoryPoint[]
 }
 
+export type ServiceStatus = "unknown" | "idle" | "active" | "unreachable"
+
+export interface ServiceState {
+  serviceId: string
+  serviceType: string
+  displayName: string
+  uiUrl: string
+  preferredGpu: number | null
+  idleUnloadAfterSeconds: number
+  serviceAlive: boolean
+  runtimeLoaded: boolean
+  status: ServiceStatus
+  activeModelRef: string | null
+  lastActivityAt: string | null
+  lastHealthCheckAt: string | null
+  detail: string | null
+}
+
 // WebSocket events
 export type WSEvent =
   | { type: "gpu_stats"; data: GPUState[] }
   | { type: "model_event"; data: { event: string; modelId: string; status: ModelStatus } }
   | { type: "download_progress"; data: { jobId: string; pct: number; speedMbS: number } }
+  | { type: "service_event"; data: { event: string; serviceId: string; status: ServiceStatus; service: ServiceState } }
   | { type: "system_alert"; data: { level: "warn" | "error"; message: string } }

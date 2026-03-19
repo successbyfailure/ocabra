@@ -95,6 +95,23 @@ async def _service_idle_unload_loop(service_manager, stop_event: asyncio.Event) 
     logger.info("service_idle_unload_loop_stopped")
 
 
+async def _service_health_loop(service_manager, stop_event: asyncio.Event) -> None:
+    interval_s = 30
+    logger.info("service_health_loop_started", interval_s=interval_s)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            pass
+        if stop_event.is_set():
+            break
+        try:
+            await service_manager.refresh_all()
+        except Exception as exc:
+            logger.warning("service_health_loop_error", error=str(exc))
+    logger.info("service_health_loop_stopped")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────
@@ -162,6 +179,11 @@ async def lifespan(app: FastAPI):
         _service_idle_unload_loop(service_manager, service_idle_stop),
         name="service-idle-unload-loop",
     )
+    service_health_stop = asyncio.Event()
+    service_health_task = asyncio.create_task(
+        _service_health_loop(service_manager, service_health_stop),
+        name="service-health-loop",
+    )
 
     # Stream 2-A: vLLM backend registration
     from ocabra.backends.vllm_backend import VLLMBackend
@@ -195,6 +217,11 @@ async def lifespan(app: FastAPI):
     service_idle_task.cancel()
     with suppress(asyncio.CancelledError):
         await service_idle_task
+
+    service_health_stop.set()
+    service_health_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await service_health_task
 
     await gpu_manager.stop()
 

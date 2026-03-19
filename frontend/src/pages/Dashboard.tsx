@@ -7,6 +7,146 @@ import { useWebSocket } from "@/hooks/useWebSocket"
 import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
+import { useServiceStore } from "@/stores/serviceStore"
+import type { ServiceState } from "@/types"
+
+function ServiceCard({ service }: { service: ServiceState }) {
+  const unloadService = useServiceStore((s) => s.unloadService)
+  const startService = useServiceStore((s) => s.startService)
+  const refreshService = useServiceStore((s) => s.refreshService)
+  const [busy, setBusy] = useState(false)
+  const [unloadError, setUnloadError] = useState<string | null>(null)
+
+  const statusColor =
+    service.status === "active"
+      ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/30"
+      : service.status === "idle"
+        ? "bg-blue-500/20 text-blue-200 border-blue-500/30"
+        : service.status === "unreachable"
+          ? "bg-red-500/20 text-red-200 border-red-500/30"
+          : "bg-muted text-muted-foreground border-border"
+
+  const statusLabel =
+    service.status === "active"
+      ? "Activo"
+      : service.status === "idle"
+        ? "Inactivo"
+        : service.status === "unreachable"
+          ? "No disponible"
+          : "Desconocido"
+
+  async function handleUnload() {
+    setBusy(true)
+    setUnloadError(null)
+    try {
+      await unloadService(service.serviceId)
+    } catch (err) {
+      setUnloadError(err instanceof Error ? err.message : "Error al descargar el modelo")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleStart() {
+    setBusy(true)
+    setUnloadError(null)
+    try {
+      await startService(service.serviceId)
+    } catch (err) {
+      setUnloadError(err instanceof Error ? err.message : "Error al iniciar el servicio")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleRefresh() {
+    setBusy(true)
+    try {
+      await refreshService(service.serviceId)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3">
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <p className="font-medium">{service.displayName}</p>
+          <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${statusColor}`}>
+            {statusLabel}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {service.serviceAlive ? (
+            <span className="text-emerald-400">UI online</span>
+          ) : (
+            <span className="text-red-400">UI offline</span>
+          )}
+          {service.runtimeLoaded && (
+            <span className="rounded-md bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
+              {service.activeModelRef ? `Modelo: ${service.activeModelRef}` : "Runtime cargado"}
+            </span>
+          )}
+          {service.preferredGpu != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5">GPU {service.preferredGpu}</span>
+          )}
+          {service.detail && !service.serviceAlive && (
+            <span className="text-muted-foreground/70 max-w-xs truncate" title={service.detail}>
+              {service.detail}
+            </span>
+          )}
+          {unloadError && (
+            <span className="text-red-400 max-w-xs truncate" title={unloadError}>
+              {unloadError}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {service.uiUrl && service.serviceAlive && (
+          <a
+            href={service.uiUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
+          >
+            Abrir UI ↗
+          </a>
+        )}
+        <button
+          type="button"
+          onClick={() => void handleRefresh()}
+          disabled={busy}
+          className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted disabled:opacity-50"
+        >
+          Actualizar
+        </button>
+        {!service.serviceAlive && (
+          <button
+            type="button"
+            onClick={() => void handleStart()}
+            disabled={busy}
+            className="rounded-md border border-emerald-500/40 px-3 py-1 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+          >
+            Iniciar
+          </button>
+        )}
+        {service.runtimeLoaded && (
+          <button
+            type="button"
+            onClick={() => void handleUnload()}
+            disabled={busy}
+            className="rounded-md border border-red-500/40 px-3 py-1 text-sm text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+          >
+            Descargar
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
 
 export function Dashboard() {
   const [error, setError] = useState<string | null>(null)
@@ -23,6 +163,9 @@ export function Dashboard() {
   const jobs = useDownloadStore((state) => state.jobs)
   const setJobs = useDownloadStore((state) => state.setJobs)
 
+  const services = useServiceStore((state) => state.services)
+  const setServices = useServiceStore((state) => state.setServices)
+
   const activeModels = useMemo(
     () => Object.values(models).filter((model) => model.status === "loaded" || model.status === "loading"),
     [models],
@@ -31,25 +174,28 @@ export function Dashboard() {
     () => jobs.filter((job) => job.status === "queued" || job.status === "downloading"),
     [jobs],
   )
+  const serviceList = useMemo(() => Object.values(services), [services])
 
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [gpuList, modelList, downloadList] = await Promise.all([
+        const [gpuList, modelList, downloadList, servicesList] = await Promise.all([
           api.gpus.list(),
           api.models.list(),
           api.downloads.list(),
+          api.services.list(),
         ])
         setGpus(gpuList)
         setModels(modelList)
         setJobs(downloadList)
+        setServices(servicesList)
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load dashboard data")
       }
     }
 
     void bootstrap()
-  }, [setGpus, setJobs, setModels])
+  }, [setGpus, setJobs, setModels, setServices])
 
   return (
     <div className="space-y-8">
@@ -72,6 +218,20 @@ export function Dashboard() {
           {gpus.length === 0 && (
             <div className="rounded-lg border border-dashed border-border p-8 text-center text-muted-foreground">
               No GPU stats available.
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold">Servicios de generación</h2>
+        <div className="space-y-3">
+          {serviceList.map((service) => (
+            <ServiceCard key={service.serviceId} service={service} />
+          ))}
+          {serviceList.length === 0 && (
+            <div className="rounded-lg border border-dashed border-border p-6 text-muted-foreground">
+              No hay servicios configurados.
             </div>
           )}
         </div>

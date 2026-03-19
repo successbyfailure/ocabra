@@ -21,6 +21,7 @@ import type {
   PerformanceStats,
   TokenStats,
   StatsParams,
+  ServiceState,
 } from "@/types"
 
 const BASE = ""
@@ -440,6 +441,25 @@ function buildQuery(params: Record<string, string | number | undefined>): string
   return query ? `?${query}` : ""
 }
 
+function toServiceState(raw: unknown): ServiceState {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    serviceId: String(data.service_id ?? data.serviceId ?? ""),
+    serviceType: String(data.service_type ?? data.serviceType ?? ""),
+    displayName: String(data.display_name ?? data.displayName ?? ""),
+    uiUrl: String(data.ui_url ?? data.uiUrl ?? ""),
+    preferredGpu: data.preferred_gpu == null && data.preferredGpu == null ? null : Number(data.preferred_gpu ?? data.preferredGpu),
+    idleUnloadAfterSeconds: Number(data.idle_unload_after_seconds ?? data.idleUnloadAfterSeconds ?? 600),
+    serviceAlive: Boolean(data.service_alive ?? data.serviceAlive),
+    runtimeLoaded: Boolean(data.runtime_loaded ?? data.runtimeLoaded),
+    status: String(data.status ?? "unknown") as ServiceState["status"],
+    activeModelRef: (data.active_model_ref ?? data.activeModelRef ?? null) as string | null,
+    lastActivityAt: (data.last_activity_at ?? data.lastActivityAt ?? null) as string | null,
+    lastHealthCheckAt: (data.last_health_check_at ?? data.lastHealthCheckAt ?? null) as string | null,
+    detail: (data.detail ?? null) as string | null,
+  }
+}
+
 export const api = {
   gpus: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
@@ -520,6 +540,18 @@ export const api = {
       const query = buildQuery({ model_id: modelId })
       return request<PerformanceStats>("GET", `/ocabra/stats/performance${query}`)
     },
+  },
+
+  services: {
+    list: async () => (await request<unknown[]>("GET", "/ocabra/services")).map(toServiceState),
+    get: async (serviceId: string) =>
+      toServiceState(await request<unknown>("GET", `/ocabra/services/${encodeURIComponent(serviceId)}`)),
+    refresh: async (serviceId: string) =>
+      toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/refresh`)),
+    unload: async (serviceId: string) =>
+      toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/unload`)),
+    start: async (serviceId: string) =>
+      toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/start`)),
   },
 
   config: {

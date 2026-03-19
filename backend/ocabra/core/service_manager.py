@@ -20,11 +20,21 @@ class ServiceState:
     service_type: str
     display_name: str
     base_url: str
-    ui_base_path: str
+    ui_url: str = ""
     health_path: str = "/health"
+    # Optional path to poll for runtime/model status after a successful health check.
+    # Response must be JSON. For key-based detection: set runtime_check_key.
+    # For A1111-style: set runtime_check_model_key to detect a loaded model name.
+    runtime_check_path: str | None = None
+    runtime_check_key: str = "runtime_loaded"
+    runtime_check_model_key: str | None = None
     unload_path: str | None = None
     unload_method: str = "POST"
     unload_payload: dict[str, Any] | None = None
+    # Optional extra POST called after unload to flush GPU memory (e.g. /free-memory on A1111).
+    post_unload_flush_path: str | None = None
+    # If set, stop this Docker container after unload to fully release VRAM.
+    docker_container_name: str | None = None
     preferred_gpu: int | None = None
     idle_unload_after_seconds: int = 600
     service_alive: bool = False
@@ -43,7 +53,7 @@ class ServiceState:
             "service_type": self.service_type,
             "display_name": self.display_name,
             "base_url": self.base_url,
-            "ui_base_path": self.ui_base_path,
+            "ui_url": self.ui_url,
             "health_path": self.health_path,
             "unload_path": self.unload_path,
             "preferred_gpu": self.preferred_gpu,
@@ -74,9 +84,11 @@ class ServiceManager:
                 service_type="hunyuan3d",
                 display_name="Hunyuan3D",
                 base_url=settings.hunyuan_base_url.rstrip("/"),
-                ui_base_path=settings.hunyuan_ui_base_path,
+                ui_url=settings.hunyuan_ui_url,
                 preferred_gpu=settings.hunyuan_preferred_gpu,
                 idle_unload_after_seconds=settings.hunyuan_idle_unload_seconds,
+                runtime_check_path="/runtime/status",
+                runtime_check_key="runtime_loaded",
                 unload_path="/runtime/unload",
             ),
             "comfyui": ServiceState(
@@ -84,7 +96,7 @@ class ServiceManager:
                 service_type="comfyui",
                 display_name="ComfyUI",
                 base_url=settings.comfyui_base_url.rstrip("/"),
-                ui_base_path=settings.comfyui_ui_base_path,
+                ui_url=settings.comfyui_ui_url,
                 health_path="/",
                 preferred_gpu=settings.comfyui_preferred_gpu,
                 idle_unload_after_seconds=settings.comfyui_idle_unload_seconds,
@@ -96,11 +108,15 @@ class ServiceManager:
                 service_type="automatic1111",
                 display_name="Automatic1111",
                 base_url=settings.a1111_base_url.rstrip("/"),
-                ui_base_path=settings.a1111_ui_base_path,
+                ui_url=settings.a1111_ui_url,
                 preferred_gpu=settings.a1111_preferred_gpu,
                 idle_unload_after_seconds=settings.a1111_idle_unload_seconds,
                 health_path="/sdapi/v1/memory",
+                runtime_check_path="/sdapi/v1/options",
+                runtime_check_model_key="sd_model_checkpoint",
                 unload_path="/sdapi/v1/unload-checkpoint",
+                post_unload_flush_path="/free-memory",
+                docker_container_name=settings.a1111_docker_container,
             ),
         }
         self._lock = asyncio.Lock()
@@ -108,6 +124,13 @@ class ServiceManager:
     async def start(self) -> None:
         for service_id in self._states:
             await self.refresh(service_id)
+
+    async def refresh_all(self) -> None:
+        for service_id in list(self._states):
+            try:
+                await self.refresh(service_id)
+            except Exception:
+                continue
 
     async def list_states(self) -> list[ServiceState]:
         return list(self._states.values())
@@ -156,6 +179,12 @@ class ServiceManager:
         await self._publish_state(state, "runtime_changed")
         return state
 
+    async def start_service(self, service_id: str) -> ServiceState:
+        state = self._require(service_id)
+        if state.docker_container_name and not state.service_alive:
+            await self._start_container(state)
+        return state
+
     async def refresh(self, service_id: str) -> ServiceState:
         state = self._require(service_id)
         url = f"{state.base_url}{state.health_path}"
@@ -166,8 +195,10 @@ class ServiceManager:
                 response.raise_for_status()
             state.service_alive = True
             state.last_health_check_at = now
-            state.status = "active" if state.runtime_loaded else "idle"
             state.detail = None
+            # Poll runtime/model status if configured
+            await self._refresh_runtime_status(state, client=None)
+            state.status = "active" if state.runtime_loaded else "idle"
         except Exception as exc:
             state.service_alive = False
             state.runtime_loaded = False
@@ -177,6 +208,48 @@ class ServiceManager:
             state.detail = str(exc)
         await self._publish_state(state, "health_checked")
         return state
+
+    async def _refresh_runtime_status(self, state: ServiceState, *, client: Any) -> None:
+        """Call the runtime check endpoint and update runtime_loaded / active_model_ref."""
+        if not state.runtime_check_path:
+            return
+
+        # Avoid re-detecting a model as loaded immediately after a manual unload.
+        # A1111 keeps sd_model_checkpoint in /options even after unload-checkpoint,
+        # so without this guard the health loop would undo the unload within 30s.
+        if state.last_unload_at is not None:
+            now = datetime.now(timezone.utc)
+            if (now - state.last_unload_at).total_seconds() < 120:
+                state.runtime_loaded = False
+                state.active_model_ref = None
+                return
+
+        url = f"{state.base_url}{state.runtime_check_path}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                resp = await c.get(url)
+                if resp.is_error:
+                    return
+                payload = resp.json()
+        except Exception:
+            return
+
+        if state.runtime_check_model_key:
+            # e.g. A1111: sd_model_checkpoint is non-null when a model is loaded
+            model_ref = payload.get(state.runtime_check_model_key)
+            if model_ref:
+                state.runtime_loaded = True
+                state.active_model_ref = str(model_ref)
+            else:
+                state.runtime_loaded = False
+                state.active_model_ref = None
+        else:
+            # e.g. Hunyuan: runtime_loaded bool
+            val = payload.get(state.runtime_check_key)
+            if isinstance(val, bool):
+                state.runtime_loaded = val
+                if not val:
+                    state.active_model_ref = None
 
     async def unload(self, service_id: str, reason: str = "manual") -> ServiceState:
         state = self._require(service_id)
@@ -194,12 +267,24 @@ class ServiceManager:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.request(method, url, **request_kwargs)
                     response.raise_for_status()
+                    if state.post_unload_flush_path:
+                        flush_url = f"{state.base_url}{state.post_unload_flush_path}"
+                        try:
+                            await client.post(flush_url)
+                        except Exception as flush_exc:
+                            logger.warning(
+                                "service_flush_failed",
+                                service_id=service_id,
+                                error=str(flush_exc),
+                            )
                 state.runtime_loaded = False
                 state.active_model_ref = None
                 state.last_unload_at = datetime.now(timezone.utc)
                 state.status = "idle" if state.service_alive else "unreachable"
                 state.detail = f"unloaded:{reason}"
                 logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
+                if state.docker_container_name:
+                    await self._stop_container(state)
             except Exception as exc:
                 state.detail = str(exc)
                 logger.warning(
@@ -212,6 +297,36 @@ class ServiceManager:
             finally:
                 await self._publish_state(state, "runtime_unloaded")
         return state
+
+    async def _stop_container(self, state: ServiceState) -> None:
+        try:
+            import docker as docker_sdk
+            client = await asyncio.get_event_loop().run_in_executor(
+                None, docker_sdk.from_env
+            )
+            container = await asyncio.get_event_loop().run_in_executor(
+                None, client.containers.get, state.docker_container_name
+            )
+            await asyncio.get_event_loop().run_in_executor(None, container.stop)
+            state.service_alive = False
+            state.status = "unreachable"
+            logger.info("container_stopped", container=state.docker_container_name)
+        except Exception as exc:
+            logger.warning("container_stop_failed", container=state.docker_container_name, error=str(exc))
+
+    async def _start_container(self, state: ServiceState) -> None:
+        try:
+            import docker as docker_sdk
+            client = await asyncio.get_event_loop().run_in_executor(
+                None, docker_sdk.from_env
+            )
+            container = await asyncio.get_event_loop().run_in_executor(
+                None, client.containers.get, state.docker_container_name
+            )
+            await asyncio.get_event_loop().run_in_executor(None, container.start)
+            logger.info("container_started", container=state.docker_container_name)
+        except Exception as exc:
+            logger.warning("container_start_failed", container=state.docker_container_name, error=str(exc))
 
     async def check_idle_unloads(self) -> None:
         now = datetime.now(timezone.utc)

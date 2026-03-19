@@ -20,6 +20,9 @@ WORKDIR /opt/ComfyUI
 RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install -r requirements.txt
 
+RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git custom_nodes/ComfyUI-Manager && \
+    pip install -r custom_nodes/ComfyUI-Manager/requirements.txt
+
 EXPOSE 8188
 
 CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188"]

@@ -76,20 +76,19 @@ class Settings(BaseSettings):
     idle_eviction_check_interval_seconds: int = 15
 
     # Interactive generation services
-    services_portal_port: int = 8485
-    services_portal_internal_port: int = 81
-    hunyuan_ui_base_path: str = "/hunyuan"
-    comfyui_ui_base_path: str = "/comfy"
-    a1111_ui_base_path: str = "/a1111"
     hunyuan_base_url: str = "http://hunyuan:8080"
     comfyui_base_url: str = "http://comfyui:8188"
     a1111_base_url: str = "http://a1111:7860"
+    hunyuan_ui_url: str = ""
+    comfyui_ui_url: str = ""
+    a1111_ui_url: str = ""
     hunyuan_preferred_gpu: int = 1
     comfyui_preferred_gpu: int = 1
     a1111_preferred_gpu: int = 1
     hunyuan_idle_unload_seconds: int = 300
     comfyui_idle_unload_seconds: int = 600
     a1111_idle_unload_seconds: int = 600
+    a1111_docker_container: str = "ocabra-a1111-1"
 
     # LiteLLM
     litellm_base_url: str = "http://litellm:4000"
