@@ -135,11 +135,13 @@ async def lifespan(app: FastAPI):
     from ocabra.core.worker_pool import WorkerPool
     from ocabra.core.model_manager import ModelManager
     from ocabra.backends.diffusers_backend import DiffusersBackend
+    from ocabra.backends.bitnet_backend import BitnetBackend
     from ocabra.backends.ollama_backend import OllamaBackend
     from ocabra.backends.whisper_backend import WhisperBackend
     from ocabra.backends.tts_backend import TTSBackend
     worker_pool = WorkerPool()
     worker_pool.register_backend("diffusers", DiffusersBackend())
+    worker_pool.register_backend("bitnet", BitnetBackend())
     worker_pool.register_backend("ollama", OllamaBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
     worker_pool.register_backend("tts", TTSBackend())

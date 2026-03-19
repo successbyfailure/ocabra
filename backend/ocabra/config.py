@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     # Needed for some custom-tokenizer/custom-model repos on Hugging Face.
     vllm_trust_remote_code: bool = False
     vllm_disable_log_requests: bool = True
+    # BitNet / bitnet.cpp (llama-server compatible)
+    bitnet_server_bin: str = "/usr/local/bin/bitnet-server"
+    bitnet_gpu_layers: int = 0
+    bitnet_ctx_size: int = 4096
+    bitnet_threads: int | None = None
+    bitnet_batch_size: int = 512
+    bitnet_ubatch_size: int = 128
+    bitnet_parallel: int = 1
+    bitnet_flash_attn: bool = False
+    bitnet_mlock: bool = True
+    bitnet_startup_timeout_s: int = 30
     # Diffusers worker tuning.
     diffusers_torch_dtype: str = "auto"
     diffusers_enable_torch_compile: bool = False
@@ -123,6 +134,7 @@ class Settings(BaseSettings):
         "vllm_enable_chunked_prefill",
         "vllm_swap_space",
         "vllm_kv_cache_dtype",
+        "bitnet_threads",
         mode="before",
     )
     @classmethod

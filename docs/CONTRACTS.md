@@ -33,7 +33,7 @@ class BackendCapabilities:
 
 @dataclass
 class WorkerInfo:
-    backend_type: str          # "vllm" | "diffusers" | "whisper" | "tts" | "ollama"
+    backend_type: str          # "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
     model_id: str
     gpu_indices: list[int]
     port: int
@@ -125,7 +125,7 @@ class LoadPolicy(str, Enum):
 class ModelState:
     model_id: str               # e.g. "mistral-7b-instruct"
     display_name: str
-    backend_type: str           # "vllm" | "diffusers" | "whisper" | "tts" | "ollama"
+    backend_type: str           # "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
     status: ModelStatus
     load_policy: LoadPolicy
     auto_reload: bool           # Recargar automáticamente tras eviction

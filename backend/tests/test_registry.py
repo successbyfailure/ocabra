@@ -1054,6 +1054,8 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
 
     gguf_file = tmp_path / "tiny.gguf"
     gguf_file.write_bytes(b"abcd")
+    bitnet_gguf = tmp_path / "bitnet-b1.58-i2_s.gguf"
+    bitnet_gguf.write_bytes(b"GGUF-bitnet-header")
 
     ollama_dir = tmp_path / "ollama-model"
     ollama_dir.mkdir()
@@ -1066,6 +1068,13 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert sources == {"huggingface", "gguf", "ollama"}
     assert any(model.model_ref == "hf-model" for model in models)
     assert any(model.model_ref == "tiny" for model in models)
+    assert any(
+        model.model_ref == "tiny" and model.backend_type == "vllm" for model in models
+    )
+    assert any(
+        model.model_ref == "bitnet-b1.58-i2_s" and model.backend_type == "bitnet"
+        for model in models
+    )
     assert any(model.model_ref == "ollama-model" for model in models)
     assert any(
         model.model_ref == "ollama-model" and model.backend_type == "ollama" for model in models

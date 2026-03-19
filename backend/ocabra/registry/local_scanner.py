@@ -28,13 +28,27 @@ class LocalScanner:
                 )
                 continue
 
+            if path.is_dir() and (path / "Modelfile").exists():
+                size = self._dir_size(path)
+                models.append(
+                    LocalModel(
+                        model_ref=path.name,
+                        path=str(path),
+                        source="ollama",
+                        backend_type="ollama",
+                        size_gb=size,
+                    )
+                )
+                continue
+
             if path.is_file() and path.suffix.lower() == ".gguf":
+                backend_type = "bitnet" if self._is_bitnet_gguf(path) else "vllm"
                 models.append(
                     LocalModel(
                         model_ref=path.stem,
                         path=str(path),
                         source="gguf",
-                        backend_type="vllm",
+                        backend_type=backend_type,
                         size_gb=path.stat().st_size / (1024**3),
                     )
                 )
@@ -49,3 +63,16 @@ class LocalScanner:
             if child.is_file():
                 total += child.stat().st_size
         return total / (1024**3) if total > 0 else None
+
+    def _is_bitnet_gguf(self, path: Path) -> bool:
+        name = path.name.lower()
+        if "bitnet" in name or "i2_s" in name:
+            return True
+
+        # Best-effort header probe: avoid full file scan.
+        try:
+            with path.open("rb") as file:
+                head = file.read(32768).lower()
+        except OSError:
+            return False
+        return b"bitnet" in head or b"i2_s" in head
