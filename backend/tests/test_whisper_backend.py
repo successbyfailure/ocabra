@@ -1,10 +1,14 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from ocabra.backends.base import WorkerInfo
-from ocabra.backends.whisper_backend import WhisperBackend
+from ocabra.backends.whisper_backend import (
+    DIARIZATION_OVERHEAD_MB,
+    WhisperBackend,
+    _build_transcription_multipart,
+)
 
 
 class _DummyResponse:
@@ -37,6 +41,12 @@ class _DummyClient:
         return self.response
 
 
+class _FakeProcess:
+    def __init__(self):
+        self.pid = 4321
+        self.returncode = None
+
+
 @pytest.mark.asyncio
 async def test_whisper_capabilities_and_vram_lookup():
     backend = WhisperBackend()
@@ -46,6 +56,14 @@ async def test_whisper_capabilities_and_vram_lookup():
 
     vram = await backend.get_vram_estimate_mb("openai/whisper-large-v3")
     assert vram == 6000
+
+
+@pytest.mark.asyncio
+async def test_whisper_vram_lookup_diarization_variant_adds_overhead():
+    backend = WhisperBackend()
+
+    vram = await backend.get_vram_estimate_mb("openai/whisper-medium::diarize")
+    assert vram == 3000 + DIARIZATION_OVERHEAD_MB
 
 
 @pytest.mark.asyncio
@@ -85,3 +103,44 @@ async def test_whisper_forward_request_reformats_openai_transcription_payload():
     assert sent["files"]["file"][2] == "audio/wav"
     assert sent["data"]["language"] == "es"
     assert sent["data"]["timestamp_granularities"] == ["segment"]
+
+
+@pytest.mark.asyncio
+async def test_whisper_load_uses_base_model_id_and_diarization_flags():
+    backend = WhisperBackend()
+
+    with (
+        patch(
+            "ocabra.backends.whisper_backend.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_FakeProcess()),
+        ) as create_proc,
+        patch.object(backend, "_wait_until_healthy", new=AsyncMock(return_value=True)),
+    ):
+        info = await backend.load(
+            "openai/whisper-medium::diarize",
+            [1],
+            port=18012,
+            extra_config={"diarization_enabled": True},
+        )
+
+    assert info.model_id == "openai/whisper-medium::diarize"
+    args = create_proc.await_args.args
+    assert "--model-id" in args
+    assert "medium" in args
+    assert "--diarize" in args
+    assert "--diarization-model-id" in args
+
+
+@pytest.mark.asyncio
+async def test_build_multipart_includes_diarize_when_present():
+    files, data = _build_transcription_multipart(
+        {
+            "file": ("sample.wav", b"123", "audio/wav"),
+            "diarize": True,
+            "response_format": "verbose_json",
+        }
+    )
+
+    assert files["file"][0] == "sample.wav"
+    assert data["diarize"] == "true"
+    assert data["response_format"] == "verbose_json"

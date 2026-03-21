@@ -16,14 +16,31 @@ from ocabra.config import settings
 logger = structlog.get_logger(__name__)
 
 KNOWN_VRAM_MB = {
+    "tiny": 300,
+    "base": 500,
+    "small": 1200,
+    "medium": 3000,
+    "large-v3": 6000,
+    "large-v3-turbo": 3500,
     "whisper-tiny": 300,
     "whisper-base": 500,
     "whisper-small": 1200,
     "whisper-medium": 3000,
     "whisper-large-v3": 6000,
     "whisper-large-v3-turbo": 3500,
+    "faster-whisper-large-v3-turbo-latam-int8-ct2": 3600,
 }
-WORKER_PATH = Path(__file__).resolve().parents[3] / "workers" / "whisper_worker.py"
+OPENAI_TO_FASTER_MODEL_ID = {
+    "openai/whisper-tiny": "tiny",
+    "openai/whisper-base": "base",
+    "openai/whisper-small": "small",
+    "openai/whisper-medium": "medium",
+    "openai/whisper-large-v3": "large-v3",
+    "openai/whisper-large-v3-turbo": "large-v3-turbo",
+}
+DEFAULT_DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-3.1"
+DIARIZATION_OVERHEAD_MB = 1200
+WORKER_PATH = Path(__file__).resolve().parents[2] / "workers" / "whisper_worker.py"
 
 
 @dataclass
@@ -47,23 +64,37 @@ class WhisperBackend(BackendInterface):
         port = int(kwargs.get("port") or 0)
         if port == 0:
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
+
+        extra_config = kwargs.get("extra_config") or {}
+        worker_model_id = _resolve_worker_model_id(model_id, extra_config)
+        diarization_enabled = _should_enable_diarization(model_id, extra_config)
+        diarization_model_id = _resolve_diarization_model_id(extra_config)
+
         env = os.environ.copy()
         env.update(kwargs.get("env", {}))
         env["PYTHONUNBUFFERED"] = "1"
         if gpu_indices:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
+        if diarization_enabled and settings.hf_token and not env.get("HF_TOKEN"):
+            env["HF_TOKEN"] = settings.hf_token
 
-        process = await asyncio.create_subprocess_exec(
+        args = [
             sys.executable,
             str(WORKER_PATH),
             "--model-id",
-            model_id,
+            worker_model_id,
             "--host",
             "127.0.0.1",
             "--port",
             str(port),
             "--gpu-indices",
             ",".join(str(i) for i in gpu_indices),
+        ]
+        if diarization_enabled:
+            args.extend(["--diarize", "--diarization-model-id", diarization_model_id])
+
+        process = await asyncio.create_subprocess_exec(
+            *args,
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -84,7 +115,14 @@ class WhisperBackend(BackendInterface):
             await self.unload(model_id)
             raise RuntimeError(f"Whisper worker failed to start for model '{model_id}'")
 
-        logger.info("whisper_worker_started", model_id=model_id, port=port, pid=process.pid)
+        logger.info(
+            "whisper_worker_started",
+            model_id=model_id,
+            worker_model_id=worker_model_id,
+            diarization_enabled=diarization_enabled,
+            port=port,
+            pid=process.pid,
+        )
         return info
 
     async def unload(self, model_id: str) -> None:
@@ -120,22 +158,35 @@ class WhisperBackend(BackendInterface):
 
     async def get_vram_estimate_mb(self, model_id: str) -> int:
         normalized = model_id.lower()
+        base_model_id = _resolve_worker_model_id(model_id, {})
+        base_normalized = base_model_id.lower()
+
         for key, size_mb in KNOWN_VRAM_MB.items():
-            if key in normalized:
-                return size_mb
+            if key in normalized or key in base_normalized:
+                return size_mb + (
+                    DIARIZATION_OVERHEAD_MB if _should_enable_diarization(model_id, {}) else 0
+                )
 
-        model_dir = Path(settings.models_dir) / model_id
-        if model_dir.exists() and model_dir.is_dir():
-            total_bytes = sum(
-                file_path.stat().st_size
-                for file_path in model_dir.rglob("*")
-                if file_path.is_file()
-            )
-            if total_bytes > 0:
-                # Estimate with overhead for runtime buffers.
-                return max(512, int(total_bytes / (1024 * 1024) * 1.4))
+        for model_path in (
+            Path(settings.models_dir) / model_id,
+            Path(settings.models_dir) / base_model_id,
+        ):
+            if model_path.exists() and model_path.is_dir():
+                total_bytes = sum(
+                    file_path.stat().st_size
+                    for file_path in model_path.rglob("*")
+                    if file_path.is_file()
+                )
+                if total_bytes > 0:
+                    base = max(512, int(total_bytes / (1024 * 1024) * 1.4))
+                    if _should_enable_diarization(model_id, {}):
+                        base += DIARIZATION_OVERHEAD_MB
+                    return base
 
-        return 2048
+        base = 2048
+        if _should_enable_diarization(model_id, {}):
+            base += DIARIZATION_OVERHEAD_MB
+        return base
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         worker = self._workers.get(model_id)
@@ -179,6 +230,7 @@ class WhisperBackend(BackendInterface):
             await asyncio.sleep(0.5)
         return False
 
+
 def _build_transcription_multipart(
     body: dict,
 ) -> tuple[dict[str, tuple[str, bytes, str]], dict[str, str | list[str]]]:
@@ -208,6 +260,9 @@ def _build_transcription_multipart(
 
     if body.get("temperature") is not None:
         form_data["temperature"] = str(body["temperature"])
+
+    if body.get("diarize") is not None:
+        form_data["diarize"] = str(body["diarize"]).lower()
 
     return files, form_data
 
@@ -247,3 +302,29 @@ def _extract_audio_file(body: dict) -> tuple[str, bytes, str]:
         return str(filename), bytes(content), str(content_type)
 
     raise ValueError("Unsupported 'file' payload format for Whisper transcription")
+
+
+def _resolve_worker_model_id(model_id: str, extra_config: dict) -> str:
+    configured = extra_config.get("base_model_id")
+    if isinstance(configured, str) and configured.strip():
+        candidate = configured.strip()
+    elif "::" in model_id:
+        candidate = model_id.split("::", 1)[0]
+    else:
+        candidate = model_id
+
+    return OPENAI_TO_FASTER_MODEL_ID.get(candidate.lower(), candidate)
+
+
+def _should_enable_diarization(model_id: str, extra_config: dict) -> bool:
+    configured = extra_config.get("diarization_enabled")
+    if isinstance(configured, bool):
+        return configured
+    return "diariz" in model_id.lower()
+
+
+def _resolve_diarization_model_id(extra_config: dict) -> str:
+    value = extra_config.get("diarization_model_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return DEFAULT_DIARIZATION_MODEL_ID
