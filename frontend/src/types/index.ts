@@ -24,7 +24,7 @@ export type ModelStatus =
   | "error"
 
 export type LoadPolicy = "pin" | "warm" | "on_demand"
-export type BackendType = "vllm" | "diffusers" | "whisper" | "tts" | "ollama"
+export type BackendType = "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
 
 export interface ModelCapabilities {
   chat: boolean
@@ -158,7 +158,7 @@ export interface EvictionSchedule {
 
 export interface DownloadJob {
   jobId: string
-  source: "huggingface" | "ollama"
+  source: "huggingface" | "ollama" | "bitnet"
   modelRef: string
   artifact?: string | null
   registerConfig?: {
@@ -179,7 +179,7 @@ export interface DownloadJob {
   completedAt: string | null
 }
 
-export type DownloadSource = "huggingface" | "ollama"
+export type DownloadSource = "huggingface" | "ollama" | "bitnet"
 export type DownloadStatus = "queued" | "downloading" | "completed" | "failed" | "cancelled"
 
 export interface HFModelCard {

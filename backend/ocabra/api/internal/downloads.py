@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
+from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
@@ -20,7 +21,7 @@ QUEUE_NAME = "queue:download"
 
 
 class DownloadCreateRequest(BaseModel):
-    source: Literal["huggingface", "ollama"]
+    source: Literal["huggingface", "ollama", "bitnet"]
     model_ref: str
     artifact: str | None = None
     register_config: dict | None = None
@@ -67,8 +68,8 @@ class DownloadManager:
         artifact: str | None = None,
         register_config: dict | None = None,
     ) -> DownloadJob:
-        if source not in {"huggingface", "ollama"}:
-            raise ValueError("source must be 'huggingface' or 'ollama'")
+        if source not in {"huggingface", "ollama", "bitnet"}:
+            raise ValueError("source must be 'huggingface', 'ollama' or 'bitnet'")
 
         now = datetime.now(UTC)
         job = DownloadJob(
@@ -186,6 +187,22 @@ class DownloadManager:
                     progress_callback=_progress,
                     artifact=downloading.artifact,
                 )
+            elif downloading.source == "bitnet":
+                if not downloading.artifact:
+                    raise ValueError("bitnet downloads require a .gguf artifact")
+                stem = Path(downloading.artifact).stem.replace("/", "_")
+                download_dir = target_dir / "huggingface" / f"{downloading.model_ref.replace('/', '--')}--{stem}"
+                await asyncio.to_thread(download_dir.mkdir, parents=True, exist_ok=True)
+
+                await asyncio.to_thread(
+                    hf_hub_download,
+                    repo_id=downloading.model_ref,
+                    filename=downloading.artifact,
+                    local_dir=str(download_dir),
+                    token=settings.hf_token or None,
+                    cache_dir=settings.hf_cache_dir or None,
+                )
+                _progress(100.0, None)
             else:
                 await self._ollama_registry.pull(
                     model_ref=downloading.model_ref,
@@ -238,23 +255,38 @@ class DownloadManager:
                 return
             if job.source == "ollama":
                 backend_type = "ollama"
+            elif job.source == "bitnet":
+                backend_type = "bitnet"
             else:
                 backend_type = await self._hf_registry.infer_backend_for_repo(job.model_ref, artifact=job.artifact)
+
+            register_config = job.register_config or {}
+            extra_config = register_config.get("extra_config") or {}
+            if job.source == "bitnet" and job.artifact:
+                stem = Path(job.artifact).stem.replace("/", "_")
+                model_path = (
+                    Path(settings.models_dir)
+                    / "huggingface"
+                    / f"{job.model_ref.replace('/', '--')}--{stem}"
+                    / job.artifact
+                )
+                extra_config = {**extra_config, "model_path": str(model_path)}
+
             await mm.add_model(
                 model_id=model_id,
                 backend_type=backend_type,
-                display_name=(job.register_config or {}).get("display_name")
+                display_name=register_config.get("display_name")
                 or (model_id.split("/")[-1] if "/" in model_id else model_id),
-                load_policy=(job.register_config or {}).get("load_policy", "on_demand"),
-                auto_reload=bool((job.register_config or {}).get("auto_reload", False)),
-                preferred_gpu=(job.register_config or {}).get("preferred_gpu"),
-                extra_config=(job.register_config or {}).get("extra_config"),
+                load_policy=register_config.get("load_policy", "on_demand"),
+                auto_reload=bool(register_config.get("auto_reload", False)),
+                preferred_gpu=register_config.get("preferred_gpu"),
+                extra_config=extra_config or None,
             )
         except Exception:
             pass  # Non-fatal: model can be registered manually
 
     def _job_model_id(self, job: DownloadJob) -> str:
-        if job.source != "huggingface" or not job.artifact:
+        if job.source not in {"huggingface", "bitnet"} or not job.artifact:
             return job.model_ref
         stem = Path(job.artifact).stem
         return f"{job.model_ref}::{stem}"

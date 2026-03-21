@@ -123,7 +123,7 @@ class LocalModel(BaseModel):
 
 class DownloadJob(BaseModel):
     job_id: str
-    source: Literal["huggingface", "ollama"]
+    source: Literal["huggingface", "ollama", "bitnet"]
     model_ref: str
     artifact: str | None = None
     register_config: dict[str, Any] | None = None

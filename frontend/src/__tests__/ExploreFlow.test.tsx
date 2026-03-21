@@ -7,13 +7,17 @@ import { useDownloadStore } from "@/stores/downloadStore"
 const {
   listDownloads,
   searchHF,
+  searchBitnet,
   getHFVariants,
+  getBitnetVariants,
   enqueue,
   streamProgress,
 } = vi.hoisted(() => ({
   listDownloads: vi.fn(),
   searchHF: vi.fn(),
+  searchBitnet: vi.fn(),
   getHFVariants: vi.fn(),
+  getBitnetVariants: vi.fn(),
   enqueue: vi.fn(),
   streamProgress: vi.fn(),
 }))
@@ -36,7 +40,9 @@ vi.mock("@/api/client", () => ({
     },
     registry: {
       searchHF,
+      searchBitnet,
       getHFVariants,
+      getBitnetVariants,
       searchOllama: vi.fn(async () => []),
       getOllamaVariants: vi.fn(async () => []),
     },
@@ -85,6 +91,8 @@ describe("Explore flow", () => {
         },
       },
     ])
+    searchBitnet.mockResolvedValue([])
+    getBitnetVariants.mockResolvedValue([])
     getHFVariants.mockResolvedValue([
       {
         variantId: "standard",

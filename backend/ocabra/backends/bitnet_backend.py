@@ -30,8 +30,8 @@ class BitnetBackend(BackendInterface):
         if port == 0:
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
-        model_file = self._resolve_model_file(model_id)
         extra_config = kwargs.get("extra_config") or {}
+        model_file = self._resolve_model_file(model_id, extra_config)
         options = self._build_options(extra_config)
         self._model_configs[model_id] = options
 
@@ -199,7 +199,13 @@ class BitnetBackend(BackendInterface):
             return bitnet_config[key]
         return extra_config.get(key, default)
 
-    def _resolve_model_file(self, model_id: str) -> Path:
+    def _resolve_model_file(self, model_id: str, extra_config: dict[str, Any] | None = None) -> Path:
+        model_path = (extra_config or {}).get("model_path") if isinstance(extra_config, dict) else None
+        if model_path:
+            explicit = Path(str(model_path))
+            if explicit.is_file():
+                return explicit
+
         direct = Path(model_id)
         if direct.is_file():
             return direct

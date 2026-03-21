@@ -121,7 +121,7 @@ function toRecipeRegisterConfig(
 }
 
 export function Explore() {
-  const [activeTab, setActiveTab] = useState<"hf" | "ollama">("hf")
+  const [activeTab, setActiveTab] = useState<"hf" | "bitnet" | "ollama">("hf")
   const [query, setQuery] = useState("mistral")
   const [debouncedQuery, setDebouncedQuery] = useState(query)
   const [taskFilter, setTaskFilter] = useState("")
@@ -129,11 +129,14 @@ export function Explore() {
   const [gatedFilter, setGatedFilter] = useState("")
   const [hfResults, setHfResults] = useState<HFCardType[]>([])
   const [ollamaResults, setOllamaResults] = useState<OllamaCardType[]>([])
+  const [bitnetResults, setBitnetResults] = useState<HFCardType[]>([])
   const [loading, setLoading] = useState(false)
   const [installTarget, setInstallTarget] = useState<InstallTarget | null>(null)
   const [ollamaVariants, setOllamaVariants] = useState<OllamaModelVariant[]>([])
   const [hfVariants, setHfVariants] = useState<HFModelVariant[]>([])
   const [selectedHFVariantId, setSelectedHFVariantId] = useState("")
+  const [bitnetVariants, setBitnetVariants] = useState<HFModelVariant[]>([])
+  const [selectedBitnetVariantId, setSelectedBitnetVariantId] = useState("")
   const [selectedVariant, setSelectedVariant] = useState("")
   const [variantLoading, setVariantLoading] = useState(false)
   const [targetDir, setTargetDir] = useState("/models")
@@ -141,10 +144,14 @@ export function Explore() {
   const selectedHFVariant = installTarget?.source === "huggingface"
     ? hfVariants.find((v) => v.variantId === selectedHFVariantId) ?? null
     : null
+  const selectedBitnetVariant = installTarget?.source === "bitnet"
+    ? bitnetVariants.find((v) => v.variantId === selectedBitnetVariantId) ?? null
+    : null
   const probePreconfigurationNotice = getProbePreconfigurationNotice(selectedHFVariant)
   const recipeProbeDifferenceNotice = getRecipeProbeDifferenceNotice(selectedHFVariant)
   const probeStatusLabel = getProbeStatusLabel(selectedHFVariant?.vllmSupport?.runtimeProbe?.status)
   const probeOverrideHint = getProbeOverrideHint(selectedHFVariant?.vllmSupport?.runtimeProbe?.status)
+  const canInstallBitnet = installTarget?.source !== "bitnet" || Boolean(selectedBitnetVariant?.artifact)
 
   const jobs = useDownloadStore((state) => state.jobs)
   const setJobs = useDownloadStore((state) => state.setJobs)
@@ -178,6 +185,7 @@ export function Explore() {
     const q = debouncedQuery.trim()
     if (!q) {
       setHfResults([])
+      setBitnetResults([])
       setOllamaResults([])
       return
     }
@@ -196,6 +204,15 @@ export function Explore() {
           if (sizeFilter === "large") next = next.filter((item) => (item.sizeGb ?? 0) > 12)
           if (gatedFilter !== "") next = next.filter((item) => String(item.gated) === gatedFilter)
           setHfResults(next)
+        } else if (activeTab === "bitnet") {
+          const data = await api.registry.searchBitnet(q, 30)
+          if (!active) return
+          let next = data
+          if (sizeFilter === "small") next = next.filter((item) => (item.sizeGb ?? 0) < 4)
+          if (sizeFilter === "medium") next = next.filter((item) => (item.sizeGb ?? 0) >= 4 && (item.sizeGb ?? 0) <= 12)
+          if (sizeFilter === "large") next = next.filter((item) => (item.sizeGb ?? 0) > 12)
+          if (gatedFilter !== "") next = next.filter((item) => String(item.gated) === gatedFilter)
+          setBitnetResults(next)
         } else {
           const data = await api.registry.searchOllama(q)
           if (!active) return
@@ -224,6 +241,8 @@ export function Explore() {
       setSelectedVariant("")
       setHfVariants([])
       setSelectedHFVariantId("")
+      setBitnetVariants([])
+      setSelectedBitnetVariantId("")
       setVariantLoading(false)
       return
     }
@@ -245,6 +264,33 @@ export function Explore() {
         .catch((err) => {
           if (!active) return
           toast.error(err instanceof Error ? err.message : "No se pudieron cargar variantes HF")
+        })
+        .finally(() => {
+          if (active) setVariantLoading(false)
+        })
+
+      return () => {
+        active = false
+      }
+    }
+
+    if (target.source === "bitnet") {
+      let active = true
+      setVariantLoading(true)
+      setBitnetVariants([])
+      setSelectedBitnetVariantId("")
+
+      void api.registry
+        .getBitnetVariants(target.modelRef)
+        .then((variants) => {
+          if (!active) return
+          setBitnetVariants(variants)
+          const preferred = variants.find((v) => v.isDefault) ?? variants[0]
+          if (preferred) setSelectedBitnetVariantId(preferred.variantId)
+        })
+        .catch((err) => {
+          if (!active) return
+          toast.error(err instanceof Error ? err.message : "No se pudieron cargar variantes BitNet")
         })
         .finally(() => {
           if (active) setVariantLoading(false)
@@ -288,7 +334,16 @@ export function Explore() {
       return
     }
     const modelRef = installTarget.source === "ollama" ? (selectedVariant || installTarget.modelRef) : installTarget.modelRef
-    const artifact = selectedHFVariant?.artifact ?? null
+    const artifact = installTarget.source === "huggingface"
+      ? (selectedHFVariant?.artifact ?? null)
+      : installTarget.source === "bitnet"
+        ? (selectedBitnetVariant?.artifact ?? null)
+        : null
+    if (installTarget.source === "bitnet" && !selectedBitnetVariant?.artifact) {
+      toast.error("Selecciona una variante GGUF BitNet")
+      return
+    }
+
     const registerConfig =
       installTarget.source === "huggingface"
         ? toRecipeRegisterConfig(installTarget.title, loadPolicy, selectedHFVariant)
@@ -335,7 +390,7 @@ export function Explore() {
     <div className="space-y-5 pb-32">
       <div>
         <h1 className="text-2xl font-semibold">Explore</h1>
-        <p className="text-muted-foreground">Buscar modelos en HuggingFace y Ollama.</p>
+        <p className="text-muted-foreground">Buscar modelos en HuggingFace, BitNet y Ollama.</p>
       </div>
 
       <input
@@ -345,13 +400,19 @@ export function Explore() {
         className="w-full rounded-lg border border-border bg-card px-3 py-2"
       />
 
-      <Tabs.Root value={activeTab} onValueChange={(value) => setActiveTab(value as "hf" | "ollama")}>
+      <Tabs.Root value={activeTab} onValueChange={(value) => setActiveTab(value as "hf" | "bitnet" | "ollama")}>
         <Tabs.List className="inline-flex rounded-lg border border-border bg-card p-1">
           <Tabs.Trigger
             value="hf"
             className="rounded-md px-3 py-1.5 text-sm text-muted-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground"
           >
             HuggingFace
+          </Tabs.Trigger>
+          <Tabs.Trigger
+            value="bitnet"
+            className="rounded-md px-3 py-1.5 text-sm text-muted-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground"
+          >
+            BitNet
           </Tabs.Trigger>
           <Tabs.Trigger
             value="ollama"
@@ -395,7 +456,42 @@ export function Explore() {
           )}
         </Tabs.Content>
 
-        <Tabs.Content value="ollama" className="mt-3">
+        
+        <Tabs.Content value="bitnet" className="mt-3 space-y-3">
+          <SearchFilters
+            task={taskFilter}
+            size={sizeFilter}
+            gated={gatedFilter}
+            onTaskChange={setTaskFilter}
+            onSizeChange={setSizeFilter}
+            onGatedChange={setGatedFilter}
+          />
+          {loading ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              {Array.from({ length: 6 }).map((_, idx) => (
+                <div key={`bitnet-skeleton-${idx}`} className="h-32 animate-pulse rounded-lg bg-muted" />
+              ))}
+            </div>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {bitnetResults.map((model) => (
+                <HFModelCard
+                  key={model.repoId}
+                  model={model}
+                  onInstall={(item) =>
+                    setInstallTarget({
+                      source: "bitnet",
+                      modelRef: item.repoId,
+                      title: item.modelName,
+                    })
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </Tabs.Content>
+
+<Tabs.Content value="ollama" className="mt-3">
           {loading ? (
             <div className="grid gap-3 md:grid-cols-2">
               {Array.from({ length: 6 }).map((_, idx) => (
@@ -462,6 +558,31 @@ export function Explore() {
                       ollamaVariants.map((variant) => (
                         <option key={variant.name} value={variant.name}>
                           {variant.name}
+                          {variant.sizeGb ? ` · ${variant.sizeGb.toFixed(1)} GB` : ""}
+                          {variant.quantization ? ` · ${variant.quantization}` : ""}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              )}
+              {installTarget?.source === "bitnet" && (
+                <label className="block text-sm text-muted-foreground">
+                  Variante GGUF BitNet
+                  <select
+                    value={selectedBitnetVariantId}
+                    disabled={variantLoading}
+                    onChange={(event) => setSelectedBitnetVariantId(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+                  >
+                    {variantLoading ? (
+                      <option value="">Cargando variantes...</option>
+                    ) : bitnetVariants.length === 0 ? (
+                      <option value="">Sin variantes compatibles</option>
+                    ) : (
+                      bitnetVariants.map((variant) => (
+                        <option key={variant.variantId} value={variant.variantId}>
+                          {variant.label}
                           {variant.sizeGb ? ` · ${variant.sizeGb.toFixed(1)} GB` : ""}
                           {variant.quantization ? ` · ${variant.quantization}` : ""}
                         </option>
@@ -602,7 +723,7 @@ export function Explore() {
               <button
                 type="button"
                 onClick={() => void install()}
-                disabled={selectedHFVariant?.installable === false}
+                disabled={selectedHFVariant?.installable === false || !canInstallBitnet}
                 className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
               >
                 Iniciar descarga

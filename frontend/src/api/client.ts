@@ -514,6 +514,15 @@ export const api = {
       (await request<unknown[]>("GET", `/ocabra/registry/hf/${encodeURIComponent(repoId)}/variants`)).map(
         toHFModelVariant,
       ),
+    searchBitnet: async (q: string, limit = 20): Promise<HFModelCard[]> => {
+      const params = new URLSearchParams({ q, limit: String(limit) })
+      const raw = await request<unknown[]>("GET", `/ocabra/registry/bitnet/search?${params}`)
+      return raw.map(toHFModelCard)
+    },
+    getBitnetVariants: async (repoId: string): Promise<HFModelVariant[]> =>
+      (await request<unknown[]>("GET", `/ocabra/registry/bitnet/${encodeURIComponent(repoId)}/variants`)).map(
+        toHFModelVariant,
+      ),
     searchOllama: (q: string) =>
       request<OllamaModelCard[]>("GET", `/ocabra/registry/ollama/search?q=${encodeURIComponent(q)}`),
     getOllamaVariants: async (modelName: string): Promise<OllamaModelVariant[]> =>

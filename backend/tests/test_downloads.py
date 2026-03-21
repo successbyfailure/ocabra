@@ -61,3 +61,40 @@ async def test_auto_register_model_uses_register_config() -> None:
             }
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_register_bitnet_sets_model_path() -> None:
+    manager = DownloadManager()
+    model_manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=None),
+        add_model=AsyncMock(),
+    )
+    manager._app = SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+
+    job = DownloadJob(
+        job_id="job-bitnet-1",
+        source="bitnet",
+        model_ref="microsoft/BitNet-b1.58-2B-4T-gguf",
+        artifact="ggml-model-i2_s.gguf",
+        register_config={
+            "display_name": "BitNet 2B",
+            "load_policy": "on_demand",
+        },
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-03-14T00:00:00Z",
+        completed_at="2026-03-14T00:01:00Z",
+    )
+
+    await manager._auto_register_model(job)
+
+    call = model_manager.add_model.await_args.kwargs
+    assert call["backend_type"] == "bitnet"
+    assert call["model_id"] == "microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s"
+    assert call["extra_config"]["model_path"].endswith(
+        "/huggingface/microsoft--BitNet-b1.58-2B-4T-gguf--ggml-model-i2_s/ggml-model-i2_s.gguf"
+    )
