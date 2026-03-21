@@ -7,6 +7,7 @@ OUTDIR="${OUTDIR:-/out}"
 BITNET_PRETUNED_MODEL="${BITNET_PRETUNED_MODEL:-bitnet_b1_58-3B}"
 BITNET_KERNEL_FLAVOR="${BITNET_KERNEL_FLAVOR:-tl2}"
 BITNET_BUILD_JOBS="${BITNET_BUILD_JOBS:-8}"
+BITNET_ENABLE_CUDA="${BITNET_ENABLE_CUDA:-false}"
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -34,8 +35,17 @@ if [[ -f "${KERNEL_CONFIG}" ]]; then
   cp "${KERNEL_CONFIG}" include/kernel_config.ini
 fi
 
+if [[ "${BITNET_ENABLE_CUDA}" == "true" && -f /usr/local/cuda/lib64/stubs/libcuda.so ]]; then
+  ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+  export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}"
+  GGML_CUDA_FLAG="ON"
+else
+  GGML_CUDA_FLAG="OFF"
+fi
+
 cmake -B build \
-  -DGGML_CUDA=ON \
+  -DGGML_CUDA="${GGML_CUDA_FLAG}" \
   -DGGML_AVX2=ON \
   -DGGML_F16C=ON \
   -DGGML_FMA=ON \
@@ -52,3 +62,14 @@ else
   exit 1
 fi
 chmod +x "${OUTDIR}/bitnet-server"
+
+LIB_OUTDIR="${OUTDIR}/lib"
+mkdir -p "${LIB_OUTDIR}"
+
+# Copy non-system shared libs produced by BitNet/llama.cpp so runtime can load bitnet-server.
+find build -type f \( -name "libllama.so*" -o -name "libggml*.so*" \) -exec cp -a {} "${LIB_OUTDIR}/" \;
+
+if [[ -z "$(ls -A "${LIB_OUTDIR}" 2>/dev/null)" ]]; then
+  echo "No BitNet shared libraries were exported to ${LIB_OUTDIR}" >&2
+  exit 1
+fi

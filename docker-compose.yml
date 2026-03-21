@@ -3,6 +3,12 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        BITNET_COMMIT: ${BITNET_COMMIT:-main}
+        BITNET_PRETUNED_MODEL: ${BITNET_PRETUNED_MODEL:-bitnet_b1_58-3B}
+        BITNET_KERNEL_FLAVOR: ${BITNET_KERNEL_FLAVOR:-tl2}
+        BITNET_BUILD_JOBS: ${BITNET_BUILD_JOBS:-8}
+        BITNET_ENABLE_CUDA: ${BITNET_ENABLE_CUDA:-false}
     runtime: nvidia
     ipc: host
     shm_size: "8gb"
