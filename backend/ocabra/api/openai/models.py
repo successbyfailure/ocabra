@@ -23,7 +23,12 @@ async def list_models(request: Request) -> dict:
     model_manager = get_model_manager(request)
     states = await model_manager.list_states()
 
-    visible_statuses = {ModelStatus.LOADED, ModelStatus.CONFIGURED, ModelStatus.LOADING}
+    visible_statuses = {
+        ModelStatus.LOADED,
+        ModelStatus.CONFIGURED,
+        ModelStatus.LOADING,
+        ModelStatus.UNLOADED,
+    }
     data = []
     for state in states:
         if state.status not in visible_statuses:

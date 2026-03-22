@@ -97,7 +97,7 @@ class TestListModels:
         assert model["owned_by"] == "ocabra"
         assert model["ocabra"]["status"] == "loaded"
 
-    def test_excludes_unloaded_models(self):
+    def test_includes_unloaded_models(self):
         from ocabra.backends.base import BackendCapabilities
         from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
@@ -114,7 +114,10 @@ class TestListModels:
 
         resp = client.get("/v1/models")
         assert resp.status_code == 200
-        assert resp.json()["data"] == []
+        data = resp.json()
+        assert len(data["data"]) == 1
+        assert data["data"][0]["id"] == "ghost-model"
+        assert data["data"][0]["ocabra"]["status"] == "unloaded"
 
 
 # ---------------------------------------------------------------------------
