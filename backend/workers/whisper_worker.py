@@ -217,11 +217,18 @@ def create_app(
 
 def _cuda_whisper_available() -> bool:
     try:
-        import ctypes
+        import ctranslate2
 
-        ctypes.CDLL("libcudnn_ops_infer.so.8")
-        return True
-    except OSError:
+        if ctranslate2.get_cuda_device_count() > 0:
+            return True
+    except Exception:
+        pass
+
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
         return False
 
 def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
@@ -237,6 +244,8 @@ def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
 def _is_missing_cudnn_error(exc: Exception) -> bool:
     message = str(exc).lower()
     if "libcudnn_ops_infer.so.8" in message:
+        return True
+    if "libcudnn_ops.so.9" in message:
         return True
     return "cudnn" in message and "cannot open shared object file" in message
 
@@ -341,7 +350,7 @@ def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None)
     except ImportError as exc:
         raise RuntimeError(
             "Diarization requested but pyannote.audio is not installed. "
-            "Install backend extras '[audio]' including whisperx/pyannote."
+            "Install backend extras '[audio]' including pyannote.audio."
         ) from exc
 
     kwargs: dict[str, Any] = {}

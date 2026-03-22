@@ -48,7 +48,6 @@ audio = [
     "faster-whisper>=1.1",
     "soundfile>=0.12",
     "transformers>=4.47",
-    "whisperx>=3.3",
     "pyannote.audio>=3.3",
     "matplotlib>=3.10",
 ]
