@@ -140,8 +140,15 @@ class ModelManager:
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
                 vram_needed = await backend.get_vram_estimate_mb(model_id)
-                gpu_managed = state.backend_type != "ollama"
-                assigned_port = await self._worker_pool.assign_port() if gpu_managed else 0
+                if state.backend_type == "bitnet":
+                    vram_needed = self._estimate_bitnet_vram_from_config(state)
+
+                bitnet_cpu_only = (
+                    state.backend_type == "bitnet" and self._resolve_bitnet_gpu_layers(state) <= 0
+                )
+                gpu_managed = state.backend_type != "ollama" and not bitnet_cpu_only
+                needs_port = state.backend_type != "ollama"
+                assigned_port = await self._worker_pool.assign_port() if needs_port else 0
                 backend_loaded = False
 
                 if not gpu_managed:
@@ -224,6 +231,26 @@ class ModelManager:
                 raise
 
         return state
+
+    def _resolve_bitnet_option(self, state: "ModelState", key: str, default: int) -> int:
+        extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+        nested = extra.get("bitnet") if isinstance(extra.get("bitnet"), dict) else None
+        if nested and key in nested:
+            return int(nested[key])
+        if key in extra:
+            return int(extra[key])
+        return int(default)
+
+    def _resolve_bitnet_gpu_layers(self, state: "ModelState") -> int:
+        return self._resolve_bitnet_option(state, "gpu_layers", settings.bitnet_gpu_layers)
+
+    def _estimate_bitnet_vram_from_config(self, state: "ModelState") -> int:
+        gpu_layers = self._resolve_bitnet_gpu_layers(state)
+        if gpu_layers <= 0:
+            return 0
+        total_layers = max(1, self._resolve_bitnet_option(state, "total_layers", 32))
+        model_vram_mb = max(1, self._resolve_bitnet_option(state, "model_vram_mb", 400))
+        return int(model_vram_mb * min(gpu_layers, total_layers) / total_layers)
 
     async def _assign_gpus_for_load(
         self,

@@ -129,3 +129,25 @@ DELETE /ocabra/models/{model_id}
 
 - [ ] En progreso
 - [ ] Completado
+
+## Nota Operativa (2026-03-22) — BitNet CPU/GPU
+
+Se añadió lógica específica para BitNet en `ModelManager` para evitar estados engañosos en UI/API:
+
+- Si `backend_type == "bitnet"` y `gpu_layers <= 0`:
+  - Se trata como **CPU-only** en scheduling.
+  - `current_gpu` queda `[]`.
+  - `vram_used_mb` queda `0`.
+  - Aun así se mantiene asignación de `port` (BitNet expone servidor HTTP local).
+- Si `gpu_layers > 0`:
+  - Se estima VRAM con `extra_config` antes de pedir GPU al scheduler.
+  - Fórmula: `model_vram_mb * min(gpu_layers, total_layers) / total_layers`.
+
+Además, para BitNet la estimación previa de VRAM usa prioridad de configuración por modelo:
+1. `extra_config["bitnet"][key]`
+2. `extra_config[key]`
+3. `settings.bitnet_*`
+
+Tests añadidos en `backend/tests/test_model_manager.py`:
+- `test_bitnet_cpu_only_skips_gpu_assignment_but_keeps_port`
+- `test_bitnet_gpu_layers_uses_extra_config_for_scheduling`

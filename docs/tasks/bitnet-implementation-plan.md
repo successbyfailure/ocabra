@@ -641,3 +641,48 @@ El mismo patrón aplica a `forward_stream` (adquiere el semáforo antes del prim
 - `test_semaphore_limits_diffusers_concurrency` — lanzar N tareas concurrentes, verificar que solo 1 está activa simultáneamente
 - `test_semaphore_timeout_raises_503` — simular worker lento, verificar que la cola expira correctamente
 - `test_vllm_no_semaphore` — vLLM no tiene semáforo, N peticiones pasan sin esperar
+
+---
+
+## Validación Operativa (2026-03-22)
+
+Hardware de validación: Threadripper 3960X (24C/48T), dual GPU (RTX 3090 + RTX 3060).
+Modelo validado: `tiiuae--falcon3-3b-instruct-1.58bit-gguf-i2_s`.
+
+### Tuning CPU (BitNet)
+
+Resultados de throughput (tokens/s) con carga homogénea:
+
+- `threads=1`  → ~9.05 tok/s
+- `threads=2`  → ~15.36 tok/s
+- `threads=4`  → ~22.01 tok/s
+- `threads=8`  → ~23.59 tok/s
+- `threads=12` → ~23.44 tok/s
+- `threads>=16` cae progresivamente
+
+Decisión operativa:
+- `BITNET_THREADS=8` (mejor equilibrio rendimiento/contención para esta máquina).
+
+### Tuning `parallel`
+
+Con `threads=8`, el rendimiento escala con concurrencia real:
+
+- `parallel=4`: ~52.5 tok/s agregado (se satura pronto)
+- `parallel=8`: ~79.8 tok/s a concurrencia 8
+- `parallel=16`: ~91.5 tok/s a concurrencia 16 (mejor punto general)
+- `parallel=32`: mejora en conc. media/alta pero no supera de forma estable a 16 en todos los perfiles
+
+Decisión operativa:
+- `BITNET_PARALLEL=16`.
+
+### CPU-only vs GPU-offload (BitNet)
+
+Con `threads=8`, `parallel=16`, diferencias pequeñas para este modelo:
+
+- `gpu_layers=0`  (CPU): single ~21.8 tok/s, conc8 ~79.2 tok/s
+- `gpu_layers=16` (GPU): single ~21.6 tok/s, conc8 ~78.1 tok/s
+- `gpu_layers=32` (GPU): single ~22.0 tok/s, conc8 ~78.8 tok/s
+
+Conclusión práctica:
+- Para este modelo/carga, CPU-only (`gpu_layers=0`) es competitivo y simplifica gestión de VRAM.
+- Offload a GPU puede mantenerse para casos específicos, pero no aporta mejora clara por defecto.

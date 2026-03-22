@@ -287,3 +287,103 @@ async def test_load_assigns_port_for_backend_that_requires_it():
     worker = wp.get_worker("test/port-required")
     assert worker is not None
     assert worker.port == backend.received_port
+
+class _BitnetPortBackend(BackendInterface):
+    def __init__(self) -> None:
+        self.received_port = None
+
+    async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
+        port = kwargs.get("port", 0)
+        if not port:
+            raise ValueError("port is required")
+        self.received_port = int(port)
+        return WorkerInfo(
+            backend_type="bitnet",
+            model_id=model_id,
+            gpu_indices=gpu_indices,
+            port=self.received_port,
+            pid=4321,
+            vram_used_mb=0,
+        )
+
+    async def unload(self, model_id: str) -> None:
+        return None
+
+    async def health_check(self, model_id: str) -> bool:
+        return True
+
+    async def get_capabilities(self, model_id: str) -> BackendCapabilities:
+        return BackendCapabilities(chat=True, completion=True, streaming=True)
+
+    async def get_vram_estimate_mb(self, model_id: str) -> int:
+        return 0
+
+    async def forward_request(self, model_id: str, path: str, body: dict):
+        return {}
+
+    async def forward_stream(self, model_id: str, path: str, body: dict):
+        if False:
+            yield b""
+
+
+@pytest.mark.asyncio
+async def test_bitnet_cpu_only_skips_gpu_assignment_but_keeps_port():
+    wp = WorkerPool()
+    backend = _BitnetPortBackend()
+    wp.register_backend("bitnet", backend)
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(return_value=[1])
+    mm = ModelManager(wp, gpu_scheduler=scheduler)
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+        from ocabra.core.model_manager import ModelState
+
+        mm._states["test/bitnet-cpu"] = ModelState(
+            model_id="test/bitnet-cpu",
+            display_name="test/bitnet-cpu",
+            backend_type="bitnet",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={"gpu_layers": 0},
+        )
+        mm._load_locks["test/bitnet-cpu"] = asyncio.Lock()
+
+        state = await mm.load("test/bitnet-cpu")
+
+    assert state.status == ModelStatus.LOADED
+    assert state.current_gpu == []
+    assert backend.received_port is not None
+    scheduler.find_gpu_for_model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bitnet_gpu_layers_uses_extra_config_for_scheduling():
+    wp = WorkerPool()
+    backend = _BitnetPortBackend()
+    wp.register_backend("bitnet", backend)
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(return_value=[1])
+    mm = ModelManager(wp, gpu_scheduler=scheduler)
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+        from ocabra.core.model_manager import ModelState
+
+        mm._states["test/bitnet-gpu"] = ModelState(
+            model_id="test/bitnet-gpu",
+            display_name="test/bitnet-gpu",
+            backend_type="bitnet",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={"gpu_layers": 16, "total_layers": 32, "model_vram_mb": 400},
+        )
+        mm._load_locks["test/bitnet-gpu"] = asyncio.Lock()
+
+        state = await mm.load("test/bitnet-gpu")
+
+    assert state.status == ModelStatus.LOADED
+    assert state.current_gpu == [1]
+    scheduler.find_gpu_for_model.assert_awaited_once_with(
+        200,
+        None,
+        enforce_vllm_headroom=False,
+    )
