@@ -47,6 +47,7 @@ WORKER_PATH = Path(__file__).resolve().parents[2] / "workers" / "whisper_worker.
 class _WhisperWorker:
     process: asyncio.subprocess.Process
     info: WorkerInfo
+    log_file: Any | None = None
 
 
 class WhisperBackend(BackendInterface):
@@ -93,11 +94,14 @@ class WhisperBackend(BackendInterface):
         if diarization_enabled:
             args.extend(["--diarize", "--diarization-model-id", diarization_model_id])
 
+        log_path = _worker_log_path(model_id)
+        log_file = open(log_path, "ab")  # noqa: PTH123
+
         process = await asyncio.create_subprocess_exec(
             *args,
             env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
         )
 
         info = WorkerInfo(
@@ -109,7 +113,7 @@ class WhisperBackend(BackendInterface):
             vram_used_mb=await self.get_vram_estimate_mb(model_id),
         )
 
-        self._workers[model_id] = _WhisperWorker(process=process, info=info)
+        self._workers[model_id] = _WhisperWorker(process=process, info=info, log_file=log_file)
 
         if not await self._wait_until_healthy(model_id):
             await self.unload(model_id)
@@ -131,15 +135,20 @@ class WhisperBackend(BackendInterface):
             return
 
         process = worker.process
-        if process.returncode is not None:
-            return
-
-        process.terminate()
         try:
-            await asyncio.wait_for(process.wait(), timeout=8)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=8)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+        finally:
+            if worker.log_file:
+                try:
+                    worker.log_file.close()
+                except Exception:
+                    pass
 
     async def health_check(self, model_id: str) -> bool:
         worker = self._workers.get(model_id)
@@ -230,6 +239,11 @@ class WhisperBackend(BackendInterface):
             await asyncio.sleep(0.5)
         return False
 
+
+
+def _worker_log_path(model_id: str) -> str:
+    safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
+    return f"/tmp/whisper-worker-{safe}.log"
 
 def _build_transcription_multipart(
     body: dict,

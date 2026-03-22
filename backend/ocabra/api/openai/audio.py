@@ -13,7 +13,13 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from ocabra.config import settings
 
-from ._deps import check_capability, ensure_loaded, get_model_manager
+from ._deps import (
+    _openai_error,
+    check_capability,
+    ensure_loaded,
+    get_model_manager,
+    raise_upstream_http_error,
+)
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -54,26 +60,79 @@ async def transcriptions(
     check_capability(state, "audio_transcription", "audio transcription")
 
     worker_pool = request.app.state.worker_pool
-    worker = worker_pool.get_worker(model_id)
-    if not worker:
-        from ._deps import _openai_error
-        raise _openai_error("Model worker not found.", "server_error", status_code=503)
-
     audio_bytes = await file.read()
-    url = f"http://127.0.0.1:{worker.port}/transcribe"
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            url,
-            files={"file": (file.filename or "audio", audio_bytes, file.content_type or "audio/mpeg")},
-            data={
-                "language": language or "",
-                "response_format": response_format,
-                "prompt": prompt or "",
-                "temperature": str(temperature),
-            },
+    resp: httpx.Response | None = None
+    last_error: Exception | None = None
+
+    for attempt in range(2):
+        worker = worker_pool.get_worker(model_id)
+        backend = await worker_pool.get_backend(state.backend_type)
+        worker_healthy = bool(worker) and await backend.health_check(model_id)
+
+        if not worker or not worker_healthy:
+            if attempt == 0:
+                reason = "worker_missing" if not worker else "worker_unhealthy"
+                # Recover stale state where ModelManager says LOADED but worker is missing/dead.
+                await model_manager.unload(model_id, reason=reason)
+                await model_manager.load(model_id)
+                continue
+            raise _openai_error(
+                f"Whisper worker unavailable for model '{model_id}'.",
+                "server_error",
+                code="worker_unavailable",
+                status_code=503,
+            )
+
+        url = f"http://127.0.0.1:{worker.port}/transcribe"
+
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                form_data: dict[str, str] = {
+                    "response_format": response_format,
+                    "temperature": str(temperature),
+                }
+                if language:
+                    form_data["language"] = language
+                if prompt:
+                    form_data["prompt"] = prompt
+
+                resp = await client.post(
+                    url,
+                    files={"file": (file.filename or "audio", audio_bytes, file.content_type or "audio/mpeg")},
+                    data=form_data,
+                )
+                resp.raise_for_status()
+            break
+        except httpx.TransportError as exc:
+            last_error = exc
+            logger.warning(
+                "whisper_worker_transport_error",
+                model_id=model_id,
+                worker_port=worker.port,
+                attempt=attempt + 1,
+                error=str(exc),
+            )
+            if attempt == 0:
+                await model_manager.unload(model_id, reason="worker_transport_error")
+                await model_manager.load(model_id)
+                continue
+            raise _openai_error(
+                f"Whisper worker unavailable for model '{model_id}'.",
+                "server_error",
+                code="worker_unavailable",
+                status_code=503,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise_upstream_http_error(exc)
+
+    if resp is None:
+        raise _openai_error(
+            f"Failed to reach Whisper worker for model '{model_id}': {last_error}",
+            "server_error",
+            code="worker_unavailable",
+            status_code=503,
         )
-        resp.raise_for_status()
 
     # OpenAI format: {"text": "..."}
     normalized_format = str(response_format).lower()

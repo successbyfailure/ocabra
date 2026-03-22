@@ -46,14 +46,15 @@ def create_app(
     async def lifespan(app: FastAPI):
         runtime.device = "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") not in {None, "", "-1"} else "cpu"
         runtime.compute_type = "float16" if runtime.device == "cuda" else "int8"
+        if runtime.device == "cuda" and not _cuda_whisper_available():
+            runtime.device = "cpu"
+            runtime.compute_type = "int8"
 
         try:
-            from faster_whisper import WhisperModel
-
-            runtime.model = WhisperModel(
+            runtime.model = _create_whisper_model(
                 runtime.model_id,
-                device=runtime.device,
-                compute_type=runtime.compute_type,
+                runtime.device,
+                runtime.compute_type,
             )
             runtime.error = None
 
@@ -146,16 +147,40 @@ def create_app(
             tmp_path = tmp.name
 
         try:
-            result = await asyncio.to_thread(
-                _run_transcription,
-                tmp_path,
-                runtime.model,
-                language,
-                prompt,
-                temperature,
-                use_diarization,
-                runtime.diarization_pipeline,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    _run_transcription,
+                    tmp_path,
+                    runtime.model,
+                    language,
+                    prompt,
+                    temperature,
+                    use_diarization,
+                    runtime.diarization_pipeline,
+                )
+            except Exception as exc:
+                if runtime.device == "cuda" and _is_missing_cudnn_error(exc):
+                    runtime.model = await asyncio.to_thread(
+                        _create_whisper_model,
+                        runtime.model_id,
+                        "cpu",
+                        "int8",
+                    )
+                    runtime.device = "cpu"
+                    runtime.compute_type = "int8"
+                    runtime.error = None
+                    result = await asyncio.to_thread(
+                        _run_transcription,
+                        tmp_path,
+                        runtime.model,
+                        language,
+                        prompt,
+                        temperature,
+                        use_diarization,
+                        runtime.diarization_pipeline,
+                    )
+                else:
+                    raise
         finally:
             with suppress(FileNotFoundError):
                 os.unlink(tmp_path)
@@ -187,6 +212,33 @@ def create_app(
 
     return app
 
+
+
+
+def _cuda_whisper_available() -> bool:
+    try:
+        import ctypes
+
+        ctypes.CDLL("libcudnn_ops_infer.so.8")
+        return True
+    except OSError:
+        return False
+
+def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
+    from faster_whisper import WhisperModel
+
+    return WhisperModel(
+        model_id,
+        device=device,
+        compute_type=compute_type,
+    )
+
+
+def _is_missing_cudnn_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "libcudnn_ops_infer.so.8" in message:
+        return True
+    return "cudnn" in message and "cannot open shared object file" in message
 
 def _run_transcription(
     audio_path: str,
