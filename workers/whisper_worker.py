@@ -241,7 +241,19 @@ def _patch_torchaudio_compat() -> None:
 
     if not hasattr(torchaudio, "AudioMetaData"):
         class _CompatAudioMetaData:  # pragma: no cover
-            pass
+            def __init__(
+                self,
+                sample_rate: int,
+                num_frames: int,
+                num_channels: int,
+                bits_per_sample: int = 0,
+                encoding: str = "PCM_S",
+            ) -> None:
+                self.sample_rate = sample_rate
+                self.num_frames = num_frames
+                self.num_channels = num_channels
+                self.bits_per_sample = bits_per_sample
+                self.encoding = encoding
 
         torchaudio.AudioMetaData = _CompatAudioMetaData
 
@@ -251,6 +263,21 @@ def _patch_torchaudio_compat() -> None:
         torchaudio.get_audio_backend = lambda: "ffmpeg"
     if not hasattr(torchaudio, "set_audio_backend"):
         torchaudio.set_audio_backend = lambda backend: None
+    if not hasattr(torchaudio, "info"):
+        import soundfile as sf
+
+        def _compat_info(path: str, backend: str | None = None):  # pragma: no cover
+            del backend
+            metadata = sf.info(path)
+            return torchaudio.AudioMetaData(
+                sample_rate=int(metadata.samplerate),
+                num_frames=int(metadata.frames),
+                num_channels=int(metadata.channels),
+                bits_per_sample=0,
+                encoding="PCM_S",
+            )
+
+        torchaudio.info = _compat_info
 
 
 def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None) -> Any:
