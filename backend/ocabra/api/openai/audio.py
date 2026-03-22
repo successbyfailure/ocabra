@@ -11,6 +11,8 @@ import structlog
 from fastapi import APIRouter, Request, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from ocabra.config import settings
+
 from ._deps import check_capability, ensure_loaded, get_model_manager
 
 router = APIRouter()
@@ -38,7 +40,9 @@ async def transcriptions(
 
     Supported response_format: json (default), text, srt, vtt, verbose_json.
     """
-    form = await request.form()
+    form = await request.form(
+        max_part_size=max(1, int(settings.openai_audio_max_part_size_mb)) * 1024 * 1024
+    )
     model_id: str = form.get("model", "")
     language: str | None = form.get("language")
     response_format: str = form.get("response_format", "json")

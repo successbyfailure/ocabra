@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0
 
+    # OpenAI audio uploads
+    # Maximum allowed size per multipart part (in MB) for /v1/audio/transcriptions.
+    openai_audio_max_part_size_mb: int = 256
+
     # Model lifecycle
     idle_timeout_seconds: int = 300
     idle_eviction_check_interval_seconds: int = 15
