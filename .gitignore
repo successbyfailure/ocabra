@@ -23,6 +23,8 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 *.tsbuildinfo
+*.tsbuildinfo.*
+frontend/.tsbuildinfo.local
 
 # === Environment ===
 .env
@@ -32,6 +34,8 @@ frontend/.vite/
 
 # === Docker ===
 docker-compose.override.yml
+caddy/caddy_data/
+caddy/caddy_config/
 
 # === Modelos de IA (archivos grandes) ===
 *.gguf
@@ -72,3 +76,6 @@ backend/alembic/versions/__pycache__/
 *.key
 *.crt
 secrets/
+
+# === Local workspaces ===
+Hunyuan3D-2.1/
