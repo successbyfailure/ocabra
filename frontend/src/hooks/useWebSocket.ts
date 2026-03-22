@@ -85,6 +85,7 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
             uiUrl: String(svc.ui_url ?? svc.uiUrl ?? ""),
             preferredGpu: svc.preferred_gpu == null && svc.preferredGpu == null ? null : Number(svc.preferred_gpu ?? svc.preferredGpu),
             idleUnloadAfterSeconds: Number(svc.idle_unload_after_seconds ?? svc.idleUnloadAfterSeconds ?? 600),
+            enabled: Boolean(svc.enabled ?? true),
             serviceAlive: Boolean(svc.service_alive ?? svc.serviceAlive),
             runtimeLoaded: Boolean(svc.runtime_loaded ?? svc.runtimeLoaded),
             status: String(svc.status ?? "unknown") as ServiceStatus,

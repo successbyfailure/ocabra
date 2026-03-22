@@ -12,6 +12,10 @@ class ServiceRuntimePatch(BaseModel):
     detail: str | None = None
 
 
+class ServicePatch(BaseModel):
+    enabled: bool
+
+
 @router.get("/services")
 async def list_services(request: Request) -> list[dict]:
     sm = request.app.state.service_manager
@@ -21,10 +25,26 @@ async def list_services(request: Request) -> list[dict]:
 
 @router.get("/services/{service_id}")
 async def get_service(service_id: str, request: Request) -> dict:
+    """Get current state for one generation service."""
     sm = request.app.state.service_manager
     state = await sm.get_state(service_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"Service '{service_id}' not found")
+    return state.to_dict()
+
+
+@router.patch("/services/{service_id}")
+async def patch_service(
+    service_id: str,
+    body: ServicePatch,
+    request: Request,
+) -> dict:
+    """Enable or disable a generation service in oCabra."""
+    sm = request.app.state.service_manager
+    try:
+        state = await sm.set_enabled(service_id, enabled=body.enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return state.to_dict()
 
 
@@ -54,6 +74,8 @@ async def patch_service_runtime(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return state.to_dict()
 
 
@@ -64,6 +86,8 @@ async def start_service(service_id: str, request: Request) -> dict:
         state = await sm.start_service(service_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return state.to_dict()
@@ -76,6 +100,8 @@ async def unload_service(service_id: str, request: Request) -> dict:
         state = await sm.unload(service_id, reason="manual")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return state.to_dict()

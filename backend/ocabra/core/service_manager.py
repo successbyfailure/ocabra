@@ -37,6 +37,7 @@ class ServiceState:
     docker_container_name: str | None = None
     preferred_gpu: int | None = None
     idle_unload_after_seconds: int = 600
+    enabled: bool = True
     service_alive: bool = False
     runtime_loaded: bool = False
     status: str = "unknown"
@@ -58,6 +59,7 @@ class ServiceState:
             "unload_path": self.unload_path,
             "preferred_gpu": self.preferred_gpu,
             "idle_unload_after_seconds": self.idle_unload_after_seconds,
+            "enabled": self.enabled,
             "service_alive": self.service_alive,
             "runtime_loaded": self.runtime_loaded,
             "status": self.status,
@@ -148,6 +150,15 @@ class ServiceManager:
     ) -> ServiceState:
         state = self._require(service_id)
         state.last_activity_at = datetime.now(timezone.utc)
+        if not state.enabled:
+            state.runtime_loaded = False
+            state.active_model_ref = None
+            state.status = "disabled"
+            if detail is not None:
+                state.detail = detail
+            await self._publish_state(state, "touched")
+            return state
+
         if runtime_loaded is not None:
             state.runtime_loaded = runtime_loaded
         if active_model_ref is not None:
@@ -167,6 +178,15 @@ class ServiceManager:
         detail: str | None = None,
     ) -> ServiceState:
         state = self._require(service_id)
+        if not state.enabled:
+            state.runtime_loaded = False
+            state.active_model_ref = None
+            state.status = "disabled"
+            if detail is not None:
+                state.detail = detail
+            await self._publish_state(state, "runtime_changed")
+            return state
+
         state.runtime_loaded = runtime_loaded
         state.active_model_ref = active_model_ref
         if detail is not None:
@@ -181,14 +201,26 @@ class ServiceManager:
 
     async def start_service(self, service_id: str) -> ServiceState:
         state = self._require(service_id)
+        if not state.enabled:
+            raise RuntimeError(f"Service '{service_id}' is disabled")
         if state.docker_container_name and not state.service_alive:
             await self._start_container(state)
         return state
 
     async def refresh(self, service_id: str) -> ServiceState:
         state = self._require(service_id)
-        url = f"{state.base_url}{state.health_path}"
         now = datetime.now(timezone.utc)
+        if not state.enabled:
+            state.service_alive = False
+            state.runtime_loaded = False
+            state.active_model_ref = None
+            state.last_health_check_at = now
+            state.status = "disabled"
+            state.detail = "disabled"
+            await self._publish_state(state, "health_checked")
+            return state
+
+        url = f"{state.base_url}{state.health_path}"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(url)
@@ -253,6 +285,8 @@ class ServiceManager:
 
     async def unload(self, service_id: str, reason: str = "manual") -> ServiceState:
         state = self._require(service_id)
+        if not state.enabled:
+            raise RuntimeError(f"Service '{service_id}' is disabled")
         if not state.unload_path:
             raise RuntimeError(f"Service '{service_id}' does not expose an unload endpoint")
 
@@ -331,6 +365,8 @@ class ServiceManager:
     async def check_idle_unloads(self) -> None:
         now = datetime.now(timezone.utc)
         for state in self._states.values():
+            if not state.enabled:
+                continue
             if not state.service_alive or not state.runtime_loaded:
                 continue
             if state.last_activity_at is None:
@@ -342,6 +378,34 @@ class ServiceManager:
                 await self.unload(state.service_id, reason="idle")
             except Exception:
                 continue
+
+    async def set_enabled(self, service_id: str, enabled: bool) -> ServiceState:
+        state = self._require(service_id)
+        if not enabled and state.enabled:
+            if state.runtime_loaded and state.unload_path:
+                try:
+                    await self.unload(service_id, reason="disabled")
+                except Exception as exc:
+                    logger.warning(
+                        "service_disable_unload_failed",
+                        service_id=service_id,
+                        error=str(exc),
+                    )
+            if state.docker_container_name and state.service_alive:
+                await self._stop_container(state)
+
+        state.enabled = enabled
+        if not enabled:
+            state.service_alive = False
+            state.runtime_loaded = False
+            state.active_model_ref = None
+            state.status = "disabled"
+            state.detail = "disabled"
+        else:
+            state.status = "idle"
+            state.detail = None
+        await self._publish_state(state, "enabled_changed")
+        return state
 
     def _require(self, service_id: str) -> ServiceState:
         state = self._states.get(service_id)

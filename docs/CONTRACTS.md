@@ -244,6 +244,10 @@ POST /ocabra/services/{service_id}/touch   → ServiceState
     active_model_ref?: str|null,
     detail?: str|null
   }
+PATCH /ocabra/services/{service_id}         → ServiceState
+  body: {
+    enabled: bool
+  }
 PATCH /ocabra/services/{service_id}/runtime → ServiceState
   body: {
     runtime_loaded: bool,
@@ -257,6 +261,11 @@ POST /ocabra/services/{service_id}/unload → ServiceState
 - `hunyuan`
 - `comfyui`
 - `a1111`
+
+
+Campos relevantes de `ServiceState`:
+- `enabled: bool`
+- `status`: `"unknown" | "idle" | "active" | "unreachable" | "disabled"`
 
 `ServiceState`:
 
@@ -272,9 +281,10 @@ class ServiceState:
     unload_path: str | None
     preferred_gpu: int | None
     idle_unload_after_seconds: int
+    enabled: bool                # servicio habilitado para uso en oCabra
     service_alive: bool           # proceso/UI accesible por healthcheck
     runtime_loaded: bool          # hay runtime/pesos cargados en VRAM
-    status: str                   # "unknown" | "idle" | "active" | "unreachable"
+    status: str                   # "unknown" | "idle" | "active" | "unreachable" | "disabled"
     active_model_ref: str | None
     last_activity_at: datetime | None
     last_health_check_at: datetime | None

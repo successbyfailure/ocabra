@@ -315,7 +315,7 @@ export interface GPUStatHistory {
   points: GPUStatHistoryPoint[]
 }
 
-export type ServiceStatus = "unknown" | "idle" | "active" | "unreachable"
+export type ServiceStatus = "unknown" | "idle" | "active" | "unreachable" | "disabled"
 
 export interface ServiceState {
   serviceId: string
@@ -324,6 +324,7 @@ export interface ServiceState {
   uiUrl: string
   preferredGpu: number | null
   idleUnloadAfterSeconds: number
+  enabled: boolean
   serviceAlive: boolean
   runtimeLoaded: boolean
   status: ServiceStatus

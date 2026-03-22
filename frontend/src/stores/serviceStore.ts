@@ -9,6 +9,7 @@ interface ServiceStore {
   unloadService: (serviceId: string) => Promise<void>
   startService: (serviceId: string) => Promise<void>
   refreshService: (serviceId: string) => Promise<void>
+  setServiceEnabled: (serviceId: string, enabled: boolean) => Promise<void>
 }
 
 export const useServiceStore = create<ServiceStore>((set) => ({
@@ -40,6 +41,12 @@ export const useServiceStore = create<ServiceStore>((set) => ({
   },
   refreshService: async (serviceId) => {
     const updated = await api.services.refresh(serviceId)
+    set((state) => ({
+      services: { ...state.services, [serviceId]: updated },
+    }))
+  },
+  setServiceEnabled: async (serviceId, enabled) => {
+    const updated = await api.services.patch(serviceId, { enabled })
     set((state) => ({
       services: { ...state.services, [serviceId]: updated },
     }))

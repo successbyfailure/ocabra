@@ -450,6 +450,7 @@ function toServiceState(raw: unknown): ServiceState {
     uiUrl: String(data.ui_url ?? data.uiUrl ?? ""),
     preferredGpu: data.preferred_gpu == null && data.preferredGpu == null ? null : Number(data.preferred_gpu ?? data.preferredGpu),
     idleUnloadAfterSeconds: Number(data.idle_unload_after_seconds ?? data.idleUnloadAfterSeconds ?? 600),
+    enabled: Boolean(data.enabled ?? true),
     serviceAlive: Boolean(data.service_alive ?? data.serviceAlive),
     runtimeLoaded: Boolean(data.runtime_loaded ?? data.runtimeLoaded),
     status: String(data.status ?? "unknown") as ServiceState["status"],
@@ -561,6 +562,8 @@ export const api = {
       toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/unload`)),
     start: async (serviceId: string) =>
       toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/start`)),
+    patch: async (serviceId: string, patch: { enabled: boolean }) =>
+      toServiceState(await request<unknown>("PATCH", `/ocabra/services/${encodeURIComponent(serviceId)}`, patch)),
   },
 
   config: {

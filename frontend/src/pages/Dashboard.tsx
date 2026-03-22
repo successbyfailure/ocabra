@@ -14,6 +14,7 @@ function ServiceCard({ service }: { service: ServiceState }) {
   const unloadService = useServiceStore((s) => s.unloadService)
   const startService = useServiceStore((s) => s.startService)
   const refreshService = useServiceStore((s) => s.refreshService)
+  const setServiceEnabled = useServiceStore((s) => s.setServiceEnabled)
   const [busy, setBusy] = useState(false)
   const [unloadError, setUnloadError] = useState<string | null>(null)
 
@@ -24,7 +25,9 @@ function ServiceCard({ service }: { service: ServiceState }) {
         ? "bg-blue-500/20 text-blue-200 border-blue-500/30"
         : service.status === "unreachable"
           ? "bg-red-500/20 text-red-200 border-red-500/30"
-          : "bg-muted text-muted-foreground border-border"
+          : service.status === "disabled"
+            ? "bg-amber-500/20 text-amber-200 border-amber-500/30"
+            : "bg-muted text-muted-foreground border-border"
 
   const statusLabel =
     service.status === "active"
@@ -33,7 +36,9 @@ function ServiceCard({ service }: { service: ServiceState }) {
         ? "Inactivo"
         : service.status === "unreachable"
           ? "No disponible"
-          : "Desconocido"
+          : service.status === "disabled"
+            ? "Desactivado"
+            : "Desconocido"
 
   async function handleUnload() {
     setBusy(true)
@@ -54,6 +59,19 @@ function ServiceCard({ service }: { service: ServiceState }) {
       await startService(service.serviceId)
     } catch (err) {
       setUnloadError(err instanceof Error ? err.message : "Error al iniciar el servicio")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+
+  async function handleToggleEnabled() {
+    setBusy(true)
+    setUnloadError(null)
+    try {
+      await setServiceEnabled(service.serviceId, !service.enabled)
+    } catch (err) {
+      setUnloadError(err instanceof Error ? err.message : "Error al cambiar el estado del servicio")
     } finally {
       setBusy(false)
     }
@@ -83,7 +101,10 @@ function ServiceCard({ service }: { service: ServiceState }) {
           ) : (
             <span className="text-red-400">UI offline</span>
           )}
-          {service.runtimeLoaded && (
+          {!service.enabled && (
+            <span className="rounded-md bg-amber-500/10 px-2 py-0.5 text-amber-300">Desactivado</span>
+          )}
+          {service.enabled && service.runtimeLoaded && (
             <span className="rounded-md bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
               {service.activeModelRef ? `Modelo: ${service.activeModelRef}` : "Runtime cargado"}
             </span>
@@ -117,13 +138,21 @@ function ServiceCard({ service }: { service: ServiceState }) {
         )}
         <button
           type="button"
-          onClick={() => void handleRefresh()}
+          onClick={() => void handleToggleEnabled()}
           disabled={busy}
+          className="rounded-md border border-amber-500/40 px-3 py-1 text-sm text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
+        >
+          {service.enabled ? "Desactivar" : "Activar"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleRefresh()}
+          disabled={busy || !service.enabled}
           className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted disabled:opacity-50"
         >
           Actualizar
         </button>
-        {!service.serviceAlive && (
+        {service.enabled && !service.serviceAlive && (
           <button
             type="button"
             onClick={() => void handleStart()}
@@ -133,7 +162,7 @@ function ServiceCard({ service }: { service: ServiceState }) {
             Iniciar
           </button>
         )}
-        {service.runtimeLoaded && (
+        {service.enabled && service.runtimeLoaded && (
           <button
             type="button"
             onClick={() => void handleUnload()}

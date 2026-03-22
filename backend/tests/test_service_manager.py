@@ -100,3 +100,80 @@ async def test_service_manager_idle_unload(monkeypatch) -> None:
     assert calls[0][1].endswith("/free")
     assert state.runtime_loaded is False
     assert state.status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_set_enabled_disables_service_runtime(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+
+    manager = ServiceManager()
+    state = await manager.get_state("comfyui")
+    assert state is not None
+    state.service_alive = True
+    state.runtime_loaded = True
+    state.active_model_ref = "flux"
+
+    updated = await manager.set_enabled("comfyui", enabled=False)
+
+    assert updated.enabled is False
+    assert updated.status == "disabled"
+    assert updated.service_alive is False
+    assert updated.runtime_loaded is False
+    assert updated.active_model_ref is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_disabled_service_skips_health_check(monkeypatch) -> None:
+    called = False
+
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def fake_get(self, url: str, *args, **kwargs):
+        nonlocal called
+        _ = self, args, kwargs
+        called = True
+        return httpx.Response(200, json={"ok": True}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    manager = ServiceManager()
+    await manager.set_enabled("a1111", enabled=False)
+
+    state = await manager.refresh("a1111")
+
+    assert state.enabled is False
+    assert state.status == "disabled"
+    assert state.service_alive is False
+    assert state.runtime_loaded is False
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_start_disabled_service_raises(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+
+    manager = ServiceManager()
+    await manager.set_enabled("hunyuan", enabled=False)
+
+    with pytest.raises(RuntimeError):
+        await manager.start_service("hunyuan")
