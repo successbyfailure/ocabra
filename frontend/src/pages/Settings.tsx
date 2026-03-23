@@ -41,13 +41,7 @@ export function Settings() {
           api.registry.listLocal(),
         ])
         if (!active) return
-        setConfig({
-          ...configData,
-          modelsDir: configData.modelsDir ?? localStorage.getItem("ocabra.modelsDir") ?? "/models",
-          downloadDir:
-            configData.downloadDir ?? localStorage.getItem("ocabra.downloadDir") ?? "/models/downloads",
-          maxTemperatureC: configData.maxTemperatureC ?? Number(localStorage.getItem("ocabra.maxTemperatureC") ?? "88"),
-        })
+        setConfig(configData)
         setGpus(gpusData)
         setLocalModels(localData)
       } catch (err) {

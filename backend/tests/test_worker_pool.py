@@ -1,5 +1,8 @@
+from unittest.mock import patch
+
 import pytest
 
+from ocabra import config
 from ocabra.backends._mock import MockBackend
 from ocabra.core.worker_pool import WorkerPool
 
@@ -54,9 +57,6 @@ async def test_set_get_remove_worker(pool):
 
 @pytest.mark.asyncio
 async def test_assign_port_range_exhausted():
-    from ocabra import config
-    from unittest.mock import patch
-
     pool = WorkerPool()
     # Use a tiny range (only 2 ports)
     with patch.object(config.settings, "worker_port_range_start", 19000), \
@@ -65,3 +65,12 @@ async def test_assign_port_range_exhausted():
         await pool.assign_port()
         with pytest.raises(RuntimeError, match="No available ports"):
             await pool.assign_port()
+
+
+@pytest.mark.asyncio
+async def test_get_backend_disabled_reason():
+    pool = WorkerPool()
+    pool.register_disabled_backend("tensorrt_llm", "feature flag disabled")
+
+    with pytest.raises(RuntimeError, match="feature flag disabled"):
+        await pool.get_backend("tensorrt_llm")

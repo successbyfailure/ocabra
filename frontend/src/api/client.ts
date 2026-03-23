@@ -398,7 +398,7 @@ function toOllamaVariant(raw: unknown): OllamaModelVariant {
 
 function toServerConfig(raw: unknown): ServerConfig {
   const data = isRecord(raw) ? raw : {}
-  const globalSchedulesRaw = data.global_schedules ?? data.globalSchedules
+  const globalSchedulesRaw = data.globalSchedules
   const globalSchedules = Array.isArray(globalSchedulesRaw)
     ? globalSchedulesRaw.map((schedule, idx) => {
         const s = isRecord(schedule) ? schedule : {}
@@ -413,18 +413,18 @@ function toServerConfig(raw: unknown): ServerConfig {
     : []
 
   return {
-    defaultGpuIndex: Number(data.default_gpu_index ?? data.defaultGpuIndex ?? 0),
-    idleTimeoutSeconds: Number(data.idle_timeout_seconds ?? data.idleTimeoutSeconds ?? 0),
-    vramBufferMb: Number(data.vram_buffer_mb ?? data.vramBufferMb ?? 0),
-    vramPressureThresholdPct: Number(data.vram_pressure_threshold_pct ?? data.vramPressureThresholdPct ?? 0),
-    logLevel: String(data.log_level ?? data.logLevel ?? "info"),
-    litellmBaseUrl: String(data.litellm_base_url ?? data.litellmBaseUrl ?? ""),
-    litellmAdminKey: String(data.litellm_admin_key ?? data.litellmAdminKey ?? ""),
-    litellmAutoSync: Boolean(data.litellm_auto_sync ?? data.litellmAutoSync),
-    energyCostEurKwh: Number(data.energy_cost_eur_kwh ?? data.energyCostEurKwh ?? 0),
-    modelsDir: String(data.models_dir ?? data.modelsDir ?? "/models"),
-    downloadDir: String(data.download_dir ?? data.downloadDir ?? "/models/downloads"),
-    maxTemperatureC: Number(data.max_temperature_c ?? data.maxTemperatureC ?? 88),
+    defaultGpuIndex: Number(data.defaultGpuIndex ?? 0),
+    idleTimeoutSeconds: Number(data.idleTimeoutSeconds ?? 0),
+    vramBufferMb: Number(data.vramBufferMb ?? 0),
+    vramPressureThresholdPct: Number(data.vramPressureThresholdPct ?? 0),
+    logLevel: String(data.logLevel ?? "info"),
+    litellmBaseUrl: String(data.litellmBaseUrl ?? ""),
+    litellmAdminKey: String(data.litellmAdminKey ?? ""),
+    litellmAutoSync: Boolean(data.litellmAutoSync),
+    energyCostEurKwh: Number(data.energyCostEurKwh ?? 0),
+    modelsDir: String(data.modelsDir ?? "/models"),
+    downloadDir: String(data.downloadDir ?? "/models/downloads"),
+    maxTemperatureC: Number(data.maxTemperatureC ?? 88),
     globalSchedules,
   }
 }

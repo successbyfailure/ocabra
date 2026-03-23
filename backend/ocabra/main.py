@@ -58,6 +58,23 @@ async def _idle_eviction_loop(model_manager, stop_event: asyncio.Event) -> None:
     logger.info("idle_eviction_loop_stopped")
 
 
+async def _schedule_maintenance_loop(gpu_scheduler, stop_event: asyncio.Event) -> None:
+    interval_s = 60
+    logger.info("schedule_maintenance_loop_started", interval_s=interval_s)
+    while not stop_event.is_set():
+        try:
+            await gpu_scheduler.check_schedule_evictions()
+            await gpu_scheduler.check_schedule_reloads()
+        except Exception as exc:
+            logger.warning("schedule_maintenance_loop_error", error=str(exc))
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    logger.info("schedule_maintenance_loop_stopped")
+
+
 async def _ollama_inventory_loop(model_manager, stop_event: asyncio.Event) -> None:
     from ocabra.registry.ollama_registry import OllamaRegistry
 
@@ -134,20 +151,45 @@ async def lifespan(app: FastAPI):
     # Stream 1-B: Worker Pool + Model Manager
     from ocabra.core.worker_pool import WorkerPool
     from ocabra.core.model_manager import ModelManager
-    from ocabra.backends.diffusers_backend import DiffusersBackend
     from ocabra.backends.bitnet_backend import BitnetBackend
+    from ocabra.backends.diffusers_backend import DiffusersBackend
+    from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.ollama_backend import OllamaBackend
-    from ocabra.backends.whisper_backend import WhisperBackend
+    from ocabra.backends.sglang_backend import SGLangBackend
+    from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
+    from ocabra.backends.vllm_backend import VLLMBackend
+    from ocabra.backends.whisper_backend import WhisperBackend
     worker_pool = WorkerPool()
     worker_pool.register_backend("diffusers", DiffusersBackend())
     worker_pool.register_backend("bitnet", BitnetBackend())
+    worker_pool.register_backend("llama_cpp", LlamaCppBackend())
     worker_pool.register_backend("ollama", OllamaBackend())
+    worker_pool.register_backend("sglang", SGLangBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
     worker_pool.register_backend("tts", TTSBackend())
+    worker_pool.register_backend("vllm", VLLMBackend())
+    tensorrt_llm_backend = TensorRTLLMBackend()
+    if tensorrt_llm_backend.is_enabled():
+        worker_pool.register_backend("tensorrt_llm", tensorrt_llm_backend)
+    else:
+        worker_pool.register_disabled_backend(
+            "tensorrt_llm",
+            tensorrt_llm_backend.disabled_reason or "feature flag disabled",
+        )
     model_manager = ModelManager(worker_pool, gpu_manager, gpu_scheduler)
+    gpu_scheduler.set_model_manager(model_manager)
     app.state.worker_pool = worker_pool
     app.state.model_manager = model_manager
+
+    if settings.litellm_auto_sync:
+        from ocabra.integrations.litellm_sync import LiteLLMSync
+
+        litellm_syncer = LiteLLMSync(model_manager)
+        model_manager.register_event_listener(litellm_syncer.handle_model_event)
+        app.state.litellm_syncer = litellm_syncer
+        logger.info("litellm_sync_enabled")
+
     await model_manager.start()
     from ocabra.registry.ollama_registry import OllamaRegistry
     try:
@@ -171,6 +213,11 @@ async def lifespan(app: FastAPI):
         _idle_eviction_loop(model_manager, idle_eviction_stop),
         name="idle-eviction-loop",
     )
+    schedule_maintenance_stop = asyncio.Event()
+    schedule_maintenance_task = asyncio.create_task(
+        _schedule_maintenance_loop(gpu_scheduler, schedule_maintenance_stop),
+        name="schedule-maintenance-loop",
+    )
     ollama_inventory_stop = asyncio.Event()
     ollama_inventory_task = asyncio.create_task(
         _ollama_inventory_loop(model_manager, ollama_inventory_stop),
@@ -187,18 +234,7 @@ async def lifespan(app: FastAPI):
         name="service-health-loop",
     )
 
-    # Stream 2-A: vLLM backend registration
-    from ocabra.backends.vllm_backend import VLLMBackend
-    worker_pool.register_backend("vllm", VLLMBackend())
     logger.info("vllm_backend_registered")
-
-    # Stream 5: LiteLLM auto-sync hook
-    if settings.litellm_auto_sync:
-        from ocabra.integrations.litellm_sync import LiteLLMSync
-        litellm_syncer = LiteLLMSync(model_manager)
-        app.state.litellm_syncer = litellm_syncer
-        logger.info("litellm_sync_enabled")
-
     logger.info("ocabra_ready")
     yield
 
@@ -209,6 +245,11 @@ async def lifespan(app: FastAPI):
     idle_eviction_task.cancel()
     with suppress(asyncio.CancelledError):
         await idle_eviction_task
+
+    schedule_maintenance_stop.set()
+    schedule_maintenance_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await schedule_maintenance_task
 
     ollama_inventory_stop.set()
     ollama_inventory_task.cancel()

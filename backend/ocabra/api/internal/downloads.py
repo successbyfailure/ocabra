@@ -19,6 +19,7 @@ from ocabra.registry.ollama_registry import OllamaRegistry
 from ocabra.schemas.registry import DownloadJob
 
 QUEUE_NAME = "queue:download"
+DOWNLOAD_PROGRESS_CHANNEL = "download:progress"
 
 
 class DownloadCreateRequest(BaseModel):
@@ -90,7 +91,7 @@ class DownloadManager:
 
         await set_key(f"download:job:{job.job_id}", job.model_dump(mode="json"))
         await lpush(QUEUE_NAME, {"job_id": job.job_id})
-        await publish(f"download:progress:{job.job_id}", job.model_dump(mode="json"))
+        await self._publish_job_update(job)
         return job
 
     async def cancel(self, job_id: str) -> None:
@@ -335,7 +336,12 @@ class DownloadManager:
 
     async def _save_and_publish(self, job: DownloadJob) -> None:
         await set_key(f"download:job:{job.job_id}", job.model_dump(mode="json"))
-        await publish(f"download:progress:{job.job_id}", job.model_dump(mode="json"))
+        await self._publish_job_update(job)
+
+    async def _publish_job_update(self, job: DownloadJob) -> None:
+        payload = job.model_dump(mode="json")
+        await publish(DOWNLOAD_PROGRESS_CHANNEL, payload)
+        await publish(f"{DOWNLOAD_PROGRESS_CHANNEL}:{job.job_id}", payload)
 
 
 def get_redis_safe():

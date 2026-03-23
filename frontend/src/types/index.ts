@@ -257,10 +257,10 @@ export interface ServerConfig {
   litellmAdminKey: string
   litellmAutoSync: boolean
   energyCostEurKwh: number
-  modelsDir?: string
-  downloadDir?: string
-  maxTemperatureC?: number
-  globalSchedules?: EvictionSchedule[]
+  modelsDir: string
+  downloadDir: string
+  maxTemperatureC: number
+  globalSchedules: EvictionSchedule[]
 }
 
 export interface StatsParams {

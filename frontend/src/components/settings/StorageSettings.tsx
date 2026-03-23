@@ -10,11 +10,11 @@ interface StorageSettingsProps {
 }
 
 export function StorageSettings({ localModels, config, onSave }: StorageSettingsProps) {
-  const [downloadDir, setDownloadDir] = useState(config.downloadDir ?? "/models/downloads")
+  const [downloadDir, setDownloadDir] = useState(config.downloadDir)
   const [confirmOpen, setConfirmOpen] = useState(false)
 
   useEffect(() => {
-    setDownloadDir(config.downloadDir ?? "/models/downloads")
+    setDownloadDir(config.downloadDir)
   }, [config.downloadDir])
 
   const maxSize = useMemo(
@@ -24,7 +24,6 @@ export function StorageSettings({ localModels, config, onSave }: StorageSettings
 
   const save = async () => {
     try {
-      localStorage.setItem("ocabra.downloadDir", downloadDir)
       await onSave({ downloadDir })
       toast.success("Storage settings guardadas")
     } catch {

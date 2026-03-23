@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -125,6 +126,7 @@ class ModelManager:
         self._gpu_scheduler = gpu_scheduler
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
+        self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
 
     async def _ensure_diarized_variants_for_whisper_models(self) -> None:
         snapshot = list(self._states.values())
@@ -159,6 +161,9 @@ class ModelManager:
 
     def set_gpu_scheduler(self, scheduler) -> None:
         self._gpu_scheduler = scheduler
+
+    def register_event_listener(self, listener: Callable[[dict], Awaitable[None]]) -> None:
+        self._event_listeners.append(listener)
 
     async def start(self) -> None:
         await self._load_configs_from_db()
@@ -236,6 +241,37 @@ class ModelManager:
             )
             await set_key(f"model:state:{model_id}", state.to_dict())
 
+    def _notify_event_listeners(self, event: str, state: "ModelState") -> None:
+        if not self._event_listeners:
+            return
+
+        payload = {
+            "event": event,
+            "model_id": state.model_id,
+            "backend_type": state.backend_type,
+            "display_name": state.display_name,
+            "load_policy": state.load_policy.value,
+            "new_status": state.status.value,
+            "status": state.status.value,
+        }
+        for listener in list(self._event_listeners):
+            asyncio.create_task(self._run_event_listener(listener, payload))
+
+    async def _run_event_listener(
+        self,
+        listener: Callable[[dict], Awaitable[None]],
+        payload: dict,
+    ) -> None:
+        try:
+            await listener(payload)
+        except Exception as exc:
+            logger.warning(
+                "model_event_listener_failed",
+                lifecycle_event=payload.get("event"),
+                model_id=payload.get("model_id"),
+                error=str(exc),
+            )
+
     async def _load_model(
         self, model_id: str, force_gpu: int | None = None
     ) -> "ModelState":
@@ -267,7 +303,7 @@ class ModelManager:
                     gpu_indices = []
                 elif self._gpu_scheduler:
                     gpu_indices = await self._assign_gpus_for_load(
-                        model_id=normalized_model_id,
+                        model_id=model_id,
                         vram_needed=vram_needed,
                         preferred_gpu=force_gpu or state.preferred_gpu,
                         enforce_vllm_headroom=(state.backend_type == "vllm"),
@@ -317,6 +353,7 @@ class ModelManager:
 
                 self._worker_pool.set_worker(model_id, worker_info)
                 await self._publish_event(model_id, "status_changed")
+                self._notify_event_listeners("load", state)
                 logger.info(
                     "model_loaded",
                     model_id=model_id,
@@ -473,6 +510,7 @@ class ModelManager:
             state.worker_info = None
             state.loaded_at = None
             await self._publish_event(model_id, "status_changed")
+            self._notify_event_listeners("unload", state)
             logger.info("model_unloaded", model_id=model_id, reason=reason)
 
             if reason == "pressure" and state.auto_reload:
@@ -617,6 +655,13 @@ class ModelManager:
 
         for model_id in changed:
             await self._publish_event(model_id, "status_changed")
+            state = self._states.get(model_id)
+            if not state:
+                continue
+            if state.status == ModelStatus.LOADED:
+                self._notify_event_listeners("load", state)
+            elif state.status == ModelStatus.UNLOADED:
+                self._notify_event_listeners("unload", state)
 
         return added
 
@@ -665,6 +710,7 @@ class ModelManager:
         )
         self._states[normalized_model_id] = state
         self._load_locks[normalized_model_id] = asyncio.Lock()
+        self._notify_event_listeners("register", state)
 
         if create_diarized_variant and _should_auto_create_diarized_variant(state):
             diarized_backend_model_id = _diarized_variant_model_id(backend_model_id)

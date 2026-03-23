@@ -33,7 +33,7 @@ class BackendCapabilities:
 
 @dataclass
 class WorkerInfo:
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     model_id: str
     gpu_indices: list[int]
     port: int
@@ -127,7 +127,7 @@ class ModelState:
                             # Formato legacy sin prefijo ya no es válido.
     backend_model_id: str       # Backend-native id (without prefix), e.g. "mistral-7b-instruct"
     display_name: str
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     status: ModelStatus
     load_policy: LoadPolicy
     auto_reload: bool           # Recargar automáticamente tras eviction
@@ -176,7 +176,7 @@ Errores siguen el formato: `{"detail": str, "code": str}`.
 ### 5.1 Modelos
 
 ```
-GET    /ocabra/models                    → list[ModelState]  # model_id is canonical backend/model
+GET    /ocabra/models                    → list[ModelState]  # model_id is canonical backend/model; no legacy bare-name fallback at this boundary
 
 Nota OpenAI `/v1/*`: el campo `model` acepta `model_id` canónico y también `backend_model_id` como alias. Si hay múltiples coincidencias de alias, se usa la primera.
 
@@ -244,6 +244,7 @@ POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]
 - `litellmBaseUrl`, `litellmAdminKey` (enmascarada), `litellmAutoSync`
 - `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
 - `globalSchedules`: `list[EvictionSchedule]`
+- `GET /ocabra/config` y `PATCH /ocabra/config` usan claves camelCase; no hay fallback legacy a snake_case o `localStorage`.
 
 ### 5.7 Servicios interactivos
 

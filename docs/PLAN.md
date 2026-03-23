@@ -40,20 +40,18 @@ enrutamiento delante de oCabra.
 ## Estado actual (2026-03-23)
 
 Implementado en código:
-- Fase 0, Fase 1 (GPU/Model/Registry/UI base), Fase 2 (vLLM, Diffusers, Audio/TTS), Fase 3 (OpenAI + Ollama APIs), Fase 4 (Models/Explore/Playground/Stats/Settings).
+- Fase 0, Fase 1 (GPU/Model/Registry/UI base), Fase 2 (vLLM, Diffusers, Audio/TTS, llama.cpp, SGLang, TensorRT-LLM opcional), Fase 3 (OpenAI + Ollama APIs), Fase 4 (Models/Explore/Playground/Stats/Settings).
 - IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en endpoints OpenAI.
 - UI Settings alineada con API de configuración (`GET/PATCH /ocabra/config`, `POST /ocabra/config/litellm/sync`).
+- PATCH /ocabra/config usa claves camelCase-only; el frontend ya no depende de fallback local para `modelsDir`, `downloadDir` o `maxTemperatureC`.
+- Endpoint Prometheus `/metrics` ya está expuesto y registrado en `main.py`.
 
 Pendiente para cierre de plan:
-- Integrar backend `llama.cpp` (worker, capacidades, registro, routing OpenAI/Ollama, tests).
-- Integrar backend `SGLang` (worker, capacidades, registro, routing OpenAI/Ollama, tests).
-- Integrar backend `TensorRT-LLM` como opcional (feature-flag, deploy profile, tests mínimos).
-- Completar scheduler de ventanas de evicción (APScheduler + wiring real).
-- Conectar auto-sync LiteLLM a eventos de lifecycle de modelos (no solo sync manual).
-- Cerrar inconsistencias de WS de descargas (canal global vs canal por job).
-- Arreglar `tests/integration/test_model_lifecycle` (actualmente 3 fallos) y cerrar mocks async de DB.
-- Mejorar cobertura de integración Fase 5 (`openai_chat`, `ollama_chat`, `gpu_pressure`).
+- Endurecer integración runtime real de `llama.cpp`/`SGLang`/`TensorRT-LLM` en entornos con binarios/engines productivos.
+- Completar cobertura de integración API para nuevos backends (`/v1/chat`, `/v1/completions`, `/v1/embeddings` según capacidad).
 - Cerrar deuda de tooling frontend detectada en validación (ESLint v9 y separación Vitest/Playwright).
+- Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.
+- Revisar tuning fino de scheduler de schedules (cron windows complejas, observabilidad y métricas de ejecución).
 
 ---
 
@@ -445,7 +443,6 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 ### FASE 5 — Integrations + Polish (secuencial, requiere todo lo anterior)
 
 - [ ] LiteLLM auto-sync: detectar cambios de modelo → actualizar config LiteLLM via API
-- [ ] Prometheus metrics endpoint (`/metrics`)
 - [ ] Logging estructurado (structlog) con nivel configurable
 - [ ] Healthcheck endpoints (`/health`, `/ready`)
 - [ ] Tests de integración para API OpenAI + Ollama

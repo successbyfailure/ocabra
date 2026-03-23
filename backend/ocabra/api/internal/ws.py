@@ -22,13 +22,6 @@ class ConnectionManager:
         except ValueError:
             pass
 
-    async def broadcast(self, message: str) -> None:
-        for ws in list(self._connections):
-            try:
-                await ws.send_text(message)
-            except Exception:
-                self.disconnect(ws)
-
 
 manager = ConnectionManager()
 
@@ -44,7 +37,7 @@ CHANNEL_EVENT_MAP = {
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     pubsub = get_redis().pubsub()
-    await pubsub.subscribe("gpu:stats", "model:events", "service:events", "download:progress")
+    await pubsub.subscribe(*CHANNEL_EVENT_MAP)
 
     async def redis_listener() -> None:
         async for message in pubsub.listen():
@@ -56,7 +49,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 data = json.loads(message["data"])
             except (json.JSONDecodeError, TypeError):
                 continue
-            await manager.broadcast(json.dumps({"type": event_type, "data": data}))
+            await websocket.send_text(json.dumps({"type": event_type, "data": data}))
 
     listener_task = asyncio.create_task(redis_listener())
     try:
@@ -70,5 +63,5 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     finally:
         listener_task.cancel()
         manager.disconnect(websocket)
-        await pubsub.unsubscribe()
+        await pubsub.unsubscribe(*CHANNEL_EVENT_MAP)
         await pubsub.aclose()

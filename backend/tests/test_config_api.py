@@ -65,6 +65,17 @@ def test_patch_config_applies_runtime_values() -> None:
         settings.idle_timeout_seconds = previous_timeout
 
 
+def test_patch_config_rejects_legacy_snake_case_keys() -> None:
+    client = TestClient(_make_app())
+
+    resp = client.patch(
+        "/ocabra/config",
+        json={"models_dir": "/tmp/legacy-models"},
+    )
+
+    assert resp.status_code == 422
+
+
 def test_sync_litellm_contract() -> None:
     client = TestClient(_make_app())
 

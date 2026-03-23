@@ -48,7 +48,7 @@ async def test_auto_register_model_uses_register_config() -> None:
     await manager._auto_register_model(job)
 
     model_manager.add_model.assert_awaited_once_with(
-        model_id="Qwen/Qwen3-8B-Instruct",
+        model_id="vllm/Qwen/Qwen3-8B-Instruct",
         backend_type="vllm",
         display_name="Qwen3 8B",
         load_policy="warm",
@@ -95,7 +95,7 @@ async def test_auto_register_bitnet_sets_model_path() -> None:
 
     call = model_manager.add_model.await_args.kwargs
     assert call["backend_type"] == "bitnet"
-    assert call["model_id"] == "microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s"
+    assert call["model_id"] == "bitnet/microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s"
     assert call["extra_config"]["model_path"].endswith(
         "/huggingface/microsoft--BitNet-b1.58-2B-4T-gguf--ggml-model-i2_s/ggml-model-i2_s.gguf"
     )

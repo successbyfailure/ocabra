@@ -24,7 +24,7 @@ class EvictionSchedulePayload(BaseModel):
 
 
 class ServerConfigPatch(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     default_gpu_index: int | None = Field(default=None, alias="defaultGpuIndex")
     idle_timeout_seconds: int | None = Field(default=None, alias="idleTimeoutSeconds")

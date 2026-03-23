@@ -8,13 +8,13 @@ interface GeneralSettingsProps {
 }
 
 export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
-  const [modelsDir, setModelsDir] = useState(config.modelsDir ?? "/models")
+  const [modelsDir, setModelsDir] = useState(config.modelsDir)
   const [logLevel, setLogLevel] = useState(config.logLevel)
   const [idleTimeoutSeconds, setIdleTimeoutSeconds] = useState(config.idleTimeoutSeconds)
   const [vramBufferMb, setVramBufferMb] = useState(config.vramBufferMb)
 
   useEffect(() => {
-    setModelsDir(config.modelsDir ?? "/models")
+    setModelsDir(config.modelsDir)
     setLogLevel(config.logLevel)
     setIdleTimeoutSeconds(config.idleTimeoutSeconds)
     setVramBufferMb(config.vramBufferMb)
@@ -22,7 +22,6 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
 
   const save = async () => {
     try {
-      localStorage.setItem("ocabra.modelsDir", modelsDir)
       await onSave({
         logLevel,
         idleTimeoutSeconds,

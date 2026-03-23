@@ -6,6 +6,7 @@ so that LiteLLM always knows which models are available to route to.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import httpx
@@ -32,6 +33,8 @@ class LiteLLMSync:
 
     def __init__(self, model_manager) -> None:
         self._model_manager = model_manager
+        self._sync_task: asyncio.Task | None = None
+        self._sync_pending = False
 
     async def sync_all(self) -> SyncResult:
         """
@@ -84,14 +87,59 @@ class LiteLLMSync:
 
         return result
 
-    async def on_model_event(self, event: str, model_id: str) -> None:
-        """
-        React to model state changes.
+    async def handle_model_event(self, payload: dict) -> None:
+        await self.on_model_event(
+            str(payload.get("event", "")),
+            str(payload.get("model_id", "")),
+            new_status=str(payload.get("new_status", payload.get("status", ""))),
+        )
 
-        If auto_sync is enabled, triggers a full re-sync whenever a model
-        transitions to LOADED or UNLOADED.
+    async def on_model_event(
+        self,
+        event: str,
+        model_id: str,
+        new_status: str | None = None,
+    ) -> None:
+        """
+        React to model lifecycle changes.
+
+        Auto-sync is scheduled in the background so model load/unload/register
+        flows do not block on LiteLLM network calls.
         """
         if not settings.litellm_auto_sync:
             return
-        if event in ("loaded", "unloaded"):
-            await self.sync_all()
+        if not self._should_sync(event, new_status):
+            return
+
+        logger.info(
+            "litellm_sync_scheduled",
+            lifecycle_event=event,
+            model_id=model_id,
+            new_status=new_status,
+        )
+        task = self._schedule_sync()
+        if task is not None:
+            await asyncio.sleep(0)
+
+    def _should_sync(self, event: str, new_status: str | None) -> bool:
+        event_name = str(event or "").lower()
+        status_name = str(new_status or "").lower()
+        return event_name in {"register", "load", "loaded", "unload", "unloaded"} or status_name in {
+            "loaded",
+            "unloaded",
+        }
+
+    def _schedule_sync(self) -> asyncio.Task | None:
+        self._sync_pending = True
+        if self._sync_task is not None and not self._sync_task.done():
+            return self._sync_task
+        self._sync_task = asyncio.create_task(self._drain_sync_queue())
+        return self._sync_task
+
+    async def _drain_sync_queue(self) -> None:
+        while self._sync_pending:
+            self._sync_pending = False
+            try:
+                await self.sync_all()
+            except Exception as exc:
+                logger.error("litellm_sync_background_failed", error=str(exc))

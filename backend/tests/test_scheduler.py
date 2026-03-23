@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -143,3 +143,78 @@ async def test_vllm_headroom_can_trigger_insufficient_even_if_raw_sum_fits():
                 preferred_gpu=None,
                 enforce_vllm_headroom=True,
             )
+
+
+@pytest.mark.asyncio
+async def test_schedule_evictions_unload_due_warm_models():
+    from types import SimpleNamespace
+
+    from ocabra.core.model_manager import LoadPolicy, ModelStatus, ModelState
+
+    gm = make_gpu_manager({0: 24000})
+    model_manager = AsyncMock()
+    scheduler = GPUScheduler(gm, model_manager=model_manager)
+    state = ModelState(
+        model_id="vllm/warm-model",
+        display_name="Warm Model",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.WARM,
+    )
+    model_manager.list_states = AsyncMock(return_value=[state])
+    scheduler._load_enabled_schedules = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                id="sched-1",
+                model_id=None,
+                action="evict_warm",
+                cron_expr="* * * * *",
+            )
+        ]
+    )
+    scheduler._is_schedule_due = MagicMock(return_value=True)
+
+    await scheduler.check_schedule_evictions()
+
+    model_manager.unload.assert_awaited_once_with(
+        "vllm/warm-model",
+        reason="schedule:evict_warm",
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_reloads_load_due_pin_models():
+    from types import SimpleNamespace
+
+    from ocabra.core.model_manager import LoadPolicy, ModelStatus, ModelState
+
+    gm = make_gpu_manager({0: 24000})
+    model_manager = AsyncMock()
+    scheduler = GPUScheduler(gm, model_manager=model_manager)
+    state = ModelState(
+        model_id="vllm/pin-model",
+        display_name="Pinned Model",
+        backend_type="vllm",
+        status=ModelStatus.UNLOADED,
+        load_policy=LoadPolicy.PIN,
+        preferred_gpu=1,
+    )
+    model_manager.list_states = AsyncMock(return_value=[state])
+    scheduler._load_enabled_schedules = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                id="sched-2",
+                model_id=None,
+                action="reload",
+                cron_expr="* * * * *",
+            )
+        ]
+    )
+    scheduler._is_schedule_due = MagicMock(return_value=True)
+
+    await scheduler.check_schedule_reloads()
+
+    model_manager.load.assert_awaited_once_with(
+        "vllm/pin-model",
+        force_gpu=1,
+    )

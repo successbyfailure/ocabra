@@ -13,14 +13,25 @@ logger = structlog.get_logger(__name__)
 class WorkerPool:
     def __init__(self) -> None:
         self._backends: dict[str, BackendInterface] = {}
+        self._disabled_backends: dict[str, str] = {}
         self._workers: dict[str, WorkerInfo] = {}
         self._used_ports: set[int] = set()
 
     def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
         self._backends[backend_type] = backend
+        self._disabled_backends.pop(backend_type, None)
         logger.info("backend_registered", backend_type=backend_type)
 
+    def register_disabled_backend(self, backend_type: str, reason: str) -> None:
+        self._backends.pop(backend_type, None)
+        self._disabled_backends[backend_type] = reason
+        logger.info("backend_disabled", backend_type=backend_type, reason=reason)
+
     async def get_backend(self, backend_type: str) -> BackendInterface:
+        if backend_type in self._disabled_backends:
+            raise RuntimeError(
+                f"Backend '{backend_type}' is disabled: {self._disabled_backends[backend_type]}"
+            )
         if backend_type not in self._backends:
             raise KeyError(f"Backend '{backend_type}' not registered")
         return self._backends[backend_type]

@@ -69,6 +69,35 @@ class Settings(BaseSettings):
     # Needed for some custom-tokenizer/custom-model repos on Hugging Face.
     vllm_trust_remote_code: bool = False
     vllm_disable_log_requests: bool = True
+    # llama.cpp / llama-server
+    llama_cpp_server_bin: str = "/usr/local/bin/llama-server"
+    llama_cpp_gpu_layers: int = 0
+    llama_cpp_ctx_size: int = 4096
+    llama_cpp_threads: int | None = None
+    llama_cpp_batch_size: int = 512
+    llama_cpp_ubatch_size: int = 128
+    llama_cpp_flash_attn: bool = False
+    llama_cpp_mlock: bool = True
+    llama_cpp_embeddings: bool = False
+    llama_cpp_startup_timeout_s: int = 30
+    # SGLang
+    sglang_server_module: str = "sglang.launch_server"
+    sglang_tensor_parallel_size: int | None = None
+    sglang_context_length: int | None = None
+    sglang_mem_fraction_static: float = 0.9
+    sglang_trust_remote_code: bool = False
+    sglang_disable_radix_cache: bool = False
+    sglang_startup_timeout_s: int = 120
+    # TensorRT-LLM
+    tensorrt_llm_enabled: bool = False
+    tensorrt_llm_serve_bin: str = "/usr/local/bin/trtllm-serve"
+    tensorrt_llm_engines_dir: str | None = None
+    tensorrt_llm_backend: str = "tensorrt"
+    tensorrt_llm_tokenizer_path: str | None = None
+    tensorrt_llm_max_batch_size: int | None = None
+    tensorrt_llm_context_length: int | None = None
+    tensorrt_llm_trust_remote_code: bool = False
+    tensorrt_llm_startup_timeout_s: int = 120
     # BitNet / bitnet.cpp (llama-server compatible)
     bitnet_server_bin: str = "/usr/local/bin/bitnet-server"
     bitnet_gpu_layers: int = 0
@@ -138,7 +167,14 @@ class Settings(BaseSettings):
         "vllm_enable_chunked_prefill",
         "vllm_swap_space",
         "vllm_kv_cache_dtype",
+        "llama_cpp_threads",
+        "sglang_tensor_parallel_size",
+        "sglang_context_length",
         "bitnet_threads",
+        "tensorrt_llm_engines_dir",
+        "tensorrt_llm_tokenizer_path",
+        "tensorrt_llm_max_batch_size",
+        "tensorrt_llm_context_length",
         mode="before",
     )
     @classmethod

@@ -11,17 +11,16 @@ interface GPUSettingsProps {
 export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
   const [defaultGpuIndex, setDefaultGpuIndex] = useState(config.defaultGpuIndex)
   const [vramPressureThresholdPct, setVramPressureThresholdPct] = useState(config.vramPressureThresholdPct)
-  const [maxTemperatureC, setMaxTemperatureC] = useState(config.maxTemperatureC ?? 88)
+  const [maxTemperatureC, setMaxTemperatureC] = useState(config.maxTemperatureC)
 
   useEffect(() => {
     setDefaultGpuIndex(config.defaultGpuIndex)
     setVramPressureThresholdPct(config.vramPressureThresholdPct)
-    setMaxTemperatureC(config.maxTemperatureC ?? 88)
+    setMaxTemperatureC(config.maxTemperatureC)
   }, [config.defaultGpuIndex, config.maxTemperatureC, config.vramPressureThresholdPct])
 
   const save = async () => {
     try {
-      localStorage.setItem("ocabra.maxTemperatureC", String(maxTemperatureC))
       await onSave({
         defaultGpuIndex,
         vramPressureThresholdPct,

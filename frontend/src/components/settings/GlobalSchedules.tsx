@@ -9,10 +9,10 @@ interface GlobalSchedulesProps {
 }
 
 export function GlobalSchedules({ config, onSave }: GlobalSchedulesProps) {
-  const [schedules, setSchedules] = useState<EvictionSchedule[]>(config.globalSchedules ?? [])
+  const [schedules, setSchedules] = useState<EvictionSchedule[]>(config.globalSchedules)
 
   useEffect(() => {
-    setSchedules(config.globalSchedules ?? [])
+    setSchedules(config.globalSchedules)
   }, [config.globalSchedules])
 
   const save = async () => {
