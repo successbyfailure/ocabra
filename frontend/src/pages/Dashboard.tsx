@@ -10,6 +10,30 @@ import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
 import type { ServiceState } from "@/types"
 
+function formatLoadedAgo(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const remMinutes = minutes % 60
+  if (hours < 24) return remMinutes === 0 ? `${hours}h` : `${hours}h ${remMinutes}m`
+  const days = Math.floor(hours / 24)
+  const remHours = hours % 24
+  return remHours === 0 ? `${days}d` : `${days}d ${remHours}h`
+}
+
+function loadedMeta(loadedAt: string | null, nowMs: number): { at: string; ago: string } | null {
+  if (!loadedAt) return null
+  const loadedTs = Date.parse(loadedAt)
+  if (Number.isNaN(loadedTs)) return null
+  const seconds = Math.max(0, Math.floor((nowMs - loadedTs) / 1000))
+  const at = new Date(loadedTs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+  return { at, ago: formatLoadedAgo(seconds) }
+}
 function ServiceCard({ service }: { service: ServiceState }) {
   const unloadService = useServiceStore((s) => s.unloadService)
   const startService = useServiceStore((s) => s.startService)
@@ -179,6 +203,7 @@ function ServiceCard({ service }: { service: ServiceState }) {
 
 export function Dashboard() {
   const [error, setError] = useState<string | null>(null)
+  const [nowMs, setNowMs] = useState<number>(() => Date.now())
 
   const { connected } = useWebSocket()
 
@@ -204,6 +229,11 @@ export function Dashboard() {
     [jobs],
   )
   const serviceList = useMemo(() => Object.values(services), [services])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     async function bootstrap() {
@@ -283,6 +313,11 @@ export function Dashboard() {
                     GPU {model.currentGpu.join(", ") || "-"}
                   </span>
                   <span>{model.vramUsedMb.toLocaleString()} MB</span>
+                  {loadedMeta(model.loadedAt, nowMs) && (
+                    <span className="rounded-md bg-muted px-2 py-0.5">
+                      Cargado {loadedMeta(model.loadedAt, nowMs)!.at} · {loadedMeta(model.loadedAt, nowMs)!.ago}
+                    </span>
+                  )}
                 </div>
               </div>
 

@@ -39,6 +39,7 @@ async def test_load_success_uses_local_model_dir(tmp_path: Path) -> None:
         mock_settings.cuda_device_order = "PCI_BUS_ID"
         mock_settings.hf_token = ""
         mock_settings.sglang_server_module = "sglang.launch_server"
+        mock_settings.sglang_python_bin = "/opt/sglang-venv/bin/python"
         mock_settings.sglang_tensor_parallel_size = None
         mock_settings.sglang_context_length = 32768
         mock_settings.sglang_mem_fraction_static = 0.8

@@ -219,21 +219,34 @@ class OllamaRegistry:
         details = await self.list_installed_details()
         return [d["name"] for d in details]
 
-    async def list_loaded(self) -> list[str]:
+    async def list_loaded_details(self) -> list[dict]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(self._url("/api/ps"))
             response.raise_for_status()
             payload = response.json()
 
         models = payload.get("models", []) if isinstance(payload, dict) else []
-        names: list[str] = []
+        details: list[dict] = []
         for item in models:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or item.get("model") or "").strip()
-            if name:
-                names.append(name)
-        return names
+            if not name:
+                continue
+            vram_bytes = int(item.get("size_vram") or item.get("vram") or item.get("size") or 0)
+            details.append(
+                {
+                    "name": name,
+                    "model": str(item.get("model") or name),
+                    "size_vram": vram_bytes,
+                    "digest": str(item.get("digest") or ""),
+                }
+            )
+        return details
+
+    async def list_loaded(self) -> list[str]:
+        details = await self.list_loaded_details()
+        return [d["name"] for d in details]
 
     async def load(self, model_ref: str, keep_alive: str | int | None = None) -> None:
         payload: dict[str, object] = {

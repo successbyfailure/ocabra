@@ -57,9 +57,12 @@ class SGLangBackend(BackendInterface):
             settings.sglang_tensor_parallel_size,
         ) or max(1, len(gpu_indices))
 
+        sglang_python = settings.sglang_python_bin.strip() if settings.sglang_python_bin else sys.executable
         cmd = [
             sys.executable,
             str(_WORKER_PATH),
+            "--python-bin",
+            sglang_python,
             "--server-module",
             settings.sglang_server_module,
             "--model-id",

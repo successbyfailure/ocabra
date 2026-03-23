@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     llama_cpp_embeddings: bool = False
     llama_cpp_startup_timeout_s: int = 30
     # SGLang
+    sglang_python_bin: str = "/opt/sglang-venv/bin/python"
     sglang_server_module: str = "sglang.launch_server"
     sglang_tensor_parallel_size: int | None = None
     sglang_context_length: int | None = None
@@ -168,6 +169,7 @@ class Settings(BaseSettings):
         "vllm_swap_space",
         "vllm_kv_cache_dtype",
         "llama_cpp_threads",
+        "sglang_python_bin",
         "sglang_tensor_parallel_size",
         "sglang_context_length",
         "bitnet_threads",

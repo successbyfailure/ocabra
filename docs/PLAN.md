@@ -50,11 +50,11 @@ Implementado en código:
 
 Validación reciente (2026-03-23):
 - `llama.cpp` validado end-to-end con modelo GGUF reciente (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`, archivo `qwen2.5-0.5b-instruct-q4_k_m.gguf`): registro, load y respuesta chat correctos.
-- `SGLang` validado a nivel de integración de backend en tests unitarios; en runtime real queda bloqueado por toolchain del contenedor (falta `nvcc` para ruta JIT/flashinfer en esta imagen).
+- `SGLang` validado en runtime real dentro del contenedor con entorno dedicado (`/opt/sglang-venv`), descarga y carga de modelo reciente (`HuggingFaceTB/SmolLM2-135M-Instruct`), y health/load correctos.
 - Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
 
 Pendiente para cierre de plan:
-- Endurecer integración runtime real de `SGLang`/`TensorRT-LLM` en entornos con binarios/engines productivos y toolchain CUDA completa cuando aplique.
+- Endurecer integración runtime real de `TensorRT-LLM` en entornos con engines productivos y toolchain CUDA/NVIDIA alineada cuando aplique.
 - Completar cobertura de integración API para nuevos backends (`/v1/chat`, `/v1/completions`, `/v1/embeddings` según capacidad).
 - Cerrar deuda de tooling frontend detectada en validación (ESLint v9 y separación Vitest/Playwright).
 - Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.

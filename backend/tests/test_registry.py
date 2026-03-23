@@ -986,13 +986,14 @@ async def test_model_manager_syncs_ollama_loaded_runtime_state() -> None:
     manager = ModelManager(worker_pool=DummyWorkerPool())
     manager._publish_event = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
 
-    await manager.sync_ollama_inventory(["qwen3:32b"], ["qwen3:32b"])
+    await manager.sync_ollama_inventory(["qwen3:32b"], ["qwen3:32b"], loaded_vram_mb={"qwen3:32b": 6144})
     state = await manager.get_state("qwen3:32b")
 
     assert state is not None
     assert state.status.value == "loaded"
     assert state.loaded_at is not None
     assert state.worker_info is not None
+    assert state.vram_used_mb == 6144
 
     await manager.sync_ollama_inventory(["qwen3:32b"], [])
     state = await manager.get_state("qwen3:32b")
@@ -1242,3 +1243,41 @@ async def test_hf_download_resolves_nemo_default_artifact(monkeypatch: pytest.Mo
     allow_patterns = captured.get("allow_patterns")
     assert isinstance(allow_patterns, list)
     assert "canary-1b-v2.nemo" in allow_patterns
+
+@pytest.mark.asyncio
+async def test_ollama_list_loaded_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        def json(self) -> dict:
+            return {
+                "models": [
+                    {"name": "qwen3:32b", "model": "qwen3:32b", "size_vram": 6442450944, "digest": "sha256:abc"},
+                    {"name": "mistral:7b", "size": 3221225472},
+                ]
+            }
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return False
+
+        async def get(self, url: str):
+            _ = url
+            return FakeResponse()
+
+    monkeypatch.setattr("ocabra.registry.ollama_registry.httpx.AsyncClient", FakeClient)
+
+    registry = OllamaRegistry()
+    details = await registry.list_loaded_details()
+    assert details[0]["name"] == "qwen3:32b"
+    assert details[0]["size_vram"] == 6442450944
+    assert details[1]["name"] == "mistral:7b"
+    assert details[1]["size_vram"] == 3221225472

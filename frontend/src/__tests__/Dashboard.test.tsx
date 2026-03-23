@@ -6,10 +6,11 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 
-const { listGpus, listModels, listDownloads } = vi.hoisted(() => ({
+const { listGpus, listModels, listDownloads, listServices } = vi.hoisted(() => ({
   listGpus: vi.fn(),
   listModels: vi.fn(),
   listDownloads: vi.fn(),
+  listServices: vi.fn(),
 }))
 
 vi.mock("@/hooks/useWebSocket", () => ({
@@ -21,6 +22,7 @@ vi.mock("@/api/client", () => ({
     gpus: { list: listGpus },
     models: { list: listModels },
     downloads: { list: listDownloads },
+    services: { list: listServices },
   },
 }))
 
@@ -74,7 +76,7 @@ describe("Dashboard", () => {
           contextLength: 8192,
         },
         lastRequestAt: null,
-        loadedAt: null,
+        loadedAt: "2026-03-23T12:00:00Z",
       },
       {
         modelId: "qwen-14b",
@@ -122,6 +124,8 @@ describe("Dashboard", () => {
         completedAt: null,
       },
     ])
+
+    listServices.mockResolvedValue([])
   })
 
   it("loads and renders dashboard sections with API data", async () => {
@@ -138,5 +142,6 @@ describe("Dashboard", () => {
     expect(listGpus).toHaveBeenCalledTimes(1)
     expect(listModels).toHaveBeenCalledTimes(1)
     expect(listDownloads).toHaveBeenCalledTimes(1)
+    expect(listServices).toHaveBeenCalledTimes(1)
   })
 })

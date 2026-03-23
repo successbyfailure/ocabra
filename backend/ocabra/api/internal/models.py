@@ -149,10 +149,22 @@ async def _get_ollama_sizes_bytes() -> dict[str, int]:
 async def _sync_ollama_inventory(model_manager) -> None:
     try:
         installed = await _ollama_registry.list_installed()
-        loaded = await _ollama_registry.list_loaded()
+        loaded_details = await _ollama_registry.list_loaded_details()
     except Exception:
         return
-    await model_manager.sync_ollama_inventory(installed, loaded)
+
+    loaded: list[str] = []
+    loaded_vram_mb: dict[str, int] = {}
+    for item in loaded_details:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        loaded.append(name)
+        loaded_vram_mb[name] = int((item.get("size_vram") or 0) / 1024 / 1024)
+
+    await model_manager.sync_ollama_inventory(installed, loaded, loaded_vram_mb=loaded_vram_mb)
 
 
 async def _resolve_disk_size_bytes(

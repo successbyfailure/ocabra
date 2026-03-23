@@ -8,6 +8,7 @@ import sys
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="oCabra SGLang worker wrapper")
+    parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--server-module", default="sglang.launch_server")
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--model-path", required=True)
@@ -29,8 +30,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    python_bin = args.python_bin or sys.executable
     cmd = [
-        sys.executable,
+        python_bin,
         "-m",
         args.server_module,
         "--model-path",
@@ -63,7 +65,7 @@ def main() -> None:
     if args.disable_radix_cache:
         cmd.append("--disable-radix-cache")
 
-    os.execvpe(sys.executable, cmd, os.environ.copy())
+    os.execvpe(python_bin, cmd, os.environ.copy())
 
 
 if __name__ == "__main__":

@@ -603,10 +603,12 @@ class ModelManager:
         self,
         installed_model_ids: list[str],
         loaded_model_ids: list[str] | None = None,
+        loaded_vram_mb: dict[str, int] | None = None,
     ) -> int:
         added = await self.sync_ollama_models(installed_model_ids)
         installed_set = {model_id.strip() for model_id in installed_model_ids if model_id.strip()}
         loaded_set = {model_id.strip() for model_id in (loaded_model_ids or []) if model_id.strip()}
+        loaded_vram_map = {k.strip(): int(v) for k, v in (loaded_vram_mb or {}).items() if k and str(k).strip()}
         parsed = urlparse(settings.ollama_base_url)
         ollama_port = int(parsed.port or 11434)
         changed: list[str] = []
@@ -625,22 +627,27 @@ class ModelManager:
                 state.capabilities = await ollama_backend.get_capabilities(backend_model_id)
 
             if backend_model_id in loaded_set:
+                loaded_vram = max(0, int(loaded_vram_map.get(backend_model_id, 0)))
                 if state.status != ModelStatus.LOADED:
                     state.status = ModelStatus.LOADED
                     state.loaded_at = state.loaded_at or datetime.now(timezone.utc)
                     state.error_message = None
                     state.current_gpu = []
-                    state.vram_used_mb = 0
+                    state.vram_used_mb = loaded_vram
                     state.worker_info = WorkerInfo(
                         backend_type="ollama",
                         model_id=backend_model_id,
                         gpu_indices=[],
                         port=ollama_port,
                         pid=0,
-                        vram_used_mb=0,
+                        vram_used_mb=loaded_vram,
                     )
                     self._worker_pool.set_worker(model_id, state.worker_info)
                     changed.append(model_id)
+                else:
+                    state.vram_used_mb = loaded_vram
+                    if state.worker_info is not None:
+                        state.worker_info.vram_used_mb = loaded_vram
                 continue
 
             if state.status in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}:
