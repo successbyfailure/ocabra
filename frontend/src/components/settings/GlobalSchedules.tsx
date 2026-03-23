@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
 import type { EvictionSchedule, ServerConfig } from "@/types"
@@ -11,9 +11,17 @@ interface GlobalSchedulesProps {
 export function GlobalSchedules({ config, onSave }: GlobalSchedulesProps) {
   const [schedules, setSchedules] = useState<EvictionSchedule[]>(config.globalSchedules ?? [])
 
+  useEffect(() => {
+    setSchedules(config.globalSchedules ?? [])
+  }, [config.globalSchedules])
+
   const save = async () => {
-    await onSave({ globalSchedules: schedules })
-    toast.success("Schedules globales guardados")
+    try {
+      await onSave({ globalSchedules: schedules })
+      toast.success("Schedules globales guardados")
+    } catch {
+      // page-level toast is shown in Settings
+    }
   }
 
   return (

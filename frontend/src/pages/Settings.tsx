@@ -74,6 +74,7 @@ export function Settings() {
       setConfig((prev) => ({ ...prev, ...next, ...patch }))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No se pudo guardar")
+      throw err
     }
   }
 
@@ -95,7 +96,7 @@ export function Settings() {
           <GeneralSettings config={config} onSave={savePatch} />
           <GPUSettings gpus={gpus} config={config} onSave={savePatch} />
           <LiteLLMSettings config={config} onSave={savePatch} />
-          <StorageSettings localModels={localModels} config={config} />
+          <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
           <GlobalSchedules config={config} onSave={savePatch} />
         </div>
       )}

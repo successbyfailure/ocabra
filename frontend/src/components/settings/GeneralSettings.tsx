@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import type { ServerConfig } from "@/types"
 
@@ -13,15 +13,26 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
   const [idleTimeoutSeconds, setIdleTimeoutSeconds] = useState(config.idleTimeoutSeconds)
   const [vramBufferMb, setVramBufferMb] = useState(config.vramBufferMb)
 
+  useEffect(() => {
+    setModelsDir(config.modelsDir ?? "/models")
+    setLogLevel(config.logLevel)
+    setIdleTimeoutSeconds(config.idleTimeoutSeconds)
+    setVramBufferMb(config.vramBufferMb)
+  }, [config.idleTimeoutSeconds, config.logLevel, config.modelsDir, config.vramBufferMb])
+
   const save = async () => {
-    localStorage.setItem("ocabra.modelsDir", modelsDir)
-    await onSave({
-      logLevel,
-      idleTimeoutSeconds,
-      vramBufferMb,
-      modelsDir,
-    })
-    toast.success("General settings guardadas")
+    try {
+      localStorage.setItem("ocabra.modelsDir", modelsDir)
+      await onSave({
+        logLevel,
+        idleTimeoutSeconds,
+        vramBufferMb,
+        modelsDir,
+      })
+      toast.success("General settings guardadas")
+    } catch {
+      // page-level toast is shown in Settings
+    }
   }
 
   return (

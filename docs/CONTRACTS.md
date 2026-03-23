@@ -233,10 +233,17 @@ GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str    → OverviewStats
 ### 5.6 Config
 
 ```
-GET   /ocabra/config           → ServerConfig
-PATCH /ocabra/config           → ServerConfig
-POST  /ocabra/config/litellm/sync → {"synced_models": int}
+GET   /ocabra/config             → ServerConfig
+PATCH /ocabra/config             → ServerConfig
+POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]}
 ```
+
+`ServerConfig` (campos relevantes):
+- `defaultGpuIndex`, `idleTimeoutSeconds`, `idleEvictionCheckIntervalSeconds`
+- `vramBufferMb`, `vramPressureThresholdPct`, `logLevel`
+- `litellmBaseUrl`, `litellmAdminKey` (enmascarada), `litellmAutoSync`
+- `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
+- `globalSchedules`: `list[EvictionSchedule]`
 
 ### 5.7 Servicios interactivos
 

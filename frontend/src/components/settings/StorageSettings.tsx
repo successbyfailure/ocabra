@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { toast } from "sonner"
 import type { LocalModel, ServerConfig } from "@/types"
@@ -6,20 +6,35 @@ import type { LocalModel, ServerConfig } from "@/types"
 interface StorageSettingsProps {
   localModels: LocalModel[]
   config: ServerConfig
+  onSave: (patch: Partial<ServerConfig>) => Promise<void>
 }
 
-export function StorageSettings({ localModels, config }: StorageSettingsProps) {
+export function StorageSettings({ localModels, config, onSave }: StorageSettingsProps) {
   const [downloadDir, setDownloadDir] = useState(config.downloadDir ?? "/models/downloads")
   const [confirmOpen, setConfirmOpen] = useState(false)
+
+  useEffect(() => {
+    setDownloadDir(config.downloadDir ?? "/models/downloads")
+  }, [config.downloadDir])
 
   const maxSize = useMemo(
     () => Math.max(1, ...localModels.map((model) => model.sizeGb)),
     [localModels],
   )
 
+  const save = async () => {
+    try {
+      localStorage.setItem("ocabra.downloadDir", downloadDir)
+      await onSave({ downloadDir })
+      toast.success("Storage settings guardadas")
+    } catch {
+      // page-level toast is shown in Settings
+    }
+  }
+
   const clearCache = () => {
     localStorage.removeItem("ocabra.hfCache")
-    toast.success("Cache HuggingFace limpiada")
+    toast.success("Cache local de UI limpiada")
     setConfirmOpen(false)
   }
 
@@ -48,21 +63,27 @@ export function StorageSettings({ localModels, config }: StorageSettingsProps) {
         Carpeta de descarga de modelos
         <input
           value={downloadDir}
-          onChange={(event) => {
-            setDownloadDir(event.target.value)
-            localStorage.setItem("ocabra.downloadDir", event.target.value)
-          }}
+          onChange={(event) => setDownloadDir(event.target.value)}
           className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
         />
       </label>
 
-      <button
-        type="button"
-        onClick={() => setConfirmOpen(true)}
-        className="rounded-md border border-red-500/40 px-3 py-2 text-sm text-red-200 hover:bg-red-500/20"
-      >
-        Limpiar cache HuggingFace
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void save()}
+          className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
+        >
+          Guardar Storage
+        </button>
+        <button
+          type="button"
+          onClick={() => setConfirmOpen(true)}
+          className="rounded-md border border-red-500/40 px-3 py-2 text-sm text-red-200 hover:bg-red-500/20"
+        >
+          Limpiar cache HuggingFace
+        </button>
+      </div>
 
       <Dialog.Root open={confirmOpen} onOpenChange={setConfirmOpen}>
         <Dialog.Portal>
@@ -70,7 +91,7 @@ export function StorageSettings({ localModels, config }: StorageSettingsProps) {
           <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[95vw] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-card p-5">
             <Dialog.Title className="text-lg font-semibold">Limpiar cache HF</Dialog.Title>
             <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-              Esta accion eliminara artefactos temporales de descarga.
+              Esta accion limpia el estado local de cache en UI. La limpieza del cache real en backend aun no esta cableada.
             </Dialog.Description>
             <div className="mt-4 flex justify-end gap-2">
               <Dialog.Close className="rounded-md border border-border px-3 py-2 text-sm hover:bg-muted">

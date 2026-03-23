@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import type { GPUState, ServerConfig } from "@/types"
 
@@ -13,14 +13,24 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
   const [vramPressureThresholdPct, setVramPressureThresholdPct] = useState(config.vramPressureThresholdPct)
   const [maxTemperatureC, setMaxTemperatureC] = useState(config.maxTemperatureC ?? 88)
 
+  useEffect(() => {
+    setDefaultGpuIndex(config.defaultGpuIndex)
+    setVramPressureThresholdPct(config.vramPressureThresholdPct)
+    setMaxTemperatureC(config.maxTemperatureC ?? 88)
+  }, [config.defaultGpuIndex, config.maxTemperatureC, config.vramPressureThresholdPct])
+
   const save = async () => {
-    localStorage.setItem("ocabra.maxTemperatureC", String(maxTemperatureC))
-    await onSave({
-      defaultGpuIndex,
-      vramPressureThresholdPct,
-      maxTemperatureC,
-    })
-    toast.success("GPU settings guardadas")
+    try {
+      localStorage.setItem("ocabra.maxTemperatureC", String(maxTemperatureC))
+      await onSave({
+        defaultGpuIndex,
+        vramPressureThresholdPct,
+        maxTemperatureC,
+      })
+      toast.success("GPU settings guardadas")
+    } catch {
+      // page-level toast is shown in Settings
+    }
   }
 
   return (

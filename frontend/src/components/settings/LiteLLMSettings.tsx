@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { ServerConfig } from "@/types"
@@ -15,9 +15,19 @@ export function LiteLLMSettings({ config, onSave }: LiteLLMSettingsProps) {
   const [lastSync, setLastSync] = useState<{ at: string; ok: boolean; count: number } | null>(null)
   const [syncing, setSyncing] = useState(false)
 
+  useEffect(() => {
+    setLiteLLMBaseUrl(config.litellmBaseUrl)
+    setLiteLLMAdminKey(config.litellmAdminKey)
+    setLiteLLMAutoSync(config.litellmAutoSync)
+  }, [config.litellmAdminKey, config.litellmAutoSync, config.litellmBaseUrl])
+
   const save = async () => {
-    await onSave({ litellmBaseUrl, litellmAdminKey, litellmAutoSync })
-    toast.success("LiteLLM settings guardadas")
+    try {
+      await onSave({ litellmBaseUrl, litellmAdminKey, litellmAutoSync })
+      toast.success("LiteLLM settings guardadas")
+    } catch {
+      // page-level toast is shown in Settings
+    }
   }
 
   const syncNow = async () => {
@@ -50,6 +60,7 @@ export function LiteLLMSettings({ config, onSave }: LiteLLMSettingsProps) {
       <label className="block text-sm text-muted-foreground">
         API key admin
         <input
+          type="password"
           value={litellmAdminKey}
           onChange={(event) => setLiteLLMAdminKey(event.target.value)}
           className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"

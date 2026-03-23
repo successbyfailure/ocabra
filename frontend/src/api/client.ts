@@ -398,6 +398,20 @@ function toOllamaVariant(raw: unknown): OllamaModelVariant {
 
 function toServerConfig(raw: unknown): ServerConfig {
   const data = isRecord(raw) ? raw : {}
+  const globalSchedulesRaw = data.global_schedules ?? data.globalSchedules
+  const globalSchedules = Array.isArray(globalSchedulesRaw)
+    ? globalSchedulesRaw.map((schedule, idx) => {
+        const s = isRecord(schedule) ? schedule : {}
+        return {
+          id: String(s.id ?? `global-schedule-${idx}`),
+          days: Array.isArray(s.days) ? s.days.map((d) => Number(d)).filter((d) => Number.isFinite(d)) : [],
+          start: String(s.start ?? "00:00"),
+          end: String(s.end ?? "00:00"),
+          enabled: Boolean(s.enabled ?? true),
+        }
+      })
+    : []
+
   return {
     defaultGpuIndex: Number(data.default_gpu_index ?? data.defaultGpuIndex ?? 0),
     idleTimeoutSeconds: Number(data.idle_timeout_seconds ?? data.idleTimeoutSeconds ?? 0),
@@ -408,6 +422,10 @@ function toServerConfig(raw: unknown): ServerConfig {
     litellmAdminKey: String(data.litellm_admin_key ?? data.litellmAdminKey ?? ""),
     litellmAutoSync: Boolean(data.litellm_auto_sync ?? data.litellmAutoSync),
     energyCostEurKwh: Number(data.energy_cost_eur_kwh ?? data.energyCostEurKwh ?? 0),
+    modelsDir: String(data.models_dir ?? data.modelsDir ?? "/models"),
+    downloadDir: String(data.download_dir ?? data.downloadDir ?? "/models/downloads"),
+    maxTemperatureC: Number(data.max_temperature_c ?? data.maxTemperatureC ?? 88),
+    globalSchedules,
   }
 }
 

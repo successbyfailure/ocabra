@@ -37,6 +37,19 @@ enrutamiento delante de oCabra.
 | Contenedores | Docker Compose con perfiles |
 | Reverse proxy | Caddy (interno, sirve API + frontend) |
 
+## Estado actual (2026-03-23)
+
+Implementado en código:
+- Fase 0, Fase 1 (GPU/Model/Registry/UI base), Fase 2 (vLLM, Diffusers, Audio/TTS), Fase 3 (OpenAI + Ollama APIs), Fase 4 (Models/Explore/Playground/Stats/Settings).
+- IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en endpoints OpenAI.
+- UI Settings alineada con API de configuración (`GET/PATCH /ocabra/config`, `POST /ocabra/config/litellm/sync`).
+
+Pendiente para cierre de plan:
+- Completar scheduler de ventanas de evicción (APScheduler + wiring real).
+- Conectar auto-sync LiteLLM a eventos de lifecycle de modelos (no solo sync manual).
+- Cerrar inconsistencias de WS de descargas (canal global vs canal por job).
+- Mejorar cobertura de integración Fase 5 (`openai_chat`, `ollama_chat`, `gpu_pressure`) y estabilizar `test_model_lifecycle`.
+
 ---
 
 ## Arquitectura
