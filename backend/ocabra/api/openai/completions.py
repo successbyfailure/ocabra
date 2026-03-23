@@ -24,7 +24,7 @@ router = APIRouter()
 @router.post("/completions", summary="Create text completion")
 async def completions(request: Request) -> Any:
     """
-    Create a text completion. Proxies to the model's vLLM worker.
+    Create a text completion. Proxies to the resolved model worker (backend-agnostic).
     """
     body = await request.json()
     model_id: str = body.get("model", "")

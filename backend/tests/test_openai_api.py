@@ -749,3 +749,106 @@ class TestImageGenerations:
         })
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
+
+class TestBackendAgnosticRouting:
+    def test_chat_routes_for_sglang_backend(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="sglang/HuggingFaceTB/SmolLM2-135M-Instruct",
+            backend_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
+            display_name="SmolLM2",
+            backend_type="sglang",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
+        )
+        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "sglang/HuggingFaceTB/SmolLM2-135M-Instruct",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            "sglang/HuggingFaceTB/SmolLM2-135M-Instruct",
+            "/v1/chat/completions",
+            {
+                "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+    def test_completions_routes_for_llama_cpp_backend(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="llama_cpp/Qwen/Qwen2.5-0.5B-Instruct-GGUF::qwen2.5-0.5b-instruct-q4_k_m",
+            backend_model_id="Qwen/Qwen2.5-0.5B-Instruct-GGUF::qwen2.5-0.5b-instruct-q4_k_m",
+            display_name="Qwen2.5 GGUF",
+            backend_type="llama_cpp",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
+        )
+        app = _make_app(model_state=state, worker_result={"object": "text_completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/completions",
+            json={
+                "model": state.model_id,
+                "prompt": "Hello",
+            },
+        )
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            state.model_id,
+            "/v1/completions",
+            {
+                "model": state.backend_model_id,
+                "prompt": "Hello",
+            },
+        )
+
+    def test_embeddings_routes_for_tensorrt_backend(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="tensorrt_llm/BAAI/bge-small-en-v1.5",
+            backend_model_id="BAAI/bge-small-en-v1.5",
+            display_name="BGE Small",
+            backend_type="tensorrt_llm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True, completion=False, streaming=False),
+        )
+        app = _make_app(model_state=state, worker_result={"object": "list", "data": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/embeddings",
+            json={
+                "model": state.model_id,
+                "input": "hola",
+            },
+        )
+
+        assert resp.status_code == 200
+        app.state.worker_pool.forward_request.assert_called_once_with(
+            state.model_id,
+            "/v1/embeddings",
+            {
+                "model": state.backend_model_id,
+                "input": "hola",
+            },
+        )

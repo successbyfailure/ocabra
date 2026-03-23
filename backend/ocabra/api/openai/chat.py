@@ -33,7 +33,7 @@ logger = structlog.get_logger(__name__)
 @router.post("/chat/completions", summary="Create chat completion")
 async def chat_completions(request: Request) -> Any:
     """
-    Create a chat completion. Proxies to the model's vLLM worker.
+    Create a chat completion. Proxies to the resolved model worker (backend-agnostic).
 
     Triggers on-demand model loading if the model is configured but not loaded.
     """
@@ -63,7 +63,7 @@ async def chat_completions(request: Request) -> Any:
 
 
 async def _stream_chat(worker_pool, model_id: str, body: dict):
-    """Yield SSE chunks from the vLLM worker."""
+    """Yield SSE chunks from the resolved model worker."""
     try:
         async for chunk in worker_pool.forward_stream(model_id, "/v1/chat/completions", body):
             yield chunk

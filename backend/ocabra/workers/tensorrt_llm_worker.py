@@ -7,6 +7,9 @@ import os
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="oCabra TensorRT-LLM worker wrapper")
+    parser.add_argument("--launch-mode", default="binary", choices=["binary", "module"])
+    parser.add_argument("--python-bin", default="/usr/bin/python3")
+    parser.add_argument("--serve-module", default="tensorrt_llm.commands.serve")
     parser.add_argument("--serve-bin", required=True)
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--engine-dir", required=True)
@@ -20,10 +23,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def _serve_args(args: argparse.Namespace) -> list[str]:
     cmd = [
-        args.serve_bin,
         args.engine_dir,
         "--host",
         args.host,
@@ -40,7 +41,18 @@ def main() -> None:
         cmd.extend(["--max-num-tokens", str(args.max_num_tokens)])
     if args.trust_remote_code:
         cmd.append("--trust-remote-code")
+    return cmd
 
+
+def main() -> None:
+    args = parse_args()
+    serve_args = _serve_args(args)
+
+    if args.launch_mode == "module":
+        cmd = [args.python_bin, "-m", args.serve_module, *serve_args]
+        os.execvpe(args.python_bin, cmd, os.environ.copy())
+
+    cmd = [args.serve_bin, *serve_args]
     os.execvpe(args.serve_bin, cmd, os.environ.copy())
 
 

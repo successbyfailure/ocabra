@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import signal
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -42,11 +43,23 @@ class TensorRTLLMBackend(BackendInterface):
         extra_config = kwargs.get("extra_config") or {}
         engine_dir = self._resolve_engine_dir(model_id, extra_config)
         tokenizer_path = self._resolve_tokenizer_path(model_id, extra_config, engine_dir)
+
+        launch_mode = str(self._get_option(extra_config, "launch_mode", settings.tensorrt_llm_launch_mode)).strip().lower() or "binary"
+        python_bin = str(self._get_option(extra_config, "python_bin", settings.tensorrt_llm_python_bin)).strip() or sys.executable
+        serve_bin = str(self._get_option(extra_config, "serve_bin", settings.tensorrt_llm_serve_bin)).strip() or settings.tensorrt_llm_serve_bin
+        serve_module = str(self._get_option(extra_config, "serve_module", settings.tensorrt_llm_serve_module)).strip() or settings.tensorrt_llm_serve_module
+
         cmd = [
             sys.executable,
             str(_WORKER_PATH),
+            "--launch-mode",
+            launch_mode,
+            "--python-bin",
+            python_bin,
+            "--serve-module",
+            serve_module,
             "--serve-bin",
-            settings.tensorrt_llm_serve_bin,
+            serve_bin,
             "--model-id",
             model_id,
             "--engine-dir",
@@ -87,7 +100,13 @@ class TensorRTLLMBackend(BackendInterface):
             "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in gpu_indices),
         }
 
-        logger.info("tensorrt_llm_starting", model_id=model_id, port=port, engine_dir=str(engine_dir))
+        logger.info(
+            "tensorrt_llm_starting",
+            model_id=model_id,
+            port=port,
+            engine_dir=str(engine_dir),
+            launch_mode=launch_mode,
+        )
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
@@ -186,11 +205,47 @@ class TensorRTLLMBackend(BackendInterface):
     def _detect_disabled_reason(self) -> str | None:
         if not settings.tensorrt_llm_enabled:
             return "feature flag TENSORRT_LLM_ENABLED=false"
-        if not shutil.which(settings.tensorrt_llm_serve_bin) and not Path(
-            settings.tensorrt_llm_serve_bin
-        ).exists():
-            return f"serve binary not found: {settings.tensorrt_llm_serve_bin}"
+
+        launch_mode = str(settings.tensorrt_llm_launch_mode).strip().lower() or "binary"
+        if launch_mode not in {"binary", "module"}:
+            return f"unsupported launch mode: {launch_mode}"
+
+        if launch_mode == "binary":
+            if not shutil.which(settings.tensorrt_llm_serve_bin) and not Path(
+                settings.tensorrt_llm_serve_bin
+            ).exists():
+                return f"serve binary not found: {settings.tensorrt_llm_serve_bin}"
+            return None
+
+        python_bin = settings.tensorrt_llm_python_bin.strip() if settings.tensorrt_llm_python_bin else ""
+        if not python_bin:
+            return "python launcher not configured for module mode"
+        if not shutil.which(python_bin) and not Path(python_bin).exists():
+            return f"python launcher not found: {python_bin}"
+
+        module_name = settings.tensorrt_llm_serve_module.strip() if settings.tensorrt_llm_serve_module else ""
+        if not module_name:
+            return "serve module not configured for module mode"
+        if not self._module_available(python_bin, module_name):
+            return f"serve module not available: {module_name}"
         return None
+
+    def _module_available(self, python_bin: str, module_name: str) -> bool:
+        probe = (
+            "import importlib.util,sys; "
+            f"sys.exit(0 if importlib.util.find_spec('{module_name}') else 1)"
+        )
+        try:
+            result = subprocess.run(
+                [python_bin, "-c", probe],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
         nested = extra_config.get("tensorrt_llm")

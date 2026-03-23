@@ -91,7 +91,10 @@ class Settings(BaseSettings):
     sglang_startup_timeout_s: int = 120
     # TensorRT-LLM
     tensorrt_llm_enabled: bool = False
+    tensorrt_llm_launch_mode: str = "binary"
+    tensorrt_llm_python_bin: str = "/usr/bin/python3"
     tensorrt_llm_serve_bin: str = "/usr/local/bin/trtllm-serve"
+    tensorrt_llm_serve_module: str = "tensorrt_llm.commands.serve"
     tensorrt_llm_engines_dir: str | None = None
     tensorrt_llm_backend: str = "tensorrt"
     tensorrt_llm_tokenizer_path: str | None = None
@@ -173,6 +176,8 @@ class Settings(BaseSettings):
         "sglang_tensor_parallel_size",
         "sglang_context_length",
         "bitnet_threads",
+        "tensorrt_llm_python_bin",
+        "tensorrt_llm_serve_module",
         "tensorrt_llm_engines_dir",
         "tensorrt_llm_tokenizer_path",
         "tensorrt_llm_max_batch_size",
@@ -191,6 +196,14 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"none", "model", "sequential"}:
             raise ValueError("diffusers_offload_mode must be one of: none, model, sequential")
+        return normalized
+
+    @field_validator("tensorrt_llm_launch_mode")
+    @classmethod
+    def _validate_tensorrt_launch_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"binary", "module"}:
+            raise ValueError("tensorrt_llm_launch_mode must be one of: binary, module")
         return normalized
 
 

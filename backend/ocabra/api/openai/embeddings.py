@@ -22,7 +22,7 @@ router = APIRouter()
 @router.post("/embeddings", summary="Create embeddings")
 async def embeddings(request: Request) -> Any:
     """
-    Create text embeddings. Proxies to the model's vLLM worker.
+    Create text embeddings. Proxies to the resolved model worker (backend-agnostic).
     Requires a model with capability embeddings=True.
     """
     body = await request.json()

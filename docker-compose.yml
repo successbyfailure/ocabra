@@ -69,6 +69,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    user: "${FRONTEND_UID:-1000}:${FRONTEND_GID:-1000}"
     restart: unless-stopped
 
   postgres:
