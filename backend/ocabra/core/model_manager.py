@@ -8,6 +8,7 @@ import structlog
 
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
+from ocabra.core.model_ref import build_model_ref, parse_model_ref
 from ocabra.redis_client import publish, set_key
 
 logger = structlog.get_logger(__name__)
@@ -31,9 +32,12 @@ class LoadPolicy(str, Enum):
 
 @dataclass
 class ModelState:
+    # Canonical identifier: backend/model
     model_id: str
     display_name: str
     backend_type: str
+    # Backend-native identifier (without backend prefix)
+    backend_model_id: str = ""
     status: ModelStatus = ModelStatus.CONFIGURED
     load_policy: LoadPolicy = LoadPolicy.ON_DEMAND
     auto_reload: bool = False
@@ -47,9 +51,21 @@ class ModelState:
     error_message: str | None = None
     extra_config: dict = field(default_factory=dict)
 
+
+    def __post_init__(self) -> None:
+        if self.backend_model_id:
+            return
+        try:
+            _, backend_model_id = parse_model_ref(self.model_id)
+            self.backend_model_id = backend_model_id
+        except ValueError:
+            # Tests and in-memory fixtures may still build non-canonical ids.
+            self.backend_model_id = self.model_id
+
     def to_dict(self) -> dict:
         return {
             "model_id": self.model_id,
+            "backend_model_id": self.backend_model_id,
             "display_name": self.display_name,
             "backend_type": self.backend_type,
             "status": self.status.value,
@@ -68,6 +84,40 @@ class ModelState:
         }
 
 
+
+def _is_diarized_model_id(model_id: str, extra_config: dict | None = None) -> bool:
+    lowered = model_id.lower()
+    if "diariz" in lowered:
+        return True
+    cfg = extra_config or {}
+    return bool(cfg.get("diarization_enabled") is True)
+
+
+
+def _diarized_variant_model_id(model_id: str) -> str:
+    if model_id.endswith("::diarize"):
+        return model_id
+    return f"{model_id}::diarize"
+
+
+
+def _should_auto_create_diarized_variant(state: "ModelState") -> bool:
+    if state.backend_type != "whisper":
+        return False
+    if "::" in state.backend_model_id:
+        return False
+    if _is_diarized_model_id(state.backend_model_id, state.extra_config):
+        return False
+    return True
+
+
+
+def _build_diarized_extra_config(base_extra_config: dict | None) -> dict:
+    merged = dict(base_extra_config or {})
+    merged["diarization_enabled"] = True
+    return merged
+
+
 class ModelManager:
     def __init__(self, worker_pool, gpu_manager=None, gpu_scheduler=None) -> None:
         self._worker_pool = worker_pool
@@ -75,6 +125,34 @@ class ModelManager:
         self._gpu_scheduler = gpu_scheduler
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
+
+    async def _ensure_diarized_variants_for_whisper_models(self) -> None:
+        snapshot = list(self._states.values())
+        for state in snapshot:
+            if not _should_auto_create_diarized_variant(state):
+                continue
+            diarized_backend_model_id = _diarized_variant_model_id(state.backend_model_id)
+            diarized_model_id = build_model_ref(state.backend_type, diarized_backend_model_id)
+            if diarized_model_id in self._states:
+                continue
+            try:
+                await self.add_model(
+                    model_id=diarized_model_id,
+                    backend_type=state.backend_type,
+                    display_name=f"{state.display_name} (diarized)",
+                    load_policy=state.load_policy.value,
+                    auto_reload=state.auto_reload,
+                    preferred_gpu=state.preferred_gpu,
+                    extra_config=_build_diarized_extra_config(state.extra_config),
+                    create_diarized_variant=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "diarized_variant_auto_create_failed",
+                    model_id=state.model_id,
+                    diarized_model_id=diarized_model_id,
+                    error=str(exc),
+                )
 
     def set_gpu_manager(self, gpu_manager) -> None:
         self._gpu_manager = gpu_manager
@@ -84,6 +162,7 @@ class ModelManager:
 
     async def start(self) -> None:
         await self._load_configs_from_db()
+        await self._ensure_diarized_variants_for_whisper_models()
         for model_id, state in self._states.items():
             if state.load_policy == LoadPolicy.PIN:
                 logger.info("auto_loading_pinned_model", model_id=model_id)
@@ -100,10 +179,18 @@ class ModelManager:
             configs = result.scalars().all()
 
         for cfg in configs:
+            backend_from_ref, backend_model_id = parse_model_ref(cfg.model_id)
+            if cfg.backend_type != backend_from_ref:
+                raise ValueError(
+                    "Invalid model config for "
+                    f"'{cfg.model_id}': backend_type='{cfg.backend_type}' "
+                    f"does not match model prefix '{backend_from_ref}'."
+                )
             self._states[cfg.model_id] = ModelState(
                 model_id=cfg.model_id,
-                display_name=cfg.display_name or cfg.model_id,
-                backend_type=cfg.backend_type,
+                backend_model_id=backend_model_id,
+                display_name=cfg.display_name or backend_model_id,
+                backend_type=backend_from_ref,
                 load_policy=LoadPolicy(cfg.load_policy),
                 auto_reload=cfg.auto_reload,
                 preferred_gpu=cfg.preferred_gpu,
@@ -139,7 +226,7 @@ class ModelManager:
 
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(model_id)
+                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id)
                 if state.backend_type == "bitnet":
                     vram_needed = self._estimate_bitnet_vram_from_config(state)
 
@@ -181,13 +268,13 @@ class ModelManager:
                             )
 
                 worker_info = await backend.load(
-                    model_id,
+                    state.backend_model_id,
                     gpu_indices,
                     port=assigned_port,
                     extra_config=state.extra_config,
                 )
                 backend_loaded = True
-                capabilities = await backend.get_capabilities(model_id)
+                capabilities = await backend.get_capabilities(state.backend_model_id)
 
                 state.worker_info = worker_info
                 state.current_gpu = gpu_indices
@@ -217,7 +304,7 @@ class ModelManager:
                 # Ensure no leaked subprocess/port after partial load failures.
                 try:
                     if "backend_loaded" in locals() and backend_loaded:
-                        await backend.unload(model_id)
+                        await backend.unload(state.backend_model_id)
                 except Exception:
                     logger.warning(
                         "model_load_cleanup_failed",
@@ -348,7 +435,7 @@ class ModelManager:
 
         try:
             backend = await self._worker_pool.get_backend(state.backend_type)
-            await backend.unload(model_id)
+            await backend.unload(state.backend_model_id)
 
             if self._gpu_manager:
                 for gpu_idx in state.current_gpu:
@@ -380,7 +467,7 @@ class ModelManager:
             await asyncio.sleep(30)
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(model_id)
+                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id)
                 gpu_indices = await self._gpu_scheduler.find_gpu_for_model(
                     vram_needed, state.preferred_gpu
                 )
@@ -433,12 +520,15 @@ class ModelManager:
     async def sync_ollama_models(self, model_ids: list[str]) -> int:
         """Ensure native Ollama models are present in the internal inventory."""
         added = 0
-        for model_id in model_ids:
-            normalized = model_id.strip()
-            if not normalized or normalized in self._states:
+        for backend_model_id in model_ids:
+            normalized = backend_model_id.strip()
+            if not normalized:
+                continue
+            model_id = build_model_ref("ollama", normalized)
+            if model_id in self._states:
                 continue
             await self.add_model(
-                model_id=normalized,
+                model_id=model_id,
                 backend_type="ollama",
                 display_name=normalized,
                 load_policy="on_demand",
@@ -465,12 +555,13 @@ class ModelManager:
         for model_id, state in self._states.items():
             if state.backend_type != "ollama":
                 continue
-            if model_id not in installed_set:
+            backend_model_id = state.backend_model_id
+            if backend_model_id not in installed_set:
                 continue
             if ollama_backend is not None:
-                state.capabilities = await ollama_backend.get_capabilities(model_id)
+                state.capabilities = await ollama_backend.get_capabilities(backend_model_id)
 
-            if model_id in loaded_set:
+            if backend_model_id in loaded_set:
                 if state.status != ModelStatus.LOADED:
                     state.status = ModelStatus.LOADED
                     state.loaded_at = state.loaded_at or datetime.now(timezone.utc)
@@ -479,7 +570,7 @@ class ModelManager:
                     state.vram_used_mb = 0
                     state.worker_info = WorkerInfo(
                         backend_type="ollama",
-                        model_id=model_id,
+                        model_id=backend_model_id,
                         gpu_indices=[],
                         port=ollama_port,
                         pid=0,
@@ -513,15 +604,25 @@ class ModelManager:
         auto_reload: bool = False,
         preferred_gpu: int | None = None,
         extra_config: dict | None = None,
+        create_diarized_variant: bool = True,
     ) -> "ModelState":
         from ocabra.database import AsyncSessionLocal
         from ocabra.db.model_config import ModelConfig
 
+        normalized_backend, backend_model_id = parse_model_ref(model_id)
+        if backend_type != normalized_backend:
+            raise ValueError(
+                f"Model id '{model_id}' backend '{normalized_backend}' does not match backend_type '{backend_type}'."
+            )
+
+        if model_id in self._states:
+            return self._states[model_id]
+
         async with AsyncSessionLocal() as session:
             cfg = ModelConfig(
                 model_id=model_id,
-                display_name=display_name or model_id,
-                backend_type=backend_type,
+                display_name=display_name or backend_model_id,
+                backend_type=normalized_backend,
                 load_policy=load_policy,
                 auto_reload=auto_reload,
                 preferred_gpu=preferred_gpu,
@@ -532,8 +633,9 @@ class ModelManager:
 
         state = ModelState(
             model_id=model_id,
-            display_name=display_name or model_id,
-            backend_type=backend_type,
+            backend_model_id=backend_model_id,
+            display_name=display_name or backend_model_id,
+            backend_type=normalized_backend,
             load_policy=LoadPolicy(load_policy),
             auto_reload=auto_reload,
             preferred_gpu=preferred_gpu,
@@ -541,6 +643,29 @@ class ModelManager:
         )
         self._states[model_id] = state
         self._load_locks[model_id] = asyncio.Lock()
+
+        if create_diarized_variant and _should_auto_create_diarized_variant(state):
+            diarized_backend_model_id = _diarized_variant_model_id(backend_model_id)
+            diarized_model_id = build_model_ref(normalized_backend, diarized_backend_model_id)
+            if diarized_model_id not in self._states:
+                try:
+                    await self.add_model(
+                        model_id=diarized_model_id,
+                        backend_type=normalized_backend,
+                        display_name=f"{display_name or backend_model_id} (diarized)",
+                        load_policy=load_policy,
+                        auto_reload=auto_reload,
+                        preferred_gpu=preferred_gpu,
+                        extra_config=_build_diarized_extra_config(extra_config),
+                        create_diarized_variant=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "diarized_variant_auto_create_failed",
+                        model_id=model_id,
+                        diarized_model_id=diarized_model_id,
+                        error=str(exc),
+                    )
         return state
 
     async def update_config(self, model_id: str, patch: dict) -> "ModelState":
