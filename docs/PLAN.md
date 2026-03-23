@@ -26,7 +26,7 @@ enrutamiento delante de oCabra.
 | ORM / DB | SQLAlchemy 2.0 async, Alembic, PostgreSQL |
 | Cache / Queue | Redis |
 | GPU monitoring | pynvml (NVML bindings) |
-| Backend LLM | vLLM |
+| Backend LLM | vLLM + llama.cpp + SGLang (+ TensorRT-LLM opcional) |
 | Backend Imagen | Diffusers + Accelerate |
 | Backend Audio | faster-whisper |
 | Backend TTS | Transformers (Qwen3-TTS, Kokoro) |
@@ -45,10 +45,15 @@ Implementado en código:
 - UI Settings alineada con API de configuración (`GET/PATCH /ocabra/config`, `POST /ocabra/config/litellm/sync`).
 
 Pendiente para cierre de plan:
+- Integrar backend `llama.cpp` (worker, capacidades, registro, routing OpenAI/Ollama, tests).
+- Integrar backend `SGLang` (worker, capacidades, registro, routing OpenAI/Ollama, tests).
+- Integrar backend `TensorRT-LLM` como opcional (feature-flag, deploy profile, tests mínimos).
 - Completar scheduler de ventanas de evicción (APScheduler + wiring real).
 - Conectar auto-sync LiteLLM a eventos de lifecycle de modelos (no solo sync manual).
 - Cerrar inconsistencias de WS de descargas (canal global vs canal por job).
-- Mejorar cobertura de integración Fase 5 (`openai_chat`, `ollama_chat`, `gpu_pressure`) y estabilizar `test_model_lifecycle`.
+- Arreglar `tests/integration/test_model_lifecycle` (actualmente 3 fallos) y cerrar mocks async de DB.
+- Mejorar cobertura de integración Fase 5 (`openai_chat`, `ollama_chat`, `gpu_pressure`).
+- Cerrar deuda de tooling frontend detectada en validación (ESLint v9 y separación Vitest/Playwright).
 
 ---
 
@@ -352,7 +357,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 
 ---
 
-### FASE 2 — Backends (3 streams paralelos, requiere Stream B de Fase 1)
+### FASE 2 — Backends (5 streams + 1 opcional, requiere Stream B de Fase 1)
 
 #### Stream A — vLLM Backend
 - `vllm_worker.py`: lanza `vllm.entrypoints.openai.api_server` como subproceso
@@ -370,6 +375,23 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 - `whisper_worker.py`: faster-whisper, endpoint `/transcribe`
 - `tts_worker.py`: Qwen3-TTS / Kokoro, endpoint `/synthesize`
 - Compatible con OpenAI `/v1/audio/transcriptions` y `/v1/audio/speech`
+
+#### Stream D — llama.cpp Backend
+- `llama_cpp_worker.py`: servidor OpenAI-compatible de llama.cpp (o wrapper propio)
+- Soporte GGUF (CPU/GPU offload), chat/completions/embeddings según modelo
+- Integración de capacidades (`tools`, `vision` si aplica, `context_length`)
+- Soporte de ids canónicas `llama_cpp/<model>` + alias por nombre nativo
+
+#### Stream E — SGLang Backend
+- `sglang_worker.py`: arranque de runtime SGLang por modelo
+- Soporte principal para chat/completions (OpenAI-compatible)
+- Integración de capacidades y límites de contexto
+- Soporte de ids canónicas `sglang/<model>` + alias por nombre nativo
+
+#### Stream F (Opcional) — TensorRT-LLM Backend
+- `tensorrt_llm_worker.py` con activación por feature flag/profile Docker
+- Integración inicial para inferencia LLM optimizada en NVIDIA
+- Fallback explícito a deshabilitado si no hay engine/modelo compatible
 
 ---
 
@@ -427,6 +449,8 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 - [ ] Logging estructurado (structlog) con nivel configurable
 - [ ] Healthcheck endpoints (`/health`, `/ready`)
 - [ ] Tests de integración para API OpenAI + Ollama
+- [ ] Tests de integración para `llama.cpp` y `SGLang`
+- [ ] Test smoke opcional para `TensorRT-LLM` (si profile habilitado)
 - [ ] Documentación OpenAPI enriquecida
 - [ ] Script de instalación / first-run
 
@@ -437,7 +461,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 ```
 Fase 0
   └── Fase 1 (A, B, C, D en paralelo)
-        ├── A+B → Fase 2 (A, B, C en paralelo)
+        ├── A+B → Fase 2 (A, B, C, D, E + F opcional en paralelo)
         │          └── Fase 3 (A, B en paralelo)
         │                 └── Fase 4 (A, B, C, D en paralelo)
         │                        └── Fase 5
