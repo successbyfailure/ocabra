@@ -35,7 +35,7 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
 
 _MIN_SGLANG_VRAM_MB = 2048
 _SHUTDOWN_TIMEOUT_S = 30
-_WORKER_PATH = Path(__file__).resolve().parents[3] / "workers" / "sglang_worker.py"
+_WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "sglang_worker.py"
 
 
 class SGLangBackend(BackendInterface):
@@ -83,6 +83,20 @@ class SGLangBackend(BackendInterface):
             "--served-model-name",
             model_id,
         ]
+        attention_backend = self._get_option(extra_config, "attention_backend", None)
+        if attention_backend:
+            cmd.extend(["--attention-backend", str(attention_backend)])
+        prefill_attention_backend = self._get_option(extra_config, "prefill_attention_backend", None)
+        if prefill_attention_backend:
+            cmd.extend(["--prefill-attention-backend", str(prefill_attention_backend)])
+        decode_attention_backend = self._get_option(extra_config, "decode_attention_backend", None)
+        if decode_attention_backend:
+            cmd.extend(["--decode-attention-backend", str(decode_attention_backend)])
+        sampling_backend = self._get_option(extra_config, "sampling_backend", None)
+        if sampling_backend:
+            cmd.extend(["--sampling-backend", str(sampling_backend)])
+        if bool(self._get_option(extra_config, "disable_cuda_graph", False)):
+            cmd.append("--disable-cuda-graph")
         context_length = self._get_option(
             extra_config,
             "context_length",

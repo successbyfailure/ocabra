@@ -19,7 +19,7 @@ logger = structlog.get_logger(__name__)
 
 _MIN_TRT_VRAM_MB = 4096
 _SHUTDOWN_TIMEOUT_S = 30
-_WORKER_PATH = Path(__file__).resolve().parents[3] / "workers" / "tensorrt_llm_worker.py"
+_WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "tensorrt_llm_worker.py"
 
 
 class TensorRTLLMBackend(BackendInterface):

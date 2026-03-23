@@ -9,9 +9,10 @@ import httpx
 import structlog
 
 from ocabra.config import settings
-from ocabra.redis_client import publish, set_key
+from ocabra.redis_client import get_key, publish, set_key
 
 logger = structlog.get_logger(__name__)
+SERVICE_OVERRIDES_KEY = "service:overrides"
 
 
 @dataclass
@@ -124,6 +125,7 @@ class ServiceManager:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
+        await self._load_persisted_overrides()
         for service_id in self._states:
             await self.refresh(service_id)
 
@@ -404,8 +406,42 @@ class ServiceManager:
         else:
             state.status = "idle"
             state.detail = None
+        await self._persist_overrides()
         await self._publish_state(state, "enabled_changed")
         return state
+
+    async def _load_persisted_overrides(self) -> None:
+        try:
+            payload = await get_key(SERVICE_OVERRIDES_KEY)
+        except Exception as exc:
+            logger.warning("service_overrides_load_failed", error=str(exc))
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        for service_id, overrides in payload.items():
+            state = self._states.get(str(service_id))
+            if state is None or not isinstance(overrides, dict):
+                continue
+            if "enabled" in overrides:
+                state.enabled = bool(overrides.get("enabled"))
+            if not state.enabled:
+                state.service_alive = False
+                state.runtime_loaded = False
+                state.active_model_ref = None
+                state.status = "disabled"
+                state.detail = "disabled"
+
+    async def _persist_overrides(self) -> None:
+        payload = {
+            service_id: {"enabled": state.enabled}
+            for service_id, state in self._states.items()
+        }
+        try:
+            await set_key(SERVICE_OVERRIDES_KEY, payload)
+        except Exception as exc:
+            logger.warning("service_overrides_persist_failed", error=str(exc))
 
     def _require(self, service_id: str) -> ServiceState:
         state = self._states.get(service_id)

@@ -45,9 +45,16 @@ Implementado en código:
 - UI Settings alineada con API de configuración (`GET/PATCH /ocabra/config`, `POST /ocabra/config/litellm/sync`).
 - PATCH /ocabra/config usa claves camelCase-only; el frontend ya no depende de fallback local para `modelsDir`, `downloadDir` o `maxTemperatureC`.
 - Endpoint Prometheus `/metrics` ya está expuesto y registrado en `main.py`.
+- Persistencia de activación/desactivación de servicios (`/ocabra/services/*`) implementada vía Redis (`service:overrides`) y aplicada en `ServiceManager.start()`.
+- Wrappers de workers para backends nuevos empaquetados dentro del backend (`backend/ocabra/workers/*`) y rutas internas de backend corregidas para entorno Docker.
+
+Validación reciente (2026-03-23):
+- `llama.cpp` validado end-to-end con modelo GGUF reciente (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`, archivo `qwen2.5-0.5b-instruct-q4_k_m.gguf`): registro, load y respuesta chat correctos.
+- `SGLang` validado a nivel de integración de backend en tests unitarios; en runtime real queda bloqueado por toolchain del contenedor (falta `nvcc` para ruta JIT/flashinfer en esta imagen).
+- Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
 
 Pendiente para cierre de plan:
-- Endurecer integración runtime real de `llama.cpp`/`SGLang`/`TensorRT-LLM` en entornos con binarios/engines productivos.
+- Endurecer integración runtime real de `SGLang`/`TensorRT-LLM` en entornos con binarios/engines productivos y toolchain CUDA completa cuando aplique.
 - Completar cobertura de integración API para nuevos backends (`/v1/chat`, `/v1/completions`, `/v1/embeddings` según capacidad).
 - Cerrar deuda de tooling frontend detectada en validación (ESLint v9 y separación Vitest/Playwright).
 - Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.

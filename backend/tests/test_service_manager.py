@@ -177,3 +177,71 @@ async def test_start_disabled_service_raises(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError):
         await manager.start_service("hunyuan")
+
+
+@pytest.mark.asyncio
+async def test_set_enabled_persists_overrides(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    called = False
+
+    async def fake_persist(self) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(ServiceManager, "_persist_overrides", fake_persist)
+
+    manager = ServiceManager()
+    state = await manager.get_state("comfyui")
+    assert state is not None
+    state.runtime_loaded = False
+    state.service_alive = False
+
+    await manager.set_enabled("comfyui", enabled=False)
+
+    assert called is True
+
+
+@pytest.mark.asyncio
+async def test_start_applies_loaded_overrides(monkeypatch) -> None:
+    from ocabra.config import settings
+
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    a1111_calls = 0
+
+    async def fake_get(self, url: str, *args, **kwargs):
+        nonlocal a1111_calls
+        _ = args, kwargs
+        if url.startswith(settings.a1111_base_url.rstrip("/")):
+            a1111_calls += 1
+        return httpx.Response(200, json={"ok": True}, request=httpx.Request("GET", url))
+
+    async def fake_load(self) -> None:
+        state = await self.get_state("a1111")
+        assert state is not None
+        state.enabled = False
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(ServiceManager, "_load_persisted_overrides", fake_load)
+
+    manager = ServiceManager()
+    await manager.start()
+
+    state = await manager.get_state("a1111")
+    assert state is not None
+    assert state.enabled is False
+    assert state.status == "disabled"
+    assert a1111_calls == 0

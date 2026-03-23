@@ -19,7 +19,7 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_TOTAL_LAYERS = 32
 _DEFAULT_STARTUP_TIMEOUT_S = 30
 _SHUTDOWN_TIMEOUT_S = 20
-_WORKER_PATH = Path(__file__).resolve().parents[3] / "workers" / "llama_cpp_worker.py"
+_WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_worker.py"
 
 
 class LlamaCppBackend(BackendInterface):
