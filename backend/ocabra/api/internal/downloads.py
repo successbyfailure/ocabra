@@ -177,13 +177,9 @@ class DownloadManager:
 
             target_dir = Path(settings.models_dir)
             if downloading.source == "huggingface":
-                folder_suffix = ""
-                if downloading.artifact:
-                    stem = Path(downloading.artifact).stem.replace("/", "_")
-                    folder_suffix = f"--{stem}"
                 await self._hf_registry.download(
                     repo_id=downloading.model_ref,
-                    target_dir=target_dir / "huggingface" / (downloading.model_ref.replace("/", "--") + folder_suffix),
+                    target_dir=self._hf_download_dir(downloading),
                     progress_callback=_progress,
                     artifact=downloading.artifact,
                 )
@@ -272,6 +268,11 @@ class DownloadManager:
                 )
                 extra_config = {**extra_config, "model_path": str(model_path)}
 
+            if job.source == "huggingface" and backend_type == "whisper":
+                nemo_path = self._find_downloaded_nemo_path(job)
+                if nemo_path is not None:
+                    extra_config = {**extra_config, "base_model_id": str(nemo_path)}
+
             await mm.add_model(
                 model_id=model_id,
                 backend_type=backend_type,
@@ -290,6 +291,29 @@ class DownloadManager:
             return job.model_ref
         stem = Path(job.artifact).stem
         return f"{job.model_ref}::{stem}"
+
+
+    def _hf_download_dir(self, job: DownloadJob) -> Path:
+        base = Path(settings.models_dir) / "huggingface"
+        suffix = ""
+        if job.artifact:
+            suffix = f"--{Path(job.artifact).stem.replace('/', '_')}"
+        return base / f"{job.model_ref.replace('/', '--')}{suffix}"
+
+    def _find_downloaded_nemo_path(self, job: DownloadJob) -> Path | None:
+        download_dir = self._hf_download_dir(job)
+        if not download_dir.exists() or not download_dir.is_dir():
+            return None
+
+        if job.artifact and job.artifact.lower().endswith(".nemo"):
+            candidate = download_dir / job.artifact
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+        nemo_files = sorted(download_dir.rglob("*.nemo"))
+        if not nemo_files:
+            return None
+        return nemo_files[0]
 
     async def clear_jobs(self, statuses: set[str] | None = None) -> int:
         """Delete jobs by status from Redis. Returns count deleted."""

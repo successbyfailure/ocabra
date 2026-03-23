@@ -49,6 +49,7 @@ audio = [
     "soundfile>=0.12",
     "transformers>=4.47",
     "pyannote.audio>=3.3",
+    "nemo_toolkit[asr]>=2.2",
     "matplotlib>=3.10",
 ]
 

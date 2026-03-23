@@ -1180,3 +1180,65 @@ async def test_registry_ollama_variants_endpoint(
 
     assert response.status_code == 200
     assert response.json()[0]["name"] == "gemma3:4b-it-q4_K_M"
+
+
+@pytest.mark.asyncio
+async def test_hf_variants_exposes_nemo_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_info = SimpleNamespace(
+        id="nvidia/parakeet-tdt-0.6b-v3",
+        pipeline_tag="automatic-speech-recognition",
+        library_name="nemo",
+        tags=["nemo", "automatic-speech-recognition"],
+        siblings=[
+            SimpleNamespace(rfilename="README.md", size=1234),
+            SimpleNamespace(rfilename="parakeet-tdt-0.6b-v3.nemo", size=6 * 1024**3),
+        ],
+    )
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+
+    registry = HuggingFaceRegistry()
+    variants = await registry.get_variants("nvidia/parakeet-tdt-0.6b-v3")
+
+    assert len(variants) == 1
+    assert variants[0].backend_type == "whisper"
+    assert variants[0].artifact == "parakeet-tdt-0.6b-v3.nemo"
+    assert variants[0].format == "nemo"
+    assert variants[0].installable is True
+    assert variants[0].is_default is True
+
+
+@pytest.mark.asyncio
+async def test_hf_download_resolves_nemo_default_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake_info = SimpleNamespace(
+        id="nvidia/canary-1b-v2",
+        pipeline_tag="automatic-speech-recognition",
+        library_name="nemo",
+        tags=["nemo", "automatic-speech-recognition"],
+        siblings=[
+            SimpleNamespace(rfilename="README.md"),
+            SimpleNamespace(rfilename="canary-1b-v2.nemo"),
+        ],
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_snapshot_download(**kwargs):
+        captured.update(kwargs)
+        return str(kwargs["local_dir"])
+
+    monkeypatch.setattr("ocabra.registry.huggingface.model_info", lambda **_: fake_info)
+    monkeypatch.setattr("ocabra.registry.huggingface.snapshot_download", fake_snapshot_download)
+
+    registry = HuggingFaceRegistry()
+    out = await registry.download(
+        repo_id="nvidia/canary-1b-v2",
+        target_dir=tmp_path / "download",
+        progress_callback=lambda *_: None,
+        artifact=None,
+    )
+
+    assert out == tmp_path / "download"
+    allow_patterns = captured.get("allow_patterns")
+    assert isinstance(allow_patterns, list)
+    assert "canary-1b-v2.nemo" in allow_patterns

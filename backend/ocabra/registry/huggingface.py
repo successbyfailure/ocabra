@@ -101,6 +101,10 @@ _REASONING_PARSER_HINTS = {
     "deepseek r1": "deepseek_r1",
     "qwen3": "qwen3",
 }
+_NEMO_STT_ARTIFACTS = {
+    "nvidia/parakeet-tdt-0.6b-v3": "parakeet-tdt-0.6b-v3.nemo",
+    "nvidia/canary-1b-v2": "canary-1b-v2.nemo",
+}
 
 
 @dataclass
@@ -262,21 +266,38 @@ class HuggingFaceRegistry:
                 repo_id=repo_id, files_metadata=True, token=settings.hf_token or None
             )
         )
+        tags = list(getattr(info, "tags", []) or [])
+        task = getattr(info, "pipeline_tag", None)
+        library_name = getattr(info, "library_name", None)
         siblings = list(info.siblings or [])
         items = [{"name": s.rfilename, "size": int(getattr(s, "size", 0) or 0)} for s in siblings]
         names = [i["name"] for i in items]
+        backend_hint = self._infer_backend(
+            task=task,
+            siblings=[{"rfilename": name} for name in names],
+            tags=tags,
+            library_name=library_name,
+            repo_id=repo_id,
+        )
         variants: list[HFModelVariant] = []
         compatibility = await self._assess_repo_compatibility(
             repo_id=repo_id,
-            backend_hint="vllm",
+            backend_hint=backend_hint,
             sibling_names=names,
-            task=None,
-            tags=None,
-            library_name=None,
+            task=task,
+            tags=tags,
+            library_name=library_name,
         )
 
-        # Standard vLLM variant (download config + safetensors/bin tokenizer files).
-        has_standard = any(n.endswith(".safetensors") or n.endswith(".bin") for n in names)
+        nemo_variants = self._nemo_variants(repo_id=repo_id, items=items)
+        if nemo_variants:
+            return nemo_variants
+
+        # Standard variant (download config + safetensors/bin tokenizer files).
+        has_standard = any(
+            n.endswith(".safetensors") or n.endswith(".bin")
+            for n in names
+        )
         if has_standard:
             total = sum(
                 i["size"]
@@ -291,7 +312,7 @@ class HuggingFaceRegistry:
                     size_gb=(total / (1024**3)) if total > 0 else None,
                     format="safetensors/bin",
                     quantization=None,
-                    backend_type="vllm",
+                    backend_type=backend_hint,
                     is_default=True,
                     installable=compatibility.installable,
                     compatibility=compatibility.compatibility,
@@ -309,7 +330,7 @@ class HuggingFaceRegistry:
                     size_gb=None,
                     format="unknown",
                     quantization=None,
-                    backend_type=await self.infer_backend_for_repo(repo_id),
+                    backend_type=backend_hint,
                     is_default=True,
                     installable=compatibility.installable,
                     compatibility=compatibility.compatibility,
@@ -346,9 +367,29 @@ class HuggingFaceRegistry:
             library_name=getattr(info, "library_name", None),
             repo_id=repo_id,
         )
-        if not self._has_supported_hf_payload(sibling_names, backend_hint):
+        resolved_artifact = self._resolve_default_artifact(
+            repo_id=repo_id,
+            sibling_names=sibling_names,
+            backend_hint=backend_hint,
+            artifact=artifact,
+        )
+        if not self._has_supported_hf_payload(
+            sibling_names,
+            backend_hint,
+            artifact=resolved_artifact,
+        ):
+            supported = self._supported_payload_hint(backend_hint=backend_hint)
+            available_exts = sorted(
+                {
+                    Path(name).suffix.lower()
+                    for name in sibling_names
+                    if Path(name).suffix
+                }
+            )
             raise ValueError(
-                "This Hugging Face repo does not expose supported native weights for oCabra"
+                "This Hugging Face repo does not expose supported native weights for oCabra "
+                f"(backend_hint={backend_hint}, supported={supported}, "
+                f"available_extensions={available_exts or ['<none>']})"
             )
         compatibility = await self._assess_repo_compatibility(
             repo_id=repo_id,
@@ -364,7 +405,7 @@ class HuggingFaceRegistry:
                 or "This Hugging Face repo is not compatible with the current vLLM stack"
             )
         allow_patterns = self._download_allow_patterns(
-            sibling_names, backend_hint, artifact=artifact
+            sibling_names, backend_hint, artifact=resolved_artifact
         )
 
         from tqdm.auto import tqdm as _BaseTqdm
@@ -434,14 +475,21 @@ class HuggingFaceRegistry:
             return "tts"
         return "vllm"
 
-    def _has_supported_hf_payload(self, names: list[str], backend_hint: str) -> bool:
+    def _has_supported_hf_payload(
+        self,
+        names: list[str],
+        backend_hint: str,
+        artifact: str | None = None,
+    ) -> bool:
         lowered = [name.lower() for name in names]
+        if artifact:
+            return artifact.lower() in lowered
         if backend_hint == "diffusers":
             return "model_index.json" in lowered
         if backend_hint == "tts":
             return any(name.endswith((".safetensors", ".bin")) for name in lowered)
         if backend_hint == "whisper":
-            return any(name.endswith((".safetensors", ".bin", ".pt")) for name in lowered)
+            return any(name.endswith((".safetensors", ".bin", ".pt", ".nemo")) for name in lowered)
         return any(name.endswith((".safetensors", ".bin")) for name in lowered)
 
     def _looks_like_diffusers_repo(
@@ -516,6 +564,22 @@ class HuggingFaceRegistry:
         if backend_hint == "diffusers" or any("model_index.json" in name for name in names):
             return None
 
+        if backend_hint == "whisper":
+            return [
+                "*.nemo",
+                "*.safetensors",
+                "*.bin",
+                "*.pt",
+                "*.json",
+                "*.model",
+                "*.txt",
+                "tokenizer*",
+                "vocab*",
+                "merges*",
+                "README*",
+                "LICENSE*",
+            ]
+
         return [
             "*.safetensors",
             "*.bin",
@@ -529,6 +593,72 @@ class HuggingFaceRegistry:
             "README*",
             "LICENSE*",
         ]
+
+    def _resolve_default_artifact(
+        self,
+        repo_id: str,
+        sibling_names: list[str],
+        backend_hint: str,
+        artifact: str | None,
+    ) -> str | None:
+        if artifact:
+            return artifact
+        if backend_hint != "whisper":
+            return None
+
+        canonical = _NEMO_STT_ARTIFACTS.get(repo_id.lower())
+        lowered_to_original = {name.lower(): name for name in sibling_names}
+        if canonical and canonical.lower() in lowered_to_original:
+            return lowered_to_original[canonical.lower()]
+
+        nemo_candidates = sorted(
+            name for name in sibling_names if name.lower().endswith(".nemo")
+        )
+        if nemo_candidates:
+            return nemo_candidates[0]
+        return None
+
+    def _supported_payload_hint(self, backend_hint: str) -> str:
+        if backend_hint == "diffusers":
+            return "model_index.json"
+        if backend_hint == "tts":
+            return ".safetensors|.bin"
+        if backend_hint == "whisper":
+            return ".nemo|.safetensors|.bin|.pt"
+        return ".safetensors|.bin"
+
+    def _nemo_variants(self, repo_id: str, items: list[dict[str, Any]]) -> list[HFModelVariant]:
+        nemo_items = [item for item in items if item["name"].lower().endswith(".nemo")]
+        if not nemo_items:
+            return []
+
+        preferred = _NEMO_STT_ARTIFACTS.get(repo_id.lower())
+        variants: list[HFModelVariant] = []
+        for idx, item in enumerate(sorted(nemo_items, key=lambda entry: entry["name"].lower())):
+            filename = item["name"]
+            variant_id = Path(filename).stem.replace("/", "_")
+            is_default = False
+            if preferred and filename.lower() == preferred.lower():
+                is_default = True
+            elif not preferred and idx == 0:
+                is_default = True
+            variants.append(
+                HFModelVariant(
+                    variant_id=variant_id,
+                    label=f"nemo ({Path(filename).name})",
+                    artifact=filename,
+                    size_gb=(item["size"] / (1024**3)) if item["size"] > 0 else None,
+                    format="nemo",
+                    quantization=None,
+                    backend_type="whisper",
+                    is_default=is_default,
+                    installable=True,
+                    compatibility="compatible",
+                    compatibility_reason="NVIDIA NeMo speech artifact detected.",
+                    vllm_support=None,
+                )
+            )
+        return variants
 
     def _extract_quant_from_filename(self, filename: str) -> str | None:
         low = filename.lower()

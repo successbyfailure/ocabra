@@ -144,3 +144,14 @@ async def test_build_multipart_includes_diarize_when_present():
     assert files["file"][0] == "sample.wav"
     assert data["diarize"] == "true"
     assert data["response_format"] == "verbose_json"
+
+
+@pytest.mark.asyncio
+async def test_whisper_vram_lookup_nvidia_nemo_models() -> None:
+    backend = WhisperBackend()
+
+    parakeet_vram = await backend.get_vram_estimate_mb("nvidia/parakeet-tdt-0.6b-v3")
+    canary_vram = await backend.get_vram_estimate_mb("nvidia/canary-1b-v2")
+
+    assert parakeet_vram == 4500
+    assert canary_vram == 9000

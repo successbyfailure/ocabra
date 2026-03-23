@@ -29,6 +29,8 @@ KNOWN_VRAM_MB = {
     "whisper-large-v3": 6000,
     "whisper-large-v3-turbo": 3500,
     "faster-whisper-large-v3-turbo-latam-int8-ct2": 3600,
+    "parakeet-tdt-0.6b-v3": 4500,
+    "canary-1b-v2": 9000,
 }
 OPENAI_TO_FASTER_MODEL_ID = {
     "openai/whisper-tiny": "tiny",
@@ -232,7 +234,7 @@ class WhisperBackend(BackendInterface):
         if isinstance(payload, bytes):
             yield payload
 
-    async def _wait_until_healthy(self, model_id: str, retries: int = 60) -> bool:
+    async def _wait_until_healthy(self, model_id: str, retries: int = 180) -> bool:
         for _ in range(retries):
             if await self.health_check(model_id):
                 return True

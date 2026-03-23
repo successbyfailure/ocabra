@@ -5,6 +5,7 @@ import tempfile
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import uvicorn
@@ -231,7 +232,35 @@ def _cuda_whisper_available() -> bool:
     except Exception:
         return False
 
+class _NemoModelAdapter:
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    def transcribe(
+        self,
+        audio_path: str,
+        language: str | None = None,
+        initial_prompt: str | None = None,
+        temperature: float = 0.0,
+    ) -> tuple[list[Any], Any]:
+        _ = initial_prompt, temperature
+        text = _nemo_transcribe_text(self._model, audio_path=audio_path, language=language)
+        segment = SimpleNamespace(start=0.0, end=0.0, text=text)
+        info = SimpleNamespace(language=language or "unknown")
+        return [segment], info
+
+
+def _is_nemo_model_id(model_id: str) -> bool:
+    candidate = Path(model_id)
+    if candidate.suffix.lower() == ".nemo":
+        return True
+    return candidate.exists() and candidate.is_file() and candidate.suffix.lower() == ".nemo"
+
+
 def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
+    if _is_nemo_model_id(model_id):
+        return _create_nemo_model(model_id=model_id, device=device)
+
     from faster_whisper import WhisperModel
 
     return WhisperModel(
@@ -239,6 +268,162 @@ def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
         device=device,
         compute_type=compute_type,
     )
+
+
+def _create_nemo_model(model_id: str, device: str) -> _NemoModelAdapter:
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "NeMo STT model requested but torch is not installed. Install backend extras '[audio]'."
+        ) from exc
+
+    try:
+        from nemo.collections.asr.models import ASRModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "NeMo STT model requested but nemo_toolkit is not installed. "
+            "Install backend extras that include nemo_toolkit[asr]."
+        ) from exc
+
+    map_location = "cuda" if device == "cuda" else "cpu"
+    model = ASRModel.restore_from(restore_path=model_id, map_location=map_location)
+    model = model.eval()
+    if device == "cuda":
+        model = model.to(torch.device("cuda"))
+    return _NemoModelAdapter(model)
+
+
+def _prepare_audio_for_nemo(audio_path: str) -> tuple[str, str | None]:
+    import numpy as np
+    import soundfile as sf
+
+    samples, sample_rate = sf.read(audio_path, always_2d=True)
+    # NeMo transcribe() expects mono waveform at 16kHz for these ASR checkpoints.
+    mono = np.mean(samples, axis=1, dtype=np.float32)
+
+    target_sr = 16000
+    if int(sample_rate) != target_sr:
+        import librosa
+
+        mono = librosa.resample(mono, orig_sr=int(sample_rate), target_sr=target_sr)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        sf.write(tmp.name, mono, target_sr, subtype="PCM_16")
+        return tmp.name, tmp.name
+
+
+def _extract_nemo_text(result: Any) -> str:
+    if isinstance(result, list):
+        if not result:
+            return ""
+        first = result[0]
+        if isinstance(first, str):
+            return first.strip()
+        if isinstance(first, dict):
+            for key in ("text", "pred_text", "transcript"):
+                value = first.get(key)
+                if isinstance(value, str):
+                    return value.strip()
+        text = getattr(first, "text", None)
+        if isinstance(text, str):
+            return text.strip()
+        return str(first).strip()
+
+    if isinstance(result, dict):
+        for key in ("text", "pred_text", "transcript"):
+            value = result.get(key)
+            if isinstance(value, str):
+                return value.strip()
+
+    if isinstance(result, str):
+        return result.strip()
+
+    text = getattr(result, "text", None)
+    if isinstance(text, str):
+        return text.strip()
+
+    return str(result).strip()
+
+
+def _run_nemo_transcribe_once(model: Any, path: str, language: str | None) -> str:
+    transcribe_attempts: list[dict[str, Any]] = []
+    if language:
+        transcribe_attempts.append({"paths2audio_files": [path], "language_id": language})
+        transcribe_attempts.append({"audio": [path], "language": language})
+        transcribe_attempts.append({
+            "audio": [path],
+            "taskname": "asr",
+            "source_lang": language,
+            "target_lang": "en",
+            "pnc": "yes",
+        })
+    transcribe_attempts.append({"paths2audio_files": [path]})
+    transcribe_attempts.append({"audio": [path]})
+    transcribe_attempts.append({
+        "audio": [path],
+        "taskname": "asr",
+        "source_lang": "en",
+        "target_lang": "en",
+        "pnc": "yes",
+    })
+
+    result: Any | None = None
+    for kwargs in transcribe_attempts:
+        try:
+            result = model.transcribe(**kwargs)
+            break
+        except TypeError:
+            continue
+
+    if result is None:
+        result = model.transcribe([path])
+    return _extract_nemo_text(result)
+
+
+def _chunk_audio_for_nemo(prepared_path: str, chunk_seconds: int = 20) -> tuple[list[str], list[str]]:
+    import soundfile as sf
+
+    audio, sample_rate = sf.read(prepared_path, always_2d=False)
+    if audio is None:
+        return [prepared_path], []
+
+    total_samples = int(audio.shape[0]) if hasattr(audio, "shape") else 0
+    chunk_size = int(sample_rate) * chunk_seconds
+    if total_samples <= chunk_size or chunk_size <= 0:
+        return [prepared_path], []
+
+    chunk_paths: list[str] = []
+    cleanup: list[str] = []
+    start = 0
+    while start < total_samples:
+        end = min(total_samples, start + chunk_size)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            sf.write(tmp.name, audio[start:end], int(sample_rate), subtype="PCM_16")
+            chunk_paths.append(tmp.name)
+            cleanup.append(tmp.name)
+        start = end
+    return chunk_paths, cleanup
+
+
+def _nemo_transcribe_text(model: Any, audio_path: str, language: str | None) -> str:
+    prepared_path, cleanup_path = _prepare_audio_for_nemo(audio_path)
+    chunk_cleanup: list[str] = []
+    try:
+        chunk_paths, chunk_cleanup = _chunk_audio_for_nemo(prepared_path, chunk_seconds=20)
+        texts: list[str] = []
+        for chunk in chunk_paths:
+            text = _run_nemo_transcribe_once(model, chunk, language)
+            if text:
+                texts.append(text.strip())
+        return " ".join(t for t in texts if t).strip()
+    finally:
+        for chunk in chunk_cleanup:
+            with suppress(FileNotFoundError):
+                os.unlink(chunk)
+        if cleanup_path:
+            with suppress(FileNotFoundError):
+                os.unlink(cleanup_path)
 
 
 def _is_missing_cudnn_error(exc: Exception) -> bool:
