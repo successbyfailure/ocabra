@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,10 @@ class RequestStat(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     model_id: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    backend_type: Mapped[str | None] = mapped_column(String(64), index=True)
+    request_kind: Mapped[str | None] = mapped_column(String(64), index=True)
+    endpoint_path: Mapped[str | None] = mapped_column(String(256))
+    status_code: Mapped[int | None] = mapped_column(Integer)
     gpu_index: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True

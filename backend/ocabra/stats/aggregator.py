@@ -4,15 +4,35 @@ and returns summary structures for the REST API.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import sqlalchemy as sa
-import structlog
 
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.stats import GpuStat, RequestStat
 
-logger = structlog.get_logger(__name__)
+
+def _normalize_window(
+    from_dt: datetime | None,
+    to_dt: datetime | None,
+) -> tuple[datetime, datetime]:
+    if to_dt is None:
+        to_dt = datetime.now(timezone.utc)
+    if from_dt is None:
+        from_dt = to_dt - timedelta(hours=24)
+    return from_dt, to_dt
+
+
+def _percentile(data: list[int], p: float) -> int:
+    if not data:
+        return 0
+    idx = int(len(data) * p / 100)
+    return data[min(idx, len(data) - 1)]
+
+
+def _truncate_minute(dt: datetime) -> datetime:
+    return dt.replace(second=0, microsecond=0)
 
 
 async def get_request_stats(
@@ -23,19 +43,11 @@ async def get_request_stats(
     """
     Return aggregated request statistics.
 
-    Args:
-        from_dt: Start of time window. Defaults to 24h ago.
-        to_dt: End of time window. Defaults to now.
-        model_id: Filter to a specific model, or None for all.
-
     Returns:
         Dict with total_requests, error_rate, avg_duration_ms,
-        p50_duration_ms, p95_duration_ms, and a time series.
+        p50_duration_ms, p95_duration_ms, and minute-level series.
     """
-    if to_dt is None:
-        to_dt = datetime.now(timezone.utc)
-    if from_dt is None:
-        from_dt = to_dt - timedelta(hours=24)
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
     async with AsyncSessionLocal() as session:
         q = sa.select(RequestStat).where(
@@ -58,21 +70,27 @@ async def get_request_stats(
             "series": [],
         }
 
-    durations = sorted(r.duration_ms or 0 for r in rows)
-    errors = sum(1 for r in rows if r.error)
+    durations = sorted(max(0, int(r.duration_ms or 0)) for r in rows)
+    errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
     n = len(rows)
 
-    def percentile(data: list[int], p: float) -> int:
-        idx = int(len(data) * p / 100)
-        return data[min(idx, len(data) - 1)]
+    per_minute: dict[datetime, int] = defaultdict(int)
+    for row in rows:
+        if row.started_at:
+            per_minute[_truncate_minute(row.started_at)] += 1
+
+    series = [
+        {"timestamp": ts.isoformat(), "count": count}
+        for ts, count in sorted(per_minute.items(), key=lambda item: item[0])
+    ]
 
     return {
         "totalRequests": n,
         "errorRate": round(errors / n, 4) if n else 0.0,
         "avgDurationMs": int(sum(durations) / n),
-        "p50DurationMs": percentile(durations, 50),
-        "p95DurationMs": percentile(durations, 95),
-        "series": [],  # Filled by frontend from WS events
+        "p50DurationMs": _percentile(durations, 50),
+        "p95DurationMs": _percentile(durations, 95),
+        "series": series,
     }
 
 
@@ -82,18 +100,8 @@ async def get_energy_stats(
 ) -> dict:
     """
     Return energy statistics per GPU.
-
-    Args:
-        from_dt: Start of time window.
-        to_dt: End of time window.
-
-    Returns:
-        Dict with total_kwh, estimated_cost_eur, and per-GPU breakdown.
     """
-    if to_dt is None:
-        to_dt = datetime.now(timezone.utc)
-    if from_dt is None:
-        from_dt = to_dt - timedelta(hours=24)
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
     async with AsyncSessionLocal() as session:
         q = sa.select(GpuStat).where(
@@ -115,11 +123,13 @@ async def get_energy_stats(
         # Each row = 1 minute average → kWh = W * h / 1000 = W * (1/60) / 1000
         kwh = sum(powers) / 60 / 1000
         total_kwh += kwh
-        gpu_summaries.append({
-            "gpuIndex": gpu_index,
-            "totalKwh": round(kwh, 4),
-            "powerDrawW": round(sum(powers) / len(powers), 1) if powers else 0.0,
-        })
+        gpu_summaries.append(
+            {
+                "gpuIndex": gpu_index,
+                "totalKwh": round(kwh, 4),
+                "powerDrawW": round(sum(powers) / len(powers), 1) if powers else 0.0,
+            }
+        )
 
     return {
         "totalKwh": round(total_kwh, 4),
@@ -128,44 +138,63 @@ async def get_energy_stats(
     }
 
 
-async def get_performance_stats(model_id: str | None = None) -> dict:
+async def get_performance_stats(
+    model_id: str | None = None,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
     """
     Return per-model performance statistics.
-
-    Args:
-        model_id: Filter to a specific model, or None for all.
-
-    Returns:
-        Dict with per-model breakdown of requests, latency, tokens/s, errors, uptime.
     """
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat)
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+        )
         if model_id:
             q = q.where(RequestStat.model_id == model_id)
         result = await session.execute(q)
         rows = result.scalars().all()
 
-    by_model: dict[str, list] = {}
+    by_model: dict[str, list[RequestStat]] = {}
     for row in rows:
         by_model.setdefault(row.model_id, []).append(row)
 
     summaries = []
     for mid, model_rows in by_model.items():
-        durations = [r.duration_ms or 0 for r in model_rows]
-        out_tokens = [r.output_tokens or 0 for r in model_rows]
-        errors = sum(1 for r in model_rows if r.error)
+        durations = [max(0, int(r.duration_ms or 0)) for r in model_rows]
+        in_tokens = [max(0, int(r.input_tokens or 0)) for r in model_rows]
+        out_tokens = [max(0, int(r.output_tokens or 0)) for r in model_rows]
+        errors = sum(1 for r in model_rows if r.error or (r.status_code is not None and r.status_code >= 400))
         n = len(model_rows)
-        avg_dur_s = (sum(durations) / n / 1000) if n else 0
-        tokens_ps = (sum(out_tokens) / sum(durations) * 1000) if sum(durations) else 0
+        total_duration_ms = sum(durations)
+        tokenized_requests = sum(1 for r in model_rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0)
 
-        summaries.append({
-            "modelId": mid,
-            "totalRequests": n,
-            "avgLatencyMs": int(sum(durations) / n) if n else 0,
-            "tokensPerSecond": round(tokens_ps, 1),
-            "errorCount": errors,
-            "uptimePct": round((n - errors) / n * 100, 1) if n else 0.0,
-        })
+        tokens_ps = (sum(out_tokens) / total_duration_ms * 1000) if total_duration_ms else 0.0
+        req_per_min = (n * 60000 / total_duration_ms) if total_duration_ms else 0.0
+
+        request_kinds = sorted({(r.request_kind or "other") for r in model_rows})
+        backend_type = next((r.backend_type for r in model_rows if r.backend_type), "unknown")
+
+        summaries.append(
+            {
+                "modelId": mid,
+                "backendType": backend_type,
+                "requestKinds": request_kinds,
+                "totalRequests": n,
+                "avgLatencyMs": int(total_duration_ms / n) if n else 0,
+                "p95LatencyMs": _percentile(sorted(durations), 95),
+                "requestsPerMinute": round(req_per_min, 2),
+                "tokensPerSecond": round(tokens_ps, 2),
+                "totalInputTokens": int(sum(in_tokens)),
+                "totalOutputTokens": int(sum(out_tokens)),
+                "tokenizedRequests": int(tokenized_requests),
+                "errorCount": errors,
+                "uptimePct": round((n - errors) / n * 100, 1) if n else 0.0,
+            }
+        )
 
     return {"byModel": summaries}
 
@@ -176,12 +205,9 @@ async def get_token_stats(
     model_id: str | None = None,
 ) -> dict:
     """
-    Return token usage totals and a simple per-request time series.
+    Return token usage totals and per-request time series.
     """
-    if to_dt is None:
-        to_dt = datetime.now(timezone.utc)
-    if from_dt is None:
-        from_dt = to_dt - timedelta(hours=24)
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
     async with AsyncSessionLocal() as session:
         q = sa.select(RequestStat).where(
@@ -194,13 +220,20 @@ async def get_token_stats(
         result = await session.execute(q)
         rows = result.scalars().all()
 
-    total_input = sum(r.input_tokens or 0 for r in rows)
-    total_output = sum(r.output_tokens or 0 for r in rows)
+    total_input = sum(max(0, int(r.input_tokens or 0)) for r in rows)
+    total_output = sum(max(0, int(r.output_tokens or 0)) for r in rows)
+
+    by_backend: dict[str, dict[str, int]] = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0})
+    for row in rows:
+        backend = row.backend_type or "unknown"
+        by_backend[backend]["inputTokens"] += max(0, int(row.input_tokens or 0))
+        by_backend[backend]["outputTokens"] += max(0, int(row.output_tokens or 0))
+
     series = [
         {
             "timestamp": r.started_at.isoformat() if r.started_at else "",
-            "inputTokens": int(r.input_tokens or 0),
-            "outputTokens": int(r.output_tokens or 0),
+            "inputTokens": int(max(0, int(r.input_tokens or 0))),
+            "outputTokens": int(max(0, int(r.output_tokens or 0))),
         }
         for r in rows
     ]
@@ -208,5 +241,84 @@ async def get_token_stats(
     return {
         "totalInputTokens": int(total_input),
         "totalOutputTokens": int(total_output),
+        "byBackend": [
+            {"backendType": backend, **values}
+            for backend, values in sorted(by_backend.items(), key=lambda item: item[0])
+        ],
         "series": series,
+    }
+
+
+async def get_overview_stats(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+    model_id: str | None = None,
+) -> dict:
+    """
+    Return high-level metrics segmented by backend and request kind.
+    """
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+        )
+        if model_id:
+            q = q.where(RequestStat.model_id == model_id)
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    total_requests = len(rows)
+    if total_requests == 0:
+        return {
+            "totalRequests": 0,
+            "totalErrors": 0,
+            "avgDurationMs": 0,
+            "tokenizedRequests": 0,
+            "totalInputTokens": 0,
+            "totalOutputTokens": 0,
+            "byBackend": [],
+            "byRequestKind": [],
+        }
+
+    durations = [max(0, int(r.duration_ms or 0)) for r in rows]
+    total_errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
+    tokenized_requests = sum(1 for r in rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0)
+    total_input_tokens = sum(max(0, int(r.input_tokens or 0)) for r in rows)
+    total_output_tokens = sum(max(0, int(r.output_tokens or 0)) for r in rows)
+
+    by_backend: dict[str, list[RequestStat]] = defaultdict(list)
+    by_kind: dict[str, list[RequestStat]] = defaultdict(list)
+    for row in rows:
+        by_backend[row.backend_type or "unknown"].append(row)
+        by_kind[row.request_kind or "other"].append(row)
+
+    def _summarize(group_rows: list[RequestStat], key_name: str, key_value: str) -> dict:
+        g_n = len(group_rows)
+        g_durations = [max(0, int(r.duration_ms or 0)) for r in group_rows]
+        g_errors = sum(1 for r in group_rows if r.error or (r.status_code is not None and r.status_code >= 400))
+        return {
+            key_name: key_value,
+            "totalRequests": g_n,
+            "errorRate": round(g_errors / g_n, 4) if g_n else 0.0,
+            "avgLatencyMs": int(sum(g_durations) / g_n) if g_n else 0,
+            "p95LatencyMs": _percentile(sorted(g_durations), 95),
+        }
+
+    return {
+        "totalRequests": total_requests,
+        "totalErrors": total_errors,
+        "avgDurationMs": int(sum(durations) / total_requests) if total_requests else 0,
+        "tokenizedRequests": tokenized_requests,
+        "totalInputTokens": int(total_input_tokens),
+        "totalOutputTokens": int(total_output_tokens),
+        "byBackend": [
+            _summarize(group_rows, "backendType", backend)
+            for backend, group_rows in sorted(by_backend.items(), key=lambda item: item[0])
+        ],
+        "byRequestKind": [
+            _summarize(group_rows, "requestKind", kind)
+            for kind, group_rows in sorted(by_kind.items(), key=lambda item: item[0])
+        ],
     }

@@ -50,6 +50,7 @@ async def transcriptions(
         max_part_size=max(1, int(settings.openai_audio_max_part_size_mb)) * 1024 * 1024
     )
     model_id: str = form.get("model", "")
+    request.state.stats_model_id = model_id
     language: str | None = form.get("language")
     response_format: str = form.get("response_format", "json")
     prompt: str | None = form.get("prompt")

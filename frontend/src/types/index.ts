@@ -287,9 +287,16 @@ export interface EnergyStats {
 export interface PerformanceStats {
   byModel: {
     modelId: string
+    backendType: string
+    requestKinds: string[]
     totalRequests: number
     avgLatencyMs: number
+    p95LatencyMs: number
+    requestsPerMinute: number
     tokensPerSecond: number
+    totalInputTokens: number
+    totalOutputTokens: number
+    tokenizedRequests: number
     errorCount: number
     uptimePct: number
   }[]
@@ -298,7 +305,31 @@ export interface PerformanceStats {
 export interface TokenStats {
   totalInputTokens: number
   totalOutputTokens: number
+  byBackend: { backendType: string; inputTokens: number; outputTokens: number }[]
   series: { timestamp: string; inputTokens: number; outputTokens: number }[]
+}
+
+export interface OverviewStats {
+  totalRequests: number
+  totalErrors: number
+  avgDurationMs: number
+  tokenizedRequests: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  byBackend: {
+    backendType: string
+    totalRequests: number
+    errorRate: number
+    avgLatencyMs: number
+    p95LatencyMs: number
+  }[]
+  byRequestKind: {
+    requestKind: string
+    totalRequests: number
+    errorRate: number
+    avgLatencyMs: number
+    p95LatencyMs: number
+  }[]
 }
 
 export interface GPUStatHistoryPoint {

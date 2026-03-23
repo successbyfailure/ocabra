@@ -20,6 +20,7 @@ import type {
   EnergyStats,
   PerformanceStats,
   TokenStats,
+  OverviewStats,
   StatsParams,
   ServiceState,
 } from "@/types"
@@ -546,9 +547,13 @@ export const api = {
       const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
       return request<TokenStats>("GET", `/ocabra/stats/tokens${query}`)
     },
-    performance: (modelId?: string) => {
-      const query = buildQuery({ model_id: modelId })
+    performance: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
       return request<PerformanceStats>("GET", `/ocabra/stats/performance${query}`)
+    },
+    overview: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
+      return request<OverviewStats>("GET", `/ocabra/stats/overview${query}`)
     },
   },
 

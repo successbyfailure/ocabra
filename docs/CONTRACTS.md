@@ -221,7 +221,8 @@ GET /ocabra/registry/local                               → list[LocalModel]
 GET /ocabra/stats/requests?from=ISO&to=ISO&model_id=str  → RequestStats
 GET /ocabra/stats/tokens?from=ISO&to=ISO                 → TokenStats
 GET /ocabra/stats/energy?from=ISO&to=ISO                 → EnergyStats
-GET /ocabra/stats/performance?model_id=str               → PerformanceStats
+GET /ocabra/stats/performance?from=ISO&to=ISO&model_id=str → PerformanceStats
+GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str    → OverviewStats
 ```
 
 ### 5.6 Config

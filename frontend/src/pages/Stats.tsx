@@ -6,7 +6,7 @@ import { EnergyPanel } from "@/components/stats/EnergyPanel"
 import { PerformanceTable } from "@/components/stats/PerformanceTable"
 import { RequestsChart } from "@/components/stats/RequestsChart"
 import { TokensChart } from "@/components/stats/TokensChart"
-import type { EnergyStats, PerformanceStats, RequestStats, TokenStats } from "@/types"
+import type { EnergyStats, OverviewStats, PerformanceStats, RequestStats, TokenStats } from "@/types"
 
 const EMPTY_REQUESTS: RequestStats = {
   totalRequests: 0,
@@ -20,6 +20,7 @@ const EMPTY_REQUESTS: RequestStats = {
 const EMPTY_TOKENS: TokenStats = {
   totalInputTokens: 0,
   totalOutputTokens: 0,
+  byBackend: [],
   series: [],
 }
 
@@ -33,6 +34,69 @@ const EMPTY_PERFORMANCE: PerformanceStats = {
   byModel: [],
 }
 
+const EMPTY_OVERVIEW: OverviewStats = {
+  totalRequests: 0,
+  totalErrors: 0,
+  avgDurationMs: 0,
+  tokenizedRequests: 0,
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
+  byBackend: [],
+  byRequestKind: [],
+}
+
+function OverviewPanel({ data }: { data: OverviewStats }) {
+  const errorPct = data.totalRequests > 0 ? (data.totalErrors / data.totalRequests) * 100 : 0
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-3">
+      <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Overview</h3>
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-md border border-border bg-background/60 p-3">
+          <p className="text-xs text-muted-foreground">Requests</p>
+          <p className="text-2xl font-semibold">{data.totalRequests}</p>
+          <p className="text-xs text-muted-foreground">Errores: {data.totalErrors} ({errorPct.toFixed(1)}%)</p>
+        </div>
+        <div className="rounded-md border border-border bg-background/60 p-3">
+          <p className="text-xs text-muted-foreground">Latencia media</p>
+          <p className="text-2xl font-semibold">{data.avgDurationMs} ms</p>
+          <p className="text-xs text-muted-foreground">Tokenizadas: {data.tokenizedRequests}</p>
+        </div>
+        <div className="rounded-md border border-border bg-background/60 p-3">
+          <p className="text-xs text-muted-foreground">Tokens</p>
+          <p className="text-2xl font-semibold">{data.totalOutputTokens}</p>
+          <p className="text-xs text-muted-foreground">Entrada: {data.totalInputTokens}</p>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        <div className="rounded-md border border-border bg-background/40 p-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Por backend</p>
+          <div className="space-y-1 text-sm">
+            {data.byBackend.map((row) => (
+              <p key={row.backendType}>
+                {row.backendType}: {row.totalRequests} req, {row.avgLatencyMs} ms avg, {(row.errorRate * 100).toFixed(1)}% err
+              </p>
+            ))}
+            {data.byBackend.length === 0 ? <p className="text-muted-foreground">Sin datos</p> : null}
+          </div>
+        </div>
+        <div className="rounded-md border border-border bg-background/40 p-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Por tipo request</p>
+          <div className="space-y-1 text-sm">
+            {data.byRequestKind.map((row) => (
+              <p key={row.requestKind}>
+                {row.requestKind}: {row.totalRequests} req, {row.avgLatencyMs} ms avg, {(row.errorRate * 100).toFixed(1)}% err
+              </p>
+            ))}
+            {data.byRequestKind.length === 0 ? <p className="text-muted-foreground">Sin datos</p> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function Stats() {
   const [loading, setLoading] = useState(true)
   const [range, setRange] = useState<DateRangeValue>(defaultDateRange)
@@ -42,6 +106,7 @@ export function Stats() {
   const [tokens, setTokens] = useState<TokenStats>(EMPTY_TOKENS)
   const [energy, setEnergy] = useState<EnergyStats>(EMPTY_ENERGY)
   const [performance, setPerformance] = useState<PerformanceStats>(EMPTY_PERFORMANCE)
+  const [overview, setOverview] = useState<OverviewStats>(EMPTY_OVERVIEW)
 
   const params = useMemo(
     () => ({
@@ -57,12 +122,13 @@ export function Stats() {
 
     const load = async () => {
       try {
-        const [modelList, req, tok, ene, perf] = await Promise.all([
+        const [modelList, req, tok, ene, perf, over] = await Promise.all([
           api.models.list(),
           api.stats.requests(params),
           api.stats.tokens(params),
           api.stats.energy(params),
-          api.stats.performance(modelId || undefined),
+          api.stats.performance(params),
+          api.stats.overview(params),
         ])
 
         if (!active) return
@@ -72,6 +138,7 @@ export function Stats() {
         setTokens(tok)
         setEnergy(ene)
         setPerformance(perf)
+        setOverview(over)
       } catch (err) {
         if (active) {
           toast.error(err instanceof Error ? err.message : "No se pudieron cargar stats")
@@ -122,6 +189,7 @@ export function Stats() {
         </div>
       ) : (
         <>
+          <OverviewPanel data={overview} />
           <div className="grid gap-3 xl:grid-cols-2">
             <RequestsChart data={requests} />
             <TokensChart data={tokens} />
