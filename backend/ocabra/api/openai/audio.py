@@ -50,7 +50,6 @@ async def transcriptions(
         max_part_size=max(1, int(settings.openai_audio_max_part_size_mb)) * 1024 * 1024
     )
     model_id: str = form.get("model", "")
-    request.state.stats_model_id = model_id
     language: str | None = form.get("language")
     response_format: str = form.get("response_format", "json")
     prompt: str | None = form.get("prompt")
@@ -59,6 +58,8 @@ async def transcriptions(
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "audio_transcription", "audio transcription")
+    model_id = state.model_id
+    request.state.stats_model_id = model_id
 
     worker_pool = request.app.state.worker_pool
     audio_bytes = await file.read()
@@ -69,7 +70,7 @@ async def transcriptions(
     for attempt in range(2):
         worker = worker_pool.get_worker(model_id)
         backend = await worker_pool.get_backend(state.backend_type)
-        worker_healthy = bool(worker) and await backend.health_check(model_id)
+        worker_healthy = bool(worker) and await backend.health_check(state.backend_model_id)
 
         if not worker or not worker_healthy:
             if attempt == 0:
@@ -161,6 +162,7 @@ async def speech(request: Request) -> StreamingResponse:
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "tts", "text-to-speech")
+    model_id = state.model_id
 
     worker_pool = request.app.state.worker_pool
     worker = worker_pool.get_worker(model_id)

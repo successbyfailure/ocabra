@@ -15,6 +15,7 @@ from ._deps import (
     ensure_loaded,
     get_model_manager,
     raise_upstream_http_error,
+    to_backend_body,
 )
 
 router = APIRouter()
@@ -32,18 +33,19 @@ async def completions(request: Request) -> Any:
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "completion", "text completions")
+    model_id = state.model_id
 
     worker_pool = request.app.state.worker_pool
 
     if stream:
         return StreamingResponse(
-            _stream_completions(worker_pool, model_id, body),
+            _stream_completions(worker_pool, model_id, to_backend_body(state, body)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     try:
-        result = await worker_pool.forward_request(model_id, "/v1/completions", body)
+        result = await worker_pool.forward_request(model_id, "/v1/completions", to_backend_body(state, body))
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
     return result

@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 
 from ocabra.config import settings
+from ocabra.core.model_ref import build_model_ref
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 from ._mapper import OllamaNameMapper
@@ -43,28 +44,32 @@ async def list_tags(request: Request) -> dict:
         ollama_name = str(item.get("name") or "")
         if not ollama_name:
             continue
-        state = by_id.get(ollama_name)
-        model_id = ollama_name
+
+        state = by_id.get(build_model_ref("ollama", ollama_name))
         if state is None:
-            model_id = _mapper.to_internal(ollama_name)
-            state = by_id.get(model_id)
+            mapped_id = _mapper.to_internal(ollama_name)
+            state = by_id.get(mapped_id)
+
+        canonical_id = state.model_id if state else build_model_ref("ollama", ollama_name)
+        backend_model_id = state.backend_model_id if state else ollama_name
+
         remote_modified = str(item.get("modified_at") or "")
         modified_at = _to_iso_z(state.loaded_at if state else None) if state and state.loaded_at else (remote_modified or _to_iso_z(None))
         family = ollama_name.split(":", 1)[0]
         is_loaded = ollama_name in loaded
         size_bytes = int(item.get("size") or 0)
         if size_bytes <= 0:
-            size_bytes = _estimate_size_bytes(model_id, state.vram_used_mb if state else 0)
+            size_bytes = _estimate_size_bytes(backend_model_id, state.vram_used_mb if state else 0)
         models.append(
             {
                 "name": ollama_name,
                 "model": ollama_name,
                 "modified_at": modified_at,
                 "size": size_bytes,
-                "digest": f"sha256:{hashlib.sha256(model_id.encode('utf-8')).hexdigest()}",
+                "digest": f"sha256:{hashlib.sha256(canonical_id.encode('utf-8')).hexdigest()}",
                 "details": {
                     "parent_model": "",
-                    "format": _infer_format(model_id),
+                    "format": _infer_format(backend_model_id),
                     "family": family,
                     "families": [family],
                     "parameter_size": _infer_parameter_size(ollama_name),

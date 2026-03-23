@@ -205,9 +205,16 @@ ocabra/
 
 Cada modelo expone sus capacidades en `/v1/models` y `/api/show`:
 
+
+**Convención de IDs de modelo (canónica):**
+- `model_id` usa siempre el formato `backend/model`.
+- Ejemplos: `vllm/meta-llama/Llama-3.3-70B-Instruct`, `ollama/mistral:7b`, `whisper/openai/whisper-large-v3`.
+- `backend_model_id` es el id nativo del runtime sin prefijo (`model`).
+- En OpenAI `/v1/*`, también se acepta `backend_model_id` como alias de `model`; si hay varios matches, se usa el primero encontrado.
+
 ```json
 {
-  "id": "mistral-7b-instruct",
+  "id": "vllm/mistral-7b-instruct",
   "capabilities": {
     "chat": true,
     "completion": true,

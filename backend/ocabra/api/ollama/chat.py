@@ -52,7 +52,7 @@ async def chat(request: Request):
             )
         return await worker_pool.forward_request(model_id, "/api/chat", upstream_body)
 
-    vllm_body = _build_vllm_chat_body(body, model_id, stream)
+    vllm_body = _build_vllm_chat_body(body, state.backend_model_id, stream)
 
     if stream:
         return StreamingResponse(

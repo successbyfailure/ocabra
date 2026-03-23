@@ -237,6 +237,55 @@ class TestChatCompletions:
         assert resp.status_code == 200
         assert state.last_request_at is not None
 
+
+
+    def test_alias_backend_model_id_resolves_to_canonical_model(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="ollama/mistral:7b",
+            backend_model_id="mistral:7b",
+            display_name="Mistral 7B",
+            backend_type="ollama",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
+        )
+        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post("/v1/chat/completions", json={
+            "model": "mistral:7b",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+
+        assert resp.status_code == 200
+        called = app.state.worker_pool.forward_request.await_args
+        assert called.args[0] == "ollama/mistral:7b"
+
+
+class TestModelLookupAliases:
+    def test_get_model_by_backend_model_id_alias(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="ollama/mistral:7b",
+            backend_model_id="mistral:7b",
+            display_name="Mistral 7B",
+            backend_type="ollama",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
+        )
+        app = _make_app(model_state=state)
+        client = TestClient(app)
+
+        resp = client.get("/v1/models/mistral:7b")
+        assert resp.status_code == 200
+        assert resp.json()["id"] == "ollama/mistral:7b"
+
     def test_upstream_400_is_propagated_not_500(self):
         app = _make_app()
         req = httpx.Request("POST", "http://127.0.0.1:18000/v1/chat/completions")

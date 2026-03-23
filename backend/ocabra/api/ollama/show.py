@@ -34,7 +34,7 @@ async def show_model(body: ShowRequest, request: Request) -> dict:
     if state is None:
         raise HTTPException(status_code=404, detail={"error": f"model '{body.name}' not found"})
 
-    ollama_name = state.model_id if state.backend_type == "ollama" else _mapper.to_ollama(state.model_id)
+    ollama_name = state.backend_model_id if state.backend_type == "ollama" else _mapper.to_ollama(state.model_id)
     family = ollama_name.split(":", 1)[0]
 
     return {
@@ -56,6 +56,7 @@ async def show_model(body: ShowRequest, request: Request) -> dict:
             "general.file_type": "safetensors",
             "ocabra.model_id": state.model_id,
             "ocabra.backend_type": state.backend_type,
+            "ocabra.backend_model_id": state.backend_model_id,
             "ocabra.context_length": state.capabilities.context_length,
             "ocabra.capabilities": state.capabilities.to_dict(),
         },

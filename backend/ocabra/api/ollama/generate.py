@@ -46,7 +46,7 @@ async def generate(request: Request):
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "completion", "text generation")
 
-    vllm_body = _build_vllm_generate_body(body, model_id, stream)
+    vllm_body = _build_vllm_generate_body(body, state.backend_model_id, stream)
     worker_pool = request.app.state.worker_pool
     if state.backend_type == "ollama":
         upstream_body = {

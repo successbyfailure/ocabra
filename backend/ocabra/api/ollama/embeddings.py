@@ -50,7 +50,7 @@ async def embeddings(request: Request) -> dict:
             model_id,
             "/v1/embeddings",
             {
-                "model": model_id,
+                "model": state.backend_model_id,
                 "input": body.get("input", ""),
             },
         )

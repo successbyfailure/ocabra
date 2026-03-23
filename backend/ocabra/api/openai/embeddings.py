@@ -13,6 +13,7 @@ from ._deps import (
     ensure_loaded,
     get_model_manager,
     raise_upstream_http_error,
+    to_backend_body,
 )
 
 router = APIRouter()
@@ -30,9 +31,10 @@ async def embeddings(request: Request) -> Any:
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "embeddings", "embeddings")
+    model_id = state.model_id
 
     worker_pool = request.app.state.worker_pool
     try:
-        return await worker_pool.forward_request(model_id, "/v1/embeddings", body)
+        return await worker_pool.forward_request(model_id, "/v1/embeddings", to_backend_body(state, body))
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)

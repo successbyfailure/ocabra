@@ -8,7 +8,7 @@ import structlog
 
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
-from ocabra.core.model_ref import build_model_ref, parse_model_ref
+from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
 from ocabra.redis_client import publish, set_key
 
 logger = structlog.get_logger(__name__)
@@ -176,27 +176,52 @@ class ModelManager:
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(sa.select(ModelConfig))
-            configs = result.scalars().all()
+            configs = list(result.scalars().all())
 
-        for cfg in configs:
-            backend_from_ref, backend_model_id = parse_model_ref(cfg.model_id)
-            if cfg.backend_type != backend_from_ref:
-                raise ValueError(
-                    "Invalid model config for "
-                    f"'{cfg.model_id}': backend_type='{cfg.backend_type}' "
-                    f"does not match model prefix '{backend_from_ref}'."
-                )
-            self._states[cfg.model_id] = ModelState(
-                model_id=cfg.model_id,
+            canonical_map: dict[str, tuple[ModelConfig, str]] = {}
+            duplicates: list[ModelConfig] = []
+            for cfg in configs:
+                try:
+                    canonical_model_id, backend_model_id = normalize_model_ref(
+                        cfg.backend_type, cfg.model_id
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "invalid_model_config_skipped",
+                        model_id=cfg.model_id,
+                        backend_type=cfg.backend_type,
+                        error=str(exc),
+                    )
+                    continue
+
+                normalized_backend = str(cfg.backend_type or "").strip().lower()
+                if cfg.model_id != canonical_model_id:
+                    cfg.model_id = canonical_model_id
+                if cfg.backend_type != normalized_backend:
+                    cfg.backend_type = normalized_backend
+
+                if canonical_model_id in canonical_map:
+                    duplicates.append(cfg)
+                    continue
+                canonical_map[canonical_model_id] = (cfg, backend_model_id)
+
+            for duplicate in duplicates:
+                await session.delete(duplicate)
+
+            await session.commit()
+
+        for canonical_model_id, (cfg, backend_model_id) in canonical_map.items():
+            self._states[canonical_model_id] = ModelState(
+                model_id=canonical_model_id,
                 backend_model_id=backend_model_id,
                 display_name=cfg.display_name or backend_model_id,
-                backend_type=backend_from_ref,
+                backend_type=str(cfg.backend_type or "").strip().lower(),
                 load_policy=LoadPolicy(cfg.load_policy),
                 auto_reload=cfg.auto_reload,
                 preferred_gpu=cfg.preferred_gpu,
                 extra_config=cfg.extra_config or {},
             )
-            self._load_locks[cfg.model_id] = asyncio.Lock()
+            self._load_locks[canonical_model_id] = asyncio.Lock()
 
     async def _publish_event(self, model_id: str, event: str) -> None:
         state = self._states.get(model_id)
@@ -242,7 +267,7 @@ class ModelManager:
                     gpu_indices = []
                 elif self._gpu_scheduler:
                     gpu_indices = await self._assign_gpus_for_load(
-                        model_id=model_id,
+                        model_id=normalized_model_id,
                         vram_needed=vram_needed,
                         preferred_gpu=force_gpu or state.preferred_gpu,
                         enforce_vllm_headroom=(state.backend_type == "vllm"),
@@ -609,18 +634,15 @@ class ModelManager:
         from ocabra.database import AsyncSessionLocal
         from ocabra.db.model_config import ModelConfig
 
-        normalized_backend, backend_model_id = parse_model_ref(model_id)
-        if backend_type != normalized_backend:
-            raise ValueError(
-                f"Model id '{model_id}' backend '{normalized_backend}' does not match backend_type '{backend_type}'."
-            )
+        normalized_model_id, backend_model_id = normalize_model_ref(backend_type, model_id)
+        normalized_backend = str(backend_type or "").strip().lower()
 
-        if model_id in self._states:
-            return self._states[model_id]
+        if normalized_model_id in self._states:
+            return self._states[normalized_model_id]
 
         async with AsyncSessionLocal() as session:
             cfg = ModelConfig(
-                model_id=model_id,
+                model_id=normalized_model_id,
                 display_name=display_name or backend_model_id,
                 backend_type=normalized_backend,
                 load_policy=load_policy,
@@ -632,7 +654,7 @@ class ModelManager:
             await session.commit()
 
         state = ModelState(
-            model_id=model_id,
+            model_id=normalized_model_id,
             backend_model_id=backend_model_id,
             display_name=display_name or backend_model_id,
             backend_type=normalized_backend,
@@ -641,8 +663,8 @@ class ModelManager:
             preferred_gpu=preferred_gpu,
             extra_config=extra_config or {},
         )
-        self._states[model_id] = state
-        self._load_locks[model_id] = asyncio.Lock()
+        self._states[normalized_model_id] = state
+        self._load_locks[normalized_model_id] = asyncio.Lock()
 
         if create_diarized_variant and _should_auto_create_diarized_variant(state):
             diarized_backend_model_id = _diarized_variant_model_id(backend_model_id)

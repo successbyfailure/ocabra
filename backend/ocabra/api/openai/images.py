@@ -34,6 +34,7 @@ async def image_generations(request: Request) -> Any:
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "image_generation", "image generation")
+    model_id = state.model_id
 
     # Translate OpenAI size to width/height
     size_str: str = body.get("size", "1024x1024")

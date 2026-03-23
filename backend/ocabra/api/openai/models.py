@@ -7,7 +7,7 @@ import time
 
 from fastapi import APIRouter, Request
 
-from ._deps import get_model_manager
+from ._deps import get_model_manager, resolve_model
 
 router = APIRouter()
 
@@ -45,6 +45,7 @@ async def list_models(request: Request) -> dict:
                 "gpu": state.current_gpu,
                 "vram_used_mb": state.vram_used_mb,
                 "display_name": state.display_name,
+                "backend_model_id": state.backend_model_id,
             },
         })
 
@@ -53,13 +54,12 @@ async def list_models(request: Request) -> dict:
 
 @router.get("/models/{model_id:path}", summary="Retrieve a model")
 async def get_model(model_id: str, request: Request) -> dict:
-    """Retrieve a single model by ID."""
-    from ocabra.core.model_manager import ModelStatus
-
+    """Retrieve a single model by ID or by backend model name alias."""
     model_manager = get_model_manager(request)
-    state = await model_manager.get_state(model_id)
+    _, state = await resolve_model(model_manager, model_id)
     if not state:
         from ._deps import _openai_error
+
         raise _openai_error(
             f"The model '{model_id}' does not exist.",
             "invalid_request_error",
@@ -80,5 +80,6 @@ async def get_model(model_id: str, request: Request) -> dict:
             "gpu": state.current_gpu,
             "vram_used_mb": state.vram_used_mb,
             "display_name": state.display_name,
+            "backend_model_id": state.backend_model_id,
         },
     }

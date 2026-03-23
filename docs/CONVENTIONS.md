@@ -22,6 +22,10 @@ class VLLMBackend(BackendInterface):
 async def load_model(model_id: str) -> ModelState: ...
 async def get_gpu_state(index: int) -> GPUState: ...
 
+# IDs de modelo: canónico backend/model
+# Ejemplos: vllm/meta-llama/Llama-3.3-70B-Instruct, ollama/mistral:7b
+# Si necesitas el id nativo del runtime usa backend_model_id.
+
 # Constantes: UPPER_SNAKE_CASE
 MAX_VRAM_BUFFER_MB = 512
 DEFAULT_IDLE_TIMEOUT_S = 300

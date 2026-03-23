@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from ocabra.config import settings
+from ocabra.core.model_ref import build_model_ref
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -245,16 +246,18 @@ class DownloadManager:
             return
         try:
             mm = self._app.state.model_manager
-            model_id = self._job_model_id(job)
-            existing = await mm.get_state(model_id)
-            if existing:
-                return
+            backend_model_id = self._job_model_id(job)
             if job.source == "ollama":
                 backend_type = "ollama"
             elif job.source == "bitnet":
                 backend_type = "bitnet"
             else:
                 backend_type = await self._hf_registry.infer_backend_for_repo(job.model_ref, artifact=job.artifact)
+
+            model_id = build_model_ref(backend_type, backend_model_id)
+            existing = await mm.get_state(model_id)
+            if existing:
+                return
 
             register_config = job.register_config or {}
             extra_config = register_config.get("extra_config") or {}
@@ -277,7 +280,7 @@ class DownloadManager:
                 model_id=model_id,
                 backend_type=backend_type,
                 display_name=register_config.get("display_name")
-                or (model_id.split("/")[-1] if "/" in model_id else model_id),
+                or backend_model_id,
                 load_policy=register_config.get("load_policy", "on_demand"),
                 auto_reload=bool(register_config.get("auto_reload", False)),
                 preferred_gpu=register_config.get("preferred_gpu"),

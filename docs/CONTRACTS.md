@@ -33,7 +33,7 @@ class BackendCapabilities:
 
 @dataclass
 class WorkerInfo:
-    backend_type: str          # "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
     model_id: str
     gpu_indices: list[int]
     port: int
@@ -123,9 +123,11 @@ class LoadPolicy(str, Enum):
 
 @dataclass
 class ModelState:
-    model_id: str               # e.g. "mistral-7b-instruct"
+    model_id: str               # Canonical: "backend/model" (e.g. "vllm/mistral-7b-instruct")
+                            # Formato legacy sin prefijo ya no es válido.
+    backend_model_id: str       # Backend-native id (without prefix), e.g. "mistral-7b-instruct"
     display_name: str
-    backend_type: str           # "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
     status: ModelStatus
     load_policy: LoadPolicy
     auto_reload: bool           # Recargar automáticamente tras eviction
@@ -174,7 +176,10 @@ Errores siguen el formato: `{"detail": str, "code": str}`.
 ### 5.1 Modelos
 
 ```
-GET    /ocabra/models                    → list[ModelState]
+GET    /ocabra/models                    → list[ModelState]  # model_id is canonical backend/model
+
+Nota OpenAI `/v1/*`: el campo `model` acepta `model_id` canónico y también `backend_model_id` como alias. Si hay múltiples coincidencias de alias, se usa la primera.
+
 GET    /ocabra/models/{model_id}         → ModelState
 POST   /ocabra/models/{model_id}/load    → ModelState
 POST   /ocabra/models/{model_id}/unload  → {"ok": true}

@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ocabra.config import settings
+from ocabra.core.model_ref import parse_model_ref
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 router = APIRouter(tags=["models"])
@@ -39,7 +40,7 @@ async def list_models(request: Request) -> list[dict]:
     payloads = []
     for state in states:
         item = state.to_dict()
-        item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, state.backend_type, ollama_sizes)
+        item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, ollama_sizes)
         payloads.append(item)
     return payloads
 
@@ -53,7 +54,7 @@ async def get_model(model_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     item = state.to_dict()
     ollama_sizes = await _get_ollama_sizes_bytes() if state.backend_type == "ollama" else {}
-    item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, state.backend_type, ollama_sizes)
+    item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, ollama_sizes)
     return item
 
 
@@ -61,15 +62,18 @@ async def get_model(model_id: str, request: Request) -> dict:
 async def add_model(body: AddModelRequest, request: Request) -> dict:
     """Register a new model configuration."""
     mm = request.app.state.model_manager
-    state = await mm.add_model(
-        model_id=body.model_id,
-        backend_type=body.backend_type,
-        display_name=body.display_name,
-        load_policy=body.load_policy,
-        auto_reload=body.auto_reload,
-        preferred_gpu=body.preferred_gpu,
-        extra_config=body.extra_config,
-    )
+    try:
+        state = await mm.add_model(
+            model_id=body.model_id,
+            backend_type=body.backend_type,
+            display_name=body.display_name,
+            load_policy=body.load_policy,
+            auto_reload=body.auto_reload,
+            preferred_gpu=body.preferred_gpu,
+            extra_config=body.extra_config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return state.to_dict()
 
 
@@ -153,13 +157,13 @@ async def _sync_ollama_inventory(model_manager) -> None:
 
 async def _resolve_disk_size_bytes(
     model_id: str,
-    backend_type: str,
     ollama_sizes: dict[str, int],
 ) -> int | None:
+    backend_type, backend_model_id = parse_model_ref(model_id)
     if backend_type == "ollama":
-        return ollama_sizes.get(model_id.strip().lower())
+        return ollama_sizes.get(backend_model_id.strip().lower())
 
-    path = _resolve_local_model_path(model_id)
+    path = _resolve_local_model_path(backend_model_id)
     if path is None or not path.exists():
         return None
     return await asyncio.to_thread(_compute_path_size_bytes, path)
