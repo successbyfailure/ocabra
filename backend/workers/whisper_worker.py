@@ -294,11 +294,52 @@ def _create_nemo_model(model_id: str, device: str) -> _NemoModelAdapter:
     return _NemoModelAdapter(model)
 
 
+def _decode_audio_with_av(audio_path: str) -> tuple["np.ndarray", int]:
+    import av
+    import numpy as np
+
+    container = av.open(audio_path)
+    try:
+        stream = container.streams.audio[0]
+        chunks: list[np.ndarray] = []
+        sample_rate = int(stream.rate or 16000)
+        for frame in container.decode(stream):
+            arr = frame.to_ndarray()
+            # PyAV may return planar/interleaved data. Normalize to [samples, channels].
+            if arr.ndim == 1:
+                arr = arr[:, None]
+            elif arr.ndim == 2:
+                if arr.shape[0] <= 8 and arr.shape[1] > arr.shape[0]:
+                    arr = arr.T
+            else:
+                arr = arr.reshape(arr.shape[0], -1)
+
+            if arr.dtype.kind in {"i", "u"}:
+                max_abs = float(np.iinfo(arr.dtype).max)
+                arr = arr.astype(np.float32) / max_abs
+            else:
+                arr = arr.astype(np.float32)
+            chunks.append(arr)
+
+        if not chunks:
+            raise RuntimeError("Unable to decode audio stream with PyAV")
+
+        samples = np.concatenate(chunks, axis=0)
+        return samples, sample_rate
+    finally:
+        container.close()
+
+
 def _prepare_audio_for_nemo(audio_path: str) -> tuple[str, str | None]:
     import numpy as np
     import soundfile as sf
 
-    samples, sample_rate = sf.read(audio_path, always_2d=True)
+    try:
+        samples, sample_rate = sf.read(audio_path, always_2d=True)
+    except Exception:
+        # Some containers (e.g. m4a/aac) are not readable via libsndfile.
+        samples, sample_rate = _decode_audio_with_av(audio_path)
+
     # NeMo transcribe() expects mono waveform at 16kHz for these ASR checkpoints.
     mono = np.mean(samples, axis=1, dtype=np.float32)
 
@@ -381,7 +422,11 @@ def _run_nemo_transcribe_once(model: Any, path: str, language: str | None) -> st
     return _extract_nemo_text(result)
 
 
-def _chunk_audio_for_nemo(prepared_path: str, chunk_seconds: int = 20) -> tuple[list[str], list[str]]:
+def _chunk_audio_for_nemo(
+    prepared_path: str,
+    chunk_seconds: int = 20,
+    min_tail_seconds: float = 0.5,
+) -> tuple[list[str], list[str]]:
     import soundfile as sf
 
     audio, sample_rate = sf.read(prepared_path, always_2d=False)
@@ -395,9 +440,18 @@ def _chunk_audio_for_nemo(prepared_path: str, chunk_seconds: int = 20) -> tuple[
 
     chunk_paths: list[str] = []
     cleanup: list[str] = []
+    min_tail_samples = max(1, int(float(sample_rate) * float(min_tail_seconds)))
     start = 0
     while start < total_samples:
-        end = min(total_samples, start + chunk_size)
+        remaining = total_samples - start
+        if remaining <= chunk_size:
+            end = total_samples
+        else:
+            end = start + chunk_size
+            tail = total_samples - end
+            # Avoid creating tiny tail chunks that can fail NeMo feature normalization.
+            if 0 < tail < min_tail_samples:
+                end = total_samples
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             sf.write(tmp.name, audio[start:end], int(sample_rate), subtype="PCM_16")
             chunk_paths.append(tmp.name)
@@ -413,7 +467,13 @@ def _nemo_transcribe_text(model: Any, audio_path: str, language: str | None) -> 
         chunk_paths, chunk_cleanup = _chunk_audio_for_nemo(prepared_path, chunk_seconds=20)
         texts: list[str] = []
         for chunk in chunk_paths:
-            text = _run_nemo_transcribe_once(model, chunk, language)
+            try:
+                text = _run_nemo_transcribe_once(model, chunk, language)
+            except ValueError as exc:
+                message = str(exc).lower()
+                if "normalize_batch" in message and "length 1" in message:
+                    continue
+                raise
             if text:
                 texts.append(text.strip())
         return " ".join(t for t in texts if t).strip()
