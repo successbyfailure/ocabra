@@ -248,6 +248,19 @@ function toGpuState(raw: unknown): GPUState {
     powerDrawW: Number(data.power_draw_w ?? data.powerDrawW ?? 0),
     powerLimitW: Number(data.power_limit_w ?? data.powerLimitW ?? 0),
     lockedVramMb: Number(data.locked_vram_mb ?? data.lockedVramMb ?? 0),
+    processes: Array.isArray(data.processes)
+      ? data.processes.map((processRaw) => {
+          const process = isRecord(processRaw) ? processRaw : {}
+          return {
+            pid: Number(process.pid ?? 0),
+            processName: (process.process_name ?? process.processName ?? null) as string | null,
+            processType: String(process.process_type ?? process.processType ?? "compute") as
+              | "compute"
+              | "graphics",
+            usedVramMb: Number(process.used_vram_mb ?? process.usedVramMb ?? 0),
+          }
+        })
+      : [],
   }
 }
 

@@ -64,6 +64,7 @@ describe("useWebSocket", () => {
             powerDrawW: 280,
             powerLimitW: 350,
             lockedVramMb: 2048,
+            processes: [],
           },
         ],
       })

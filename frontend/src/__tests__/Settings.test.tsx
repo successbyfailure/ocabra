@@ -71,6 +71,7 @@ describe("Settings", () => {
         powerDrawW: 142,
         powerLimitW: 170,
         lockedVramMb: 512,
+        processes: [],
       },
       {
         index: 1,
@@ -83,6 +84,7 @@ describe("Settings", () => {
         powerDrawW: 220,
         powerLimitW: 350,
         lockedVramMb: 1024,
+        processes: [],
       },
     ])
     localModelsList.mockResolvedValue([

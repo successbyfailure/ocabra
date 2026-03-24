@@ -72,14 +72,14 @@ exports[`GpuCard > renders high temperature/utilization alert state 1`] = `
       class="flex items-center justify-between text-xs text-muted-foreground"
     >
       <span>
-        22,576
+        22.576
          / 
-        24,576
+        24.576
          MB
       </span>
       <span>
         locked 
-        4,096
+        4096
          MB
       </span>
     </div>
@@ -96,7 +96,7 @@ exports[`GpuCard > renders high temperature/utilization alert state 1`] = `
         Utilization
       </span>
       <p
-        class="font-semibold text-red-400 animate-pulse"
+        class="animate-pulse font-semibold text-red-400"
       >
         92.0
         %
@@ -116,6 +116,47 @@ exports[`GpuCard > renders high temperature/utilization alert state 1`] = `
         84.0
         °C
       </p>
+    </div>
+  </div>
+  <div
+    class="mt-4 rounded-md border border-border/60 bg-background/40 p-3"
+  >
+    <div
+      class="mb-2 flex items-center justify-between"
+    >
+      <span
+        class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        Processes (nvidia-smi)
+      </span>
+      <span
+        class="text-xs text-muted-foreground"
+      >
+        1
+      </span>
+    </div>
+    <div
+      class="space-y-1"
+    >
+      <div
+        class="flex items-center justify-between gap-2 rounded bg-muted/40 px-2 py-1 text-xs"
+      >
+        <span
+          class="min-w-0 truncate font-mono text-foreground/90"
+        >
+          1234
+           · 
+          python
+        </span>
+        <span
+          class="shrink-0 text-muted-foreground"
+        >
+          compute
+           · 
+          1024
+           MB
+        </span>
+      </div>
     </div>
   </div>
 </article>

@@ -1,6 +1,13 @@
 // Base types mirroring docs/CONTRACTS.md
 // Stream 1-D expands these. All streams consume them.
 
+export interface GPUProcessInfo {
+  pid: number
+  processName: string | null
+  processType: "compute" | "graphics"
+  usedVramMb: number
+}
+
 export interface GPUState {
   index: number
   name: string
@@ -12,6 +19,7 @@ export interface GPUState {
   powerDrawW: number
   powerLimitW: number
   lockedVramMb: number
+  processes: GPUProcessInfo[]
 }
 
 export type ModelStatus =

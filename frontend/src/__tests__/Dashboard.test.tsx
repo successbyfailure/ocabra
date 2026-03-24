@@ -44,6 +44,7 @@ describe("Dashboard", () => {
         powerDrawW: 220,
         powerLimitW: 350,
         lockedVramMb: 1024,
+        processes: [],
       },
     ])
 
