@@ -192,7 +192,7 @@ def create_app(
         detected_language = result["language"]
 
         if normalized_format == "text":
-            return PlainTextResponse(text)
+            return PlainTextResponse(_to_text(segments))
         if normalized_format == "srt":
             return PlainTextResponse(_to_srt(segments))
         if normalized_format == "vtt":
@@ -735,12 +735,31 @@ def _parse_optional_bool(value: str | None) -> bool | None:
     raise ValueError("Invalid 'diarize' value. Use true/false.")
 
 
+def _to_text(segments: Sequence[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    current_speaker: str | None = None
+    for segment in segments:
+        speaker = segment.get("speaker")
+        text = segment["text"].strip()
+        if speaker:
+            if speaker != current_speaker:
+                current_speaker = speaker
+                lines.append(f"[{speaker}] {text}")
+            else:
+                lines.append(text)
+        else:
+            lines.append(text)
+    return "\n".join(lines)
+
+
 def _to_srt(segments: Sequence[dict[str, Any]]) -> str:
     lines: list[str] = []
     for i, segment in enumerate(segments, start=1):
         lines.append(str(i))
         lines.append(f"{_format_srt_ts(segment['start'])} --> {_format_srt_ts(segment['end'])}")
-        lines.append(segment["text"].strip())
+        speaker = segment.get("speaker")
+        text = segment["text"].strip()
+        lines.append(f"[{speaker}] {text}" if speaker else text)
         lines.append("")
     return "\n".join(lines)
 
@@ -749,7 +768,9 @@ def _to_vtt(segments: Sequence[dict[str, Any]]) -> str:
     lines = ["WEBVTT", ""]
     for segment in segments:
         lines.append(f"{_format_vtt_ts(segment['start'])} --> {_format_vtt_ts(segment['end'])}")
-        lines.append(segment["text"].strip())
+        speaker = segment.get("speaker")
+        text = segment["text"].strip()
+        lines.append(f"<v {speaker}>{text}" if speaker else text)
         lines.append("")
     return "\n".join(lines)
 
