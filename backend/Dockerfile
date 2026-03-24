@@ -31,6 +31,8 @@ RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} ${LLAMA_CPP_REPO} /build/llama
 RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build -DCMAKE_BUILD_TYPE=Release
 RUN cmake --build /build/llama.cpp/build --target llama-server -j4
 
+FROM docker:28-cli AS docker-cli
+
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -61,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python -m pip install --upgrade pip setuptools wheel
 
 WORKDIR /app
+COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
 COPY --from=bitnet-builder /out/bitnet-server /usr/local/bin/bitnet-server
 COPY --from=bitnet-builder /out/lib/ /usr/local/lib/bitnet/
 COPY --from=llama-builder /build/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server

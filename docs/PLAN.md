@@ -51,11 +51,12 @@ Implementado en código:
 Validación reciente (2026-03-23):
 - `llama.cpp` validado end-to-end con modelo GGUF reciente (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`, archivo `qwen2.5-0.5b-instruct-q4_k_m.gguf`): registro, load y respuesta chat correctos.
 - `SGLang` validado en runtime real dentro del contenedor con entorno dedicado (`/opt/sglang-venv`), descarga y carga de modelo reciente (`HuggingFaceTB/SmolLM2-135M-Instruct`), y health/load correctos.
-- `TensorRT-LLM` endurecido para runtime mixto: soporte de lanzamiento por binario (`trtllm-serve`) o por módulo Python (`python -m tensorrt_llm.commands.serve`), con validaciones tempranas de prerequisitos y mensajes de diagnóstico.
+- `TensorRT-LLM` endurecido para runtime mixto: soporte de lanzamiento por binario (`trtllm-serve`), por módulo Python (`python -m tensorrt_llm.commands.serve`) y por contenedor Docker NVIDIA (`launch_mode=docker`), con validaciones tempranas de prerequisitos y mensajes de diagnóstico.
 - Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
 
 Pendiente para cierre de plan:
 - Validar en entorno productivo final de `TensorRT-LLM` con engines reales y toolchain CUDA/NVIDIA objetivo (además de las validaciones de arranque ya incorporadas).
+  Comando smoke reproducible: `scripts/smoke_trtllm.py --engine-dir <ruta_engine_dir> --model-id tensorrt_llm/<org>/<modelo>`.
 - Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.
 - Revisar tuning fino de scheduler de schedules (cron windows complejas, observabilidad y métricas de ejecución).
 

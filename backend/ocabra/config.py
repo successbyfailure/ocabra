@@ -95,8 +95,14 @@ class Settings(BaseSettings):
     tensorrt_llm_python_bin: str = "/usr/bin/python3"
     tensorrt_llm_serve_bin: str = "/usr/local/bin/trtllm-serve"
     tensorrt_llm_serve_module: str = "tensorrt_llm.commands.serve"
+    tensorrt_llm_docker_bin: str = "/usr/bin/docker"
+    tensorrt_llm_docker_image: str = "nvcr.io/nvidia/tensorrt-llm/release:latest"
+    tensorrt_llm_docker_models_mount_host: str = "/docker/ai-models/ocabra/models"
+    tensorrt_llm_docker_models_mount_container: str = "/data/models"
+    tensorrt_llm_docker_hf_cache_mount_host: str | None = "/docker/ai-models/ocabra/hf_cache"
+    tensorrt_llm_docker_hf_cache_mount_container: str = "/data/hf_cache"
     tensorrt_llm_engines_dir: str | None = None
-    tensorrt_llm_backend: str = "tensorrt"
+    tensorrt_llm_backend: str = "trt"
     tensorrt_llm_tokenizer_path: str | None = None
     tensorrt_llm_max_batch_size: int | None = None
     tensorrt_llm_context_length: int | None = None
@@ -178,6 +184,7 @@ class Settings(BaseSettings):
         "bitnet_threads",
         "tensorrt_llm_python_bin",
         "tensorrt_llm_serve_module",
+        "tensorrt_llm_docker_hf_cache_mount_host",
         "tensorrt_llm_engines_dir",
         "tensorrt_llm_tokenizer_path",
         "tensorrt_llm_max_batch_size",
@@ -202,8 +209,8 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_tensorrt_launch_mode(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"binary", "module"}:
-            raise ValueError("tensorrt_llm_launch_mode must be one of: binary, module")
+        if normalized not in {"binary", "module", "docker"}:
+            raise ValueError("tensorrt_llm_launch_mode must be one of: binary, module, docker")
         return normalized
 
 

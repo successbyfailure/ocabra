@@ -48,6 +48,12 @@ class TensorRTLLMBackend(BackendInterface):
         python_bin = str(self._get_option(extra_config, "python_bin", settings.tensorrt_llm_python_bin)).strip() or sys.executable
         serve_bin = str(self._get_option(extra_config, "serve_bin", settings.tensorrt_llm_serve_bin)).strip() or settings.tensorrt_llm_serve_bin
         serve_module = str(self._get_option(extra_config, "serve_module", settings.tensorrt_llm_serve_module)).strip() or settings.tensorrt_llm_serve_module
+        docker_bin = str(self._get_option(extra_config, "docker_bin", settings.tensorrt_llm_docker_bin)).strip() or settings.tensorrt_llm_docker_bin
+        docker_image = str(self._get_option(extra_config, "docker_image", settings.tensorrt_llm_docker_image)).strip() or settings.tensorrt_llm_docker_image
+        docker_models_mount_host = str(self._get_option(extra_config, "docker_models_mount_host", settings.tensorrt_llm_docker_models_mount_host)).strip() or settings.tensorrt_llm_docker_models_mount_host
+        docker_models_mount_container = str(self._get_option(extra_config, "docker_models_mount_container", settings.tensorrt_llm_docker_models_mount_container)).strip() or settings.tensorrt_llm_docker_models_mount_container
+        docker_hf_cache_mount_host = self._get_option(extra_config, "docker_hf_cache_mount_host", settings.tensorrt_llm_docker_hf_cache_mount_host)
+        docker_hf_cache_mount_container = str(self._get_option(extra_config, "docker_hf_cache_mount_container", settings.tensorrt_llm_docker_hf_cache_mount_container)).strip() or settings.tensorrt_llm_docker_hf_cache_mount_container
 
         cmd = [
             sys.executable,
@@ -60,6 +66,14 @@ class TensorRTLLMBackend(BackendInterface):
             serve_module,
             "--serve-bin",
             serve_bin,
+            "--docker-bin",
+            docker_bin,
+            "--docker-image",
+            docker_image,
+            "--docker-models-mount-host",
+            docker_models_mount_host,
+            "--docker-models-mount-container",
+            docker_models_mount_container,
             "--model-id",
             model_id,
             "--engine-dir",
@@ -73,6 +87,9 @@ class TensorRTLLMBackend(BackendInterface):
         ]
         if tokenizer_path is not None:
             cmd.extend(["--tokenizer-path", str(tokenizer_path)])
+        if docker_hf_cache_mount_host:
+            cmd.extend(["--docker-hf-cache-mount-host", str(docker_hf_cache_mount_host)])
+            cmd.extend(["--docker-hf-cache-mount-container", docker_hf_cache_mount_container])
         max_batch_size = self._get_option(
             extra_config,
             "max_batch_size",
@@ -207,7 +224,7 @@ class TensorRTLLMBackend(BackendInterface):
             return "feature flag TENSORRT_LLM_ENABLED=false"
 
         launch_mode = str(settings.tensorrt_llm_launch_mode).strip().lower() or "binary"
-        if launch_mode not in {"binary", "module"}:
+        if launch_mode not in {"binary", "module", "docker"}:
             return f"unsupported launch mode: {launch_mode}"
 
         if launch_mode == "binary":
@@ -217,17 +234,29 @@ class TensorRTLLMBackend(BackendInterface):
                 return f"serve binary not found: {settings.tensorrt_llm_serve_bin}"
             return None
 
-        python_bin = settings.tensorrt_llm_python_bin.strip() if settings.tensorrt_llm_python_bin else ""
-        if not python_bin:
-            return "python launcher not configured for module mode"
-        if not shutil.which(python_bin) and not Path(python_bin).exists():
-            return f"python launcher not found: {python_bin}"
+        if launch_mode == "module":
+            python_bin = settings.tensorrt_llm_python_bin.strip() if settings.tensorrt_llm_python_bin else ""
+            if not python_bin:
+                return "python launcher not configured for module mode"
+            if not shutil.which(python_bin) and not Path(python_bin).exists():
+                return f"python launcher not found: {python_bin}"
 
-        module_name = settings.tensorrt_llm_serve_module.strip() if settings.tensorrt_llm_serve_module else ""
-        if not module_name:
-            return "serve module not configured for module mode"
-        if not self._module_available(python_bin, module_name):
-            return f"serve module not available: {module_name}"
+            module_name = settings.tensorrt_llm_serve_module.strip() if settings.tensorrt_llm_serve_module else ""
+            if not module_name:
+                return "serve module not configured for module mode"
+            if not self._module_available(python_bin, module_name):
+                return f"serve module not available: {module_name}"
+            return None
+
+        docker_bin = settings.tensorrt_llm_docker_bin.strip() if settings.tensorrt_llm_docker_bin else ""
+        if not docker_bin:
+            return "docker launcher not configured for docker mode"
+        if not shutil.which(docker_bin) and not Path(docker_bin).exists():
+            return f"docker launcher not found: {docker_bin}"
+        if not settings.tensorrt_llm_docker_image:
+            return "docker image not configured for docker mode"
+        if not settings.tensorrt_llm_docker_models_mount_host:
+            return "docker models host mount not configured for docker mode"
         return None
 
     def _module_available(self, python_bin: str, module_name: str) -> bool:
