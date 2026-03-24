@@ -91,6 +91,16 @@ class GPUState:
     power_draw_w: float
     power_limit_w: float
     locked_vram_mb: int          # VRAM reservada por modelos cargados
+    processes: list[GPUProcessInfo]
+
+
+
+@dataclass
+class GPUProcessInfo:
+    pid: int
+    process_name: str | None
+    process_type: str            # "compute" | "graphics"
+    used_vram_mb: int
 
 # Publicado en Redis como evento cada N segundos:
 # Canal: "gpu:stats"
