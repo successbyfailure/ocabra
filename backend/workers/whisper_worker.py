@@ -527,15 +527,25 @@ def _run_transcription(
     diarization_turns: list[dict[str, Any]] | None = None
     speakers: list[str] = []
     if diarize and diarization_pipeline is not None:
-        # pyannote ≥4.0 uses torchcodec for audio I/O which may not be available.
-        # Pass a pre-loaded waveform dict to bypass the AudioDecoder dependency.
-        try:
-            import torchaudio as _torchaudio
+        # pyannote ≥4.0 uses torchcodec (requires FFmpeg shared libs) for
+        # audio I/O. Since torchcodec may not be available, load the audio
+        # via PyAV (bundled with faster-whisper) and pass a waveform dict.
+        import av as _av
+        import numpy as _np
+        import torch as _torch
 
-            _waveform, _sr = _torchaudio.load(audio_path)
-            _audio_input: Any = {"waveform": _waveform, "sample_rate": _sr}
-        except Exception:
-            _audio_input = audio_path
+        _sr_target = 16000
+        _frames: list[_np.ndarray] = []
+        with _av.open(audio_path) as _container:
+            _resampler = _av.audio.resampler.AudioResampler(
+                format="fltp", layout="mono", rate=_sr_target
+            )
+            for _frame in _container.decode(audio=0):
+                for _rf in _resampler.resample(_frame):
+                    _frames.append(_rf.to_ndarray())
+        _waveform_np = _np.concatenate(_frames, axis=1) if _frames else _np.zeros((1, 1), dtype=_np.float32)
+        _waveform = _torch.from_numpy(_waveform_np)
+        _audio_input: Any = {"waveform": _waveform, "sample_rate": _sr_target}
         annotation = diarization_pipeline(_audio_input)
         diarization_turns = _collect_diarization_turns(annotation)
         speakers = _attach_speakers(segment_list, diarization_turns)
@@ -669,6 +679,9 @@ def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None)
 
 
 def _collect_diarization_turns(annotation: Any) -> list[dict[str, Any]]:
+    # pyannote ≥4.0 returns DiarizeOutput; pyannote 3.x returns Annotation directly.
+    if hasattr(annotation, "speaker_diarization"):
+        annotation = annotation.speaker_diarization
     turns: list[dict[str, Any]] = []
     for segment, _, speaker in annotation.itertracks(yield_label=True):
         turns.append(
