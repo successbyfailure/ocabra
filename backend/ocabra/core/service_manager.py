@@ -126,6 +126,9 @@ class ServiceManager:
 
     async def start(self) -> None:
         await self._load_persisted_overrides()
+        for state in self._states.values():
+            if not state.enabled and state.docker_container_name:
+                await self._stop_container_if_running(state)
         for service_id in self._states:
             await self.refresh(service_id)
 
@@ -213,12 +216,17 @@ class ServiceManager:
         state = self._require(service_id)
         now = datetime.now(timezone.utc)
         if not state.enabled:
-            state.service_alive = False
+            container_running = await self._is_container_running(state)
+            state.service_alive = bool(container_running)
             state.runtime_loaded = False
             state.active_model_ref = None
             state.last_health_check_at = now
             state.status = "disabled"
-            state.detail = "disabled"
+            state.detail = (
+                f"disabled_but_container_running:{state.docker_container_name}"
+                if container_running and state.docker_container_name
+                else "disabled"
+            )
             await self._publish_state(state, "health_checked")
             return state
 
@@ -334,35 +342,75 @@ class ServiceManager:
                 await self._publish_state(state, "runtime_unloaded")
         return state
 
+    async def _run_docker_command(self, *args: str) -> tuple[int, str, str]:
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return (
+            process.returncode or 0,
+            stdout.decode("utf-8", errors="ignore").strip(),
+            stderr.decode("utf-8", errors="ignore").strip(),
+        )
+
     async def _stop_container(self, state: ServiceState) -> None:
-        try:
-            import docker as docker_sdk
-            client = await asyncio.get_event_loop().run_in_executor(
-                None, docker_sdk.from_env
-            )
-            container = await asyncio.get_event_loop().run_in_executor(
-                None, client.containers.get, state.docker_container_name
-            )
-            await asyncio.get_event_loop().run_in_executor(None, container.stop)
+        if not state.docker_container_name:
+            return
+
+        code, _out, err = await self._run_docker_command("stop", state.docker_container_name)
+        if code == 0:
             state.service_alive = False
             state.status = "unreachable"
             logger.info("container_stopped", container=state.docker_container_name)
-        except Exception as exc:
-            logger.warning("container_stop_failed", container=state.docker_container_name, error=str(exc))
+            return
+
+        logger.warning(
+            "container_stop_failed",
+            container=state.docker_container_name,
+            error=err or f"exit_code={code}",
+        )
+
+    async def _is_container_running(self, state: ServiceState) -> bool:
+        if not state.docker_container_name:
+            return False
+
+        code, out, _err = await self._run_docker_command(
+            "inspect",
+            "-f",
+            "{{.State.Running}}",
+            state.docker_container_name,
+        )
+        if code != 0:
+            return False
+
+        return out.strip().lower() == "true"
+
+    async def _stop_container_if_running(self, state: ServiceState) -> None:
+        if not state.docker_container_name:
+            return
+
+        if not await self._is_container_running(state):
+            return
+
+        await self._stop_container(state)
 
     async def _start_container(self, state: ServiceState) -> None:
-        try:
-            import docker as docker_sdk
-            client = await asyncio.get_event_loop().run_in_executor(
-                None, docker_sdk.from_env
-            )
-            container = await asyncio.get_event_loop().run_in_executor(
-                None, client.containers.get, state.docker_container_name
-            )
-            await asyncio.get_event_loop().run_in_executor(None, container.start)
+        if not state.docker_container_name:
+            return
+
+        code, _out, err = await self._run_docker_command("start", state.docker_container_name)
+        if code == 0:
             logger.info("container_started", container=state.docker_container_name)
-        except Exception as exc:
-            logger.warning("container_start_failed", container=state.docker_container_name, error=str(exc))
+            return
+
+        logger.warning(
+            "container_start_failed",
+            container=state.docker_container_name,
+            error=err or f"exit_code={code}",
+        )
 
     async def check_idle_unloads(self) -> None:
         now = datetime.now(timezone.utc)
@@ -393,8 +441,8 @@ class ServiceManager:
                         service_id=service_id,
                         error=str(exc),
                     )
-            if state.docker_container_name and state.service_alive:
-                await self._stop_container(state)
+            if state.docker_container_name:
+                await self._stop_container_if_running(state)
 
         state.enabled = enabled
         if not enabled:

@@ -245,3 +245,69 @@ async def test_start_applies_loaded_overrides(monkeypatch) -> None:
     assert state.enabled is False
     assert state.status == "disabled"
     assert a1111_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_disabled_service_marks_external_runtime(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def fake_is_running(self, state) -> bool:  # noqa: ANN001
+        _ = self, state
+        return True
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(ServiceManager, "_is_container_running", fake_is_running)
+
+    manager = ServiceManager()
+    state = await manager.get_state("a1111")
+    assert state is not None
+    state.enabled = False
+
+    updated = await manager.refresh("a1111")
+
+    assert updated.enabled is False
+    assert updated.status == "disabled"
+    assert updated.service_alive is True
+    assert updated.runtime_loaded is False
+    assert updated.detail is not None
+    assert "disabled_but_container_running" in updated.detail
+
+
+@pytest.mark.asyncio
+async def test_set_enabled_stops_running_container_even_if_service_not_marked_alive(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def fake_is_running(self, state) -> bool:  # noqa: ANN001
+        _ = self, state
+        return True
+
+    stop_calls: list[str] = []
+
+    async def fake_stop(self, state) -> None:  # noqa: ANN001
+        _ = self
+        stop_calls.append(state.service_id)
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(ServiceManager, "_is_container_running", fake_is_running)
+    monkeypatch.setattr(ServiceManager, "_stop_container", fake_stop)
+
+    manager = ServiceManager()
+    state = await manager.get_state("a1111")
+    assert state is not None
+    state.enabled = True
+    state.service_alive = False
+    state.runtime_loaded = False
+
+    await manager.set_enabled("a1111", enabled=False)
+
+    assert stop_calls == ["a1111"]
