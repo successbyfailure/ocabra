@@ -124,3 +124,40 @@ async def test_vram_buffer_always_reserved():
 
         free = await gm.get_free_vram(0)
         assert free == 10000 - settings.vram_buffer_mb
+
+@pytest.mark.asyncio
+async def test_read_gpu_includes_running_processes() -> None:
+    patches = _make_mock_nvml(gpu_count=1)
+
+    proc_compute = MagicMock()
+    proc_compute.pid = 4321
+    proc_compute.usedGpuMemory = 1024 * 1024 * 1536
+
+    proc_graphics = MagicMock()
+    proc_graphics.pid = 9876
+    proc_graphics.usedGpuMemory = 1024 * 1024 * 256
+
+    patches.update(
+        {
+            "pynvml.nvmlDeviceGetComputeRunningProcesses_v3": MagicMock(return_value=[proc_compute]),
+            "pynvml.nvmlDeviceGetGraphicsRunningProcesses_v3": MagicMock(return_value=[proc_graphics]),
+        }
+    )
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
+        gm = GPUManager()
+        with patch.object(gm, "_read_process_name", side_effect=["python", "Xorg"]):
+            state = gm._read_gpu(0)
+
+    assert len(state.processes) == 2
+    assert state.processes[0].pid == 4321
+    assert state.processes[0].process_name == "python"
+    assert state.processes[0].process_type == "compute"
+    assert state.processes[0].used_vram_mb == 1536
+    assert state.processes[1].pid == 9876
+    assert state.processes[1].process_type == "graphics"

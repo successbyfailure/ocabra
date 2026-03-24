@@ -1,6 +1,7 @@
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pynvml
 import structlog
@@ -9,6 +10,14 @@ from ocabra.config import settings
 from ocabra.redis_client import publish, set_key
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class GPUProcessInfo:
+    pid: int
+    process_name: str | None
+    process_type: str
+    used_vram_mb: int
 
 
 @dataclass
@@ -23,6 +32,7 @@ class GPUState:
     power_draw_w: float
     power_limit_w: float
     locked_vram_mb: int = 0
+    processes: list[GPUProcessInfo] = field(default_factory=list)
 
 
 class GPUManager:
@@ -78,6 +88,7 @@ class GPUManager:
         if isinstance(name, bytes):
             name = name.decode()
         locked = sum(self._locks.get(index, {}).values())
+        processes = self._read_gpu_processes(handle)
         return GPUState(
             index=index,
             name=name,
@@ -89,7 +100,105 @@ class GPUManager:
             power_draw_w=power_w,
             power_limit_w=power_limit_w,
             locked_vram_mb=locked,
+            processes=processes,
         )
+
+    def _read_gpu_processes(self, handle) -> list[GPUProcessInfo]:
+        process_map: dict[tuple[str, int], GPUProcessInfo] = {}
+
+        for process in self._query_nvml_processes(
+            handle,
+            query_names=(
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetComputeRunningProcesses_v2",
+                "nvmlDeviceGetComputeRunningProcesses",
+            ),
+            process_type="compute",
+        ):
+            process_map[(process.process_type, process.pid)] = process
+
+        for process in self._query_nvml_processes(
+            handle,
+            query_names=(
+                "nvmlDeviceGetGraphicsRunningProcesses_v3",
+                "nvmlDeviceGetGraphicsRunningProcesses_v2",
+                "nvmlDeviceGetGraphicsRunningProcesses",
+            ),
+            process_type="graphics",
+        ):
+            process_map[(process.process_type, process.pid)] = process
+
+        processes = list(process_map.values())
+        processes.sort(key=lambda item: (-item.used_vram_mb, item.pid))
+        return processes
+
+    def _query_nvml_processes(
+        self,
+        handle,
+        query_names: tuple[str, ...],
+        process_type: str,
+    ) -> list[GPUProcessInfo]:
+        for query_name in query_names:
+            query = getattr(pynvml, query_name, None)
+            if not callable(query):
+                continue
+            try:
+                nvml_processes = query(handle)
+            except pynvml.NVMLError:
+                continue
+            return [self._to_process_info(process, process_type) for process in nvml_processes]
+        return []
+
+    def _to_process_info(self, nvml_process, process_type: str) -> GPUProcessInfo:
+        pid = int(getattr(nvml_process, "pid", 0) or 0)
+        used_vram_mb = self._normalize_vram_mb(getattr(nvml_process, "usedGpuMemory", 0))
+        return GPUProcessInfo(
+            pid=pid,
+            process_name=self._read_process_name(pid),
+            process_type=process_type,
+            used_vram_mb=used_vram_mb,
+        )
+
+    def _normalize_vram_mb(self, used_gpu_memory: int | None) -> int:
+        if used_gpu_memory in {None, 0}:
+            return 0
+
+        unavailable = getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", None)
+        if unavailable is not None and used_gpu_memory == unavailable:
+            return 0
+
+        try:
+            used = int(used_gpu_memory)
+        except (TypeError, ValueError):
+            return 0
+
+        if used < 0:
+            return 0
+        return used // (1024 * 1024)
+
+    def _read_process_name(self, pid: int) -> str | None:
+        if pid <= 0:
+            return None
+
+        cmdline = Path(f"/proc/{pid}/cmdline")
+        try:
+            raw = cmdline.read_bytes()
+            if raw:
+                first = raw.split(b"\x00", 1)[0].decode(errors="ignore").strip()
+                if first:
+                    return Path(first).name
+        except OSError:
+            pass
+
+        comm = Path(f"/proc/{pid}/comm")
+        try:
+            value = comm.read_text(encoding="utf-8", errors="ignore").strip()
+            if value:
+                return value
+        except OSError:
+            pass
+
+        return None
 
     async def _poll_loop(self) -> None:
         while True:
