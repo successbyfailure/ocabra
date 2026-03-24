@@ -133,10 +133,15 @@ function ServiceCard({ service }: { service: ServiceState }) {
               {service.activeModelRef ? `Modelo: ${service.activeModelRef}` : "Runtime cargado"}
             </span>
           )}
+          {!service.enabled && service.serviceAlive && (
+            <span className="rounded-md bg-red-500/10 px-2 py-0.5 text-red-300">
+              Runtime activo fuera de oCabra
+            </span>
+          )}
           {service.preferredGpu != null && (
             <span className="rounded-md bg-muted px-2 py-0.5">GPU {service.preferredGpu}</span>
           )}
-          {service.detail && !service.serviceAlive && (
+          {service.detail && (
             <span className="text-muted-foreground/70 max-w-xs truncate" title={service.detail}>
               {service.detail}
             </span>
