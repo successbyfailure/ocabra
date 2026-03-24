@@ -20,7 +20,13 @@ logger = structlog.get_logger(__name__)
 _ENSURE_LOAD_TIMEOUT_S = 180
 
 
-def _openai_error(message: str, error_type: str, param: str | None = None, code: str | None = None, status_code: int = 400) -> HTTPException:
+def _openai_error(
+    message: str,
+    error_type: str,
+    param: str | None = None,
+    code: str | None = None,
+    status_code: int = 400,
+) -> HTTPException:
     return HTTPException(
         status_code=status_code,
         detail={
@@ -84,7 +90,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
         state.last_request_at = datetime.now(UTC)
         return state
 
-    if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED):
+    if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED, ModelStatus.ERROR):
         try:
             await model_manager.load(resolved_model_id)
         except Exception as exc:
@@ -104,7 +110,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
                 code="model_load_failed",
                 status_code=503,
             ) from exc
-        # Verify it loaded
+
         state = await model_manager.get_state(resolved_model_id)
         if state and state.status == ModelStatus.LOADED:
             state.last_request_at = datetime.now(UTC)
@@ -124,8 +130,15 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
             status_code=503,
         )
 
+    detail_suffix = ""
+    if state and state.error_message:
+        detail_suffix = f" detail: {state.error_message}"
+
     raise _openai_error(
-        f"Model '{resolved_model_id}' is not available (status: {state.status.value if state else 'unknown'}).",
+        (
+            f"Model '{resolved_model_id}' is not available "
+            f"(status: {state.status.value if state else 'unknown'}).{detail_suffix}"
+        ),
         "server_error",
         code="model_unavailable",
         status_code=503,

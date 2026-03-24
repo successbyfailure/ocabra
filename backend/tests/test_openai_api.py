@@ -852,3 +852,76 @@ class TestBackendAgnosticRouting:
                 "input": "hola",
             },
         )
+
+class TestModelErrorRecovery:
+    def test_error_state_triggers_reload_attempt(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        error_state = ModelState(
+            model_id="whisper/openai/whisper-large-v3-turbo::diarize",
+            display_name="Whisper diarize",
+            backend_type="whisper",
+            status=ModelStatus.ERROR,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+            error_message="startup timeout",
+        )
+        loaded_state = ModelState(
+            model_id="whisper/openai/whisper-large-v3-turbo::diarize",
+            display_name="Whisper diarize",
+            backend_type="whisper",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+        )
+
+        app = _make_app(model_state=loaded_state, worker_result={"object": "chat.completion", "choices": []})
+        app.state.model_manager.get_state = AsyncMock(side_effect=[error_state, loaded_state])
+        app.state.model_manager.load = AsyncMock(return_value=loaded_state)
+
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "whisper/openai/whisper-large-v3-turbo::diarize",
+                "messages": [{"role": "user", "content": "hola"}],
+            },
+        )
+
+        assert resp.status_code == 200
+        app.state.model_manager.load.assert_called_once_with(
+            "whisper/openai/whisper-large-v3-turbo::diarize"
+        )
+
+    def test_error_state_load_failure_returns_explicit_message(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        error_state = ModelState(
+            model_id="whisper/openai/whisper-large-v3-turbo::diarize",
+            display_name="Whisper diarize",
+            backend_type="whisper",
+            status=ModelStatus.ERROR,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+            error_message="status probe failed",
+        )
+
+        app = _make_app(model_state=error_state)
+        app.state.model_manager.get_state = AsyncMock(return_value=error_state)
+        app.state.model_manager.load = AsyncMock(side_effect=RuntimeError("worker startup timeout"))
+
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "whisper/openai/whisper-large-v3-turbo::diarize",
+                "messages": [{"role": "user", "content": "hola"}],
+            },
+        )
+
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]["error"]
+        assert detail["code"] == "model_load_failed"
+        assert "worker startup timeout" in detail["message"]
