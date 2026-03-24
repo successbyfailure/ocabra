@@ -155,3 +155,24 @@ async def test_whisper_vram_lookup_nvidia_nemo_models() -> None:
 
     assert parakeet_vram == 4500
     assert canary_vram == 9000
+
+@pytest.mark.asyncio
+async def test_whisper_load_uses_configured_startup_timeout():
+    backend = WhisperBackend()
+
+    with (
+        patch(
+            "ocabra.backends.whisper_backend.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_FakeProcess()),
+        ),
+        patch("ocabra.backends.whisper_backend.settings.whisper_startup_timeout_s", 321),
+        patch.object(backend, "_wait_until_healthy", new=AsyncMock(return_value=True)) as wait_healthy,
+    ):
+        await backend.load(
+            "openai/whisper-medium::diarize",
+            [1],
+            port=18012,
+            extra_config={"diarization_enabled": True},
+        )
+
+    wait_healthy.assert_awaited_once_with("openai/whisper-medium::diarize", timeout_s=321)

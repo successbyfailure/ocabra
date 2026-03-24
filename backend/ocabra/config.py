@@ -131,6 +131,8 @@ class Settings(BaseSettings):
     # OpenAI audio uploads
     # Maximum allowed size per multipart part (in MB) for /v1/audio/transcriptions.
     openai_audio_max_part_size_mb: int = 256
+    # Whisper worker startup deadline (seconds). Diarization cold starts may need extra time.
+    whisper_startup_timeout_s: int = 300
 
     # Model lifecycle
     idle_timeout_seconds: int = 300

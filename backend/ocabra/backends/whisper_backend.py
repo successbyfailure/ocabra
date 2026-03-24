@@ -117,9 +117,12 @@ class WhisperBackend(BackendInterface):
 
         self._workers[model_id] = _WhisperWorker(process=process, info=info, log_file=log_file)
 
-        if not await self._wait_until_healthy(model_id):
+        startup_timeout_s = max(1, int(settings.whisper_startup_timeout_s))
+        if not await self._wait_until_healthy(model_id, timeout_s=startup_timeout_s):
             await self.unload(model_id)
-            raise RuntimeError(f"Whisper worker failed to start for model '{model_id}'")
+            raise RuntimeError(
+                f"Whisper worker failed to start for model '{model_id}' within {startup_timeout_s}s"
+            )
 
         logger.info(
             "whisper_worker_started",
@@ -234,8 +237,9 @@ class WhisperBackend(BackendInterface):
         if isinstance(payload, bytes):
             yield payload
 
-    async def _wait_until_healthy(self, model_id: str, retries: int = 180) -> bool:
-        for _ in range(retries):
+    async def _wait_until_healthy(self, model_id: str, timeout_s: int = 90) -> bool:
+        attempts = max(1, int(timeout_s * 2))
+        for _ in range(attempts):
             if await self.health_check(model_id):
                 return True
             await asyncio.sleep(0.5)
