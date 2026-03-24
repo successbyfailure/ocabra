@@ -54,6 +54,7 @@ async def transcriptions(
     response_format: str = form.get("response_format", "json")
     prompt: str | None = form.get("prompt")
     temperature: float = float(form.get("temperature", 0.0))
+    diarize: str | None = form.get("diarize")
 
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id)
@@ -98,6 +99,8 @@ async def transcriptions(
                     form_data["language"] = language
                 if prompt:
                     form_data["prompt"] = prompt
+                if diarize is not None:
+                    form_data["diarize"] = diarize
 
                 resp = await client.post(
                     url,

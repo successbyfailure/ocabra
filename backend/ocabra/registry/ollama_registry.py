@@ -248,15 +248,29 @@ class OllamaRegistry:
         details = await self.list_loaded_details()
         return [d["name"] for d in details]
 
+    @staticmethod
+    def _is_embed_model(model_ref: str) -> bool:
+        name = model_ref.lower()
+        return "embed" in name or "nomic-embed" in name or "mxbai-embed" in name
+
     async def load(self, model_ref: str, keep_alive: str | int | None = None) -> None:
-        payload: dict[str, object] = {
-            "model": model_ref,
-            "prompt": "",
-            "stream": False,
-            "keep_alive": settings.ollama_keep_alive if keep_alive is None else keep_alive,
-        }
+        keep_alive_value = settings.ollama_keep_alive if keep_alive is None else keep_alive
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(self._url("/api/generate"), json=payload)
+            if self._is_embed_model(model_ref):
+                payload: dict[str, object] = {
+                    "model": model_ref,
+                    "input": "",
+                    "keep_alive": keep_alive_value,
+                }
+                response = await client.post(self._url("/api/embed"), json=payload)
+            else:
+                payload = {
+                    "model": model_ref,
+                    "prompt": "",
+                    "stream": False,
+                    "keep_alive": keep_alive_value,
+                }
+                response = await client.post(self._url("/api/generate"), json=payload)
             response.raise_for_status()
 
     async def unload(self, model_ref: str) -> None:

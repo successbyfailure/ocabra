@@ -527,7 +527,16 @@ def _run_transcription(
     diarization_turns: list[dict[str, Any]] | None = None
     speakers: list[str] = []
     if diarize and diarization_pipeline is not None:
-        annotation = diarization_pipeline(audio_path)
+        # pyannote ≥4.0 uses torchcodec for audio I/O which may not be available.
+        # Pass a pre-loaded waveform dict to bypass the AudioDecoder dependency.
+        try:
+            import torchaudio as _torchaudio
+
+            _waveform, _sr = _torchaudio.load(audio_path)
+            _audio_input: Any = {"waveform": _waveform, "sample_rate": _sr}
+        except Exception:
+            _audio_input = audio_path
+        annotation = diarization_pipeline(_audio_input)
         diarization_turns = _collect_diarization_turns(annotation)
         speakers = _attach_speakers(segment_list, diarization_turns)
 
@@ -600,7 +609,16 @@ def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None)
 
     kwargs: dict[str, Any] = {}
     if hf_token:
-        kwargs["use_auth_token"] = hf_token
+        kwargs["token"] = hf_token
+
+    # Resolve local model directory before attempting a remote download.
+    pipeline_source: str = model_id
+    models_dir = os.environ.get("MODELS_DIR", "")
+    if models_dir:
+        local_hf = Path(models_dir) / "huggingface" / model_id.replace("/", "--")
+        if local_hf.is_dir() and (local_hf / "config.yaml").exists():
+            pipeline_source = str(local_hf)
+            kwargs.pop("token", None)  # local path needs no auth
 
     try:
         import torch
@@ -610,7 +628,34 @@ def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None)
     except Exception:
         pass
 
-    pipeline = Pipeline.from_pretrained(model_id, **kwargs)
+    # pyannote ≥4.0 always calls get_plda() even for AgglomerativeClustering
+    # which doesn't use PLDA. Patch it to return None on download failures so
+    # the pipeline still loads when PLDA is unavailable (gated HF access).
+    _patch_targets: list[Any] = []
+    try:
+        import pyannote.audio.pipelines.speaker_diarization as _sd_mod
+        from pyannote.audio.pipelines.utils import getter as _getter
+
+        _orig_get_plda = _getter.get_plda
+
+        def _safe_get_plda(plda, **kw):  # type: ignore[override]
+            try:
+                return _orig_get_plda(plda, **kw)
+            except Exception:
+                return None
+
+        # Must patch both the canonical location and the imported reference.
+        _getter.get_plda = _safe_get_plda
+        _sd_mod.get_plda = _safe_get_plda
+        _patch_targets = [(_getter, "get_plda"), (_sd_mod, "get_plda")]
+    except Exception:
+        pass
+
+    try:
+        pipeline = Pipeline.from_pretrained(pipeline_source, **kwargs)
+    finally:
+        for _mod, _attr in _patch_targets:
+            setattr(_mod, _attr, _orig_get_plda)
 
     try:
         import torch
