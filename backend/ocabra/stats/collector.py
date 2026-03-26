@@ -23,6 +23,7 @@ _TRACKED_API_PATHS = {
     "/api/chat",
     "/api/generate",
     "/api/embeddings",
+    "/api/embed",
 }
 
 
@@ -37,11 +38,15 @@ def _classify_request_kind(path: str) -> str:
         "/api/chat": "ollama_chat",
         "/api/generate": "ollama_generate",
         "/api/embeddings": "ollama_embedding",
+        "/api/embed": "ollama_embedding",
     }
     return mapping.get(path, "other")
 
 
-def _extract_usage_tokens(payload: dict | None) -> tuple[int | None, int | None]:
+def _extract_usage_tokens(
+    payload: dict | None,
+    request_kind: str = "",
+) -> tuple[int | None, int | None]:
     if not payload:
         return None, None
 
@@ -66,13 +71,22 @@ def _extract_usage_tokens(payload: dict | None) -> tuple[int | None, int | None]
     # Ollama-style normalized responses.
     prompt_eval_count = payload.get("prompt_eval_count")
     eval_count = payload.get("eval_count")
-    try:
-        return (
-            int(prompt_eval_count) if prompt_eval_count is not None else None,
-            int(eval_count) if eval_count is not None else None,
-        )
-    except (TypeError, ValueError):
-        return None, None
+    if prompt_eval_count is not None or eval_count is not None:
+        try:
+            return (
+                int(prompt_eval_count) if prompt_eval_count is not None else None,
+                int(eval_count) if eval_count is not None else None,
+            )
+        except (TypeError, ValueError):
+            return None, None
+
+    # Whisper-style: {"text": "..."}  — use word count as output proxy.
+    if request_kind == "audio_transcription":
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            return None, len(text.split())
+
+    return None, None
 
 
 class StatsMiddleware(BaseHTTPMiddleware):
@@ -130,7 +144,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         model_id = _extract_model_id(request=request, body=request_payload)
         if model_id:
-            input_tokens, output_tokens = _extract_usage_tokens(response_payload)
+            input_tokens, output_tokens = _extract_usage_tokens(response_payload, request_kind=_classify_request_kind(path))
 
             import asyncio
 
@@ -227,15 +241,30 @@ async def _record_stat(
     try:
         gpu_index: int | None = None
         backend_type: str | None = None
+        energy_wh: float | None = None
         try:
             mm = request.app.state.model_manager
             state = await mm.get_state(model_id)
+            if state is None:
+                # Fallback: resolve by backend_model_id alias (e.g. "mistral:7b" → "ollama/mistral:7b")
+                states = await mm.list_states()
+                state = next((s for s in states if s.backend_model_id == model_id), None)
             if state:
                 backend_type = state.backend_type
                 if state.current_gpu:
                     gpu_index = state.current_gpu[0]
         except Exception:
             pass
+
+        # Estimate energy from current GPU power draw × request duration.
+        if gpu_index is not None:
+            try:
+                gm = request.app.state.gpu_manager
+                gpu_state = gm._states.get(gpu_index)
+                if gpu_state and gpu_state.power_draw_w > 0:
+                    energy_wh = gpu_state.power_draw_w * duration_ms / 1000.0 / 3600.0
+            except Exception:
+                pass
 
         from ocabra.api.metrics import record_request, record_tokens
         from ocabra.database import AsyncSessionLocal
@@ -256,6 +285,7 @@ async def _record_stat(
                 duration_ms=int(duration_ms),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                energy_wh=energy_wh,
                 error=error_message,
             )
             session.add(stat)

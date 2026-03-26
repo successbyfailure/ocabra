@@ -229,13 +229,16 @@ async def get_token_stats(
         by_backend[backend]["inputTokens"] += max(0, int(row.input_tokens or 0))
         by_backend[backend]["outputTokens"] += max(0, int(row.output_tokens or 0))
 
+    per_minute: dict[datetime, dict[str, int]] = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0})
+    for row in rows:
+        if row.started_at:
+            bucket = _truncate_minute(row.started_at)
+            per_minute[bucket]["inputTokens"] += max(0, int(row.input_tokens or 0))
+            per_minute[bucket]["outputTokens"] += max(0, int(row.output_tokens or 0))
+
     series = [
-        {
-            "timestamp": r.started_at.isoformat() if r.started_at else "",
-            "inputTokens": int(max(0, int(r.input_tokens or 0))),
-            "outputTokens": int(max(0, int(r.output_tokens or 0))),
-        }
-        for r in rows
+        {"timestamp": ts.isoformat(), **counts}
+        for ts, counts in sorted(per_minute.items())
     ]
 
     return {

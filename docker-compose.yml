@@ -219,7 +219,7 @@ services:
       # "gradio" (default) — Gradio UI on port 7860
       # "api"              — REST API on port 8001 (set ACESTEP_BASE_URL=http://acestep:8001 in api service)
       ACESTEP_MODE: ${ACESTEP_MODE:-gradio}
-      ACESTEP_LLM_BACKEND: ${ACESTEP_LLM_BACKEND:-vllm}
+      ACESTEP_LLM_BACKEND: ${ACESTEP_LLM_BACKEND:-pt}
       ACESTEP_INIT_SERVICE: ${ACESTEP_INIT_SERVICE:-true}
       ACESTEP_CONFIG_PATH: ${ACESTEP_CONFIG_PATH:-acestep-v15-turbo}
       ACESTEP_LM_MODEL_PATH: ${ACESTEP_LM_MODEL_PATH:-acestep-5Hz-lm-0.6B}
