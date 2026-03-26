@@ -1,6 +1,7 @@
 """
 POST /v1/audio/transcriptions — Whisper speech-to-text
 POST /v1/audio/speech — TTS text-to-speech
+POST /v1/audio/generate — ACE-Step music generation
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from typing import Any
 import httpx
 import structlog
 from fastapi import APIRouter, Request, UploadFile
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from ocabra.config import settings
 
@@ -196,4 +197,74 @@ async def speech(request: Request) -> StreamingResponse:
         _stream_audio(),
         media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="speech.{response_format}"'},
+    )
+
+
+@router.post("/audio/generate", summary="Generate music")
+async def generate_music(request: Request) -> Response:
+    """
+    Generate music audio from a text prompt using an ACE-Step model.
+    Requires a model with capability music_generation=True.
+
+    Request body (JSON):
+        model           — canonical model ID, e.g. "acestep/turbo" (required)
+        prompt          — music description, e.g. "upbeat jazz with piano" (required)
+        lyrics          — optional song lyrics
+        audio_duration  — duration in seconds (10–600, default chosen by model)
+        bpm             — tempo in BPM (30–300)
+        key_scale       — e.g. "C Major"
+        time_signature  — e.g. "4"
+        inference_steps — diffusion steps (default 8 for turbo)
+        thinking        — bool, enable LM-based song planning (default false)
+        vocal_language  — lyrics language code, e.g. "en", "es" (default "en")
+        seed            — int, -1 for random
+        response_format — "mp3" (default), "wav", or "flac"
+
+    Returns the generated audio file as binary.
+    """
+    body = await request.json()
+    model_id: str = body.get("model", "")
+    response_format: str = str(body.get("response_format") or "mp3").lower()
+    if response_format not in {"mp3", "wav", "flac"}:
+        response_format = "mp3"
+
+    model_manager = get_model_manager(request)
+    state = await ensure_loaded(model_manager, model_id)
+    check_capability(state, "music_generation", "music generation")
+    model_id = state.model_id
+    request.state.stats_model_id = model_id
+
+    worker_pool = request.app.state.worker_pool
+    worker = worker_pool.get_worker(model_id)
+    backend = await worker_pool.get_backend(state.backend_type)
+
+    if not worker or not await backend.health_check(state.backend_model_id):
+        raise _openai_error(
+            f"ACE-Step worker unavailable for model '{model_id}'.",
+            "server_error",
+            code="worker_unavailable",
+            status_code=503,
+        )
+
+    try:
+        result = await backend.forward_request(model_id, "/generate", body)
+    except TimeoutError as exc:
+        raise _openai_error(str(exc), "server_error", code="generation_timeout", status_code=504) from exc
+    except RuntimeError as exc:
+        raise _openai_error(str(exc), "server_error", code="generation_failed", status_code=500) from exc
+
+    if not isinstance(result, tuple) or len(result) < 2:
+        raise _openai_error(
+            "Unexpected response from ACE-Step backend.",
+            "server_error",
+            code="generation_failed",
+            status_code=500,
+        )
+
+    audio_bytes, content_type = result[0], result[1]
+    filename = f"music.{response_format}"
+    return Response(
+        content=audio_bytes,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

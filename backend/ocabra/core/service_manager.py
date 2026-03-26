@@ -121,6 +121,20 @@ class ServiceManager:
                 post_unload_flush_path="/free-memory",
                 docker_container_name=settings.a1111_docker_container,
             ),
+            "acestep": ServiceState(
+                service_id="acestep",
+                service_type="acestep",
+                display_name="ACE-Step",
+                base_url=settings.acestep_base_url.rstrip("/"),
+                ui_url=settings.acestep_ui_url,
+                # Gradio mode: health_path="/" (HTML, port 7860 by default)
+                # API mode:    health_path="/health" (JSON, port 8001)
+                # Detected automatically from base_url port suffix.
+                health_path="/" if settings.acestep_base_url.endswith(("7860", "7860/")) else "/health",
+                preferred_gpu=settings.acestep_preferred_gpu,
+                idle_unload_after_seconds=settings.acestep_idle_unload_seconds,
+                # ACE-Step auto-loads models on startup; no dedicated unload endpoint.
+            ),
         }
         self._lock = asyncio.Lock()
 

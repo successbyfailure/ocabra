@@ -19,6 +19,7 @@ class BackendCapabilities:
     image_generation: bool = False
     audio_transcription: bool = False
     tts: bool = False
+    music_generation: bool = False
     streaming: bool = False
     context_length: int = 0
 
@@ -37,6 +38,7 @@ class BackendCapabilities:
             "image_generation": self.image_generation,
             "audio_transcription": self.audio_transcription,
             "tts": self.tts,
+            "music_generation": self.music_generation,
             "streaming": self.streaming,
             "context_length": self.context_length,
         }

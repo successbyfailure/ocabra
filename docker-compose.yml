@@ -43,6 +43,10 @@ services:
       HUNYUAN_UI_URL: ${HUNYUAN_UI_URL:-}
       COMFYUI_UI_URL: ${COMFYUI_UI_URL:-}
       A1111_UI_URL: ${A1111_UI_URL:-}
+      # Gradio mode (default): http://acestep:7860 | API mode: http://acestep:8001
+      ACESTEP_BASE_URL: ${ACESTEP_BASE_URL:-http://acestep:7860}
+      ACESTEP_UI_URL: ${ACESTEP_UI_URL:-}
+      ACESTEP_PREFERRED_GPU: ${ACESTEP_PREFERRED_GPU:-1}
     env_file: .env
 #    ports:
 #      - "8000:8000"
@@ -56,6 +60,8 @@ services:
       redis:
         condition: service_healthy
       ollama:
+        condition: service_started
+      acestep:
         condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -196,6 +202,51 @@ services:
       timeout: 5s
       retries: 10
       start_period: 180s
+    restart: unless-stopped
+
+  acestep:
+    build:
+      context: /docker/ACE-Step-1.5
+      dockerfile: Dockerfile
+    image: acestep:latest
+    container_name: ocabra-acestep-1
+    runtime: nvidia
+    ipc: host
+    shm_size: "2gb"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${ACESTEP_NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # "gradio" (default) — Gradio UI on port 7860
+      # "api"              — REST API on port 8001 (set ACESTEP_BASE_URL=http://acestep:8001 in api service)
+      ACESTEP_MODE: ${ACESTEP_MODE:-gradio}
+      ACESTEP_LLM_BACKEND: ${ACESTEP_LLM_BACKEND:-vllm}
+      ACESTEP_INIT_SERVICE: ${ACESTEP_INIT_SERVICE:-true}
+      ACESTEP_CONFIG_PATH: ${ACESTEP_CONFIG_PATH:-acestep-v15-turbo}
+      ACESTEP_LM_MODEL_PATH: ${ACESTEP_LM_MODEL_PATH:-acestep-5Hz-lm-0.6B}
+      TOKENIZERS_PARALLELISM: "false"
+      HF_HOME: /root/.cache/huggingface
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
+      - /docker/ACE-Step-1.5/checkpoints:/app/checkpoints
+      - /docker/ACE-Step-1.5/gradio_outputs:/app/gradio_outputs
+      - /docker/ACE-Step-1.5/lora_output:/app/lora_output
+    ports:
+      # Gradio mode (default): port 7860
+      - "${ACESTEP_GRADIO_PORT:-7862}:7860"
+      # API mode: uncomment if running with ACESTEP_MODE=api
+      # - "${ACESTEP_API_PORT:-8001}:8001"
+    healthcheck:
+      test: >-
+        curl -sf http://localhost:7860/ > /dev/null 2>&1 ||
+        curl -sf http://localhost:8001/health > /dev/null 2>&1 ||
+        exit 1
+      interval: 30s
+      timeout: 10s
+      start_period: 300s
+      retries: 3
     restart: unless-stopped
 
   caddy:

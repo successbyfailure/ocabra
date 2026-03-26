@@ -158,6 +158,23 @@ class Settings(BaseSettings):
     litellm_admin_key: str = ""
     litellm_auto_sync: bool = False
 
+    # ACE-Step music generation — backend (subprocess) mode
+    acestep_project_dir: str = "/docker/ACE-Step-1.5"
+    acestep_startup_timeout_s: int = 300
+    acestep_generation_timeout_s: int = 600
+    acestep_poll_interval_s: float = 1.0
+    # ACE-Step — service/dashboard mode (standalone Gradio or API instance)
+    # In Gradio mode (default): base_url = http://acestep:7860, health_path = /
+    # In API mode: base_url = http://acestep:8001, health_path = /health
+    acestep_base_url: str = "http://acestep:7860"
+    acestep_ui_url: str = ""
+    acestep_preferred_gpu: int = 1
+    acestep_idle_unload_seconds: int = 0  # 0 = no idle unload (ACE-Step manages its own memory)
+    # Optional: if set, AceStepBackend will proxy to this external ACE-Step REST API
+    # instead of spawning a local subprocess (use when running ACE-Step as a Docker service
+    # with ACESTEP_MODE=api). Example: http://acestep:8001
+    acestep_external_api_url: str = ""
+
     # Energy
     energy_cost_eur_kwh: float = 0.15
 
