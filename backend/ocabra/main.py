@@ -208,6 +208,7 @@ async def lifespan(app: FastAPI):
     service_manager = ServiceManager()
     await service_manager.start()
     app.state.service_manager = service_manager
+    model_manager.set_service_manager(service_manager)
     logger.info("service_manager_ready")
 
     idle_eviction_stop = asyncio.Event()

@@ -124,6 +124,7 @@ class ModelManager:
         self._worker_pool = worker_pool
         self._gpu_manager = gpu_manager
         self._gpu_scheduler = gpu_scheduler
+        self._service_manager = None
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
@@ -161,6 +162,9 @@ class ModelManager:
 
     def set_gpu_scheduler(self, scheduler) -> None:
         self._gpu_scheduler = scheduler
+
+    def set_service_manager(self, service_manager) -> None:
+        self._service_manager = service_manager
 
     def register_event_listener(self, listener: Callable[[dict], Awaitable[None]]) -> None:
         self._event_listeners.append(listener)
@@ -421,6 +425,38 @@ class ModelManager:
             )
         except InsufficientVRAMError as initial_exc:
             last_exc = initial_exc
+
+            # First: try stopping external services (ACE-Step, ComfyUI, etc.) on the
+            # preferred GPU — they often hold large amounts of VRAM and can be restarted.
+            if self._service_manager:
+                service_candidates = self._service_manager.get_pressure_eviction_candidates(preferred_gpu)
+                if service_candidates:
+                    logger.info(
+                        "pressure_eviction_service_candidates",
+                        requested_model_id=model_id,
+                        candidates=service_candidates,
+                    )
+                for service_id in service_candidates:
+                    logger.info(
+                        "pressure_eviction_service_attempt",
+                        requested_model_id=model_id,
+                        evicting_service_id=service_id,
+                    )
+                    evicted = await self._service_manager.pressure_evict(service_id)
+                    if not evicted:
+                        continue
+                    await self._wait_for_vram_released(0)  # wait for VRAM to settle
+                    try:
+                        return await self._gpu_scheduler.find_gpu_for_model(
+                            vram_needed,
+                            preferred_gpu,
+                            enforce_vllm_headroom=enforce_vllm_headroom,
+                        )
+                    except InsufficientVRAMError as exc:
+                        last_exc = exc
+                        continue
+
+            # Then: evict model workers (on-demand first, then warm, then pinned)
             candidates = self._get_pressure_eviction_candidates(model_id)
             logger.info(
                 "pressure_eviction_candidates",

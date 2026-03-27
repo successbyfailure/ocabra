@@ -438,6 +438,56 @@ class ServiceManager:
             error=err or f"exit_code={code}",
         )
 
+    def get_pressure_eviction_candidates(self, preferred_gpu: int | None = None) -> list[str]:
+        """Return service IDs that can be stopped to free VRAM under pressure.
+
+        Only includes services that are alive, have a model loaded, and can
+        actually be stopped (docker_container_name or unload_path).
+        Filtered to `preferred_gpu` when provided.
+        """
+        return [
+            state.service_id
+            for state in self._states.values()
+            if state.enabled
+            and state.service_alive
+            and state.runtime_loaded
+            and (preferred_gpu is None or state.preferred_gpu == preferred_gpu)
+            and (state.docker_container_name or state.unload_path)
+        ]
+
+    async def pressure_evict(self, service_id: str) -> bool:
+        """Stop a service to free VRAM under model-load pressure.
+
+        Prefers stopping the Docker container (instant VRAM release) over the
+        HTTP unload endpoint. Returns True if the service was stopped.
+        """
+        state = self._states.get(service_id)
+        if not state or not state.enabled or not state.service_alive:
+            return False
+
+        now = datetime.now(timezone.utc)
+        logger.info("service_pressure_evict", service_id=service_id)
+
+        if state.docker_container_name:
+            await self._stop_container(state)
+            state.runtime_loaded = False
+            state.active_model_ref = None
+            state.last_unload_at = now
+            state.status = "idle"
+            state.detail = "unloaded:pressure"
+            await self._publish_state(state, "runtime_unloaded")
+            return True
+
+        if state.unload_path:
+            try:
+                await self.unload(service_id, reason="pressure")
+                return True
+            except Exception as exc:
+                logger.warning("service_pressure_evict_failed", service_id=service_id, error=str(exc))
+                return False
+
+        return False
+
     async def check_idle_unloads(self) -> None:
         now = datetime.now(timezone.utc)
         for state in self._states.values():
