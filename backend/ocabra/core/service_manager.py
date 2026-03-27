@@ -36,7 +36,11 @@ class ServiceState:
     post_unload_flush_path: str | None = None
     # If set, stop this Docker container after unload to fully release VRAM.
     docker_container_name: str | None = None
+    # When True, the service is assumed to have its model loaded whenever service_alive is True.
+    # Use for services (like ACE-Step Gradio) that have no dedicated runtime-status endpoint.
+    runtime_loaded_when_alive: bool = False
     preferred_gpu: int | None = None
+    # Seconds of inactivity before the model is unloaded. 0 = disabled.
     idle_unload_after_seconds: int = 600
     enabled: bool = True
     service_alive: bool = False
@@ -134,6 +138,9 @@ class ServiceManager:
                 preferred_gpu=settings.acestep_preferred_gpu,
                 idle_unload_after_seconds=settings.acestep_idle_unload_seconds,
                 # ACE-Step auto-loads models on startup; no dedicated unload endpoint.
+                # Idle unload is handled by stopping the Docker container.
+                docker_container_name="ocabra-acestep-1",
+                runtime_loaded_when_alive=True,
             ),
         }
         self._lock = asyncio.Lock()
@@ -254,6 +261,11 @@ class ServiceManager:
             state.detail = None
             # Poll runtime/model status if configured
             await self._refresh_runtime_status(state, client=None)
+            # For services with no runtime-check endpoint that always have a model loaded
+            if state.runtime_loaded_when_alive and not state.runtime_check_path:
+                state.runtime_loaded = True
+                if state.last_activity_at is None:
+                    state.last_activity_at = now
             state.status = "active" if state.runtime_loaded else "idle"
         except Exception as exc:
             state.service_alive = False
@@ -431,6 +443,8 @@ class ServiceManager:
         for state in self._states.values():
             if not state.enabled:
                 continue
+            if state.idle_unload_after_seconds <= 0:
+                continue
             if not state.service_alive or not state.runtime_loaded:
                 continue
             if state.last_activity_at is None:
@@ -439,7 +453,22 @@ class ServiceManager:
             if idle_for < timedelta(seconds=state.idle_unload_after_seconds):
                 continue
             try:
-                await self.unload(state.service_id, reason="idle")
+                if state.unload_path:
+                    await self.unload(state.service_id, reason="idle")
+                elif state.docker_container_name:
+                    # No API unload endpoint — stop the container to release VRAM
+                    logger.info(
+                        "service_idle_container_stop",
+                        service_id=state.service_id,
+                        idle_seconds=int(idle_for.total_seconds()),
+                    )
+                    await self._stop_container(state)
+                    state.runtime_loaded = False
+                    state.active_model_ref = None
+                    state.last_unload_at = now
+                    state.status = "idle"
+                    state.detail = "unloaded:idle"
+                    await self._publish_state(state, "runtime_unloaded")
             except Exception:
                 continue
 

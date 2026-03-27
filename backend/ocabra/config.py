@@ -169,7 +169,7 @@ class Settings(BaseSettings):
     acestep_base_url: str = "http://acestep:7860"
     acestep_ui_url: str = ""
     acestep_preferred_gpu: int = 1
-    acestep_idle_unload_seconds: int = 0  # 0 = no idle unload (ACE-Step manages its own memory)
+    acestep_idle_unload_seconds: int = 1800  # 0 = disabled; default 30 min
     # Optional: if set, AceStepBackend will proxy to this external ACE-Step REST API
     # instead of spawning a local subprocess (use when running ACE-Step as a Docker service
     # with ACESTEP_MODE=api). Example: http://acestep:8001
