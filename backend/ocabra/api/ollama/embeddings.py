@@ -52,7 +52,14 @@ async def _run_embeddings(request: Request, body: dict, legacy: bool) -> dict:
         )
         vectors = [item.get("embedding", []) for item in result.get("data", [])]
 
-    return {"model": ollama_model, "embeddings": vectors}
+    response: dict = {"model": ollama_model, "embeddings": vectors}
+    # Preserve token-count fields so the stats middleware can record usage.
+    for field in ("prompt_eval_count", "total_duration", "load_duration"):
+        if field in result:
+            response[field] = result[field]
+    if "usage" in result:
+        response["usage"] = result["usage"]
+    return response
 
 
 @router.post("/embeddings", summary="Create embeddings (legacy)")
