@@ -42,6 +42,11 @@ class ServiceState:
     preferred_gpu: int | None = None
     # Seconds of inactivity before the model is unloaded. 0 = disabled.
     idle_unload_after_seconds: int = 600
+    # "stop"    — kill the container on idle (UI goes offline, VRAM freed immediately).
+    # "restart" — restart the container on idle (UI comes back after startup, VRAM freed
+    #             during the restart window). Use for Gradio services like ACE-Step where
+    #             keeping the UI accessible matters more than instant VRAM release.
+    idle_action: str = "stop"
     enabled: bool = True
     service_alive: bool = False
     runtime_loaded: bool = False
@@ -64,6 +69,7 @@ class ServiceState:
             "unload_path": self.unload_path,
             "preferred_gpu": self.preferred_gpu,
             "idle_unload_after_seconds": self.idle_unload_after_seconds,
+            "idle_action": self.idle_action,
             "enabled": self.enabled,
             "service_alive": self.service_alive,
             "runtime_loaded": self.runtime_loaded,
@@ -138,9 +144,12 @@ class ServiceManager:
                 preferred_gpu=settings.acestep_preferred_gpu,
                 idle_unload_after_seconds=settings.acestep_idle_unload_seconds,
                 # ACE-Step auto-loads models on startup; no dedicated unload endpoint.
-                # Idle unload is handled by stopping the Docker container.
+                # On idle: restart (not stop) so the Gradio UI stays accessible while
+                # VRAM is freed during the restart window.
+                # On pressure eviction: pressure_evict() still does a full stop.
                 docker_container_name="ocabra-acestep-1",
                 runtime_loaded_when_alive=True,
+                idle_action="restart",
             ),
         }
         self._lock = asyncio.Lock()
@@ -423,6 +432,23 @@ class ServiceManager:
 
         await self._stop_container(state)
 
+    async def _restart_container(self, state: ServiceState) -> None:
+        if not state.docker_container_name:
+            return
+
+        code, _out, err = await self._run_docker_command("restart", state.docker_container_name)
+        if code == 0:
+            state.service_alive = False
+            state.status = "restarting"
+            logger.info("container_restarted", container=state.docker_container_name)
+            return
+
+        logger.warning(
+            "container_restart_failed",
+            container=state.docker_container_name,
+            error=err or f"exit_code={code}",
+        )
+
     async def _start_container(self, state: ServiceState) -> None:
         if not state.docker_container_name:
             return
@@ -506,18 +532,28 @@ class ServiceManager:
                 if state.unload_path:
                     await self.unload(state.service_id, reason="idle")
                 elif state.docker_container_name:
-                    # No API unload endpoint — stop the container to release VRAM
-                    logger.info(
-                        "service_idle_container_stop",
-                        service_id=state.service_id,
-                        idle_seconds=int(idle_for.total_seconds()),
-                    )
-                    await self._stop_container(state)
+                    idle_seconds = int(idle_for.total_seconds())
+                    if state.idle_action == "restart":
+                        # Restart keeps the UI accessible; VRAM is freed during startup.
+                        logger.info(
+                            "service_idle_container_restart",
+                            service_id=state.service_id,
+                            idle_seconds=idle_seconds,
+                        )
+                        await self._restart_container(state)
+                    else:
+                        logger.info(
+                            "service_idle_container_stop",
+                            service_id=state.service_id,
+                            idle_seconds=idle_seconds,
+                        )
+                        await self._stop_container(state)
                     state.runtime_loaded = False
                     state.active_model_ref = None
                     state.last_unload_at = now
-                    state.status = "idle"
-                    state.detail = "unloaded:idle"
+                    state.last_activity_at = None  # reset so timer starts fresh after restart
+                    state.status = "idle" if state.idle_action == "stop" else "restarting"
+                    state.detail = f"unloaded:idle:{state.idle_action}"
                     await self._publish_state(state, "runtime_unloaded")
             except Exception:
                 continue
