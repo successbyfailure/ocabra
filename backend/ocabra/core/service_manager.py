@@ -482,24 +482,29 @@ class ServiceManager:
         ]
 
     async def pressure_evict(self, service_id: str) -> bool:
-        """Stop a service to free VRAM under model-load pressure.
+        """Evict a service to free VRAM under model-load pressure.
 
-        Prefers stopping the Docker container (instant VRAM release) over the
-        HTTP unload endpoint. Returns True if the service was stopped.
+        Respects idle_action: services with idle_action="restart" are restarted
+        (UI stays accessible) rather than stopped. Returns True if evicted.
         """
         state = self._states.get(service_id)
         if not state or not state.enabled or not state.service_alive:
             return False
 
         now = datetime.now(timezone.utc)
-        logger.info("service_pressure_evict", service_id=service_id)
+        logger.info("service_pressure_evict", service_id=service_id, idle_action=state.idle_action)
 
         if state.docker_container_name:
-            await self._stop_container(state)
+            if state.idle_action == "restart":
+                await self._restart_container(state)
+                state.status = "restarting"
+            else:
+                await self._stop_container(state)
+                state.status = "idle"
             state.runtime_loaded = False
             state.active_model_ref = None
             state.last_unload_at = now
-            state.status = "idle"
+            state.last_activity_at = None
             state.detail = "unloaded:pressure"
             await self._publish_state(state, "runtime_unloaded")
             return True
