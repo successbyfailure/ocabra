@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-_ENSURE_LOAD_TIMEOUT_S = 180
+def _ensure_load_timeout_s() -> int:
+    from ocabra.config import settings
+    return max(60, int(settings.model_load_wait_timeout_s))
 
 
 def _openai_error(
@@ -117,7 +119,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
             return state
 
     if state and state.status == ModelStatus.LOADING:
-        for _ in range(_ENSURE_LOAD_TIMEOUT_S):
+        for _ in range(_ensure_load_timeout_s()):
             await asyncio.sleep(1)
             state = await model_manager.get_state(resolved_model_id)
             if state and state.status == ModelStatus.LOADED:

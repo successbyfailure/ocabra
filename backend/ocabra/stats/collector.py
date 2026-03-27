@@ -110,11 +110,23 @@ class StatsMiddleware(BaseHTTPMiddleware):
         started_at = datetime.now(timezone.utc)
         request_payload = await _extract_request_payload(request)
 
+        # Track in-flight requests so the pressure eviction loop can avoid
+        # evicting models that are currently serving a request.
+        inflight_model_id = _extract_model_id(request=request, body=request_payload)
+        try:
+            mm = request.app.state.model_manager
+        except AttributeError:
+            mm = None
+        if mm and inflight_model_id:
+            mm.begin_request(inflight_model_id)
+
         error_message: str | None = None
         response: Response | None = None
         try:
             response = await call_next(request)
         except Exception as exc:
+            if mm and inflight_model_id:
+                mm.end_request(inflight_model_id)
             error_message = str(exc)
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
@@ -135,6 +147,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     )
                 )
             raise
+
+        if mm and inflight_model_id:
+            mm.end_request(inflight_model_id)
 
         duration_ms = (time.monotonic() - start) * 1000
         if response.status_code >= 400:

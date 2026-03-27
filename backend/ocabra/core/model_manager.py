@@ -128,6 +128,24 @@ class ModelManager:
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
+        # In-flight request tracking: model_id → active request count
+        self._in_flight: dict[str, int] = {}
+
+    def begin_request(self, model_id: str) -> None:
+        """Mark one request as in-flight for this model."""
+        self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
+
+    def end_request(self, model_id: str) -> None:
+        """Mark one in-flight request for this model as complete."""
+        count = self._in_flight.get(model_id, 0)
+        if count <= 1:
+            self._in_flight.pop(model_id, None)
+        else:
+            self._in_flight[model_id] = count - 1
+
+    def is_busy(self, model_id: str) -> bool:
+        """Return True if there are in-flight requests for this model."""
+        return self._in_flight.get(model_id, 0) > 0
 
     async def _ensure_diarized_variants_for_whisper_models(self) -> None:
         snapshot = list(self._states.values())
@@ -463,7 +481,27 @@ class ModelManager:
                 requested_model_id=model_id,
                 candidates=candidates,
             )
+            drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
             for candidate_id in candidates:
+                # Wait for any in-flight requests to drain before evicting
+                if self.is_busy(candidate_id):
+                    logger.info(
+                        "pressure_eviction_drain_wait",
+                        requested_model_id=model_id,
+                        evicting_model_id=candidate_id,
+                        drain_timeout_s=drain_timeout_s,
+                    )
+                    for _ in range(drain_timeout_s * 2):
+                        if not self.is_busy(candidate_id):
+                            break
+                        await asyncio.sleep(0.5)
+                    if self.is_busy(candidate_id):
+                        logger.warning(
+                            "pressure_eviction_drain_timeout_skip",
+                            evicting_model_id=candidate_id,
+                        )
+                        continue  # skip — still busy, try next candidate
+
                 logger.info(
                     "pressure_eviction_attempt",
                     requested_model_id=model_id,

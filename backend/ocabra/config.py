@@ -137,6 +137,12 @@ class Settings(BaseSettings):
     # Model lifecycle
     idle_timeout_seconds: int = 300
     idle_eviction_check_interval_seconds: int = 15
+    # How long (seconds) ensure_loaded waits for a model that is currently loading.
+    # Covers: eviction of a busy model (drain) + actual model startup time.
+    # Large models (vLLM 70B, Whisper large-v3 + diarization) can take 10+ minutes.
+    model_load_wait_timeout_s: int = 720
+    # Max seconds to wait for in-flight requests to drain before pressure-evicting a model.
+    pressure_eviction_drain_timeout_s: int = 60
 
     # Interactive generation services
     hunyuan_base_url: str = "http://hunyuan:8080"
