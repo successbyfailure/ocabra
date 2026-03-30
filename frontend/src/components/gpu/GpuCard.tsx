@@ -1,5 +1,5 @@
 import type { GPUState } from "@/types"
-import { useGpuStore } from "@/stores/gpuStore"
+import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
 import { PowerGauge } from "./PowerGauge"
 import { VramBar } from "./VramBar"
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts"
@@ -14,8 +14,17 @@ const CHART_COLORS = {
   power: { stroke: "#f59e0b", fill: "#f59e0b20" },
 }
 
+// Downsample to at most 120 points for rendering — keeps the chart fast
+// while the store holds the full 60-min ring buffer.
+function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
+  if (pts.length <= max) return pts
+  const step = pts.length / max
+  return Array.from({ length: max }, (_, i) => pts[Math.round(i * step)])
+}
+
 function MiniChart({ gpuIndex }: { gpuIndex: number }) {
-  const history = useGpuStore((s) => s.history[gpuIndex] ?? [])
+  const raw = useGpuStore((s) => s.history[gpuIndex] ?? [])
+  const history = downsample(raw, 120)
   if (history.length < 2) return null
 
   return (

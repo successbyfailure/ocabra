@@ -8,7 +8,7 @@ export interface GpuHistoryPoint {
   powerPct: number   // powerDrawW / powerLimitW * 100
 }
 
-const HISTORY_LEN = 60 // ~2 min at 2s poll interval
+const HISTORY_LEN = 1800 // 60 min at 2s poll interval
 
 interface GPUStore {
   gpus: GPUState[]
