@@ -1,4 +1,4 @@
-import { Pencil, Pin, PinOff, Play, Square, Trash2 } from "lucide-react"
+import { Cpu, Pencil, Pin, PinOff, Play, Square, Trash2 } from "lucide-react"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import type { ModelState } from "@/types"
@@ -11,6 +11,7 @@ interface ModelCardProps {
   onTogglePin: (model: ModelState) => void
   onConfigure: (model: ModelState) => void
   onDelete: (model: ModelState) => void
+  onCompile?: (model: ModelState) => void
 }
 
 function modelType(model: ModelState): string {
@@ -63,7 +64,7 @@ function summarizeError(model: ModelState): { message: string; suggestTrustRemot
   }
 }
 
-export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfigure, onDelete }: ModelCardProps) {
+export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfigure, onDelete, onCompile }: ModelCardProps) {
   const isLoaded = model.status === "loaded" || model.status === "loading"
   const isUnloaded = model.status === "unloaded" || model.status === "unloading"
   const errorHint = model.status === "error" ? summarizeError(model) : null
@@ -126,6 +127,17 @@ export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfig
             >
               <Pencil size={14} />
             </button>
+            {onCompile && model.backendType === "vllm" && (
+              <button
+                type="button"
+                onClick={() => onCompile(model)}
+                disabled={busy}
+                className="rounded-md border border-purple-500/40 p-1.5 text-purple-300 hover:bg-purple-500/10 disabled:opacity-40"
+                title="Compilar engine TensorRT-LLM"
+              >
+                <Cpu size={14} />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onDelete(model)}

@@ -373,6 +373,30 @@ export interface ServiceState {
   detail: string | null
 }
 
+// TRT-LLM compile jobs
+export type CompileStatus = "pending" | "running" | "done" | "failed" | "cancelled"
+export type CompilePhase = "convert" | "build" | null
+
+export interface CompileJob {
+  jobId: string
+  sourceModel: string
+  engineName: string
+  gpuIndices: number[]
+  dtype: string
+  config: {
+    maxBatchSize: number
+    maxInputLen: number
+    maxSeqLen: number
+  }
+  status: CompileStatus
+  phase: CompilePhase
+  progressPct: number
+  errorDetail: string | null
+  engineDir: string | null
+  startedAt: string | null
+  finishedAt: string | null
+}
+
 // WebSocket events
 export type WSEvent =
   | { type: "gpu_stats"; data: GPUState[] }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { CompileModal } from "@/components/models/CompileModal"
 import { ModelCard } from "@/components/models/ModelCard"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
@@ -26,6 +27,7 @@ export function Models() {
   const [busyModelId, setBusyModelId] = useState<string | null>(null)
   const [configModel, setConfigModel] = useState<ModelState | null>(null)
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
+  const [compileModel, setCompileModel] = useState<ModelState | null>(null)
 
   useWebSocket()
 
@@ -218,6 +220,7 @@ export function Models() {
                   onTogglePin={(item) => void togglePin(item)}
                   onConfigure={(item) => setConfigModel(item)}
                   onDelete={(item) => setDeleteModel(item)}
+                  onCompile={(item) => setCompileModel(item)}
                 />
               ))}
             </tbody>
@@ -240,6 +243,13 @@ export function Models() {
         open={Boolean(configModel)}
         onOpenChange={(open) => !open && setConfigModel(null)}
         onSave={saveConfig}
+      />
+
+      <CompileModal
+        model={compileModel}
+        open={Boolean(compileModel)}
+        onOpenChange={(open) => !open && setCompileModel(null)}
+        onLoadNow={(modelId) => void runAction(modelId, () => loadModel(modelId))}
       />
 
       <Dialog.Root open={Boolean(deleteModel)} onOpenChange={(next) => !next && setDeleteModel(null)}>

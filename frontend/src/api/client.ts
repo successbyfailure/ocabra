@@ -23,6 +23,7 @@ import type {
   OverviewStats,
   StatsParams,
   ServiceState,
+  CompileJob,
 } from "@/types"
 
 const BASE = ""
@@ -493,6 +494,32 @@ function toServiceState(raw: unknown): ServiceState {
   }
 }
 
+function toCompileJob(raw: unknown): CompileJob {
+  const data = isRecord(raw) ? raw : {}
+  const cfg = isRecord(data.config) ? data.config : {}
+  return {
+    jobId: String(data.job_id ?? data.jobId ?? ""),
+    sourceModel: String(data.source_model ?? data.sourceModel ?? ""),
+    engineName: String(data.engine_name ?? data.engineName ?? ""),
+    gpuIndices: Array.isArray(data.gpu_indices ?? data.gpuIndices)
+      ? ((data.gpu_indices ?? data.gpuIndices) as unknown[]).map(Number)
+      : [],
+    dtype: String(data.dtype ?? "fp16"),
+    config: {
+      maxBatchSize: Number(cfg.max_batch_size ?? cfg.maxBatchSize ?? 1),
+      maxInputLen: Number(cfg.max_input_len ?? cfg.maxInputLen ?? 2048),
+      maxSeqLen: Number(cfg.max_seq_len ?? cfg.maxSeqLen ?? 4096),
+    },
+    status: String(data.status ?? "pending") as CompileJob["status"],
+    phase: (data.phase ?? null) as CompileJob["phase"],
+    progressPct: Number(data.progress_pct ?? data.progressPct ?? 0),
+    errorDetail: (data.error_detail ?? data.errorDetail ?? null) as string | null,
+    engineDir: (data.engine_dir ?? data.engineDir ?? null) as string | null,
+    startedAt: (data.started_at ?? data.startedAt ?? null) as string | null,
+    finishedAt: (data.finished_at ?? data.finishedAt ?? null) as string | null,
+  }
+}
+
 export const api = {
   gpus: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
@@ -610,5 +637,33 @@ export const api = {
       const result = await request<{ synced_models: number }>("POST", "/ocabra/config/litellm/sync")
       return { syncedModels: result.synced_models }
     },
+  },
+
+  trtllm: {
+    compile: async (body: {
+      modelId: string
+      gpuIndices: number[]
+      dtype: string
+      maxBatchSize: number
+      maxInputLen: number
+      maxSeqLen: number
+      engineName: string
+    }): Promise<CompileJob> =>
+      toCompileJob(
+        await request<unknown>("POST", "/ocabra/trtllm/compile", {
+          model_id: body.modelId,
+          gpu_indices: body.gpuIndices,
+          dtype: body.dtype,
+          max_batch_size: body.maxBatchSize,
+          max_input_len: body.maxInputLen,
+          max_seq_len: body.maxSeqLen,
+          engine_name: body.engineName,
+        }),
+      ),
+    list: async (): Promise<CompileJob[]> =>
+      (await request<unknown[]>("GET", "/ocabra/trtllm/compile")).map(toCompileJob),
+    cancel: async (jobId: string): Promise<CompileJob> =>
+      toCompileJob(await request<unknown>("DELETE", `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}`)),
+    streamUrl: (jobId: string): string => `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}/stream`,
   },
 }
