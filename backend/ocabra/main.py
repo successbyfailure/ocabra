@@ -211,6 +211,12 @@ async def lifespan(app: FastAPI):
     model_manager.set_service_manager(service_manager)
     logger.info("service_manager_ready")
 
+    from ocabra.core.trtllm_compile_manager import TrtllmCompileManager
+    trtllm_compile_manager = TrtllmCompileManager()
+    await trtllm_compile_manager.start()
+    app.state.trtllm_compile_manager = trtllm_compile_manager
+    logger.info("trtllm_compile_manager_ready")
+
     idle_eviction_stop = asyncio.Event()
     idle_eviction_task = asyncio.create_task(
         _idle_eviction_loop(model_manager, idle_eviction_stop),
@@ -269,6 +275,7 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await service_health_task
 
+    await trtllm_compile_manager.stop()
     await gpu_manager.stop()
 
     from ocabra.redis_client import close_redis
@@ -337,4 +344,8 @@ from ocabra.api.internal.stats import router as stats_router  # noqa: E402
 app.include_router(metrics_router)
 app.include_router(config_router, prefix="/ocabra")
 app.include_router(stats_router, prefix="/ocabra")
+
+# C-7: TensorRT-LLM compile
+from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
+app.include_router(trtllm_router, prefix="/ocabra")
 # ─────────────────────────────────────────────────────────────
