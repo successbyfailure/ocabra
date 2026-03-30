@@ -60,6 +60,12 @@ Pendiente para cierre de plan:
 - Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.
 - Revisar tuning fino de scheduler de schedules (cron windows complejas, observabilidad y métricas de ejecución).
 
+Nuevas funcionalidades planificadas:
+- **Compilación de engines TRT-LLM desde la UI** — permitir compilar engines TensorRT-LLM
+  directamente desde oCabra, con soporte para 1 GPU o 2 GPUs (tensor parallelism).
+  Caso de uso principal: `Qwen3.5-27B-GPTQ-Int4` en GPU 1 (3090).
+  Plan completo en `docs/tasks/trtllm-compile-ui-plan.md`.
+
 ---
 
 ## Arquitectura

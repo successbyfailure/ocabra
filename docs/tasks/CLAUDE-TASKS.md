@@ -233,3 +233,44 @@ Cuando los streams 3-A, 3-B y todos los de frontend (4-A/B/C/D) estén mergeados
 ### Señal de finalización
 - Rama `feat/5-integrations` mergeada en `main`.
 - `docs/agents/stream-5-integrations.md` → `[x] Completado`.
+
+---
+
+## TAREA C-7 — Compilación de engines TensorRT-LLM desde la UI
+
+**Estado:** PENDIENTE
+**Rama:** `feat/trtllm-compile-ui`
+**Plan completo:** `docs/tasks/trtllm-compile-ui-plan.md`
+
+### Cuándo entrar
+Cuando el usuario lo solicite. No tiene dependencias bloqueantes (el backend TRT-LLM ya existe).
+Prerequisito práctico: imagen Docker `nvcr.io/nvidia/tensorrt-llm/release:latest` descargada.
+
+### Resumen
+
+Permitir compilar engines TRT-LLM desde la UI sin salir de oCabra. El usuario elige un modelo
+HuggingFace descargado, configura parámetros (GPU, dtype, batch size, longitud de contexto)
+y lanza la compilación con progreso en tiempo real.
+
+### Fases (ver plan completo para detalle)
+
+**Fase 1 — Backend**
+1. Migración Alembic: tabla `trtllm_compile_jobs`
+2. `backend/ocabra/core/trtllm_compile_manager.py` — gestión de jobs, Docker en 2 fases (convert + build), progreso via Redis
+3. `backend/ocabra/api/internal/trtllm.py` — endpoints REST + SSE
+4. Tests con mock Docker
+
+**Fase 2 — Frontend**
+1. `frontend/src/components/models/CompileModal.tsx` — formulario con estimación VRAM y advertencias
+2. Progreso SSE en tiempo real
+3. Integración en páginas Models y Explore
+4. Panel de historial de compilaciones
+
+**Fase 3 — Validación**
+1. Compilar `Qwen/Qwen3.5-27B-GPTQ-Int4` en GPU 1 sola (caso principal)
+2. Compilar modelo pequeño en TP=2 (ambas GPUs) para validar ese flujo
+3. Smoke test sobre engines compilados
+
+### Señal de finalización
+- Rama `feat/trtllm-compile-ui` mergeada en `main`.
+- Engine de `Qwen3.5-27B` compilado y cargado correctamente desde la UI.
