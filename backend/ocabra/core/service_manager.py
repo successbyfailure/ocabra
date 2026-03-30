@@ -333,7 +333,22 @@ class ServiceManager:
         if not state.enabled:
             raise RuntimeError(f"Service '{service_id}' is disabled")
         if not state.unload_path:
-            raise RuntimeError(f"Service '{service_id}' does not expose an unload endpoint")
+            # No HTTP unload endpoint — fall back to container restart/stop.
+            if not state.docker_container_name:
+                raise RuntimeError(f"Service '{service_id}' does not expose an unload endpoint")
+            async with self._lock:
+                now = datetime.now(timezone.utc)
+                if state.idle_action == "restart":
+                    await self._restart_container(state)
+                else:
+                    await self._stop_container(state)
+                state.runtime_loaded = False
+                state.active_model_ref = None
+                state.last_unload_at = now
+                state.detail = f"unloaded:{reason}"
+                logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
+                await self._publish_state(state, "runtime_unloaded")
+            return state
 
         url = f"{state.base_url}{state.unload_path}"
         method = state.unload_method.upper()
