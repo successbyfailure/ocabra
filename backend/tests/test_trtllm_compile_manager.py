@@ -241,15 +241,25 @@ async def test_docker_cmd_single_gpu() -> None:
     assert "device=1" in " ".join(convert_cmd)
     assert "device=1" in " ".join(build_cmd)
 
-    # TP size
+    # Convert uses python3 -c (TRT-LLM 1.0, no trtllm-convert binary)
+    assert "python3" in convert_cmd
+    assert "-c" in convert_cmd
+
+    # TP size passed as arg to convert script
     assert "--tp_size" in convert_cmd
     tp_idx = convert_cmd.index("--tp_size")
     assert convert_cmd[tp_idx + 1] == "1"
 
+    # dtype mapped correctly: fp16 → float16
+    assert "--dtype" in convert_cmd
+    dtype_idx = convert_cmd.index("--dtype")
+    assert convert_cmd[dtype_idx + 1] == "float16"
+
     # Source model path
     assert "Qwen--Qwen3.5-27B-GPTQ-Int4" in " ".join(convert_cmd)
 
-    # Build params
+    # Build uses trtllm-build
+    assert "trtllm-build" in build_cmd
     assert "--max_batch_size" in build_cmd
     assert "--max_input_len" in build_cmd
     assert "--max_seq_len" in build_cmd
@@ -278,6 +288,7 @@ async def test_docker_cmd_two_gpus() -> None:
         convert_cmd = manager._build_docker_cmd(state, "convert")
 
     assert "device=0,1" in " ".join(convert_cmd)
+    assert "--tp_size" in convert_cmd
     tp_idx = convert_cmd.index("--tp_size")
     assert convert_cmd[tp_idx + 1] == "2"
 

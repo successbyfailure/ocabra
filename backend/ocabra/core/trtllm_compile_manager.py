@@ -340,6 +340,50 @@ class TrtllmCompileManager:
 
     # ── Docker command builders ──────────────────────────────────
 
+    # TRT-LLM 1.0 uses python3 -c for the convert step (no trtllm-convert binary).
+    # The script detects architecture from config.json and uses the right model class.
+    # Passed as a -c argument so no shell escaping is needed (subprocess list form).
+    _CONVERT_SCRIPT = (
+        "import argparse,json,sys;"
+        "p=argparse.ArgumentParser();"
+        "p.add_argument('--model_dir');"
+        "p.add_argument('--output_dir');"
+        "p.add_argument('--dtype',default='float16');"
+        "p.add_argument('--tp_size',type=int,default=1);"
+        "a=p.parse_args(sys.argv[1:]);"
+        "cfg=json.load(open(a.model_dir+'/config.json'));"
+        "arch=cfg.get('architectures',['?'])[0];"
+        "print('[convert] arch='+arch,flush=True);"
+        "from tensorrt_llm.models import MODEL_MAP;"
+        "cls=MODEL_MAP.get(arch);"
+        "cls or (print('[convert] ERROR: arch '+arch+' not supported by TRT-LLM 1.0',file=sys.stderr) or sys.exit(1));"
+        "print('[convert] class='+cls.__name__,flush=True);"
+        "from tensorrt_llm.mapping import Mapping;"
+        "qcfg=cfg.get('quantization_config',{});"
+        "quant=None;"
+        "qm=qcfg.get('quant_method','');"
+        "qm=='gptq' and (print('[convert] GPTQ detected',flush=True),);"
+        "from tensorrt_llm.models.modeling_utils import QuantConfig;"
+        "from tensorrt_llm.quantization import QuantAlgo;"
+        "quant=QuantConfig(quant_algo=QuantAlgo.W4A16_GPTQ) if qm=='gptq' else None;"
+        "import os;os.makedirs(a.output_dir,exist_ok=True);"
+        "print('[convert] loading model on cpu ...',flush=True);"
+        "m=cls.from_hugging_face(a.model_dir,dtype=a.dtype,"
+        "mapping=Mapping(world_size=a.tp_size,tp_size=a.tp_size),"
+        "quant_config=quant,load_model_on_cpu=True);"
+        "print('[convert] saving checkpoint ...',flush=True);"
+        "m.save_checkpoint(a.output_dir);"
+        "print('[convert] done',flush=True)"
+    )
+
+    # dtype names differ: TRT-LLM uses 'float16', 'bfloat16'; user picks 'fp16', 'bf16'
+    _DTYPE_MAP = {
+        "fp16": "float16",
+        "bf16": "bfloat16",
+        "int8": "int8",
+        "fp8": "fp8",
+    }
+
     def _build_docker_cmd(self, state: CompileJobState, phase: str) -> list[str]:
         docker_bin = settings.tensorrt_llm_docker_bin or "docker"
         image = settings.tensorrt_llm_docker_image or "nvcr.io/nvidia/tensorrt-llm/release:latest"
@@ -348,11 +392,11 @@ class TrtllmCompileManager:
 
         gpu_spec = ",".join(str(i) for i in state.gpu_indices)
         tp_size = len(state.gpu_indices)
+        dtype_trtllm = self._DTYPE_MAP.get(state.dtype, state.dtype)
 
         # Source model path inside container
         # model_id format: "vllm/Org/Model" or "Org/Model"
         raw_model = state.source_model
-        # Strip backend prefix like "vllm/" or "tensorrt_llm/"
         if "/" in raw_model:
             parts = raw_model.split("/", 1)
             if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
@@ -363,19 +407,22 @@ class TrtllmCompileManager:
         ckpt_dir = f"{models_container}/tensorrt_llm/{state.engine_name}/tllm_ckpt"
         engine_dir = f"{models_container}/tensorrt_llm/{state.engine_name}/engine"
 
+        # Both phases need GPU access (TRT-LLM python libs require CUDA even for convert)
         base_cmd = [
             docker_bin, "run", "--rm",
             "--gpus", f"device={gpu_spec}",
             "-v", f"{models_host}:{models_container}",
+            "--ipc", "host",
         ]
 
         if phase == "convert":
+            # TRT-LLM 1.0: no trtllm-convert binary — use Python API via python3 -c
             return base_cmd + [
                 image,
-                "trtllm-convert",
+                "python3", "-c", self._CONVERT_SCRIPT,
                 "--model_dir", model_dir,
                 "--output_dir", ckpt_dir,
-                "--dtype", state.dtype,
+                "--dtype", dtype_trtllm,
                 "--tp_size", str(tp_size),
             ]
         else:  # build
@@ -388,7 +435,6 @@ class TrtllmCompileManager:
                 "--max_batch_size", str(cfg.get("max_batch_size", 1)),
                 "--max_input_len", str(cfg.get("max_input_len", 2048)),
                 "--max_seq_len", str(cfg.get("max_seq_len", 4096)),
-                "--tp_size", str(tp_size),
             ]
 
     def _engine_dir(self, engine_name: str) -> str:
