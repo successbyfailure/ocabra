@@ -129,6 +129,64 @@ async def _service_health_loop(service_manager, stop_event: asyncio.Event) -> No
     logger.info("service_health_loop_stopped")
 
 
+async def _scan_and_register_trtllm_engines(model_manager) -> None:
+    """Discover compiled TRT-LLM engines on disk and register any not yet in the model manager."""
+    from pathlib import Path
+    from ocabra.config import settings
+
+    # Use the container-side path (TENSORRT_LLM_ENGINES_DIR or models_dir/tensorrt_llm)
+    if settings.tensorrt_llm_engines_dir:
+        engines_root = Path(settings.tensorrt_llm_engines_dir)
+    elif settings.models_dir:
+        engines_root = Path(settings.models_dir) / "tensorrt_llm"
+    else:
+        return
+    if not engines_root.exists():
+        return
+
+    registered = 0
+    for engine_dir in sorted(engines_root.iterdir()):
+        if not engine_dir.is_dir():
+            continue
+        engine_subdir = engine_dir / "engine"
+        if not engine_subdir.exists():
+            continue
+        if not (engine_subdir / "config.json").exists():
+            continue
+        has_engine = any(engine_subdir.glob("*.engine"))
+        if not has_engine:
+            continue
+
+        engine_name = engine_dir.name
+        model_id = f"tensorrt_llm/{engine_name}"
+        if model_id in model_manager._states:
+            continue
+
+        try:
+            import json
+            cfg = json.loads((engine_subdir / "config.json").read_text())
+            build_cfg = cfg.get("build_config", {})
+            extra_config = {
+                "engine_dir": str(engine_subdir),
+                "launch_mode": "docker",
+                "max_batch_size": build_cfg.get("max_batch_size", 1),
+                "context_length": build_cfg.get("max_seq_len", 4096),
+            }
+            await model_manager.add_model(
+                model_id=model_id,
+                backend_type="tensorrt_llm",
+                display_name=engine_name,
+                extra_config=extra_config,
+            )
+            registered += 1
+            logger.info("trtllm_engine_scanned_registered", model_id=model_id)
+        except Exception as exc:
+            logger.warning("trtllm_engine_scan_failed", engine_name=engine_name, error=str(exc))
+
+    if registered:
+        logger.info("trtllm_engines_registered_on_startup", count=registered)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────
@@ -212,9 +270,10 @@ async def lifespan(app: FastAPI):
     logger.info("service_manager_ready")
 
     from ocabra.core.trtllm_compile_manager import TrtllmCompileManager
-    trtllm_compile_manager = TrtllmCompileManager()
+    trtllm_compile_manager = TrtllmCompileManager(model_manager=model_manager)
     await trtllm_compile_manager.start()
     app.state.trtllm_compile_manager = trtllm_compile_manager
+    await _scan_and_register_trtllm_engines(model_manager)
     logger.info("trtllm_compile_manager_ready")
 
     idle_eviction_stop = asyncio.Event()

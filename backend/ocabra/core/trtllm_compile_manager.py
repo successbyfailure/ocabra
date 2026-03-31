@@ -89,12 +89,17 @@ class TrtllmCompileManager:
         await manager.stop()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model_manager: Any = None) -> None:
         self._queue: asyncio.Queue[CompileJobState] = asyncio.Queue()
         self._active: CompileJobState | None = None
         self._history: dict[str, CompileJobState] = {}
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
+        self._model_manager = model_manager
+
+    def set_model_manager(self, model_manager: Any) -> None:
+        """Inject model manager for auto-registration after compile."""
+        self._model_manager = model_manager
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -271,6 +276,7 @@ class TrtllmCompileManager:
                 job_id=state.job_id,
                 engine_dir=engine_dir,
             )
+            await self._register_engine(state)
 
         except Exception as exc:
             state.status = "failed"
@@ -438,8 +444,40 @@ class TrtllmCompileManager:
             ]
 
     def _engine_dir(self, engine_name: str) -> str:
+        """Return the host-side engine path (for Docker mounts and DB storage)."""
         models_host = settings.tensorrt_llm_docker_models_mount_host or "/docker/ai-models/ocabra/models"
         return f"{models_host}/tensorrt_llm/{engine_name}/engine"
+
+    def _engine_dir_container(self, engine_name: str) -> str:
+        """Return the container-side engine path (used by the backend at runtime)."""
+        if settings.tensorrt_llm_engines_dir:
+            return f"{settings.tensorrt_llm_engines_dir}/{engine_name}/engine"
+        models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
+        return f"{models_container}/tensorrt_llm/{engine_name}/engine"
+
+    async def _register_engine(self, state: CompileJobState) -> None:
+        """Register a successfully compiled engine as a tensorrt_llm model."""
+        if self._model_manager is None:
+            logger.warning("trtllm_no_model_manager_skipping_registration", engine=state.engine_name)
+            return
+        model_id = f"tensorrt_llm/{state.engine_name}"
+        extra_config = {
+            "engine_dir": self._engine_dir_container(state.engine_name),
+            "launch_mode": "docker",
+            "max_batch_size": state.config.get("max_batch_size", 1),
+            "context_length": state.config.get("max_seq_len", 4096),
+        }
+        try:
+            await self._model_manager.add_model(
+                model_id=model_id,
+                backend_type="tensorrt_llm",
+                display_name=state.engine_name,
+                preferred_gpu=state.gpu_indices[0] if state.gpu_indices else None,
+                extra_config=extra_config,
+            )
+            logger.info("trtllm_engine_registered", model_id=model_id)
+        except Exception as exc:
+            logger.warning("trtllm_engine_registration_failed", model_id=model_id, error=str(exc))
 
     # ── Redis helpers ────────────────────────────────────────────
 

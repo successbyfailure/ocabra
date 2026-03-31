@@ -665,5 +665,8 @@ export const api = {
     cancel: async (jobId: string): Promise<CompileJob> =>
       toCompileJob(await request<unknown>("DELETE", `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}`)),
     streamUrl: (jobId: string): string => `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}/stream`,
+    deleteEngine: async (engineName: string): Promise<void> => {
+      await request<unknown>("DELETE", `/ocabra/trtllm/engines/${encodeURIComponent(engineName)}`)
+    },
   },
 }

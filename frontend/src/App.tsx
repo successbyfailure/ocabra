@@ -6,6 +6,7 @@ import { Explore } from "@/pages/Explore"
 import { Playground } from "@/pages/Playground"
 import { Stats } from "@/pages/Stats"
 import { Settings } from "@/pages/Settings"
+import { TrtllmEngines } from "@/pages/TrtllmEngines"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/models" element={<Models />} />
+        <Route path="/engines" element={<TrtllmEngines />} />
         <Route path="/explore" element={<Explore />} />
         <Route path="/playground" element={<Playground />} />
         <Route path="/stats" element={<Stats />} />

@@ -1,21 +1,25 @@
 """TensorRT-LLM compilation API.
 
 Endpoints:
-    POST   /ocabra/trtllm/compile              — submit a compile job
-    GET    /ocabra/trtllm/compile               — list all jobs (history)
-    GET    /ocabra/trtllm/compile/{job_id}/stream — SSE progress stream
-    DELETE /ocabra/trtllm/compile/{job_id}      — cancel a job
+    POST   /ocabra/trtllm/compile                    — submit a compile job
+    GET    /ocabra/trtllm/compile                     — list all jobs (history)
+    GET    /ocabra/trtllm/compile/{job_id}/stream     — SSE progress stream
+    DELETE /ocabra/trtllm/compile/{job_id}            — cancel a job
+    DELETE /ocabra/trtllm/engines/{engine_name}       — delete engine + unregister model
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ocabra.config import settings
 from ocabra.core.trtllm_compile_manager import CompileRequest
 from ocabra.redis_client import subscribe
 
@@ -183,6 +187,54 @@ async def cancel_compile_job(job_id: str, request: Request) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return state.to_dict()
+
+
+@router.delete("/trtllm/engines/{engine_name}", status_code=200)
+async def delete_engine(engine_name: str, request: Request) -> dict:
+    """Delete a compiled TensorRT-LLM engine from disk and unregister its model.
+
+    Parameters:
+        engine_name: Engine directory name (e.g. 'TinyLlama--TinyLlama-1.1B-fp16').
+
+    Returns:
+        dict with engine_name and deleted=True.
+    """
+    # Unload + unregister from model manager
+    model_manager = getattr(request.app.state, "model_manager", None)
+    model_id = f"tensorrt_llm/{engine_name}"
+    if model_manager is not None and model_id in model_manager._states:
+        try:
+            await model_manager.delete_model(model_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to unregister model: {exc}") from exc
+
+    # Delete engine files from disk (use container-side path)
+    if settings.tensorrt_llm_engines_dir:
+        engines_base = Path(settings.tensorrt_llm_engines_dir)
+    else:
+        models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
+        engines_base = Path(models_container) / "tensorrt_llm"
+    engine_root = engines_base / engine_name
+    if engine_root.exists():
+        try:
+            await asyncio.to_thread(shutil.rmtree, str(engine_root))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to delete engine files: {exc}") from exc
+
+    # Remove compile job records for this engine from DB
+    try:
+        import sqlalchemy as sa
+        from ocabra.database import AsyncSessionLocal
+        from ocabra.db.trtllm import TrtllmCompileJob
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                sa.delete(TrtllmCompileJob).where(TrtllmCompileJob.engine_name == engine_name)
+            )
+            await session.commit()
+    except Exception:
+        pass  # DB cleanup is best-effort
+
+    return {"engine_name": engine_name, "deleted": True}
 
 
 # ── Helpers ──────────────────────────────────────────────────────

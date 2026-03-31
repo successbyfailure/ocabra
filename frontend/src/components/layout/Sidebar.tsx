@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom"
 import {
   LayoutDashboard,
   Boxes,
+  Cpu,
   Search,
   MessageSquare,
   BarChart2,
@@ -17,6 +18,7 @@ interface SidebarProps {
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard",  icon: LayoutDashboard },
   { to: "/models",    label: "Models",     icon: Boxes },
+  { to: "/engines",   label: "Engines",    icon: Cpu },
   { to: "/explore",   label: "Explore",    icon: Search },
   { to: "/playground",label: "Playground", icon: MessageSquare },
   { to: "/stats",     label: "Stats",      icon: BarChart2 },
