@@ -320,9 +320,13 @@ class TensorRTLLMBackend(BackendInterface):
             engine_dir,
             engine_dir.parent,
         ):
-            if candidate.exists() and candidate.is_dir():
+            if candidate.exists() and candidate.is_dir() and self._has_tokenizer_files(candidate):
                 return candidate
         return None
+
+    @staticmethod
+    def _has_tokenizer_files(path: Path) -> bool:
+        return (path / "tokenizer.json").exists() or (path / "tokenizer_config.json").exists()
 
     async def _wait_for_startup(self, model_id: str, port: int, timeout_s: int) -> None:
         deadline = asyncio.get_running_loop().time() + timeout_s

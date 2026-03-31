@@ -32,7 +32,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def _serve_args(args: argparse.Namespace) -> list[str]:
+    # TRT-LLM 1.0: trtllm-serve is a multi-command CLI, inference uses "serve" subcommand
     cmd = [
+        "serve",
         args.engine_dir,
         "--host",
         args.host,
@@ -65,9 +67,10 @@ def _map_path_to_host(path: str, mount_container: str, mount_host: str) -> str:
 
 def _dockerize_serve_args(args: argparse.Namespace, serve_args: list[str]) -> list[str]:
     mapped = list(serve_args)
-    if mapped:
-        mapped[0] = _map_path_to_host(
-            mapped[0],
+    # serve_args[0] = "serve" (subcommand), serve_args[1] = engine_dir
+    if len(mapped) > 1:
+        mapped[1] = _map_path_to_host(
+            mapped[1],
             args.docker_models_mount_container,
             args.docker_models_mount_host,
         )

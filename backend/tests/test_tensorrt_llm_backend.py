@@ -137,3 +137,45 @@ def test_detect_disabled_reason_module_missing_module() -> None:
 
     assert backend.is_enabled() is False
     assert backend.disabled_reason == "serve module not available: tensorrt_llm.commands.serve"
+
+
+def test_tokenizer_resolution_skips_dirs_without_tokenizer_files(tmp_path: Path) -> None:
+    """_resolve_tokenizer_path must only return dirs that actually have tokenizer files."""
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    engine_parent = tmp_path
+    # Neither engine_dir nor its parent has tokenizer files → expect None
+
+    backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)
+    with patch("ocabra.backends.tensorrt_llm_backend.settings") as ms:
+        ms.models_dir = str(tmp_path / "models")
+        ms.tensorrt_llm_tokenizer_path = ""
+        result = backend._resolve_tokenizer_path("some/model", {}, engine_dir)
+
+    assert result is None
+
+
+def test_tokenizer_resolution_finds_hf_dir(tmp_path: Path) -> None:
+    """_resolve_tokenizer_path returns the first candidate with tokenizer files."""
+    hf_model = tmp_path / "models" / "huggingface" / "Org--Model"
+    hf_model.mkdir(parents=True)
+    (hf_model / "tokenizer.json").write_text("{}")
+    engine_dir = tmp_path / "engines" / "Org--Model" / "engine"
+    engine_dir.mkdir(parents=True)
+
+    backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)
+    with patch("ocabra.backends.tensorrt_llm_backend.settings") as ms:
+        ms.models_dir = str(tmp_path / "models")
+        ms.tensorrt_llm_tokenizer_path = ""
+        result = backend._resolve_tokenizer_path("Org--Model", {}, engine_dir)
+
+    assert result is not None
+    assert "huggingface" in str(result)
+
+
+def test_has_tokenizer_files(tmp_path: Path) -> None:
+    d = tmp_path / "notoken"
+    d.mkdir()
+    assert TensorRTLLMBackend._has_tokenizer_files(d) is False
+    (d / "tokenizer_config.json").write_text("{}")
+    assert TensorRTLLMBackend._has_tokenizer_files(d) is True

@@ -443,6 +443,22 @@ class TrtllmCompileManager:
                 "--max_seq_len", str(cfg.get("max_seq_len", 4096)),
             ]
 
+    def _resolve_hf_tokenizer_path(self, source_model: str) -> str | None:
+        """Derive the HuggingFace model directory from source_model (used as tokenizer)."""
+        raw = source_model
+        parts = raw.split("/", 1)
+        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
+            raw = parts[1]
+        hf_dir_name = raw.replace("/", "--")
+        models_container = settings.tensorrt_llm_engines_dir.rsplit("/tensorrt_llm", 1)[0] \
+            if settings.tensorrt_llm_engines_dir and "/tensorrt_llm" in settings.tensorrt_llm_engines_dir \
+            else (settings.models_dir or "/data/models")
+        candidate = f"{models_container}/huggingface/{hf_dir_name}"
+        from pathlib import Path
+        if Path(candidate).exists():
+            return candidate
+        return None
+
     def _engine_dir(self, engine_name: str) -> str:
         """Return the host-side engine path (for Docker mounts and DB storage)."""
         models_host = settings.tensorrt_llm_docker_models_mount_host or "/docker/ai-models/ocabra/models"
@@ -466,6 +482,7 @@ class TrtllmCompileManager:
             "launch_mode": "docker",
             "max_batch_size": state.config.get("max_batch_size", 1),
             "context_length": state.config.get("max_seq_len", 4096),
+            "tokenizer_path": self._resolve_hf_tokenizer_path(state.source_model),
         }
         try:
             await self._model_manager.add_model(

@@ -129,6 +129,45 @@ async def _service_health_loop(service_manager, stop_event: asyncio.Event) -> No
     logger.info("service_health_loop_stopped")
 
 
+def _find_tokenizer_for_engine(engine_name: str, models_root) -> str | None:
+    """Try to find a HuggingFace model directory to use as tokenizer for the given engine.
+
+    Strategy: strip known dtype/variant suffixes from engine_name and look for a
+    matching HuggingFace directory that has tokenizer files.
+    """
+    import re
+    from pathlib import Path
+
+    hf_root = Path(models_root) / "huggingface"
+    if not hf_root.exists():
+        return None
+
+    def has_tokenizer(p: Path) -> bool:
+        return (p / "tokenizer.json").exists() or (p / "tokenizer_config.json").exists()
+
+    # Exact match
+    exact = hf_root / engine_name
+    if exact.exists() and has_tokenizer(exact):
+        return str(exact)
+
+    # Strip common suffixes: -fp16, -bf16, -int8, -fp8, -test, -v2, -v3 etc.
+    stripped = re.sub(r"[-_](fp16|bf16|int8|fp8|int4|test|v\d+)(\b.*)?$", "", engine_name, flags=re.IGNORECASE)
+    if stripped != engine_name:
+        candidate = hf_root / stripped
+        if candidate.exists() and has_tokenizer(candidate):
+            return str(candidate)
+
+    # Find the longest-matching HF dir name that is a prefix of the engine name
+    best: Path | None = None
+    for hf_dir in hf_root.iterdir():
+        if not hf_dir.is_dir():
+            continue
+        if engine_name.startswith(hf_dir.name) and has_tokenizer(hf_dir):
+            if best is None or len(hf_dir.name) > len(best.name):
+                best = hf_dir
+    return str(best) if best else None
+
+
 async def _scan_and_register_trtllm_engines(model_manager) -> None:
     """Discover compiled TRT-LLM engines on disk and register any not yet in the model manager."""
     from pathlib import Path
@@ -166,12 +205,15 @@ async def _scan_and_register_trtllm_engines(model_manager) -> None:
             import json
             cfg = json.loads((engine_subdir / "config.json").read_text())
             build_cfg = cfg.get("build_config", {})
-            extra_config = {
+            tokenizer_path = _find_tokenizer_for_engine(engine_name, engines_root.parent)
+            extra_config: dict = {
                 "engine_dir": str(engine_subdir),
                 "launch_mode": "docker",
                 "max_batch_size": build_cfg.get("max_batch_size", 1),
                 "context_length": build_cfg.get("max_seq_len", 4096),
             }
+            if tokenizer_path:
+                extra_config["tokenizer_path"] = tokenizer_path
             await model_manager.add_model(
                 model_id=model_id,
                 backend_type="tensorrt_llm",
