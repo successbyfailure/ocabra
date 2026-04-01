@@ -668,5 +668,42 @@ export const api = {
     deleteEngine: async (engineName: string): Promise<void> => {
       await request<unknown>("DELETE", `/ocabra/trtllm/engines/${encodeURIComponent(engineName)}`)
     },
+    estimate: async (params: {
+      modelId: string
+      tpSize: number
+      dtype: string
+      maxBatchSize: number
+      maxSeqLen: number
+    }): Promise<VramEstimate> => {
+      const qs = new URLSearchParams({
+        model_id: params.modelId,
+        tp_size: String(params.tpSize),
+        dtype: params.dtype,
+        max_batch_size: String(params.maxBatchSize),
+        max_seq_len: String(params.maxSeqLen),
+      })
+      const raw = await request<Record<string, unknown>>("GET", `/ocabra/trtllm/estimate?${qs}`)
+      return {
+        estimatedParamsB: raw.estimated_params_b as number | null,
+        quant: raw.quant as string,
+        tpSize: raw.tp_size as number,
+        configFound: raw.config_found as boolean,
+        serve: raw.serve as VramEstimate["serve"],
+        build: raw.build as VramEstimate["build"],
+        disk: raw.disk as VramEstimate["disk"],
+        warnings: raw.warnings as string[],
+      }
+    },
   },
+}
+
+export interface VramEstimate {
+  estimatedParamsB: number | null
+  quant: string
+  tpSize: number
+  configFound: boolean
+  serve: { vramPerGpuMb: number; vramTotalMb: number; breakdown: { weightsMb: number; kvCacheMb: number; overheadMb: number } }
+  build: { vramPerGpuMb: number; vramTotalMb: number }
+  disk: { engineMb: number; checkpointMbTemp: number; totalPeakMb: number }
+  warnings: string[]
 }

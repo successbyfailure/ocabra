@@ -384,13 +384,15 @@ class TrtllmCompileManager:
         "    quant=QuantConfig(quant_algo=QuantAlgo.W4A16_GPTQ)\n"
         "    quant.group_size=qcfg.get('group_size',128)\n"
         "import os\nos.makedirs(a.output_dir,exist_ok=True)\n"
-        "print('[convert] loading model on cpu ...',flush=True)\n"
-        "m=cls.from_hugging_face(a.model_dir,dtype=a.dtype,"
-        "mapping=Mapping(world_size=a.tp_size,tp_size=a.tp_size),"
+        "for rank in range(a.tp_size):\n"
+        "    print(f'[convert] rank {rank}/{a.tp_size} loading model on cpu ...',flush=True)\n"
+        "    m=cls.from_hugging_face(a.model_dir,dtype=a.dtype,"
+        "mapping=Mapping(world_size=a.tp_size,tp_size=a.tp_size,rank=rank),"
         "quant_config=quant,load_model_on_cpu=True,**extra_kwargs)\n"
-        "print('[convert] saving checkpoint ...',flush=True)\n"
-        "m.save_checkpoint(a.output_dir)\n"
-        "print('[convert] done',flush=True)"
+        "    print(f'[convert] rank {rank}/{a.tp_size} saving checkpoint ...',flush=True)\n"
+        "    m.save_checkpoint(a.output_dir)\n"
+        "    del m\n"
+        "print('[convert] done all ranks',flush=True)"
     )
 
     # dtype names differ: TRT-LLM uses 'float16', 'bfloat16'; user picks 'fp16', 'bf16'
@@ -407,9 +409,12 @@ class TrtllmCompileManager:
         models_host = settings.tensorrt_llm_docker_models_mount_host or "/docker/ai-models/ocabra/models"
         models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
 
-        gpu_spec = ",".join(str(i) for i in state.gpu_indices)
         tp_size = len(state.gpu_indices)
         dtype_trtllm = self._DTYPE_MAP.get(state.dtype, state.dtype)
+        # Docker requires quoted value "device=0,1" for multiple GPU IDs;
+        # single GPU can use bare device=N format.
+        gpu_ids = ",".join(str(i) for i in state.gpu_indices)
+        gpu_spec = f'"device={gpu_ids}"' if tp_size > 1 else f"device={gpu_ids}"
 
         # Source model path inside container
         # model_id format: "vllm/Org/Model" or "Org/Model"
@@ -427,7 +432,7 @@ class TrtllmCompileManager:
         # Both phases need GPU access (TRT-LLM python libs require CUDA even for convert)
         base_cmd = [
             docker_bin, "run", "--rm",
-            "--gpus", f"device={gpu_spec}",
+            "--gpus", gpu_spec,
             "-v", f"{models_host}:{models_container}",
             "--ipc", "host",
         ]
@@ -450,11 +455,14 @@ class TrtllmCompileManager:
                 "--tp_size", str(tp_size),
             ]
         elif phase == "build":
+            # For TP>1, use --workers N so trtllm-build launches one worker per rank
+            workers_args = ["--workers", str(tp_size)] if tp_size > 1 else []
             return base_cmd + [
                 image,
                 "trtllm-build",
                 "--checkpoint_dir", ckpt_dir,
                 "--output_dir", engine_dir,
+                *workers_args,
                 *build_common,
             ]
         else:
