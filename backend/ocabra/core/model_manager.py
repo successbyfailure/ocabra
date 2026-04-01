@@ -359,8 +359,9 @@ class ModelManager:
                 backend_loaded = True
                 capabilities = await backend.get_capabilities(state.backend_model_id)
 
+                actual_gpu_indices = worker_info.gpu_indices or gpu_indices
                 state.worker_info = worker_info
-                state.current_gpu = gpu_indices
+                state.current_gpu = actual_gpu_indices
                 state.vram_used_mb = worker_info.vram_used_mb
                 state.capabilities = capabilities
                 state.status = ModelStatus.LOADED
@@ -368,9 +369,10 @@ class ModelManager:
                 state.error_message = None
 
                 if gpu_managed and self._gpu_manager:
-                    for gpu_idx in gpu_indices:
+                    vram_per_gpu = worker_info.vram_used_mb // max(1, len(actual_gpu_indices))
+                    for gpu_idx in actual_gpu_indices:
                         await self._gpu_manager.lock_vram(
-                            gpu_idx, worker_info.vram_used_mb, model_id
+                            gpu_idx, vram_per_gpu, model_id
                         )
 
                 self._worker_pool.set_worker(model_id, worker_info)

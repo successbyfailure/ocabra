@@ -278,6 +278,8 @@ class TrtllmCompileManager:
                 engine_dir=engine_dir,
             )
             await self._register_engine(state)
+            # Remove temporary checkpoint (not needed after engine is built)
+            await self._cleanup_checkpoint(state.engine_name)
 
         except Exception as exc:
             state.status = "failed"
@@ -519,6 +521,19 @@ class TrtllmCompileManager:
             return f"{settings.tensorrt_llm_engines_dir}/{engine_name}/engine"
         models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
         return f"{models_container}/tensorrt_llm/{engine_name}/engine"
+
+    async def _cleanup_checkpoint(self, engine_name: str) -> None:
+        """Delete the TRT-LLM checkpoint dir after a successful build to free disk space."""
+        import shutil
+        from pathlib import Path
+        models_host = settings.tensorrt_llm_docker_models_mount_host or "/docker/ai-models/ocabra/models"
+        ckpt_path = Path(models_host) / "tensorrt_llm" / engine_name / "tllm_ckpt"
+        if ckpt_path.exists():
+            try:
+                await asyncio.to_thread(shutil.rmtree, ckpt_path)
+                logger.info("trtllm_checkpoint_cleaned", path=str(ckpt_path))
+            except Exception as exc:
+                logger.warning("trtllm_checkpoint_cleanup_failed", path=str(ckpt_path), error=str(exc))
 
     async def _register_engine(self, state: CompileJobState) -> None:
         """Register a successfully compiled engine as a tensorrt_llm model."""

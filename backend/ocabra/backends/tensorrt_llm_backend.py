@@ -148,13 +148,22 @@ class TensorRTLLMBackend(BackendInterface):
             await self._kill_process(model_id)
             raise
 
+        # Determine actual GPU indices used: if engine is TP>1 but scheduler
+        # only assigned one GPU (because total VRAM fit on one), override with
+        # all available GPUs up to tp_size so UI shows correct GPU list.
+        engine_dir_loaded = self._resolve_engine_dir(model_id, extra_config)
+        scan_dir_loaded = engine_dir_loaded / "engine" if (engine_dir_loaded / "engine").is_dir() else engine_dir_loaded
+        tp_size = self._read_engine_tp_size(scan_dir_loaded)
+        actual_gpu_indices = gpu_indices if len(gpu_indices) >= tp_size else list(range(tp_size))
+
+        vram_estimate = await self.get_vram_estimate_mb(model_id)
         return WorkerInfo(
             backend_type="tensorrt_llm",
             model_id=model_id,
-            gpu_indices=gpu_indices,
+            gpu_indices=actual_gpu_indices,
             port=port,
             pid=process.pid or 0,
-            vram_used_mb=await self.get_vram_estimate_mb(model_id),
+            vram_used_mb=vram_estimate * tp_size,  # total across all GPUs
         )
 
     async def unload(self, model_id: str) -> None:
@@ -194,9 +203,27 @@ class TensorRTLLMBackend(BackendInterface):
             engine_dir = self._resolve_engine_dir(model_id, {})
         except Exception:
             return _MIN_TRT_VRAM_MB
-        total_bytes = sum(path.stat().st_size for path in engine_dir.rglob("*") if path.is_file())
-        estimated = int(total_bytes / 1024 / 1024 * 1.1)
+        # Only count the engine/ subdir (excludes tllm_ckpt which is not loaded at serve time)
+        scan_dir = engine_dir / "engine" if (engine_dir / "engine").is_dir() else engine_dir
+        total_bytes = sum(path.stat().st_size for path in scan_dir.rglob("*") if path.is_file())
+        tp_size = self._read_engine_tp_size(scan_dir)
+        # Return per-GPU estimate so scheduler can compare against single-GPU free VRAM
+        # (scheduler sums across GPUs when assigning TP models)
+        per_gpu_bytes = total_bytes / tp_size
+        estimated = int(per_gpu_bytes / 1024 / 1024 * 1.1)
         return max(_MIN_TRT_VRAM_MB, estimated)
+
+    @staticmethod
+    def _read_engine_tp_size(engine_dir: Path) -> int:
+        """Read tp_size from engine config.json, defaulting to 1."""
+        import json as _json
+        cfg_path = engine_dir / "config.json"
+        try:
+            cfg = _json.loads(cfg_path.read_text())
+            mapping = cfg.get("pretrained_config", {}).get("mapping", {})
+            return int(mapping.get("tp_size") or mapping.get("world_size") or 1)
+        except Exception:
+            return 1
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         entry = self._processes.get(model_id)
