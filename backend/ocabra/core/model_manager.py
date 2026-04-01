@@ -12,7 +12,7 @@ import structlog
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
 from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
-from ocabra.redis_client import publish, set_key
+from ocabra.redis_client import get_key, publish, set_key
 
 logger = structlog.get_logger(__name__)
 
@@ -219,6 +219,7 @@ class ModelManager:
     async def start(self) -> None:
         await self._load_configs_from_db()
         await self._ensure_diarized_variants_for_whisper_models()
+        await self._hydrate_last_request_at_from_redis()
         for model_id, state in self._states.items():
             if state.load_policy == LoadPolicy.PIN:
                 logger.info("auto_loading_pinned_model", model_id=model_id)
@@ -294,7 +295,57 @@ class ModelManager:
                     "new_status": state.status.value,
                 },
             )
+            await self._persist_state(model_id)
+
+    async def _persist_state(self, model_id: str) -> None:
+        state = self._states.get(model_id)
+        if not state:
+            return
+        try:
             await set_key(f"model:state:{model_id}", state.to_dict())
+        except Exception as exc:
+            logger.warning("model_state_persist_failed", model_id=model_id, error=str(exc))
+
+    async def _hydrate_last_request_at_from_redis(self) -> None:
+        for model_id, state in self._states.items():
+            try:
+                payload = await get_key(f"model:state:{model_id}")
+            except Exception as exc:
+                logger.warning(
+                    "model_state_restore_failed",
+                    model_id=model_id,
+                    error=str(exc),
+                )
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            parsed = self._parse_datetime(payload.get("last_request_at"))
+            if parsed is not None:
+                state.last_request_at = parsed
+
+    @staticmethod
+    def _parse_datetime(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+
+        normalized = value.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    async def touch_last_request_at(self, model_id: str, at: datetime | None = None) -> None:
+        state = self._states.get(model_id)
+        if not state:
+            raise KeyError(f"Model '{model_id}' not configured")
+
+        state.last_request_at = at or datetime.now(timezone.utc)
+        await self._persist_state(model_id)
 
     def _notify_event_listeners(self, event: str, state: "ModelState") -> None:
         if not self._event_listeners:
@@ -711,24 +762,6 @@ class ModelManager:
                     break
             except Exception:
                 continue
-
-    async def on_request(self, model_id: str) -> None:
-        state = self._states.get(model_id)
-        if not state:
-            raise KeyError(f"Model '{model_id}' not configured")
-
-        state.last_request_at = datetime.now(timezone.utc)
-
-        if state.status in (ModelStatus.UNLOADED, ModelStatus.CONFIGURED):
-            await self._load_model(model_id)
-        elif state.status == ModelStatus.LOADING:
-            for _ in range(120):
-                await asyncio.sleep(1)
-                if state.status == ModelStatus.LOADED:
-                    return
-            raise TimeoutError(f"Model '{model_id}' did not load within 120s")
-        elif state.status == ModelStatus.ERROR:
-            raise RuntimeError(f"Model '{model_id}' is in error state: {state.error_message}")
 
     async def check_idle_evictions(self) -> None:
         if settings.idle_timeout_seconds <= 0:

@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+
 def _ensure_load_timeout_s() -> int:
     from ocabra.config import settings
+
     return max(60, int(settings.model_load_wait_timeout_s))
 
 
@@ -73,8 +75,9 @@ async def resolve_model(model_manager: ModelManager, model_id: str) -> tuple[str
 async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelState:
     """
     Ensure a model is LOADED before forwarding a request.
-    Triggers on-demand loading if CONFIGURED or UNLOADED.
-    Waits up to 180s if already LOADING.
+    Triggers on-demand loading if CONFIGURED, UNLOADED, or ERROR.
+    Waits up to settings.model_load_wait_timeout_s if already LOADING.
+    On success, updates the model's last-request timestamp and persists it.
     """
     from ocabra.core.model_manager import ModelStatus
 
@@ -89,7 +92,9 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
         )
 
     if state.status == ModelStatus.LOADED:
-        state.last_request_at = datetime.now(UTC)
+        request_at = datetime.now(UTC)
+        state.last_request_at = request_at
+        await model_manager.touch_last_request_at(resolved_model_id, request_at)
         return state
 
     if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED, ModelStatus.ERROR):
@@ -115,7 +120,9 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
 
         state = await model_manager.get_state(resolved_model_id)
         if state and state.status == ModelStatus.LOADED:
-            state.last_request_at = datetime.now(UTC)
+            request_at = datetime.now(UTC)
+            state.last_request_at = request_at
+            await model_manager.touch_last_request_at(resolved_model_id, request_at)
             return state
 
     if state and state.status == ModelStatus.LOADING:
@@ -123,7 +130,9 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
             await asyncio.sleep(1)
             state = await model_manager.get_state(resolved_model_id)
             if state and state.status == ModelStatus.LOADED:
-                state.last_request_at = datetime.now(UTC)
+                request_at = datetime.now(UTC)
+                state.last_request_at = request_at
+                await model_manager.touch_last_request_at(resolved_model_id, request_at)
                 return state
         raise _openai_error(
             f"Model '{resolved_model_id}' did not finish loading in time.",
@@ -162,6 +171,12 @@ def to_backend_body(state: ModelState, body: dict) -> dict:
     """Copy request payload and normalize model field to backend-native model id."""
     payload = dict(body)
     payload["model"] = state.backend_model_id
+    if payload.get("stream") is True:
+        stream_options = payload.get("stream_options")
+        if isinstance(stream_options, dict):
+            payload["stream_options"] = {**stream_options, "include_usage": True}
+        else:
+            payload["stream_options"] = {"include_usage": True}
     return payload
 
 

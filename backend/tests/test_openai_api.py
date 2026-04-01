@@ -44,6 +44,7 @@ def _make_app(model_state=None, worker_result=None):
     mm.get_state = AsyncMock(return_value=model_state)
     mm.list_states = AsyncMock(return_value=[model_state])
     mm.load = AsyncMock(return_value=model_state)
+    mm.touch_last_request_at = AsyncMock()
 
     # Mock worker pool
     wp = MagicMock()
@@ -62,6 +63,50 @@ def _make_app(model_state=None, worker_result=None):
 async def _async_gen(items):
     for item in items:
         yield item
+
+
+def test_to_backend_body_requests_stream_usage() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    state = ModelState(
+        model_id="vllm/demo",
+        backend_model_id="demo",
+        display_name="Demo",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, streaming=True),
+    )
+
+    payload = to_backend_body(state, {"model": "vllm/demo", "stream": True})
+
+    assert payload["model"] == "demo"
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_to_backend_body_preserves_existing_stream_options() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    state = ModelState(
+        model_id="vllm/demo",
+        backend_model_id="demo",
+        display_name="Demo",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, streaming=True),
+    )
+
+    payload = to_backend_body(
+        state,
+        {"model": "vllm/demo", "stream": True, "stream_options": {"foo": "bar"}},
+    )
+
+    assert payload["stream_options"] == {"foo": "bar", "include_usage": True}
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +275,16 @@ class TestChatCompletions:
         app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
         client = TestClient(app)
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert resp.status_code == 200
         assert state.last_request_at is not None
-
-
+        app.state.model_manager.touch_last_request_at.assert_awaited_once()
 
     def test_alias_backend_model_id_resolves_to_canonical_model(self):
         from ocabra.backends.base import BackendCapabilities

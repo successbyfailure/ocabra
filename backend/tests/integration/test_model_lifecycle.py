@@ -62,8 +62,8 @@ class TestModelLifecycle:
             assert state.status == ModelStatus.UNLOADED
 
     @pytest.mark.asyncio
-    async def test_on_demand_load_via_on_request(self, model_manager: ModelManager, mock_session_factory):
-        """on_request() should trigger load for CONFIGURED model."""
+    async def test_configured_model_can_be_loaded(self, model_manager: ModelManager, mock_session_factory):
+        """Configured models should load successfully when requested by the manager."""
         model_id = "vllm/on-demand/model"
         with (
             patch("ocabra.core.model_manager.publish", new=AsyncMock()),
@@ -79,7 +79,7 @@ class TestModelLifecycle:
             assert state is not None
             assert state.status == ModelStatus.CONFIGURED
 
-            await model_manager.on_request(model_id)
+            await model_manager.load(model_id)
             state = await model_manager.get_state(model_id)
             assert state is not None
             assert state.status == ModelStatus.LOADED

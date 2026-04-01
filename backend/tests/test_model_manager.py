@@ -98,18 +98,6 @@ async def test_pin_policy_loads_on_start(worker_pool):
 
 
 @pytest.mark.asyncio
-async def test_on_request_loads_unloaded_model(model_manager):
-    """on_request() auto-loads an UNLOADED model."""
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
-        state = await add_test_model(model_manager)
-        state.status = ModelStatus.UNLOADED
-
-        await model_manager.on_request("test/model")
-        assert state.status == ModelStatus.LOADED
-
-
-@pytest.mark.asyncio
 async def test_idle_eviction(model_manager):
     """on_demand model idle > timeout is evicted."""
     with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
@@ -190,6 +178,35 @@ async def test_background_task_failure_is_logged(model_manager, monkeypatch):
 
     assert task.done()
     fake_logger.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_touch_last_request_at_persists_timestamp(model_manager):
+    now = datetime.now(timezone.utc)
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()) as set_key_mock:
+        state = await add_test_model(model_manager)
+        await model_manager.touch_last_request_at("test/model", now)
+
+    assert state.last_request_at == now
+    set_key_mock.assert_awaited_once()
+    key = set_key_mock.await_args.args[0]
+    payload = set_key_mock.await_args.args[1]
+    assert key == "model:state:test/model"
+    assert payload["last_request_at"] == now.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_hydrate_last_request_at_from_redis_restores_timestamp(model_manager):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    state = await add_test_model(model_manager)
+    state.last_request_at = None
+
+    with patch("ocabra.core.model_manager.get_key", new=AsyncMock(return_value={"last_request_at": now.isoformat()})):
+        await model_manager._hydrate_last_request_at_from_redis()
+
+    assert state.last_request_at == now
 
 
 @pytest.mark.asyncio
