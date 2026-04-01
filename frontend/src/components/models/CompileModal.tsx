@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { AlertTriangle, Check, Cpu, HardDrive, Loader2, X } from "lucide-react"
+import { AlertTriangle, Check, CheckCircle2, Circle, Cpu, HardDrive, Loader2, X, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { api, type VramEstimate } from "@/api/client"
 import { useSSE } from "@/hooks/useSSE"
@@ -31,28 +31,144 @@ function defaultEngineName(modelId: string, dtype: string): string {
   return `${name}-${dtype}`
 }
 
-// ── Progress bar ─────────────────────────────────────────────────
+// ── Compile phase stepper ────────────────────────────────────────
 
-function ProgressBar({ pct }: { pct: number }) {
+type StepState = "waiting" | "running" | "done" | "failed"
+
+const PHASES = [
+  {
+    id: "convert",
+    label: "Convertir checkpoint",
+    description: "Carga los pesos HuggingFace en CPU y los convierte al formato TRT-LLM. Para TP>1 se genera un shard por GPU.",
+    eta: "5–20 min según tamaño",
+  },
+  {
+    id: "build",
+    label: "Compilar engine TensorRT",
+    description: "TensorRT optimiza el grafo de operaciones: fusión de kernels, calibración de precisión y generación del engine binario.",
+    eta: "3–30 min según modelo y GPU",
+  },
+] as const
+
+function stepState(phaseId: string, currentPhase: CompileJob["phase"], status: CompileJob["status"]): StepState {
+  const order = ["convert", "build"]
+  const currentIdx = currentPhase ? order.indexOf(currentPhase) : -1
+  const thisIdx = order.indexOf(phaseId)
+
+  if (status === "failed" && currentPhase === phaseId) return "failed"
+  if (status === "done") return "done"
+  if (thisIdx < currentIdx) return "done"
+  if (thisIdx === currentIdx) return "running"
+  return "waiting"
+}
+
+function StepIcon({ state }: { state: StepState }) {
+  if (state === "done") return <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
+  if (state === "failed") return <XCircle size={18} className="text-red-400 shrink-0" />
+  if (state === "running") return <Loader2 size={18} className="animate-spin text-blue-400 shrink-0" />
+  return <Circle size={18} className="text-muted-foreground/40 shrink-0" />
+}
+
+function CompileStepper({ job }: { job: CompileJob }) {
+  const allDone = job.status === "done"
+  const allFailed = job.status === "failed"
+
   return (
-    <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-      <div
-        className="h-full rounded-full bg-emerald-500 transition-all duration-300"
-        style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-      />
+    <div className="space-y-2">
+      {PHASES.map((phase, i) => {
+        const state = allDone ? "done" : stepState(phase.id, job.phase, job.status)
+        const isActive = state === "running" || (allFailed && job.phase === phase.id)
+        return (
+          <div
+            key={phase.id}
+            className={`rounded-lg border px-3 py-2.5 transition-colors ${
+              state === "running"
+                ? "border-blue-500/40 bg-blue-500/5"
+                : state === "failed"
+                  ? "border-red-500/40 bg-red-500/5"
+                  : state === "done"
+                    ? "border-emerald-500/20 bg-emerald-500/5"
+                    : "border-border bg-muted/20 opacity-50"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <StepIcon state={state} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={`text-sm font-medium ${state === "waiting" ? "text-muted-foreground" : "text-foreground"}`}>
+                    Paso {i + 1}/2 — {phase.label}
+                  </span>
+                  {state === "running" && (
+                    <span className="ml-auto text-xs text-blue-400 shrink-0">{job.progressPct}%</span>
+                  )}
+                  {state === "done" && !allDone && (
+                    <span className="ml-auto text-xs text-emerald-400 shrink-0">listo</span>
+                  )}
+                </div>
+                {isActive && (
+                  <p className="mt-0.5 text-xs text-muted-foreground">{phase.description}</p>
+                )}
+                {state === "waiting" && (
+                  <p className="mt-0.5 text-xs text-muted-foreground/60">ETA: {phase.eta}</p>
+                )}
+              </div>
+            </div>
+            {state === "running" && (
+              <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-blue-500 transition-all duration-500"
+                  style={{
+                    width: phase.id === "convert"
+                      ? `${Math.min(99, (job.progressPct / 45) * 100)}%`
+                      : `${Math.min(99, ((job.progressPct - 50) / 50) * 100)}%`,
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {allDone && (
+        <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+          <Check size={16} />
+          Engine compilado y listo para cargar
+        </div>
+      )}
+      {allFailed && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          <XCircle size={16} />
+          Compilación fallida — revisa el log
+        </div>
+      )}
+      {job.status === "cancelled" && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+          <XCircle size={16} />
+          Compilación cancelada
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Phase label ──────────────────────────────────────────────────
+// ── Elapsed timer ────────────────────────────────────────────────
 
-function PhaseLabel({ phase, status }: { phase: CompileJob["phase"]; status: CompileJob["status"] }) {
-  if (status === "done") return <span className="text-emerald-400">Completado</span>
-  if (status === "failed") return <span className="text-red-400">Fallido</span>
-  if (status === "cancelled") return <span className="text-amber-400">Cancelado</span>
-  if (phase === "convert") return <span className="text-blue-400">Paso 1/2: Convirtiendo pesos HF → TRT-LLM…</span>
-  if (phase === "build") return <span className="text-purple-400">Paso 2/2: Compilando engine…</span>
-  return <span className="text-muted-foreground">En cola…</span>
+function ElapsedTimer({ startedAt }: { startedAt: string | null }) {
+  const [elapsed, setElapsed] = useState("")
+  useEffect(() => {
+    if (!startedAt) return
+    const start = new Date(startedAt).getTime()
+    const tick = () => {
+      const s = Math.floor((Date.now() - start) / 1000)
+      const m = Math.floor(s / 60)
+      setElapsed(`${m}m ${s % 60}s`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [startedAt])
+  if (!elapsed) return null
+  return <span className="text-xs text-muted-foreground">Tiempo: {elapsed}</span>
 }
 
 // ── VRAM estimate panel ──────────────────────────────────────────
@@ -477,41 +593,38 @@ export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileMo
           )}
 
           {screen === "progress" && job && (
-            <div className="space-y-4">
-              {/* Status + phase */}
-              <div className="flex items-center justify-between text-sm">
-                <PhaseLabel phase={job.phase} status={job.status} />
-                <span className="text-muted-foreground">{job.progressPct}%</span>
-              </div>
+            <div className="space-y-3">
+              {/* Stepper */}
+              <CompileStepper job={job} />
 
-              <ProgressBar pct={job.progressPct} />
+              {/* Elapsed time */}
+              <div className="flex justify-end">
+                <ElapsedTimer startedAt={job.startedAt ?? null} />
+              </div>
 
               {/* Log output */}
-              <div
-                ref={logRef}
-                className="h-52 overflow-y-auto rounded-md border border-border bg-background p-2 font-mono text-xs text-muted-foreground"
-              >
-                {logLines.length === 0 ? (
-                  <span className="opacity-50">Esperando salida de Docker…</span>
-                ) : (
-                  logLines.map((line, i) => (
-                    <div key={i} className="whitespace-pre-wrap break-all leading-5">{line}</div>
-                  ))
-                )}
+              <div>
+                <div className="mb-1 text-xs font-medium text-muted-foreground">Log Docker</div>
+                <div
+                  ref={logRef}
+                  className="h-40 overflow-y-auto rounded-md border border-border bg-background p-2 font-mono text-xs text-muted-foreground"
+                >
+                  {logLines.length === 0 ? (
+                    <span className="opacity-50">Esperando salida de Docker…</span>
+                  ) : (
+                    logLines.map((line, i) => (
+                      <div key={i} className="whitespace-pre-wrap break-all leading-5">{line}</div>
+                    ))
+                  )}
+                </div>
               </div>
 
-              {/* Error detail */}
-              {job.errorDetail && (
-                <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
-                  {job.errorDetail}
-                </div>
-              )}
-
-              {/* Engine dir */}
-              {job.status === "done" && job.engineDir && (
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
-                  Engine listo en: <span className="font-mono">{job.engineDir}</span>
-                </div>
+              {/* Error detail on failure */}
+              {job.errorDetail && job.status === "failed" && (
+                <details className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                  <summary className="cursor-pointer font-medium">Detalle del error</summary>
+                  <pre className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-all opacity-80">{job.errorDetail}</pre>
+                </details>
               )}
 
               {/* Actions */}
