@@ -245,6 +245,7 @@ class TrtllmCompileManager:
 
         try:
             # ── Phase 1: convert ────────────────────────────────
+            # AWQ models use same pipeline but convert script passes use_autoawq=True
             await self._run_phase(state, "convert")
             if state._cancel_event.is_set():
                 state.status = "cancelled"
@@ -366,17 +367,19 @@ class TrtllmCompileManager:
         "print('[convert] class='+cls.__name__,flush=True);"
         "from tensorrt_llm.mapping import Mapping;"
         "qcfg=cfg.get('quantization_config',{});"
-        "quant=None;"
-        "qm=qcfg.get('quant_method','');"
-        "qm=='gptq' and (print('[convert] GPTQ detected',flush=True),);"
+        "qm=qcfg.get('quant_method','').lower();"
         "from tensorrt_llm.models.modeling_utils import QuantConfig;"
         "from tensorrt_llm.quantization import QuantAlgo;"
-        "quant=QuantConfig(quant_algo=QuantAlgo.W4A16_GPTQ) if qm=='gptq' else None;"
+        "is_awq='awq' in qm;"
+        "is_gptq='gptq' in qm;"
+        "quant=QuantConfig(quant_algo=QuantAlgo.W4A16_AWQ) if is_awq else (QuantConfig(quant_algo=QuantAlgo.W4A16_GPTQ) if is_gptq else None);"
+        "is_awq and print('[convert] AWQ detected — using use_autoawq=True',flush=True);"
+        "is_gptq and print('[convert] GPTQ detected',flush=True);"
         "import os;os.makedirs(a.output_dir,exist_ok=True);"
         "print('[convert] loading model on cpu ...',flush=True);"
         "m=cls.from_hugging_face(a.model_dir,dtype=a.dtype,"
         "mapping=Mapping(world_size=a.tp_size,tp_size=a.tp_size),"
-        "quant_config=quant,load_model_on_cpu=True);"
+        "quant_config=quant,load_model_on_cpu=True,**({'use_autoawq':True} if is_awq else {}));"
         "print('[convert] saving checkpoint ...',flush=True);"
         "m.save_checkpoint(a.output_dir);"
         "print('[convert] done',flush=True)"
@@ -421,6 +424,13 @@ class TrtllmCompileManager:
             "--ipc", "host",
         ]
 
+        cfg = state.config
+        build_common = [
+            "--max_batch_size", str(cfg.get("max_batch_size", 1)),
+            "--max_input_len", str(cfg.get("max_input_len", 2048)),
+            "--max_seq_len", str(cfg.get("max_seq_len", 4096)),
+        ]
+
         if phase == "convert":
             # TRT-LLM 1.0: no trtllm-convert binary — use Python API via python3 -c
             return base_cmd + [
@@ -431,17 +441,40 @@ class TrtllmCompileManager:
                 "--dtype", dtype_trtllm,
                 "--tp_size", str(tp_size),
             ]
-        else:  # build
-            cfg = state.config
+        elif phase == "build":
             return base_cmd + [
                 image,
                 "trtllm-build",
                 "--checkpoint_dir", ckpt_dir,
                 "--output_dir", engine_dir,
-                "--max_batch_size", str(cfg.get("max_batch_size", 1)),
-                "--max_input_len", str(cfg.get("max_input_len", 2048)),
-                "--max_seq_len", str(cfg.get("max_seq_len", 4096)),
+                *build_common,
             ]
+        else:
+            raise ValueError(f"Unknown build phase: {phase}")
+
+    def _is_awq_model(self, state: CompileJobState) -> bool:
+        """Check if the source model is AWQ-quantized by reading its config.json."""
+        import json as _json
+        from pathlib import Path as _Path
+        # Use container-side path (where the API runs)
+        models_dir = settings.models_dir or (
+            settings.tensorrt_llm_engines_dir.rsplit("/tensorrt_llm", 1)[0]
+            if settings.tensorrt_llm_engines_dir and "/tensorrt_llm" in settings.tensorrt_llm_engines_dir
+            else "/data/models"
+        )
+        raw = state.source_model
+        parts = raw.split("/", 1)
+        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
+            raw = parts[1]
+        hf_dir_name = raw.replace("/", "--")
+        cfg_path = _Path(models_dir) / "huggingface" / hf_dir_name / "config.json"
+        try:
+            cfg = _json.loads(cfg_path.read_text())
+            qcfg = cfg.get("quantization_config") or {}
+            qm = str(qcfg.get("quant_type") or qcfg.get("quant_method") or "").lower()
+            return "awq" in qm
+        except Exception:
+            return False
 
     def _resolve_hf_tokenizer_path(self, source_model: str) -> str | None:
         """Derive the HuggingFace model directory from source_model (used as tokenizer)."""
