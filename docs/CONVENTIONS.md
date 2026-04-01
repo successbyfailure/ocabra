@@ -6,7 +6,7 @@
 - Formateador: **ruff format** (compatible Black, line-length 100)
 - Linter: **ruff check** con reglas: E, F, I, UP, B, ASYNC
 - Type hints en toda función pública. Retornos anotados siempre.
-- No `Any` salvo en código de proxy/reenvío donde el tipo es genuinamente dinámico.
+- No `Any` salvo en código de proxy/reenvío donde el tipo es genuinamente dinámico y algunos módulos legacy ya existentes; para código nuevo, preferir tipos explícitos.
 
 ### Naming
 ```python
@@ -66,7 +66,7 @@ from .base import BackendInterface
 
 ### SQLAlchemy
 - Usar siempre `AsyncSession`.
-- Schemas Pydantic en `ocabra/schemas/` (no en `db/`).
+- Schemas Pydantic preferiblemente en `ocabra/schemas/` (no en `db/`). Algunas rutas legacy aún mantienen schemas inline en módulos de API, pero no deben ampliarse.
 - Modelos SQLAlchemy en `ocabra/db/`.
 - Nombrar tablas en plural, snake_case: `model_configs`, `request_stats`.
 
@@ -86,7 +86,7 @@ from .base import BackendInterface
 ## TypeScript / React (frontend)
 
 ### Estilo
-- Formateador: **Prettier** (config en `frontend/.prettierrc`)
+- Formateador: **Prettier**
 - Linter: **ESLint** con plugin react + typescript
 - Siempre TypeScript estricto (`strict: true` en tsconfig)
 
@@ -138,7 +138,8 @@ export const ModelCard = ({ model }: { model: ModelState }) => {
 ```
 
 ### Estado global (Zustand)
-- Un store por dominio: `gpuStore`, `modelStore`, `statsStore`, `downloadStore`
+- Un store por dominio: `gpuStore`, `modelStore`, `downloadStore`, `serviceStore`
+- `statsStore` se añadirá solo cuando exista un dominio propio para ello; no es un requisito actual
 - Actions en el propio store, no en componentes
 - Tipos explícitos para el state y las actions
 

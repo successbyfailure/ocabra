@@ -35,20 +35,21 @@ enrutamiento delante de oCabra.
 | Estado frontend | Zustand |
 | Tiempo real | WebSockets + SSE (FastAPI nativo) |
 | Contenedores | Docker Compose con perfiles |
-| Reverse proxy | Caddy (interno, sirve API + frontend) |
+| Frontend serve | Nginx |
+| Reverse proxy | Caddy |
 
-## Estado actual (2026-03-23)
+## Estado actual (2026-04-02)
 
 Implementado en código:
-- Fase 0, Fase 1 (GPU/Model/Registry/UI base), Fase 2 (vLLM, Diffusers, Audio/TTS, llama.cpp, SGLang, TensorRT-LLM opcional), Fase 3 (OpenAI + Ollama APIs), Fase 4 (Models/Explore/Playground/Stats/Settings).
-- IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en endpoints OpenAI.
-- UI Settings alineada con API de configuración (`GET/PATCH /ocabra/config`, `POST /ocabra/config/litellm/sync`).
-- PATCH /ocabra/config usa claves camelCase-only; el frontend ya no depende de fallback local para `modelsDir`, `downloadDir` o `maxTemperatureC`.
-- Endpoint Prometheus `/metrics` ya está expuesto y registrado en `main.py`.
-- Persistencia de activación/desactivación de servicios (`/ocabra/services/*`) implementada vía Redis (`service:overrides`) y aplicada en `ServiceManager.start()`.
-- Wrappers de workers para backends nuevos empaquetados dentro del backend (`backend/ocabra/workers/*`) y rutas internas de backend corregidas para entorno Docker.
+- Fase 0 a Fase 4 implementadas en código; Fase 5 en curso de cierre documental y endurecimiento.
+- IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en OpenAI `/v1/*`.
+- Backends first-class ya presentes en el runtime: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
+- UI Settings alineada con `/ocabra/config`; `modelsDir` es de solo lectura en runtime y `downloadDir`/`maxTemperatureC` son overrides en memoria.
+- `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/start`, `/ocabra/services/runtime` y `/ocabra/services/unload` ya están expuestos.
+- Stats persistidos: `request_stats`, `gpu_stats` y `model_load_stats`.
+- Frontend servido por Nginx; Caddy actúa como reverse proxy.
 
-Validación reciente (2026-03-23):
+Validación reciente (2026-04-02):
 - `llama.cpp` validado end-to-end con modelo GGUF reciente (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`, archivo `qwen2.5-0.5b-instruct-q4_k_m.gguf`): registro, load y respuesta chat correctos.
 - `SGLang` validado en runtime real dentro del contenedor con entorno dedicado (`/opt/sglang-venv`), descarga y carga de modelo reciente (`HuggingFaceTB/SmolLM2-135M-Instruct`), y health/load correctos.
 - `TensorRT-LLM` endurecido para runtime mixto: soporte de lanzamiento por binario (`trtllm-serve`), por módulo Python (`python -m tensorrt_llm.commands.serve`) y por contenedor Docker NVIDIA (`launch_mode=docker`), con validaciones tempranas de prerequisitos y mensajes de diagnóstico.
@@ -140,36 +141,51 @@ ocabra/
 │       │   │   ├── completions.py
 │       │   │   ├── embeddings.py
 │       │   │   ├── images.py
-│       │   │   └── audio.py
+│       │   │   ├── audio.py
+│       │   │   └── pooling.py
 │       │   ├── ollama/              # /api/* endpoints
 │       │   │   ├── tags.py
 │       │   │   ├── show.py
 │       │   │   ├── pull.py
 │       │   │   ├── generate.py
-│       │   │   └── chat.py
+│       │   │   ├── chat.py
+│       │   │   ├── embeddings.py
+│       │   │   └── delete.py
 │       │   └── internal/            # /ocabra/* endpoints
 │       │       ├── models.py
 │       │       ├── gpus.py
 │       │       ├── stats.py
 │       │       ├── config.py
-│       │       └── downloads.py
+│       │       ├── downloads.py
+│       │       ├── registry.py
+│       │       ├── services.py
+│       │       ├── trtllm.py
+│       │       └── ws.py
 │       │
 │       ├── core/
 │       │   ├── gpu_manager.py       # Detección, monitoreo NVML, power stats
 │       │   ├── model_manager.py     # Load/unload/pin, state machine
 │       │   ├── scheduler.py         # GPU assignment, pressure eviction, schedules
-│       │   └── worker_pool.py       # Spawn/kill/proxy a workers
+│       │   ├── worker_pool.py       # Spawn/kill/proxy a workers
+│       │   ├── model_ref.py         # IDs canónicas backend/model
+│       │   ├── service_manager.py   # Orquestación de servicios interactivos
+│       │   └── trtllm_compile_manager.py
 │       │
 │       ├── backends/
 │       │   ├── base.py              # BackendInterface abstracta
 │       │   ├── vllm_backend.py      # vLLM process manager + proxy
 │       │   ├── diffusers_backend.py # Stable Diffusion / FLUX
 │       │   ├── whisper_backend.py   # faster-whisper
-│       │   └── tts_backend.py       # Qwen3-TTS, Kokoro
+│       │   ├── tts_backend.py       # Qwen3-TTS, Kokoro
+│       │   ├── ollama_backend.py
+│       │   ├── bitnet_backend.py
+│       │   ├── acestep_backend.py
+│       │   └── vllm_recipes.py
 │       │
 │       ├── registry/
 │       │   ├── huggingface.py       # HF Hub API: buscar, metadata, download
 │       │   ├── ollama_registry.py   # ollama.com model list
+│       │   ├── bitnet_registry.py
 │       │   └── local_scanner.py     # Escanear modelos locales
 │       │
 │       ├── integrations/
@@ -182,7 +198,7 @@ ocabra/
 │       │
 │       └── db/
 │           ├── models_config.py     # SQLAlchemy: ModelConfig
-│           ├── stats.py             # SQLAlchemy: RequestStat, GpuStat
+│           ├── stats.py             # SQLAlchemy: RequestStat, GpuStat, ModelLoadStat
 │           └── server_config.py     # SQLAlchemy: ServerConfig
 │
 ├── frontend/
@@ -198,7 +214,8 @@ ocabra/
 │       │   ├── Explore.tsx          # Browser HuggingFace + Ollama
 │       │   ├── Playground.tsx       # Chat/imagen/audio de prueba
 │       │   ├── Stats.tsx            # Gráficos de uso, tokens, energía
-│       │   └── Settings.tsx         # Config servidor, GPUs, LiteLLM sync
+│       │   ├── Settings.tsx         # Config servidor, GPUs, LiteLLM sync
+│       │   └── TrtllmEngines.tsx    # Engines TRT-LLM compilados
 │       ├── components/
 │       │   ├── gpu/
 │       │   │   ├── GpuCard.tsx
@@ -217,7 +234,8 @@ ocabra/
 │       ├── stores/
 │       │   ├── gpuStore.ts
 │       │   ├── modelStore.ts
-│       │   └── statsStore.ts
+│       │   ├── downloadStore.ts
+│       │   └── serviceStore.ts
 │       └── hooks/
 │           └── useWebSocket.ts
 │
@@ -250,17 +268,26 @@ Cada modelo expone sus capacidades en `/v1/models` y `/api/show`:
     "tools": true,
     "vision": false,
     "embeddings": false,
-    "reasoning": false,
-    "image_generation": false,
-    "audio_transcription": false,
+  "reasoning": false,
+  "pooling": false,
+  "rerank": false,
+  "classification": false,
+  "score": false,
+  "image_generation": false,
+  "audio_transcription": false,
+    "music_generation": false,
     "tts": false,
     "streaming": true,
     "context_length": 32768
   },
-  "gpu_assignment": { "preferred": 1, "current": 1 },
   "status": "loaded",
-  "vram_used_mb": 8200,
-  "pin": false
+  "ocabra": {
+    "load_policy": "warm",
+    "gpu": [1],
+    "vram_used_mb": 8200,
+    "display_name": "mistral-7b-instruct",
+    "backend_model_id": "mistral-7b-instruct"
+  }
 }
 ```
 
@@ -319,19 +346,19 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 
 ### FASE 0 — Fundación (secuencial, bloquea todo)
 
-**Un agente. ~1 jornada.**
+**Completada.**
 
-- [ ] Estructura de directorios completa
-- [ ] `docker-compose.yml` con servicios: api, frontend, postgres, redis, caddy
-- [ ] `pyproject.toml` con dependencias backend
-- [ ] `package.json` con dependencias frontend
-- [ ] `.env.example`
-- [ ] FastAPI app skeleton con lifespan (startup/shutdown)
-- [ ] SQLAlchemy async setup + modelos de BD + Alembic
-- [ ] Redis client + pub/sub helper
-- [ ] Config system (pydantic-settings)
-- [ ] React app base + routing (React Router) + TailwindCSS + shadcn/ui init
-- [ ] Layout principal con sidebar de navegación
+- [x] Estructura de directorios completa
+- [x] `docker-compose.yml` con servicios: api, frontend, postgres, redis, caddy
+- [x] `pyproject.toml` con dependencias backend
+- [x] `package.json` con dependencias frontend
+- [x] `.env.example`
+- [x] FastAPI app skeleton con lifespan (startup/shutdown)
+- [x] SQLAlchemy async setup + modelos de BD + Alembic
+- [x] Redis client + pub/sub helper
+- [x] Config system (pydantic-settings)
+- [x] React app base + routing (React Router) + TailwindCSS + shadcn/ui init
+- [x] Layout principal con sidebar de navegación
 
 ---
 
@@ -341,7 +368,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 - pynvml: detección, polling VRAM, utilización, temperatura, power draw
 - GPU state model (available VRAM, locked VRAM por modelo)
 - Algoritmo de asignación (preferred → fallback → tensor parallel)
-- Eviction scheduler: presión, idle timeout, horarios (APScheduler)
+- Eviction scheduler: presión, idle timeout, horarios (loops `asyncio` + cron en BD)
 - WebSocket event emitter para UI en tiempo real
 - Endpoints: `GET /ocabra/gpus`, `GET /ocabra/gpus/{id}/stats`
 
@@ -350,7 +377,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 - Worker Pool: spawn/kill subprocesos, health check, port assignment dinámico
 - BackendInterface abstracta + registro de backends
 - Model pin logic + auto-reload logic
-- Endpoints: `GET/POST/DELETE /ocabra/models`, `POST /ocabra/models/{id}/load`, `/unload`, `/pin`
+- Endpoints: `GET/POST/DELETE /ocabra/models`, `POST /ocabra/models/{id}/load`, `/unload`, `PATCH`
 
 #### Stream C — Model Registry + Download Manager
 - HuggingFace Hub API: búsqueda, metadatos, archivos, descarga con progreso
@@ -360,7 +387,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 - Endpoints: `GET /ocabra/registry/hf/*`, `GET /ocabra/registry/ollama/*`, `GET/POST /ocabra/downloads`
 
 #### Stream D — Frontend Skeleton + Dashboard
-- Zustand stores: gpuStore, modelStore, statsStore
+- Zustand stores: gpuStore, modelStore, downloadStore, serviceStore
 - Typed API client (`src/api/client.ts`)
 - `useWebSocket` hook para eventos en tiempo real
 - Página Dashboard: GpuCard (VRAM bar, temp, power gauge), lista modelos activos
@@ -455,12 +482,12 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 
 ### FASE 5 — Integrations + Polish (secuencial, requiere todo lo anterior)
 
-- [ ] LiteLLM auto-sync: detectar cambios de modelo → actualizar config LiteLLM via API
-- [ ] Logging estructurado (structlog) con nivel configurable
-- [ ] Healthcheck endpoints (`/health`, `/ready`)
-- [ ] Tests de integración para API OpenAI + Ollama
-- [ ] Tests de integración para `llama.cpp` y `SGLang`
-- [ ] Test smoke opcional para `TensorRT-LLM` (si profile habilitado)
+- [x] LiteLLM auto-sync: detectar cambios de modelo → actualizar config LiteLLM via API
+- [x] Logging estructurado (structlog) con nivel configurable
+- [x] Healthcheck endpoints (`/health`, `/ready`)
+- [x] Tests de integración para API OpenAI + Ollama
+- [x] Tests de integración para `llama.cpp` y `SGLang`
+- [x] Test smoke opcional para `TensorRT-LLM` (si profile habilitado)
 - [ ] Documentación OpenAPI enriquecida
 - [ ] Script de instalación / first-run
 

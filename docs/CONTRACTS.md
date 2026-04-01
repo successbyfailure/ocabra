@@ -8,7 +8,7 @@ Si necesitas cambiar un contrato, documenta el cambio aquí antes de implementar
 
 ## 1. BackendInterface — Contrato de backends de inferencia
 
-Todo backend (vLLM, Diffusers, Whisper, TTS) debe implementar esta interfaz abstracta.
+Todo backend de inferencia (vLLM, Diffusers, Whisper, TTS, Ollama, llama.cpp, SGLang, TensorRT-LLM, BitNet, ACE-Step) debe implementar esta interfaz abstracta.
 
 ```python
 # backend/ocabra/backends/base.py
@@ -24,16 +24,21 @@ class BackendCapabilities:
     tools: bool = False
     vision: bool = False
     embeddings: bool = False
+    pooling: bool = False
+    rerank: bool = False
+    classification: bool = False
+    score: bool = False
     reasoning: bool = False
     image_generation: bool = False
     audio_transcription: bool = False
     tts: bool = False
+    music_generation: bool = False
     streaming: bool = False
     context_length: int = 0
 
 @dataclass
 class WorkerInfo:
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     model_id: str
     gpu_indices: list[int]
     port: int
@@ -137,7 +142,7 @@ class ModelState:
                             # Formato legacy sin prefijo ya no es válido.
     backend_model_id: str       # Backend-native id (without prefix), e.g. "mistral-7b-instruct"
     display_name: str
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     status: ModelStatus
     load_policy: LoadPolicy
     auto_reload: bool           # Recargar automáticamente tras eviction
@@ -148,6 +153,8 @@ class ModelState:
     last_request_at: datetime | None
     loaded_at: datetime | None
     worker_info: WorkerInfo | None
+    error_message: str | None
+    extra_config: dict
 
 # Publicado en Redis como evento en cada cambio de estado:
 # Canal: "model:events"
@@ -162,17 +169,35 @@ class ModelState:
 # backend/ocabra/core/worker_pool.py
 
 class WorkerPool:
-    async def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
+    def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
         """Registra un backend disponible."""
 
-    async def get_worker(self, model_id: str) -> WorkerInfo | None:
+    def register_disabled_backend(self, backend_type: str, reason: str) -> None:
+        """Marca un backend como deshabilitado."""
+
+    async def get_backend(self, backend_type: str) -> BackendInterface:
+        """Retorna el backend registrado o falla si está deshabilitado/no existe."""
+
+    def get_worker(self, model_id: str) -> WorkerInfo | None:
         """Retorna el WorkerInfo del modelo si está cargado."""
 
     async def assign_port(self) -> int:
         """Asigna un puerto libre del rango configurado (default: 18000-19000)."""
 
-    async def release_port(self, port: int) -> None:
+    def set_worker(self, model_id: str, info: WorkerInfo) -> None:
+        """Registra un worker cargado."""
+
+    def remove_worker(self, model_id: str) -> None:
+        """Elimina un worker cargado y libera su puerto."""
+
+    def release_port(self, port: int) -> None:
         """Libera un puerto."""
+
+    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
+        """Reenvía una petición HTTP al worker."""
+
+    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
+        """Reenvía una petición streaming al worker."""
 ```
 
 ---
@@ -187,28 +212,37 @@ Errores siguen el formato: `{"detail": str, "code": str}`.
 
 ```
 GET    /ocabra/models                    → list[ModelState]  # model_id is canonical backend/model; no legacy bare-name fallback at this boundary
+GET    /ocabra/models/storage            → ModelsStorageStats
 
 Nota OpenAI `/v1/*`: el campo `model` acepta `model_id` canónico y también `backend_model_id` como alias. Si hay múltiples coincidencias de alias, se usa la primera.
 
 GET    /ocabra/models/{model_id}         → ModelState
 POST   /ocabra/models/{model_id}/load    → ModelState
-POST   /ocabra/models/{model_id}/unload  → {"ok": true}
+POST   /ocabra/models/{model_id}/unload  → ModelState
 PATCH  /ocabra/models/{model_id}         → ModelState
   body: {
     load_policy?: "pin"|"warm"|"on_demand",
     preferred_gpu?: int|null,
+    idle_timeout_seconds?: int|null,
     auto_reload?: bool,
-    display_name?: str
+    display_name?: str,
+    extra_config?: dict
   }
-DELETE /ocabra/models/{model_id}         → {"ok": true}  # elimina config y ficheros
+DELETE /ocabra/models/{model_id}         → {"ok": true, "deleted_path": str|null}  # elimina config y ficheros
 ```
+
+`ModelState` REST payload:
+- `model_id`, `backend_model_id`, `display_name`, `backend_type`
+- `status`, `load_policy`, `auto_reload`, `preferred_gpu`, `current_gpu`, `vram_used_mb`
+- `capabilities`, `last_request_at`, `loaded_at`, `error_message`, `extra_config`
+- `disk_size_bytes` se añade en `/ocabra/models` y `/ocabra/models/{model_id}` cuando se puede estimar
 
 ### 5.2 GPUs
 
 ```
 GET /ocabra/gpus               → list[GPUState]
 GET /ocabra/gpus/{index}       → GPUState
-GET /ocabra/gpus/{index}/stats?window=5m → GPUStatHistory
+GET /ocabra/gpus/{index}/stats?window=5m|1h|24h → list[GPUStat]
 ```
 
 ### 5.3 Descargas
@@ -216,7 +250,12 @@ GET /ocabra/gpus/{index}/stats?window=5m → GPUStatHistory
 ```
 GET    /ocabra/downloads                 → list[DownloadJob]
 POST   /ocabra/downloads                 → DownloadJob
-  body: { source: "huggingface"|"ollama", model_ref: str }
+  body: {
+    source: "huggingface"|"ollama"|"bitnet",
+    model_ref: str,
+    artifact?: str|null,
+    register_config?: dict|null
+  }
 DELETE /ocabra/downloads/{job_id}        → {"ok": true}  # cancela descarga
 GET    /ocabra/downloads/{job_id}/stream → SSE stream de progreso
 ```
@@ -226,19 +265,44 @@ GET    /ocabra/downloads/{job_id}/stream → SSE stream de progreso
 ```
 GET /ocabra/registry/hf/search?q=str&task=str&limit=20  → list[HFModelCard]
 GET /ocabra/registry/hf/{repo_id}                        → HFModelDetail
+GET /ocabra/registry/hf/{repo_id}/variants              → list[HFModelVariant]
+GET /ocabra/registry/bitnet/search?q=str&limit=20       → list[HFModelCard]
+GET /ocabra/registry/bitnet/{repo_id}/variants          → list[HFModelVariant]
 GET /ocabra/registry/ollama/search?q=str                 → list[OllamaModelCard]
+GET /ocabra/registry/ollama/{model_name}/variants       → list[OllamaModelVariant]
 GET /ocabra/registry/local                               → list[LocalModel]
 ```
 
 ### 5.5 Stats
 
 ```
-GET /ocabra/stats/requests?from=ISO&to=ISO&model_id=str  → RequestStats
-GET /ocabra/stats/tokens?from=ISO&to=ISO                 → TokenStats
-GET /ocabra/stats/energy?from=ISO&to=ISO                 → EnergyStats
+GET /ocabra/stats/requests?from=ISO&to=ISO&model_id=str   → RequestStats
+GET /ocabra/stats/tokens?from=ISO&to=ISO&model_id=str     → TokenStats
+GET /ocabra/stats/energy?from=ISO&to=ISO                  → EnergyStats
 GET /ocabra/stats/performance?from=ISO&to=ISO&model_id=str → PerformanceStats
-GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str    → OverviewStats
+GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str   → OverviewStats
 ```
+
+`RequestStats`:
+- `totalRequests`, `errorRate`, `avgDurationMs`, `p50DurationMs`, `p95DurationMs`
+- `series`: `[{ timestamp, count }]`
+
+`TokenStats`:
+- `totalInputTokens`, `totalOutputTokens`
+- `byBackend`: `[{ backendType, inputTokens, outputTokens }]`
+- `series`: `[{ timestamp, inputTokens, outputTokens }]`
+
+`EnergyStats`:
+- `totalKwh`, `estimatedCostEur`
+- `byGpu`: `[{ gpuIndex, totalKwh, powerDrawW }]`
+
+`PerformanceStats`:
+- `byModel`: `[{ modelId, backendType, requestKinds, totalRequests, avgLatencyMs, p95LatencyMs, requestsPerMinute, tokensPerSecond, totalInputTokens, totalOutputTokens, tokenizedRequests, errorCount, uptimePct, loadCount, avgLoadMs, p95LoadMs, lastLoadMs }]`
+
+`OverviewStats`:
+- `totalRequests`, `totalErrors`, `avgDurationMs`, `tokenizedRequests`, `totalInputTokens`, `totalOutputTokens`
+- `byBackend`: `[{ backendType, totalRequests, errorRate, avgLatencyMs, p95LatencyMs }]`
+- `byRequestKind`: `[{ requestKind, totalRequests, errorRate, avgLatencyMs, p95LatencyMs }]`
 
 ### 5.6 Config
 
@@ -253,7 +317,9 @@ POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]
 - `vramBufferMb`, `vramPressureThresholdPct`, `logLevel`
 - `litellmBaseUrl`, `litellmAdminKey` (enmascarada), `litellmAutoSync`
 - `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
-- `globalSchedules`: `list[EvictionSchedule]`
+- `globalSchedules`: `list[EvictionSchedule]` en memoria para la UI; el scheduler usa la tabla `eviction_schedules` en BD
+- `modelsDir` proviene de `MODELS_DIR` y es de solo lectura en runtime
+- `downloadDir`, `maxTemperatureC` y `globalSchedules` se guardan como overrides de proceso en `request.app.state.config_overrides`
 - `GET /ocabra/config` y `PATCH /ocabra/config` usan claves camelCase; no hay fallback legacy a snake_case o `localStorage`.
 
 ### 5.7 Servicios interactivos
@@ -262,12 +328,7 @@ POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]
 GET  /ocabra/services                    → list[ServiceState]
 GET  /ocabra/services/{service_id}       → ServiceState
 POST /ocabra/services/{service_id}/refresh → ServiceState
-POST /ocabra/services/{service_id}/touch   → ServiceState
-  body: {
-    runtime_loaded?: bool,
-    active_model_ref?: str|null,
-    detail?: str|null
-  }
+POST /ocabra/services/{service_id}/start   → ServiceState
 PATCH /ocabra/services/{service_id}         → ServiceState
   body: {
     enabled: bool
@@ -285,6 +346,7 @@ POST /ocabra/services/{service_id}/unload → ServiceState
 - `hunyuan`
 - `comfyui`
 - `a1111`
+- `acestep`
 
 
 Campos relevantes de `ServiceState`:
@@ -296,15 +358,24 @@ Campos relevantes de `ServiceState`:
 ```python
 @dataclass
 class ServiceState:
-    service_id: str               # "hunyuan" | "comfyui" | "a1111"
-    service_type: str             # "hunyuan3d" | "comfyui" | "automatic1111"
+    service_id: str               # "hunyuan" | "comfyui" | "a1111" | "acestep"
+    service_type: str             # "hunyuan3d" | "comfyui" | "automatic1111" | "acestep"
     display_name: str
     base_url: str                 # URL interna Docker
-    ui_base_path: str             # path proxied, e.g. "/comfy"
+    ui_url: str                   # path proxied, e.g. "/comfy"
     health_path: str
+    runtime_check_path: str | None
+    runtime_check_key: str
+    runtime_check_model_key: str | None
     unload_path: str | None
+    unload_method: str
+    unload_payload: dict | None
+    post_unload_flush_path: str | None
+    docker_container_name: str | None
+    runtime_loaded_when_alive: bool
     preferred_gpu: int | None
     idle_unload_after_seconds: int
+    idle_action: str              # "stop" | "restart"
     enabled: bool                # servicio habilitado para uso en oCabra
     service_alive: bool           # proceso/UI accesible por healthcheck
     runtime_loaded: bool          # hay runtime/pesos cargados en VRAM
@@ -329,7 +400,6 @@ Eventos emitidos por el servidor (JSON):
 {"type": "model_event",  "data": {"event": str, "model_id": str, "status": str}}
 {"type": "service_event", "data": {"event": str, "service_id": str, "status": str, "service": ServiceState}}
 {"type": "download_progress", "data": {"job_id": str, "pct": float, "speed_mb_s": float}}
-{"type": "system_alert", "data": {"level": "warn"|"error", "message": str}}
 ```
 
 ---
@@ -346,6 +416,7 @@ download:progress:{job_id}  → DownloadProgress cada 500ms
 # Keys (state)
 model:state:{model_id}      → ModelState (JSON, TTL: none)
 service:state:{service_id}  → ServiceState (JSON, TTL: none)
+service:overrides           → overrides persistidos de enable/disable
 gpu:state:{index}           → GPUState (JSON, TTL: 5s)
 download:job:{job_id}       → DownloadJob (JSON)
 
@@ -386,6 +457,10 @@ eviction_schedules (
 request_stats (
   id              UUID PRIMARY KEY,
   model_id        TEXT NOT NULL,
+  backend_type    TEXT,
+  request_kind    TEXT,
+  endpoint_path   TEXT,
+  status_code     INTEGER,
   gpu_index       INTEGER,
   started_at      TIMESTAMPTZ NOT NULL,
   duration_ms     INTEGER,
@@ -404,6 +479,17 @@ gpu_stats (
   power_draw_w     FLOAT,
   temperature_c    FLOAT,
   PRIMARY KEY (recorded_at, gpu_index)
+)
+
+model_load_stats (
+  id              UUID PRIMARY KEY,
+  model_id        TEXT NOT NULL,
+  backend_type    TEXT,
+  started_at      TIMESTAMPTZ NOT NULL,
+  finished_at     TIMESTAMPTZ,
+  duration_ms     INTEGER,
+  gpu_count       INTEGER,
+  gpu_indices     TEXT
 )
 
 -- Config del servidor
