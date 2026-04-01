@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ocabra.config import settings
+from ocabra.database import AsyncSessionLocal
+from ocabra.db.model_config import global_schedule_rows_to_payload, get_global_schedule_rows, replace_global_schedules
 
 router = APIRouter(tags=["config"])
 
@@ -71,14 +73,22 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "modelsDir": settings.models_dir,
         "downloadDir": overrides.get("download_dir", default_download_dir),
         "maxTemperatureC": overrides.get("max_temperature_c", 88),
-        "globalSchedules": overrides.get("global_schedules", []),
+        "globalSchedules": [],
     }
+
+
+async def _load_global_schedules() -> list[dict[str, Any]]:
+    async with AsyncSessionLocal() as session:
+        rows = await get_global_schedule_rows(session)
+    return global_schedule_rows_to_payload(rows)
 
 
 @router.get("/config", summary="Get server configuration")
 async def get_config(request: Request) -> dict[str, Any]:
     """Return current server configuration (non-secret values)."""
-    return _build_config_response(request)
+    payload = _build_config_response(request)
+    payload["globalSchedules"] = await _load_global_schedules()
+    return payload
 
 
 @router.patch("/config", summary="Patch server configuration")
@@ -90,6 +100,17 @@ async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, 
             status_code=400,
             detail="modelsDir is managed by the container environment and cannot be changed at runtime",
         )
+
+    if "global_schedules" in payload:
+        try:
+            async with AsyncSessionLocal() as session:
+                await replace_global_schedules(
+                    session,
+                    [schedule.model_dump() for schedule in payload["global_schedules"]],
+                )
+                await session.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if "default_gpu_index" in payload:
         settings.default_gpu_index = int(payload["default_gpu_index"])
@@ -121,10 +142,10 @@ async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, 
         overrides["download_dir"] = str(payload["download_dir"])
     if "max_temperature_c" in payload:
         overrides["max_temperature_c"] = int(payload["max_temperature_c"])
-    if "global_schedules" in payload:
-        overrides["global_schedules"] = payload["global_schedules"]
 
-    return _build_config_response(request)
+    response = _build_config_response(request)
+    response["globalSchedules"] = await _load_global_schedules()
+    return response
 
 
 @router.post("/config/litellm/sync", summary="Sync models to LiteLLM proxy")

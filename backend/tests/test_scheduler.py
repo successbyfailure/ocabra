@@ -225,6 +225,7 @@ async def test_schedule_reloads_load_due_pin_models():
         backend_type="vllm",
         status=ModelStatus.UNLOADED,
         load_policy=LoadPolicy.PIN,
+        auto_reload=True,
         preferred_gpu=1,
     )
     model_manager.list_states = AsyncMock(return_value=[state])
@@ -246,3 +247,95 @@ async def test_schedule_reloads_load_due_pin_models():
         "vllm/pin-model",
         force_gpu=1,
     )
+
+
+@pytest.mark.asyncio
+async def test_schedule_reloads_skip_models_without_auto_reload():
+    from types import SimpleNamespace
+
+    from ocabra.core.model_manager import LoadPolicy, ModelStatus, ModelState
+
+    gm = make_gpu_manager({0: 24000})
+    model_manager = AsyncMock()
+    scheduler = GPUScheduler(gm, model_manager=model_manager)
+    state = ModelState(
+        model_id="vllm/pin-model",
+        display_name="Pinned Model",
+        backend_type="vllm",
+        status=ModelStatus.UNLOADED,
+        load_policy=LoadPolicy.PIN,
+        auto_reload=False,
+        preferred_gpu=1,
+    )
+    model_manager.list_states = AsyncMock(return_value=[state])
+    scheduler._load_enabled_schedules = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                id="sched-3",
+                model_id=None,
+                action="reload",
+                cron_expr="* * * * *",
+            )
+        ]
+    )
+    scheduler._is_schedule_due = MagicMock(return_value=True)
+
+    await scheduler.check_schedule_reloads()
+
+    model_manager.load.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_enabled_schedules_reads_db_rows():
+    from ocabra.db.model_config import global_schedule_payload_to_rows
+
+    rows = global_schedule_payload_to_rows("weekday-window", [1, 2, 3], "02:00", "06:00", True)
+    rows.append(
+        global_schedule_payload_to_rows("disabled-window", [4], "03:00", "05:00", False)[0]
+    )
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(self._rows)
+
+    class FakeSession:
+        def __init__(self, rows):
+            self.rows = list(rows)
+
+        async def execute(self, query):
+            sql = str(query.compile(compile_kwargs={"literal_binds": True})).lower()
+            filtered = [row for row in self.rows if row.enabled]
+            if "action in ('reload')" in sql:
+                filtered = [row for row in filtered if row.action == "reload"]
+            elif "action in ('evict_all')" in sql:
+                filtered = [row for row in filtered if row.action == "evict_all"]
+            return FakeResult(filtered)
+
+    class FakeSessionFactory:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return FakeSession(self.rows)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    gm = make_gpu_manager({0: 24000})
+    scheduler = GPUScheduler(gm)
+
+    with patch("ocabra.core.scheduler.AsyncSessionLocal", new=FakeSessionFactory(rows)):
+        evictions = await scheduler._load_enabled_schedules(actions={"evict_all"})
+        reloads = await scheduler._load_enabled_schedules(actions={"reload"})
+
+    assert [row.action for row in evictions] == ["evict_all"]
+    assert [row.action for row in reloads] == ["reload"]

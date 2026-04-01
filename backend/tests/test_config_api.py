@@ -14,13 +14,23 @@ from ocabra.config import settings
 async def test_get_config_includes_settings_fields() -> None:
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
-    payload = await config_api.get_config(request)
+    with patch.object(
+        config_api,
+        "_load_global_schedules",
+        new=AsyncMock(
+            return_value=[
+                {"id": "night", "days": [1], "start": "01:00", "end": "05:00", "enabled": True}
+            ]
+        ),
+    ):
+        payload = await config_api.get_config(request)
 
     assert "defaultGpuIndex" in payload
     assert "modelsDir" in payload
     assert "downloadDir" in payload
     assert "maxTemperatureC" in payload
     assert "globalSchedules" in payload
+    assert payload["globalSchedules"][0]["id"] == "night"
 
 
 @pytest.mark.asyncio
@@ -29,7 +39,7 @@ async def test_patch_config_applies_runtime_values() -> None:
     previous_timeout = settings.idle_timeout_seconds
 
     try:
-        patch = config_api.ServerConfigPatch.model_validate(
+        config_patch = config_api.ServerConfigPatch.model_validate(
             {
                 "idleTimeoutSeconds": 123,
                 "downloadDir": "/tmp/test-downloads",
@@ -46,12 +56,37 @@ async def test_patch_config_applies_runtime_values() -> None:
             }
         )
 
-        payload = await config_api.patch_config(patch, request)
+        with patch.object(
+            config_api,
+            "_load_global_schedules",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "id": "night",
+                        "days": [1, 2, 3],
+                        "start": "01:00",
+                        "end": "05:00",
+                        "enabled": True,
+                    }
+                ]
+            ),
+        ), patch.object(config_api, "replace_global_schedules", new=AsyncMock()) as replace_global_schedules:
+            payload = await config_api.patch_config(config_patch, request)
 
         assert payload["idleTimeoutSeconds"] == 123
         assert payload["downloadDir"] == "/tmp/test-downloads"
         assert payload["maxTemperatureC"] == 91
         assert payload["globalSchedules"][0]["id"] == "night"
+        replace_global_schedules.assert_awaited_once()
+        assert replace_global_schedules.await_args.args[1] == [
+            {
+                "id": "night",
+                "days": [1, 2, 3],
+                "start": "01:00",
+                "end": "05:00",
+                "enabled": True,
+            }
+        ]
     finally:
         settings.idle_timeout_seconds = previous_timeout
 

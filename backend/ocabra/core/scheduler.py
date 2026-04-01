@@ -202,6 +202,8 @@ class GPUScheduler:
     def _should_reload_state(self, state) -> bool:
         from ocabra.core.model_manager import LoadPolicy, ModelStatus
 
+        if not state.auto_reload:
+            return False
         if state.load_policy not in {LoadPolicy.WARM, LoadPolicy.PIN}:
             return False
         return state.status in {ModelStatus.CONFIGURED, ModelStatus.UNLOADED}
