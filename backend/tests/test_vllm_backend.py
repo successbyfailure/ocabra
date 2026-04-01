@@ -7,6 +7,7 @@ All tests mock subprocess creation — no real vLLM or GPU required.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -298,12 +299,13 @@ class TestLoadUnload:
         model_path.mkdir()
 
         proc = _fake_proc(returncode=None)
+        create_subprocess = AsyncMock(return_value=proc)
 
         from ocabra.backends.vllm_backend import VLLMBackend
 
         with (
             patch("ocabra.backends.vllm_backend.settings") as mock_settings,
-            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch("asyncio.create_subprocess_exec", new=create_subprocess),
             patch.object(VLLMBackend, "_wait_for_startup", new=AsyncMock()),
             patch.object(VLLMBackend, "get_vram_estimate_mb", new=AsyncMock(return_value=8192)),
         ):
@@ -318,6 +320,7 @@ class TestLoadUnload:
         assert info.pid == 12345
         assert info.vram_used_mb == 8192
         assert info.backend_type == "vllm"
+        assert create_subprocess.await_args.kwargs["start_new_session"] is True
 
     @pytest.mark.asyncio
     async def test_load_passes_vllm_tuning_flags(self, tmp_model_dir: Path):
@@ -518,21 +521,20 @@ class TestLoadUnload:
         (tmp_model_dir / "slow-model").mkdir()
 
         proc = _fake_proc(returncode=None)
+        create_subprocess = AsyncMock(return_value=proc)
 
         from ocabra.backends.vllm_backend import VLLMBackend
 
-        async def _timeout(*_args, **_kwargs):
-            raise TimeoutError("startup timeout")
-
         with (
             patch("ocabra.backends.vllm_backend.settings") as mock_settings,
-            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch("asyncio.create_subprocess_exec", new=create_subprocess),
             patch.object(
                 VLLMBackend,
                 "_wait_for_startup",
                 new=AsyncMock(side_effect=TimeoutError("startup timeout")),
             ),
-            patch.object(VLLMBackend, "_kill_process", new=AsyncMock()),
+            patch("ocabra.backends.vllm_backend.os.getpgid", return_value=12345),
+            patch("ocabra.backends.vllm_backend.os.killpg") as killpg_mock,
         ):
             mock_settings.models_dir = str(tmp_model_dir)
             mock_settings.hf_cache_dir = "/tmp/hf_cache"
@@ -540,6 +542,11 @@ class TestLoadUnload:
             backend = VLLMBackend()
             with pytest.raises(TimeoutError):
                 await backend.load("slow-model", gpu_indices=[0], port=18002)
+
+        assert create_subprocess.await_args.kwargs["start_new_session"] is True
+        killpg_mock.assert_called_once_with(12345, signal.SIGKILL)
+        proc.wait.assert_awaited_once()
+        assert "slow-model" not in backend._processes
 
     @pytest.mark.asyncio
     async def test_oom_detected_during_startup(self, tmp_model_dir: Path):
@@ -581,9 +588,14 @@ class TestLoadUnload:
         backend = VLLMBackend()
         backend._processes["my-model"] = (proc, 18001)
 
-        await backend.unload("my-model")
+        with (
+            patch("ocabra.backends.vllm_backend.os.getpgid", return_value=4321),
+            patch("ocabra.backends.vllm_backend.os.killpg") as killpg_mock,
+        ):
+            await backend.unload("my-model")
 
-        proc.terminate.assert_called_once()
+        killpg_mock.assert_called_once_with(4321, signal.SIGTERM)
+        proc.wait.assert_awaited_once()
         assert "my-model" not in backend._processes
 
     @pytest.mark.asyncio

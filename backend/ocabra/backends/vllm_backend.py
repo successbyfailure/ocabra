@@ -143,7 +143,8 @@ class VLLMBackend(BackendInterface):
             "disable_log_requests",
             self._get_setting("vllm_disable_log_requests"),
         ):
-            cmd.append("--disable-log-requests")
+            # vLLM >=0.17 renamed --disable-log-requests → --no-enable-log-requests
+            cmd.append("--no-enable-log-requests")
         model_impl = self._get_vllm_option(
             extra_config, "model_impl", self._get_setting("vllm_model_impl")
         )
@@ -283,6 +284,7 @@ class VLLMBackend(BackendInterface):
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         self._processes[model_id] = (proc, port)
@@ -544,16 +546,28 @@ class VLLMBackend(BackendInterface):
         if proc.returncode is not None:
             return
 
+        pgid: int | None = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, AttributeError, TypeError):
+            pgid = None
+
         if graceful:
             try:
-                proc.terminate()  # SIGTERM
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    proc.terminate()  # SIGTERM
                 await asyncio.wait_for(proc.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
                 return
             except (TimeoutError, ProcessLookupError):
                 logger.warning("vllm_sigterm_timeout", model_id=model_id)
 
         try:
-            proc.kill()  # SIGKILL
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()  # SIGKILL
             await proc.wait()
         except ProcessLookupError:
             pass
