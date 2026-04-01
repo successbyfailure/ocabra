@@ -1,7 +1,8 @@
 import asyncio
+import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ocabra.config import settings
@@ -122,14 +123,62 @@ async def update_model(model_id: str, body: ModelPatch, request: Request) -> dic
 
 
 @router.delete("/models/{model_id:path}")
-async def delete_model(model_id: str, request: Request) -> dict:
-    """Remove a model configuration and optionally its files."""
+async def delete_model(
+    model_id: str,
+    request: Request,
+    delete_files: bool = Query(default=True),
+) -> dict:
+    """Remove a model configuration and its files from disk.
+
+    Args:
+        model_id: Canonical model id (backend/org/name).
+        delete_files: If true (default), also delete the model files from disk.
+
+    Returns:
+        {"ok": true, "deleted_path": path_or_null}
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     await mm.delete_model(model_id)
-    return {"ok": True}
+
+    deleted_path: str | None = None
+    if delete_files:
+        deleted_path = await _delete_model_files(model_id, state.backend_type)
+
+    return {"ok": True, "deleted_path": deleted_path}
+
+
+async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
+    """Delete model files from disk based on backend type."""
+    import asyncio
+
+    if backend_type == "ollama":
+        # Ollama manages its own storage — use ollama rm
+        try:
+            parts = model_id.split("/", 1)
+            ollama_name = parts[1] if len(parts) == 2 else model_id
+            proc = await asyncio.create_subprocess_exec(
+                "ollama", "rm", ollama_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        except Exception:
+            pass
+        return None
+
+    # HuggingFace-backed models (vllm, diffusers, whisper, transformers, tensorrt_llm…)
+    parts = model_id.split("/", 1)
+    raw_model = parts[1] if len(parts) == 2 else model_id
+    hf_dir_name = raw_model.replace("/", "--")
+    models_dir = Path(settings.models_dir or "/data/models")
+    candidate = models_dir / "huggingface" / hf_dir_name
+    if candidate.exists():
+        await asyncio.to_thread(shutil.rmtree, candidate)
+        return str(candidate)
+    return None
 
 
 async def _get_ollama_sizes_bytes() -> dict[str, int]:
