@@ -32,7 +32,17 @@ export type ModelStatus =
   | "error"
 
 export type LoadPolicy = "pin" | "warm" | "on_demand"
-export type BackendType = "vllm" | "bitnet" | "diffusers" | "whisper" | "tts" | "ollama"
+export type BackendType =
+  | "vllm"
+  | "bitnet"
+  | "acestep"
+  | "diffusers"
+  | "whisper"
+  | "tts"
+  | "ollama"
+  | "tensorrt_llm"
+  | "llama_cpp"
+  | "sglang"
 
 export interface ModelCapabilities {
   chat: boolean
@@ -47,6 +57,7 @@ export interface ModelCapabilities {
   reasoning: boolean
   imageGeneration: boolean
   audioTranscription: boolean
+  musicGeneration: boolean
   tts: boolean
   streaming: boolean
   contextLength: number
@@ -69,6 +80,13 @@ export interface ModelState {
   errorMessage?: string | null
   schedules?: EvictionSchedule[]
   extraConfig?: Record<string, unknown>
+}
+
+export interface ModelsStorageStats {
+  path: string
+  totalBytes: number
+  usedBytes: number
+  freeBytes: number
 }
 
 export interface VLLMConfig {
@@ -258,6 +276,7 @@ export interface LocalModel {
 export interface ServerConfig {
   defaultGpuIndex: number
   idleTimeoutSeconds: number
+  idleEvictionCheckIntervalSeconds: number
   vramBufferMb: number
   vramPressureThresholdPct: number
   logLevel: string
@@ -307,6 +326,10 @@ export interface PerformanceStats {
     tokenizedRequests: number
     errorCount: number
     uptimePct: number
+    loadCount: number
+    avgLoadMs: number
+    p95LoadMs: number
+    lastLoadMs: number
   }[]
 }
 

@@ -24,6 +24,7 @@ import type {
   StatsParams,
   ServiceState,
   CompileJob,
+  ModelsStorageStats,
 } from "@/types"
 
 const BASE = ""
@@ -37,7 +38,7 @@ function isRecord(value: unknown): value is AnyRecord {
 function toVLLMConfig(raw: unknown): ModelState["extraConfig"] {
   const data = isRecord(raw) ? raw : {}
   const vllmRaw = data.vllm
-  const vllm = isRecord(vllmRaw) ? vllmRaw : {}
+  const vllm = isRecord(vllmRaw) ? vllmRaw : data
 
   return {
     ...data,
@@ -230,6 +231,7 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     reasoning: Boolean(data.reasoning),
     imageGeneration: Boolean(data.image_generation ?? data.imageGeneration),
     audioTranscription: Boolean(data.audio_transcription ?? data.audioTranscription),
+    musicGeneration: Boolean(data.music_generation ?? data.musicGeneration),
     tts: Boolean(data.tts),
     streaming: Boolean(data.streaming),
     contextLength: Number(data.context_length ?? data.contextLength ?? 0),
@@ -262,6 +264,16 @@ function toGpuState(raw: unknown): GPUState {
           }
         })
       : [],
+  }
+}
+
+function toModelsStorageStats(raw: unknown): ModelsStorageStats {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    path: String(data.path ?? ""),
+    totalBytes: Number(data.total_bytes ?? data.totalBytes ?? 0),
+    usedBytes: Number(data.used_bytes ?? data.usedBytes ?? 0),
+    freeBytes: Number(data.free_bytes ?? data.freeBytes ?? 0),
   }
 }
 
@@ -429,6 +441,9 @@ function toServerConfig(raw: unknown): ServerConfig {
   return {
     defaultGpuIndex: Number(data.defaultGpuIndex ?? 0),
     idleTimeoutSeconds: Number(data.idleTimeoutSeconds ?? 0),
+    idleEvictionCheckIntervalSeconds: Number(
+      data.idleEvictionCheckIntervalSeconds ?? data.idle_eviction_check_interval_seconds ?? 15,
+    ),
     vramBufferMb: Number(data.vramBufferMb ?? 0),
     vramPressureThresholdPct: Number(data.vramPressureThresholdPct ?? 0),
     logLevel: String(data.logLevel ?? "info"),
@@ -530,6 +545,7 @@ export const api = {
 
   models: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/models")).map(toModelState),
+    storage: async () => toModelsStorageStats(await request<unknown>("GET", "/ocabra/models/storage")),
     get: async (modelId: string) =>
       toModelState(await request<unknown>("GET", `/ocabra/models/${encodeURIComponent(modelId)}`)),
     load: async (modelId: string) =>
@@ -558,7 +574,7 @@ export const api = {
     clearHistory: (status = "failed,cancelled,completed") =>
       request<{ deleted: number }>("DELETE", `/ocabra/downloads?status=${encodeURIComponent(status)}`),
     streamProgress: (jobId: string): EventSource =>
-      new EventSource(`/ocabra/downloads/${jobId}/stream`),
+      new EventSource(`/ocabra/downloads/${encodeURIComponent(jobId)}/stream`),
   },
 
   registry: {
@@ -670,29 +686,21 @@ export const api = {
     },
     estimate: async (params: {
       modelId: string
+      gpuIndices: number[]
       tpSize: number
       dtype: string
       maxBatchSize: number
       maxSeqLen: number
     }): Promise<VramEstimate> => {
-      const qs = new URLSearchParams({
-        model_id: params.modelId,
-        tp_size: String(params.tpSize),
-        dtype: params.dtype,
-        max_batch_size: String(params.maxBatchSize),
-        max_seq_len: String(params.maxSeqLen),
-      })
+      const qs = new URLSearchParams()
+      qs.set("model_id", params.modelId)
+      qs.set("tp_size", String(params.tpSize))
+      qs.set("dtype", params.dtype)
+      qs.set("max_batch_size", String(params.maxBatchSize))
+      qs.set("max_seq_len", String(params.maxSeqLen))
+      params.gpuIndices.forEach((gpuIndex) => qs.append("gpu_indices", String(gpuIndex)))
       const raw = await request<Record<string, unknown>>("GET", `/ocabra/trtllm/estimate?${qs}`)
-      return {
-        estimatedParamsB: raw.estimated_params_b as number | null,
-        quant: raw.quant as string,
-        tpSize: raw.tp_size as number,
-        configFound: raw.config_found as boolean,
-        serve: raw.serve as VramEstimate["serve"],
-        build: raw.build as VramEstimate["build"],
-        disk: raw.disk as VramEstimate["disk"],
-        warnings: raw.warnings as string[],
-      }
+      return toVramEstimate(raw)
     },
   },
 }
@@ -706,4 +714,37 @@ export interface VramEstimate {
   build: { vramPerGpuMb: number; vramTotalMb: number }
   disk: { engineMb: number; checkpointMbTemp: number; totalPeakMb: number }
   warnings: string[]
+}
+
+function toVramEstimate(raw: Record<string, unknown>): VramEstimate {
+  const serveRaw = (raw.serve ?? {}) as Record<string, unknown>
+  const buildRaw = (raw.build ?? {}) as Record<string, unknown>
+  const diskRaw = (raw.disk ?? {}) as Record<string, unknown>
+  const breakdownRaw = (serveRaw.breakdown ?? {}) as Record<string, unknown>
+
+  return {
+    estimatedParamsB: raw.estimated_params_b == null ? null : Number(raw.estimated_params_b),
+    quant: String(raw.quant ?? "unknown"),
+    tpSize: Number(raw.tp_size ?? 1),
+    configFound: Boolean(raw.config_found),
+    serve: {
+      vramPerGpuMb: Number(serveRaw.vram_per_gpu_mb ?? 0),
+      vramTotalMb: Number(serveRaw.vram_total_mb ?? 0),
+      breakdown: {
+        weightsMb: Number(breakdownRaw.weights_mb ?? 0),
+        kvCacheMb: Number(breakdownRaw.kv_cache_mb ?? 0),
+        overheadMb: Number(breakdownRaw.overhead_mb ?? 0),
+      },
+    },
+    build: {
+      vramPerGpuMb: Number(buildRaw.vram_per_gpu_mb ?? 0),
+      vramTotalMb: Number(buildRaw.vram_total_mb ?? 0),
+    },
+    disk: {
+      engineMb: Number(diskRaw.engine_mb ?? 0),
+      checkpointMbTemp: Number(diskRaw.checkpoint_mb_temp ?? 0),
+      totalPeakMb: Number(diskRaw.total_peak_mb ?? 0),
+    },
+    warnings: Array.isArray(raw.warnings) ? raw.warnings.map(String) : [],
+  }
 }

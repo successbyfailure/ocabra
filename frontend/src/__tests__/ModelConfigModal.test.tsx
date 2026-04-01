@@ -35,6 +35,7 @@ describe("ModelConfigModal", () => {
             reasoning: true,
             imageGeneration: false,
             audioTranscription: false,
+            musicGeneration: false,
             tts: false,
             streaming: true,
             contextLength: 32768,
@@ -84,7 +85,7 @@ describe("ModelConfigModal", () => {
 
     fireEvent.click(screen.getByText(/Aplicar tuning recomendado/i))
 
-    expect(screen.getByDisplayValue("0.9")).toBeTruthy()
+    expect((screen.getByLabelText(/GPU memory utilization/i) as HTMLInputElement).value).toBe("0.9")
 
     fireEvent.click(screen.getByText(/Aplicar recomendacion del probe/i))
 
@@ -122,6 +123,7 @@ describe("ModelConfigModal", () => {
             reasoning: true,
             imageGeneration: false,
             audioTranscription: false,
+            musicGeneration: false,
             tts: false,
             streaming: true,
             contextLength: 32768,

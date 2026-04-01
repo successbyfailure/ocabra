@@ -39,6 +39,7 @@ describe("Settings", () => {
     configGet.mockResolvedValue({
       defaultGpuIndex: 1,
       idleTimeoutSeconds: 123,
+      idleEvictionCheckIntervalSeconds: 15,
       vramBufferMb: 768,
       vramPressureThresholdPct: 91,
       logLevel: "warning",

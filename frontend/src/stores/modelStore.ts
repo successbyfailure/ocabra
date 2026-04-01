@@ -46,6 +46,7 @@ export const useModelStore = create<ModelStore>((set) => ({
                 reasoning: false,
                 imageGeneration: false,
                 audioTranscription: false,
+                musicGeneration: false,
                 tts: false,
                 streaming: false,
                 contextLength: 0,
