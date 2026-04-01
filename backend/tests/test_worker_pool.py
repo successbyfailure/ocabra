@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from ocabra import config
@@ -74,3 +75,65 @@ async def test_get_backend_disabled_reason():
 
     with pytest.raises(RuntimeError, match="feature flag disabled"):
         await pool.get_backend("tensorrt_llm")
+
+
+@pytest.mark.asyncio
+async def test_forward_stream_raises_on_http_error(pool, monkeypatch):
+    class _ErrorResponse:
+        status_code = 503
+
+        def __init__(self, url: str) -> None:
+            self.request = httpx.Request("POST", url)
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError(
+                "Service unavailable",
+                request=self.request,
+                response=httpx.Response(self.status_code, request=self.request),
+            )
+
+        async def aiter_bytes(self):
+            if False:
+                yield b""
+
+    class _StreamContext:
+        def __init__(self, response: _ErrorResponse) -> None:
+            self._response = response
+
+        async def __aenter__(self):
+            return self._response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method: str, url: str, json: dict):
+            return _StreamContext(_ErrorResponse(url))
+
+    monkeypatch.setattr("ocabra.core.worker_pool.httpx.AsyncClient", _FakeAsyncClient)
+    from ocabra.backends.base import WorkerInfo
+
+    pool.set_worker(
+        "test/model",
+        WorkerInfo(
+            backend_type="mock",
+            model_id="test/model",
+            gpu_indices=[0],
+            port=18042,
+            pid=123,
+            vram_used_mb=0,
+        ),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        async for _chunk in pool.forward_stream("test/model", "/v1/chat/completions", {}):
+            pass

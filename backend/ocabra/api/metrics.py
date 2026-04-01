@@ -110,7 +110,7 @@ async def _update_gauges(request: Request) -> None:
     # GPU gauges
     try:
         gpu_manager = request.app.state.gpu_manager
-        for gpu_state in gpu_manager.get_all_states():
+        for gpu_state in await gpu_manager.get_all_states():
             idx = str(gpu_state.index)
             gpu_vram_used.labels(gpu_index=idx).set(gpu_state.used_vram_mb * 1024 * 1024)
             gpu_utilization.labels(gpu_index=idx).set(gpu_state.utilization_pct)

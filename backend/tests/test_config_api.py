@@ -1,26 +1,21 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
 
-from ocabra.api.internal.config import router as config_router
+from ocabra.api.internal import config as config_api
 from ocabra.config import settings
 
 
-def _make_app() -> FastAPI:
-    app = FastAPI()
-    app.state.model_manager = object()
-    app.include_router(config_router, prefix="/ocabra")
-    return app
+@pytest.mark.asyncio
+async def test_get_config_includes_settings_fields() -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
+    payload = await config_api.get_config(request)
 
-def test_get_config_includes_settings_fields() -> None:
-    client = TestClient(_make_app())
-    resp = client.get("/ocabra/config")
-    assert resp.status_code == 200
-
-    payload = resp.json()
     assert "defaultGpuIndex" in payload
     assert "modelsDir" in payload
     assert "downloadDir" in payload
@@ -28,17 +23,14 @@ def test_get_config_includes_settings_fields() -> None:
     assert "globalSchedules" in payload
 
 
-def test_patch_config_applies_runtime_values() -> None:
-    client = TestClient(_make_app())
-
-    previous_models_dir = settings.models_dir
+@pytest.mark.asyncio
+async def test_patch_config_applies_runtime_values() -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     previous_timeout = settings.idle_timeout_seconds
 
     try:
-        resp = client.patch(
-            "/ocabra/config",
-            json={
-                "modelsDir": "/tmp/test-models",
+        patch = config_api.ServerConfigPatch.model_validate(
+            {
                 "idleTimeoutSeconds": 123,
                 "downloadDir": "/tmp/test-downloads",
                 "maxTemperatureC": 91,
@@ -51,39 +43,48 @@ def test_patch_config_applies_runtime_values() -> None:
                         "enabled": True,
                     }
                 ],
-            },
+            }
         )
-        assert resp.status_code == 200
-        payload = resp.json()
-        assert payload["modelsDir"] == "/tmp/test-models"
+
+        payload = await config_api.patch_config(patch, request)
+
         assert payload["idleTimeoutSeconds"] == 123
         assert payload["downloadDir"] == "/tmp/test-downloads"
         assert payload["maxTemperatureC"] == 91
         assert payload["globalSchedules"][0]["id"] == "night"
     finally:
-        settings.models_dir = previous_models_dir
         settings.idle_timeout_seconds = previous_timeout
 
 
-def test_patch_config_rejects_legacy_snake_case_keys() -> None:
-    client = TestClient(_make_app())
+@pytest.mark.asyncio
+async def test_patch_config_rejects_models_dir_runtime_mutation() -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    previous_models_dir = settings.models_dir
 
-    resp = client.patch(
-        "/ocabra/config",
-        json={"models_dir": "/tmp/legacy-models"},
-    )
+    patch = config_api.ServerConfigPatch.model_validate({"modelsDir": "/tmp/test-models"})
 
-    assert resp.status_code == 422
+    with pytest.raises(HTTPException) as exc_info:
+        await config_api.patch_config(patch, request)
+
+    assert exc_info.value.status_code == 400
+    assert "cannot be changed at runtime" in str(exc_info.value.detail)
+    assert settings.models_dir == previous_models_dir
 
 
-def test_sync_litellm_contract() -> None:
-    client = TestClient(_make_app())
+@pytest.mark.asyncio
+async def test_patch_config_rejects_legacy_snake_case_keys() -> None:
+    with pytest.raises(ValidationError):
+        config_api.ServerConfigPatch.model_validate({"models_dir": "/tmp/legacy-models"})
 
+
+@pytest.mark.asyncio
+async def test_sync_litellm_contract() -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=object())))
     fake_result = SimpleNamespace(synced=4, errors=[])
-    with patch("ocabra.integrations.litellm_sync.LiteLLMSync.sync_all", new=AsyncMock(return_value=fake_result)):
-        resp = client.post("/ocabra/config/litellm/sync")
 
-    assert resp.status_code == 200
-    payload = resp.json()
+    with patch("ocabra.integrations.litellm_sync.LiteLLMSync.sync_all", new=AsyncMock(return_value=fake_result)):
+        response = await config_api.sync_litellm(request)
+
+    payload = json.loads(response.body)
     assert payload["synced_models"] == 4
     assert payload["errors"] == []

@@ -32,6 +32,7 @@ class GPUScheduler:
         enforce_vllm_headroom: bool = False,
     ) -> list[int]:
         preferred = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
+        pressure_threshold_pct = max(0.0, min(100.0, float(settings.vram_pressure_threshold_pct)))
         states = await self._gpu_manager.get_all_states()
         gpu_indices = list(range(len(states)))
         free_per_gpu = {i: await self._gpu_manager.get_free_vram(i) for i in gpu_indices}
@@ -44,28 +45,42 @@ class GPUScheduler:
             required_free_mb = int(state.total_vram_mb * settings.vllm_gpu_memory_utilization)
             return state.free_vram_mb >= required_free_mb
 
-        ordered = [preferred] + [i for i in gpu_indices if i != preferred]
-        for gpu_idx in ordered:
-            free = free_per_gpu[gpu_idx]
-            if free >= vram_needed_mb and _has_vllm_headroom(gpu_idx):
-                logger.info(
-                    "gpu_assigned",
-                    gpu=gpu_idx,
-                    vram_needed_mb=vram_needed_mb,
-                    free_mb=free,
-                )
-                return [gpu_idx]
+        def _is_under_pressure(gpu_idx: int) -> bool:
+            state = state_by_gpu[gpu_idx]
+            if state.total_vram_mb <= 0:
+                return False
+            free_pct = free_per_gpu[gpu_idx] * 100.0 / state.total_vram_mb
+            return free_pct < pressure_threshold_pct
 
-        tp_candidates = [i for i in gpu_indices if _has_vllm_headroom(i)]
-        total_free = sum(free_per_gpu[i] for i in tp_candidates)
-        if total_free >= vram_needed_mb:
-            logger.info(
-                "tensor_parallel_assigned",
-                gpus=tp_candidates,
-                vram_needed_mb=vram_needed_mb,
-                total_free_mb=total_free,
-            )
-            return tp_candidates
+        healthy_gpu_indices = [i for i in gpu_indices if not _is_under_pressure(i)]
+        total_free = sum(free_per_gpu.values())
+        candidate_groups = [healthy_gpu_indices] if healthy_gpu_indices else []
+        if not candidate_groups or healthy_gpu_indices != gpu_indices:
+            candidate_groups.append(gpu_indices)
+
+        for candidates in candidate_groups:
+            ordered = [preferred] + [i for i in candidates if i != preferred]
+            for gpu_idx in ordered:
+                free = free_per_gpu[gpu_idx]
+                if free >= vram_needed_mb and _has_vllm_headroom(gpu_idx):
+                    logger.info(
+                        "gpu_assigned",
+                        gpu=gpu_idx,
+                        vram_needed_mb=vram_needed_mb,
+                        free_mb=free,
+                    )
+                    return [gpu_idx]
+
+            tp_candidates = [i for i in candidates if _has_vllm_headroom(i)]
+            total_free = sum(free_per_gpu[i] for i in tp_candidates)
+            if total_free >= vram_needed_mb:
+                logger.info(
+                    "tensor_parallel_assigned",
+                    gpus=tp_candidates,
+                    vram_needed_mb=vram_needed_mb,
+                    total_free_mb=total_free,
+                )
+                return tp_candidates
 
         raise InsufficientVRAMError(
             f"Need {vram_needed_mb} MB VRAM, only {total_free} MB available across all GPUs"

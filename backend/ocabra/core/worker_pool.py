@@ -89,5 +89,6 @@ class WorkerPool:
             url = f"http://127.0.0.1:{worker.port}{path}"
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, json=body) as resp:
+                resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     yield chunk

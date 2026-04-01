@@ -126,6 +126,34 @@ async def test_tensor_parallel_skips_gpu_without_vllm_headroom():
 
 
 @pytest.mark.asyncio
+async def test_pressure_threshold_prefers_healthier_gpu_over_pressured_preferred_gpu():
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 10000, 1: 9000},
+        total_by_gpu={0: 12000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+
+    with patch("ocabra.core.scheduler.settings.vram_pressure_threshold_pct", 80.0):
+        result = await scheduler.find_gpu_for_model(8000, preferred_gpu=1)
+
+    assert result == [0]
+
+
+@pytest.mark.asyncio
+async def test_pressure_threshold_falls_back_to_pressured_gpu_when_needed():
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 9800, 1: 15000},
+        total_by_gpu={0: 12000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+
+    with patch("ocabra.core.scheduler.settings.vram_pressure_threshold_pct", 80.0):
+        result = await scheduler.find_gpu_for_model(10000, preferred_gpu=0)
+
+    assert result == [1]
+
+
+@pytest.mark.asyncio
 async def test_vllm_headroom_can_trigger_insufficient_even_if_raw_sum_fits():
     """
     Raw free sum can be enough, but if no eligible GPUs satisfy vLLM headroom,

@@ -38,6 +38,15 @@ structlog.configure(
 logger = structlog.get_logger(__name__)
 
 
+def _build_cors_config() -> dict[str, object]:
+    """Restrict browser access to same-origin production and loopback dev origins."""
+    return {
+        "allow_origin_regex": r"^https?://(localhost|127\.0\.0\.1)(?::\d+)?$",
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+
+
 async def _idle_eviction_loop(model_manager, stop_event: asyncio.Event) -> None:
     interval_s = max(1, int(settings.idle_eviction_check_interval_seconds))
     logger.info(
@@ -396,9 +405,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    **_build_cors_config(),
 )
 
 # Stream 3-A: Stats middleware for /v1/* endpoints

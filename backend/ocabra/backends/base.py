@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 
@@ -24,24 +24,7 @@ class BackendCapabilities:
     context_length: int = 0
 
     def to_dict(self) -> dict:
-        return {
-            "chat": self.chat,
-            "completion": self.completion,
-            "tools": self.tools,
-            "vision": self.vision,
-            "embeddings": self.embeddings,
-            "pooling": self.pooling,
-            "rerank": self.rerank,
-            "classification": self.classification,
-            "score": self.score,
-            "reasoning": self.reasoning,
-            "image_generation": self.image_generation,
-            "audio_transcription": self.audio_transcription,
-            "tts": self.tts,
-            "music_generation": self.music_generation,
-            "streaming": self.streaming,
-            "context_length": self.context_length,
-        }
+        return asdict(self)
 
 
 @dataclass

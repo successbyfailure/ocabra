@@ -6,11 +6,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from math import ceil
 
 import sqlalchemy as sa
 
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.stats import GpuStat, RequestStat
+from ocabra.db.stats import GpuStat, ModelLoadStat, RequestStat
 
 
 def _normalize_window(
@@ -27,7 +28,7 @@ def _normalize_window(
 def _percentile(data: list[int], p: float) -> int:
     if not data:
         return 0
-    idx = int(len(data) * p / 100)
+    idx = max(0, ceil(len(data) * p / 100.0) - 1)
     return data[min(idx, len(data) - 1)]
 
 
@@ -108,26 +109,39 @@ async def get_energy_stats(
             GpuStat.recorded_at >= from_dt,
             GpuStat.recorded_at <= to_dt,
         )
+        q = q.order_by(GpuStat.gpu_index, GpuStat.recorded_at)
         result = await session.execute(q)
         rows = result.scalars().all()
 
     from ocabra.config import settings
 
-    by_gpu: dict[int, list[float]] = {}
+    by_gpu: dict[int, list[GpuStat]] = {}
     for row in rows:
-        by_gpu.setdefault(row.gpu_index, []).append(row.power_draw_w or 0.0)
+        by_gpu.setdefault(row.gpu_index, []).append(row)
 
     gpu_summaries = []
     total_kwh = 0.0
     for gpu_index, powers in by_gpu.items():
-        # Each row = 1 minute average → kWh = W * h / 1000 = W * (1/60) / 1000
-        kwh = sum(powers) / 60 / 1000
+        ordered_rows = sorted(powers, key=lambda row: row.recorded_at)
+        energy_wh = 0.0
+        total_seconds = 0.0
+        for i, row in enumerate(ordered_rows):
+            start = row.recorded_at
+            end = ordered_rows[i + 1].recorded_at if i + 1 < len(ordered_rows) else to_dt
+            if end <= start:
+                continue
+            interval_seconds = (end - start).total_seconds()
+            total_seconds += interval_seconds
+            energy_wh += float(row.power_draw_w or 0.0) * interval_seconds / 3600.0
+
+        kwh = energy_wh / 1000.0
         total_kwh += kwh
+        avg_power_w = energy_wh / (total_seconds / 3600.0) if total_seconds else 0.0
         gpu_summaries.append(
             {
                 "gpuIndex": gpu_index,
                 "totalKwh": round(kwh, 4),
-                "powerDrawW": round(sum(powers) / len(powers), 1) if powers else 0.0,
+                "powerDrawW": round(avg_power_w, 1),
             }
         )
 
@@ -158,12 +172,27 @@ async def get_performance_stats(
         result = await session.execute(q)
         rows = result.scalars().all()
 
+        load_q = sa.select(ModelLoadStat).where(
+            ModelLoadStat.started_at >= from_dt,
+            ModelLoadStat.started_at <= to_dt,
+        )
+        if model_id:
+            load_q = load_q.where(ModelLoadStat.model_id == model_id)
+        load_result = await session.execute(load_q)
+        load_rows = load_result.scalars().all()
+
     by_model: dict[str, list[RequestStat]] = {}
     for row in rows:
         by_model.setdefault(row.model_id, []).append(row)
 
+    load_by_model: dict[str, list[ModelLoadStat]] = {}
+    for row in load_rows:
+        load_by_model.setdefault(row.model_id, []).append(row)
+
     summaries = []
-    for mid, model_rows in by_model.items():
+    for mid in sorted(set(by_model) | set(load_by_model)):
+        model_rows = by_model.get(mid, [])
+        model_load_rows = load_by_model.get(mid, [])
         durations = [max(0, int(r.duration_ms or 0)) for r in model_rows]
         in_tokens = [max(0, int(r.input_tokens or 0)) for r in model_rows]
         out_tokens = [max(0, int(r.output_tokens or 0)) for r in model_rows]
@@ -176,7 +205,14 @@ async def get_performance_stats(
         req_per_min = (n * 60000 / total_duration_ms) if total_duration_ms else 0.0
 
         request_kinds = sorted({(r.request_kind or "other") for r in model_rows})
-        backend_type = next((r.backend_type for r in model_rows if r.backend_type), "unknown")
+        backend_type = next(
+            (r.backend_type for r in model_rows if r.backend_type),
+            next((r.backend_type for r in model_load_rows if r.backend_type), "unknown"),
+        )
+        load_durations = sorted(max(0, int(r.duration_ms or 0)) for r in model_load_rows)
+        avg_load_ms = int(sum(load_durations) / len(load_durations)) if load_durations else 0
+        p95_load_ms = _percentile(load_durations, 95) if load_durations else 0
+        last_load_ms = max(load_durations) if load_durations else 0
 
         summaries.append(
             {
@@ -193,6 +229,10 @@ async def get_performance_stats(
                 "tokenizedRequests": int(tokenized_requests),
                 "errorCount": errors,
                 "uptimePct": round((n - errors) / n * 100, 1) if n else 0.0,
+                "loadCount": len(load_durations),
+                "avgLoadMs": avg_load_ms,
+                "p95LoadMs": p95_load_ms,
+                "lastLoadMs": last_load_ms,
             }
         )
 

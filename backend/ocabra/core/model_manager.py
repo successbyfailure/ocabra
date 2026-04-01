@@ -1,8 +1,10 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
+from threading import Lock
 from urllib.parse import urlparse
 
 import structlog
@@ -130,22 +132,26 @@ class ModelManager:
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
         # In-flight request tracking: model_id → active request count
         self._in_flight: dict[str, int] = {}
+        self._in_flight_lock = Lock()
 
     def begin_request(self, model_id: str) -> None:
         """Mark one request as in-flight for this model."""
-        self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
+        with self._in_flight_lock:
+            self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
 
     def end_request(self, model_id: str) -> None:
         """Mark one in-flight request for this model as complete."""
-        count = self._in_flight.get(model_id, 0)
-        if count <= 1:
-            self._in_flight.pop(model_id, None)
-        else:
-            self._in_flight[model_id] = count - 1
+        with self._in_flight_lock:
+            count = self._in_flight.get(model_id, 0)
+            if count <= 1:
+                self._in_flight.pop(model_id, None)
+            else:
+                self._in_flight[model_id] = count - 1
 
     def is_busy(self, model_id: str) -> bool:
         """Return True if there are in-flight requests for this model."""
-        return self._in_flight.get(model_id, 0) > 0
+        with self._in_flight_lock:
+            return self._in_flight.get(model_id, 0) > 0
 
     async def _ensure_diarized_variants_for_whisper_models(self) -> None:
         snapshot = list(self._states.values())
@@ -187,13 +193,40 @@ class ModelManager:
     def register_event_listener(self, listener: Callable[[dict], Awaitable[None]]) -> None:
         self._event_listeners.append(listener)
 
+    def _create_background_task(
+        self,
+        coro: Awaitable[object],
+        *,
+        task_name: str,
+        **context: object,
+    ) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=task_name)
+
+        def _log_task_result(done: asyncio.Task) -> None:
+            with suppress(asyncio.CancelledError):
+                exc = done.exception()
+                if exc is not None:
+                    logger.warning(
+                        "background_task_failed",
+                        task=task_name,
+                        error=str(exc),
+                        **context,
+                    )
+
+        task.add_done_callback(_log_task_result)
+        return task
+
     async def start(self) -> None:
         await self._load_configs_from_db()
         await self._ensure_diarized_variants_for_whisper_models()
         for model_id, state in self._states.items():
             if state.load_policy == LoadPolicy.PIN:
                 logger.info("auto_loading_pinned_model", model_id=model_id)
-                asyncio.create_task(self._load_model(model_id))
+                self._create_background_task(
+                    self._load_model(model_id),
+                    task_name=f"load:{model_id}",
+                    model_id=model_id,
+                )
 
     async def _load_configs_from_db(self) -> None:
         import sqlalchemy as sa
@@ -277,7 +310,12 @@ class ModelManager:
             "status": state.status.value,
         }
         for listener in list(self._event_listeners):
-            asyncio.create_task(self._run_event_listener(listener, payload))
+            self._create_background_task(
+                self._run_event_listener(listener, payload),
+                task_name=f"listener:{payload.get('event')}:{payload.get('model_id')}",
+                model_id=payload.get("model_id"),
+                event=payload.get("event"),
+            )
 
     async def _run_event_listener(
         self,
@@ -306,6 +344,7 @@ class ModelManager:
 
             state.status = ModelStatus.LOADING
             await self._publish_event(model_id, "status_changed")
+            load_started_at = datetime.now(timezone.utc)
 
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
@@ -368,6 +407,14 @@ class ModelManager:
                 state.loaded_at = datetime.now(timezone.utc)
                 state.error_message = None
 
+                await self._record_model_load_stat(
+                    model_id=model_id,
+                    backend_type=state.backend_type,
+                    started_at=load_started_at,
+                    finished_at=state.loaded_at,
+                    gpu_indices=actual_gpu_indices,
+                )
+
                 if gpu_managed and self._gpu_manager:
                     vram_per_gpu = worker_info.vram_used_mb // max(1, len(actual_gpu_indices))
                     for gpu_idx in actual_gpu_indices:
@@ -404,6 +451,38 @@ class ModelManager:
                 raise
 
         return state
+
+    async def _record_model_load_stat(
+        self,
+        model_id: str,
+        backend_type: str,
+        started_at: datetime,
+        finished_at: datetime | None,
+        gpu_indices: list[int],
+    ) -> None:
+        duration_ms = None
+        if finished_at is not None:
+            duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
+
+        try:
+            from ocabra.database import AsyncSessionLocal
+            from ocabra.db.stats import ModelLoadStat
+
+            async with AsyncSessionLocal() as session:
+                session.add(
+                    ModelLoadStat(
+                        model_id=model_id,
+                        backend_type=backend_type,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        duration_ms=duration_ms,
+                        gpu_count=len(gpu_indices),
+                        gpu_indices=",".join(str(idx) for idx in gpu_indices) if gpu_indices else None,
+                    )
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning("model_load_stat_write_failed", model_id=model_id, error=str(exc))
 
     def _resolve_bitnet_option(self, state: "ModelState", key: str, default: int) -> int:
         extra = state.extra_config if isinstance(state.extra_config, dict) else {}
@@ -590,7 +669,11 @@ class ModelManager:
             logger.info("model_unloaded", model_id=model_id, reason=reason)
 
             if reason == "pressure" and state.auto_reload:
-                asyncio.create_task(self._watch_and_reload(model_id))
+                self._create_background_task(
+                    self._watch_and_reload(model_id),
+                    task_name=f"watch-and-reload:{model_id}",
+                    model_id=model_id,
+                )
         except Exception as e:
             state.status = ModelStatus.ERROR
             state.error_message = str(e)
@@ -599,11 +682,24 @@ class ModelManager:
             raise
 
     async def _watch_and_reload(self, model_id: str) -> None:
-        state = self._states.get(model_id)
-        if not state or not self._gpu_scheduler:
+        if not self._gpu_scheduler:
             return
-        while True:
+        deadline = datetime.now(timezone.utc) + timedelta(
+            seconds=max(30, int(settings.model_load_wait_timeout_s))
+        )
+        while model_id in self._states:
+            state = self._states.get(model_id)
+            if not state or not state.auto_reload:
+                return
+            if state.status != ModelStatus.UNLOADED:
+                return
+            if datetime.now(timezone.utc) >= deadline:
+                logger.warning("watch_and_reload_timeout", model_id=model_id)
+                return
             await asyncio.sleep(30)
+            state = self._states.get(model_id)
+            if not state or not state.auto_reload or state.status != ModelStatus.UNLOADED:
+                return
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
                 vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id)
@@ -648,7 +744,11 @@ class ModelManager:
             idle_s = (now - state.last_request_at).total_seconds()
             if idle_s > settings.idle_timeout_seconds:
                 logger.info("idle_eviction", model_id=model_id, idle_s=int(idle_s))
-                asyncio.create_task(self.unload(model_id, reason="idle"))
+                self._create_background_task(
+                    self.unload(model_id, reason="idle"),
+                    task_name=f"idle-unload:{model_id}",
+                    model_id=model_id,
+                )
 
     async def get_state(self, model_id: str) -> "ModelState | None":
         return self._states.get(model_id)
@@ -829,6 +929,19 @@ class ModelManager:
         if not state:
             raise KeyError(f"Model '{model_id}' not found")
 
+        allowed_fields = {
+            "display_name",
+            "load_policy",
+            "auto_reload",
+            "preferred_gpu",
+            "extra_config",
+        }
+        unsupported_fields = sorted(set(patch) - allowed_fields)
+        if unsupported_fields:
+            raise ValueError(
+                "Unsupported model config fields: " + ", ".join(unsupported_fields)
+            )
+
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 sa.select(ModelConfig).where(ModelConfig.model_id == model_id)
@@ -836,14 +949,28 @@ class ModelManager:
             cfg = result.scalar_one_or_none()
             if cfg:
                 for key, val in patch.items():
-                    if hasattr(cfg, key):
+                    if key == "load_policy":
+                        setattr(cfg, key, LoadPolicy(val).value)
+                    elif key == "preferred_gpu":
+                        setattr(cfg, key, int(val) if val is not None else None)
+                    elif key == "auto_reload":
+                        setattr(cfg, key, bool(val))
+                    elif key == "extra_config":
+                        setattr(cfg, key, val or {})
+                    else:
                         setattr(cfg, key, val)
                 await session.commit()
 
         for key, val in patch.items():
-            if hasattr(state, key):
-                if key == "load_policy":
-                    val = LoadPolicy(val)
+            if key == "load_policy":
+                setattr(state, key, LoadPolicy(val))
+            elif key == "preferred_gpu":
+                setattr(state, key, int(val) if val is not None else None)
+            elif key == "auto_reload":
+                setattr(state, key, bool(val))
+            elif key == "extra_config":
+                setattr(state, key, val or {})
+            else:
                 setattr(state, key, val)
 
         return state

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,6 +85,11 @@ async def get_config(request: Request) -> dict[str, Any]:
 async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, Any]:
     """Patch mutable server configuration values for the running process."""
     payload = patch.model_dump(exclude_unset=True)
+    if "models_dir" in payload:
+        raise HTTPException(
+            status_code=400,
+            detail="modelsDir is managed by the container environment and cannot be changed at runtime",
+        )
 
     if "default_gpu_index" in payload:
         settings.default_gpu_index = int(payload["default_gpu_index"])
@@ -110,8 +115,6 @@ async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, 
         settings.litellm_auto_sync = bool(payload["litellm_auto_sync"])
     if "energy_cost_eur_kwh" in payload:
         settings.energy_cost_eur_kwh = float(payload["energy_cost_eur_kwh"])
-    if "models_dir" in payload:
-        settings.models_dir = str(payload["models_dir"])
 
     overrides = _config_overrides(request)
     if "download_dir" in payload:

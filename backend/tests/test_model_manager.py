@@ -3,11 +3,14 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import sqlalchemy as sa
 
 from ocabra.backends._mock import MockBackend
 from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
 from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
 from ocabra.core.worker_pool import WorkerPool
+from ocabra.database import AsyncSessionLocal
+from ocabra.db.stats import ModelLoadStat
 
 
 def make_worker_pool_with_mock(vram_mb: int = 4096) -> WorkerPool:
@@ -56,6 +59,26 @@ async def test_load_model_full_cycle(model_manager):
         assert state.status == ModelStatus.UNLOADED
         assert state.vram_used_mb == 0
         assert state.loaded_at is None
+
+
+@pytest.mark.asyncio
+async def test_load_records_model_load_stat(model_manager):
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+        await add_test_model(model_manager)
+
+        state = await model_manager.load("test/model")
+        assert state.status == ModelStatus.LOADED
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            sa.select(ModelLoadStat).where(ModelLoadStat.model_id == "test/model")
+        )
+        rows = result.scalars().all()
+
+    assert rows
+    assert rows[-1].duration_ms is not None
+    assert rows[-1].duration_ms >= 0
 
 
 @pytest.mark.asyncio
@@ -131,6 +154,45 @@ async def test_concurrent_load_only_loads_once(model_manager):
 
 
 @pytest.mark.asyncio
+async def test_in_flight_counters_are_thread_safe(model_manager):
+    model_id = "test/model"
+    await add_test_model(model_manager, model_id=model_id)
+
+    await asyncio.gather(
+        *[asyncio.to_thread(model_manager.begin_request, model_id) for _ in range(200)]
+    )
+    assert model_manager._in_flight[model_id] == 200
+
+    await asyncio.gather(
+        *[asyncio.to_thread(model_manager.end_request, model_id) for _ in range(200)]
+    )
+    assert model_manager._in_flight.get(model_id, 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_background_task_failure_is_logged(model_manager, monkeypatch):
+    from ocabra.core import model_manager as model_manager_module
+
+    fake_logger = MagicMock()
+    monkeypatch.setattr(model_manager_module, "logger", fake_logger)
+
+    async def boom():
+        raise RuntimeError("boom")
+
+    task = model_manager._create_background_task(
+        boom(),
+        task_name="boom-task",
+        model_id="test/model",
+    )
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert task.done()
+    fake_logger.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_load_passes_model_extra_config_to_backend():
     wp = WorkerPool()
     backend = _PortRequiredBackend()
@@ -193,6 +255,37 @@ async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
     assert state.status == ModelStatus.LOADED
     unload_mock.assert_awaited_once_with("test/candidate", reason="pressure")
     assert requested.current_gpu == [1]
+
+
+@pytest.mark.asyncio
+async def test_update_config_rejects_unsupported_fields(model_manager):
+    await add_test_model(model_manager)
+
+    with pytest.raises(ValueError, match="Unsupported model config fields"):
+        await model_manager.update_config("test/model", {"status": "loaded"})
+
+
+@pytest.mark.asyncio
+async def test_update_config_applies_whitelisted_fields(model_manager):
+    state = await add_test_model(model_manager)
+
+    updated = await model_manager.update_config(
+        "test/model",
+        {
+            "display_name": "renamed",
+            "load_policy": "warm",
+            "auto_reload": True,
+            "preferred_gpu": 1,
+            "extra_config": {"foo": "bar"},
+        },
+    )
+
+    assert updated is state
+    assert state.display_name == "renamed"
+    assert state.load_policy == LoadPolicy.WARM
+    assert state.auto_reload is True
+    assert state.preferred_gpu == 1
+    assert state.extra_config == {"foo": "bar"}
 
 
 @pytest.mark.asyncio
