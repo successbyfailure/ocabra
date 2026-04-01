@@ -29,3 +29,7 @@ def test_normalize_model_ref_keeps_canonical() -> None:
 def test_build_model_ref_requires_known_backend() -> None:
     with pytest.raises(ValueError):
         build_model_ref("openai", "whisper-medium")
+
+
+def test_build_model_ref_accepts_acestep_backend() -> None:
+    assert build_model_ref("acestep", "turbo") == "acestep/turbo"

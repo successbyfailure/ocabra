@@ -71,9 +71,79 @@ def test_name_resolution_prefers_native_ollama_model() -> None:
                 return mapped_state
             return None
 
-    model_id, state = asyncio.run(resolve_model(FakeModelManager(), "llama3.2:3b"))
+    with patch(
+        "ocabra.api.ollama._mapper.resolve_openai_model",
+        new=AsyncMock(side_effect=AssertionError("openai fallback should not run for native ollama matches")),
+    ):
+        model_id, state = asyncio.run(resolve_model(FakeModelManager(), "llama3.2:3b"))
+
     assert model_id == "ollama/llama3.2:3b"
     assert state is native_state
+
+
+def test_name_resolution_delegates_to_openai_resolution_when_no_native_ollama_match() -> None:
+    import asyncio
+
+    from ocabra.api.ollama import _mapper
+
+    class FakeModelManager:
+        async def get_state(self, model_id: str):
+            return None
+
+    delegated_state = object()
+
+    async def fake_openai_resolve(model_manager, requested_name):
+        assert requested_name == "some-alias"
+        return "vllm/delegated-model", delegated_state
+
+    with patch.object(_mapper, "resolve_openai_model", new=fake_openai_resolve):
+        model_id, state = asyncio.run(_mapper.resolve_model(FakeModelManager(), "some-alias"))
+
+    assert model_id == "vllm/delegated-model"
+    assert state is delegated_state
+
+
+def test_generate_passthroughs_native_ollama_body() -> None:
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    model_state = ModelState(
+        model_id="ollama/llama3.2:3b",
+        display_name="Llama 3.2 3B",
+        backend_type="ollama",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(completion=True, streaming=True),
+        backend_model_id="llama3.2:3b",
+    )
+
+    app = _make_app(
+        model_state=model_state,
+        worker_result={"response": "ok", "usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+    )
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/generate",
+        json={
+            "model": "llama3.2:3b",
+            "prompt": "hello",
+            "stream": False,
+            "options": {"temperature": 0.2, "num_predict": 12},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["response"] == "ok"
+
+    called = app.state.worker_pool.forward_request.await_args
+    assert called.args[1] == "/api/generate"
+    assert called.args[2] == {
+        "model": "llama3.2:3b",
+        "prompt": "hello",
+        "stream": False,
+        "options": {"temperature": 0.2, "num_predict": 12},
+    }
 
 
 def test_pull_delegates_to_download_manager() -> None:

@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from starlette.responses import StreamingResponse
@@ -14,19 +13,9 @@ from starlette.responses import StreamingResponse
 from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
 
 from ._mapper import resolve_model
+from ._shared import apply_option_map, build_native_passthrough_body, iter_sse_payloads, now_iso_z
 
 router = APIRouter()
-
-OPTION_MAP = {
-    "num_predict": "max_tokens",
-    "num_ctx": "max_model_len",
-    "temperature": "temperature",
-    "top_p": "top_p",
-    "top_k": "top_k",
-    "stop": "stop",
-    "seed": "seed",
-    "repeat_penalty": "repetition_penalty",
-}
 
 
 @router.post("/generate", summary="Generate completion")
@@ -46,15 +35,14 @@ async def generate(request: Request):
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "completion", "text generation")
 
-    vllm_body = _build_vllm_generate_body(body, state.backend_model_id, stream)
     worker_pool = request.app.state.worker_pool
     if state.backend_type == "ollama":
-        upstream_body = {
-            "model": ollama_model,
-            "prompt": body.get("prompt", ""),
-            "stream": stream,
-            "options": body.get("options", {}) if isinstance(body.get("options"), dict) else {},
-        }
+        upstream_body = build_native_passthrough_body(
+            body,
+            model=ollama_model,
+            stream=stream,
+            content_keys=("prompt",),
+        )
         if stream:
             return StreamingResponse(
                 worker_pool.forward_stream(model_id, "/api/generate", upstream_body),
@@ -62,6 +50,8 @@ async def generate(request: Request):
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         return await worker_pool.forward_request(model_id, "/api/generate", upstream_body)
+
+    vllm_body = _build_vllm_generate_body(body, state.backend_model_id, stream)
 
     if stream:
         return StreamingResponse(
@@ -104,12 +94,7 @@ def _build_vllm_generate_body(payload: dict, model_id: str, stream: bool) -> dic
         if key in payload:
             body[key] = payload[key]
 
-    options = payload.get("options") or {}
-    if isinstance(options, dict):
-        for key, value in options.items():
-            mapped = OPTION_MAP.get(key)
-            if mapped:
-                body[mapped] = value
+    apply_option_map(body, payload.get("options"))
 
     return body
 
@@ -124,14 +109,14 @@ async def _stream_generate(
     prompt_eval_count = 0
     eval_count = 0
 
-    async for payload in _iter_sse_payloads(
+    async for payload in iter_sse_payloads(
         worker_pool.forward_stream(model_id, "/v1/completions", body)
     ):
         if payload == "[DONE]":
             total_duration = time.monotonic_ns() - started_ns
             done_payload = {
                 "model": ollama_model,
-                "created_at": _now_iso_z(),
+                "created_at": now_iso_z(),
                 "response": "",
                 "done": True,
                 "total_duration": total_duration,
@@ -161,41 +146,8 @@ async def _stream_generate(
 
         chunk = {
             "model": ollama_model,
-            "created_at": _now_iso_z(),
+            "created_at": now_iso_z(),
             "response": token,
             "done": False,
         }
         yield (json.dumps(chunk) + "\n").encode("utf-8")
-
-
-async def _iter_sse_payloads(source: AsyncIterator[bytes]) -> AsyncIterator[dict | str]:
-    """Parse `data: ...\n\n` SSE frames and yield decoded payloads."""
-    buffer = ""
-    async for chunk in source:
-        if not chunk:
-            continue
-        buffer += chunk.decode("utf-8", errors="ignore")
-
-        while "\n\n" in buffer:
-            raw_event, buffer = buffer.split("\n\n", 1)
-            data_lines = []
-            for line in raw_event.splitlines():
-                if line.startswith("data:"):
-                    data_lines.append(line[5:].strip())
-            if not data_lines:
-                continue
-
-            data = "\n".join(data_lines).strip()
-            if not data:
-                continue
-            if data == "[DONE]":
-                yield "[DONE]"
-                continue
-            try:
-                yield json.loads(data)
-            except json.JSONDecodeError:
-                continue
-
-
-def _now_iso_z() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

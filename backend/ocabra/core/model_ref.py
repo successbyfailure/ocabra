@@ -2,6 +2,7 @@ from __future__ import annotations
 
 KNOWN_BACKEND_TYPES = {
     "vllm",
+    "acestep",
     "llama_cpp",
     "sglang",
     "tensorrt_llm",

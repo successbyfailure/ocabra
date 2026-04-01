@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from ocabra.api.openai._deps import resolve_model as resolve_openai_model
 from ocabra.core.model_ref import build_model_ref, parse_model_ref
 
 _DEFAULT_OLLAMA_TO_INTERNAL: dict[str, str] = {
@@ -109,17 +110,24 @@ async def resolve_model(model_manager, requested_name: str) -> tuple[str, object
     exact_name = requested_name.strip()
     if exact_name:
         try:
-            parse_model_ref(exact_name)
+            parsed_backend, _ = parse_model_ref(exact_name)
+        except ValueError:
+            parsed_backend = None
+
+        if parsed_backend == "ollama":
             exact_state = await model_manager.get_state(exact_name)
             if exact_state is not None:
                 return exact_name, exact_state
-        except ValueError:
-            pass
 
-        ollama_canonical = build_model_ref("ollama", exact_name)
-        native_state = await model_manager.get_state(ollama_canonical)
-        if native_state is not None:
-            return ollama_canonical, native_state
+        if parsed_backend != "ollama":
+            ollama_canonical = build_model_ref("ollama", exact_name)
+            native_state = await model_manager.get_state(ollama_canonical)
+            if native_state is not None:
+                return ollama_canonical, native_state
+
+    resolved_model_id, resolved_state = await resolve_openai_model(model_manager, exact_name)
+    if resolved_state is not None:
+        return resolved_model_id, resolved_state
 
     mapper = OllamaNameMapper()
     model_id = mapper.to_internal(requested_name)

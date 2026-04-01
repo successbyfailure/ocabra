@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from starlette.responses import StreamingResponse
@@ -14,7 +13,7 @@ from starlette.responses import StreamingResponse
 from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
 
 from ._mapper import resolve_model
-from .generate import OPTION_MAP, _iter_sse_payloads
+from ._shared import build_native_passthrough_body, iter_sse_payloads, now_iso_z, apply_option_map
 
 router = APIRouter()
 
@@ -38,12 +37,12 @@ async def chat(request: Request):
 
     worker_pool = request.app.state.worker_pool
     if state.backend_type == "ollama":
-        upstream_body = {
-            "model": ollama_model,
-            "messages": body.get("messages", []),
-            "stream": stream,
-            "options": body.get("options", {}) if isinstance(body.get("options"), dict) else {},
-        }
+        upstream_body = build_native_passthrough_body(
+            body,
+            model=ollama_model,
+            stream=stream,
+            content_keys=("messages",),
+        )
         if stream:
             return StreamingResponse(
                 worker_pool.forward_stream(model_id, "/api/chat", upstream_body),
@@ -91,11 +90,7 @@ def _build_vllm_chat_body(payload: dict, model_id: str, stream: bool) -> dict:
             body[key] = payload[key]
 
     options = payload.get("options") or {}
-    if isinstance(options, dict):
-        for key, value in options.items():
-            mapped = OPTION_MAP.get(key)
-            if mapped:
-                body[mapped] = value
+    apply_option_map(body, options)
 
     return body
 
@@ -110,14 +105,14 @@ async def _stream_chat(
     prompt_eval_count = 0
     eval_count = 0
 
-    async for payload in _iter_sse_payloads(
+    async for payload in iter_sse_payloads(
         worker_pool.forward_stream(model_id, "/v1/chat/completions", body)
     ):
         if payload == "[DONE]":
             total_duration = time.monotonic_ns() - started_ns
             done_payload = {
                 "model": ollama_model,
-                "created_at": _now_iso_z(),
+                "created_at": now_iso_z(),
                 "message": {"role": "assistant", "content": ""},
                 "done": True,
                 "total_duration": total_duration,
@@ -148,7 +143,7 @@ async def _stream_chat(
 
         chunk = {
             "model": ollama_model,
-            "created_at": _now_iso_z(),
+            "created_at": now_iso_z(),
             "message": {"role": "assistant", "content": token},
             "done": False,
         }
@@ -161,7 +156,3 @@ def _extract_chat_message(payload: dict) -> str:
         return ""
     message = choices[0].get("message") or {}
     return str(message.get("content") or "")
-
-
-def _now_iso_z() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
