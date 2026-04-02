@@ -314,8 +314,12 @@ export interface ServerConfig {
   defaultGpuIndex: number
   idleTimeoutSeconds: number
   idleEvictionCheckIntervalSeconds: number
+  modelLoadWaitTimeoutSeconds: number
+  pressureEvictionDrainTimeoutSeconds: number
   vramBufferMb: number
   vramPressureThresholdPct: number
+  openaiAudioMaxPartSizeMb: number
+  whisperStartupTimeoutSeconds: number
   logLevel: string
   litellmBaseUrl: string
   litellmAdminKey: string
@@ -324,6 +328,28 @@ export interface ServerConfig {
   modelsDir: string
   downloadDir: string
   maxTemperatureC: number
+  vllmGpuMemoryUtilization: number
+  vllmMaxNumSeqs: number | null
+  vllmMaxNumBatchedTokens: number | null
+  vllmEnablePrefixCaching: boolean
+  vllmEnforceEager: boolean
+  sglangMemFractionStatic: number
+  sglangContextLength: number | null
+  sglangDisableRadixCache: boolean
+  llamaCppGpuLayers: number
+  llamaCppCtxSize: number
+  llamaCppFlashAttn: boolean
+  bitnetGpuLayers: number
+  bitnetCtxSize: number
+  bitnetFlashAttn: boolean
+  diffusersTorchDtype: string
+  diffusersOffloadMode: string
+  diffusersEnableTorchCompile: boolean
+  diffusersEnableXformers: boolean
+  diffusersAllowTf32: boolean
+  tensorrtLlmEnabled: boolean
+  tensorrtLlmMaxBatchSize: number | null
+  tensorrtLlmContextLength: number | null
   globalSchedules: EvictionSchedule[]
 }
 

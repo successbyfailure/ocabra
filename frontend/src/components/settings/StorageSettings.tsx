@@ -59,6 +59,18 @@ export function StorageSettings({ localModels, config, onSave }: StorageSettings
       </div>
 
       <label className="block text-sm text-muted-foreground">
+        MODELS_DIR
+        <input
+          value={config.modelsDir}
+          readOnly
+          className="mt-1 w-full rounded-md border border-border bg-muted/30 px-3 py-2 text-muted-foreground"
+        />
+        <p className="mt-1 text-xs text-muted-foreground">
+          Gestionado por el entorno del contenedor. No se cambia en runtime desde la UI.
+        </p>
+      </label>
+
+      <label className="block text-sm text-muted-foreground">
         Carpeta de descarga de modelos
         <input
           value={downloadDir}

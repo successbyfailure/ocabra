@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
@@ -12,8 +13,12 @@ const EMPTY_CONFIG: ServerConfig = {
   defaultGpuIndex: 0,
   idleTimeoutSeconds: 300,
   idleEvictionCheckIntervalSeconds: 15,
+  modelLoadWaitTimeoutSeconds: 720,
+  pressureEvictionDrainTimeoutSeconds: 60,
   vramBufferMb: 512,
   vramPressureThresholdPct: 85,
+  openaiAudioMaxPartSizeMb: 256,
+  whisperStartupTimeoutSeconds: 300,
   logLevel: "info",
   litellmBaseUrl: "",
   litellmAdminKey: "",
@@ -22,6 +27,28 @@ const EMPTY_CONFIG: ServerConfig = {
   modelsDir: "/models",
   downloadDir: "/models/downloads",
   maxTemperatureC: 88,
+  vllmGpuMemoryUtilization: 0.85,
+  vllmMaxNumSeqs: 16,
+  vllmMaxNumBatchedTokens: 8192,
+  vllmEnablePrefixCaching: true,
+  vllmEnforceEager: true,
+  sglangMemFractionStatic: 0.9,
+  sglangContextLength: null,
+  sglangDisableRadixCache: false,
+  llamaCppGpuLayers: 0,
+  llamaCppCtxSize: 4096,
+  llamaCppFlashAttn: false,
+  bitnetGpuLayers: 0,
+  bitnetCtxSize: 4096,
+  bitnetFlashAttn: false,
+  diffusersTorchDtype: "auto",
+  diffusersOffloadMode: "none",
+  diffusersEnableTorchCompile: false,
+  diffusersEnableXformers: false,
+  diffusersAllowTf32: true,
+  tensorrtLlmEnabled: false,
+  tensorrtLlmMaxBatchSize: null,
+  tensorrtLlmContextLength: null,
   globalSchedules: [],
 }
 
@@ -90,6 +117,7 @@ export function Settings() {
         <div className="grid gap-4">
           <GeneralSettings config={config} onSave={savePatch} />
           <GPUSettings gpus={gpus} config={config} onSave={savePatch} />
+          <BackendRuntimeSettings config={config} onSave={savePatch} />
           <LiteLLMSettings config={config} onSave={savePatch} />
           <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
           <GlobalSchedules config={config} onSave={savePatch} />

@@ -40,8 +40,12 @@ describe("Settings", () => {
       defaultGpuIndex: 1,
       idleTimeoutSeconds: 123,
       idleEvictionCheckIntervalSeconds: 15,
+      modelLoadWaitTimeoutSeconds: 720,
+      pressureEvictionDrainTimeoutSeconds: 60,
       vramBufferMb: 768,
       vramPressureThresholdPct: 91,
+      openaiAudioMaxPartSizeMb: 256,
+      whisperStartupTimeoutSeconds: 300,
       logLevel: "warning",
       litellmBaseUrl: "http://litellm:4000",
       litellmAdminKey: "***",
@@ -50,6 +54,28 @@ describe("Settings", () => {
       modelsDir: "/srv/models",
       downloadDir: "/srv/models/downloads",
       maxTemperatureC: 93,
+      vllmGpuMemoryUtilization: 0.85,
+      vllmMaxNumSeqs: 16,
+      vllmMaxNumBatchedTokens: 8192,
+      vllmEnablePrefixCaching: true,
+      vllmEnforceEager: true,
+      sglangMemFractionStatic: 0.9,
+      sglangContextLength: null,
+      sglangDisableRadixCache: false,
+      llamaCppGpuLayers: 0,
+      llamaCppCtxSize: 4096,
+      llamaCppFlashAttn: false,
+      bitnetGpuLayers: 0,
+      bitnetCtxSize: 4096,
+      bitnetFlashAttn: false,
+      diffusersTorchDtype: "auto",
+      diffusersOffloadMode: "none",
+      diffusersEnableTorchCompile: false,
+      diffusersEnableXformers: false,
+      diffusersAllowTf32: true,
+      tensorrtLlmEnabled: false,
+      tensorrtLlmMaxBatchSize: null,
+      tensorrtLlmContextLength: null,
       globalSchedules: [
         {
           id: "night",
@@ -116,10 +142,10 @@ describe("Settings", () => {
     render(<Settings />)
 
     await waitFor(() => {
-      expect((screen.getByLabelText("MODELS_DIR") as HTMLInputElement).value).toBe("/srv/models")
+      expect(screen.getByDisplayValue("/srv/models")).toBeTruthy()
     })
 
-    expect((screen.getByLabelText("MODELS_DIR") as HTMLInputElement).value).toBe("/srv/models")
+    expect(screen.getByDisplayValue("/srv/models")).toBeTruthy()
     expect((screen.getByLabelText("Carpeta de descarga de modelos") as HTMLInputElement).value).toBe(
       "/srv/models/downloads",
     )

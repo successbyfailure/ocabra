@@ -29,6 +29,8 @@ async def test_get_config_includes_settings_fields() -> None:
     assert "modelsDir" in payload
     assert "downloadDir" in payload
     assert "maxTemperatureC" in payload
+    assert "vllmGpuMemoryUtilization" in payload
+    assert "diffusersOffloadMode" in payload
     assert "globalSchedules" in payload
     assert payload["globalSchedules"][0]["id"] == "night"
 
@@ -44,6 +46,9 @@ async def test_patch_config_applies_runtime_values() -> None:
                 "idleTimeoutSeconds": 123,
                 "downloadDir": "/tmp/test-downloads",
                 "maxTemperatureC": 91,
+                "vllmGpuMemoryUtilization": 0.91,
+                "sglangContextLength": 65536,
+                "diffusersOffloadMode": "model",
                 "globalSchedules": [
                     {
                         "id": "night",
@@ -76,6 +81,9 @@ async def test_patch_config_applies_runtime_values() -> None:
         assert payload["idleTimeoutSeconds"] == 123
         assert payload["downloadDir"] == "/tmp/test-downloads"
         assert payload["maxTemperatureC"] == 91
+        assert payload["vllmGpuMemoryUtilization"] == 0.91
+        assert payload["sglangContextLength"] == 65536
+        assert payload["diffusersOffloadMode"] == "model"
         assert payload["globalSchedules"][0]["id"] == "night"
         replace_global_schedules.assert_awaited_once()
         assert replace_global_schedules.await_args.args[1] == [

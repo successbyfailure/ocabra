@@ -519,8 +519,20 @@ function toServerConfig(raw: unknown): ServerConfig {
     idleEvictionCheckIntervalSeconds: Number(
       data.idleEvictionCheckIntervalSeconds ?? data.idle_eviction_check_interval_seconds ?? 15,
     ),
+    modelLoadWaitTimeoutSeconds: Number(
+      data.modelLoadWaitTimeoutSeconds ?? data.model_load_wait_timeout_seconds ?? 720,
+    ),
+    pressureEvictionDrainTimeoutSeconds: Number(
+      data.pressureEvictionDrainTimeoutSeconds ?? data.pressure_eviction_drain_timeout_seconds ?? 60,
+    ),
     vramBufferMb: Number(data.vramBufferMb ?? 0),
     vramPressureThresholdPct: Number(data.vramPressureThresholdPct ?? 0),
+    openaiAudioMaxPartSizeMb: Number(
+      data.openaiAudioMaxPartSizeMb ?? data.openai_audio_max_part_size_mb ?? 256,
+    ),
+    whisperStartupTimeoutSeconds: Number(
+      data.whisperStartupTimeoutSeconds ?? data.whisper_startup_timeout_seconds ?? 300,
+    ),
     logLevel: String(data.logLevel ?? "info"),
     litellmBaseUrl: String(data.litellmBaseUrl ?? ""),
     litellmAdminKey: String(data.litellmAdminKey ?? ""),
@@ -529,6 +541,53 @@ function toServerConfig(raw: unknown): ServerConfig {
     modelsDir: String(data.modelsDir ?? "/models"),
     downloadDir: String(data.downloadDir ?? "/models/downloads"),
     maxTemperatureC: Number(data.maxTemperatureC ?? 88),
+    vllmGpuMemoryUtilization: Number(data.vllmGpuMemoryUtilization ?? data.vllm_gpu_memory_utilization ?? 0.85),
+    vllmMaxNumSeqs:
+      data.vllmMaxNumSeqs == null && data.vllm_max_num_seqs == null
+        ? null
+        : Number(data.vllmMaxNumSeqs ?? data.vllm_max_num_seqs),
+    vllmMaxNumBatchedTokens:
+      data.vllmMaxNumBatchedTokens == null && data.vllm_max_num_batched_tokens == null
+        ? null
+        : Number(data.vllmMaxNumBatchedTokens ?? data.vllm_max_num_batched_tokens),
+    vllmEnablePrefixCaching: Boolean(
+      data.vllmEnablePrefixCaching ?? data.vllm_enable_prefix_caching ?? true,
+    ),
+    vllmEnforceEager: Boolean(data.vllmEnforceEager ?? data.vllm_enforce_eager ?? true),
+    sglangMemFractionStatic: Number(
+      data.sglangMemFractionStatic ?? data.sglang_mem_fraction_static ?? 0.9,
+    ),
+    sglangContextLength:
+      data.sglangContextLength == null && data.sglang_context_length == null
+        ? null
+        : Number(data.sglangContextLength ?? data.sglang_context_length),
+    sglangDisableRadixCache: Boolean(
+      data.sglangDisableRadixCache ?? data.sglang_disable_radix_cache ?? false,
+    ),
+    llamaCppGpuLayers: Number(data.llamaCppGpuLayers ?? data.llama_cpp_gpu_layers ?? 0),
+    llamaCppCtxSize: Number(data.llamaCppCtxSize ?? data.llama_cpp_ctx_size ?? 4096),
+    llamaCppFlashAttn: Boolean(data.llamaCppFlashAttn ?? data.llama_cpp_flash_attn ?? false),
+    bitnetGpuLayers: Number(data.bitnetGpuLayers ?? data.bitnet_gpu_layers ?? 0),
+    bitnetCtxSize: Number(data.bitnetCtxSize ?? data.bitnet_ctx_size ?? 4096),
+    bitnetFlashAttn: Boolean(data.bitnetFlashAttn ?? data.bitnet_flash_attn ?? false),
+    diffusersTorchDtype: String(data.diffusersTorchDtype ?? data.diffusers_torch_dtype ?? "auto"),
+    diffusersOffloadMode: String(data.diffusersOffloadMode ?? data.diffusers_offload_mode ?? "none"),
+    diffusersEnableTorchCompile: Boolean(
+      data.diffusersEnableTorchCompile ?? data.diffusers_enable_torch_compile ?? false,
+    ),
+    diffusersEnableXformers: Boolean(
+      data.diffusersEnableXformers ?? data.diffusers_enable_xformers ?? false,
+    ),
+    diffusersAllowTf32: Boolean(data.diffusersAllowTf32 ?? data.diffusers_allow_tf32 ?? true),
+    tensorrtLlmEnabled: Boolean(data.tensorrtLlmEnabled ?? data.tensorrt_llm_enabled ?? false),
+    tensorrtLlmMaxBatchSize:
+      data.tensorrtLlmMaxBatchSize == null && data.tensorrt_llm_max_batch_size == null
+        ? null
+        : Number(data.tensorrtLlmMaxBatchSize ?? data.tensorrt_llm_max_batch_size),
+    tensorrtLlmContextLength:
+      data.tensorrtLlmContextLength == null && data.tensorrt_llm_context_length == null
+        ? null
+        : Number(data.tensorrtLlmContextLength ?? data.tensorrt_llm_context_length),
     globalSchedules,
   }
 }

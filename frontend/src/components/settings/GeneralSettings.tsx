@@ -8,25 +8,22 @@ interface GeneralSettingsProps {
 }
 
 export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
-  const [modelsDir, setModelsDir] = useState(config.modelsDir)
   const [logLevel, setLogLevel] = useState(config.logLevel)
+  const [energyCostEurKwh, setEnergyCostEurKwh] = useState(config.energyCostEurKwh)
   const [idleTimeoutSeconds, setIdleTimeoutSeconds] = useState(config.idleTimeoutSeconds)
-  const [vramBufferMb, setVramBufferMb] = useState(config.vramBufferMb)
 
   useEffect(() => {
-    setModelsDir(config.modelsDir)
     setLogLevel(config.logLevel)
+    setEnergyCostEurKwh(config.energyCostEurKwh)
     setIdleTimeoutSeconds(config.idleTimeoutSeconds)
-    setVramBufferMb(config.vramBufferMb)
-  }, [config.idleTimeoutSeconds, config.logLevel, config.modelsDir, config.vramBufferMb])
+  }, [config.energyCostEurKwh, config.idleTimeoutSeconds, config.logLevel])
 
   const save = async () => {
     try {
       await onSave({
         logLevel,
         idleTimeoutSeconds,
-        vramBufferMb,
-        modelsDir,
+        energyCostEurKwh,
       })
       toast.success("General settings guardadas")
     } catch {
@@ -37,16 +34,6 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
   return (
     <section className="space-y-3 rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">General</h2>
-
-      <label className="block text-sm text-muted-foreground">
-        MODELS_DIR
-        <input
-          value={modelsDir}
-          onChange={(event) => setModelsDir(event.target.value)}
-          className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-        />
-      </label>
-
       <label className="block text-sm text-muted-foreground">
         Log level
         <select
@@ -74,12 +61,13 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
         </label>
 
         <label className="text-sm text-muted-foreground">
-          VRAM buffer (MB)
+          Coste energia (EUR/kWh)
           <input
             type="number"
             min={0}
-            value={vramBufferMb}
-            onChange={(event) => setVramBufferMb(Number(event.target.value))}
+            step="0.01"
+            value={energyCostEurKwh}
+            onChange={(event) => setEnergyCostEurKwh(Number(event.target.value))}
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
         </label>
