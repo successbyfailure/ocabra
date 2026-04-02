@@ -13,13 +13,13 @@ Ya quedaron reflejados en documentación o código estable:
 - `WorkerPool` con firmas reales síncronas para registro/gestión in-memory y helpers de forwarding
 - `/v1/models` con extensión `ocabra` real
 - `ServiceState` con `ui_url`, `start`, `runtime_loaded_when_alive` y campos runtime reales
-- `downloadDir`/`maxTemperatureC` como overrides en memoria y `modelsDir` como valor inmutable de entorno
+- `downloadDir`/`maxTemperatureC` como overrides en memoria, `modelsDir` como valor inmutable de entorno y `globalSchedules` persistido en `eviction_schedules`
 - `backend/ocabra/api/internal/gpus.py` y stats con respuestas actuales de listas planas / agregadas
 - Stack real: frontend servido por Nginx; Caddy como reverse proxy
 - Fase 0 y Fase 5 marcadas como completadas en `docs/PLAN.md`
 
 Pendiente de cambios de código:
-- `globalSchedules` de `PATCH /ocabra/config` sigue siendo un override en memoria y no alimenta la tabla `eviction_schedules`; el scheduler todavía lee `cron_expr` desde BD
+- Validación backend de `pytest` en un entorno con dependencias completas
 - Validación productiva final de TensorRT-LLM con engines reales y toolchain objetivo
 
 El resto del fichero conserva el snapshot de auditoría anterior para trazabilidad, pero esta sección es la que debe considerarse viva.
@@ -111,7 +111,7 @@ El resto del fichero conserva el snapshot de auditoría anterior para trazabilid
 
 ### B7. `eviction_schedules.cron_expr` vs. formato real de la API desconectados
 - **CONTRACTS.md sec. 7** define la tabla con `cron_expr TEXT NOT NULL`.
-- **API schema** (`api/internal/config.py:18-23`): usa `days: list[int]`, `start: str`, `end: str`. Formatos incompatibles y sin conexión entre sí (ver también REFACTOR_PLAN.md A5).
+- **API schema** (`api/internal/config.py:18-23`) expone `days: list[int]`, `start: str`, `end: str` y el runtime lo convierte a dos filas por ventana global (`evict_all`/`reload`) cuando persiste `globalSchedules`.
 
 ---
 
@@ -204,6 +204,13 @@ Ficheros/directorios existentes no listados (selección):
 ### E6. `to_dict()` manual en vez de `dataclasses.asdict()`
 - `GPUState` usa `asdict()` correctamente.
 - `BackendCapabilities` (`backends/base.py:26-44`) y `ModelState` (`core/model_manager.py:66-85`) usan `to_dict()` manual. Inconsistente y propenso a desincronizarse.
+
+## Backlog residual real
+
+- `SEC-1`: autenticación administrativa en `/ocabra/*`
+- Validación productiva final de TensorRT-LLM con engines reales y toolchain CUDA/NVIDIA objetivo
+- Batería backend de `pytest` en entorno completo de CI o contenedor
+- Limpieza estructural adicional de módulos inflados y código muerto restante si se prioriza deuda técnica sobre nuevas features
 
 ---
 

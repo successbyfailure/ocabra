@@ -44,7 +44,7 @@ Implementado en código:
 - Fase 0 a Fase 4 implementadas en código; Fase 5 en curso de cierre documental y endurecimiento.
 - IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en OpenAI `/v1/*`.
 - Backends first-class ya presentes en el runtime: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
-- UI Settings alineada con `/ocabra/config`; `modelsDir` es de solo lectura en runtime y `downloadDir`/`maxTemperatureC` son overrides en memoria.
+- UI Settings alineada con `/ocabra/config`; `modelsDir` es de solo lectura en runtime, `downloadDir`/`maxTemperatureC` son overrides en memoria y `globalSchedules` persiste en `eviction_schedules`.
 - `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/start`, `/ocabra/services/runtime` y `/ocabra/services/unload` ya están expuestos.
 - Stats persistidos: `request_stats`, `gpu_stats` y `model_load_stats`.
 - Frontend servido por Nginx; Caddy actúa como reverse proxy.
@@ -56,10 +56,12 @@ Validación reciente (2026-04-02):
 - Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
 
 Pendiente para cierre de plan:
+- Autenticación administrativa en `/ocabra/*` delante de la capa pública de oCabra.
 - Validar en entorno productivo final de `TensorRT-LLM` con engines reales y toolchain CUDA/NVIDIA objetivo (además de las validaciones de arranque ya incorporadas).
   Comando smoke reproducible: `scripts/smoke_trtllm.py --engine-dir <ruta_engine_dir> --model-id tensorrt_llm/<org>/<modelo>`.
 - Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.
 - Revisar tuning fino de scheduler de schedules (cron windows complejas, observabilidad y métricas de ejecución).
+- Cerrar la batería backend de `pytest` en CI o contenedor con dependencias completas.
 
 Nuevas funcionalidades planificadas:
 - **Compilación de engines TRT-LLM desde la UI** — permitir compilar engines TensorRT-LLM

@@ -317,9 +317,11 @@ POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]
 - `vramBufferMb`, `vramPressureThresholdPct`, `logLevel`
 - `litellmBaseUrl`, `litellmAdminKey` (enmascarada), `litellmAutoSync`
 - `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
-- `globalSchedules`: `list[EvictionSchedule]` en memoria para la UI; el scheduler usa la tabla `eviction_schedules` en BD
+- `globalSchedules`: `list[EvictionSchedule]` persistida en la tabla `eviction_schedules` y reconstruida por `GET /ocabra/config`
 - `modelsDir` proviene de `MODELS_DIR` y es de solo lectura en runtime
-- `downloadDir`, `maxTemperatureC` y `globalSchedules` se guardan como overrides de proceso en `request.app.state.config_overrides`
+- `downloadDir` y `maxTemperatureC` siguen como overrides de proceso en `request.app.state.config_overrides`
+- `globalSchedules` se traduce internamente a dos filas por ventana en `eviction_schedules`: una acción `evict_all` al inicio y una acción `reload` al final
+- `check_schedule_reloads()` exige `auto_reload=True` además de `pin`/`warm`
 - `GET /ocabra/config` y `PATCH /ocabra/config` usan claves camelCase; no hay fallback legacy a snake_case o `localStorage`.
 
 ### 5.7 Servicios interactivos
