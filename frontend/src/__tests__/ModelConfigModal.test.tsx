@@ -1,7 +1,36 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
+import { api } from "@/api/client"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
+
+vi.mock("@/api/client", () => ({
+  api: {
+    models: {
+      estimateMemory: vi.fn(async () => ({
+        backendType: "vllm",
+        gpuIndex: 1,
+        totalVramMb: 24576,
+        freeVramMb: 24115,
+        budgetVramMb: 22118,
+        requestedContextLength: 7800,
+        estimatedWeightsMb: 18000,
+        estimatedEngineMbPerGpu: null,
+        estimatedKvCacheMb: 1956,
+        estimatedMaxContextLength: 7824,
+        modelLoadingMemoryMb: 18575,
+        maximumConcurrency: 1,
+        tensorParallelSize: 1,
+        fitsCurrentGpu: true,
+        enginePresent: null,
+        source: "heuristic",
+        status: "ok",
+        warning: null,
+        notes: ["estimacion de prueba"],
+      })),
+    },
+  },
+}))
 
 describe("ModelConfigModal", () => {
   it("renders persisted recipe metadata and reapplies suggested config", () => {
@@ -217,5 +246,64 @@ describe("ModelConfigModal", () => {
         }),
       }),
     )
+  })
+
+  it("renders memory estimate and lets the user trigger runtime validation", async () => {
+    render(
+      <ModelConfigModal
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn(async () => undefined)}
+        gpus={[]}
+        model={{
+          modelId: "vllm/Qwen/Qwen3-32B-AWQ",
+          displayName: "Qwen3 32B AWQ",
+          backendType: "vllm",
+          status: "configured",
+          loadPolicy: "on_demand",
+          autoReload: false,
+          preferredGpu: null,
+          currentGpu: [],
+          vramUsedMb: 0,
+          diskSizeBytes: null,
+          capabilities: {
+            chat: true,
+            completion: true,
+            tools: true,
+            vision: false,
+            embeddings: false,
+            pooling: false,
+            rerank: false,
+            classification: false,
+            score: false,
+            reasoning: true,
+            imageGeneration: false,
+            audioTranscription: false,
+            musicGeneration: false,
+            tts: false,
+            streaming: true,
+            contextLength: 40960,
+          },
+          lastRequestAt: null,
+          loadedAt: null,
+          extraConfig: {
+            vllm: {
+              maxModelLen: 7800,
+              gpuMemoryUtilization: 0.9,
+            },
+          },
+        }}
+      />,
+    )
+
+    await screen.findByText(/Prevision de memoria/i)
+    await screen.findByText(/pesos estimados: 18000 MB/i)
+    await screen.findByText(/contexto maximo estimado por engine: 7.8k/i)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Validar con engine/i))
+    })
+
+    expect(api.models.estimateMemory).toHaveBeenCalled()
   })
 })

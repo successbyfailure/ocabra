@@ -25,6 +25,7 @@ import type {
   ServiceState,
   CompileJob,
   ModelsStorageStats,
+  ModelMemoryEstimate,
 } from "@/types"
 
 const BASE = ""
@@ -121,8 +122,12 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
           | "generate"
           | "pooling"
           | null,
-      modelImpl: (vllmSource.model_impl ?? vllmSource.modelImpl ?? null) as string | null,
-      runner: (vllmSource.runner ?? null) as string | null,
+      modelImpl: (vllmSource.model_impl ?? vllmSource.modelImpl ?? null) as
+        | "auto"
+        | "vllm"
+        | "transformers"
+        | null,
+      runner: (vllmSource.runner ?? null) as "generate" | "pooling" | null,
       hfOverrides: (vllmSource.hf_overrides ?? vllmSource.hfOverrides ?? null) as string | Record<string, unknown> | null,
       chatTemplate: (vllmSource.chat_template ?? vllmSource.chatTemplate ?? null) as string | null,
       chatTemplateContentFormat:
@@ -349,6 +354,61 @@ function toModelsStorageStats(raw: unknown): ModelsStorageStats {
     totalBytes: Number(data.total_bytes ?? data.totalBytes ?? 0),
     usedBytes: Number(data.used_bytes ?? data.usedBytes ?? 0),
     freeBytes: Number(data.free_bytes ?? data.freeBytes ?? 0),
+  }
+}
+
+function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as ModelMemoryEstimate["backendType"],
+    gpuIndex:
+      data.gpu_index == null && data.gpuIndex == null ? null : Number(data.gpu_index ?? data.gpuIndex),
+    totalVramMb:
+      data.total_vram_mb == null && data.totalVramMb == null ? null : Number(data.total_vram_mb ?? data.totalVramMb),
+    freeVramMb:
+      data.free_vram_mb == null && data.freeVramMb == null ? null : Number(data.free_vram_mb ?? data.freeVramMb),
+    budgetVramMb:
+      data.budget_vram_mb == null && data.budgetVramMb == null ? null : Number(data.budget_vram_mb ?? data.budgetVramMb),
+    requestedContextLength:
+      data.requested_context_length == null && data.requestedContextLength == null
+        ? null
+        : Number(data.requested_context_length ?? data.requestedContextLength),
+    estimatedWeightsMb:
+      data.estimated_weights_mb == null && data.estimatedWeightsMb == null
+        ? null
+        : Number(data.estimated_weights_mb ?? data.estimatedWeightsMb),
+    estimatedEngineMbPerGpu:
+      data.estimated_engine_mb_per_gpu == null && data.estimatedEngineMbPerGpu == null
+        ? null
+        : Number(data.estimated_engine_mb_per_gpu ?? data.estimatedEngineMbPerGpu),
+    estimatedKvCacheMb:
+      data.estimated_kv_cache_mb == null && data.estimatedKvCacheMb == null
+        ? null
+        : Number(data.estimated_kv_cache_mb ?? data.estimatedKvCacheMb),
+    estimatedMaxContextLength:
+      data.estimated_max_context_length == null && data.estimatedMaxContextLength == null
+        ? null
+        : Number(data.estimated_max_context_length ?? data.estimatedMaxContextLength),
+    modelLoadingMemoryMb:
+      data.model_loading_memory_mb == null && data.modelLoadingMemoryMb == null
+        ? null
+        : Number(data.model_loading_memory_mb ?? data.modelLoadingMemoryMb),
+    maximumConcurrency:
+      data.maximum_concurrency == null && data.maximumConcurrency == null
+        ? null
+        : Number(data.maximum_concurrency ?? data.maximumConcurrency),
+    tensorParallelSize:
+      data.tensor_parallel_size == null && data.tensorParallelSize == null
+        ? null
+        : Number(data.tensor_parallel_size ?? data.tensorParallelSize),
+    fitsCurrentGpu:
+      data.fits_current_gpu == null && data.fitsCurrentGpu == null ? null : Boolean(data.fits_current_gpu ?? data.fitsCurrentGpu),
+    enginePresent:
+      data.engine_present == null && data.enginePresent == null ? null : Boolean(data.engine_present ?? data.enginePresent),
+    source: String(data.source ?? "heuristic") as ModelMemoryEstimate["source"],
+    status: String(data.status ?? "ok") as ModelMemoryEstimate["status"],
+    warning: (data.warning ?? null) as string | null,
+    notes: Array.isArray(data.notes) ? data.notes.map(String) : [],
   }
 }
 
@@ -687,6 +747,19 @@ export const api = {
     unload: (modelId: string) => request<void>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/unload`),
     patch: (modelId: string, patch: ModelPatchRequest) =>
       request<unknown>("PATCH", `/ocabra/models/${encodeURIComponent(modelId)}`, patch).then(toModelState),
+    estimateMemory: (
+      modelId: string,
+      body: {
+        preferredGpu?: number | null
+        extraConfig?: ModelPatchRequest["extraConfig"]
+        runProbe?: boolean
+      },
+    ) =>
+      request<unknown>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/memory-estimate`, {
+        preferred_gpu: body.preferredGpu ?? null,
+        extra_config: body.extraConfig ?? null,
+        run_probe: Boolean(body.runProbe),
+      }).then(toModelMemoryEstimate),
     delete: (modelId: string) => request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
   },
 

@@ -271,6 +271,29 @@ class TestGetVramEstimate:
         # Very small models still reserve a minimum baseline for vLLM runtime overhead.
         assert estimate >= 2048
 
+
+class TestMemoryProfileParsing:
+    def test_parse_memory_profile_logs_extracts_kv_cache_and_context(self):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        backend = VLLMBackend()
+        profile = backend._parse_memory_profile_logs(
+            """
+            Model loading took 18.14 GiB memory and 12.014981 seconds
+            Available KV cache memory: 1.91 GiB
+            GPU KV cache size: 7,824 tokens
+            Maximum concurrency for 7,800 tokens per request: 1.00x
+            ValueError: estimated maximum model length is 7824
+            """
+        )
+
+        assert profile["model_loading_memory_mb"] == 18575
+        assert profile["available_kv_cache_mb"] == 1955
+        assert profile["gpu_kv_cache_tokens"] == 7824
+        assert profile["requested_context_length"] == 7800
+        assert profile["maximum_concurrency"] == 1.0
+        assert profile["estimated_max_model_len"] == 7824
+
     @pytest.mark.asyncio
     async def test_empty_directory(self, tmp_model_dir: Path):
         model_path = tmp_model_dir / "empty"

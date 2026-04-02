@@ -157,6 +157,28 @@ export interface WhisperConfig {
   diarizationModelId?: string | null
 }
 
+export interface ModelMemoryEstimate {
+  backendType: BackendType
+  gpuIndex: number | null
+  totalVramMb: number | null
+  freeVramMb: number | null
+  budgetVramMb: number | null
+  requestedContextLength: number | null
+  estimatedWeightsMb: number | null
+  estimatedEngineMbPerGpu: number | null
+  estimatedKvCacheMb: number | null
+  estimatedMaxContextLength: number | null
+  modelLoadingMemoryMb: number | null
+  maximumConcurrency: number | null
+  tensorParallelSize: number | null
+  fitsCurrentGpu: boolean | null
+  enginePresent: boolean | null
+  source: "heuristic" | "runtime_probe"
+  status: "ok" | "warning" | "error"
+  warning: string | null
+  notes: string[]
+}
+
 export type BackendExtraConfig = Record<string, unknown> & {
   vllm?: VLLMConfig
   sglang?: SGLangConfig

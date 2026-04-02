@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
@@ -33,6 +34,14 @@ class AddModelRequest(BaseModel):
     auto_reload: bool = False
     preferred_gpu: int | None = None
     extra_config: dict | None = None
+
+
+class ModelMemoryEstimateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preferred_gpu: int | None = None
+    extra_config: dict | None = None
+    run_probe: bool = False
 
 
 @router.get("/models")
@@ -144,6 +153,28 @@ async def update_model(model_id: str, body: ModelPatch, request: Request) -> dic
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return updated.to_dict()
+
+
+@router.post("/models/{model_id:path}/memory-estimate")
+async def estimate_model_memory(
+    model_id: str,
+    body: ModelMemoryEstimateRequest,
+    request: Request,
+) -> dict:
+    """Estimate memory requirements for the current backend/config combination."""
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    extra_config = body.extra_config if isinstance(body.extra_config, dict) else state.extra_config or {}
+    return await _build_model_memory_estimate(
+        request=request,
+        state=state,
+        extra_config=extra_config,
+        preferred_gpu=body.preferred_gpu,
+        run_probe=body.run_probe,
+    )
 
 
 @router.delete("/models/{model_id:path}")
@@ -267,6 +298,138 @@ async def _resolve_disk_size_bytes(
     return await asyncio.to_thread(_compute_path_size_bytes, path)
 
 
+async def _build_model_memory_estimate(
+    request: Request,
+    state,
+    extra_config: dict[str, Any],
+    preferred_gpu: int | None,
+    run_probe: bool,
+) -> dict[str, Any]:
+    worker_pool = getattr(request.app.state, "worker_pool", None)
+    gpu_manager = getattr(request.app.state, "gpu_manager", None)
+    backend = await worker_pool.get_backend(state.backend_type) if worker_pool else None
+
+    gpu_index = (
+        preferred_gpu
+        if preferred_gpu is not None
+        else state.preferred_gpu
+        if getattr(state, "preferred_gpu", None) is not None
+        else settings.default_gpu_index
+    )
+    gpu_state = await gpu_manager.get_state(gpu_index) if gpu_manager is not None else None
+    total_vram_mb = int(getattr(gpu_state, "total_vram_mb", 0) or 0) or None
+    free_vram_mb = int(getattr(gpu_state, "free_vram_mb", 0) or 0) or None
+
+    estimate = {
+        "backend_type": state.backend_type,
+        "gpu_index": gpu_index,
+        "total_vram_mb": total_vram_mb,
+        "free_vram_mb": free_vram_mb,
+        "budget_vram_mb": None,
+        "requested_context_length": _resolve_requested_context_length(state, extra_config),
+        "estimated_weights_mb": None,
+        "estimated_engine_mb_per_gpu": None,
+        "estimated_kv_cache_mb": None,
+        "estimated_max_context_length": None,
+        "model_loading_memory_mb": None,
+        "maximum_concurrency": None,
+        "tensor_parallel_size": _resolve_tensor_parallel_size(state, extra_config),
+        "fits_current_gpu": None,
+        "engine_present": None,
+        "source": "heuristic",
+        "status": "ok",
+        "warning": None,
+        "notes": [],
+    }
+
+    if backend is None:
+        estimate["status"] = "warning"
+        estimate["warning"] = "No backend runtime available to calculate memory estimates."
+        return estimate
+
+    heuristic_mb = int(await backend.get_vram_estimate_mb(state.backend_model_id) or 0)
+
+    if state.backend_type == "vllm":
+        gpu_util = _resolve_vllm_gpu_memory_utilization(extra_config)
+        budget_vram_mb = int((total_vram_mb or 0) * gpu_util) if total_vram_mb is not None else None
+        estimate.update(
+            {
+                "budget_vram_mb": budget_vram_mb,
+                "estimated_weights_mb": heuristic_mb or None,
+                "estimated_kv_cache_mb": None,
+                "fits_current_gpu": None,
+            }
+        )
+        estimate["notes"] = [
+            "La estimación rápida de vLLM aproxima el peso cargado y la reserva objetivo de VRAM.",
+            "La memoria de KV cache y el contexto máximo real dependen del engine; usa el probe para una validación fiable.",
+        ]
+        if run_probe and hasattr(backend, "estimate_memory_profile"):
+            profile = await backend.estimate_memory_profile(
+                state.backend_model_id,
+                gpu_index=gpu_index,
+                extra_config=extra_config,
+            )
+            estimate.update(
+                {
+                    "source": "runtime_probe",
+                    "model_loading_memory_mb": profile.get("model_loading_memory_mb"),
+                    "estimated_kv_cache_mb": profile.get("available_kv_cache_mb") or estimate["estimated_kv_cache_mb"],
+                    "estimated_max_context_length": profile.get("estimated_max_model_len")
+                    or profile.get("gpu_kv_cache_tokens"),
+                    "maximum_concurrency": profile.get("maximum_concurrency"),
+                }
+            )
+            if profile.get("requested_context_length") and not estimate["requested_context_length"]:
+                estimate["requested_context_length"] = profile.get("requested_context_length")
+            if profile.get("status") != "ok":
+                estimate["status"] = "error"
+                estimate["warning"] = profile.get("error") or "vLLM runtime probe failed."
+                if profile.get("estimated_max_model_len"):
+                    estimate["notes"].append(
+                        f"El engine estima un máximo de {profile['estimated_max_model_len']} tokens con esta configuración."
+                    )
+            else:
+                estimate["notes"].append(
+                    "Probe real de vLLM completado; las cifras de KV cache y contexto vienen del engine."
+                )
+        return estimate
+
+    if state.backend_type == "tensorrt_llm":
+        engine_path = _resolve_extra_config_path(extra_config, "engine_dir") or _resolve_tensorrt_engine_path(
+            state.backend_model_id
+        )
+        tp_size = _resolve_tensor_parallel_size(state, extra_config)
+        estimate.update(
+            {
+                "estimated_engine_mb_per_gpu": heuristic_mb or None,
+                "engine_present": bool(engine_path and engine_path.exists()),
+                "fits_current_gpu": (
+                    heuristic_mb <= total_vram_mb if total_vram_mb is not None and heuristic_mb > 0 else None
+                ),
+                "tensor_parallel_size": tp_size,
+            }
+        )
+        if not estimate["engine_present"]:
+            estimate["status"] = "error"
+            estimate["warning"] = "Engine directory not found for this TensorRT-LLM model."
+        estimate["notes"] = [
+            "La estimación de TensorRT-LLM usa el tamaño real del engine por GPU y el tp_size detectado en config.json.",
+        ]
+        return estimate
+
+    estimate.update(
+        {
+            "estimated_weights_mb": heuristic_mb or None,
+            "fits_current_gpu": (
+                heuristic_mb <= total_vram_mb if total_vram_mb is not None and heuristic_mb > 0 else None
+            ),
+            "notes": ["Estimación heurística basada en el tamaño de los artefactos locales del modelo."],
+        }
+    )
+    return estimate
+
+
 async def _serialize_model_state(
     request: Request,
     state,
@@ -337,6 +500,69 @@ def _apply_capability_fallbacks(state, payload: dict) -> dict:
     ):
         merged["context_length"] = fallback_context_length
     return merged
+
+
+def _resolve_vllm_gpu_memory_utilization(extra_config: dict[str, Any]) -> float:
+    vllm_config = extra_config.get("vllm")
+    if isinstance(vllm_config, dict):
+        if vllm_config.get("gpu_memory_utilization") is not None:
+            return float(vllm_config["gpu_memory_utilization"])
+        if vllm_config.get("gpuMemoryUtilization") is not None:
+            return float(vllm_config["gpuMemoryUtilization"])
+    if extra_config.get("gpu_memory_utilization") is not None:
+        return float(extra_config["gpu_memory_utilization"])
+    if extra_config.get("gpuMemoryUtilization") is not None:
+        return float(extra_config["gpuMemoryUtilization"])
+    return float(settings.vllm_gpu_memory_utilization)
+
+
+def _resolve_requested_context_length(state, extra_config: dict[str, Any]) -> int | None:
+    for key in ("context_length", "max_model_len", "ctx_size"):
+        for candidate in (key, _to_camel_key(key)):
+            value = extra_config.get(candidate)
+            if isinstance(value, int) and value > 0:
+                return value
+    for section in ("vllm", "sglang", "llama_cpp", "bitnet", "tensorrt_llm"):
+        nested = extra_config.get(section)
+        if isinstance(nested, dict):
+            for key in ("context_length", "max_model_len", "ctx_size"):
+                for candidate in (key, _to_camel_key(key)):
+                    value = nested.get(candidate)
+                    if isinstance(value, int) and value > 0:
+                        return value
+    fallback = _resolve_context_length_fallback(state)
+    return fallback if fallback > 0 else None
+
+
+def _resolve_tensor_parallel_size(state, extra_config: dict[str, Any]) -> int | None:
+    for section in ("vllm", "sglang"):
+        nested = extra_config.get(section)
+        if isinstance(nested, dict):
+            value = nested.get("tensor_parallel_size") or nested.get("tensorParallelSize")
+            if isinstance(value, int) and value > 0:
+                return value
+    if state.backend_type == "tensorrt_llm":
+        engine_path = _resolve_extra_config_path(extra_config, "engine_dir") or _resolve_tensorrt_engine_path(
+            state.backend_model_id
+        )
+        if engine_path is not None and engine_path.exists():
+            scan_dir = engine_path / "engine" if (engine_path / "engine").is_dir() else engine_path
+            try:
+                import json as _json
+
+                cfg = _json.loads((scan_dir / "config.json").read_text())
+                mapping = cfg.get("pretrained_config", {}).get("mapping", {})
+                return int(mapping.get("tp_size") or mapping.get("world_size") or 1)
+            except Exception:
+                return 1
+    return 1
+
+
+def _to_camel_key(value: str) -> str:
+    return "".join(
+        part.capitalize() if index else part
+        for index, part in enumerate(value.split("_"))
+    )
 
 
 def _resolve_context_length_fallback(state) -> int:

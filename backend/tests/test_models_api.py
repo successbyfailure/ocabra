@@ -13,6 +13,23 @@ class _FakeBackend:
         assert model_id == "My--Engine"
         return BackendCapabilities(completion=True, streaming=True, context_length=0)
 
+    async def get_vram_estimate_mb(self, model_id: str) -> int:
+        assert model_id in {"My--Engine", "Qwen/Qwen3-32B-AWQ", "demo"}
+        return 18000
+
+    async def estimate_memory_profile(self, model_id: str, gpu_index: int, extra_config: dict):
+        assert model_id == "Qwen/Qwen3-32B-AWQ"
+        assert gpu_index == 1
+        assert extra_config["vllm"]["max_model_len"] == 7800
+        return {
+            "status": "ok",
+            "model_loading_memory_mb": 18575,
+            "available_kv_cache_mb": 1956,
+            "estimated_max_model_len": 7824,
+            "maximum_concurrency": 1.0,
+            "requested_context_length": 7800,
+        }
+
 
 class _FakeWorkerPool:
     async def get_backend(self, backend_type: str):
@@ -197,3 +214,90 @@ async def test_get_models_storage_returns_filesystem_usage(monkeypatch, tmp_path
         "used_bytes": 307200,
         "free_bytes": 102400,
     }
+
+
+@pytest.mark.asyncio
+async def test_build_model_memory_estimate_uses_vllm_runtime_probe():
+    state = SimpleNamespace(
+        model_id="vllm/Qwen/Qwen3-32B-AWQ",
+        backend_model_id="Qwen/Qwen3-32B-AWQ",
+        backend_type="vllm",
+        preferred_gpu=None,
+        extra_config={"vllm": {"max_model_len": 7800}},
+        capabilities=SimpleNamespace(context_length=32768),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                worker_pool=SimpleNamespace(get_backend=lambda _backend_type: _FakeBackend()),
+                gpu_manager=SimpleNamespace(
+                    get_state=lambda _gpu: SimpleNamespace(total_vram_mb=24576, free_vram_mb=24115)
+                ),
+            )
+        )
+    )
+
+    async def _get_backend(_backend_type: str):
+        return _FakeBackend()
+
+    async def _get_gpu(_gpu: int):
+        return SimpleNamespace(total_vram_mb=24576, free_vram_mb=24115)
+
+    request.app.state.worker_pool.get_backend = _get_backend
+    request.app.state.gpu_manager.get_state = _get_gpu
+
+    payload = await models_api._build_model_memory_estimate(
+        request=request,
+        state=state,
+        extra_config={"vllm": {"max_model_len": 7800}},
+        preferred_gpu=1,
+        run_probe=True,
+    )
+
+    assert payload["source"] == "runtime_probe"
+    assert payload["gpu_index"] == 1
+    assert payload["estimated_weights_mb"] == 18000
+    assert payload["model_loading_memory_mb"] == 18575
+    assert payload["estimated_kv_cache_mb"] == 1956
+    assert payload["estimated_max_context_length"] == 7824
+
+
+@pytest.mark.asyncio
+async def test_build_model_memory_estimate_marks_missing_tensorrt_engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(models_api.settings, "models_dir", str(tmp_path / "models"))
+    state = SimpleNamespace(
+        model_id="tensorrt_llm/demo",
+        backend_model_id="demo",
+        backend_type="tensorrt_llm",
+        preferred_gpu=None,
+        extra_config={},
+        capabilities=SimpleNamespace(context_length=0),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                worker_pool=SimpleNamespace(),
+                gpu_manager=SimpleNamespace(),
+            )
+        )
+    )
+
+    async def _get_backend(_backend_type: str):
+        return _FakeBackend()
+
+    async def _get_gpu(_gpu: int):
+        return SimpleNamespace(total_vram_mb=24576, free_vram_mb=24115)
+
+    request.app.state.worker_pool.get_backend = _get_backend
+    request.app.state.gpu_manager.get_state = _get_gpu
+
+    payload = await models_api._build_model_memory_estimate(
+        request=request,
+        state=state,
+        extra_config={},
+        preferred_gpu=None,
+        run_probe=False,
+    )
+
+    assert payload["status"] == "error"
+    assert payload["engine_present"] is False

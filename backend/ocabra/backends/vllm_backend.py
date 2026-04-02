@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
+import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -105,9 +107,121 @@ class VLLMBackend(BackendInterface):
         if port == 0:
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
-        model_target = self._resolve_model_target(model_id)
         extra_config = kwargs.get("extra_config") or {}
+        cmd, env, cuda_devices = self._build_launch_spec(
+            model_id=model_id,
+            gpu_indices=gpu_indices,
+            port=port,
+            extra_config=extra_config,
+        )
 
+        logger.info(
+            "vllm_starting",
+            model_id=model_id,
+            port=port,
+            gpus=cuda_devices,
+        )
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        self._processes[model_id] = (proc, port)
+
+        # Wait until the server is healthy or times out
+        try:
+            await self._wait_for_startup(model_id, port)
+        except TimeoutError:
+            await self._kill_process(model_id)
+            raise
+
+        vram_mb = await self.get_vram_estimate_mb(model_id)
+
+        logger.info("vllm_ready", model_id=model_id, port=port, pid=proc.pid)
+        return WorkerInfo(
+            backend_type="vllm",
+            model_id=model_id,
+            gpu_indices=gpu_indices,
+            port=port,
+            pid=proc.pid or 0,
+            vram_used_mb=vram_mb,
+        )
+
+    async def estimate_memory_profile(
+        self,
+        model_id: str,
+        *,
+        gpu_index: int,
+        extra_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        port = self._reserve_free_port()
+        cmd, env, _cuda_devices = self._build_launch_spec(
+            model_id=model_id,
+            gpu_indices=[gpu_index],
+            port=port,
+            extra_config=extra_config or {},
+        )
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        readers = [
+            asyncio.create_task(self._consume_stream(proc.stdout, stdout_chunks)),
+            asyncio.create_task(self._consume_stream(proc.stderr, stderr_chunks)),
+        ]
+        healthy = False
+        error_message: str | None = None
+        try:
+            await self._wait_for_probe_startup(proc, port)
+            healthy = True
+        except Exception as exc:
+            error_message = str(exc)
+        finally:
+            await self._terminate_probe_process(proc)
+            await asyncio.gather(*readers, return_exceptions=True)
+
+        logs = "\n".join([*stdout_chunks, *stderr_chunks])
+        profile = self._parse_memory_profile_logs(logs)
+        profile["status"] = "ok" if healthy else "error"
+        profile["error"] = error_message
+        profile["logs"] = logs[-8000:] if logs else ""
+        return profile
+
+    def _get_vllm_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
+        camel_key = "".join(
+            part.capitalize() if index else part
+            for index, part in enumerate(key.split("_"))
+        )
+        vllm_config = extra_config.get("vllm")
+        if isinstance(vllm_config, dict):
+            if key in vllm_config:
+                return vllm_config[key]
+            if camel_key in vllm_config:
+                return vllm_config[camel_key]
+        if key in extra_config:
+            return extra_config[key]
+        if camel_key in extra_config:
+            return extra_config[camel_key]
+        return default
+
+    def _build_launch_spec(
+        self,
+        *,
+        model_id: str,
+        gpu_indices: list[int],
+        port: int,
+        extra_config: dict[str, Any],
+    ) -> tuple[list[str], dict[str, str], str]:
+        model_target = self._resolve_model_target(model_id)
         cuda_devices = ",".join(str(i) for i in gpu_indices)
         tensor_parallel = self._get_vllm_option(
             extra_config,
@@ -143,7 +257,6 @@ class VLLMBackend(BackendInterface):
             "disable_log_requests",
             self._get_setting("vllm_disable_log_requests"),
         ):
-            # vLLM >=0.17 renamed --disable-log-requests → --no-enable-log-requests
             cmd.append("--no-enable-log-requests")
         model_impl = self._get_vllm_option(
             extra_config, "model_impl", self._get_setting("vllm_model_impl")
@@ -272,47 +385,7 @@ class VLLMBackend(BackendInterface):
         if settings.hf_token:
             env["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
 
-        logger.info(
-            "vllm_starting",
-            model_id=model_id,
-            port=port,
-            gpus=cuda_devices,
-        )
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-
-        self._processes[model_id] = (proc, port)
-
-        # Wait until the server is healthy or times out
-        try:
-            await self._wait_for_startup(model_id, port)
-        except TimeoutError:
-            await self._kill_process(model_id)
-            raise
-
-        vram_mb = await self.get_vram_estimate_mb(model_id)
-
-        logger.info("vllm_ready", model_id=model_id, port=port, pid=proc.pid)
-        return WorkerInfo(
-            backend_type="vllm",
-            model_id=model_id,
-            gpu_indices=gpu_indices,
-            port=port,
-            pid=proc.pid or 0,
-            vram_used_mb=vram_mb,
-        )
-
-    def _get_vllm_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
-        vllm_config = extra_config.get("vllm")
-        if isinstance(vllm_config, dict) and key in vllm_config:
-            return vllm_config[key]
-        return extra_config.get(key, default)
+        return cmd, env, cuda_devices
 
     def _encode_vllm_json_option(self, value: Any) -> str:
         if isinstance(value, str):
@@ -537,6 +610,107 @@ class VLLMBackend(BackendInterface):
         raise TimeoutError(
             f"vLLM worker for '{model_id}' did not become healthy within {_STARTUP_TIMEOUT_S}s"
         )
+
+    async def _wait_for_probe_startup(
+        self,
+        proc: asyncio.subprocess.Process,
+        port: int,
+        timeout_s: int = _STARTUP_TIMEOUT_S,
+    ) -> None:
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        url = f"http://127.0.0.1:{port}/health"
+
+        while asyncio.get_event_loop().time() < deadline:
+            if proc.returncode is not None:
+                raise RuntimeError(f"Probe process exited with rc={proc.returncode}")
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        raise TimeoutError(f"vLLM probe did not become healthy within {timeout_s}s")
+
+    async def _terminate_probe_process(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            return
+        pgid: int | None = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, AttributeError, TypeError):
+            pgid = None
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                return
+            await proc.wait()
+
+    async def _consume_stream(
+        self,
+        stream: asyncio.StreamReader | None,
+        sink: list[str],
+    ) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.readline()
+            if not chunk:
+                return
+            sink.append(chunk.decode("utf-8", errors="replace").rstrip())
+
+    def _parse_memory_profile_logs(self, logs: str) -> dict[str, Any]:
+        def _extract_float(pattern: str) -> float | None:
+            match = re.search(pattern, logs, flags=re.MULTILINE)
+            return float(match.group(1)) if match else None
+
+        def _extract_int(pattern: str) -> int | None:
+            match = re.search(pattern, logs, flags=re.MULTILINE)
+            return int(match.group(1).replace(",", "")) if match else None
+
+        model_loading_gib = _extract_float(r"Model loading took ([0-9.]+) GiB memory")
+        available_kv_gib = _extract_float(r"Available KV cache memory: ([0-9.]+) GiB")
+        gpu_kv_tokens = _extract_int(r"GPU KV cache size: ([0-9,]+) tokens")
+        max_context = _extract_int(r"estimated maximum model length is ([0-9,]+)")
+        concurrency_match = re.search(
+            r"Maximum concurrency for ([0-9,]+) tokens per request: ([0-9.]+)x",
+            logs,
+            flags=re.MULTILINE,
+        )
+        requested_context = (
+            int(concurrency_match.group(1).replace(",", "")) if concurrency_match else None
+        )
+        maximum_concurrency = float(concurrency_match.group(2)) if concurrency_match else None
+        return {
+            "model_loading_memory_mb": int(model_loading_gib * 1024) if model_loading_gib is not None else None,
+            "available_kv_cache_mb": int(available_kv_gib * 1024) if available_kv_gib is not None else None,
+            "gpu_kv_cache_tokens": gpu_kv_tokens,
+            "estimated_max_model_len": max_context,
+            "requested_context_length": requested_context,
+            "maximum_concurrency": maximum_concurrency,
+        }
+
+    @staticmethod
+    def _reserve_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            return int(sock.getsockname()[1])
 
     async def _kill_process(self, model_id: str, graceful: bool = False) -> None:
         entry = self._processes.pop(model_id, None)
