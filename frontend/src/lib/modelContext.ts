@@ -1,4 +1,13 @@
-import type { ModelState, VLLMConfig } from "@/types"
+import type {
+  BackendExtraConfig,
+  BitNetConfig,
+  LlamaCppConfig,
+  ModelState,
+  SGLangConfig,
+  TensorRTLLMConfig,
+  VLLMConfig,
+  WhisperConfig,
+} from "@/types"
 
 export interface ModelContextSummary {
   nativeContext: number | null
@@ -7,30 +16,98 @@ export interface ModelContextSummary {
   maxOutputTokens: number | null
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function getConfigSection<T>(model: ModelState, key: keyof BackendExtraConfig): T | null {
+  const extraConfig = model.extraConfig
+  if (!isRecord(extraConfig)) return null
+  const nested = extraConfig[key]
+  if (isRecord(nested)) return nested as T
+  return extraConfig as T
+}
+
+function toPositiveNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null
+}
+
+export function getWritableExtraConfig(model: ModelState): BackendExtraConfig {
+  return isRecord(model.extraConfig) ? ({ ...model.extraConfig } as BackendExtraConfig) : {}
+}
+
 export function getVllmConfig(model: ModelState): VLLMConfig | null {
-  const vllm = model.extraConfig?.vllm
-  if (vllm && typeof vllm === "object") return vllm as VLLMConfig
-  if (model.extraConfig && typeof model.extraConfig === "object") return model.extraConfig as VLLMConfig
-  return null
+  if (model.backendType !== "vllm") return null
+  return getConfigSection<VLLMConfig>(model, "vllm")
+}
+
+export function getSGLangConfig(model: ModelState): SGLangConfig | null {
+  if (model.backendType !== "sglang") return null
+  return getConfigSection<SGLangConfig>(model, "sglang")
+}
+
+export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
+  if (model.backendType !== "llama_cpp") return null
+  return getConfigSection<LlamaCppConfig>(model, "llama_cpp")
+}
+
+export function getBitNetConfig(model: ModelState): BitNetConfig | null {
+  if (model.backendType !== "bitnet") return null
+  return getConfigSection<BitNetConfig>(model, "bitnet")
+}
+
+export function getTensorRTLLMConfig(model: ModelState): TensorRTLLMConfig | null {
+  if (model.backendType !== "tensorrt_llm") return null
+  return getConfigSection<TensorRTLLMConfig>(model, "tensorrt_llm")
+}
+
+export function getWhisperConfig(model: ModelState): WhisperConfig | null {
+  if (model.backendType !== "whisper") return null
+  return getConfigSection<WhisperConfig>(model, "whisper")
 }
 
 export function getModelContextSummary(model: ModelState): ModelContextSummary {
-  const vllm = getVllmConfig(model)
   const nativeContext =
     typeof model.capabilities.contextLength === "number" && model.capabilities.contextLength > 0
       ? model.capabilities.contextLength
       : null
-  const configuredContext =
-    typeof vllm?.maxModelLen === "number" && vllm.maxModelLen > 0
-      ? vllm.maxModelLen
-      : nativeContext
+
+  let configuredContext: number | null = null
+  switch (model.backendType) {
+    case "vllm": {
+      const vllm = getVllmConfig(model)
+      configuredContext = toPositiveNumber(vllm?.maxModelLen)
+      break
+    }
+    case "sglang": {
+      const sglang = getSGLangConfig(model)
+      configuredContext = toPositiveNumber(sglang?.contextLength ?? (sglang as Record<string, unknown> | null)?.context_length)
+      break
+    }
+    case "llama_cpp": {
+      const llamaCpp = getLlamaCppConfig(model)
+      configuredContext = toPositiveNumber(llamaCpp?.ctxSize ?? (llamaCpp as Record<string, unknown> | null)?.ctx_size)
+      break
+    }
+    case "bitnet": {
+      const bitnet = getBitNetConfig(model)
+      configuredContext = toPositiveNumber(bitnet?.ctxSize ?? (bitnet as Record<string, unknown> | null)?.ctx_size)
+      break
+    }
+    case "tensorrt_llm": {
+      const tensorrt = getTensorRTLLMConfig(model)
+      configuredContext = toPositiveNumber(
+        tensorrt?.contextLength ?? (tensorrt as Record<string, unknown> | null)?.context_length,
+      )
+      break
+    }
+  }
+
+  configuredContext ??= nativeContext
 
   return {
     nativeContext,
     configuredContext,
-    // In vLLM the request must fit into a shared context window.
-    // Showing both bounds as the configured window is clearer than inventing
-    // a fixed split that the runtime does not enforce.
     maxInputTokens: configuredContext,
     maxOutputTokens: configuredContext,
   }

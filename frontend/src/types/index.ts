@@ -79,7 +79,7 @@ export interface ModelState {
   loadedAt: string | null
   errorMessage?: string | null
   schedules?: EvictionSchedule[]
-  extraConfig?: Record<string, unknown>
+  extraConfig?: BackendExtraConfig
 }
 
 export interface ModelsStorageStats {
@@ -123,6 +123,47 @@ export interface VLLMConfig {
   trustRemoteCode?: boolean
   swapSpace?: number | null
   kvCacheDtype?: string | null
+}
+
+export interface SGLangConfig {
+  tensorParallelSize?: number | null
+  memFractionStatic?: number | null
+  contextLength?: number | null
+  trustRemoteCode?: boolean
+  disableRadixCache?: boolean
+}
+
+export interface LlamaCppConfig {
+  gpuLayers?: number | null
+  ctxSize?: number | null
+  flashAttn?: boolean
+  embedding?: boolean
+}
+
+export interface BitNetConfig {
+  gpuLayers?: number | null
+  ctxSize?: number | null
+  flashAttn?: boolean
+}
+
+export interface TensorRTLLMConfig {
+  maxBatchSize?: number | null
+  contextLength?: number | null
+  trustRemoteCode?: boolean
+}
+
+export interface WhisperConfig {
+  diarizationEnabled?: boolean
+  diarizationModelId?: string | null
+}
+
+export type BackendExtraConfig = Record<string, unknown> & {
+  vllm?: VLLMConfig
+  sglang?: SGLangConfig
+  llama_cpp?: LlamaCppConfig
+  bitnet?: BitNetConfig
+  tensorrt_llm?: TensorRTLLMConfig
+  whisper?: WhisperConfig
 }
 
 export interface HFVLLMRuntimeProbe {
@@ -169,9 +210,7 @@ export interface ModelPatchRequest {
   autoReload?: boolean
   displayName?: string
   schedules?: EvictionSchedule[]
-  extraConfig?: {
-    vllm?: VLLMConfig
-  }
+  extraConfig?: BackendExtraConfig
 }
 
 export interface EvictionSchedule {
@@ -192,9 +231,7 @@ export interface DownloadJob {
     loadPolicy?: LoadPolicy
     autoReload?: boolean
     preferredGpu?: number | null
-    extraConfig?: {
-      vllm?: VLLMConfig
-    }
+    extraConfig?: BackendExtraConfig
   } | null
   status: "queued" | "downloading" | "completed" | "failed" | "cancelled"
   progressPct: number

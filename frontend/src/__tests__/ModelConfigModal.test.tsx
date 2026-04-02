@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 
@@ -85,7 +85,7 @@ describe("ModelConfigModal", () => {
 
     fireEvent.click(screen.getByText(/Aplicar tuning recomendado/i))
 
-    expect((screen.getByLabelText(/GPU memory utilization/i) as HTMLInputElement).value).toBe("0.9")
+    expect((screen.getAllByLabelText(/GPU memory utilization/i)[1] as HTMLInputElement).value).toBe("0.9")
 
     fireEvent.click(screen.getByText(/Aplicar recomendacion del probe/i))
 
@@ -146,5 +146,76 @@ describe("ModelConfigModal", () => {
 
     expect(screen.getByText(/probe=falta reasoning_parser/i)).toBeTruthy()
     expect(screen.getByText(/override sugerido: reasoning_parser/i)).toBeTruthy()
+  })
+
+  it("saves llama.cpp options in nested backend config", async () => {
+    const onSave = vi.fn(async () => undefined)
+
+    render(
+      <ModelConfigModal
+        open
+        onOpenChange={vi.fn()}
+        onSave={onSave}
+        gpus={[]}
+        model={{
+          modelId: "llama_cpp/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          displayName: "Qwen2.5 GGUF",
+          backendType: "llama_cpp",
+          status: "configured",
+          loadPolicy: "on_demand",
+          autoReload: false,
+          preferredGpu: null,
+          currentGpu: [],
+          vramUsedMb: 0,
+          diskSizeBytes: null,
+          capabilities: {
+            chat: true,
+            completion: true,
+            tools: false,
+            vision: false,
+            embeddings: false,
+            pooling: false,
+            rerank: false,
+            classification: false,
+            score: false,
+            reasoning: false,
+            imageGeneration: false,
+            audioTranscription: false,
+            musicGeneration: false,
+            tts: false,
+            streaming: true,
+            contextLength: 8192,
+          },
+          lastRequestAt: null,
+          loadedAt: null,
+          extraConfig: {
+            model_path: "/models/qwen.gguf",
+          },
+        }}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText(/GPU layers/i), { target: { value: "24" } })
+    fireEvent.change(screen.getByLabelText(/Context size/i), { target: { value: "16384" } })
+    fireEvent.click(screen.getByLabelText(/flash attention/i))
+    fireEvent.click(screen.getByLabelText(/embedding mode/i))
+    await act(async () => {
+      fireEvent.click(screen.getByText(/^Guardar$/i))
+    })
+
+    expect(onSave).toHaveBeenCalledWith(
+      "llama_cpp/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+      expect.objectContaining({
+        extraConfig: expect.objectContaining({
+          model_path: "/models/qwen.gguf",
+          llama_cpp: expect.objectContaining({
+            gpuLayers: 24,
+            ctxSize: 16384,
+            flashAttn: true,
+            embedding: true,
+          }),
+        }),
+      }),
+    )
   })
 })

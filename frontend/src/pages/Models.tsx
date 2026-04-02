@@ -9,7 +9,7 @@ import { useWebSocket } from "@/hooks/useWebSocket"
 import { getModelContextSummary } from "@/lib/modelContext"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
-import type { BackendType, LoadPolicy, ModelState, ModelStatus, ModelsStorageStats, VLLMConfig } from "@/types"
+import type { BackendExtraConfig, BackendType, LoadPolicy, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
 
 function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
   if (model.capabilities.imageGeneration) return "image"
@@ -197,9 +197,7 @@ export function Models() {
       preferredGpu: number | null
       autoReload: boolean
       schedules: ModelState["schedules"]
-      extraConfig?: {
-        vllm?: VLLMConfig
-      }
+      extraConfig?: BackendExtraConfig
     },
   ) => {
     await runAction(modelId, async () => {

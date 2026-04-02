@@ -35,100 +35,175 @@ function isRecord(value: unknown): value is AnyRecord {
   return typeof value === "object" && value !== null
 }
 
-function toVLLMConfig(raw: unknown): ModelState["extraConfig"] {
-  const data = isRecord(raw) ? raw : {}
-  const vllmRaw = data.vllm
-  const vllm = isRecord(vllmRaw) ? vllmRaw : data
+function hasAnyKey(record: AnyRecord, keys: string[]): boolean {
+  return keys.some((key) => key in record)
+}
 
-  return {
-    ...data,
-    vllm: {
-      recipeId: (vllm.recipe_id ?? vllm.recipeId ?? null) as string | null,
-      recipeNotes: Array.isArray(vllm.recipe_notes ?? vllm.recipeNotes)
-        ? ((vllm.recipe_notes ?? vllm.recipeNotes) as unknown[]).map(String)
+function toNumberOrNull(record: AnyRecord, snakeKey: string, camelKey = snakeKey): number | null {
+  const value = record[snakeKey] ?? record[camelKey]
+  return value == null ? null : Number(value)
+}
+
+function toBooleanOrNull(record: AnyRecord, snakeKey: string, camelKey = snakeKey): boolean | null {
+  const value = record[snakeKey] ?? record[camelKey]
+  return value == null ? null : Boolean(value)
+}
+
+function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
+  const data = isRecord(raw) ? raw : {}
+  const next: ModelState["extraConfig"] = { ...data }
+
+  const vllmRaw = isRecord(data.vllm) ? data.vllm : {}
+  const vllmSource = isRecord(data.vllm) ? vllmRaw : data
+  if (
+    isRecord(data.vllm) ||
+    hasAnyKey(vllmSource, [
+      "recipe_id",
+      "recipeId",
+      "probe_status",
+      "probeStatus",
+      "model_impl",
+      "modelImpl",
+      "runner",
+      "tensor_parallel_size",
+      "tensorParallelSize",
+      "max_model_len",
+      "maxModelLen",
+      "max_num_seqs",
+      "maxNumSeqs",
+      "gpu_memory_utilization",
+      "gpuMemoryUtilization",
+      "enable_prefix_caching",
+      "enablePrefixCaching",
+      "trust_remote_code",
+      "trustRemoteCode",
+      "hf_overrides",
+      "hfOverrides",
+      "chat_template",
+      "chatTemplate",
+      "tool_call_parser",
+      "toolCallParser",
+      "reasoning_parser",
+      "reasoningParser",
+    ])
+  ) {
+    next.vllm = {
+      recipeId: (vllmSource.recipe_id ?? vllmSource.recipeId ?? null) as string | null,
+      recipeNotes: Array.isArray(vllmSource.recipe_notes ?? vllmSource.recipeNotes)
+        ? ((vllmSource.recipe_notes ?? vllmSource.recipeNotes) as unknown[]).map(String)
         : [],
-      recipeModelImpl: (vllm.recipe_model_impl ?? vllm.recipeModelImpl ?? null) as
+      recipeModelImpl: (vllmSource.recipe_model_impl ?? vllmSource.recipeModelImpl ?? null) as
         | "auto"
         | "vllm"
         | "transformers"
         | null,
-      recipeRunner: (vllm.recipe_runner ?? vllm.recipeRunner ?? null) as
+      recipeRunner: (vllmSource.recipe_runner ?? vllmSource.recipeRunner ?? null) as
         | "generate"
         | "pooling"
         | null,
-      suggestedConfig: isRecord(vllm.suggested_config ?? vllm.suggestedConfig)
-        ? ((vllm.suggested_config ?? vllm.suggestedConfig) as Record<string, unknown>)
+      suggestedConfig: isRecord(vllmSource.suggested_config ?? vllmSource.suggestedConfig)
+        ? ((vllmSource.suggested_config ?? vllmSource.suggestedConfig) as Record<string, unknown>)
         : {},
-      suggestedTuning: isRecord(vllm.suggested_tuning ?? vllm.suggestedTuning)
-        ? ((vllm.suggested_tuning ?? vllm.suggestedTuning) as Record<string, unknown>)
+      suggestedTuning: isRecord(vllmSource.suggested_tuning ?? vllmSource.suggestedTuning)
+        ? ((vllmSource.suggested_tuning ?? vllmSource.suggestedTuning) as Record<string, unknown>)
         : {},
-      probeStatus: (vllm.probe_status ?? vllm.probeStatus ?? null) as import("@/types").HFVLLMRuntimeProbe["status"] | null,
-      probeReason: (vllm.probe_reason ?? vllm.probeReason ?? null) as string | null,
-      probeObservedAt: (vllm.probe_observed_at ?? vllm.probeObservedAt ?? null) as string | null,
+      probeStatus: (vllmSource.probe_status ?? vllmSource.probeStatus ?? null) as import("@/types").HFVLLMRuntimeProbe["status"] | null,
+      probeReason: (vllmSource.probe_reason ?? vllmSource.probeReason ?? null) as string | null,
+      probeObservedAt: (vllmSource.probe_observed_at ?? vllmSource.probeObservedAt ?? null) as string | null,
       probeRecommendedModelImpl:
-        (vllm.probe_recommended_model_impl ?? vllm.probeRecommendedModelImpl ?? null) as
+        (vllmSource.probe_recommended_model_impl ?? vllmSource.probeRecommendedModelImpl ?? null) as
           | "auto"
           | "vllm"
           | "transformers"
           | null,
       probeRecommendedRunner:
-        (vllm.probe_recommended_runner ?? vllm.probeRecommendedRunner ?? null) as
+        (vllmSource.probe_recommended_runner ?? vllmSource.probeRecommendedRunner ?? null) as
           | "generate"
           | "pooling"
           | null,
-      modelImpl: (vllm.model_impl ?? vllm.modelImpl ?? null) as string | null,
-      runner: (vllm.runner ?? null) as string | null,
-      hfOverrides: (vllm.hf_overrides ?? vllm.hfOverrides ?? null) as string | Record<string, unknown> | null,
-      chatTemplate: (vllm.chat_template ?? vllm.chatTemplate ?? null) as string | null,
+      modelImpl: (vllmSource.model_impl ?? vllmSource.modelImpl ?? null) as string | null,
+      runner: (vllmSource.runner ?? null) as string | null,
+      hfOverrides: (vllmSource.hf_overrides ?? vllmSource.hfOverrides ?? null) as string | Record<string, unknown> | null,
+      chatTemplate: (vllmSource.chat_template ?? vllmSource.chatTemplate ?? null) as string | null,
       chatTemplateContentFormat:
-        (vllm.chat_template_content_format ?? vllm.chatTemplateContentFormat ?? null) as string | null,
-      generationConfig: (vllm.generation_config ?? vllm.generationConfig ?? null) as string | null,
+        (vllmSource.chat_template_content_format ?? vllmSource.chatTemplateContentFormat ?? null) as string | null,
+      generationConfig: (vllmSource.generation_config ?? vllmSource.generationConfig ?? null) as string | null,
       overrideGenerationConfig:
-        (vllm.override_generation_config ?? vllm.overrideGenerationConfig ?? null) as
+        (vllmSource.override_generation_config ?? vllmSource.overrideGenerationConfig ?? null) as
           | string
           | Record<string, unknown>
           | null,
-      toolCallParser: (vllm.tool_call_parser ?? vllm.toolCallParser ?? null) as string | null,
-      toolParserPlugin: (vllm.tool_parser_plugin ?? vllm.toolParserPlugin ?? null) as string | null,
-      reasoningParser: (vllm.reasoning_parser ?? vllm.reasoningParser ?? null) as string | null,
-      languageModelOnly:
-        vllm.language_model_only == null && vllm.languageModelOnly == null
-          ? null
-          : Boolean(vllm.language_model_only ?? vllm.languageModelOnly),
-      maxNumSeqs:
-        vllm.max_num_seqs == null && vllm.maxNumSeqs == null
-          ? null
-          : Number(vllm.max_num_seqs ?? vllm.maxNumSeqs ?? 0),
-      maxNumBatchedTokens:
-        vllm.max_num_batched_tokens == null && vllm.maxNumBatchedTokens == null
-          ? null
-          : Number(vllm.max_num_batched_tokens ?? vllm.maxNumBatchedTokens ?? 0),
-      tensorParallelSize:
-        vllm.tensor_parallel_size == null && vllm.tensorParallelSize == null
-          ? null
-          : Number(vllm.tensor_parallel_size ?? vllm.tensorParallelSize ?? 0),
-      maxModelLen:
-        vllm.max_model_len == null && vllm.maxModelLen == null
-          ? null
-          : Number(vllm.max_model_len ?? vllm.maxModelLen ?? 0),
-      gpuMemoryUtilization:
-        vllm.gpu_memory_utilization == null && vllm.gpuMemoryUtilization == null
-          ? null
-          : Number(vllm.gpu_memory_utilization ?? vllm.gpuMemoryUtilization ?? 0),
-      enablePrefixCaching: Boolean(vllm.enable_prefix_caching ?? vllm.enablePrefixCaching),
-      enableChunkedPrefill:
-        vllm.enable_chunked_prefill == null && vllm.enableChunkedPrefill == null
-          ? null
-          : Boolean(vllm.enable_chunked_prefill ?? vllm.enableChunkedPrefill),
-      enforceEager: Boolean(vllm.enforce_eager ?? vllm.enforceEager),
-      trustRemoteCode: Boolean(vllm.trust_remote_code ?? vllm.trustRemoteCode),
-      swapSpace:
-        vllm.swap_space == null && vllm.swapSpace == null
-          ? null
-          : Number(vllm.swap_space ?? vllm.swapSpace ?? 0),
-      kvCacheDtype: (vllm.kv_cache_dtype ?? vllm.kvCacheDtype ?? null) as string | null,
-    },
+      toolCallParser: (vllmSource.tool_call_parser ?? vllmSource.toolCallParser ?? null) as string | null,
+      toolParserPlugin: (vllmSource.tool_parser_plugin ?? vllmSource.toolParserPlugin ?? null) as string | null,
+      reasoningParser: (vllmSource.reasoning_parser ?? vllmSource.reasoningParser ?? null) as string | null,
+      languageModelOnly: toBooleanOrNull(vllmSource, "language_model_only", "languageModelOnly"),
+      maxNumSeqs: toNumberOrNull(vllmSource, "max_num_seqs", "maxNumSeqs"),
+      maxNumBatchedTokens: toNumberOrNull(vllmSource, "max_num_batched_tokens", "maxNumBatchedTokens"),
+      tensorParallelSize: toNumberOrNull(vllmSource, "tensor_parallel_size", "tensorParallelSize"),
+      maxModelLen: toNumberOrNull(vllmSource, "max_model_len", "maxModelLen"),
+      gpuMemoryUtilization: toNumberOrNull(vllmSource, "gpu_memory_utilization", "gpuMemoryUtilization"),
+      enablePrefixCaching: Boolean(vllmSource.enable_prefix_caching ?? vllmSource.enablePrefixCaching),
+      enableChunkedPrefill: toBooleanOrNull(vllmSource, "enable_chunked_prefill", "enableChunkedPrefill"),
+      enforceEager: Boolean(vllmSource.enforce_eager ?? vllmSource.enforceEager),
+      trustRemoteCode: Boolean(vllmSource.trust_remote_code ?? vllmSource.trustRemoteCode),
+      swapSpace: toNumberOrNull(vllmSource, "swap_space", "swapSpace"),
+      kvCacheDtype: (vllmSource.kv_cache_dtype ?? vllmSource.kvCacheDtype ?? null) as string | null,
+    }
   }
+
+  const sglangRaw = isRecord(data.sglang) ? data.sglang : {}
+  const sglangSource = isRecord(data.sglang) ? sglangRaw : data
+  if (isRecord(data.sglang) || hasAnyKey(sglangSource, ["tensor_parallel_size", "context_length", "mem_fraction_static", "trust_remote_code", "disable_radix_cache"])) {
+    next.sglang = {
+      tensorParallelSize: toNumberOrNull(sglangSource, "tensor_parallel_size", "tensorParallelSize"),
+      contextLength: toNumberOrNull(sglangSource, "context_length", "contextLength"),
+      memFractionStatic: toNumberOrNull(sglangSource, "mem_fraction_static", "memFractionStatic"),
+      trustRemoteCode: Boolean(sglangSource.trust_remote_code ?? sglangSource.trustRemoteCode),
+      disableRadixCache: Boolean(sglangSource.disable_radix_cache ?? sglangSource.disableRadixCache),
+    }
+  }
+
+  const llamaCppRaw = isRecord(data.llama_cpp) ? data.llama_cpp : {}
+  const llamaCppSource = isRecord(data.llama_cpp) ? llamaCppRaw : data
+  if (isRecord(data.llama_cpp) || hasAnyKey(llamaCppSource, ["gpu_layers", "ctx_size", "flash_attn", "embedding"])) {
+    next.llama_cpp = {
+      gpuLayers: toNumberOrNull(llamaCppSource, "gpu_layers", "gpuLayers"),
+      ctxSize: toNumberOrNull(llamaCppSource, "ctx_size", "ctxSize"),
+      flashAttn: Boolean(llamaCppSource.flash_attn ?? llamaCppSource.flashAttn),
+      embedding: Boolean(llamaCppSource.embedding),
+    }
+  }
+
+  const bitnetRaw = isRecord(data.bitnet) ? data.bitnet : {}
+  const bitnetSource = isRecord(data.bitnet) ? bitnetRaw : data
+  if (isRecord(data.bitnet) || hasAnyKey(bitnetSource, ["gpu_layers", "ctx_size", "flash_attn"])) {
+    next.bitnet = {
+      gpuLayers: toNumberOrNull(bitnetSource, "gpu_layers", "gpuLayers"),
+      ctxSize: toNumberOrNull(bitnetSource, "ctx_size", "ctxSize"),
+      flashAttn: Boolean(bitnetSource.flash_attn ?? bitnetSource.flashAttn),
+    }
+  }
+
+  const tensorrtRaw = isRecord(data.tensorrt_llm) ? data.tensorrt_llm : {}
+  const tensorrtSource = isRecord(data.tensorrt_llm) ? tensorrtRaw : data
+  if (isRecord(data.tensorrt_llm) || hasAnyKey(tensorrtSource, ["max_batch_size", "context_length", "trust_remote_code"])) {
+    next.tensorrt_llm = {
+      maxBatchSize: toNumberOrNull(tensorrtSource, "max_batch_size", "maxBatchSize"),
+      contextLength: toNumberOrNull(tensorrtSource, "context_length", "contextLength"),
+      trustRemoteCode: Boolean(tensorrtSource.trust_remote_code ?? tensorrtSource.trustRemoteCode),
+    }
+  }
+
+  const whisperRaw = isRecord(data.whisper) ? data.whisper : {}
+  const whisperSource = isRecord(data.whisper) ? whisperRaw : data
+  if (isRecord(data.whisper) || hasAnyKey(whisperSource, ["diarization_enabled", "diarization_model_id"])) {
+    next.whisper = {
+      diarizationEnabled: Boolean(whisperSource.diarization_enabled ?? whisperSource.diarizationEnabled),
+      diarizationModelId: (whisperSource.diarization_model_id ?? whisperSource.diarizationModelId ?? null) as string | null,
+    }
+  }
+
+  return next
 }
 
 function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
@@ -313,7 +388,7 @@ function toModelState(raw: unknown): ModelState {
     loadedAt: (data.loaded_at ?? data.loadedAt ?? null) as string | null,
     errorMessage: (data.error_message ?? data.errorMessage ?? null) as string | null,
     schedules,
-    extraConfig: toVLLMConfig(data.extra_config ?? data.extraConfig),
+    extraConfig: toBackendExtraConfig(data.extra_config ?? data.extraConfig),
   }
 }
 
