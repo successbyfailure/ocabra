@@ -7,24 +7,6 @@ from ocabra.redis_client import get_redis
 
 router = APIRouter(tags=["websocket"])
 
-
-class ConnectionManager:
-    def __init__(self) -> None:
-        self._connections: list[WebSocket] = []
-
-    async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
-        self._connections.append(ws)
-
-    def disconnect(self, ws: WebSocket) -> None:
-        try:
-            self._connections.remove(ws)
-        except ValueError:
-            pass
-
-
-manager = ConnectionManager()
-
 CHANNEL_EVENT_MAP = {
     "gpu:stats": "gpu_stats",
     "model:events": "model_event",
@@ -35,7 +17,7 @@ CHANNEL_EVENT_MAP = {
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    await manager.connect(websocket)
+    await websocket.accept()
     pubsub = get_redis().pubsub()
     await pubsub.subscribe(*CHANNEL_EVENT_MAP)
 
@@ -62,6 +44,5 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         pass
     finally:
         listener_task.cancel()
-        manager.disconnect(websocket)
         await pubsub.unsubscribe(*CHANNEL_EVENT_MAP)
         await pubsub.aclose()

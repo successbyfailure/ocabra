@@ -10,7 +10,6 @@ from ocabra.database import Base
 # Import all models so Alembic can detect them
 import ocabra.db.model_config  # noqa: F401
 import ocabra.db.stats  # noqa: F401
-import ocabra.db.server_config  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

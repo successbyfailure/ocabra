@@ -52,10 +52,6 @@ async def get_key(key: str) -> Any | None:
     return json.loads(value) if value else None
 
 
-async def delete_key(key: str) -> None:
-    await get_redis().delete(key)
-
-
 async def lpush(queue: str, data: Any) -> None:
     await get_redis().lpush(queue, json.dumps(data))
 
