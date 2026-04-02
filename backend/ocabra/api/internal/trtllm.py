@@ -199,6 +199,19 @@ async def delete_engine(engine_name: str, request: Request) -> dict:
     Returns:
         dict with engine_name and deleted=True.
     """
+    # Delete engine files from disk (use container-side path)
+    if settings.tensorrt_llm_engines_dir:
+        engines_base = Path(settings.tensorrt_llm_engines_dir)
+    else:
+        models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
+        engines_base = Path(models_container) / "tensorrt_llm"
+    engine_root = engines_base / engine_name
+    if engine_root.exists() and not _is_path_within_base(engine_root, engines_base):
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to delete a TensorRT-LLM engine path outside the configured engines directory",
+        )
+
     # Unload + unregister from model manager
     model_manager = getattr(request.app.state, "model_manager", None)
     model_id = f"tensorrt_llm/{engine_name}"
@@ -208,13 +221,6 @@ async def delete_engine(engine_name: str, request: Request) -> dict:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to unregister model: {exc}") from exc
 
-    # Delete engine files from disk (use container-side path)
-    if settings.tensorrt_llm_engines_dir:
-        engines_base = Path(settings.tensorrt_llm_engines_dir)
-    else:
-        models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
-        engines_base = Path(models_container) / "tensorrt_llm"
-    engine_root = engines_base / engine_name
     if engine_root.exists():
         try:
             await asyncio.to_thread(shutil.rmtree, str(engine_root))
@@ -239,6 +245,7 @@ async def delete_engine(engine_name: str, request: Request) -> dict:
 
 @router.get("/trtllm/estimate")
 async def estimate_compile(
+    request: Request,
     model_id: str,
     tp_size: int = 1,
     dtype: str = "fp16",
@@ -257,12 +264,14 @@ async def estimate_compile(
     Returns:
         Estimates in MB for build phase and serve phase, per GPU and total.
     """
-    return _estimate_vram(model_id, tp_size, dtype, max_batch_size, max_seq_len)
+    gpu_indices = _parse_gpu_indices_query(request)
+    return _estimate_vram(model_id, tp_size, gpu_indices, dtype, max_batch_size, max_seq_len)
 
 
 def _estimate_vram(
     model_id: str,
     tp_size: int,
+    gpu_indices: list[int] | None,
     dtype: str,
     max_batch_size: int,
     max_seq_len: int,
@@ -415,15 +424,28 @@ def _estimate_vram(
             "total_peak_mb": round(engine_disk_mb + ckpt_disk_mb),
         },
         "warnings": _estimate_warnings(
-            build_mb_per_gpu, serve_mb_per_gpu, tp_size, params_b or 0
+            build_mb_per_gpu, serve_mb_per_gpu, tp_size, gpu_indices, params_b or 0
         ),
     }
 
 
 def _estimate_warnings(
-    build_mb: float, serve_mb: float, tp_size: int, params_b: float
+    build_mb: float,
+    serve_mb: float,
+    tp_size: int,
+    gpu_indices: list[int] | None,
+    params_b: float,
 ) -> list[str]:
     import pynvml
+
+    def _format_tight_message(kind: str, required_mb: float, gpu_index: int, free_mb: int) -> str:
+        margin_mb = required_mb - free_mb
+        return (
+            f"Muy justo: {kind} necesita ~{required_mb / 1024:.1f}GB/GPU "
+            f"y la GPU {gpu_index} tiene {free_mb / 1024:.1f}GB libres ahora "
+            f"({int(round(margin_mb))} MB por debajo). Puede funcionar si liberas algo de VRAM antes de empezar."
+        )
+
     warnings = []
     try:
         pynvml.nvmlInit()
@@ -438,19 +460,66 @@ def _estimate_warnings(
         if tp_size > len(gpus):
             warnings.append(f"tp_size={tp_size} exceeds available GPUs ({len(gpus)})")
         else:
-            # Check if smallest GPU in the tp_size set has enough VRAM
-            smallest_free = min(g["free_mb"] for g in gpus[:tp_size])
+            if gpu_indices:
+                selected = [g for g in gpus if g["index"] in gpu_indices]
+            else:
+                selected = gpus[:tp_size]
+
+            if len(selected) != tp_size:
+                warnings.append(
+                    f"Selected GPUs {gpu_indices} do not match tp_size={tp_size} or are not available"
+                )
+                return warnings
+
+            smallest = min(selected, key=lambda gpu: gpu["free_mb"])
+            smallest_free = smallest["free_mb"]
+            smallest_index = smallest["index"]
+            tight_margin_mb = 1024
+
             if build_mb > smallest_free:
-                warnings.append(
-                    f"Build needs ~{build_mb/1024:.1f}GB/GPU but smallest GPU has {smallest_free/1024:.1f}GB free"
-                )
+                if build_mb - smallest_free <= tight_margin_mb:
+                    warnings.append(_format_tight_message("build", build_mb, smallest_index, smallest_free))
+                else:
+                    warnings.append(
+                        f"Build probablemente no cabe: necesita ~{build_mb/1024:.1f}GB/GPU y la GPU {smallest_index} tiene {smallest_free/1024:.1f}GB libres ahora"
+                    )
             elif serve_mb > smallest_free:
-                warnings.append(
-                    f"Serving needs ~{serve_mb/1024:.1f}GB/GPU but smallest GPU has {smallest_free/1024:.1f}GB free"
-                )
+                if serve_mb - smallest_free <= tight_margin_mb:
+                    warnings.append(_format_tight_message("serving", serve_mb, smallest_index, smallest_free))
+                else:
+                    warnings.append(
+                        f"Serving probablemente no cabe: necesita ~{serve_mb/1024:.1f}GB/GPU y la GPU {smallest_index} tiene {smallest_free/1024:.1f}GB libres ahora"
+                    )
     except Exception:
         pass
     return warnings
+
+
+def _parse_gpu_indices_query(request: Request) -> list[int] | None:
+    values = request.query_params.getlist("gpu_indices")
+    if not values:
+        raw = request.query_params.get("gpu_indices")
+        values = [raw] if raw else []
+
+    parsed: list[int] = []
+    for value in values:
+        for part in str(value).split(","):
+            item = part.strip()
+            if not item:
+                continue
+            try:
+                parsed.append(int(item))
+            except ValueError:
+                continue
+
+    return parsed or None
+
+
+def _is_path_within_base(path: Path, base: Path) -> bool:
+    try:
+        return path.resolve(strict=False).is_relative_to(base.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 # ── Helpers ──────────────────────────────────────────────────────

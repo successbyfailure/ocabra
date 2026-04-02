@@ -1,9 +1,11 @@
 import asyncio
+import json
+import os
 import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ocabra.config import settings
 from ocabra.core.model_ref import parse_model_ref
@@ -14,6 +16,8 @@ _ollama_registry = OllamaRegistry()
 
 
 class ModelPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str | None = None
     load_policy: str | None = None
     auto_reload: bool | None = None
@@ -40,10 +44,29 @@ async def list_models(request: Request) -> list[dict]:
     ollama_sizes = await _get_ollama_sizes_bytes()
     payloads = []
     for state in states:
-        item = state.to_dict()
-        item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, ollama_sizes)
+        item = await _serialize_model_state(request, state, ollama_sizes)
         payloads.append(item)
     return payloads
+
+
+@router.get("/models/storage")
+async def get_models_storage() -> dict:
+    """Return storage usage for the models directory filesystem."""
+    models_dir = Path(settings.models_dir or "/data/models")
+    try:
+        stats = await asyncio.to_thread(os.statvfs, models_dir)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to read models storage stats: {exc}") from exc
+
+    total_bytes = int(stats.f_frsize * stats.f_blocks)
+    free_bytes = int(stats.f_frsize * stats.f_bavail)
+    used_bytes = max(0, total_bytes - free_bytes)
+    return {
+        "path": str(models_dir),
+        "total_bytes": total_bytes,
+        "used_bytes": used_bytes,
+        "free_bytes": free_bytes,
+    }
 
 
 @router.get("/models/{model_id:path}")
@@ -53,10 +76,8 @@ async def get_model(model_id: str, request: Request) -> dict:
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-    item = state.to_dict()
     ollama_sizes = await _get_ollama_sizes_bytes() if state.backend_type == "ollama" else {}
-    item["disk_size_bytes"] = await _resolve_disk_size_bytes(state.model_id, ollama_sizes)
-    return item
+    return await _serialize_model_state(request, state, ollama_sizes)
 
 
 @router.post("/models")
@@ -118,7 +139,10 @@ async def update_model(model_id: str, body: ModelPatch, request: Request) -> dic
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
-    updated = await mm.update_config(model_id, patch)
+    try:
+        updated = await mm.update_config(model_id, patch)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return updated.to_dict()
 
 
@@ -176,6 +200,11 @@ async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
     models_dir = Path(settings.models_dir or "/data/models")
     candidate = models_dir / "huggingface" / hf_dir_name
     if candidate.exists():
+        if not _is_path_within_base(candidate, models_dir / "huggingface"):
+            raise HTTPException(
+                status_code=400,
+                detail="Refusing to delete a model path outside the configured models directory",
+            )
         await asyncio.to_thread(shutil.rmtree, candidate)
         return str(candidate)
     return None
@@ -217,17 +246,143 @@ async def _sync_ollama_inventory(model_manager) -> None:
 
 
 async def _resolve_disk_size_bytes(
-    model_id: str,
+    state,
     ollama_sizes: dict[str, int],
 ) -> int | None:
-    backend_type, backend_model_id = parse_model_ref(model_id)
+    backend_type, backend_model_id = parse_model_ref(state.model_id)
     if backend_type == "ollama":
         return ollama_sizes.get(backend_model_id.strip().lower())
+    if backend_type == "tensorrt_llm":
+        path = _resolve_extra_config_path(state.extra_config, "engine_dir") or _resolve_tensorrt_engine_path(backend_model_id)
+        if path is None or not path.exists():
+            return None
+        return await asyncio.to_thread(_compute_path_size_bytes, path)
 
-    path = _resolve_local_model_path(backend_model_id)
+    path = (
+        _resolve_extra_config_path(state.extra_config, "model_path", "base_model_id")
+        or _resolve_local_model_path(backend_model_id)
+    )
     if path is None or not path.exists():
         return None
     return await asyncio.to_thread(_compute_path_size_bytes, path)
+
+
+async def _serialize_model_state(
+    request: Request,
+    state,
+    ollama_sizes: dict[str, int],
+) -> dict:
+    item = state.to_dict()
+    item["disk_size_bytes"] = await _resolve_disk_size_bytes(state, ollama_sizes)
+    item["capabilities"] = await _resolve_capabilities_payload(request, state, item["capabilities"])
+    return item
+
+
+async def _resolve_capabilities_payload(
+    request: Request,
+    state,
+    current_payload: dict,
+) -> dict:
+    has_meaningful_caps = any(
+        bool(current_payload.get(key))
+        for key in (
+            "chat",
+            "completion",
+            "tools",
+            "vision",
+            "embeddings",
+            "pooling",
+            "rerank",
+            "classification",
+            "score",
+            "reasoning",
+            "streaming",
+            "audio_transcription",
+            "tts",
+        )
+    ) or int(current_payload.get("context_length") or 0) > 0
+
+    if has_meaningful_caps and not (
+        state.backend_type == "tensorrt_llm"
+        and int(current_payload.get("context_length") or 0) <= 0
+        and isinstance(state.extra_config, dict)
+        and state.extra_config.get("context_length")
+    ):
+        return current_payload
+
+    worker_pool = getattr(request.app.state, "worker_pool", None)
+    if worker_pool is None:
+        return _apply_capability_fallbacks(state, current_payload)
+
+    try:
+        backend = await worker_pool.get_backend(state.backend_type)
+        capabilities = await backend.get_capabilities(state.backend_model_id)
+        payload = capabilities.to_dict()
+    except Exception:
+        payload = dict(current_payload)
+
+    return _apply_capability_fallbacks(state, payload)
+
+
+def _apply_capability_fallbacks(state, payload: dict) -> dict:
+    merged = dict(payload)
+    fallback_context_length = _resolve_context_length_fallback(state)
+    current_context_length = int(merged.get("context_length") or 0)
+    if fallback_context_length > 0 and (
+        current_context_length <= 0
+        or (
+            state.backend_type == "tensorrt_llm"
+            and fallback_context_length > current_context_length
+        )
+    ):
+        merged["context_length"] = fallback_context_length
+    return merged
+
+
+def _resolve_context_length_fallback(state) -> int:
+    extra_config = state.extra_config if isinstance(state.extra_config, dict) else {}
+
+    for key in ("context_length", "max_model_len", "ctx_size"):
+        value = extra_config.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+
+    vllm_config = extra_config.get("vllm")
+    if isinstance(vllm_config, dict):
+        for key in ("max_model_len", "context_length"):
+            value = vllm_config.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+
+    backend_model_id = getattr(state, "backend_model_id", "")
+    model_path = (
+        _resolve_extra_config_path(extra_config, "model_path", "base_model_id")
+        or _resolve_local_model_path(backend_model_id)
+    )
+    if model_path is None:
+        return 0
+
+    for file_name, keys in (
+        (
+            "config.json",
+            (
+                "max_position_embeddings",
+                "max_seq_len",
+                "model_max_length",
+                "max_sequence_length",
+                "seq_length",
+                "n_positions",
+                "context_length",
+                "max_context_length",
+            ),
+        ),
+        ("tokenizer_config.json", ("model_max_length",)),
+    ):
+        value = _read_first_positive_int(model_path / file_name, keys)
+        if value > 0:
+            return value
+
+    return 0
 
 
 def _resolve_local_model_path(model_id: str) -> Path | None:
@@ -235,6 +390,12 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
     direct = base / model_id
     if direct.exists():
         return direct
+
+    if "::" in model_id:
+        base_model_id, _variant = model_id.split("::", 1)
+        base_direct = base / base_model_id
+        if base_direct.exists():
+            return base_direct
 
     # Hugging Face local layout: /data/models/huggingface/org--repo[--artifact-stem]
     if "::" in model_id:
@@ -245,6 +406,27 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
     hf_layout = base / "huggingface" / hf_dir_name
     if hf_layout.exists():
         return hf_layout
+
+    if "::" in model_id:
+        repo_id, _variant_stem = model_id.split("::", 1)
+        base_hf_layout = base / "huggingface" / repo_id.replace("/", "--")
+        if base_hf_layout.exists():
+            return base_hf_layout
+
+    # GGUF / local file fallback for llama.cpp and bitnet style registrations.
+    base_model_id = model_id.split("::", 1)[0]
+    leaf = Path(base_model_id).name
+    variant_stem = model_id.split("::", 1)[1] if "::" in model_id else ""
+    candidate_stems = {leaf, Path(leaf).stem}
+    if variant_stem:
+        candidate_stems.add(variant_stem)
+        candidate_stems.add(Path(variant_stem).stem)
+    gguf_candidates = [
+        path for path in base.rglob("*.gguf")
+        if path.name == leaf or any(path.stem == stem or path.stem.endswith(stem) for stem in candidate_stems)
+    ]
+    if gguf_candidates:
+        return max(gguf_candidates, key=lambda path: path.stat().st_mtime)
 
     # Optional HF cache layout fallback.
     hf_cache_dir = (settings.hf_cache_dir or "").strip()
@@ -269,6 +451,36 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
     return None
 
 
+def _resolve_extra_config_path(extra_config: dict | None, *keys: str) -> Path | None:
+    if not isinstance(extra_config, dict):
+        return None
+    models_dir = Path(settings.models_dir or "/data/models")
+    for key in keys:
+        raw = extra_config.get(key)
+        if not raw or not isinstance(raw, str):
+            continue
+        path = Path(raw)
+        if path.exists() and _is_path_within_base(path, models_dir):
+            return path
+    return None
+
+
+def _resolve_tensorrt_engine_path(engine_name: str) -> Path | None:
+    if settings.tensorrt_llm_engines_dir:
+        base = Path(settings.tensorrt_llm_engines_dir)
+    else:
+        models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
+        base = Path(models_container) / "tensorrt_llm"
+
+    candidate = base / engine_name
+    if candidate.exists():
+        return candidate
+    engine_subdir = candidate / "engine"
+    if engine_subdir.exists():
+        return engine_subdir
+    return None
+
+
 def _compute_path_size_bytes(path: Path) -> int:
     if path.is_file():
         return path.stat().st_size
@@ -277,3 +489,30 @@ def _compute_path_size_bytes(path: Path) -> int:
         if child.is_file():
             total += child.stat().st_size
     return total
+
+
+def _is_path_within_base(path: Path, base: Path) -> bool:
+    try:
+        return path.resolve(strict=False).is_relative_to(base.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _read_first_positive_int(path: Path, keys: tuple[str, ...]) -> int:
+    if not path.exists():
+        return 0
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    for key in keys:
+        value = payload.get(key)
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > 0:
+            return numeric
+    return 0

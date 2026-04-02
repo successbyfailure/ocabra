@@ -47,3 +47,24 @@ class GpuStat(Base):
     __table_args__ = (
         Index("ix_gpu_stats_recorded_at_gpu", "recorded_at", "gpu_index"),
     )
+
+
+class ModelLoadStat(Base):
+    __tablename__ = "model_load_stats"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    model_id: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    backend_type: Mapped[str | None] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    gpu_count: Mapped[int | None] = mapped_column(Integer)
+    gpu_indices: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_model_load_stats_started_at_model", "started_at", "model_id"),
+    )

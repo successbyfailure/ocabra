@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ocabra.stats.collector import (
     _classify_request_kind,
+    _extract_last_payload_from_stream,
     _extract_response_payload_and_rebuild,
     _extract_usage_tokens,
 )
@@ -28,6 +29,31 @@ def test_extract_usage_tokens_ollama_payload() -> None:
     )
     assert input_tokens == 7
     assert output_tokens == 11
+
+
+def test_extract_usage_tokens_audio_transcription_payload() -> None:
+    input_tokens, output_tokens = _extract_usage_tokens(
+        {"text": "hola mundo desde whisper"},
+        request_kind="audio_transcription",
+    )
+    assert input_tokens is None
+    assert output_tokens == 4
+
+
+def test_extract_last_payload_from_sse_stream_uses_usage_chunk() -> None:
+    body = b"""data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n"""
+
+    payload = _extract_last_payload_from_stream(body, "text/event-stream")
+
+    assert payload == {"usage": {"prompt_tokens": 3, "completion_tokens": 5}}
+
+
+def test_extract_last_payload_from_ndjson_stream_uses_done_chunk() -> None:
+    body = b"{\"message\":{\"content\":\"hola\"},\"done\":false}\n{\"prompt_eval_count\":7,\"eval_count\":11,\"done\":true}\n"
+
+    payload = _extract_last_payload_from_stream(body, "application/x-ndjson")
+
+    assert payload == {"prompt_eval_count": 7, "eval_count": 11, "done": True}
 
 
 @pytest.mark.asyncio
