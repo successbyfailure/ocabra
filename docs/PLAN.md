@@ -45,6 +45,7 @@ Implementado en código:
 - IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en OpenAI `/v1/*`.
 - Backends first-class ya presentes en el runtime: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
 - UI Settings alineada con `/ocabra/config`; `modelsDir` es de solo lectura en runtime, `downloadDir`/`maxTemperatureC` son overrides en memoria y `globalSchedules` persiste en `eviction_schedules`.
+- Configuración por modelo racionalizada por backend; `ModelConfigModal` muestra estimación rápida de memoria y, para `vllm`, permite lanzar un probe real del engine antes de guardar cambios.
 - `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/start`, `/ocabra/services/runtime` y `/ocabra/services/unload` ya están expuestos.
 - Stats persistidos: `request_stats`, `gpu_stats` y `model_load_stats`.
 - Frontend servido por Nginx; Caddy actúa como reverse proxy.
@@ -56,6 +57,7 @@ Validación reciente (2026-04-02):
 - `TensorRT-LLM` validado end-to-end con engine real (`tensorrt_llm/Qwen3-8B-fp16`): carga, respuesta y descarga correctas, sin procesos `trtllm-serve`/`mpi4py` huérfanos.
 - `vLLM` validado end-to-end con `vllm/Qwen/Qwen3.5-0.8B`: carga, respuesta y descarga correctas.
 - `vLLM` validado end-to-end con `vllm/Qwen/Qwen3-32B-AWQ` tras ajustar `max_model_len` a `7800` para que el KV cache quepa en la RTX 3090; con `8000` fallaba por falta de memoria de KV cache.
+- `POST /ocabra/models/{model_id}/memory-estimate` validado con heurística y probe runtime real; permite ver presupuesto de memoria, KV cache y contexto máximo estimado antes de guardar configuración.
 - Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
 
 Pendiente para cierre de plan:

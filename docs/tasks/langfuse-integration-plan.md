@@ -3,6 +3,8 @@
 **Fecha:** 2026-03-19
 **Objetivo:** Integrar oCabra con una instancia Langfuse externa (self-hosted en otro host) para observabilidad de llamadas LLM. Completamente opcional; desactivado por defecto.
 
+Documento activo. Mantener mientras esta integración siga en backlog.
+
 ---
 
 ## Contexto

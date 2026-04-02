@@ -3,6 +3,8 @@
 **Fecha:** 2026-03-31
 **Estado:** PENDIENTE DE IMPLEMENTACIÓN
 
+Documento activo. Mantener mientras esta funcionalidad siga en backlog.
+
 ---
 
 ## Objetivo

@@ -220,6 +220,12 @@ Nota OpenAI `/v1/*`: el campo `model` acepta `model_id` canónico y también `ba
 GET    /ocabra/models/{model_id}         → ModelState
 POST   /ocabra/models/{model_id}/load    → ModelState
 POST   /ocabra/models/{model_id}/unload  → ModelState
+POST   /ocabra/models/{model_id}/memory-estimate → ModelMemoryEstimate
+  body: {
+    preferred_gpu?: int|null,
+    extra_config?: dict|null,
+    run_probe?: bool
+  }
 PATCH  /ocabra/models/{model_id}         → ModelState
   body: {
     load_policy?: "pin"|"warm"|"on_demand",
@@ -237,6 +243,20 @@ DELETE /ocabra/models/{model_id}         → {"ok": true, "deleted_path": str|nu
 - `status`, `load_policy`, `auto_reload`, `preferred_gpu`, `current_gpu`, `vram_used_mb`
 - `capabilities`, `last_request_at`, `loaded_at`, `error_message`, `extra_config`
 - `disk_size_bytes` se añade en `/ocabra/models` y `/ocabra/models/{model_id}` cuando se puede estimar
+
+`ModelMemoryEstimate` REST payload:
+- `backend_type`, `preferred_gpu`, `source`
+- `estimated_total_mb` cuando aplica
+- `estimated_weights_mb` para backends basados en pesos
+- `estimated_engine_mb_per_gpu` y `engine_present` para `tensorrt_llm`
+- `estimated_kv_cache_mb`, `estimated_max_context_length`, `maximum_concurrency` cuando el backend puede derivarlos
+- `status: "ok" | "warning" | "error"` si se ejecuta probe runtime
+- `warning`, `error`, `notes` como señales diagnósticas legibles
+
+Semántica:
+- `source="heuristic"` implica cálculo rápido sin arrancar runtime.
+- `source="runtime_probe"` implica validación real con el engine; se usa sobre todo en `vllm`.
+- El endpoint no persiste cambios por sí mismo; solo evalúa la configuración propuesta.
 
 ### 5.2 GPUs
 

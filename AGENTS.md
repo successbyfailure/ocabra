@@ -26,7 +26,9 @@ Si hay conflicto entre instrucciones, prioriza primero la seguridad y el alcance
 - `docs/PLAN.md` — Plan completo, arquitectura, fases
 - `docs/CONTRACTS.md` — Interfaces entre módulos (LEE ESTO ANTES DE IMPLEMENTAR)
 - `docs/CONVENTIONS.md` — Estilo de código y naming
-- `docs/agents/` — Briefing específico de cada stream de trabajo
+- `docs/DOC_AUDIT.md` — Estado documental y backlog residual real
+- `docs/agents/` — Estado resumido por stream, no plan maestro
+- `docs/tasks/` — Solo algunos documentos siguen activos; el resto son archivo histórico
 
 ## Reglas de colaboración multi-agente
 
@@ -100,4 +102,5 @@ Fase 0  (fundación completa)
 
 ## Estado del proyecto
 
-Ver el estado actualizado de cada stream en `docs/agents/<stream>.md`.
+La fuente de verdad del estado actual está en `docs/PLAN.md` y `docs/DOC_AUDIT.md`.
+`docs/agents/<stream>.md` solo resume ownership y backlog residual por stream.
