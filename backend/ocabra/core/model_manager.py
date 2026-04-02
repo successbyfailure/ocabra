@@ -7,11 +7,24 @@ from enum import Enum
 from threading import Lock
 from urllib.parse import urlparse
 
+import sqlalchemy as sa
 import structlog
 
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
+from ocabra.core.model_manager_helpers import (
+    build_diarized_extra_config,
+    diarized_variant_model_id,
+    estimate_bitnet_vram_from_config,
+    is_diarized_model_id,
+    resolve_bitnet_gpu_layers,
+    resolve_bitnet_option,
+    should_auto_create_diarized_variant,
+)
 from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
+from ocabra.database import AsyncSessionLocal
+from ocabra.db.model_config import ModelConfig
+from ocabra.db.stats import ModelLoadStat
 from ocabra.redis_client import get_key, publish, set_key
 
 logger = structlog.get_logger(__name__)
@@ -86,41 +99,6 @@ class ModelState:
             "extra_config": self.extra_config,
         }
 
-
-
-def _is_diarized_model_id(model_id: str, extra_config: dict | None = None) -> bool:
-    lowered = model_id.lower()
-    if "diariz" in lowered:
-        return True
-    cfg = extra_config or {}
-    return bool(cfg.get("diarization_enabled") is True)
-
-
-
-def _diarized_variant_model_id(model_id: str) -> str:
-    if model_id.endswith("::diarize"):
-        return model_id
-    return f"{model_id}::diarize"
-
-
-
-def _should_auto_create_diarized_variant(state: "ModelState") -> bool:
-    if state.backend_type != "whisper":
-        return False
-    if "::" in state.backend_model_id:
-        return False
-    if _is_diarized_model_id(state.backend_model_id, state.extra_config):
-        return False
-    return True
-
-
-
-def _build_diarized_extra_config(base_extra_config: dict | None) -> dict:
-    merged = dict(base_extra_config or {})
-    merged["diarization_enabled"] = True
-    return merged
-
-
 class ModelManager:
     def __init__(self, worker_pool, gpu_manager=None, gpu_scheduler=None) -> None:
         self._worker_pool = worker_pool
@@ -156,9 +134,9 @@ class ModelManager:
     async def _ensure_diarized_variants_for_whisper_models(self) -> None:
         snapshot = list(self._states.values())
         for state in snapshot:
-            if not _should_auto_create_diarized_variant(state):
+            if not should_auto_create_diarized_variant(state):
                 continue
-            diarized_backend_model_id = _diarized_variant_model_id(state.backend_model_id)
+            diarized_backend_model_id = diarized_variant_model_id(state.backend_model_id)
             diarized_model_id = build_model_ref(state.backend_type, diarized_backend_model_id)
             if diarized_model_id in self._states:
                 continue
@@ -170,7 +148,7 @@ class ModelManager:
                     load_policy=state.load_policy.value,
                     auto_reload=state.auto_reload,
                     preferred_gpu=state.preferred_gpu,
-                    extra_config=_build_diarized_extra_config(state.extra_config),
+                    extra_config=build_diarized_extra_config(state.extra_config),
                     create_diarized_variant=False,
                 )
             except Exception as exc:
@@ -230,11 +208,6 @@ class ModelManager:
                 )
 
     async def _load_configs_from_db(self) -> None:
-        import sqlalchemy as sa
-
-        from ocabra.database import AsyncSessionLocal
-        from ocabra.db.model_config import ModelConfig
-
         async with AsyncSessionLocal() as session:
             result = await session.execute(sa.select(ModelConfig))
             configs = list(result.scalars().all())
@@ -516,9 +489,6 @@ class ModelManager:
             duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
 
         try:
-            from ocabra.database import AsyncSessionLocal
-            from ocabra.db.stats import ModelLoadStat
-
             async with AsyncSessionLocal() as session:
                 session.add(
                     ModelLoadStat(
@@ -536,24 +506,13 @@ class ModelManager:
             logger.warning("model_load_stat_write_failed", model_id=model_id, error=str(exc))
 
     def _resolve_bitnet_option(self, state: "ModelState", key: str, default: int) -> int:
-        extra = state.extra_config if isinstance(state.extra_config, dict) else {}
-        nested = extra.get("bitnet") if isinstance(extra.get("bitnet"), dict) else None
-        if nested and key in nested:
-            return int(nested[key])
-        if key in extra:
-            return int(extra[key])
-        return int(default)
+        return resolve_bitnet_option(state, key, default)
 
     def _resolve_bitnet_gpu_layers(self, state: "ModelState") -> int:
-        return self._resolve_bitnet_option(state, "gpu_layers", settings.bitnet_gpu_layers)
+        return resolve_bitnet_gpu_layers(state, settings.bitnet_gpu_layers)
 
     def _estimate_bitnet_vram_from_config(self, state: "ModelState") -> int:
-        gpu_layers = self._resolve_bitnet_gpu_layers(state)
-        if gpu_layers <= 0:
-            return 0
-        total_layers = max(1, self._resolve_bitnet_option(state, "total_layers", 32))
-        model_vram_mb = max(1, self._resolve_bitnet_option(state, "model_vram_mb", 400))
-        return int(model_vram_mb * min(gpu_layers, total_layers) / total_layers)
+        return estimate_bitnet_vram_from_config(state, default_gpu_layers=settings.bitnet_gpu_layers)
 
     async def _assign_gpus_for_load(
         self,
@@ -892,9 +851,6 @@ class ModelManager:
         extra_config: dict | None = None,
         create_diarized_variant: bool = True,
     ) -> "ModelState":
-        from ocabra.database import AsyncSessionLocal
-        from ocabra.db.model_config import ModelConfig
-
         normalized_model_id, backend_model_id = normalize_model_ref(backend_type, model_id)
         normalized_backend = str(backend_type or "").strip().lower()
 
@@ -928,8 +884,8 @@ class ModelManager:
         self._load_locks[normalized_model_id] = asyncio.Lock()
         self._notify_event_listeners("register", state)
 
-        if create_diarized_variant and _should_auto_create_diarized_variant(state):
-            diarized_backend_model_id = _diarized_variant_model_id(backend_model_id)
+        if create_diarized_variant and should_auto_create_diarized_variant(state):
+            diarized_backend_model_id = diarized_variant_model_id(backend_model_id)
             diarized_model_id = build_model_ref(normalized_backend, diarized_backend_model_id)
             if diarized_model_id not in self._states:
                 try:
@@ -940,7 +896,7 @@ class ModelManager:
                         load_policy=load_policy,
                         auto_reload=auto_reload,
                         preferred_gpu=preferred_gpu,
-                        extra_config=_build_diarized_extra_config(extra_config),
+                        extra_config=build_diarized_extra_config(extra_config),
                         create_diarized_variant=False,
                     )
                 except Exception as exc:
@@ -953,11 +909,6 @@ class ModelManager:
         return state
 
     async def update_config(self, model_id: str, patch: dict) -> "ModelState":
-        import sqlalchemy as sa
-
-        from ocabra.database import AsyncSessionLocal
-        from ocabra.db.model_config import ModelConfig
-
         state = self._states.get(model_id)
         if not state:
             raise KeyError(f"Model '{model_id}' not found")
@@ -1009,16 +960,11 @@ class ModelManager:
         return state
 
     async def delete_model(self, model_id: str) -> None:
-        import sqlalchemy as sa
-
         if (
             model_id in self._states
             and self._states[model_id].status == ModelStatus.LOADED
         ):
             await self.unload(model_id)
-
-        from ocabra.database import AsyncSessionLocal
-        from ocabra.db.model_config import ModelConfig
 
         async with AsyncSessionLocal() as session:
             await session.execute(
