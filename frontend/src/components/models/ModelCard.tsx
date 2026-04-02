@@ -1,7 +1,7 @@
 import { Cpu, Pencil, Pin, PinOff, Play, Square, Trash2 } from "lucide-react"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
-import { formatTokenCount, getModelContextSummary } from "@/lib/modelContext"
+import { formatTokenCount, getModelContextSummary, getVllmConfig } from "@/lib/modelContext"
 import type { ModelState } from "@/types"
 
 interface ModelCardProps {
@@ -34,9 +34,7 @@ function summarizeError(model: ModelState): { message: string; suggestTrustRemot
   const error = model.errorMessage?.trim()
   if (!error) return null
 
-  const trustRemoteEnabled = Boolean(
-    (model.extraConfig?.vllm as { trustRemoteCode?: boolean } | undefined)?.trustRemoteCode,
-  )
+  const trustRemoteEnabled = Boolean(getVllmConfig(model)?.trustRemoteCode)
   const suggestTrustRemote =
     error.includes("trust_remote_code") ||
     error.includes("--trust-remote-code") ||

@@ -101,51 +101,53 @@ export function Models() {
   }, [setGpus, setModels])
 
   const filtered = useMemo(() => {
-    const visible = modelList.filter((model) => {
-      const matchesQuery =
-        model.displayName.toLowerCase().includes(query.toLowerCase()) ||
-        model.modelId.toLowerCase().includes(query.toLowerCase())
-      const matchesStatus = statusFilter === "all" || model.status === statusFilter
-      const matchesType = typeFilter === "all" || inferType(model) === typeFilter
-      const matchesBackend = backendFilter === "all" || model.backendType === backendFilter
-      const modelGpu = model.currentGpu[0] ?? model.preferredGpu
-      const matchesGpu = gpuFilter === "all" || String(modelGpu) === gpuFilter
-      return matchesQuery && matchesStatus && matchesType && matchesBackend && matchesGpu
-    })
+    const visible = modelList
+      .map((model) => {
+        const context = getModelContextSummary(model)
+        return {
+          model,
+          context,
+          modelGpu: model.currentGpu[0] ?? model.preferredGpu,
+          ioTokens: Math.max(context.maxInputTokens ?? 0, context.maxOutputTokens ?? 0),
+        }
+      })
+      .filter(({ model, modelGpu }) => {
+        const matchesQuery =
+          model.displayName.toLowerCase().includes(query.toLowerCase()) ||
+          model.modelId.toLowerCase().includes(query.toLowerCase())
+        const matchesStatus = statusFilter === "all" || model.status === statusFilter
+        const matchesType = typeFilter === "all" || inferType(model) === typeFilter
+        const matchesBackend = backendFilter === "all" || model.backendType === backendFilter
+        const matchesGpu = gpuFilter === "all" || String(modelGpu) === gpuFilter
+        return matchesQuery && matchesStatus && matchesType && matchesBackend && matchesGpu
+      })
 
-    const sorted = [...visible].sort((left, right) => {
-      const leftContext = getModelContextSummary(left)
-      const rightContext = getModelContextSummary(right)
-      const leftGpu = left.currentGpu[0] ?? left.preferredGpu ?? -1
-      const rightGpu = right.currentGpu[0] ?? right.preferredGpu ?? -1
-      const leftIo = Math.max(leftContext.maxInputTokens ?? 0, leftContext.maxOutputTokens ?? 0)
-      const rightIo = Math.max(rightContext.maxInputTokens ?? 0, rightContext.maxOutputTokens ?? 0)
-
+    visible.sort((left, right) => {
       const byKey: Record<typeof sortKey, string | number> = {
-        name: left.displayName.toLowerCase(),
-        type: inferType(left),
-        backend: left.backendType,
-        policy: left.loadPolicy,
-        gpu: leftGpu,
-        ctxNative: leftContext.nativeContext ?? -1,
-        ctxConfig: leftContext.configuredContext ?? -1,
-        io: leftIo,
-        vram: left.vramUsedMb,
-        size: left.diskSizeBytes ?? -1,
-        status: left.status,
+        name: left.model.displayName.toLowerCase(),
+        type: inferType(left.model),
+        backend: left.model.backendType,
+        policy: left.model.loadPolicy,
+        gpu: left.modelGpu ?? -1,
+        ctxNative: left.context.nativeContext ?? -1,
+        ctxConfig: left.context.configuredContext ?? -1,
+        io: left.ioTokens,
+        vram: left.model.vramUsedMb,
+        size: left.model.diskSizeBytes ?? -1,
+        status: left.model.status,
       }
       const otherByKey: Record<typeof sortKey, string | number> = {
-        name: right.displayName.toLowerCase(),
-        type: inferType(right),
-        backend: right.backendType,
-        policy: right.loadPolicy,
-        gpu: rightGpu,
-        ctxNative: rightContext.nativeContext ?? -1,
-        ctxConfig: rightContext.configuredContext ?? -1,
-        io: rightIo,
-        vram: right.vramUsedMb,
-        size: right.diskSizeBytes ?? -1,
-        status: right.status,
+        name: right.model.displayName.toLowerCase(),
+        type: inferType(right.model),
+        backend: right.model.backendType,
+        policy: right.model.loadPolicy,
+        gpu: right.modelGpu ?? -1,
+        ctxNative: right.context.nativeContext ?? -1,
+        ctxConfig: right.context.configuredContext ?? -1,
+        io: right.ioTokens,
+        vram: right.model.vramUsedMb,
+        size: right.model.diskSizeBytes ?? -1,
+        status: right.model.status,
       }
 
       const a = byKey[sortKey]
@@ -154,7 +156,7 @@ export function Models() {
       return sortDir === "asc" ? cmp : -cmp
     })
 
-    return sorted
+    return visible
   }, [backendFilter, gpuFilter, modelList, query, sortDir, sortKey, statusFilter, typeFilter])
 
   const toggleSort = (
@@ -328,7 +330,7 @@ export function Models() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((model) => (
+              {filtered.map(({ model }) => (
                 <ModelCard
                   key={model.modelId}
                   model={model}

@@ -7,7 +7,7 @@ export interface ModelContextSummary {
   maxOutputTokens: number | null
 }
 
-function getVllmConfig(model: ModelState): VLLMConfig | null {
+export function getVllmConfig(model: ModelState): VLLMConfig | null {
   const vllm = model.extraConfig?.vllm
   if (vllm && typeof vllm === "object") return vllm as VLLMConfig
   if (model.extraConfig && typeof model.extraConfig === "object") return model.extraConfig as VLLMConfig

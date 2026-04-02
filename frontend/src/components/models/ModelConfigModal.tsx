@@ -2,7 +2,7 @@ import type { ReactNode } from "react"
 import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { X } from "lucide-react"
-import { formatTokenCount, getModelContextSummary } from "@/lib/modelContext"
+import { formatTokenCount, getModelContextSummary, getVllmConfig } from "@/lib/modelContext"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import type { EvictionSchedule, GPUState, LoadPolicy, ModelState, VLLMConfig } from "@/types"
@@ -141,17 +141,18 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [swapSpace, setSwapSpace] = useState("")
   const [enforceEager, setEnforceEager] = useState(false)
   const [saving, setSaving] = useState(false)
-  const recipeId = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeId ?? null
-  const recipeNotes = ((model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeNotes ?? []) as string[]
-  const recipeModelImpl = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeModelImpl ?? null
-  const recipeRunner = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.recipeRunner ?? null
-  const recipeSuggestedConfig = ((model?.extraConfig?.vllm as VLLMConfig | undefined)?.suggestedConfig ?? {}) as Record<string, unknown>
-  const recipeSuggestedTuning = ((model?.extraConfig?.vllm as VLLMConfig | undefined)?.suggestedTuning ?? {}) as Record<string, unknown>
-  const probeStatus = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeStatus ?? null
-  const probeReason = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeReason ?? null
-  const probeObservedAt = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeObservedAt ?? null
-  const probeRecommendedModelImpl = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeRecommendedModelImpl ?? null
-  const probeRecommendedRunner = (model?.extraConfig?.vllm as VLLMConfig | undefined)?.probeRecommendedRunner ?? null
+  const vllm = model ? getVllmConfig(model) : null
+  const recipeId = vllm?.recipeId ?? null
+  const recipeNotes = (vllm?.recipeNotes ?? []) as string[]
+  const recipeModelImpl = vllm?.recipeModelImpl ?? null
+  const recipeRunner = vllm?.recipeRunner ?? null
+  const recipeSuggestedConfig = (vllm?.suggestedConfig ?? {}) as Record<string, unknown>
+  const recipeSuggestedTuning = (vllm?.suggestedTuning ?? {}) as Record<string, unknown>
+  const probeStatus = vllm?.probeStatus ?? null
+  const probeReason = vllm?.probeReason ?? null
+  const probeObservedAt = vllm?.probeObservedAt ?? null
+  const probeRecommendedModelImpl = vllm?.probeRecommendedModelImpl ?? null
+  const probeRecommendedRunner = vllm?.probeRecommendedRunner ?? null
 
   useEffect(() => {
     if (!model) return
@@ -159,40 +160,40 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setPreferredGpu(model.preferredGpu)
     setAutoReload(model.autoReload)
     setSchedules(model.schedules ?? [])
-    const vllm = (model.extraConfig?.vllm as Record<string, unknown> | undefined) ?? {}
-    setModelImpl(vllm.modelImpl == null ? "" : (String(vllm.modelImpl) as "auto" | "vllm" | "transformers"))
-    setRunner(vllm.runner == null ? "" : (String(vllm.runner) as "generate" | "pooling"))
-    setHfOverrides(vllm.hfOverrides == null ? "" : typeof vllm.hfOverrides === "string" ? vllm.hfOverrides : JSON.stringify(vllm.hfOverrides))
-    setChatTemplate(vllm.chatTemplate == null ? "" : String(vllm.chatTemplate))
-    setChatTemplateContentFormat(vllm.chatTemplateContentFormat == null ? "" : String(vllm.chatTemplateContentFormat))
-    setGenerationConfig(vllm.generationConfig == null ? "" : String(vllm.generationConfig))
+    const config = vllm ?? {}
+    setModelImpl(config.modelImpl == null ? "" : (String(config.modelImpl) as "auto" | "vllm" | "transformers"))
+    setRunner(config.runner == null ? "" : (String(config.runner) as "generate" | "pooling"))
+    setHfOverrides(config.hfOverrides == null ? "" : typeof config.hfOverrides === "string" ? config.hfOverrides : JSON.stringify(config.hfOverrides))
+    setChatTemplate(config.chatTemplate == null ? "" : String(config.chatTemplate))
+    setChatTemplateContentFormat(config.chatTemplateContentFormat == null ? "" : String(config.chatTemplateContentFormat))
+    setGenerationConfig(config.generationConfig == null ? "" : String(config.generationConfig))
     setOverrideGenerationConfig(
-      vllm.overrideGenerationConfig == null
+      config.overrideGenerationConfig == null
         ? ""
-        : typeof vllm.overrideGenerationConfig === "string"
-          ? vllm.overrideGenerationConfig
-          : JSON.stringify(vllm.overrideGenerationConfig),
+        : typeof config.overrideGenerationConfig === "string"
+          ? config.overrideGenerationConfig
+          : JSON.stringify(config.overrideGenerationConfig),
     )
-    setToolCallParser(vllm.toolCallParser == null ? "" : String(vllm.toolCallParser))
-    setToolParserPlugin(vllm.toolParserPlugin == null ? "" : String(vllm.toolParserPlugin))
-    setReasoningParser(vllm.reasoningParser == null ? "" : String(vllm.reasoningParser))
+    setToolCallParser(config.toolCallParser == null ? "" : String(config.toolCallParser))
+    setToolParserPlugin(config.toolParserPlugin == null ? "" : String(config.toolParserPlugin))
+    setReasoningParser(config.reasoningParser == null ? "" : String(config.reasoningParser))
     setLanguageModelOnly(
-      vllm.languageModelOnly == null ? "inherit" : vllm.languageModelOnly ? "on" : "off",
+      config.languageModelOnly == null ? "inherit" : config.languageModelOnly ? "on" : "off",
     )
-    setTensorParallelSize(vllm.tensorParallelSize == null ? "" : String(vllm.tensorParallelSize))
-    setMaxModelLen(vllm.maxModelLen == null ? "" : String(vllm.maxModelLen))
-    setMaxNumSeqs(vllm.maxNumSeqs == null ? "" : String(vllm.maxNumSeqs))
-    setMaxNumBatchedTokens(vllm.maxNumBatchedTokens == null ? "" : String(vllm.maxNumBatchedTokens))
-    setGpuMemoryUtilization(vllm.gpuMemoryUtilization == null ? "" : String(vllm.gpuMemoryUtilization))
-    setEnablePrefixCaching(Boolean(vllm.enablePrefixCaching))
-    setTrustRemoteCode(Boolean(vllm.trustRemoteCode))
+    setTensorParallelSize(config.tensorParallelSize == null ? "" : String(config.tensorParallelSize))
+    setMaxModelLen(config.maxModelLen == null ? "" : String(config.maxModelLen))
+    setMaxNumSeqs(config.maxNumSeqs == null ? "" : String(config.maxNumSeqs))
+    setMaxNumBatchedTokens(config.maxNumBatchedTokens == null ? "" : String(config.maxNumBatchedTokens))
+    setGpuMemoryUtilization(config.gpuMemoryUtilization == null ? "" : String(config.gpuMemoryUtilization))
+    setEnablePrefixCaching(Boolean(config.enablePrefixCaching))
+    setTrustRemoteCode(Boolean(config.trustRemoteCode))
     setEnableChunkedPrefillMode(
-      vllm.enableChunkedPrefill == null ? "inherit" : vllm.enableChunkedPrefill ? "on" : "off",
+      config.enableChunkedPrefill == null ? "inherit" : config.enableChunkedPrefill ? "on" : "off",
     )
-    setKvCacheDtype(vllm.kvCacheDtype == null ? "" : String(vllm.kvCacheDtype))
-    setSwapSpace(vllm.swapSpace == null ? "" : String(vllm.swapSpace))
-    setEnforceEager(Boolean(vllm.enforceEager))
-  }, [model])
+    setKvCacheDtype(config.kvCacheDtype == null ? "" : String(config.kvCacheDtype))
+    setSwapSpace(config.swapSpace == null ? "" : String(config.swapSpace))
+    setEnforceEager(Boolean(config.enforceEager))
+  }, [model, vllm])
 
   const handleSave = async () => {
     if (!model) return
@@ -257,11 +258,11 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
 
   const applyRecipeSuggestedConfig = () => {
     const suggested = recipeSuggestedConfig
-    if (modelImpl === "" && typeof (model?.extraConfig?.vllm as VLLMConfig | undefined)?.modelImpl === "string") {
-      setModelImpl((model?.extraConfig?.vllm as VLLMConfig).modelImpl as "auto" | "vllm" | "transformers")
+    if (modelImpl === "" && vllm && typeof vllm.modelImpl === "string") {
+      setModelImpl(vllm.modelImpl as "auto" | "vllm" | "transformers")
     }
-    if (runner === "" && typeof (model?.extraConfig?.vllm as VLLMConfig | undefined)?.runner === "string") {
-      setRunner((model?.extraConfig?.vllm as VLLMConfig).runner as "generate" | "pooling")
+    if (runner === "" && vllm && typeof vllm.runner === "string") {
+      setRunner(vllm.runner as "generate" | "pooling")
     }
     if (typeof suggested.toolCallParser === "string") setToolCallParser(suggested.toolCallParser)
     if (typeof suggested.reasoningParser === "string") setReasoningParser(suggested.reasoningParser)
