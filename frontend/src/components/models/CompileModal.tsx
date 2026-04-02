@@ -177,6 +177,104 @@ function mb(v: number) {
   return v >= 1024 ? `${(v / 1024).toFixed(1)} GB` : `${v} MB`
 }
 
+function quantizationLabel(quant: string | null | undefined) {
+  const value = String(quant ?? "").toLowerCase()
+  if (value === "awq") return "AWQ (4-bit)"
+  if (value === "gptq") return "GPTQ (4-bit)"
+  if (value === "fp16") return "FP16"
+  if (value === "bf16") return "BF16"
+  if (value === "int8") return "INT8"
+  if (value === "fp8") return "FP8"
+  return value ? value.toUpperCase() : "Desconocida"
+}
+
+function runtimeDtypeOptions(quant: string | null | undefined) {
+  const sourceQuant = String(quant ?? "").toLowerCase()
+  const checkpointIs4Bit = sourceQuant === "awq" || sourceQuant === "gptq"
+
+  return [
+    { value: "fp16", label: "fp16", disabled: false },
+    { value: "bf16", label: "bf16", disabled: false },
+    {
+      value: "int8",
+      label: checkpointIs4Bit ? "int8 (no aplica a checkpoint 4-bit)" : "int8",
+      disabled: checkpointIs4Bit,
+    },
+    {
+      value: "fp8",
+      label: checkpointIs4Bit ? "fp8 (no aplica a checkpoint 4-bit)" : "fp8",
+      disabled: checkpointIs4Bit,
+    },
+  ] as const
+}
+
+const MAX_BATCH_PRESETS = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+const MAX_INPUT_PRESETS = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+const MAX_SEQ_PRESETS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+
+function clampCompileValue(value: number, min: number, max?: number) {
+  if (!Number.isFinite(value)) return min
+  const rounded = Math.round(value)
+  if (max != null) return Math.min(max, Math.max(min, rounded))
+  return Math.max(min, rounded)
+}
+
+function CompileNumberField({
+  label,
+  value,
+  onChange,
+  presets,
+  min,
+  max,
+  step = 1,
+  helpText,
+}: {
+  label: string
+  value: number
+  onChange: (value: number) => void
+  presets: number[]
+  min: number
+  max?: number
+  step?: number
+  helpText?: string
+}) {
+  const presetValue = presets.includes(value) ? String(value) : "custom"
+
+  return (
+    <div>
+      <label className="mb-1 block text-sm font-medium">{label}</label>
+      <div className="grid grid-cols-[minmax(0,1fr)_110px] gap-2">
+        <select
+          value={presetValue}
+          onChange={(e) => {
+            const next = e.target.value
+            if (next === "custom") return
+            onChange(clampCompileValue(Number(next), min, max))
+          }}
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+        >
+          {presets.map((preset) => (
+            <option key={preset} value={preset}>
+              {preset.toLocaleString()}
+            </option>
+          ))}
+          <option value="custom">Personalizado</option>
+        </select>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(clampCompileValue(Number(e.target.value), min, max))}
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+        />
+      </div>
+      {helpText && <p className="mt-1 text-xs text-muted-foreground">{helpText}</p>}
+    </div>
+  )
+}
+
 function VramEstimatePanel({ estimate, estimating }: { estimate: VramEstimate | null; estimating: boolean }) {
   if (estimating) {
     return (
@@ -188,7 +286,22 @@ function VramEstimatePanel({ estimate, estimating }: { estimate: VramEstimate | 
   }
   if (!estimate) return null
 
+  const hasCompleteEstimate =
+    Number.isFinite(estimate.serve?.vramPerGpuMb) &&
+    Number.isFinite(estimate.build?.vramPerGpuMb) &&
+    Number.isFinite(estimate.disk?.totalPeakMb)
+
+  if (!hasCompleteEstimate) {
+    return (
+      <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+        <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+        La estimación de memoria no está completa. Revisa `config.json` del modelo o vuelve a abrir el modal.
+      </div>
+    )
+  }
+
   const hasWarnings = estimate.warnings.length > 0
+  const hasTightWarning = estimate.warnings.some((warning) => warning.startsWith("Muy justo"))
   const serveMb = estimate.serve.vramPerGpuMb
   const buildMb = estimate.build.vramPerGpuMb
   const tpLabel = estimate.tpSize > 1 ? ` × ${estimate.tpSize} GPUs` : ""
@@ -196,13 +309,19 @@ function VramEstimatePanel({ estimate, estimating }: { estimate: VramEstimate | 
   return (
     <div className="space-y-1.5">
       {/* Main estimate row */}
-      <div className={`rounded-md border px-3 py-2 text-xs ${hasWarnings ? "border-red-500/40 bg-red-500/10" : "border-border bg-muted/30"}`}>
+      <div className={`rounded-md border px-3 py-2 text-xs ${
+        hasWarnings
+          ? hasTightWarning
+            ? "border-amber-500/40 bg-amber-500/10"
+            : "border-red-500/40 bg-red-500/10"
+          : "border-border bg-muted/30"
+      }`}>
         <div className="mb-1.5 flex items-center gap-1.5 font-medium text-foreground">
           <Cpu size={12} />
           Estimación de recursos
           {estimate.estimatedParamsB && (
             <span className="ml-auto font-normal text-muted-foreground">
-              ~{estimate.estimatedParamsB}B params · {estimate.quant}
+              ~{estimate.estimatedParamsB}B params · checkpoint {quantizationLabel(estimate.quant)}
             </span>
           )}
         </div>
@@ -210,7 +329,9 @@ function VramEstimatePanel({ estimate, estimating }: { estimate: VramEstimate | 
         <div className="grid grid-cols-3 gap-2 text-center">
           <div className="rounded border border-border/50 bg-background/50 px-2 py-1.5">
             <div className="text-muted-foreground">Compilar</div>
-            <div className={`font-mono font-semibold ${hasWarnings ? "text-red-300" : "text-amber-300"}`}>
+            <div className={`font-mono font-semibold ${
+              hasWarnings ? (hasTightWarning ? "text-amber-300" : "text-red-300") : "text-amber-300"
+            }`}>
               {mb(buildMb)}{tpLabel}
             </div>
             <div className="text-muted-foreground opacity-70">por GPU</div>
@@ -244,7 +365,14 @@ function VramEstimatePanel({ estimate, estimating }: { estimate: VramEstimate | 
 
       {/* Warnings */}
       {estimate.warnings.map((w, i) => (
-        <div key={i} className="flex items-start gap-1.5 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs text-red-300">
+        <div
+          key={i}
+          className={`flex items-start gap-1.5 rounded-md border px-3 py-1.5 text-xs ${
+            w.startsWith("Muy justo")
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+              : "border-red-500/40 bg-red-500/10 text-red-300"
+          }`}
+        >
           <AlertTriangle size={12} className="mt-0.5 shrink-0" />
           {w}
         </div>
@@ -265,6 +393,8 @@ interface CompileModalProps {
 
 export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileModalProps) {
   const gpus = useGpuStore((s) => s.gpus)
+  const openedForRef = useRef<string | null>(null)
+  const estimateRequestRef = useRef(0)
 
   // ── Form state ────────────────────────────────────────────────
   const [gpuSelection, setGpuSelection] = useState<"single0" | "single1" | "both">("single1")
@@ -283,47 +413,76 @@ export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileMo
   const [logLines, setLogLines] = useState<string[]>([])
   const logRef = useRef<HTMLDivElement>(null)
 
-  // Reset when model changes or modal opens
+  // ── GPU resolution ────────────────────────────────────────────
+  const gpuIndices = gpuSelection === "both" ? [0, 1] : gpuSelection === "single0" ? [0] : [1]
+
+  // Reset once when the dialog opens for a given model.
   useEffect(() => {
-    if (open && model) {
-      setScreen("form")
-      setJob(null)
-      setLogLines([])
-      setDtype("fp16")
-      setMaxBatchSize(1)
-      setMaxInputLen(2048)
-      setMaxSeqLen(4096)
-      setEngineName(defaultEngineName(model.modelId, "fp16"))
-      setEstimate(null)
-      // Pick best single GPU default: prefer GPU 1 (3090) if available
-      const hasGpu1 = gpus.some((g) => g.index === 1)
-      setGpuSelection(hasGpu1 ? "single1" : "single0")
+    if (!open || !model) {
+      openedForRef.current = null
+      return
     }
+    if (openedForRef.current === model.modelId) return
+
+    openedForRef.current = model.modelId
+    setScreen("form")
+    setJob(null)
+    setLogLines([])
+    setDtype("fp16")
+    setMaxBatchSize(1)
+    setMaxInputLen(2048)
+    setMaxSeqLen(4096)
+    setEngineName(defaultEngineName(model.modelId, "fp16"))
+    setEstimate(null)
+    setEstimating(false)
+    // Pick best single GPU default: prefer GPU 1 (3090) if available
+    const hasGpu1 = gpus.some((g) => g.index === 1)
+    setGpuSelection(hasGpu1 ? "single1" : "single0")
   }, [open, model, gpus])
 
-  // Fetch VRAM estimate from backend (debounced)
+  // Fetch VRAM estimate from backend (debounced), ignoring stale responses.
   useEffect(() => {
     if (!open || !model) return
     const tpSize = gpuSelection === "both" ? 2 : 1
+    const requestId = ++estimateRequestRef.current
     const timer = setTimeout(async () => {
       setEstimating(true)
       try {
         const est = await api.trtllm.estimate({
           modelId: model.modelId,
+          gpuIndices: gpuSelection === "both" ? [0, 1] : gpuSelection === "single0" ? [0] : [1],
           tpSize,
           dtype,
           maxBatchSize,
           maxSeqLen,
         })
-        setEstimate(est)
+        if (estimateRequestRef.current === requestId) {
+          setEstimate(est)
+        }
       } catch {
-        setEstimate(null)
+        if (estimateRequestRef.current === requestId) {
+          setEstimate(null)
+        }
       } finally {
-        setEstimating(false)
+        if (estimateRequestRef.current === requestId) {
+          setEstimating(false)
+        }
       }
     }, 400)
-    return () => clearTimeout(timer)
+    return () => {
+      clearTimeout(timer)
+      if (estimateRequestRef.current === requestId) {
+        setEstimating(false)
+      }
+    }
   }, [open, model, gpuSelection, dtype, maxBatchSize, maxSeqLen])
+
+  useEffect(() => {
+    const options = runtimeDtypeOptions(estimate?.quant)
+    if (options.some((option) => option.value === dtype && option.disabled)) {
+      setDtype("fp16")
+    }
+  }, [estimate?.quant, dtype])
 
   // Update engine name default when dtype changes (only if user hasn't edited it)
   useEffect(() => {
@@ -344,9 +503,6 @@ export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileMo
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
   }, [logLines])
-
-  // ── GPU resolution ────────────────────────────────────────────
-  const gpuIndices = gpuSelection === "both" ? [0, 1] : gpuSelection === "single0" ? [0] : [1]
 
   function gpuLabel(g: GPUState) {
     const vramGb = (g.totalVramMb / 1024).toFixed(0)
@@ -380,15 +536,24 @@ export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileMo
   // ── Submit ────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (!model) return
+    const normalizedBatch = clampCompileValue(maxBatchSize, 1, 256)
+    const normalizedInput = clampCompileValue(maxInputLen, 128)
+    const normalizedSeq = clampCompileValue(maxSeqLen, 256)
+
+    if (normalizedInput > normalizedSeq) {
+      toast.error("`Max input len` no puede ser mayor que `Max seq len`")
+      return
+    }
+
     setSubmitting(true)
     try {
       const created = await api.trtllm.compile({
         modelId: model.modelId,
         gpuIndices,
         dtype,
-        maxBatchSize,
-        maxInputLen,
-        maxSeqLen,
+        maxBatchSize: normalizedBatch,
+        maxInputLen: normalizedInput,
+        maxSeqLen: normalizedSeq,
         engineName: engineName.trim() || defaultEngineName(model.modelId, dtype),
       })
       setJob(created)
@@ -422,6 +587,8 @@ export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileMo
   if (!model) return null
 
   const isTerminal = job && ["done", "failed", "cancelled"].includes(job.status)
+  const dtypeOptions = runtimeDtypeOptions(estimate?.quant)
+  const selectedDtypeDisabled = dtypeOptions.some((option) => option.value === dtype && option.disabled)
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -507,58 +674,63 @@ export function CompileModal({ model, open, onOpenChange, onLoadNow }: CompileMo
               {/* Dtype + batch size */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Dtype</label>
+                  <label className="mb-1 block text-sm font-medium">Runtime dtype</label>
                   <select
                     value={dtype}
                     onChange={(e) => setDtype(e.target.value)}
                     className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
                   >
-                    <option value="fp16">fp16</option>
-                    <option value="bf16">bf16</option>
-                    <option value="int8">int8</option>
-                    <option value="fp8">fp8</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Max batch size</label>
-                  <select
-                    value={maxBatchSize}
-                    onChange={(e) => setMaxBatchSize(Number(e.target.value))}
-                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                  >
-                    {[1, 4, 8, 16].map((v) => (
-                      <option key={v} value={v}>{v}</option>
+                    {dtypeOptions.map((option) => (
+                      <option key={option.value} value={option.value} disabled={option.disabled}>
+                        {option.label}
+                      </option>
                     ))}
                   </select>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Ajusta la precision objetivo del engine. No cambia la cuantizacion base del checkpoint.
+                  </p>
+                  {selectedDtypeDisabled && (
+                    <p className="mt-1 text-xs text-amber-300">
+                      La opcion seleccionada no encaja con la cuantizacion detectada del checkpoint. Cambia a `fp16` o `bf16`.
+                    </p>
+                  )}
                 </div>
+                <div>
+                  <CompileNumberField
+                    label="Max batch size"
+                    value={maxBatchSize}
+                    onChange={setMaxBatchSize}
+                    presets={MAX_BATCH_PRESETS}
+                    min={1}
+                    max={256}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Checkpoint detectado:</span>{" "}
+                {estimate ? quantizationLabel(estimate.quant) : "calculando..."}.
+                {" "}Si el modelo fuente es AWQ o GPTQ, ya viene cuantizado en 4-bit; cambiar `runtime dtype` no lo convierte a otro formato base.
               </div>
 
               {/* Input / seq len */}
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Max input len</label>
-                  <select
-                    value={maxInputLen}
-                    onChange={(e) => setMaxInputLen(Number(e.target.value))}
-                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                  >
-                    {[512, 2048, 8192, 32768].map((v) => (
-                      <option key={v} value={v}>{v.toLocaleString()}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Max seq len</label>
-                  <select
-                    value={maxSeqLen}
-                    onChange={(e) => setMaxSeqLen(Number(e.target.value))}
-                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                  >
-                    {[1024, 4096, 16384, 65536].map((v) => (
-                      <option key={v} value={v}>{v.toLocaleString()}</option>
-                    ))}
-                  </select>
-                </div>
+                <CompileNumberField
+                  label="Max input len"
+                  value={maxInputLen}
+                  onChange={setMaxInputLen}
+                  presets={MAX_INPUT_PRESETS}
+                  min={128}
+                  helpText="Tokens máximos de entrada admitidos por el engine."
+                />
+                <CompileNumberField
+                  label="Max seq len"
+                  value={maxSeqLen}
+                  onChange={setMaxSeqLen}
+                  presets={MAX_SEQ_PRESETS}
+                  min={256}
+                  helpText="Ventana total de secuencia: entrada + salida."
+                />
               </div>
 
               {/* Engine name */}

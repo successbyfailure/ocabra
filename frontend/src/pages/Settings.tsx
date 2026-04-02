@@ -11,6 +11,7 @@ import type { GPUState, LocalModel, ServerConfig } from "@/types"
 const EMPTY_CONFIG: ServerConfig = {
   defaultGpuIndex: 0,
   idleTimeoutSeconds: 300,
+  idleEvictionCheckIntervalSeconds: 15,
   vramBufferMb: 512,
   vramPressureThresholdPct: 85,
   logLevel: "info",

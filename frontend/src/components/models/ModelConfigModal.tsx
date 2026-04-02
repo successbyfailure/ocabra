@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { X } from "lucide-react"
+import { formatTokenCount, getModelContextSummary } from "@/lib/modelContext"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import type { EvictionSchedule, GPUState, LoadPolicy, ModelState, VLLMConfig } from "@/types"
@@ -35,6 +36,80 @@ function FieldSection({ title, description, children }: { title: string; descrip
       </div>
       {children}
     </section>
+  )
+}
+
+const VLLM_GPU_MEMORY_UTILIZATION_PRESETS = [0.75, 0.8, 0.85, 0.9, 0.92, 0.95]
+const VLLM_MAX_NUM_SEQS_PRESETS = [1, 2, 4, 8, 12, 16, 24, 32]
+
+function clampIntegerInput(value: string, min: number) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return ""
+  return String(Math.max(min, Math.round(parsed)))
+}
+
+function clampDecimalInput(value: string, min: number, max: number, digits = 2) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return ""
+  const clamped = Math.min(max, Math.max(min, parsed))
+  return String(Number(clamped.toFixed(digits)))
+}
+
+function PresetNumberField({
+  label,
+  value,
+  onValueChange,
+  presets,
+  placeholder,
+  min,
+  max,
+  step,
+  help,
+}: {
+  label: string
+  value: string
+  onValueChange: (value: string) => void
+  presets: Array<number>
+  placeholder: string
+  min: number
+  max?: number
+  step: string
+  help: string
+}) {
+  const presetValue = value !== "" && presets.some((preset) => String(preset) === value) ? value : "custom"
+
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 block text-muted-foreground">{label}</span>
+      <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-2">
+        <select
+          value={presetValue}
+          onChange={(event) => {
+            if (event.target.value === "custom") return
+            onValueChange(event.target.value)
+          }}
+          className="w-full rounded-md border border-border bg-background px-3 py-2"
+        >
+          {presets.map((preset) => (
+            <option key={preset} value={String(preset)}>
+              {preset}
+            </option>
+          ))}
+          <option value="custom">custom</option>
+        </select>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(event) => onValueChange(event.target.value)}
+          placeholder={placeholder}
+          className="w-full rounded-md border border-border bg-background px-3 py-2"
+        />
+      </div>
+      <FieldHint>{help}</FieldHint>
+    </label>
   )
 }
 
@@ -251,6 +326,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     (recipeRunner != null && probeRecommendedRunner != null && recipeRunner !== probeRecommendedRunner)
   const probeStatusLabel = getProbeStatusLabel(probeStatus)
   const probeOverrideHint = getProbeOverrideHint(probeStatus)
+  const context = model ? getModelContextSummary(model) : null
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -427,6 +503,14 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   title="vLLM Basico"
                   description="Parametros con impacto directo en compatibilidad, reparto entre GPUs y limite de contexto."
                 >
+                  {context && (
+                    <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
+                      nativo {formatTokenCount(context.nativeContext)} · configurado {formatTokenCount(context.configuredContext)} ·
+                      ventana operativa {formatTokenCount(context.maxInputTokens)} input / {formatTokenCount(context.maxOutputTokens)} output.
+                      {" "}Input y output comparten la misma ventana total.
+                    </div>
+                  )}
                   <div className="grid gap-4 md:grid-cols-2">
                     <label className="block text-sm">
                       <span className="mb-1 block text-muted-foreground">Model impl</span>
@@ -619,33 +703,28 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   description="Toca concurrencia, throughput y cuanta VRAM reserva vLLM."
                 >
                   <div className="grid gap-4 md:grid-cols-2">
-                    <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">GPU memory utilization</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={gpuMemoryUtilization}
-                        onChange={(event) => setGpuMemoryUtilization(event.target.value)}
-                        placeholder="heredar global"
-                        className="w-full rounded-md border border-border bg-background px-3 py-2"
-                      />
-                      <FieldHint>Normalmente `0.85-0.90`. Mas alto da mas KV cache, pero acerca el riesgo de OOM.</FieldHint>
-                    </label>
+                    <PresetNumberField
+                      label="GPU memory utilization"
+                      value={gpuMemoryUtilization}
+                      onValueChange={(value) => setGpuMemoryUtilization(clampDecimalInput(value, 0.1, 0.99))}
+                      presets={VLLM_GPU_MEMORY_UTILIZATION_PRESETS}
+                      placeholder="heredar global"
+                      min={0.1}
+                      max={0.99}
+                      step="0.01"
+                      help="Normalmente `0.85-0.90`. Mas alto da mas KV cache, pero acerca el riesgo de OOM."
+                    />
 
-                    <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Max concurrent sequences</span>
-                      <input
-                        type="number"
-                        min="1"
-                        value={maxNumSeqs}
-                        onChange={(event) => setMaxNumSeqs(event.target.value)}
-                        placeholder="heredar global"
-                        className="w-full rounded-md border border-border bg-background px-3 py-2"
-                      />
-                      <FieldHint>Limita cuantas peticiones procesa por iteracion. Subirlo mejora concurrencia pero usa mas memoria.</FieldHint>
-                    </label>
+                    <PresetNumberField
+                      label="Max concurrent sequences"
+                      value={maxNumSeqs}
+                      onValueChange={(value) => setMaxNumSeqs(clampIntegerInput(value, 1))}
+                      presets={VLLM_MAX_NUM_SEQS_PRESETS}
+                      placeholder="heredar global"
+                      min={1}
+                      step="1"
+                      help="Limita cuantas peticiones procesa por iteracion. Subirlo mejora concurrencia pero usa mas memoria."
+                    />
 
                     <label className="block text-sm">
                       <span className="mb-1 block text-muted-foreground">Max batched tokens</span>

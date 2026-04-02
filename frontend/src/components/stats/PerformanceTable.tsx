@@ -7,6 +7,8 @@ type SortKey =
   | "totalRequests"
   | "avgLatencyMs"
   | "p95LatencyMs"
+  | "avgLoadMs"
+  | "lastLoadMs"
   | "requestsPerMinute"
   | "tokensPerSecond"
   | "errorCount"
@@ -18,7 +20,7 @@ interface PerformanceTableProps {
 
 function toCsv(data: PerformanceStats): string {
   const header =
-    "model_id,backend_type,request_kinds,total_requests,avg_latency_ms,p95_latency_ms,requests_per_minute,tokens_per_second,input_tokens,output_tokens,tokenized_requests,error_count,uptime_pct"
+    "model_id,backend_type,request_kinds,total_requests,avg_latency_ms,p95_latency_ms,avg_load_ms,p95_load_ms,last_load_ms,load_count,requests_per_minute,tokens_per_second,input_tokens,output_tokens,tokenized_requests,error_count,uptime_pct"
   const rows = data.byModel.map((row) =>
     [
       row.modelId,
@@ -27,6 +29,10 @@ function toCsv(data: PerformanceStats): string {
       row.totalRequests,
       row.avgLatencyMs,
       row.p95LatencyMs,
+      row.avgLoadMs,
+      row.p95LoadMs,
+      row.lastLoadMs,
+      row.loadCount,
       row.requestsPerMinute,
       row.tokensPerSecond,
       row.totalInputTokens,
@@ -98,6 +104,8 @@ export function PerformanceTable({ data }: PerformanceTableProps) {
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("totalRequests")}>Requests</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("avgLatencyMs")}>Avg ms</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("p95LatencyMs")}>P95 ms</button></th>
+              <th className="px-2 py-2"><button type="button" onClick={() => setSort("avgLoadMs")}>Load avg</button></th>
+              <th className="px-2 py-2"><button type="button" onClick={() => setSort("lastLoadMs")}>Load last</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("requestsPerMinute")}>Req/min</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("tokensPerSecond")}>Tokens/s</button></th>
               <th className="px-2 py-2">Tok in/out</th>
@@ -114,6 +122,8 @@ export function PerformanceTable({ data }: PerformanceTableProps) {
                 <td className="px-2 py-2">{row.totalRequests}</td>
                 <td className="px-2 py-2">{row.avgLatencyMs.toFixed(1)}</td>
                 <td className="px-2 py-2">{row.p95LatencyMs.toFixed(1)}</td>
+                <td className="px-2 py-2">{row.loadCount > 0 ? row.avgLoadMs.toFixed(0) : "-"}</td>
+                <td className="px-2 py-2">{row.loadCount > 0 ? row.lastLoadMs.toFixed(0) : "-"}</td>
                 <td className="px-2 py-2">{row.requestsPerMinute.toFixed(2)}</td>
                 <td className="px-2 py-2">{row.tokensPerSecond.toFixed(2)}</td>
                 <td className="px-2 py-2">{row.totalInputTokens}/{row.totalOutputTokens}</td>

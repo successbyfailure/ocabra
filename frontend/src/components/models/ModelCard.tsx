@@ -1,6 +1,7 @@
 import { Cpu, Pencil, Pin, PinOff, Play, Square, Trash2 } from "lucide-react"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
+import { formatTokenCount, getModelContextSummary } from "@/lib/modelContext"
 import type { ModelState } from "@/types"
 
 interface ModelCardProps {
@@ -68,6 +69,7 @@ export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfig
   const isLoaded = model.status === "loaded" || model.status === "loading"
   const isUnloaded = model.status === "unloaded" || model.status === "unloading"
   const errorHint = model.status === "error" ? summarizeError(model) : null
+  const context = getModelContextSummary(model)
 
   return (
     <>
@@ -83,6 +85,18 @@ export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfig
         </td>
         <td className="px-3 py-3 text-muted-foreground">
           {model.currentGpu.join(", ") || (model.preferredGpu ?? "-")}
+        </td>
+        <td className="px-3 py-3 text-muted-foreground">
+          <div>{formatTokenCount(context.nativeContext)}</div>
+          <div className="text-xs opacity-70">nativo</div>
+        </td>
+        <td className="px-3 py-3 text-muted-foreground">
+          <div>{formatTokenCount(context.configuredContext)}</div>
+          <div className="text-xs opacity-70">configurado</div>
+        </td>
+        <td className="px-3 py-3 text-muted-foreground">
+          <div>{formatTokenCount(context.maxInputTokens)} / {formatTokenCount(context.maxOutputTokens)}</div>
+          <div className="text-xs opacity-70">input / output</div>
         </td>
         <td className="px-3 py-3 text-muted-foreground">{model.vramUsedMb.toLocaleString()} MB</td>
         <td className="px-3 py-3 text-muted-foreground">{formatDiskSize(model.diskSizeBytes)}</td>
@@ -152,7 +166,7 @@ export function ModelCard({ model, busy, onLoad, onUnload, onTogglePin, onConfig
       </tr>
       {errorHint && (
         <tr className="border-b border-border/60 bg-red-500/5 text-sm">
-          <td colSpan={9} className="px-3 py-3">
+          <td colSpan={12} className="px-3 py-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <p className="text-red-200">{errorHint.message}</p>
               {errorHint.suggestTrustRemote && (

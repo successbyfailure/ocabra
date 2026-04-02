@@ -6,9 +6,10 @@ import { CompileModal } from "@/components/models/CompileModal"
 import { ModelCard } from "@/components/models/ModelCard"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
+import { getModelContextSummary } from "@/lib/modelContext"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
-import type { LoadPolicy, ModelState, ModelStatus, VLLMConfig } from "@/types"
+import type { BackendType, LoadPolicy, ModelState, ModelStatus, ModelsStorageStats, VLLMConfig } from "@/types"
 
 function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
   if (model.capabilities.imageGeneration) return "image"
@@ -23,11 +24,17 @@ export function Models() {
   const [query, setQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<ModelStatus | "all">("all")
   const [typeFilter, setTypeFilter] = useState<"all" | "llm" | "image" | "audio" | "pooling">("all")
+  const [backendFilter, setBackendFilter] = useState<BackendType | "all">("all")
   const [gpuFilter, setGpuFilter] = useState<string>("all")
+  const [sortKey, setSortKey] = useState<
+    "name" | "type" | "backend" | "policy" | "gpu" | "ctxNative" | "ctxConfig" | "io" | "vram" | "size" | "status"
+  >("name")
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc")
   const [busyModelId, setBusyModelId] = useState<string | null>(null)
   const [configModel, setConfigModel] = useState<ModelState | null>(null)
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
+  const [storage, setStorage] = useState<ModelsStorageStats | null>(null)
 
   useWebSocket()
 
@@ -42,9 +49,26 @@ export function Models() {
   const modelList = useMemo(() => Object.values(models), [models])
 
   const refresh = async () => {
-    const [gpuList, modelListResp] = await Promise.all([api.gpus.list(), api.models.list()])
+    const [gpuList, modelListResp, storageStats] = await Promise.all([
+      api.gpus.list(),
+      api.models.list(),
+      api.models.storage(),
+    ])
     setGpus(gpuList)
     setModels(modelListResp)
+    setStorage(storageStats)
+  }
+
+  const formatBytes = (bytes: number) => {
+    if (bytes <= 0) return "0 B"
+    const units = ["B", "KB", "MB", "GB", "TB"]
+    let value = bytes
+    let unitIndex = 0
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024
+      unitIndex += 1
+    }
+    return `${value.toFixed(value >= 100 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
   }
 
   useEffect(() => {
@@ -77,17 +101,72 @@ export function Models() {
   }, [setGpus, setModels])
 
   const filtered = useMemo(() => {
-    return modelList.filter((model) => {
+    const visible = modelList.filter((model) => {
       const matchesQuery =
         model.displayName.toLowerCase().includes(query.toLowerCase()) ||
         model.modelId.toLowerCase().includes(query.toLowerCase())
       const matchesStatus = statusFilter === "all" || model.status === statusFilter
       const matchesType = typeFilter === "all" || inferType(model) === typeFilter
+      const matchesBackend = backendFilter === "all" || model.backendType === backendFilter
       const modelGpu = model.currentGpu[0] ?? model.preferredGpu
       const matchesGpu = gpuFilter === "all" || String(modelGpu) === gpuFilter
-      return matchesQuery && matchesStatus && matchesType && matchesGpu
+      return matchesQuery && matchesStatus && matchesType && matchesBackend && matchesGpu
     })
-  }, [gpuFilter, modelList, query, statusFilter, typeFilter])
+
+    const sorted = [...visible].sort((left, right) => {
+      const leftContext = getModelContextSummary(left)
+      const rightContext = getModelContextSummary(right)
+      const leftGpu = left.currentGpu[0] ?? left.preferredGpu ?? -1
+      const rightGpu = right.currentGpu[0] ?? right.preferredGpu ?? -1
+      const leftIo = Math.max(leftContext.maxInputTokens ?? 0, leftContext.maxOutputTokens ?? 0)
+      const rightIo = Math.max(rightContext.maxInputTokens ?? 0, rightContext.maxOutputTokens ?? 0)
+
+      const byKey: Record<typeof sortKey, string | number> = {
+        name: left.displayName.toLowerCase(),
+        type: inferType(left),
+        backend: left.backendType,
+        policy: left.loadPolicy,
+        gpu: leftGpu,
+        ctxNative: leftContext.nativeContext ?? -1,
+        ctxConfig: leftContext.configuredContext ?? -1,
+        io: leftIo,
+        vram: left.vramUsedMb,
+        size: left.diskSizeBytes ?? -1,
+        status: left.status,
+      }
+      const otherByKey: Record<typeof sortKey, string | number> = {
+        name: right.displayName.toLowerCase(),
+        type: inferType(right),
+        backend: right.backendType,
+        policy: right.loadPolicy,
+        gpu: rightGpu,
+        ctxNative: rightContext.nativeContext ?? -1,
+        ctxConfig: rightContext.configuredContext ?? -1,
+        io: rightIo,
+        vram: right.vramUsedMb,
+        size: right.diskSizeBytes ?? -1,
+        status: right.status,
+      }
+
+      const a = byKey[sortKey]
+      const b = otherByKey[sortKey]
+      const cmp = typeof a === "string" && typeof b === "string" ? a.localeCompare(b) : Number(a) - Number(b)
+      return sortDir === "asc" ? cmp : -cmp
+    })
+
+    return sorted
+  }, [backendFilter, gpuFilter, modelList, query, sortDir, sortKey, statusFilter, typeFilter])
+
+  const toggleSort = (
+    key: "name" | "type" | "backend" | "policy" | "gpu" | "ctxNative" | "ctxConfig" | "io" | "vram" | "size" | "status",
+  ) => {
+    if (sortKey === key) {
+      setSortDir((current) => (current === "asc" ? "desc" : "asc"))
+      return
+    }
+    setSortKey(key)
+    setSortDir("asc")
+  }
 
   const runAction = async (modelId: string, action: () => Promise<void>) => {
     setBusyModelId(modelId)
@@ -139,6 +218,29 @@ export function Models() {
         <p className="text-muted-foreground">Gestion de modelos instalados y ciclo de vida.</p>
       </div>
 
+      {storage && (
+        <div className="rounded-lg border border-border bg-card p-3">
+          <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+            <div>
+              <p className="font-medium">Almacenamiento de modelos</p>
+              <p className="text-xs text-muted-foreground">{storage.path}</p>
+            </div>
+            <div className="text-right text-xs text-muted-foreground">
+              <p>{formatBytes(storage.freeBytes)} libres</p>
+              <p>{formatBytes(storage.usedBytes)} usados de {formatBytes(storage.totalBytes)}</p>
+            </div>
+          </div>
+          <div className="h-3 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-[width]"
+              style={{
+                width: `${storage.totalBytes > 0 ? Math.max(0, Math.min(100, (storage.freeBytes / storage.totalBytes) * 100)) : 0}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-2 rounded-lg border border-border bg-card p-3 md:grid-cols-4">
         <input
           value={query}
@@ -174,6 +276,19 @@ export function Models() {
         </select>
 
         <select
+          value={backendFilter}
+          onChange={(event) => setBackendFilter(event.target.value as BackendType | "all")}
+          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
+        >
+          <option value="all">Backend: todos</option>
+          {Array.from(new Set(modelList.map((model) => model.backendType))).sort().map((backend) => (
+            <option key={backend} value={backend}>
+              {backend}
+            </option>
+          ))}
+        </select>
+
+        <select
           value={gpuFilter}
           onChange={(event) => setGpuFilter(event.target.value)}
           className="rounded-md border border-border bg-background px-3 py-2 text-sm"
@@ -198,14 +313,17 @@ export function Models() {
           <table className="min-w-full text-left">
             <thead className="bg-muted/40 text-xs uppercase text-muted-foreground">
               <tr>
-                <th className="px-3 py-2">Nombre</th>
-                <th className="px-3 py-2">Tipo</th>
-                <th className="px-3 py-2">Backend</th>
-                <th className="px-3 py-2">Policy</th>
-                <th className="px-3 py-2">GPU</th>
-                <th className="px-3 py-2">VRAM</th>
-                <th className="px-3 py-2">Tamaño</th>
-                <th className="px-3 py-2">Status</th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("name")}>Nombre</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("type")}>Tipo</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("backend")}>Backend</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("policy")}>Policy</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("gpu")}>GPU</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("ctxNative")}>Ctx Nativo</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("ctxConfig")}>Ctx Config</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("io")}>Input / Output</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("vram")}>VRAM</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("size")}>Tamaño</button></th>
+                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("status")}>Status</button></th>
                 <th className="px-3 py-2">Acciones</th>
               </tr>
             </thead>
