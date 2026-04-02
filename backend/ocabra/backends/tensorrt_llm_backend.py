@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -129,6 +130,7 @@ class TensorRTLLMBackend(BackendInterface):
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         self._processes[model_id] = (process, port)
 
@@ -168,6 +170,20 @@ class TensorRTLLMBackend(BackendInterface):
 
     async def unload(self, model_id: str) -> None:
         await self._kill_process(model_id, graceful=True)
+
+    async def reconcile_orphaned_processes(self) -> int:
+        """Kill stale host-side TRT-LLM runtime groups left behind by prior runs.
+
+        This only targets bare `trtllm-serve serve` processes bound to oCabra's
+        worker port range and serving engines from the configured oCabra models
+        directories. Docker-launched TRT runtimes are not touched here.
+        """
+        groups = await self._list_host_trt_process_groups()
+        if not groups:
+            return 0
+        await self._kill_host_process_groups(groups)
+        logger.warning("tensorrt_llm_orphans_reaped", groups=sorted(groups))
+        return len(groups)
 
     async def health_check(self, model_id: str) -> bool:
         entry = self._processes.get(model_id)
@@ -390,18 +406,104 @@ class TensorRTLLMBackend(BackendInterface):
         process, _ = entry
         if process.returncode is not None:
             return
+        pgid: int | None = None
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, AttributeError, TypeError):
+            pgid = None
         if graceful:
             try:
-                process.terminate()
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    process.terminate()
                 await asyncio.wait_for(process.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
                 return
             except (TimeoutError, ProcessLookupError):
                 logger.warning("tensorrt_llm_sigterm_timeout", model_id=model_id)
         try:
-            process.kill()
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
             await process.wait()
         except ProcessLookupError:
             pass
+
+    async def _list_host_trt_process_groups(self) -> set[int]:
+        output = await self._run_host_helper("ps", "-eo", "pid=,pgid=,args=")
+        groups: set[int] = set()
+        if not output:
+            return groups
+        for line in output.splitlines():
+            parsed = self._parse_host_ps_line(line)
+            if parsed is None:
+                continue
+            _pid, pgid, args = parsed
+            if not self._is_orphaned_trt_command(args):
+                continue
+            groups.add(pgid)
+        return groups
+
+    async def _kill_host_process_groups(self, pgids: set[int]) -> None:
+        if not pgids:
+            return
+        targets = " ".join(f"-{pgid}" for pgid in sorted(pgids))
+        script = (
+            f"kill -TERM -- {targets} 2>/dev/null || true; "
+            "sleep 2; "
+            f"kill -KILL -- {targets} 2>/dev/null || true"
+        )
+        await self._run_host_helper("sh", "-lc", script)
+
+    async def _run_host_helper(self, entrypoint: str, *args: str) -> str:
+        helper_image = str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api"
+        docker_bin = str(settings.tensorrt_llm_docker_bin).strip() or "docker"
+        process = await asyncio.create_subprocess_exec(
+            docker_bin,
+            "run",
+            "--rm",
+            "--pid=host",
+            "--entrypoint",
+            entrypoint,
+            helper_image,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if (process.returncode or 0) != 0:
+            raise RuntimeError(
+                "host helper failed: "
+                + (stderr.decode("utf-8", errors="ignore").strip() or f"exit_code={process.returncode}")
+            )
+        return stdout.decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _parse_host_ps_line(line: str) -> tuple[int, int, str] | None:
+        match = re.match(r"^\s*(\d+)\s+(\d+)\s+(.+?)\s*$", line)
+        if not match:
+            return None
+        pid, pgid, args = match.groups()
+        return int(pid), int(pgid), args
+
+    def _is_orphaned_trt_command(self, args: str) -> bool:
+        if "trtllm-serve serve" not in args:
+            return False
+        port_match = re.search(r"--port\s+(\d+)", args)
+        if port_match is None:
+            return False
+        port = int(port_match.group(1))
+        if not (settings.worker_port_range_start <= port < settings.worker_port_range_end):
+            return False
+
+        models_host = str(settings.tensorrt_llm_docker_models_mount_host or "").rstrip("/")
+        models_container = str(settings.tensorrt_llm_docker_models_mount_container or "").rstrip("/")
+        engine_markers = [
+            f"{models_host}/tensorrt_llm/" if models_host else "",
+            f"{models_container}/tensorrt_llm/" if models_container else "",
+        ]
+        return any(marker and marker in args for marker in engine_markers)
 
     async def _read_stderr_tail(self, process: asyncio.subprocess.Process, limit: int = 4000) -> str:
         if process.stderr is None:

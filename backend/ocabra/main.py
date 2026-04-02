@@ -282,6 +282,12 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("vllm", VLLMBackend())
     tensorrt_llm_backend = TensorRTLLMBackend()
     if tensorrt_llm_backend.is_enabled():
+        try:
+            reaped = await tensorrt_llm_backend.reconcile_orphaned_processes()
+            if reaped:
+                logger.warning("tensorrt_llm_startup_reconciled_orphans", groups=reaped)
+        except Exception as exc:
+            logger.warning("tensorrt_llm_orphan_reconcile_failed", error=str(exc))
         worker_pool.register_backend("tensorrt_llm", tensorrt_llm_backend)
     else:
         worker_pool.register_disabled_backend(

@@ -80,6 +80,7 @@ async def test_load_success_when_enabled_binary_mode(tmp_path: Path) -> None:
     assert args[args.index("--launch-mode") + 1] == "binary"
     assert "--engine-dir" in args
     assert str(engine_dir) in args
+    assert create_proc.await_args.kwargs["start_new_session"] is True
 
 
 @pytest.mark.asyncio
@@ -122,6 +123,7 @@ async def test_load_success_when_enabled_module_mode(tmp_path: Path) -> None:
     assert args[args.index("--python-bin") + 1] == "/usr/bin/python3"
     assert "--serve-module" in args
     assert args[args.index("--serve-module") + 1] == "tensorrt_llm.commands.serve"
+    assert create_proc.await_args.kwargs["start_new_session"] is True
 
 
 def test_detect_disabled_reason_module_missing_module() -> None:
@@ -179,3 +181,49 @@ def test_has_tokenizer_files(tmp_path: Path) -> None:
     assert TensorRTLLMBackend._has_tokenizer_files(d) is False
     (d / "tokenizer_config.json").write_text("{}")
     assert TensorRTLLMBackend._has_tokenizer_files(d) is True
+
+
+def test_is_orphaned_trt_command_filters_by_port_and_models_root() -> None:
+    backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)
+    with patch("ocabra.backends.tensorrt_llm_backend.settings") as ms:
+        ms.worker_port_range_start = 18000
+        ms.worker_port_range_end = 19000
+        ms.tensorrt_llm_docker_models_mount_host = "/docker/ai-models/ocabra/models"
+        ms.tensorrt_llm_docker_models_mount_container = "/data/models"
+
+        assert (
+            backend._is_orphaned_trt_command(
+                "/usr/bin/python /usr/local/bin/trtllm-serve serve "
+                "/docker/ai-models/ocabra/models/tensorrt_llm/Qwen3-8B-fp16/engine "
+                "--host 127.0.0.1 --port 18000 --backend trt"
+            )
+            is True
+        )
+        assert (
+            backend._is_orphaned_trt_command(
+                "/usr/bin/python /usr/local/bin/trtllm-serve serve /tmp/other/engine "
+                "--host 127.0.0.1 --port 18000 --backend trt"
+            )
+            is False
+        )
+        assert (
+            backend._is_orphaned_trt_command(
+                "/usr/bin/python /usr/local/bin/trtllm-serve serve "
+                "/docker/ai-models/ocabra/models/tensorrt_llm/Qwen3-8B-fp16/engine "
+                "--host 127.0.0.1 --port 28000 --backend trt"
+            )
+            is False
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphaned_processes_kills_detected_groups() -> None:
+    backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)
+    groups = {3656367, 3661483}
+    backend._list_host_trt_process_groups = AsyncMock(return_value=groups)
+    backend._kill_host_process_groups = AsyncMock()
+
+    reaped = await backend.reconcile_orphaned_processes()
+
+    assert reaped == 2
+    backend._kill_host_process_groups.assert_awaited_once_with(groups)

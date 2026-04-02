@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     tensorrt_llm_serve_module: str = "tensorrt_llm.commands.serve"
     tensorrt_llm_docker_bin: str = "/usr/bin/docker"
     tensorrt_llm_docker_image: str = "nvcr.io/nvidia/tensorrt-llm/release:latest"
+    tensorrt_llm_host_helper_image: str = "ocabra-api"
     tensorrt_llm_docker_models_mount_host: str = "/docker/ai-models/ocabra/models"
     tensorrt_llm_docker_models_mount_container: str = "/data/models"
     tensorrt_llm_docker_hf_cache_mount_host: str | None = "/docker/ai-models/ocabra/hf_cache"
