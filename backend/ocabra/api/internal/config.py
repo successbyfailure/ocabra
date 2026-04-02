@@ -106,7 +106,7 @@ async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, 
             async with AsyncSessionLocal() as session:
                 await replace_global_schedules(
                     session,
-                    [schedule.model_dump() for schedule in payload["global_schedules"]],
+                    list(payload["global_schedules"]),
                 )
                 await session.commit()
         except ValueError as exc:

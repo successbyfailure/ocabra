@@ -72,6 +72,10 @@ class BitnetBackend(BackendInterface):
             "CUDA_DEVICE_ORDER": settings.cuda_device_order,
             "CUDA_VISIBLE_DEVICES": visible,
         }
+        current_ld_path = env.get("LD_LIBRARY_PATH", "")
+        preferred_paths = ["/usr/local/lib/bitnet", "/usr/local/lib/llama_cpp"]
+        ld_parts = preferred_paths + ([current_ld_path] if current_ld_path else [])
+        env["LD_LIBRARY_PATH"] = ":".join(part for part in ld_parts if part)
 
         logger.info("bitnet_starting", model_id=model_id, port=port, gpu_layers=options["gpu_layers"])
         proc = await asyncio.create_subprocess_exec(

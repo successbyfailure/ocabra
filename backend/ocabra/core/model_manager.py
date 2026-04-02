@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import sqlalchemy as sa
 import structlog
 
+import ocabra.database as database
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import (
@@ -22,7 +23,6 @@ from ocabra.core.model_manager_helpers import (
     should_auto_create_diarized_variant,
 )
 from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
-from ocabra.database import AsyncSessionLocal
 from ocabra.db.model_config import ModelConfig
 from ocabra.db.stats import ModelLoadStat
 from ocabra.redis_client import get_key, publish, set_key
@@ -107,6 +107,7 @@ class ModelManager:
         self._service_manager = None
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
+        self._persisted_model_ids: set[str] = set()
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
         # In-flight request tracking: model_id → active request count
         self._in_flight: dict[str, int] = {}
@@ -208,7 +209,7 @@ class ModelManager:
                 )
 
     async def _load_configs_from_db(self) -> None:
-        async with AsyncSessionLocal() as session:
+        async with database.AsyncSessionLocal() as session:
             result = await session.execute(sa.select(ModelConfig))
             configs = list(result.scalars().all())
 
@@ -256,6 +257,7 @@ class ModelManager:
                 extra_config=cfg.extra_config or {},
             )
             self._load_locks[canonical_model_id] = asyncio.Lock()
+            self._persisted_model_ids.add(canonical_model_id)
 
     async def _publish_event(self, model_id: str, event: str) -> None:
         state = self._states.get(model_id)
@@ -489,7 +491,7 @@ class ModelManager:
             duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
 
         try:
-            async with AsyncSessionLocal() as session:
+            async with database.AsyncSessionLocal() as session:
                 session.add(
                     ModelLoadStat(
                         model_id=model_id,
@@ -751,19 +753,24 @@ class ModelManager:
     async def sync_ollama_models(self, model_ids: list[str]) -> int:
         """Ensure native Ollama models are present in the internal inventory."""
         added = 0
+        seen: set[str] = set()
         for backend_model_id in model_ids:
             normalized = backend_model_id.strip()
-            if not normalized:
+            if not normalized or normalized in seen:
                 continue
+            seen.add(normalized)
             model_id = build_model_ref("ollama", normalized)
             if model_id in self._states:
                 continue
-            await self.add_model(
+
+            self._states[model_id] = ModelState(
                 model_id=model_id,
+                backend_model_id=normalized,
                 backend_type="ollama",
                 display_name=normalized,
-                load_policy="on_demand",
+                load_policy=LoadPolicy.ON_DEMAND,
             )
+            self._load_locks[model_id] = asyncio.Lock()
             added += 1
         return added
 
@@ -857,7 +864,7 @@ class ModelManager:
         if normalized_model_id in self._states:
             return self._states[normalized_model_id]
 
-        async with AsyncSessionLocal() as session:
+        async with database.AsyncSessionLocal() as session:
             cfg = ModelConfig(
                 model_id=normalized_model_id,
                 display_name=display_name or backend_model_id,
@@ -882,6 +889,7 @@ class ModelManager:
         )
         self._states[normalized_model_id] = state
         self._load_locks[normalized_model_id] = asyncio.Lock()
+        self._persisted_model_ids.add(normalized_model_id)
         self._notify_event_listeners("register", state)
 
         if create_diarized_variant and should_auto_create_diarized_variant(state):
@@ -926,24 +934,25 @@ class ModelManager:
                 "Unsupported model config fields: " + ", ".join(unsupported_fields)
             )
 
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                sa.select(ModelConfig).where(ModelConfig.model_id == model_id)
-            )
-            cfg = result.scalar_one_or_none()
-            if cfg:
-                for key, val in patch.items():
-                    if key == "load_policy":
-                        setattr(cfg, key, LoadPolicy(val).value)
-                    elif key == "preferred_gpu":
-                        setattr(cfg, key, int(val) if val is not None else None)
-                    elif key == "auto_reload":
-                        setattr(cfg, key, bool(val))
-                    elif key == "extra_config":
-                        setattr(cfg, key, val or {})
-                    else:
-                        setattr(cfg, key, val)
-                await session.commit()
+        if model_id in self._persisted_model_ids:
+            async with database.AsyncSessionLocal() as session:
+                result = await session.execute(
+                    sa.select(ModelConfig).where(ModelConfig.model_id == model_id)
+                )
+                cfg = result.scalar_one_or_none()
+                if cfg:
+                    for key, val in patch.items():
+                        if key == "load_policy":
+                            setattr(cfg, key, LoadPolicy(val).value)
+                        elif key == "preferred_gpu":
+                            setattr(cfg, key, int(val) if val is not None else None)
+                        elif key == "auto_reload":
+                            setattr(cfg, key, bool(val))
+                        elif key == "extra_config":
+                            setattr(cfg, key, val or {})
+                        else:
+                            setattr(cfg, key, val)
+                    await session.commit()
 
         for key, val in patch.items():
             if key == "load_policy":
@@ -966,7 +975,7 @@ class ModelManager:
         ):
             await self.unload(model_id)
 
-        async with AsyncSessionLocal() as session:
+        async with database.AsyncSessionLocal() as session:
             await session.execute(
                 sa.delete(ModelConfig).where(ModelConfig.model_id == model_id)
             )
@@ -974,3 +983,4 @@ class ModelManager:
 
         self._states.pop(model_id, None)
         self._load_locks.pop(model_id, None)
+        self._persisted_model_ids.discard(model_id)

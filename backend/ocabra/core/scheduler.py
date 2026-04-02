@@ -59,7 +59,10 @@ class GPUScheduler:
             candidate_groups.append(gpu_indices)
 
         for candidates in candidate_groups:
-            ordered = [preferred] + [i for i in candidates if i != preferred]
+            ordered = []
+            if preferred in candidates:
+                ordered.append(preferred)
+            ordered.extend(i for i in candidates if i != preferred)
             for gpu_idx in ordered:
                 free = free_per_gpu[gpu_idx]
                 if free >= vram_needed_mb and _has_vllm_headroom(gpu_idx):

@@ -284,6 +284,9 @@ def _extract_last_payload_from_stream(body: bytes, content_type: str) -> dict | 
 
 
 async def _extract_response_payload_and_rebuild(response: Response) -> tuple[dict | None, Response]:
+    if isinstance(response, StreamingResponse):
+        return None, response
+
     body = getattr(response, "body", b"") or b""
     if not body and getattr(response, "body_iterator", None) is not None:
         chunks: list[bytes] = []

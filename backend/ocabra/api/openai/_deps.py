@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -81,6 +82,15 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
     """
     from ocabra.core.model_manager import ModelStatus
 
+    async def _touch_last_request_at(resolved_id: str, request_at: datetime) -> None:
+        state.last_request_at = request_at
+        touch = getattr(model_manager, "touch_last_request_at", None)
+        if touch is None:
+            return
+        result = touch(resolved_id, request_at)
+        if inspect.isawaitable(result):
+            await result
+
     resolved_model_id, state = await resolve_model(model_manager, model_id)
     if state is None:
         raise _openai_error(
@@ -93,8 +103,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
 
     if state.status == ModelStatus.LOADED:
         request_at = datetime.now(UTC)
-        state.last_request_at = request_at
-        await model_manager.touch_last_request_at(resolved_model_id, request_at)
+        await _touch_last_request_at(resolved_model_id, request_at)
         return state
 
     if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED, ModelStatus.ERROR):
@@ -121,8 +130,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
         state = await model_manager.get_state(resolved_model_id)
         if state and state.status == ModelStatus.LOADED:
             request_at = datetime.now(UTC)
-            state.last_request_at = request_at
-            await model_manager.touch_last_request_at(resolved_model_id, request_at)
+            await _touch_last_request_at(resolved_model_id, request_at)
             return state
 
     if state and state.status == ModelStatus.LOADING:
@@ -131,8 +139,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
             state = await model_manager.get_state(resolved_model_id)
             if state and state.status == ModelStatus.LOADED:
                 request_at = datetime.now(UTC)
-                state.last_request_at = request_at
-                await model_manager.touch_last_request_at(resolved_model_id, request_at)
+                await _touch_last_request_at(resolved_model_id, request_at)
                 return state
         raise _openai_error(
             f"Model '{resolved_model_id}' did not finish loading in time.",

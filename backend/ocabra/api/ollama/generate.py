@@ -66,7 +66,7 @@ async def generate(request: Request):
     choices = result.get("choices") or []
     if choices:
         text = str(choices[0].get("text") or "")
-    now_iso = _now_iso_z()
+    now_iso = now_iso_z()
     total_duration = time.monotonic_ns() - started_ns
     usage = result.get("usage") or {}
     return {
