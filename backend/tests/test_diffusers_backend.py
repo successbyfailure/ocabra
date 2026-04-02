@@ -120,7 +120,7 @@ async def test_forward_request_translates_openai_size():
 
 
 def test_detect_pipeline_class_from_model_index(tmp_path):
-    worker_path = Path(__file__).resolve().parents[2] / "workers" / "diffusers_worker.py"
+    worker_path = Path(__file__).resolve().parents[1] / "workers" / "diffusers_worker.py"
     spec = importlib.util.spec_from_file_location("diffusers_worker_module", worker_path)
     assert spec is not None
     assert spec.loader is not None

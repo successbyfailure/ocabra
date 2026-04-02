@@ -967,7 +967,7 @@ async def test_model_manager_syncs_native_ollama_inventory() -> None:
 
     assert added == 2
     states = await manager.list_states()
-    assert sorted(state.model_id for state in states) == ["gemma3:4b", "llama3.2:3b"]
+    assert sorted(state.model_id for state in states) == ["ollama/gemma3:4b", "ollama/llama3.2:3b"]
     assert all(state.backend_type == "ollama" for state in states)
 
 
@@ -987,7 +987,7 @@ async def test_model_manager_syncs_ollama_loaded_runtime_state() -> None:
     manager._publish_event = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
 
     await manager.sync_ollama_inventory(["qwen3:32b"], ["qwen3:32b"], loaded_vram_mb={"qwen3:32b": 6144})
-    state = await manager.get_state("qwen3:32b")
+    state = await manager.get_state("ollama/qwen3:32b")
 
     assert state is not None
     assert state.status.value == "loaded"
@@ -996,7 +996,7 @@ async def test_model_manager_syncs_ollama_loaded_runtime_state() -> None:
     assert state.vram_used_mb == 6144
 
     await manager.sync_ollama_inventory(["qwen3:32b"], [])
-    state = await manager.get_state("qwen3:32b")
+    state = await manager.get_state("ollama/qwen3:32b")
 
     assert state is not None
     assert state.status.value == "unloaded"

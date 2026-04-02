@@ -40,7 +40,7 @@ class DiffusersBackend(BackendInterface):
 
         port = int(kwargs.get("port") or 0)
         if port == 0:
-            raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
+            port = await self._assign_port()
         gpu_index = gpu_indices[0]
 
         worker_script = self._worker_script_path()
@@ -203,8 +203,11 @@ class DiffusersBackend(BackendInterface):
             process.kill()
             await process.wait()
 
+    async def _assign_port(self) -> int:
+        raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
+
     def _worker_script_path(self) -> Path:
-        repo_root = Path(__file__).resolve().parents[3]
+        repo_root = Path(__file__).resolve().parents[2]
         worker_script = repo_root / "workers" / "diffusers_worker.py"
         if not worker_script.exists():
             raise FileNotFoundError(f"Worker script not found: {worker_script}")

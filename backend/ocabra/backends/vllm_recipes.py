@@ -94,9 +94,8 @@ def get_vllm_recipe(
         required = ["reasoning_parser"]
         if not tokenizer_has_chat_template:
             required.append("chat_template")
-        recipe_id = "deepseek-r1-distill" if "distill" in repo else "deepseek-r1"
         return VLLMRecipe(
-            recipe_id=recipe_id,
+            recipe_id="deepseek-r1",
             notes=["DeepSeek-R1 rinde mejor con parser de reasoning explícito."],
             model_impl="vllm",
             runner="generate",
