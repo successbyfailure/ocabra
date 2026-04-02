@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     hunyuan_idle_unload_seconds: int = 300
     comfyui_idle_unload_seconds: int = 600
     a1111_idle_unload_seconds: int = 600
+    hunyuan_docker_container: str = "ocabra-hunyuan-1"
+    comfyui_docker_container: str = "ocabra-comfyui-1"
     a1111_docker_container: str = "ocabra-a1111-1"
 
     # LiteLLM
@@ -176,6 +178,7 @@ class Settings(BaseSettings):
     acestep_ui_url: str = ""
     acestep_preferred_gpu: int = 1
     acestep_idle_unload_seconds: int = 1800  # 0 = disabled; default 30 min
+    acestep_docker_container: str = "ocabra-acestep-1"
     # Optional: if set, AceStepBackend will proxy to this external ACE-Step REST API
     # instead of spawning a local subprocess (use when running ACE-Step as a Docker service
     # with ACESTEP_MODE=api). Example: http://acestep:8001

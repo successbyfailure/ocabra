@@ -103,6 +103,7 @@ class ServiceManager:
                 runtime_check_path="/runtime/status",
                 runtime_check_key="runtime_loaded",
                 unload_path="/runtime/unload",
+                docker_container_name=settings.hunyuan_docker_container,
             ),
             "comfyui": ServiceState(
                 service_id="comfyui",
@@ -115,6 +116,7 @@ class ServiceManager:
                 idle_unload_after_seconds=settings.comfyui_idle_unload_seconds,
                 unload_path="/free",
                 unload_payload={"unload_models": True, "free_memory": True},
+                docker_container_name=settings.comfyui_docker_container,
             ),
             "a1111": ServiceState(
                 service_id="a1111",
@@ -147,7 +149,7 @@ class ServiceManager:
                 # On idle: restart (not stop) so the Gradio UI stays accessible while
                 # VRAM is freed during the restart window.
                 # On pressure eviction: pressure_evict() still does a full stop.
-                docker_container_name="ocabra-acestep-1",
+                docker_container_name=settings.acestep_docker_container,
                 runtime_loaded_when_alive=True,
                 idle_action="restart",
             ),
@@ -247,7 +249,10 @@ class ServiceManager:
         now = datetime.now(timezone.utc)
         if not state.enabled:
             container_running = await self._is_container_running(state)
-            state.service_alive = bool(container_running)
+            service_alive = bool(container_running)
+            if not service_alive:
+                service_alive = await self._check_service_alive(state)
+            state.service_alive = service_alive
             state.runtime_loaded = False
             state.active_model_ref = None
             state.last_health_check_at = now
@@ -255,16 +260,17 @@ class ServiceManager:
             state.detail = (
                 f"disabled_but_container_running:{state.docker_container_name}"
                 if container_running and state.docker_container_name
+                else "disabled_but_service_alive"
+                if service_alive
                 else "disabled"
             )
             await self._publish_state(state, "health_checked")
             return state
 
-        url = f"{state.base_url}{state.health_path}"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(url)
-                response.raise_for_status()
+            service_alive = await self._check_service_alive(state)
+            if not service_alive:
+                raise RuntimeError("service health check failed")
             state.service_alive = True
             state.last_health_check_at = now
             state.detail = None
@@ -285,6 +291,16 @@ class ServiceManager:
             state.detail = str(exc)
         await self._publish_state(state, "health_checked")
         return state
+
+    async def _check_service_alive(self, state: ServiceState) -> bool:
+        url = f"{state.base_url}{state.health_path}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            return True
+        except Exception:
+            return False
 
     async def _refresh_runtime_status(self, state: ServiceState, *, client: Any) -> None:
         """Call the runtime check endpoint and update runtime_loaded / active_model_ref."""

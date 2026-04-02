@@ -5,6 +5,7 @@ import { Dashboard } from "@/pages/Dashboard"
 import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
+import { useServiceStore } from "@/stores/serviceStore"
 
 const { listGpus, listModels, listDownloads, listServices } = vi.hoisted(() => ({
   listGpus: vi.fn(),
@@ -28,9 +29,19 @@ vi.mock("@/api/client", () => ({
 
 describe("Dashboard", () => {
   beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class ResizeObserver {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+
     useGpuStore.setState({ gpus: [], lastUpdated: null })
     useModelStore.setState({ models: {} })
     useDownloadStore.setState({ jobs: [] })
+    useServiceStore.setState({ services: {} })
 
     listGpus.mockResolvedValue([
       {
@@ -146,5 +157,40 @@ describe("Dashboard", () => {
     expect(listModels).toHaveBeenCalledTimes(1)
     expect(listDownloads).toHaveBeenCalledTimes(1)
     expect(listServices).toHaveBeenCalledTimes(1)
+  })
+
+  it("explains that external runtimes do not count as active models", async () => {
+    listModels.mockResolvedValue([])
+    listServices.mockResolvedValue([
+      {
+        serviceId: "comfyui",
+        serviceType: "comfyui",
+        displayName: "ComfyUI",
+        baseUrl: "http://comfyui:8188",
+        uiUrl: "http://localhost:8188",
+        healthPath: "/",
+        unloadPath: "/free",
+        preferredGpu: 1,
+        idleUnloadAfterSeconds: 600,
+        idleAction: "stop",
+        enabled: false,
+        serviceAlive: true,
+        runtimeLoaded: false,
+        status: "disabled",
+        activeModelRef: null,
+        lastActivityAt: null,
+        lastHealthCheckAt: null,
+        lastUnloadAt: null,
+        detail: "disabled_but_container_running:ocabra-comfyui-1",
+        extra: {},
+      },
+    ])
+
+    render(<Dashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByText("ComfyUI")).toBeTruthy()
+      expect(screen.getByText(/Hay runtimes externos ocupando GPU/i)).toBeTruthy()
+    })
   })
 })

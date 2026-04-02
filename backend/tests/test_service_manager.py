@@ -130,7 +130,7 @@ async def test_set_enabled_disables_service_runtime(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_disabled_service_skips_health_check(monkeypatch) -> None:
+async def test_refresh_disabled_service_falls_back_to_health_check(monkeypatch) -> None:
     called = False
 
     async def fake_publish(channel: str, data: dict) -> None:
@@ -150,15 +150,18 @@ async def test_refresh_disabled_service_skips_health_check(monkeypatch) -> None:
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
 
     manager = ServiceManager()
-    await manager.set_enabled("a1111", enabled=False)
+    state = await manager.get_state("comfyui")
+    assert state is not None
+    state.enabled = False
 
-    state = await manager.refresh("a1111")
+    updated = await manager.refresh("comfyui")
 
-    assert state.enabled is False
-    assert state.status == "disabled"
-    assert state.service_alive is False
-    assert state.runtime_loaded is False
-    assert called is False
+    assert updated.enabled is False
+    assert updated.status == "disabled"
+    assert updated.service_alive is True
+    assert updated.runtime_loaded is False
+    assert updated.detail == "disabled_but_service_alive"
+    assert called is True
 
 
 @pytest.mark.asyncio

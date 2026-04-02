@@ -234,6 +234,10 @@ export function Dashboard() {
     [jobs],
   )
   const serviceList = useMemo(() => Object.values(services), [services])
+  const externalRuntimeServices = useMemo(
+    () => serviceList.filter((service) => !service.enabled && service.serviceAlive),
+    [serviceList],
+  )
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
@@ -304,6 +308,12 @@ export function Dashboard() {
       <section className="space-y-4">
         <h2 className="text-xl font-semibold">Modelos activos</h2>
         <div className="space-y-3">
+          {activeModels.length === 0 && externalRuntimeServices.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              Hay runtimes externos ocupando GPU en servicios de generación. No se cuentan como modelos activos
+              porque no los gestiona `model_manager`.
+            </div>
+          )}
           {activeModels.map((model) => (
             <div
               key={model.modelId}
