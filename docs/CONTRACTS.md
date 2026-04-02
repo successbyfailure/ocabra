@@ -206,7 +206,8 @@ class WorkerPool:
 
 Base URL: `/ocabra/`
 Todos los endpoints retornan `Content-Type: application/json`.
-Errores siguen el formato: `{"detail": str, "code": str}`.
+Errores internos de `/ocabra/*` siguen el formato estándar de FastAPI `{"detail": ...}`.
+Los endpoints de compatibilidad OpenAI y Ollama usan sus propios envelopes de error.
 
 ### 5.1 Modelos
 

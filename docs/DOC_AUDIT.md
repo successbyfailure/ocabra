@@ -17,10 +17,20 @@ Ya quedaron reflejados en documentación o código estable:
 - `backend/ocabra/api/internal/gpus.py` y stats con respuestas actuales de listas planas / agregadas
 - Stack real: frontend servido por Nginx; Caddy como reverse proxy
 - Fase 0 y Fase 5 marcadas como completadas en `docs/PLAN.md`
+- Árbol de directorios de `docs/PLAN.md` limpiado: fuera `docker-compose.dev.yml` y referencias muertas a `server_config.py`; dentro `model_config.py`, `trtllm.py` y workers reales
+- `statsStore` ya no se trata como requisito documental; se mantiene `downloadStore`, `gpuStore`, `modelStore` y `serviceStore`
+
+Validación runtime adicional ya confirmada:
+- `tensorrt_llm/Qwen3-8B-fp16` validado end-to-end: carga, respuesta y descarga reales, sin huérfanos
+- `vllm/Qwen/Qwen3.5-0.8B` validado end-to-end: carga, respuesta y descarga reales
+- `vllm/Qwen/Qwen3-32B-AWQ` validado end-to-end tras ajustar `max_model_len` a `7800`; el valor anterior `8000` fallaba por falta de KV cache en la RTX 3090
+- `tensorrt_llm/Qwen3-32B-AWQ-fp16` sigue fallando de forma correcta porque no existe su `engine_dir`
 
 Pendiente de cambios de código:
-- Validación backend de `pytest` en un entorno con dependencias completas
-- Validación productiva final de TensorRT-LLM con engines reales y toolchain objetivo
+- Autenticación administrativa en `/ocabra/*`
+- Validación backend de `pytest` en CI o en un contenedor con dependencias completas
+- Validación productiva final de TensorRT-LLM con más de un engine real y el toolchain CUDA/NVIDIA objetivo
+- Limpieza de inventario/config para entradas TRT-LLM persistidas con `engine_dir` inexistente
 
 El resto del fichero conserva el snapshot de auditoría anterior para trazabilidad, pero esta sección es la que debe considerarse viva.
 
@@ -208,8 +218,9 @@ Ficheros/directorios existentes no listados (selección):
 ## Backlog residual real
 
 - `SEC-1`: autenticación administrativa en `/ocabra/*`
-- Validación productiva final de TensorRT-LLM con engines reales y toolchain CUDA/NVIDIA objetivo
+- Validación productiva final de TensorRT-LLM con más de un engine real y toolchain CUDA/NVIDIA objetivo
 - Batería backend de `pytest` en entorno completo de CI o contenedor
+- Limpieza de entradas TRT-LLM persistidas con `engine_dir` inexistente
 - Limpieza estructural adicional de módulos inflados y código muerto restante si se prioriza deuda técnica sobre nuevas features
 
 ---

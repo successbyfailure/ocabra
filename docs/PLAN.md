@@ -41,7 +41,7 @@ enrutamiento delante de oCabra.
 ## Estado actual (2026-04-02)
 
 Implementado en código:
-- Fase 0 a Fase 4 implementadas en código; Fase 5 en curso de cierre documental y endurecimiento.
+- Fase 0 a Fase 4 implementadas en código; Fase 5 ya quedó mayormente cerrada y el backlog residual es corto y explícito.
 - IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en OpenAI `/v1/*`.
 - Backends first-class ya presentes en el runtime: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
 - UI Settings alineada con `/ocabra/config`; `modelsDir` es de solo lectura en runtime, `downloadDir`/`maxTemperatureC` son overrides en memoria y `globalSchedules` persiste en `eviction_schedules`.
@@ -52,13 +52,17 @@ Implementado en código:
 Validación reciente (2026-04-02):
 - `llama.cpp` validado end-to-end con modelo GGUF reciente (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`, archivo `qwen2.5-0.5b-instruct-q4_k_m.gguf`): registro, load y respuesta chat correctos.
 - `SGLang` validado en runtime real dentro del contenedor con entorno dedicado (`/opt/sglang-venv`), descarga y carga de modelo reciente (`HuggingFaceTB/SmolLM2-135M-Instruct`), y health/load correctos.
-- `TensorRT-LLM` endurecido para runtime mixto: soporte de lanzamiento por binario (`trtllm-serve`), por módulo Python (`python -m tensorrt_llm.commands.serve`) y por contenedor Docker NVIDIA (`launch_mode=docker`), con validaciones tempranas de prerequisitos y mensajes de diagnóstico.
+- `TensorRT-LLM` endurecido para runtime mixto: soporte de lanzamiento por binario (`trtllm-serve`), por módulo Python (`python -m tensorrt_llm.commands.serve`) y por contenedor Docker NVIDIA (`launch_mode=docker`), con validaciones tempranas de prerequisitos, reconciliación de huérfanos y mensajes de diagnóstico.
+- `TensorRT-LLM` validado end-to-end con engine real (`tensorrt_llm/Qwen3-8B-fp16`): carga, respuesta y descarga correctas, sin procesos `trtllm-serve`/`mpi4py` huérfanos.
+- `vLLM` validado end-to-end con `vllm/Qwen/Qwen3.5-0.8B`: carga, respuesta y descarga correctas.
+- `vLLM` validado end-to-end con `vllm/Qwen/Qwen3-32B-AWQ` tras ajustar `max_model_len` a `7800` para que el KV cache quepa en la RTX 3090; con `8000` fallaba por falta de memoria de KV cache.
 - Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
 
 Pendiente para cierre de plan:
 - Autenticación administrativa en `/ocabra/*` delante de la capa pública de oCabra.
-- Validar en entorno productivo final de `TensorRT-LLM` con engines reales y toolchain CUDA/NVIDIA objetivo (además de las validaciones de arranque ya incorporadas).
+- Completar la validación productiva final de `TensorRT-LLM` en el toolchain CUDA/NVIDIA objetivo con más de un engine y perfiles de producción.
   Comando smoke reproducible: `scripts/smoke_trtllm.py --engine-dir <ruta_engine_dir> --model-id tensorrt_llm/<org>/<modelo>`.
+- Limpiar entradas TRT-LLM mal configuradas en inventario persistido, como `tensorrt_llm/Qwen3-32B-AWQ-fp16`, que ahora mismo falla correctamente porque no existe su `engine_dir`.
 - Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.
 - Revisar tuning fino de scheduler de schedules (cron windows complejas, observabilidad y métricas de ejecución).
 - Cerrar la batería backend de `pytest` en CI o contenedor con dependencias completas.
@@ -121,7 +125,6 @@ DISCOVERED → CONFIGURED → [LOADING] → LOADED → [IDLE] → [UNLOADING] �
 ```
 ocabra/
 ├── docker-compose.yml
-├── docker-compose.dev.yml
 ├── .env.example
 ├── docs/
 │   └── PLAN.md
@@ -199,9 +202,9 @@ ocabra/
 │       │   └── aggregator.py        # Agregación periódica a BD
 │       │
 │       └── db/
-│           ├── models_config.py     # SQLAlchemy: ModelConfig
+│           ├── model_config.py      # SQLAlchemy: ModelConfig, EvictionSchedule
 │           ├── stats.py             # SQLAlchemy: RequestStat, GpuStat, ModelLoadStat
-│           └── server_config.py     # SQLAlchemy: ServerConfig
+│           └── trtllm.py            # SQLAlchemy: metadatos de compilación TRT-LLM
 │
 ├── frontend/
 │   ├── Dockerfile
@@ -242,10 +245,13 @@ ocabra/
 │           └── useWebSocket.ts
 │
 └── workers/                         # Scripts standalone para backends
-    ├── vllm_worker.py               # Wraps vLLM OpenAI server + healthcheck
     ├── diffusers_worker.py
-    ├── whisper_worker.py
-    └── tts_worker.py
+    ├── llama_cpp_worker.py
+    ├── sglang_worker.py
+    ├── tensorrt_llm_worker.py
+    ├── tts_worker.py
+    ├── vllm_worker.py               # Wraps vLLM OpenAI server + healthcheck
+    └── whisper_worker.py
 ```
 
 ---
