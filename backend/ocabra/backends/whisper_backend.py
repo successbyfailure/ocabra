@@ -325,7 +325,7 @@ def _extract_audio_file(body: dict) -> tuple[str, bytes, str]:
 
 
 def _resolve_worker_model_id(model_id: str, extra_config: dict) -> str:
-    configured = extra_config.get("base_model_id")
+    configured = _get_whisper_option(extra_config, "base_model_id")
     if isinstance(configured, str) and configured.strip():
         candidate = configured.strip()
     elif "::" in model_id:
@@ -337,14 +337,30 @@ def _resolve_worker_model_id(model_id: str, extra_config: dict) -> str:
 
 
 def _should_enable_diarization(model_id: str, extra_config: dict) -> bool:
-    configured = extra_config.get("diarization_enabled")
+    configured = _get_whisper_option(extra_config, "diarization_enabled")
     if isinstance(configured, bool):
         return configured
     return "diariz" in model_id.lower()
 
 
 def _resolve_diarization_model_id(extra_config: dict) -> str:
-    value = extra_config.get("diarization_model_id")
+    value = _get_whisper_option(extra_config, "diarization_model_id")
     if isinstance(value, str) and value.strip():
         return value.strip()
     return DEFAULT_DIARIZATION_MODEL_ID
+
+
+def _get_whisper_option(extra_config: dict, key: str) -> Any:
+    if not isinstance(extra_config, dict):
+        return None
+    whisper_config = extra_config.get("whisper")
+    if isinstance(whisper_config, dict):
+        if key in whisper_config:
+            return whisper_config[key]
+        camel_key = "".join(
+            part.capitalize() if index else part
+            for index, part in enumerate(key.split("_"))
+        )
+        if camel_key in whisper_config:
+            return whisper_config[camel_key]
+    return extra_config.get(key)

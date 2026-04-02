@@ -7,7 +7,12 @@ def is_diarized_model_id(model_id: str, extra_config: dict | None = None) -> boo
     if "diariz" in lowered:
         return True
     cfg = extra_config or {}
-    return bool(cfg.get("diarization_enabled") is True)
+    whisper_cfg = cfg.get("whisper") if isinstance(cfg.get("whisper"), dict) else {}
+    return bool(
+        cfg.get("diarization_enabled") is True
+        or whisper_cfg.get("diarization_enabled") is True
+        or whisper_cfg.get("diarizationEnabled") is True
+    )
 
 
 def diarized_variant_model_id(model_id: str) -> str:
@@ -29,6 +34,8 @@ def should_auto_create_diarized_variant(state) -> bool:
 def build_diarized_extra_config(base_extra_config: dict | None) -> dict:
     merged = dict(base_extra_config or {})
     merged["diarization_enabled"] = True
+    whisper_cfg = merged.get("whisper") if isinstance(merged.get("whisper"), dict) else {}
+    merged["whisper"] = {**whisper_cfg, "diarizationEnabled": True}
     return merged
 
 

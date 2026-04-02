@@ -532,6 +532,14 @@ def test_diarized_variant_helpers_for_whisper_models() -> None:
     )
     assert should_auto_create_diarized_variant(diarized_cfg_state) is False
 
+    diarized_nested_cfg_state = ModelState(
+        model_id="openai/whisper-medium",
+        display_name="wm",
+        backend_type="whisper",
+        extra_config={"whisper": {"diarizationEnabled": True}},
+    )
+    assert should_auto_create_diarized_variant(diarized_nested_cfg_state) is False
+
     non_whisper = ModelState(
         model_id="gpt-oss:20b",
         display_name="gpt",
@@ -542,3 +550,4 @@ def test_diarized_variant_helpers_for_whisper_models() -> None:
     merged = build_diarized_extra_config({"base_model_id": "/path/model.nemo"})
     assert merged["diarization_enabled"] is True
     assert merged["base_model_id"] == "/path/model.nemo"
+    assert merged["whisper"]["diarizationEnabled"] is True

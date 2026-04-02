@@ -132,6 +132,36 @@ async def test_whisper_load_uses_base_model_id_and_diarization_flags():
 
 
 @pytest.mark.asyncio
+async def test_whisper_load_accepts_nested_whisper_config():
+    backend = WhisperBackend()
+
+    with (
+        patch(
+            "ocabra.backends.whisper_backend.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_FakeProcess()),
+        ) as create_proc,
+        patch.object(backend, "_wait_until_healthy", new=AsyncMock(return_value=True)),
+    ):
+        await backend.load(
+            "openai/whisper-medium::diarize",
+            [0],
+            port=18013,
+            extra_config={
+                "whisper": {
+                    "baseModelId": "openai/whisper-small",
+                    "diarizationEnabled": True,
+                    "diarizationModelId": "pyannote/custom-diarization",
+                }
+            },
+        )
+
+    args = create_proc.await_args.args
+    assert "small" in args
+    assert "--diarize" in args
+    assert "pyannote/custom-diarization" in args
+
+
+@pytest.mark.asyncio
 async def test_build_multipart_includes_diarize_when_present():
     files, data = _build_transcription_multipart(
         {
