@@ -499,6 +499,24 @@ async def test_bitnet_gpu_layers_uses_extra_config_for_scheduling():
     )
 
 
+def test_apply_capability_fallbacks_prefers_tensorrt_extra_config_context_length():
+    from ocabra.core.model_manager import ModelState
+
+    state = ModelState(
+        model_id="tensorrt_llm/Qwen3-8B-fp16",
+        display_name="Qwen3-8B-fp16",
+        backend_type="tensorrt_llm",
+        backend_model_id="Qwen3-8B-fp16",
+        load_policy=LoadPolicy.ON_DEMAND,
+        extra_config={"context_length": 8192},
+    )
+
+    caps = BackendCapabilities(chat=True, completion=True, streaming=True, context_length=512)
+    merged = ModelManager._apply_capability_fallbacks(state, caps)
+
+    assert merged.context_length == 8192
+
+
 def test_diarized_variant_helpers_for_whisper_models() -> None:
     from ocabra.core.model_manager import ModelState
     from ocabra.core.model_manager_helpers import (

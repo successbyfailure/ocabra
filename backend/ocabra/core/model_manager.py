@@ -30,6 +30,13 @@ from ocabra.redis_client import get_key, publish, set_key
 logger = structlog.get_logger(__name__)
 
 
+def _to_camel_key(value: str) -> str:
+    return "".join(
+        part.capitalize() if index else part
+        for index, part in enumerate(value.split("_"))
+    )
+
+
 class ModelStatus(str, Enum):
     DISCOVERED = "discovered"
     CONFIGURED = "configured"
@@ -423,6 +430,7 @@ class ModelManager:
                 )
                 backend_loaded = True
                 capabilities = await backend.get_capabilities(state.backend_model_id)
+                capabilities = self._apply_capability_fallbacks(state, capabilities)
 
                 actual_gpu_indices = worker_info.gpu_indices or gpu_indices
                 state.worker_info = worker_info
@@ -477,6 +485,43 @@ class ModelManager:
                 raise
 
         return state
+
+    @staticmethod
+    def _apply_capability_fallbacks(
+        state: ModelState,
+        capabilities: BackendCapabilities,
+    ) -> BackendCapabilities:
+        fallback_context_length = ModelManager._resolve_context_length_fallback(state)
+        if fallback_context_length <= 0:
+            return capabilities
+
+        current_context_length = int(getattr(capabilities, "context_length", 0) or 0)
+        if current_context_length <= 0 or (
+            state.backend_type == "tensorrt_llm" and fallback_context_length > current_context_length
+        ):
+            capabilities.context_length = fallback_context_length
+        return capabilities
+
+    @staticmethod
+    def _resolve_context_length_fallback(state: ModelState) -> int:
+        extra_config = state.extra_config if isinstance(state.extra_config, dict) else {}
+
+        for key in ("context_length", "max_model_len", "ctx_size"):
+            value = extra_config.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+
+        for section_name in ("vllm", "sglang", "llama_cpp", "bitnet", "tensorrt_llm", "whisper"):
+            section = extra_config.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for key in ("context_length", "max_model_len", "ctx_size"):
+                for candidate in (key, _to_camel_key(key)):
+                    value = section.get(candidate)
+                    if isinstance(value, int) and value > 0:
+                        return value
+
+        return 0
 
     async def _record_model_load_stat(
         self,

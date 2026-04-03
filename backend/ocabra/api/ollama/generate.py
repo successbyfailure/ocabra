@@ -14,6 +14,7 @@ from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_m
 
 from ._mapper import resolve_model
 from ._shared import apply_option_map, build_native_passthrough_body, iter_sse_payloads, now_iso_z
+from .chat import _native_backend_model_name
 
 router = APIRouter()
 
@@ -39,9 +40,10 @@ async def generate(request: Request):
     if state.backend_type == "ollama":
         upstream_body = build_native_passthrough_body(
             body,
-            model=ollama_model,
+            model=_native_backend_model_name(ollama_model, state.backend_model_id),
             stream=stream,
             content_keys=("prompt",),
+            passthrough_keys=("suffix", "system", "template", "context", "raw", "format", "keep_alive", "images", "think"),
         )
         if stream:
             return StreamingResponse(

@@ -15,6 +15,18 @@ OPTION_MAP: dict[str, str] = {
     "repeat_penalty": "repetition_penalty",
 }
 
+NATIVE_OPTION_ALIAS_MAP: dict[str, str] = {
+    "max_tokens": "num_predict",
+    "num_predict": "num_predict",
+    "num_ctx": "num_ctx",
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "stop": "stop",
+    "seed": "seed",
+    "repeat_penalty": "repeat_penalty",
+}
+
 
 def now_iso_z() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -26,17 +38,22 @@ def build_native_passthrough_body(
     model: str,
     stream: bool,
     content_keys: tuple[str, ...],
+    passthrough_keys: tuple[str, ...] = (),
 ) -> dict:
     body: dict = {
         "model": model,
         "stream": stream,
     }
-    for key in content_keys:
+    for key in (*content_keys, *passthrough_keys):
         if key in payload:
             body[key] = payload[key]
 
     options = payload.get("options")
-    body["options"] = dict(options) if isinstance(options, Mapping) else {}
+    merged_options = dict(options) if isinstance(options, Mapping) else {}
+    for source_key, target_key in NATIVE_OPTION_ALIAS_MAP.items():
+        if source_key in payload and target_key not in merged_options:
+            merged_options[target_key] = payload[source_key]
+    body["options"] = merged_options
     return body
 
 

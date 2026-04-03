@@ -183,6 +183,28 @@ def test_has_tokenizer_files(tmp_path: Path) -> None:
     assert TensorRTLLMBackend._has_tokenizer_files(d) is True
 
 
+@pytest.mark.asyncio
+async def test_get_capabilities_prefers_engine_context_length(tmp_path: Path) -> None:
+    engine_root = tmp_path / "engines"
+    engine_dir = engine_root / "Qwen3-8B-fp16"
+    engine_dir.mkdir(parents=True)
+    (engine_dir / "config.json").write_text(
+        '{"build_config": {"max_seq_len": 8192}, "pretrained_config": {"mapping": {"tp_size": 1}}}',
+        encoding="utf-8",
+    )
+
+    backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)
+    with patch("ocabra.backends.tensorrt_llm_backend.settings") as ms:
+        ms.tensorrt_llm_context_length = 512
+        ms.tensorrt_llm_enabled = True
+        ms.tensorrt_llm_launch_mode = "binary"
+        ms.tensorrt_llm_serve_bin = "/usr/local/bin/trtllm-serve"
+        ms.tensorrt_llm_engines_dir = str(engine_root)
+        caps = await backend.get_capabilities("Qwen3-8B-fp16")
+
+    assert caps.context_length == 8192
+
+
 def test_is_orphaned_trt_command_filters_by_port_and_models_root() -> None:
     backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)
     with patch("ocabra.backends.tensorrt_llm_backend.settings") as ms:

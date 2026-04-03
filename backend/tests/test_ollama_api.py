@@ -146,6 +146,40 @@ def test_generate_passthroughs_native_ollama_body() -> None:
     }
 
 
+def test_native_backend_model_name_prefers_backend_model_id() -> None:
+    from ocabra.api.ollama.chat import _native_backend_model_name
+
+    assert _native_backend_model_name("ollama/qwen3:8b", "qwen3:8b") == "qwen3:8b"
+    assert _native_backend_model_name("qwen3:8b", None) == "qwen3:8b"
+
+
+def test_build_native_passthrough_body_promotes_top_level_limits_to_options() -> None:
+    from ocabra.api.ollama._shared import build_native_passthrough_body
+
+    body = build_native_passthrough_body(
+        {
+            "model": "qwen3:8b",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+            "think": False,
+            "max_tokens": 32,
+            "temperature": 0.1,
+        },
+        model="qwen3:8b",
+        stream=False,
+        content_keys=("messages",),
+        passthrough_keys=("keep_alive", "format", "think", "tools"),
+    )
+
+    assert body == {
+        "model": "qwen3:8b",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": False,
+        "think": False,
+        "options": {"num_predict": 32, "temperature": 0.1},
+    }
+
+
 def test_pull_delegates_to_download_manager() -> None:
     app = _make_app()
     client = TestClient(app)
@@ -229,3 +263,19 @@ def test_generate_translates_options_to_vllm_params() -> None:
     assert called.args[1] == "/v1/completions"
     assert called.args[2]["max_tokens"] == 12
     assert called.args[2]["repetition_penalty"] == 1.2
+
+
+def test_build_vllm_chat_body_preserves_top_level_max_tokens() -> None:
+    from ocabra.api.ollama.chat import _build_vllm_chat_body
+
+    body = _build_vllm_chat_body(
+        {
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+            "max_tokens": 12,
+        },
+        "meta-llama/Llama-3.2-3B-Instruct",
+        False,
+    )
+
+    assert body["max_tokens"] == 12

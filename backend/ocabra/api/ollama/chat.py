@@ -18,6 +18,10 @@ from ._shared import build_native_passthrough_body, iter_sse_payloads, now_iso_z
 router = APIRouter()
 
 
+def _native_backend_model_name(requested_model: str, backend_model_id: str | None) -> str:
+    return backend_model_id or requested_model
+
+
 @router.post("/chat", summary="Create chat completion")
 async def chat(request: Request):
     """
@@ -39,9 +43,10 @@ async def chat(request: Request):
     if state.backend_type == "ollama":
         upstream_body = build_native_passthrough_body(
             body,
-            model=ollama_model,
+            model=_native_backend_model_name(ollama_model, state.backend_model_id),
             stream=stream,
             content_keys=("messages",),
+            passthrough_keys=("keep_alive", "format", "think", "tools"),
         )
         if stream:
             return StreamingResponse(
@@ -85,7 +90,16 @@ def _build_vllm_chat_body(payload: dict, model_id: str, stream: bool) -> dict:
         "stream": stream,
     }
 
-    for key in ("tools", "tool_choice", "response_format", "temperature", "top_p", "stop", "seed"):
+    for key in (
+        "tools",
+        "tool_choice",
+        "response_format",
+        "temperature",
+        "top_p",
+        "stop",
+        "seed",
+        "max_tokens",
+    ):
         if key in payload:
             body[key] = payload[key]
 

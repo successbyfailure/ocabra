@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -201,6 +202,7 @@ class TensorRTLLMBackend(BackendInterface):
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         normalized = model_id.lower()
+        context_length = self._infer_context_length(model_id)
         return BackendCapabilities(
             chat="embed" not in normalized,
             completion=True,
@@ -209,7 +211,7 @@ class TensorRTLLMBackend(BackendInterface):
             embeddings=any(token in normalized for token in ("embed", "embedding", "bge", "e5")),
             reasoning=any(token in normalized for token in ("deepseek-r1", "qwen3", "reason")),
             streaming=True,
-            context_length=int(settings.tensorrt_llm_context_length or 0),
+            context_length=context_length,
         )
 
     async def get_vram_estimate_mb(self, model_id: str) -> int:
@@ -232,14 +234,41 @@ class TensorRTLLMBackend(BackendInterface):
     @staticmethod
     def _read_engine_tp_size(engine_dir: Path) -> int:
         """Read tp_size from engine config.json, defaulting to 1."""
-        import json as _json
         cfg_path = engine_dir / "config.json"
         try:
-            cfg = _json.loads(cfg_path.read_text())
+            cfg = json.loads(cfg_path.read_text())
             mapping = cfg.get("pretrained_config", {}).get("mapping", {})
             return int(mapping.get("tp_size") or mapping.get("world_size") or 1)
         except Exception:
             return 1
+
+    def _infer_context_length(self, model_id: str) -> int:
+        try:
+            engine_dir = self._resolve_engine_dir(model_id, {})
+        except Exception:
+            return int(settings.tensorrt_llm_context_length or 0)
+
+        scan_dir = engine_dir / "engine" if (engine_dir / "engine").is_dir() else engine_dir
+        cfg_path = scan_dir / "config.json"
+        if not cfg_path.exists():
+            return int(settings.tensorrt_llm_context_length or 0)
+
+        try:
+            cfg = json.loads(cfg_path.read_text())
+        except Exception:
+            return int(settings.tensorrt_llm_context_length or 0)
+
+        for section in (cfg, cfg.get("build_config", {}), cfg.get("pretrained_config", {})):
+            if not isinstance(section, dict):
+                continue
+            for key in ("max_seq_len", "max_input_len", "context_length", "max_context_length"):
+                value = section.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+
+        return int(settings.tensorrt_llm_context_length or 0)
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         entry = self._processes.get(model_id)
