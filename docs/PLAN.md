@@ -58,7 +58,11 @@ Validación reciente (2026-04-02):
 - `vLLM` validado end-to-end con `vllm/Qwen/Qwen3.5-0.8B`: carga, respuesta y descarga correctas.
 - `vLLM` validado end-to-end con `vllm/Qwen/Qwen3-32B-AWQ` tras ajustar `max_model_len` a `7800` para que el KV cache quepa en la RTX 3090; con `8000` fallaba por falta de memoria de KV cache.
 - `POST /ocabra/models/{model_id}/memory-estimate` validado con heurística y probe runtime real; permite ver presupuesto de memoria, KV cache y contexto máximo estimado antes de guardar configuración.
+- Compatibilidad Ollama corregida y validada en runtime real: `/api/chat` y `/api/generate` ya reenvían el `backend_model_id` nativo y respetan `max_tokens` como `num_predict`.
 - Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
+
+Referencia operativa:
+- Baseline de benchmark documentado en `docs/benchmarks/qwen3-backends-2026-04-03.md`, con metodología reproducible para `vllm`, `tensorrt_llm` y `ollama` sobre variantes Qwen3.
 
 Pendiente para cierre de plan:
 - Autenticación administrativa en `/ocabra/*` delante de la capa pública de oCabra.

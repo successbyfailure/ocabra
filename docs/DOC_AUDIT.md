@@ -15,6 +15,9 @@ Documentación ya alineada con el código:
 - `modelsDir` es de solo lectura en runtime; `downloadDir` y `maxTemperatureC` siguen siendo overrides en memoria.
 - La configuración de modelos expone estimación de memoria rápida y, para `vllm`, probe real con el engine.
 - `TensorRT-LLM` y `vLLM` han quedado validados en runtime real con carga, respuesta y descarga sin huérfanos.
+- La compatibilidad Ollama ya traduce `max_tokens -> num_predict` y usa `backend_model_id` nativo al reenviar `/api/chat` y `/api/generate`.
+- `TensorRT-LLM` deriva `context_length` desde el `config.json` real del engine y lo alinea con el estado del modelo.
+- Existe un baseline de benchmark reproducible en `docs/benchmarks/qwen3-backends-2026-04-03.md`.
 - `docs/agents/` y `docs/tasks/` se han reducido a estado actual o notas de archivo; ya no deben usarse como plan maestro.
 
 ## Cambios vivos recientes que ya deben asumirse
