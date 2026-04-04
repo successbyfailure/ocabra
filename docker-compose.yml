@@ -47,6 +47,11 @@ services:
       ACESTEP_BASE_URL: ${ACESTEP_BASE_URL:-http://acestep:7860}
       ACESTEP_UI_URL: ${ACESTEP_UI_URL:-}
       ACESTEP_PREFERRED_GPU: ${ACESTEP_PREFERRED_GPU:-1}
+      OCABRA_ADMIN_USER: ${OCABRA_ADMIN_USER:-ocabra}
+      OCABRA_ADMIN_PASS: ${OCABRA_ADMIN_PASS:-ocabra}
+      JWT_SECRET: ${JWT_SECRET:-}
+      REQUIRE_API_KEY_OPENAI: ${REQUIRE_API_KEY_OPENAI:-true}
+      REQUIRE_API_KEY_OLLAMA: ${REQUIRE_API_KEY_OLLAMA:-true}
     env_file: .env
 #    ports:
 #      - "8000:8000"
@@ -120,6 +125,9 @@ services:
     build:
       context: ./Hunyuan3D-2.1
       dockerfile: docker/Dockerfile
+    command: ["python", "gradio_app.py", "--host", "0.0.0.0", "--port", "8080",
+              "--cache-path", "./gradio_cache", "--low_vram_mode",
+              "--root-path", "${HUNYUAN_UI_URL:-}"]
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -214,7 +222,7 @@ services:
     ipc: host
     shm_size: "2gb"
     environment:
-      NVIDIA_VISIBLE_DEVICES: ${ACESTEP_NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_VISIBLE_DEVICES: ${ACESTEP_NVIDIA_VISIBLE_DEVICES:-1}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       # "gradio" (default) — Gradio UI on port 7860
       # "api"              — REST API on port 8001 (set ACESTEP_BASE_URL=http://acestep:8001 in api service)
@@ -247,6 +255,20 @@ services:
       timeout: 10s
       start_period: 300s
       retries: 3
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      OCABRA_API_URL: http://api:8000
+      GATEWAY_PORT: "9000"
+    ports:
+      - "${GATEWAY_PORT:-9000}:9000"
+    depends_on:
+      - api
     restart: unless-stopped
 
   caddy:

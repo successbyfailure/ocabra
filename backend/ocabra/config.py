@@ -1,4 +1,6 @@
-from pydantic import field_validator
+import secrets
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -161,6 +163,11 @@ class Settings(BaseSettings):
     hunyuan_docker_container: str = "ocabra-hunyuan-1"
     comfyui_docker_container: str = "ocabra-comfyui-1"
     a1111_docker_container: str = "ocabra-a1111-1"
+    # Seconds to wait for an active generation to finish before forcing eviction.
+    # 0 = evict immediately, -1 = wait indefinitely (not recommended for pressure eviction).
+    hunyuan_generation_grace_period_s: int = 120
+    comfyui_generation_grace_period_s: int = 120
+    a1111_generation_grace_period_s: int = 120
 
     # LiteLLM
     litellm_base_url: str = "http://litellm:4000"
@@ -180,6 +187,10 @@ class Settings(BaseSettings):
     acestep_preferred_gpu: int = 1
     acestep_idle_unload_seconds: int = 1800  # 0 = disabled; default 30 min
     acestep_docker_container: str = "ocabra-acestep-1"
+    acestep_generation_grace_period_s: int = 180
+    # GPU utilization threshold (%) used to infer active generation for services that
+    # have no dedicated generation-status endpoint (Hunyuan, ACE-Step).
+    generation_gpu_util_threshold_pct: int = 50
     # Optional: if set, AceStepBackend will proxy to this external ACE-Step REST API
     # instead of spawning a local subprocess (use when running ACE-Step as a Docker service
     # with ACESTEP_MODE=api). Example: http://acestep:8001
@@ -187,6 +198,18 @@ class Settings(BaseSettings):
 
     # Energy
     energy_cost_eur_kwh: float = 0.15
+
+    # Auth
+    jwt_secret: str = Field(default_factory=lambda: secrets.token_hex(32))
+    jwt_ttl_hours: int = 24
+    jwt_remember_days: int = 30
+    ocabra_admin_user: str = "ocabra"
+    ocabra_admin_pass: str = "ocabra"
+    use_https: bool = False
+
+    # API access control
+    require_api_key_openai: bool = True
+    require_api_key_ollama: bool = True
 
     @field_validator(
         "vllm_attention_backend",

@@ -324,6 +324,7 @@ async def lifespan(app: FastAPI):
     await service_manager.start()
     app.state.service_manager = service_manager
     model_manager.set_service_manager(service_manager)
+    service_manager.set_gpu_manager(gpu_manager)
     logger.info("service_manager_ready")
 
     from ocabra.core.trtllm_compile_manager import TrtllmCompileManager
@@ -358,6 +359,13 @@ async def lifespan(app: FastAPI):
         _service_health_loop(service_manager, service_health_stop),
         name="service-health-loop",
     )
+
+    # Auth: seed first admin if the users table is empty
+    from ocabra.core.auth_manager import seed_first_admin
+    from ocabra.database import AsyncSessionLocal as _ASL
+    async with _ASL() as _session:
+        await seed_first_admin(_session)
+    logger.info("auth_seed_done")
 
     logger.info("vllm_backend_registered")
     logger.info("ocabra_ready")
@@ -438,10 +446,12 @@ app.include_router(ws_router, prefix="/ocabra")
 from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
 from ocabra.api.internal.registry import router as registry_router  # noqa: E402
 from ocabra.api.internal.services import router as services_router  # noqa: E402
+from ocabra.api.internal.host import router as host_router  # noqa: E402
 
 app.include_router(registry_router, prefix="/ocabra")
 app.include_router(downloads_router, prefix="/ocabra")
 app.include_router(services_router, prefix="/ocabra")
+app.include_router(host_router, prefix="/ocabra")
 
 # Stream 3-A: OpenAI API
 from ocabra.api.openai import router as openai_router  # noqa: E402
@@ -462,4 +472,8 @@ app.include_router(stats_router, prefix="/ocabra")
 # C-7: TensorRT-LLM compile
 from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
 app.include_router(trtllm_router, prefix="/ocabra")
+
+# Auth foundation
+from ocabra.api.internal.auth import router as auth_router  # noqa: E402
+app.include_router(auth_router, prefix="/ocabra")
 # ─────────────────────────────────────────────────────────────
