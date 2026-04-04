@@ -5,9 +5,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 
+from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.model_ref import parse_model_ref
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -45,7 +46,10 @@ class ModelMemoryEstimateRequest(BaseModel):
 
 
 @router.get("/models")
-async def list_models(request: Request) -> list[dict]:
+async def list_models(
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> list[dict]:
     """List all configured models and their runtime state."""
     mm = request.app.state.model_manager
     await _sync_ollama_inventory(mm)
@@ -59,7 +63,9 @@ async def list_models(request: Request) -> list[dict]:
 
 
 @router.get("/models/storage")
-async def get_models_storage() -> dict:
+async def get_models_storage(
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
     """Return storage usage for the models directory filesystem."""
     models_dir = Path(settings.models_dir or "/data/models")
     try:
@@ -79,7 +85,11 @@ async def get_models_storage() -> dict:
 
 
 @router.get("/models/{model_id:path}")
-async def get_model(model_id: str, request: Request) -> dict:
+async def get_model(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
     """Get state of a specific model."""
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
@@ -90,7 +100,11 @@ async def get_model(model_id: str, request: Request) -> dict:
 
 
 @router.post("/models")
-async def add_model(body: AddModelRequest, request: Request) -> dict:
+async def add_model(
+    body: AddModelRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
     """Register a new model configuration."""
     mm = request.app.state.model_manager
     try:
@@ -109,7 +123,11 @@ async def add_model(body: AddModelRequest, request: Request) -> dict:
 
 
 @router.post("/models/{model_id:path}/load")
-async def load_model(model_id: str, request: Request) -> dict:
+async def load_model(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
     """Load a model onto a GPU."""
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
@@ -129,7 +147,11 @@ async def load_model(model_id: str, request: Request) -> dict:
 
 
 @router.post("/models/{model_id:path}/unload")
-async def unload_model(model_id: str, request: Request) -> dict:
+async def unload_model(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
     """Unload a model from GPU."""
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
@@ -141,7 +163,12 @@ async def unload_model(model_id: str, request: Request) -> dict:
 
 
 @router.patch("/models/{model_id:path}")
-async def update_model(model_id: str, body: ModelPatch, request: Request) -> dict:
+async def update_model(
+    model_id: str,
+    body: ModelPatch,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
     """Update model configuration."""
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
@@ -160,6 +187,7 @@ async def estimate_model_memory(
     model_id: str,
     body: ModelMemoryEstimateRequest,
     request: Request,
+    _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """Estimate memory requirements for the current backend/config combination."""
     mm = request.app.state.model_manager
@@ -182,6 +210,7 @@ async def delete_model(
     model_id: str,
     request: Request,
     delete_files: bool = Query(default=True),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Remove a model configuration and its files from disk.
 
