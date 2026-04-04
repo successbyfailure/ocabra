@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+
+from ocabra.api._deps_auth import UserContext, get_current_user
 
 if TYPE_CHECKING:
     from ocabra.core.model_manager import ModelManager, ModelState
@@ -49,13 +51,47 @@ def get_model_manager(request: Request) -> ModelManager:
     return request.app.state.model_manager
 
 
-async def resolve_model(model_manager: ModelManager, model_id: str) -> tuple[str, ModelState | None]:
+async def get_openai_user(
+    user: UserContext = Depends(get_current_user),
+) -> UserContext:
+    """Resolve auth for OpenAI-compatible endpoints.
+
+    Delegates to ``get_current_user`` which already handles:
+    - Bearer API key resolution.
+    - Cookie JWT resolution.
+    - Anonymous access when ``require_api_key_openai=False``.
+    - HTTP 401 when ``require_api_key_openai=True`` and no credentials provided.
+
+    Returns:
+        Resolved :class:`UserContext` for the caller.
+
+    Raises:
+        HTTPException 401: When authentication is required but missing or invalid.
     """
-    Resolve a model id by canonical id or backend_model_id alias.
+    return user
+
+
+async def resolve_model(
+    model_manager: ModelManager,
+    model_id: str,
+    user: UserContext | None = None,
+) -> tuple[str, ModelState | None]:
+    """Resolve a model id by canonical id or backend_model_id alias.
 
     Resolution order:
     1) Exact canonical match (model_id)
     2) First state whose backend_model_id equals requested value
+
+    If *user* is provided and the resolved model is not in the user's accessible
+    model set, the model is treated as not found (404) to avoid leaking existence.
+
+    Args:
+        model_manager: The application :class:`ModelManager`.
+        model_id: Requested model identifier (canonical or alias).
+        user: Optional resolved :class:`UserContext`; used to filter model access.
+
+    Returns:
+        Tuple of ``(resolved_model_id, ModelState | None)``.
     """
     requested = str(model_id or "").strip()
     if not requested:
@@ -63,14 +99,23 @@ async def resolve_model(model_manager: ModelManager, model_id: str) -> tuple[str
 
     exact = await model_manager.get_state(requested)
     if exact is not None:
-        return requested, exact
+        resolved_id = requested
+        resolved_state = exact
+    else:
+        states = await model_manager.list_states()
+        resolved_id = requested
+        resolved_state = None
+        for state in states:
+            if state.backend_model_id == requested:
+                resolved_id = state.model_id
+                resolved_state = state
+                break
 
-    states = await model_manager.list_states()
-    for state in states:
-        if state.backend_model_id == requested:
-            return state.model_id, state
+    if resolved_state is not None and user is not None:
+        if not user.is_admin and resolved_id not in user.accessible_model_ids:
+            return resolved_id, None
 
-    return requested, None
+    return resolved_id, resolved_state
 
 
 async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelState:

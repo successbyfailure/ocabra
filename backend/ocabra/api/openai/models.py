@@ -5,23 +5,30 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
-from ._deps import get_model_manager, resolve_model
+from ocabra.api._deps_auth import UserContext
+
+from ._deps import get_model_manager, get_openai_user, resolve_model
 
 router = APIRouter()
 
 
 @router.get("/models", summary="List models")
-async def list_models(request: Request) -> dict:
+async def list_models(
+    request: Request,
+    user: UserContext = Depends(get_openai_user),
+) -> dict:
     """
     List all configured/loaded models in OpenAI-compatible format.
+
+    Filters models by the caller's group membership unless the caller is an admin.
     Includes an 'ocabra' extension field with status, capabilities, and GPU info.
     """
     from ocabra.core.model_manager import ModelStatus
 
     model_manager = get_model_manager(request)
-    states = await model_manager.list_states()
+    all_states = await model_manager.list_states()
 
     visible_statuses = {
         ModelStatus.LOADED,
@@ -29,6 +36,12 @@ async def list_models(request: Request) -> dict:
         ModelStatus.LOADING,
         ModelStatus.UNLOADED,
     }
+
+    if user.is_admin:
+        states = all_states
+    else:
+        states = [s for s in all_states if s.model_id in user.accessible_model_ids]
+
     data = []
     for state in states:
         if state.status not in visible_statuses:
@@ -53,10 +66,14 @@ async def list_models(request: Request) -> dict:
 
 
 @router.get("/models/{model_id:path}", summary="Retrieve a model")
-async def get_model(model_id: str, request: Request) -> dict:
+async def get_model(
+    model_id: str,
+    request: Request,
+    user: UserContext = Depends(get_openai_user),
+) -> dict:
     """Retrieve a single model by ID or by backend model name alias."""
     model_manager = get_model_manager(request)
-    _, state = await resolve_model(model_manager, model_id)
+    _, state = await resolve_model(model_manager, model_id, user=user)
     if not state:
         from ._deps import _openai_error
 
