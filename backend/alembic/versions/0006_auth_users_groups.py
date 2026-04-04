@@ -110,35 +110,16 @@ def upgrade() -> None:
     )
     op.create_index("ix_group_models_model_id", "group_models", ["model_id"])
 
-    # ── alter request_stats: add user_id FK ───────────────────
-    op.add_column(
-        "request_stats",
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_request_stats_user_id",
-        "request_stats",
-        "users",
-        ["user_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_index("ix_request_stats_user_id", "request_stats", ["user_id"])
-
     # ── seed: default group ────────────────────────────────────
     op.execute(
         sa.text(
             "INSERT INTO groups (id, name, description, is_default) "
-            "VALUES (:id, 'default', 'Default group — all users have implicit access', true)"
-        ).bindparams(id=str(uuid.uuid4()))
+            "VALUES (gen_random_uuid(), 'default', 'Default group — all users have implicit access', true)"
+        )
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_request_stats_user_id", table_name="request_stats")
-    op.drop_constraint("fk_request_stats_user_id", "request_stats", type_="foreignkey")
-    op.drop_column("request_stats", "user_id")
-
     op.drop_index("ix_group_models_model_id", table_name="group_models")
     op.drop_table("group_models")
     op.drop_table("user_groups")

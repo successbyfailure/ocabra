@@ -21,7 +21,18 @@ def upgrade() -> None:
         "request_stats",
         sa.Column("user_id", sa.Uuid(), nullable=True),
     )
+    op.create_foreign_key(
+        "fk_request_stats_user_id",
+        "request_stats",
+        "users",
+        ["user_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_index("ix_request_stats_user_id", "request_stats", ["user_id"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_request_stats_user_id", table_name="request_stats")
+    op.drop_constraint("fk_request_stats_user_id", "request_stats", type_="foreignkey")
     op.drop_column("request_stats", "user_id")
