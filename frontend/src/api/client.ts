@@ -26,6 +26,8 @@ import type {
   CompileJob,
   ModelsStorageStats,
   ModelMemoryEstimate,
+  AuthUser,
+  ApiKey,
 } from "@/types"
 
 const BASE = ""
@@ -700,6 +702,32 @@ function toServiceState(raw: unknown): ServiceState {
     lastActivityAt: (data.last_activity_at ?? data.lastActivityAt ?? null) as string | null,
     lastHealthCheckAt: (data.last_health_check_at ?? data.lastHealthCheckAt ?? null) as string | null,
     detail: (data.detail ?? null) as string | null,
+    isGenerating: Boolean(data.is_generating ?? data.isGenerating ?? false),
+    queueDepth: Number(data.queue_depth ?? data.queueDepth ?? 0),
+    vramUsedMb: data.vram_used_mb == null && data.vramUsedMb == null ? null : Number(data.vram_used_mb ?? data.vramUsedMb),
+    gpuUtilPct: data.gpu_util_pct == null && data.gpuUtilPct == null ? null : Number(data.gpu_util_pct ?? data.gpuUtilPct),
+    cpuPct: data.cpu_pct == null && data.cpuPct == null ? null : Number(data.cpu_pct ?? data.cpuPct),
+    memUsedMb: data.mem_used_mb == null && data.memUsedMb == null ? null : Number(data.mem_used_mb ?? data.memUsedMb),
+    memLimitMb: data.mem_limit_mb == null && data.memLimitMb == null ? null : Number(data.mem_limit_mb ?? data.memLimitMb),
+  }
+}
+
+function toHostStats(raw: unknown): import("@/types").HostStats {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    cpuPct: Number(d.cpu_pct ?? d.cpuPct ?? 0),
+    cpuCount: Number(d.cpu_count ?? d.cpuCount ?? 0),
+    cpuCountPhysical: Number(d.cpu_count_physical ?? d.cpuCountPhysical ?? 0),
+    loadAvg1m: Number(d.load_avg_1m ?? d.loadAvg1m ?? 0),
+    loadAvg5m: Number(d.load_avg_5m ?? d.loadAvg5m ?? 0),
+    loadAvg15m: Number(d.load_avg_15m ?? d.loadAvg15m ?? 0),
+    memTotalMb: Number(d.mem_total_mb ?? d.memTotalMb ?? 0),
+    memUsedMb: Number(d.mem_used_mb ?? d.memUsedMb ?? 0),
+    memFreeMb: Number(d.mem_free_mb ?? d.memFreeMb ?? 0),
+    memPct: Number(d.mem_pct ?? d.memPct ?? 0),
+    swapTotalMb: Number(d.swap_total_mb ?? d.swapTotalMb ?? 0),
+    swapUsedMb: Number(d.swap_used_mb ?? d.swapUsedMb ?? 0),
+    swapPct: Number(d.swap_pct ?? d.swapPct ?? 0),
   }
 }
 
@@ -726,6 +754,30 @@ function toCompileJob(raw: unknown): CompileJob {
     engineDir: (data.engine_dir ?? data.engineDir ?? null) as string | null,
     startedAt: (data.started_at ?? data.startedAt ?? null) as string | null,
     finishedAt: (data.finished_at ?? data.finishedAt ?? null) as string | null,
+  }
+}
+
+function toAuthUser(raw: unknown): AuthUser {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    id: String(d.id ?? ""),
+    username: String(d.username ?? ""),
+    email: (d.email ?? null) as string | null,
+    role: String(d.role ?? "user") as AuthUser["role"],
+    createdAt: String(d.created_at ?? d.createdAt ?? ""),
+  }
+}
+
+function toApiKey(raw: unknown): ApiKey {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    id: String(d.id ?? ""),
+    name: String(d.name ?? ""),
+    keyPrefix: String(d.key_prefix ?? d.keyPrefix ?? ""),
+    expiresAt: (d.expires_at ?? d.expiresAt ?? null) as string | null,
+    lastUsedAt: (d.last_used_at ?? d.lastUsedAt ?? null) as string | null,
+    isRevoked: Boolean(d.is_revoked ?? d.isRevoked ?? false),
+    createdAt: String(d.created_at ?? d.createdAt ?? ""),
   }
 }
 
@@ -852,6 +904,10 @@ export const api = {
       toServiceState(await request<unknown>("PATCH", `/ocabra/services/${encodeURIComponent(serviceId)}`, patch)),
   },
 
+  host: {
+    stats: async () => toHostStats(await request<unknown>("GET", "/ocabra/host/stats")),
+  },
+
   config: {
     get: async () => toServerConfig(await request<unknown>("GET", "/ocabra/config")),
     patch: async (patch: Partial<ServerConfig>) =>
@@ -909,6 +965,41 @@ export const api = {
       const raw = await request<Record<string, unknown>>("GET", `/ocabra/trtllm/estimate?${qs}`)
       return toVramEstimate(raw)
     },
+  },
+
+  auth: {
+    login: async (username: string, password: string, remember?: boolean): Promise<{ user: AuthUser }> => {
+      const raw = await request<Record<string, unknown>>("POST", "/ocabra/auth/login", {
+        username,
+        password,
+        remember: remember ?? false,
+      })
+      return { user: toAuthUser(raw.user ?? raw) }
+    },
+
+    logout: (): Promise<void> => request<void>("POST", "/ocabra/auth/logout"),
+
+    me: async (): Promise<AuthUser> => toAuthUser(await request<unknown>("GET", "/ocabra/auth/me")),
+
+    changePassword: (currentPassword: string, newPassword: string): Promise<void> =>
+      request<void>("PUT", "/ocabra/auth/password", {
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+
+    listKeys: async (): Promise<ApiKey[]> =>
+      (await request<unknown[]>("GET", "/ocabra/auth/keys")).map(toApiKey),
+
+    createKey: async (name: string, expiresInDays?: number | null): Promise<ApiKey & { key: string }> => {
+      const raw = await request<Record<string, unknown>>("POST", "/ocabra/auth/keys", {
+        name,
+        expires_in_days: expiresInDays ?? null,
+      })
+      return { ...toApiKey(raw), key: String(raw.key ?? "") }
+    },
+
+    revokeKey: (keyId: string): Promise<void> =>
+      request<void>("DELETE", `/ocabra/auth/keys/${encodeURIComponent(keyId)}`),
   },
 }
 
