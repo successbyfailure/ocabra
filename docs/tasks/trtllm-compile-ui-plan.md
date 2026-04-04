@@ -1,9 +1,9 @@
 # Plan: Compilación de engines TensorRT-LLM desde la UI
 
 **Fecha:** 2026-03-31
-**Estado:** PENDIENTE DE IMPLEMENTACIÓN
+**Estado:** IMPLEMENTADO (2026-04-04)
 
-Documento activo. Mantener mientras esta funcionalidad siga en backlog.
+Documento archivado. Conservar como referencia de diseño.
 
 ---
 

@@ -23,12 +23,13 @@ Si hay conflicto entre instrucciones, prioriza primero la seguridad y el alcance
 - LiteLLM Proxy actúa como capa externa de autenticación
 
 **Documentación esencial:**
-- `docs/PLAN.md` — Plan completo, arquitectura, fases
+- `docs/PLAN.md` — Plan completo, arquitectura, fases y estado actual
+- `docs/ROADMAP.md` — Trabajo pendiente y orden de ejecución (**fuente de verdad del backlog**)
 - `docs/CONTRACTS.md` — Interfaces entre módulos (LEE ESTO ANTES DE IMPLEMENTAR)
 - `docs/CONVENTIONS.md` — Estilo de código y naming
-- `docs/DOC_AUDIT.md` — Estado documental y backlog residual real
+- `docs/REFACTOR_PLAN.md` — Historial del refactor (cerrado); 3 items residuales documentados
 - `docs/agents/` — Estado resumido por stream, no plan maestro
-- `docs/tasks/` — Solo algunos documentos siguen activos; el resto son archivo histórico
+- `docs/tasks/` — Solo `langfuse-integration-plan.md` sigue activo; el resto son archivo histórico
 
 ## Reglas de colaboración multi-agente
 

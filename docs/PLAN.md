@@ -38,46 +38,51 @@ enrutamiento delante de oCabra.
 | Frontend serve | Nginx |
 | Reverse proxy | Caddy |
 
-## Estado actual (2026-04-02)
+## Estado actual (2026-04-04)
 
-Implementado en código:
-- Fase 0 a Fase 4 implementadas en código; Fase 5 ya quedó mayormente cerrada y el backlog residual es corto y explícito.
-- IDs canónicas de modelo en formato `backend/model`, con alias por nombre nativo (`backend_model_id`) en OpenAI `/v1/*`.
-- Backends first-class ya presentes en el runtime: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
-- UI Settings alineada con `/ocabra/config`; `modelsDir` es de solo lectura en runtime, `downloadDir`/`maxTemperatureC` son overrides en memoria y `globalSchedules` persiste en `eviction_schedules`.
-- Configuración por modelo racionalizada por backend; `ModelConfigModal` muestra estimación rápida de memoria y, para `vllm`, permite lanzar un probe real del engine antes de guardar cambios.
-- `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/start`, `/ocabra/services/runtime` y `/ocabra/services/unload` ya están expuestos.
-- Stats persistidos: `request_stats`, `gpu_stats` y `model_load_stats`.
-- Frontend servido por Nginx; Caddy actúa como reverse proxy.
+**Todas las fases del plan original (0–5) están implementadas y en producción.**
 
-Validación reciente (2026-04-02):
-- `llama.cpp` validado end-to-end con modelo GGUF reciente (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`, archivo `qwen2.5-0.5b-instruct-q4_k_m.gguf`): registro, load y respuesta chat correctos.
-- `SGLang` validado en runtime real dentro del contenedor con entorno dedicado (`/opt/sglang-venv`), descarga y carga de modelo reciente (`HuggingFaceTB/SmolLM2-135M-Instruct`), y health/load correctos.
-- `TensorRT-LLM` endurecido para runtime mixto: soporte de lanzamiento por binario (`trtllm-serve`), por módulo Python (`python -m tensorrt_llm.commands.serve`) y por contenedor Docker NVIDIA (`launch_mode=docker`), con validaciones tempranas de prerequisitos, reconciliación de huérfanos y mensajes de diagnóstico.
-- `TensorRT-LLM` validado end-to-end con engine real (`tensorrt_llm/Qwen3-8B-fp16`): carga, respuesta y descarga correctas, sin procesos `trtllm-serve`/`mpi4py` huérfanos.
-- `vLLM` validado end-to-end con `vllm/Qwen/Qwen3.5-0.8B`: carga, respuesta y descarga correctas.
-- `vLLM` validado end-to-end con `vllm/Qwen/Qwen3-32B-AWQ` tras ajustar `max_model_len` a `7800` para que el KV cache quepa en la RTX 3090; con `8000` fallaba por falta de memoria de KV cache.
-- `POST /ocabra/models/{model_id}/memory-estimate` validado con heurística y probe runtime real; permite ver presupuesto de memoria, KV cache y contexto máximo estimado antes de guardar configuración.
-- Compatibilidad Ollama corregida y validada en runtime real: `/api/chat` y `/api/generate` ya reenvían el `backend_model_id` nativo y respetan `max_tokens` como `num_predict`.
-- Tests backend relevantes en verde (`test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`).
+El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
+El trabajo pendiente está en `docs/ROADMAP.md`.
 
-Referencia operativa:
-- Baseline de benchmark documentado en `docs/benchmarks/qwen3-backends-2026-04-03.md`, con metodología reproducible para `vllm`, `tensorrt_llm` y `ollama` sobre variantes Qwen3.
+### Implementado en código
 
-Pendiente para cierre de plan:
-- Autenticación administrativa en `/ocabra/*` delante de la capa pública de oCabra.
-- Completar la validación productiva final de `TensorRT-LLM` en el toolchain CUDA/NVIDIA objetivo con más de un engine y perfiles de producción.
-  Comando smoke reproducible: `scripts/smoke_trtllm.py --engine-dir <ruta_engine_dir> --model-id tensorrt_llm/<org>/<modelo>`.
-- Limpiar entradas TRT-LLM mal configuradas en inventario persistido, como `tensorrt_llm/Qwen3-32B-AWQ-fp16`, que ahora mismo falla correctamente porque no existe su `engine_dir`.
-- Mantener ampliación de tests e2e para flujos completos de carga/descarga por backend.
-- Revisar tuning fino de scheduler de schedules (cron windows complejas, observabilidad y métricas de ejecución).
-- Cerrar la batería backend de `pytest` en CI o contenedor con dependencias completas.
+- Fases 0–5 completas.
+- IDs canónicas de modelo `backend/model`, con alias `backend_model_id` en OpenAI `/v1/*`.
+- Backends first-class: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
+- UI Settings alineada con `/ocabra/config`; `modelsDir` de solo lectura, `downloadDir`/`maxTemperatureC` overrides en memoria, `globalSchedules` persiste en `eviction_schedules` (BD).
+- Configuración por modelo con estimación rápida de memoria y probe real de engine vLLM.
+- Endpoints expuestos: `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/*`, `/ocabra/host/stats`.
+- Stats persistidos: `request_stats`, `gpu_stats`, `model_load_stats`.
+- Compilación de engines TRT-LLM desde la UI: `CompileManager`, endpoints SSE, modal y página `TrtllmEngines`.
+- Path traversal protegido con `_is_path_within_base()` en borrado de modelos y engines.
+- Race conditions en `_in_flight` resueltas con `threading.Lock`.
+- `global_schedules` persistido en BD via `replace_global_schedules()`.
+- `last_request_at` persistido en Redis; rehidratado al arrancar.
+- CORS restringido a `localhost/127.0.0.1` via `allow_origin_regex`.
+- Frontend servido por Nginx; Caddy como reverse proxy.
 
-Nuevas funcionalidades planificadas:
-- **Compilación de engines TRT-LLM desde la UI** — permitir compilar engines TensorRT-LLM
-  directamente desde oCabra, con soporte para 1 GPU o 2 GPUs (tensor parallelism).
-  Caso de uso principal: `Qwen3.5-27B-GPTQ-Int4` en GPU 1 (3090).
-  Plan completo en `docs/tasks/trtllm-compile-ui-plan.md`.
+### Validaciones end-to-end confirmadas
+
+- `llama.cpp`: `Qwen/Qwen2.5-0.5B-Instruct-GGUF` — registro, load, chat correctos.
+- `SGLang`: `HuggingFaceTB/SmolLM2-135M-Instruct` — health/load correctos.
+- `TensorRT-LLM`: `tensorrt_llm/Qwen3-8B-fp16` — carga, respuesta, descarga sin huérfanos.
+- `vLLM`: `vllm/Qwen/Qwen3.5-0.8B` y `vllm/Qwen/Qwen3-32B-AWQ` (con `max_model_len=7800`).
+- Compatibilidad Ollama: `/api/chat` y `/api/generate` con `backend_model_id` nativo y `num_predict`.
+- Tests backend en verde: `test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`.
+
+### Referencia operativa
+
+- Benchmark baseline: `docs/benchmarks/qwen3-backends-2026-04-03.md` (`vllm`, `tensorrt_llm`, `ollama` sobre Qwen3).
+
+### Pendiente
+
+Ver `docs/ROADMAP.md`. Resumen:
+- **SEC-1**: Autenticación en `/ocabra/*` — única tarea bloqueante para exposición pública.
+- **Langfuse**: Integración de observabilidad (plan en `docs/tasks/langfuse-integration-plan.md`).
+- **Fixes menores**: B6 (`ModelPatch` null reset), A4 (shutdown en `_watch_and_reload`), M7 (`HFModelVariant` Literal).
+- **Tests**: Cobertura de paths críticos y flujos e2e por backend.
+- **Operativo**: Limpiar `tensorrt_llm/Qwen3-32B-AWQ-fp16` del inventario; validar TRT-LLM con múltiples engines.
 
 ---
 
