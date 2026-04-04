@@ -248,6 +248,7 @@ async def get_current_user(request: Request) -> UserContext:
         if cookie_token:
             ctx = await _resolve_jwt_cookie(cookie_token, session)
             if ctx is not None:
+                request.state.auth_user = ctx
                 return ctx
             # Cookie present but invalid → 401 (don't fall through to anonymous).
             raise HTTPException(status_code=401, detail="Session expired or invalid")
@@ -258,6 +259,7 @@ async def get_current_user(request: Request) -> UserContext:
             raw_key = auth_header[len("Bearer "):]
             ctx = await _resolve_api_key(raw_key, session)
             if ctx is not None:
+                request.state.auth_user = ctx
                 return ctx
             # Header present but key invalid → 401.
             raise HTTPException(status_code=401, detail="Invalid or expired API key")
@@ -277,7 +279,9 @@ async def get_current_user(request: Request) -> UserContext:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        return await _build_anonymous_context(session)
+        ctx = await _build_anonymous_context(session)
+        request.state.auth_user = ctx
+        return ctx
 
 
 def require_role(min_role: str):
