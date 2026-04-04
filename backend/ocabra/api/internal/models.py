@@ -147,7 +147,7 @@ async def update_model(model_id: str, body: ModelPatch, request: Request) -> dic
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    patch = body.model_dump(exclude_unset=True)
     try:
         updated = await mm.update_config(model_id, patch)
     except ValueError as exc:
