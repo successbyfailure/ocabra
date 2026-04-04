@@ -28,6 +28,13 @@ import type {
   ModelMemoryEstimate,
   AuthUser,
   ApiKey,
+  AdminUser,
+  GroupMember,
+  Group,
+  CreateUserPayload,
+  UpdateUserPayload,
+  CreateGroupPayload,
+  UpdateGroupPayload,
 } from "@/types"
 
 const BASE = ""
@@ -768,6 +775,40 @@ function toAuthUser(raw: unknown): AuthUser {
   }
 }
 
+function toAdminUser(raw: unknown): AdminUser {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    id: String(d.id ?? ""),
+    username: String(d.username ?? ""),
+    email: (d.email ?? null) as string | null,
+    role: String(d.role ?? "user") as AdminUser["role"],
+    isActive: Boolean(d.is_active ?? d.isActive ?? true),
+    createdAt: String(d.created_at ?? d.createdAt ?? ""),
+  }
+}
+
+function toGroupMember(raw: unknown): GroupMember {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    userId: String(d.user_id ?? d.userId ?? d.id ?? ""),
+    username: String(d.username ?? ""),
+    role: String(d.role ?? "user") as GroupMember["role"],
+  }
+}
+
+function toGroup(raw: unknown): Group {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    id: String(d.id ?? ""),
+    name: String(d.name ?? ""),
+    description: String(d.description ?? ""),
+    isDefault: Boolean(d.is_default ?? d.isDefault ?? false),
+    memberCount: Number(d.member_count ?? d.memberCount ?? 0),
+    modelCount: Number(d.model_count ?? d.modelCount ?? 0),
+    createdAt: String(d.created_at ?? d.createdAt ?? ""),
+  }
+}
+
 function toApiKey(raw: unknown): ApiKey {
   const d = isRecord(raw) ? raw : {}
   return {
@@ -1000,6 +1041,117 @@ export const api = {
 
     revokeKey: (keyId: string): Promise<void> =>
       request<void>("DELETE", `/ocabra/auth/keys/${encodeURIComponent(keyId)}`),
+  },
+
+  users: {
+    list: async (): Promise<AdminUser[]> =>
+      (await request<unknown[]>("GET", "/ocabra/users")).map(toAdminUser),
+    create: async (data: CreateUserPayload): Promise<AdminUser> =>
+      toAdminUser(
+        await request<unknown>("POST", "/ocabra/users", {
+          username: data.username,
+          password: data.password,
+          role: data.role,
+          email: data.email ?? null,
+        }),
+      ),
+    get: async (id: string): Promise<AdminUser> =>
+      toAdminUser(await request<unknown>("GET", `/ocabra/users/${encodeURIComponent(id)}`)),
+    update: async (id: string, data: UpdateUserPayload): Promise<AdminUser> =>
+      toAdminUser(
+        await request<unknown>("PATCH", `/ocabra/users/${encodeURIComponent(id)}`, {
+          role: data.role,
+          is_active: data.isActive,
+          email: data.email,
+        }),
+      ),
+    remove: (id: string): Promise<void> =>
+      request<void>("DELETE", `/ocabra/users/${encodeURIComponent(id)}`),
+    resetPassword: (id: string, newPassword: string): Promise<void> =>
+      request<void>("POST", `/ocabra/users/${encodeURIComponent(id)}/reset-password`, {
+        new_password: newPassword,
+      }),
+    listKeys: async (id: string): Promise<ApiKey[]> =>
+      (await request<unknown[]>("GET", `/ocabra/users/${encodeURIComponent(id)}/keys`)).map(toApiKey),
+    revokeKey: (userId: string, keyId: string): Promise<void> =>
+      request<void>("DELETE", `/ocabra/users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}`),
+  },
+
+  groups: {
+    list: async (): Promise<Group[]> =>
+      (await request<unknown[]>("GET", "/ocabra/groups")).map(toGroup),
+    create: async (data: CreateGroupPayload): Promise<Group> =>
+      toGroup(
+        await request<unknown>("POST", "/ocabra/groups", {
+          name: data.name,
+          description: data.description ?? null,
+        }),
+      ),
+    update: async (id: string, data: UpdateGroupPayload): Promise<Group> =>
+      toGroup(
+        await request<unknown>("PATCH", `/ocabra/groups/${encodeURIComponent(id)}`, {
+          name: data.name,
+          description: data.description,
+        }),
+      ),
+    remove: (id: string): Promise<void> =>
+      request<void>("DELETE", `/ocabra/groups/${encodeURIComponent(id)}`),
+    listModels: async (id: string): Promise<string[]> => {
+      const raw = await request<unknown[]>("GET", `/ocabra/groups/${encodeURIComponent(id)}/models`)
+      return raw.map((item) => {
+        if (typeof item === "string") return item
+        const r = isRecord(item) ? item : {}
+        return String(r.model_id ?? r.modelId ?? r.id ?? item)
+      })
+    },
+    addModel: (id: string, modelId: string): Promise<void> =>
+      request<void>("POST", `/ocabra/groups/${encodeURIComponent(id)}/models`, {
+        model_id: modelId,
+      }),
+    removeModel: (id: string, modelId: string): Promise<void> =>
+      request<void>(
+        "DELETE",
+        `/ocabra/groups/${encodeURIComponent(id)}/models/${encodeURIComponent(modelId)}`,
+      ),
+    listMembers: async (id: string): Promise<GroupMember[]> =>
+      (await request<unknown[]>("GET", `/ocabra/groups/${encodeURIComponent(id)}/members`)).map(toGroupMember),
+    addMember: (id: string, userId: string): Promise<void> =>
+      request<void>("POST", `/ocabra/groups/${encodeURIComponent(id)}/members`, {
+        user_id: userId,
+      }),
+    removeMember: (id: string, userId: string): Promise<void> =>
+      request<void>(
+        "DELETE",
+        `/ocabra/groups/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      ),
+    /**
+     * Returns the IDs of groups that contain the given model.
+     * Fetches all groups and filters client-side using their model lists.
+     */
+    getModelGroups: async (modelId: string): Promise<string[]> => {
+      const groups = await (api.groups.list())
+      const results = await Promise.all(
+        groups.map(async (group) => {
+          const modelIds = await api.groups.listModels(group.id)
+          return modelIds.includes(modelId) ? group.id : null
+        }),
+      )
+      return results.filter((id): id is string => id !== null)
+    },
+    /**
+     * Synchronizes group membership for a model by adding to addGroupIds
+     * and removing from removeGroupIds.
+     */
+    updateModelGroups: async (
+      modelId: string,
+      addGroupIds: string[],
+      removeGroupIds: string[],
+    ): Promise<void> => {
+      await Promise.all([
+        ...addGroupIds.map((gid) => api.groups.addModel(gid, modelId)),
+        ...removeGroupIds.map((gid) => api.groups.removeModel(gid, modelId)),
+      ])
+    },
   },
 }
 
