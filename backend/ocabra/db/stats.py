@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text
+import sqlalchemy as sa
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +30,8 @@ class RequestStat(Base):
     # Vatios-hora estimados consumidos durante el request
     energy_wh: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(Text)
+    # Authenticated user who made the request; NULL for anonymous callers.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True)
 
 
 class GpuStat(Base):
@@ -67,4 +70,29 @@ class ModelLoadStat(Base):
 
     __table_args__ = (
         Index("ix_model_load_stats_started_at_model", "started_at", "model_id"),
+    )
+
+
+class ServiceGenerationStat(Base):
+    """One row per completed (or force-evicted) generation job on an interactive service."""
+
+    __tablename__ = "service_generation_stats"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    service_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    service_type: Mapped[str | None] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    vram_peak_mb: Mapped[int | None] = mapped_column(Integer)
+    # True when the generation was interrupted by a forced eviction (grace period expired)
+    evicted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("ix_svc_gen_stats_started_at_svc", "started_at", "service_id"),
     )
