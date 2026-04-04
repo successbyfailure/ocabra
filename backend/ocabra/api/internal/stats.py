@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+
+from ocabra.api._deps_auth import UserContext, require_role
 
 router = APIRouter(tags=["stats"])
 
@@ -16,6 +18,7 @@ async def request_stats(
     to_dt: datetime | None = Query(None, alias="to"),
     model_id: str | None = Query(None, alias="model_id"),
     model_id_camel: str | None = Query(None, alias="modelId"),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Return aggregated request statistics for the given time window."""
     from ocabra.stats.aggregator import get_request_stats
@@ -27,6 +30,7 @@ async def request_stats(
 async def energy_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """Return energy consumption statistics per GPU."""
     from ocabra.stats.aggregator import get_energy_stats
@@ -40,6 +44,7 @@ async def performance_stats(
     to_dt: datetime | None = Query(None, alias="to"),
     model_id: str | None = Query(None, alias="model_id"),
     model_id_camel: str | None = Query(None, alias="modelId"),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Return per-model performance statistics."""
     from ocabra.stats.aggregator import get_performance_stats
@@ -53,6 +58,7 @@ async def token_stats(
     to_dt: datetime | None = Query(None, alias="to"),
     model_id: str | None = Query(None, alias="model_id"),
     model_id_camel: str | None = Query(None, alias="modelId"),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Return token usage totals and timeline."""
     from ocabra.stats.aggregator import get_token_stats
@@ -66,6 +72,7 @@ async def overview_stats(
     to_dt: datetime | None = Query(None, alias="to"),
     model_id: str | None = Query(None, alias="model_id"),
     model_id_camel: str | None = Query(None, alias="modelId"),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Return high-level statistics segmented by backend and request kind."""
     from ocabra.stats.aggregator import get_overview_stats
