@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { X } from "lucide-react"
+import { toast } from "sonner"
 import { api } from "@/api/client"
 import {
   formatTokenCount,
@@ -16,10 +17,12 @@ import {
 } from "@/lib/modelContext"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
+import { useIsAdmin } from "@/hooks/useAuth"
 import type {
   BackendExtraConfig,
   EvictionSchedule,
   GPUState,
+  Group,
   LoadPolicy,
   ModelMemoryEstimate,
   ModelState,
@@ -194,11 +197,19 @@ function setNestedConfig(
 }
 
 export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: ModelConfigModalProps) {
+  const isAdmin = useIsAdmin()
+
   const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand")
   const [preferredGpu, setPreferredGpu] = useState<number | null>(null)
   const [autoReload, setAutoReload] = useState(false)
   const [schedules, setSchedules] = useState<EvictionSchedule[]>([])
   const [saving, setSaving] = useState(false)
+
+  // Group assignment state (system_admin only)
+  const [allGroups, setAllGroups] = useState<Group[]>([])
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set())
+  const [initialGroupIds, setInitialGroupIds] = useState<Set<string>>(new Set())
+  const [loadingGroups, setLoadingGroups] = useState(false)
 
   const [tensorParallelSize, setTensorParallelSize] = useState("")
   const [maxModelLen, setMaxModelLen] = useState("")
@@ -312,6 +323,33 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
       whisper?.diarizationModelId == null ? "" : String(whisper.diarizationModelId),
     )
   }, [bitnet, llamaCpp, model, sglang, tensorrt, vllm, whisper])
+
+  // Load groups for system_admin when modal opens
+  useEffect(() => {
+    if (!open || !model || !isAdmin) return
+    let cancelled = false
+    setLoadingGroups(true)
+    void (async () => {
+      try {
+        const [groups, modelGroupIds] = await Promise.all([
+          api.groups.list(),
+          api.groups.getModelGroups(model.modelId),
+        ])
+        if (cancelled) return
+        setAllGroups(groups)
+        const idSet = new Set(modelGroupIds)
+        setSelectedGroupIds(new Set(idSet))
+        setInitialGroupIds(new Set(idSet))
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : "No se pudieron cargar los grupos")
+        }
+      } finally {
+        if (!cancelled) setLoadingGroups(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [open, model, isAdmin])
 
   const applyRecipeSuggestedConfig = () => {
     const suggested = recipeSuggestedConfig
@@ -544,13 +582,25 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     if (!model) return
     setSaving(true)
     try {
-      await onSave(model.modelId, {
+      const savePromise = onSave(model.modelId, {
         loadPolicy,
         preferredGpu,
         autoReload,
         schedules,
         extraConfig: buildExtraConfig(),
       })
+
+      // Sync group assignments if admin and groups changed
+      let groupSyncPromise: Promise<void> = Promise.resolve()
+      if (isAdmin && allGroups.length > 0) {
+        const addGroupIds = [...selectedGroupIds].filter((id) => !initialGroupIds.has(id))
+        const removeGroupIds = [...initialGroupIds].filter((id) => !selectedGroupIds.has(id))
+        if (addGroupIds.length > 0 || removeGroupIds.length > 0) {
+          groupSyncPromise = api.groups.updateModelGroups(model.modelId, addGroupIds, removeGroupIds)
+        }
+      }
+
+      await Promise.all([savePromise, groupSyncPromise])
       onOpenChange(false)
     } finally {
       setSaving(false)
@@ -1251,6 +1301,54 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 <p className="text-sm text-muted-foreground">
                   Si aparece una necesidad operativa real, añadiremos el parámetro concreto en lugar de abrir todo el runtime.
                 </p>
+              </FieldSection>
+            )}
+
+            {isAdmin && (
+              <FieldSection
+                title="Grupos"
+                description="Asigna o retira este modelo de grupos de acceso. Solo visible para system_admin."
+              >
+                {loadingGroups ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={`group-skel-${i}`} className="h-6 animate-pulse rounded bg-muted" />
+                    ))}
+                  </div>
+                ) : allGroups.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No hay grupos configurados.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {allGroups.map((group) => (
+                      <label key={group.id} className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={selectedGroupIds.has(group.id)}
+                          onChange={(e) => {
+                            setSelectedGroupIds((prev) => {
+                              const next = new Set(prev)
+                              if (e.target.checked) {
+                                next.add(group.id)
+                              } else {
+                                next.delete(group.id)
+                              }
+                              return next
+                            })
+                          }}
+                        />
+                        <span className="font-medium">{group.name}</span>
+                        {group.description && (
+                          <span className="text-muted-foreground">— {group.description}</span>
+                        )}
+                        {group.isDefault && (
+                          <span className="rounded-full bg-blue-500/15 px-1.5 py-0.5 text-xs text-blue-600 dark:text-blue-400">
+                            default
+                          </span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                )}
               </FieldSection>
             )}
 
