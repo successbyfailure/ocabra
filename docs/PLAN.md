@@ -4,8 +4,9 @@
 
 Servidor de modelos de IA de alto rendimiento compatible con las APIs de OpenAI y Ollama.
 Gestiona múltiples GPUs, carga modelos bajo demanda, y sirve cualquier tipo de modelo
-(LLM, imagen, audio, TTS, multimodal). LiteLLM Proxy actúa como capa de autenticación y
-enrutamiento delante de oCabra.
+(LLM, imagen, audio, TTS, multimodal). Incluye sistema de autenticación propio (JWT + API keys),
+grupos de acceso a modelos, y gateway para servicios interactivos de generación.
+LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rate-limiting.
 
 ---
 
@@ -41,6 +42,7 @@ enrutamiento delante de oCabra.
 ## Estado actual (2026-04-04)
 
 **Todas las fases del plan original (0–5) están implementadas y en producción.**
+**El sistema de autenticación y el gateway de servicios también están implementados.**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
 El trabajo pendiente está en `docs/ROADMAP.md`.
@@ -50,13 +52,16 @@ El trabajo pendiente está en `docs/ROADMAP.md`.
 - Fases 0–5 completas.
 - IDs canónicas de modelo `backend/model`, con alias `backend_model_id` en OpenAI `/v1/*`.
 - Backends first-class: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
-- UI Settings alineada con `/ocabra/config`; `modelsDir` de solo lectura, `downloadDir`/`maxTemperatureC` overrides en memoria, `globalSchedules` persiste en `eviction_schedules` (BD).
+- **Auth system completo**: JWT (cookie HTTP-only), API keys por usuario (`sk-ocabra-...`), 3 roles (`user`, `model_manager`, `system_admin`), grupos de acceso a modelos.
+- Modo sin key configurable por separado para OpenAI y Ollama (anonymous → solo grupo default).
+- **Settings persistidos en BD** (`server_config`): `PATCH /ocabra/config` persiste en PostgreSQL; `.env` solo establece valores iniciales.
+- **Gateway de servicios** (`gateway/`): proxy para HunyuanVideo, ComfyUI, A1111, AceStep con directorio autenticado.
+- UI Settings alineada con `/ocabra/config`; `globalSchedules` persiste en `eviction_schedules` (BD).
 - Configuración por modelo con estimación rápida de memoria y probe real de engine vLLM.
 - Endpoints expuestos: `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/*`, `/ocabra/host/stats`.
 - Stats persistidos: `request_stats`, `gpu_stats`, `model_load_stats`.
 - Compilación de engines TRT-LLM desde la UI: `CompileManager`, endpoints SSE, modal y página `TrtllmEngines`.
 - Path traversal protegido con `_is_path_within_base()` en borrado de modelos y engines.
-- Race conditions en `_in_flight` resueltas con `threading.Lock`.
 - `global_schedules` persistido en BD via `replace_global_schedules()`.
 - `last_request_at` persistido en Redis; rehidratado al arrancar.
 - CORS restringido a `localhost/127.0.0.1` via `allow_origin_regex`.
@@ -68,7 +73,7 @@ El trabajo pendiente está en `docs/ROADMAP.md`.
 - `SGLang`: `HuggingFaceTB/SmolLM2-135M-Instruct` — health/load correctos.
 - `TensorRT-LLM`: `tensorrt_llm/Qwen3-8B-fp16` — carga, respuesta, descarga sin huérfanos.
 - `vLLM`: `vllm/Qwen/Qwen3.5-0.8B` y `vllm/Qwen/Qwen3-32B-AWQ` (con `max_model_len=7800`).
-- Compatibilidad Ollama: `/api/chat` y `/api/generate` con `backend_model_id` nativo y `num_predict`.
+- Compatibilidad Ollama: `/api/chat`, `/api/generate`, `/api/embed` (con fallback a `/api/embeddings` para Ollama < 0.3).
 - Tests backend en verde: `test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`.
 
 ### Referencia operativa
@@ -78,7 +83,6 @@ El trabajo pendiente está en `docs/ROADMAP.md`.
 ### Pendiente
 
 Ver `docs/ROADMAP.md`. Resumen:
-- **SEC-1**: Autenticación en `/ocabra/*` — única tarea bloqueante para exposición pública.
 - **Langfuse**: Integración de observabilidad (plan en `docs/tasks/langfuse-integration-plan.md`).
 - **Fixes menores**: B6 (`ModelPatch` null reset), A4 (shutdown en `_watch_and_reload`), M7 (`HFModelVariant` Literal).
 - **Tests**: Cobertura de paths críticos y flujos e2e por backend.
@@ -90,7 +94,7 @@ Ver `docs/ROADMAP.md`. Resumen:
 
 ```
                     ┌─────────────────────┐
-                    │   LiteLLM Proxy     │  ← Autenticación, routing, rate limit
+                    │   LiteLLM Proxy     │  ← Routing/rate-limit opcional
                     │   (externo)         │
                     └─────────┬───────────┘
                               │ OpenAI API

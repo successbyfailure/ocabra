@@ -16,22 +16,20 @@ La UI de compilación de engines TRT-LLM también está implementada y cableada.
 
 ---
 
-## Bloque 1 — Auth, usuarios y grupos (bloqueante para exposición pública)
-
-**Prioridad: CRÍTICA**
+## ✅ Bloque 1 — Auth, usuarios y grupos (COMPLETADO)
 
 Plan completo en `docs/tasks/auth-system-plan.md`.
 
-### Resumen
+### Implementado
 
-- 3 roles jerárquicos: `user`, `model_manager`, `system_admin`
-- Sesión JWT (cookie HTTP-only) para el dashboard; 24h por defecto, 30d con "recordarme"
-- API keys por usuario para OpenAI/Ollama (`Authorization: Bearer sk-ocabra-...`)
-- Modo sin key configurable por separado para OpenAI y Ollama (anonymous → solo grupo default)
-- Grupos de acceso a modelos; los usuarios solo ven modelos de sus grupos en `/v1/models`
-- Primer admin desde `.env` (`OCABRA_ADMIN_USER/PASS`, default `ocabra/ocabra`)
-- Reemplaza LiteLLM como capa de auth (solo modelos locales)
-- 5 fases de implementación + tests
+- 3 roles: `user`, `model_manager`, `system_admin`
+- Sesión JWT (cookie HTTP-only) para el dashboard
+- API keys por usuario (`sk-ocabra-...`) para OpenAI y Ollama
+- Modo sin key configurable por separado (anonymous → solo grupo default)
+- Grupos de acceso a modelos con selector por backend en la UI
+- Página de API Keys en el sidebar
+- Auth interna reemplaza LiteLLM como capa de autenticación
+- Gateway de servicios con directorio autenticado
 
 ---
 
@@ -149,11 +147,11 @@ Paths críticos sin tests confirmados en el audit:
 ## Orden de ejecución sugerido
 
 ```
-[Ahora]     SEC-1 (auth)  ←── bloqueante para exponer en red
-            B6 + A4 + M7  ←── quick wins, < 2h en total
+[✅ Hecho]  Auth + gateway + settings persistence
 
-[Siguiente] Settings DB    ←── .env solo como valor inicial, overrides en BD
-            Langfuse       ←── feature autocontenida, plan listo
+[Ahora]     B6 + A4 + M7  ←── quick wins, < 2h en total
+
+[Siguiente] Langfuse       ←── feature autocontenida, plan listo
             Tests batch    ←── paths críticos
 
 [Cuando proceda] WS system_alert · OpenAPI docs · first-run script
