@@ -373,6 +373,8 @@ export interface ServerConfig {
   tensorrtLlmMaxBatchSize: number | null
   tensorrtLlmContextLength: number | null
   globalSchedules: EvictionSchedule[]
+  requireApiKeyOpenai: boolean
+  requireApiKeyOllama: boolean
 }
 
 export interface StatsParams {

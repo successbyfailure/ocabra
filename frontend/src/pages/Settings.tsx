@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
 import { LiteLLMSettings } from "@/components/settings/LiteLLMSettings"
 import { StorageSettings } from "@/components/settings/StorageSettings"
-import { ApiKeyManager } from "@/components/auth/ApiKeyManager"
-import { useCurrentUser } from "@/hooks/useAuth"
 import type { GPUState, LocalModel, ServerConfig } from "@/types"
 
 const EMPTY_CONFIG: ServerConfig = {
@@ -52,10 +51,11 @@ const EMPTY_CONFIG: ServerConfig = {
   tensorrtLlmMaxBatchSize: null,
   tensorrtLlmContextLength: null,
   globalSchedules: [],
+  requireApiKeyOpenai: true,
+  requireApiKeyOllama: true,
 }
 
 export function Settings() {
-  const user = useCurrentUser()
   const [loading, setLoading] = useState(true)
   const [config, setConfig] = useState<ServerConfig>(EMPTY_CONFIG)
   const [gpus, setGpus] = useState<GPUState[]>([])
@@ -119,16 +119,12 @@ export function Settings() {
       ) : (
         <div className="grid gap-4">
           <GeneralSettings config={config} onSave={savePatch} />
+          <ApiAccessSettings config={config} onSave={savePatch} />
           <GPUSettings gpus={gpus} config={config} onSave={savePatch} />
           <BackendRuntimeSettings config={config} onSave={savePatch} />
           <LiteLLMSettings config={config} onSave={savePatch} />
           <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
           <GlobalSchedules config={config} onSave={savePatch} />
-          {user !== null && (
-            <div className="rounded-lg border border-border bg-card p-4">
-              <ApiKeyManager />
-            </div>
-          )}
         </div>
       )}
     </div>

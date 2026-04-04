@@ -211,6 +211,9 @@ class Settings(BaseSettings):
     require_api_key_openai: bool = True
     require_api_key_ollama: bool = True
 
+    # Gateway service-to-service token (empty = disabled)
+    gateway_service_token: str = ""
+
     @field_validator(
         "vllm_attention_backend",
         "vllm_tensor_parallel_size",

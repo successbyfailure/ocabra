@@ -241,6 +241,10 @@ class GPUManager:
                 self._poll_history[i] = []
             await session.commit()
 
+    def get_state_nowait(self, index: int) -> GPUState | None:
+        """Return the most recently cached GPU state without awaiting the poll loop."""
+        return self._states.get(index)
+
     async def get_all_states(self) -> list[GPUState]:
         return list(self._states.values())
 

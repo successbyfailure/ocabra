@@ -8,7 +8,7 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { ServiceState } from "@/types"
+import type { HostStats, ServiceState } from "@/types"
 
 function formatLoadedAgo(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -34,6 +34,64 @@ function loadedMeta(loadedAt: string | null, nowMs: number): { at: string; ago: 
   })
   return { at, ago: formatLoadedAgo(seconds) }
 }
+function MiniBar({ pct, color }: { pct: number; color: string }) {
+  return (
+    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+      <div
+        className={`h-full rounded-full transition-all ${color}`}
+        style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+      />
+    </div>
+  )
+}
+
+function HostStatsCard({ stats }: { stats: HostStats }) {
+  const cpuColor =
+    stats.cpuPct > 90 ? "bg-red-500" : stats.cpuPct > 70 ? "bg-amber-500" : "bg-emerald-500"
+  const memColor =
+    stats.memPct > 90 ? "bg-red-500" : stats.memPct > 70 ? "bg-amber-500" : "bg-blue-500"
+
+  const memUsedGb = (stats.memUsedMb / 1024).toFixed(1)
+  const memTotalGb = (stats.memTotalMb / 1024).toFixed(1)
+
+  return (
+    <div className="rounded-lg border border-border bg-card px-4 py-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Host · {stats.cpuCountPhysical}C/{stats.cpuCount}T</span>
+        <span className="text-xs text-muted-foreground">
+          load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
+        </span>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="flex justify-between text-xs text-muted-foreground">
+          <span>CPU</span>
+          <span className="font-mono">{stats.cpuPct.toFixed(1)}%</span>
+        </div>
+        <MiniBar pct={stats.cpuPct} color={cpuColor} />
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="flex justify-between text-xs text-muted-foreground">
+          <span>RAM</span>
+          <span className="font-mono">{memUsedGb} / {memTotalGb} GB</span>
+        </div>
+        <MiniBar pct={stats.memPct} color={memColor} />
+      </div>
+
+      {stats.swapTotalMb > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-xs text-muted-foreground">
+            <span>Swap</span>
+            <span className="font-mono">{(stats.swapUsedMb / 1024).toFixed(1)} / {(stats.swapTotalMb / 1024).toFixed(1)} GB</span>
+          </div>
+          <MiniBar pct={stats.swapPct} color="bg-purple-500" />
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ServiceCard({ service }: { service: ServiceState }) {
   const unloadService = useServiceStore((s) => s.unloadService)
   const startService = useServiceStore((s) => s.startService)
@@ -133,6 +191,32 @@ function ServiceCard({ service }: { service: ServiceState }) {
               {service.activeModelRef ? `Modelo: ${service.activeModelRef}` : "Runtime cargado"}
             </span>
           )}
+          {service.isGenerating && (
+            <span className="rounded-md bg-emerald-900/40 px-2 py-0.5 text-emerald-300 border border-emerald-500/30">
+              🎨 Generando{service.queueDepth > 0 ? ` (+${service.queueDepth} en cola)` : ""}
+            </span>
+          )}
+          {service.vramUsedMb != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5">
+              💾 {(service.vramUsedMb / 1024).toFixed(1)} GB VRAM
+            </span>
+          )}
+          {service.gpuUtilPct != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5">
+              ⚡ GPU {Math.round(service.gpuUtilPct)}%
+            </span>
+          )}
+          {service.cpuPct != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5">
+              🖥 CPU {service.cpuPct.toFixed(1)}%
+            </span>
+          )}
+          {service.memUsedMb != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5">
+              🗄 RAM {(service.memUsedMb / 1024).toFixed(1)}
+              {service.memLimitMb != null ? `/${(service.memLimitMb / 1024).toFixed(0)}` : ""} GB
+            </span>
+          )}
           {!service.enabled && service.serviceAlive && (
             <span className="rounded-md bg-red-500/10 px-2 py-0.5 text-red-300">
               Runtime activo fuera de oCabra
@@ -209,6 +293,7 @@ function ServiceCard({ service }: { service: ServiceState }) {
 export function Dashboard() {
   const [error, setError] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
+  const [hostStats, setHostStats] = useState<HostStats | null>(null)
 
   const { connected } = useWebSocket()
 
@@ -241,6 +326,20 @@ export function Dashboard() {
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    async function pollHostStats() {
+      try {
+        const stats = await api.host.stats()
+        setHostStats(stats)
+      } catch {
+        // non-critical, keep stale data
+      }
+    }
+    void pollHostStats()
+    const timer = window.setInterval(() => void pollHostStats(), 5000)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -283,7 +382,8 @@ export function Dashboard() {
           {gpus.map((gpu) => (
             <GpuCard key={gpu.index} gpu={gpu} />
           ))}
-          {gpus.length === 0 && (
+          {hostStats && <HostStatsCard stats={hostStats} />}
+          {gpus.length === 0 && !hostStats && (
             <div className="rounded-lg border border-dashed border-border p-8 text-center text-muted-foreground">
               No GPU stats available.
             </div>

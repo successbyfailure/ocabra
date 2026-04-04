@@ -1,10 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useState, type FormEvent } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Tabs from "@radix-ui/react-tabs"
-import { Plus, X, Trash2, Users as UsersIcon, Layers } from "lucide-react"
+import { Plus, X, Trash2, Users as UsersIcon, Layers, Search } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import type { AdminUser, Group, GroupMember } from "@/types"
+import type { AdminUser, Group, GroupMember, ModelState } from "@/types"
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -154,10 +154,12 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
   const [models, setModels] = useState<string[]>([])
   const [members, setMembers] = useState<GroupMember[]>([])
   const [allUsers, setAllUsers] = useState<AdminUser[]>([])
+  const [allModels, setAllModels] = useState<ModelState[]>([])
   const [loadingModels, setLoadingModels] = useState(true)
   const [loadingMembers, setLoadingMembers] = useState(true)
-  const [newModelId, setNewModelId] = useState("")
-  const [addingModel, setAddingModel] = useState(false)
+  const [modelSearch, setModelSearch] = useState("")
+  const [modelBackendTab, setModelBackendTab] = useState("all")
+  const [addingModelId, setAddingModelId] = useState<string | null>(null)
   const [selectedUserId, setSelectedUserId] = useState("")
   const [addingMember, setAddingMember] = useState(false)
   const [confirmRemoveModel, setConfirmRemoveModel] = useState<string | null>(null)
@@ -165,8 +167,14 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
 
   useEffect(() => {
     setLoadingModels(true)
-    api.groups.listModels(group.id)
-      .then(setModels)
+    Promise.all([
+      api.groups.listModels(group.id),
+      api.models.list(),
+    ])
+      .then(([groupModels, available]) => {
+        setModels(groupModels)
+        setAllModels(available)
+      })
       .catch((e: unknown) => toast.error(e instanceof Error ? e.message : "Error cargando modelos."))
       .finally(() => setLoadingModels(false))
 
@@ -179,21 +187,18 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
     api.users.list().then(setAllUsers).catch(() => {/* best effort */})
   }, [group.id])
 
-  async function handleAddModel() {
-    const modelId = newModelId.trim()
+  async function handleAddModel(modelId: string) {
     if (!modelId) return
-    setAddingModel(true)
+    setAddingModelId(modelId)
     try {
       await api.groups.addModel(group.id, modelId)
       setModels((prev) => [...prev, modelId])
-      setNewModelId("")
-      const updated = { ...group, modelCount: group.modelCount + 1 }
-      onGroupUpdated(updated)
+      onGroupUpdated({ ...group, modelCount: group.modelCount + 1 })
       toast.success("Modelo añadido al grupo.")
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Error al añadir modelo.")
     } finally {
-      setAddingModel(false)
+      setAddingModelId(null)
     }
   }
 
@@ -242,6 +247,24 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
     }
   }
 
+  const assignedSet = useMemo(() => new Set(models), [models])
+
+  const backendTabs = useMemo(() => {
+    const seen = new Set<string>()
+    for (const m of allModels) if (m.backendType) seen.add(m.backendType)
+    return Array.from(seen).sort()
+  }, [allModels])
+
+  const availableModels = useMemo(() => {
+    const q = modelSearch.trim().toLowerCase()
+    return allModels.filter((m) => {
+      if (assignedSet.has(m.modelId)) return false
+      if (modelBackendTab !== "all" && m.backendType !== modelBackendTab) return false
+      if (q && !m.modelId.toLowerCase().includes(q) && !m.displayName.toLowerCase().includes(q)) return false
+      return true
+    })
+  }, [allModels, assignedSet, modelBackendTab, modelSearch])
+
   const memberIds = new Set(members.map((m) => m.userId))
   const availableUsers = allUsers.filter((u) => !memberIds.has(u.id))
 
@@ -284,49 +307,117 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
           </Tabs.List>
 
           {/* Models tab */}
-          <Tabs.Content value="models" className="space-y-3">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={newModelId}
-                onChange={(e) => setNewModelId(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddModel() } }}
-                className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                placeholder="model-id o org/model"
-              />
-              <button
-                type="button"
-                onClick={handleAddModel}
-                disabled={addingModel || !newModelId.trim()}
-                className="flex items-center gap-1 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-              >
-                <Plus size={14} />
-                Añadir
-              </button>
+          <Tabs.Content value="models" className="space-y-4">
+            {/* Assigned models */}
+            <div>
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                Asignados ({models.length})
+              </p>
+              {loadingModels ? (
+                <div className="space-y-1">
+                  {[...Array(2)].map((_, i) => <div key={i} className="h-8 animate-pulse rounded bg-muted" />)}
+                </div>
+              ) : models.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic py-1">Ningún modelo asignado aún.</p>
+              ) : (
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {models.map((modelId) => (
+                    <div key={modelId} className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-1.5 text-sm">
+                      <span className="font-mono text-xs truncate">{modelId}</span>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRemoveModel(modelId)}
+                        className="ml-2 shrink-0 rounded p-1 text-muted-foreground hover:text-destructive hover:bg-muted"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
-            {loadingModels ? (
-              <div className="space-y-1">
-                {[...Array(3)].map((_, i) => <div key={i} className="h-8 animate-pulse rounded bg-muted" />)}
+            {/* Model picker */}
+            <div className="border-t border-border pt-3 space-y-3">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Añadir modelos</p>
+
+              {/* Search */}
+              <div className="relative">
+                <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  placeholder="Buscar por nombre o ID…"
+                  className="w-full rounded-md border border-input bg-background pl-8 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                />
               </div>
-            ) : models.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-4">No hay modelos asignados.</p>
-            ) : (
-              <div className="space-y-1 max-h-64 overflow-y-auto">
-                {models.map((modelId) => (
-                  <div key={modelId} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
-                    <span className="font-mono text-xs truncate">{modelId}</span>
+
+              {/* Backend tabs */}
+              {backendTabs.length > 0 && (
+                <div className="flex gap-1 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setModelBackendTab("all")}
+                    className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                      modelBackendTab === "all"
+                        ? "bg-primary text-primary-foreground"
+                        : "border border-border hover:bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    Todos
+                  </button>
+                  {backendTabs.map((bt) => (
                     <button
+                      key={bt}
                       type="button"
-                      onClick={() => setConfirmRemoveModel(modelId)}
-                      className="ml-2 shrink-0 rounded p-1 text-muted-foreground hover:text-destructive hover:bg-muted"
+                      onClick={() => setModelBackendTab(bt)}
+                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                        modelBackendTab === bt
+                          ? "bg-primary text-primary-foreground"
+                          : "border border-border hover:bg-muted text-muted-foreground"
+                      }`}
                     >
-                      <X size={12} />
+                      {bt}
                     </button>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
+
+              {/* Available models grid */}
+              {loadingModels ? (
+                <div className="grid grid-cols-1 gap-1">
+                  {[...Array(3)].map((_, i) => <div key={i} className="h-9 animate-pulse rounded bg-muted" />)}
+                </div>
+              ) : availableModels.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-3 italic">
+                  {modelSearch ? "Sin resultados." : "Todos los modelos de este backend ya están asignados."}
+                </p>
+              ) : (
+                <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+                  {availableModels.map((m) => (
+                    <button
+                      key={m.modelId}
+                      type="button"
+                      disabled={addingModelId === m.modelId}
+                      onClick={() => handleAddModel(m.modelId)}
+                      className="w-full flex items-center justify-between rounded-md border border-border px-3 py-1.5 text-left hover:border-primary/60 hover:bg-muted/50 disabled:opacity-50 transition-colors group"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium truncate">{m.displayName || m.modelId}</p>
+                        {m.displayName && m.displayName !== m.modelId && (
+                          <p className="text-[11px] text-muted-foreground font-mono truncate">{m.modelId}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 ml-2 shrink-0">
+                        <span className="text-[10px] text-muted-foreground border border-border rounded px-1">{m.backendType}</span>
+                        <Plus size={12} className="text-muted-foreground group-hover:text-primary transition-colors" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </Tabs.Content>
 
           {/* Members tab */}

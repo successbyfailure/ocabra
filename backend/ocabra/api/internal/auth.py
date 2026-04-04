@@ -101,13 +101,14 @@ async def login(body: LoginRequest, response: Response) -> dict:
     logger.info("auth_login_success", username=user.username, role=user.role)
 
     return {
+        "access_token": token,
         "user": {
             "id": str(user.id),
             "username": user.username,
             "email": user.email,
             "role": user.role,
             "created_at": user.created_at.isoformat(),
-        }
+        },
     }
 
 

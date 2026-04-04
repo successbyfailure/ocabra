@@ -52,8 +52,12 @@ class UserContext:
 async def _build_anonymous_context(session) -> UserContext:
     """Build a UserContext for an unauthenticated caller.
 
-    Anonymous users implicitly belong to the ``default`` group and can only
-    access the models listed in that group.
+    Anonymous users implicitly belong to the ``default`` group.  If the default
+    group has at least one model assigned, only those models are accessible.
+    If the default group is empty (no models explicitly assigned), all models
+    are accessible — preserving the pre-auth open-access behaviour for
+    deployments that have disabled API-key requirements without configuring
+    model restrictions.
     """
     from ocabra.db.auth import Group, GroupModel
 
@@ -72,12 +76,14 @@ async def _build_anonymous_context(session) -> UserContext:
 
     group_ids = [str(default_group_id)] if default_group_id else []
 
+    # Empty set means "all models" (unrestricted) — used when the default
+    # group has no explicit model assignments.
     return UserContext(
         user_id=None,
         username=None,
         role="user",
         group_ids=group_ids,
-        accessible_model_ids=model_ids,
+        accessible_model_ids=model_ids,  # empty = no models accessible (default group has none assigned)
         is_anonymous=True,
     )
 
@@ -197,7 +203,8 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
 async def _fetch_accessible_models(role: str, group_ids: list[str], session) -> set[str]:
     """Return the set of accessible model IDs.
 
-    Admins receive an empty set which conventionally means *all models*.
+    Admins receive an empty set; callers must check ``user.is_admin`` to grant
+    unrestricted access — an empty set for non-admins means *no models accessible*.
     Regular users receive the union of model IDs across their groups.
     """
     if role == "system_admin":
@@ -231,9 +238,10 @@ async def get_current_user(request: Request) -> UserContext:
     """Resolve the calling user from the current request.
 
     Resolution order:
-    1. Cookie ``ocabra_session`` (dashboard / browser).
-    2. ``Authorization: Bearer sk-ocabra-...`` header (API key).
-    3. Anonymous context if auth is not required by server settings.
+    1. ``X-Gateway-Token`` header (internal gateway service-to-service calls).
+    2. Cookie ``ocabra_session`` (dashboard / browser).
+    3. ``Authorization: Bearer`` header — tries JWT first, then API key.
+    4. Anonymous context if auth is not required by server settings.
 
     Raises:
         HTTPException 401: If credentials are present but invalid, or if no
@@ -241,6 +249,20 @@ async def get_current_user(request: Request) -> UserContext:
     """
     from ocabra.config import settings
     from ocabra.database import AsyncSessionLocal
+
+    # 0. Gateway service token (internal calls — no DB needed)
+    gw_token = request.headers.get("X-Gateway-Token", "")
+    if gw_token and settings.gateway_service_token and gw_token == settings.gateway_service_token:
+        ctx = UserContext(
+            user_id=None,
+            username="__gateway__",
+            role="model_manager",
+            group_ids=[],
+            accessible_model_ids=set(),
+            is_anonymous=False,
+        )
+        request.state.auth_user = ctx
+        return ctx
 
     async with AsyncSessionLocal() as session:
         # 1. JWT cookie

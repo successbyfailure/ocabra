@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -11,12 +11,16 @@ import structlog
 from ocabra.config import settings
 from ocabra.redis_client import get_key, publish, set_key
 
+if TYPE_CHECKING:
+    from ocabra.core.gpu_manager import GPUManager
+
 logger = structlog.get_logger(__name__)
 SERVICE_OVERRIDES_KEY = "service:overrides"
 
 
 @dataclass
 class ServiceState:
+    # ── Identity & config ─────────────────────────────────────────────────
     service_id: str
     service_type: str
     display_name: str
@@ -24,29 +28,25 @@ class ServiceState:
     ui_url: str = ""
     health_path: str = "/health"
     # Optional path to poll for runtime/model status after a successful health check.
-    # Response must be JSON. For key-based detection: set runtime_check_key.
-    # For A1111-style: set runtime_check_model_key to detect a loaded model name.
     runtime_check_path: str | None = None
     runtime_check_key: str = "runtime_loaded"
     runtime_check_model_key: str | None = None
     unload_path: str | None = None
     unload_method: str = "POST"
     unload_payload: dict[str, Any] | None = None
-    # Optional extra POST called after unload to flush GPU memory (e.g. /free-memory on A1111).
     post_unload_flush_path: str | None = None
-    # If set, stop this Docker container after unload to fully release VRAM.
     docker_container_name: str | None = None
-    # When True, the service is assumed to have its model loaded whenever service_alive is True.
-    # Use for services (like ACE-Step Gradio) that have no dedicated runtime-status endpoint.
+    # When True, treat the service as model-loaded whenever it is alive.
     runtime_loaded_when_alive: bool = False
     preferred_gpu: int | None = None
-    # Seconds of inactivity before the model is unloaded. 0 = disabled.
     idle_unload_after_seconds: int = 600
-    # "stop"    — kill the container on idle (UI goes offline, VRAM freed immediately).
-    # "restart" — restart the container on idle (UI comes back after startup, VRAM freed
-    #             during the restart window). Use for Gradio services like ACE-Step where
-    #             keeping the UI accessible matters more than instant VRAM release.
+    # "stop" — kill container; "restart" — restart container (UI stays accessible).
     idle_action: str = "stop"
+    # Seconds to wait for an active generation before forcing eviction.
+    # 0 = evict immediately; -1 = wait indefinitely (capped at 30 s for pressure eviction).
+    generation_grace_period_s: int = 120
+
+    # ── Live state ────────────────────────────────────────────────────────
     enabled: bool = True
     service_alive: bool = False
     runtime_loaded: bool = False
@@ -57,6 +57,21 @@ class ServiceState:
     last_unload_at: datetime | None = None
     detail: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+    # ── Generation metrics (refreshed each health cycle) ──────────────────
+    is_generating: bool = False
+    queue_depth: int = 0
+    vram_used_mb: int | None = None     # VRAM used by this service (MB)
+    gpu_util_pct: float | None = None   # GPU utilisation % on preferred_gpu
+
+    # ── Container resource metrics (refreshed each health cycle) ──────────
+    cpu_pct: float | None = None        # Container CPU %
+    mem_used_mb: int | None = None      # Container RSS memory (MB)
+    mem_limit_mb: int | None = None     # Container memory limit (MB)
+
+    # ── Internal generation tracking (not serialised) ─────────────────────
+    _generation_started_at: datetime | None = field(default=None, repr=False)
+    _generation_vram_peak_mb: int | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +85,7 @@ class ServiceState:
             "preferred_gpu": self.preferred_gpu,
             "idle_unload_after_seconds": self.idle_unload_after_seconds,
             "idle_action": self.idle_action,
+            "generation_grace_period_s": self.generation_grace_period_s,
             "enabled": self.enabled,
             "service_alive": self.service_alive,
             "runtime_loaded": self.runtime_loaded,
@@ -86,11 +102,21 @@ class ServiceState:
             ),
             "detail": self.detail,
             "extra": self.extra,
+            # Generation metrics
+            "is_generating": self.is_generating,
+            "queue_depth": self.queue_depth,
+            "vram_used_mb": self.vram_used_mb,
+            "gpu_util_pct": self.gpu_util_pct,
+            # Container resource metrics
+            "cpu_pct": self.cpu_pct,
+            "mem_used_mb": self.mem_used_mb,
+            "mem_limit_mb": self.mem_limit_mb,
         }
 
 
 class ServiceManager:
     def __init__(self) -> None:
+        self._gpu_manager: GPUManager | None = None
         self._states: dict[str, ServiceState] = {
             "hunyuan": ServiceState(
                 service_id="hunyuan",
@@ -100,6 +126,7 @@ class ServiceManager:
                 ui_url=settings.hunyuan_ui_url,
                 preferred_gpu=settings.hunyuan_preferred_gpu,
                 idle_unload_after_seconds=settings.hunyuan_idle_unload_seconds,
+                generation_grace_period_s=settings.hunyuan_generation_grace_period_s,
                 runtime_check_path="/runtime/status",
                 runtime_check_key="runtime_loaded",
                 unload_path="/runtime/unload",
@@ -114,9 +141,11 @@ class ServiceManager:
                 health_path="/",
                 preferred_gpu=settings.comfyui_preferred_gpu,
                 idle_unload_after_seconds=settings.comfyui_idle_unload_seconds,
+                generation_grace_period_s=settings.comfyui_generation_grace_period_s,
                 unload_path="/free",
                 unload_payload={"unload_models": True, "free_memory": True},
                 docker_container_name=settings.comfyui_docker_container,
+                runtime_loaded_when_alive=True,
             ),
             "a1111": ServiceState(
                 service_id="a1111",
@@ -126,6 +155,7 @@ class ServiceManager:
                 ui_url=settings.a1111_ui_url,
                 preferred_gpu=settings.a1111_preferred_gpu,
                 idle_unload_after_seconds=settings.a1111_idle_unload_seconds,
+                generation_grace_period_s=settings.a1111_generation_grace_period_s,
                 health_path="/sdapi/v1/memory",
                 runtime_check_path="/sdapi/v1/options",
                 runtime_check_model_key="sd_model_checkpoint",
@@ -139,22 +169,21 @@ class ServiceManager:
                 display_name="ACE-Step",
                 base_url=settings.acestep_base_url.rstrip("/"),
                 ui_url=settings.acestep_ui_url,
-                # Gradio mode: health_path="/" (HTML, port 7860 by default)
-                # API mode:    health_path="/health" (JSON, port 8001)
-                # Detected automatically from base_url port suffix.
                 health_path="/" if settings.acestep_base_url.endswith(("7860", "7860/")) else "/health",
                 preferred_gpu=settings.acestep_preferred_gpu,
                 idle_unload_after_seconds=settings.acestep_idle_unload_seconds,
-                # ACE-Step auto-loads models on startup; no dedicated unload endpoint.
-                # On idle: restart (not stop) so the Gradio UI stays accessible while
-                # VRAM is freed during the restart window.
-                # On pressure eviction: pressure_evict() still does a full stop.
+                generation_grace_period_s=settings.acestep_generation_grace_period_s,
                 docker_container_name=settings.acestep_docker_container,
                 runtime_loaded_when_alive=True,
-                idle_action="restart",
+                idle_action="stop",
             ),
         }
         self._lock = asyncio.Lock()
+
+    def set_gpu_manager(self, gpu_manager: GPUManager) -> None:
+        self._gpu_manager = gpu_manager
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         await self._load_persisted_overrides()
@@ -170,6 +199,8 @@ class ServiceManager:
                 await self.refresh(service_id)
             except Exception:
                 continue
+
+    # ── State accessors ───────────────────────────────────────────────────
 
     async def list_states(self) -> list[ServiceState]:
         return list(self._states.values())
@@ -236,13 +267,7 @@ class ServiceManager:
         await self._publish_state(state, "runtime_changed")
         return state
 
-    async def start_service(self, service_id: str) -> ServiceState:
-        state = self._require(service_id)
-        if not state.enabled:
-            raise RuntimeError(f"Service '{service_id}' is disabled")
-        if state.docker_container_name and not state.service_alive:
-            await self._start_container(state)
-        return state
+    # ── Health & metrics refresh ──────────────────────────────────────────
 
     async def refresh(self, service_id: str) -> ServiceState:
         state = self._require(service_id)
@@ -274,18 +299,27 @@ class ServiceManager:
             state.service_alive = True
             state.last_health_check_at = now
             state.detail = None
-            # Poll runtime/model status if configured
+
             await self._refresh_runtime_status(state, client=None)
-            # For services with no runtime-check endpoint that always have a model loaded
+
             if state.runtime_loaded_when_alive and not state.runtime_check_path:
                 state.runtime_loaded = True
                 if state.last_activity_at is None:
                     state.last_activity_at = now
+
             state.status = "active" if state.runtime_loaded else "idle"
+
+            # Refresh generation metrics (best-effort, never blocks health check)
+            await self._refresh_generation_metrics(state)
+
+            # Refresh container CPU/RAM stats (best-effort)
+            await self._refresh_container_stats(state)
+
         except Exception as exc:
             state.service_alive = False
             state.runtime_loaded = False
             state.active_model_ref = None
+            state.is_generating = False
             state.last_health_check_at = now
             state.status = "unreachable"
             state.detail = str(exc)
@@ -303,13 +337,9 @@ class ServiceManager:
             return False
 
     async def _refresh_runtime_status(self, state: ServiceState, *, client: Any) -> None:
-        """Call the runtime check endpoint and update runtime_loaded / active_model_ref."""
         if not state.runtime_check_path:
             return
 
-        # Avoid re-detecting a model as loaded immediately after a manual unload.
-        # A1111 keeps sd_model_checkpoint in /options even after unload-checkpoint,
-        # so without this guard the health loop would undo the unload within 30s.
         if state.last_unload_at is not None:
             now = datetime.now(timezone.utc)
             if (now - state.last_unload_at).total_seconds() < 120:
@@ -328,7 +358,6 @@ class ServiceManager:
             return
 
         if state.runtime_check_model_key:
-            # e.g. A1111: sd_model_checkpoint is non-null when a model is loaded
             model_ref = payload.get(state.runtime_check_model_key)
             if model_ref:
                 state.runtime_loaded = True
@@ -337,19 +366,186 @@ class ServiceManager:
                 state.runtime_loaded = False
                 state.active_model_ref = None
         else:
-            # e.g. Hunyuan: runtime_loaded bool
             val = payload.get(state.runtime_check_key)
             if isinstance(val, bool):
                 state.runtime_loaded = val
                 if not val:
                     state.active_model_ref = None
 
+    async def _refresh_generation_metrics(self, state: ServiceState) -> None:
+        """Poll GPU and service-specific endpoints to update generation metrics.
+
+        Detects start/end of generation and persists events to DB.
+        Never raises — all failures are silently suppressed.
+        """
+        was_generating = state.is_generating
+
+        # GPU utilisation from pynvml cache (sync, no IO)
+        if self._gpu_manager is not None and state.preferred_gpu is not None:
+            gpu_state = self._gpu_manager.get_state_nowait(state.preferred_gpu)
+            if gpu_state is not None:
+                state.gpu_util_pct = gpu_state.utilization_pct
+
+        # Service-specific generation detection
+        try:
+            if state.service_type == "comfyui":
+                await self._refresh_comfyui_metrics(state)
+            elif state.service_type == "automatic1111":
+                await self._refresh_a1111_metrics(state)
+            else:
+                # Hunyuan, ACE-Step: infer from GPU utilisation
+                threshold = settings.generation_gpu_util_threshold_pct
+                state.is_generating = bool(
+                    state.gpu_util_pct is not None
+                    and state.gpu_util_pct >= threshold
+                )
+                state.queue_depth = 0
+        except Exception as exc:
+            logger.debug(
+                "generation_metrics_error",
+                service_id=state.service_id,
+                error=str(exc),
+            )
+
+        # Track peak VRAM during generation
+        if state.is_generating and state.vram_used_mb is not None:
+            peak = state._generation_vram_peak_mb or 0
+            if state.vram_used_mb > peak:
+                state._generation_vram_peak_mb = state.vram_used_mb
+
+        # Detect generation start
+        if state.is_generating and not was_generating:
+            state._generation_started_at = datetime.now(timezone.utc)
+            state._generation_vram_peak_mb = state.vram_used_mb
+            logger.info("generation_started", service_id=state.service_id)
+
+        # Detect generation end → persist event
+        if not state.is_generating and was_generating and state._generation_started_at is not None:
+            logger.info("generation_finished", service_id=state.service_id)
+            asyncio.create_task(self._persist_generation_event(state, evicted=False))
+
+    async def _refresh_container_stats(self, state: ServiceState) -> None:
+        """Read container CPU % and memory from docker stats. Never raises."""
+        if not state.docker_container_name:
+            return
+        try:
+            code, out, _err = await self._run_docker_command(
+                "stats", "--no-stream", "--format", "{{json .}}", state.docker_container_name
+            )
+            if code != 0 or not out:
+                return
+            import json as _json
+            row = _json.loads(out)
+
+            # CPU: "0.85%" → float
+            cpu_str = str(row.get("CPUPerc", "")).replace("%", "").strip()
+            if cpu_str:
+                try:
+                    state.cpu_pct = float(cpu_str)
+                except ValueError:
+                    pass
+
+            # Memory: "117.2MiB / 94.17GiB" → (used_mb, limit_mb)
+            mem_str = str(row.get("MemUsage", ""))
+            parts = [p.strip() for p in mem_str.split("/")]
+            if len(parts) == 2:
+                state.mem_used_mb = self._parse_size_mb(parts[0])
+                state.mem_limit_mb = self._parse_size_mb(parts[1])
+        except Exception as exc:
+            logger.debug("container_stats_error", service_id=state.service_id, error=str(exc))
+
+    @staticmethod
+    def _parse_size_mb(s: str) -> int | None:
+        """Parse a Docker size string like '117.2MiB' or '94.17GiB' into MB."""
+        s = s.strip()
+        for suffix, factor in (
+            ("GiB", 1024), ("GB", 1000), ("MiB", 1), ("MB", 1),
+            ("KiB", 1 / 1024), ("KB", 1 / 1000),
+            ("TiB", 1024 * 1024), ("TB", 1000 * 1000),
+            ("B", 1 / (1024 * 1024)),
+        ):
+            if s.endswith(suffix):
+                try:
+                    return int(float(s[: -len(suffix)]) * factor)
+                except ValueError:
+                    return None
+        return None
+
+    async def _refresh_comfyui_metrics(self, state: ServiceState) -> None:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            # Queue status → is_generating + queue_depth
+            try:
+                r = await client.get(f"{state.base_url}/queue")
+                if r.is_success:
+                    data = r.json()
+                    running = data.get("queue_running", [])
+                    pending = data.get("queue_pending", [])
+                    state.is_generating = len(running) > 0
+                    state.queue_depth = len(pending)
+            except Exception:
+                pass
+
+            # System stats → VRAM used
+            try:
+                r = await client.get(f"{state.base_url}/system_stats")
+                if r.is_success:
+                    devices = r.json().get("devices", [])
+                    if devices:
+                        d = devices[0]
+                        total = d.get("vram_total", 0)
+                        free = d.get("vram_free", 0)
+                        state.vram_used_mb = (total - free) // (1024 * 1024)
+            except Exception:
+                pass
+
+    async def _refresh_a1111_metrics(self, state: ServiceState) -> None:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            # Progress → is_generating
+            try:
+                r = await client.get(f"{state.base_url}/sdapi/v1/progress")
+                if r.is_success:
+                    data = r.json()
+                    progress = data.get("progress", 0.0)
+                    job = data.get("state", {}).get("job", "")
+                    state.is_generating = bool(job) or (0 < progress < 1)
+                    state.queue_depth = 0
+            except Exception:
+                pass
+
+            # Memory → VRAM used
+            try:
+                r = await client.get(f"{state.base_url}/sdapi/v1/memory")
+                if r.is_success:
+                    cuda = r.json().get("cuda", {})
+                    used_bytes = cuda.get("system", {}).get("used", 0)
+                    if used_bytes:
+                        state.vram_used_mb = used_bytes // (1024 * 1024)
+            except Exception:
+                pass
+
+    # ── Service lifecycle (start / unload) ────────────────────────────────
+
+    async def start_service(self, service_id: str) -> ServiceState:
+        state = self._require(service_id)
+        if not state.enabled:
+            raise RuntimeError(f"Service '{service_id}' is disabled")
+        if state.docker_container_name and not state.service_alive:
+            await self._start_container(state)
+        return state
+
     async def unload(self, service_id: str, reason: str = "manual") -> ServiceState:
         state = self._require(service_id)
         if not state.enabled:
             raise RuntimeError(f"Service '{service_id}' is disabled")
+
+        # Grace period: wait for active generation to finish
+        if state.is_generating:
+            grace_finished = await self._wait_for_generation_grace(state, reason=reason)
+            if not grace_finished:
+                # Grace period expired — force evict, mark generation as interrupted
+                asyncio.create_task(self._persist_generation_event(state, evicted=True))
+
         if not state.unload_path:
-            # No HTTP unload endpoint — fall back to container restart/stop.
             if not state.docker_container_name:
                 raise RuntimeError(f"Service '{service_id}' does not expose an unload endpoint")
             async with self._lock:
@@ -360,6 +556,7 @@ class ServiceManager:
                     await self._stop_container(state)
                 state.runtime_loaded = False
                 state.active_model_ref = None
+                state.is_generating = False
                 state.last_unload_at = now
                 state.detail = f"unloaded:{reason}"
                 logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
@@ -389,6 +586,7 @@ class ServiceManager:
                             )
                 state.runtime_loaded = False
                 state.active_model_ref = None
+                state.is_generating = False
                 state.last_unload_at = datetime.now(timezone.utc)
                 state.status = "idle" if state.service_alive else "unreachable"
                 state.detail = f"unloaded:{reason}"
@@ -408,147 +606,7 @@ class ServiceManager:
                 await self._publish_state(state, "runtime_unloaded")
         return state
 
-    async def _run_docker_command(self, *args: str) -> tuple[int, str, str]:
-        process = await asyncio.create_subprocess_exec(
-            "docker",
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        return (
-            process.returncode or 0,
-            stdout.decode("utf-8", errors="ignore").strip(),
-            stderr.decode("utf-8", errors="ignore").strip(),
-        )
-
-    async def _stop_container(self, state: ServiceState) -> None:
-        if not state.docker_container_name:
-            return
-
-        code, _out, err = await self._run_docker_command("stop", state.docker_container_name)
-        if code == 0:
-            state.service_alive = False
-            state.status = "unreachable"
-            logger.info("container_stopped", container=state.docker_container_name)
-            return
-
-        logger.warning(
-            "container_stop_failed",
-            container=state.docker_container_name,
-            error=err or f"exit_code={code}",
-        )
-
-    async def _is_container_running(self, state: ServiceState) -> bool:
-        if not state.docker_container_name:
-            return False
-
-        code, out, _err = await self._run_docker_command(
-            "inspect",
-            "-f",
-            "{{.State.Running}}",
-            state.docker_container_name,
-        )
-        if code != 0:
-            return False
-
-        return out.strip().lower() == "true"
-
-    async def _stop_container_if_running(self, state: ServiceState) -> None:
-        if not state.docker_container_name:
-            return
-
-        if not await self._is_container_running(state):
-            return
-
-        await self._stop_container(state)
-
-    async def _restart_container(self, state: ServiceState) -> None:
-        if not state.docker_container_name:
-            return
-
-        code, _out, err = await self._run_docker_command("restart", state.docker_container_name)
-        if code == 0:
-            state.service_alive = False
-            state.status = "restarting"
-            logger.info("container_restarted", container=state.docker_container_name)
-            return
-
-        logger.warning(
-            "container_restart_failed",
-            container=state.docker_container_name,
-            error=err or f"exit_code={code}",
-        )
-
-    async def _start_container(self, state: ServiceState) -> None:
-        if not state.docker_container_name:
-            return
-
-        code, _out, err = await self._run_docker_command("start", state.docker_container_name)
-        if code == 0:
-            logger.info("container_started", container=state.docker_container_name)
-            return
-
-        logger.warning(
-            "container_start_failed",
-            container=state.docker_container_name,
-            error=err or f"exit_code={code}",
-        )
-
-    def get_pressure_eviction_candidates(self, preferred_gpu: int | None = None) -> list[str]:
-        """Return service IDs that can be stopped to free VRAM under pressure.
-
-        Only includes services that are alive, have a model loaded, and can
-        actually be stopped (docker_container_name or unload_path).
-        Filtered to `preferred_gpu` when provided.
-        """
-        return [
-            state.service_id
-            for state in self._states.values()
-            if state.enabled
-            and state.service_alive
-            and state.runtime_loaded
-            and (preferred_gpu is None or state.preferred_gpu == preferred_gpu)
-            and (state.docker_container_name or state.unload_path)
-        ]
-
-    async def pressure_evict(self, service_id: str) -> bool:
-        """Evict a service to free VRAM under model-load pressure.
-
-        Respects idle_action: services with idle_action="restart" are restarted
-        (UI stays accessible) rather than stopped. Returns True if evicted.
-        """
-        state = self._states.get(service_id)
-        if not state or not state.enabled or not state.service_alive:
-            return False
-
-        now = datetime.now(timezone.utc)
-        logger.info("service_pressure_evict", service_id=service_id, idle_action=state.idle_action)
-
-        if state.docker_container_name:
-            if state.idle_action == "restart":
-                await self._restart_container(state)
-                state.status = "restarting"
-            else:
-                await self._stop_container(state)
-                state.status = "idle"
-            state.runtime_loaded = False
-            state.active_model_ref = None
-            state.last_unload_at = now
-            state.last_activity_at = None
-            state.detail = "unloaded:pressure"
-            await self._publish_state(state, "runtime_unloaded")
-            return True
-
-        if state.unload_path:
-            try:
-                await self.unload(service_id, reason="pressure")
-                return True
-            except Exception as exc:
-                logger.warning("service_pressure_evict_failed", service_id=service_id, error=str(exc))
-                return False
-
-        return False
+    # ── Idle eviction ─────────────────────────────────────────────────────
 
     async def check_idle_unloads(self) -> None:
         now = datetime.now(timezone.utc)
@@ -565,12 +623,34 @@ class ServiceManager:
             if idle_for < timedelta(seconds=state.idle_unload_after_seconds):
                 continue
             try:
+                idle_seconds = int(idle_for.total_seconds())
+                logger.info(
+                    "service_idle_eviction_triggered",
+                    service_id=state.service_id,
+                    idle_seconds=idle_seconds,
+                    is_generating=state.is_generating,
+                )
+
+                # Refresh generation status before deciding
+                try:
+                    await self._refresh_generation_metrics(state)
+                except Exception:
+                    pass
+
+                # Wait for active generation to finish (idle eviction: full grace period)
+                if state.is_generating:
+                    grace_finished = await self._wait_for_generation_grace(
+                        state, reason="idle"
+                    )
+                    if not grace_finished:
+                        asyncio.create_task(
+                            self._persist_generation_event(state, evicted=True)
+                        )
+
                 if state.unload_path:
                     await self.unload(state.service_id, reason="idle")
                 elif state.docker_container_name:
-                    idle_seconds = int(idle_for.total_seconds())
                     if state.idle_action == "restart":
-                        # Restart keeps the UI accessible; VRAM is freed during startup.
                         logger.info(
                             "service_idle_container_restart",
                             service_id=state.service_id,
@@ -586,13 +666,88 @@ class ServiceManager:
                         await self._stop_container(state)
                     state.runtime_loaded = False
                     state.active_model_ref = None
+                    state.is_generating = False
                     state.last_unload_at = now
-                    state.last_activity_at = None  # reset so timer starts fresh after restart
+                    state.last_activity_at = None
                     state.status = "idle" if state.idle_action == "stop" else "restarting"
                     state.detail = f"unloaded:idle:{state.idle_action}"
                     await self._publish_state(state, "runtime_unloaded")
             except Exception:
                 continue
+
+    # ── Pressure eviction ─────────────────────────────────────────────────
+
+    def get_pressure_eviction_candidates(self, preferred_gpu: int | None = None) -> list[str]:
+        return [
+            state.service_id
+            for state in self._states.values()
+            if state.enabled
+            and state.service_alive
+            and state.runtime_loaded
+            and (preferred_gpu is None or state.preferred_gpu == preferred_gpu)
+            and (state.docker_container_name or state.unload_path)
+        ]
+
+    async def pressure_evict(self, service_id: str) -> bool:
+        """Evict a service to free VRAM under model-load pressure.
+
+        For pressure eviction the grace period is capped at 30 s so the waiting
+        model is not blocked indefinitely.
+        """
+        state = self._states.get(service_id)
+        if not state or not state.enabled or not state.service_alive:
+            return False
+
+        now = datetime.now(timezone.utc)
+        logger.info(
+            "service_pressure_evict",
+            service_id=service_id,
+            is_generating=state.is_generating,
+            idle_action=state.idle_action,
+        )
+
+        # Grace period — capped at 30 s for pressure eviction
+        if state.is_generating and state.generation_grace_period_s != 0:
+            max_wait = (
+                min(state.generation_grace_period_s, 30)
+                if state.generation_grace_period_s > 0
+                else 30  # -1 = indefinite → cap at 30 s for pressure
+            )
+            grace_finished = await self._wait_for_generation_grace(
+                state, reason="pressure", max_wait_s=max_wait
+            )
+            if not grace_finished:
+                asyncio.create_task(self._persist_generation_event(state, evicted=True))
+
+        if state.docker_container_name:
+            if state.idle_action == "restart":
+                await self._restart_container(state)
+                state.status = "restarting"
+            else:
+                await self._stop_container(state)
+                state.status = "idle"
+            state.runtime_loaded = False
+            state.active_model_ref = None
+            state.is_generating = False
+            state.last_unload_at = now
+            state.last_activity_at = None
+            state.detail = "unloaded:pressure"
+            await self._publish_state(state, "runtime_unloaded")
+            return True
+
+        if state.unload_path:
+            try:
+                await self.unload(service_id, reason="pressure")
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "service_pressure_evict_failed", service_id=service_id, error=str(exc)
+                )
+                return False
+
+        return False
+
+    # ── Enable / disable ──────────────────────────────────────────────────
 
     async def set_enabled(self, service_id: str, enabled: bool) -> ServiceState:
         state = self._require(service_id)
@@ -614,6 +769,7 @@ class ServiceManager:
             state.service_alive = False
             state.runtime_loaded = False
             state.active_model_ref = None
+            state.is_generating = False
             state.status = "disabled"
             state.detail = "disabled"
         else:
@@ -623,16 +779,192 @@ class ServiceManager:
         await self._publish_state(state, "enabled_changed")
         return state
 
+    # ── Generation event persistence ──────────────────────────────────────
+
+    async def _persist_generation_event(
+        self, state: ServiceState, *, evicted: bool = False
+    ) -> None:
+        started_at = state._generation_started_at
+        if started_at is None:
+            return
+        now = datetime.now(timezone.utc)
+        duration_ms = int((now - started_at).total_seconds() * 1000)
+
+        # Reset tracking immediately so the next generation starts fresh
+        state._generation_started_at = None
+        vram_peak = state._generation_vram_peak_mb
+        state._generation_vram_peak_mb = None
+
+        try:
+            from ocabra.database import AsyncSessionLocal
+            from ocabra.db.stats import ServiceGenerationStat
+
+            async with AsyncSessionLocal() as session:
+                session.add(
+                    ServiceGenerationStat(
+                        service_id=state.service_id,
+                        service_type=state.service_type,
+                        started_at=started_at,
+                        finished_at=now,
+                        duration_ms=duration_ms,
+                        gpu_index=state.preferred_gpu,
+                        vram_peak_mb=vram_peak,
+                        evicted=evicted,
+                    )
+                )
+                await session.commit()
+            logger.info(
+                "generation_event_persisted",
+                service_id=state.service_id,
+                duration_ms=duration_ms,
+                vram_peak_mb=vram_peak,
+                evicted=evicted,
+            )
+        except Exception as exc:
+            logger.warning(
+                "generation_event_persist_failed",
+                service_id=state.service_id,
+                error=str(exc),
+            )
+
+    # ── Grace period wait ─────────────────────────────────────────────────
+
+    async def _wait_for_generation_grace(
+        self,
+        state: ServiceState,
+        reason: str,
+        max_wait_s: int | None = None,
+    ) -> bool:
+        """Poll until the service stops generating or the grace period expires.
+
+        Returns True if the generation finished within the grace period,
+        False if it had to be forced.
+        """
+        grace = max_wait_s if max_wait_s is not None else state.generation_grace_period_s
+        if grace == 0:
+            return False
+        if grace < 0:
+            grace = 86400  # treat -1 as "very long" (24 h)
+
+        state.status = "evicting_grace"
+        state.detail = f"waiting_for_generation:{reason} (up to {grace}s)"
+        await self._publish_state(state, "eviction_grace_started")
+        logger.info(
+            "eviction_grace_started",
+            service_id=state.service_id,
+            reason=reason,
+            max_wait_s=grace,
+        )
+
+        deadline = asyncio.get_event_loop().time() + grace
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(2)
+            try:
+                await self._refresh_generation_metrics(state)
+            except Exception:
+                pass
+            if not state.is_generating:
+                logger.info(
+                    "eviction_grace_generation_finished",
+                    service_id=state.service_id,
+                    reason=reason,
+                )
+                return True
+
+        logger.warning(
+            "eviction_grace_timeout",
+            service_id=state.service_id,
+            reason=reason,
+            max_wait_s=grace,
+        )
+        return False
+
+    # ── Docker helpers ────────────────────────────────────────────────────
+
+    async def _run_docker_command(self, *args: str) -> tuple[int, str, str]:
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return (
+            process.returncode or 0,
+            stdout.decode("utf-8", errors="ignore").strip(),
+            stderr.decode("utf-8", errors="ignore").strip(),
+        )
+
+    async def _stop_container(self, state: ServiceState) -> None:
+        if not state.docker_container_name:
+            return
+        code, _out, err = await self._run_docker_command("stop", state.docker_container_name)
+        if code == 0:
+            state.service_alive = False
+            state.status = "unreachable"
+            logger.info("container_stopped", container=state.docker_container_name)
+            return
+        logger.warning(
+            "container_stop_failed",
+            container=state.docker_container_name,
+            error=err or f"exit_code={code}",
+        )
+
+    async def _is_container_running(self, state: ServiceState) -> bool:
+        if not state.docker_container_name:
+            return False
+        code, out, _err = await self._run_docker_command(
+            "inspect", "-f", "{{.State.Running}}", state.docker_container_name
+        )
+        if code != 0:
+            return False
+        return out.strip().lower() == "true"
+
+    async def _stop_container_if_running(self, state: ServiceState) -> None:
+        if not state.docker_container_name:
+            return
+        if not await self._is_container_running(state):
+            return
+        await self._stop_container(state)
+
+    async def _restart_container(self, state: ServiceState) -> None:
+        if not state.docker_container_name:
+            return
+        code, _out, err = await self._run_docker_command("restart", state.docker_container_name)
+        if code == 0:
+            state.service_alive = False
+            state.status = "restarting"
+            logger.info("container_restarted", container=state.docker_container_name)
+            return
+        logger.warning(
+            "container_restart_failed",
+            container=state.docker_container_name,
+            error=err or f"exit_code={code}",
+        )
+
+    async def _start_container(self, state: ServiceState) -> None:
+        if not state.docker_container_name:
+            return
+        code, _out, err = await self._run_docker_command("start", state.docker_container_name)
+        if code == 0:
+            logger.info("container_started", container=state.docker_container_name)
+            return
+        logger.warning(
+            "container_start_failed",
+            container=state.docker_container_name,
+            error=err or f"exit_code={code}",
+        )
+
+    # ── Redis persistence ─────────────────────────────────────────────────
+
     async def _load_persisted_overrides(self) -> None:
         try:
             payload = await get_key(SERVICE_OVERRIDES_KEY)
         except Exception as exc:
             logger.warning("service_overrides_load_failed", error=str(exc))
             return
-
         if not isinstance(payload, dict):
             return
-
         for service_id, overrides in payload.items():
             state = self._states.get(str(service_id))
             if state is None or not isinstance(overrides, dict):

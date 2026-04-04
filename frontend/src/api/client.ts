@@ -658,6 +658,8 @@ function toServerConfig(raw: unknown): ServerConfig {
         ? null
         : Number(data.tensorrtLlmContextLength ?? data.tensorrt_llm_context_length),
     globalSchedules,
+    requireApiKeyOpenai: Boolean(data.requireApiKeyOpenai ?? data.require_api_key_openai ?? true),
+    requireApiKeyOllama: Boolean(data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true),
   }
 }
 

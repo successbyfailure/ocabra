@@ -35,24 +35,31 @@ async def _run_embeddings(
     raw_input = body.get("input") or body.get("prompt") or ""
 
     if state.backend_type == "ollama":
+        # Try /api/embed first (Ollama v0.3+); fall back to /api/embeddings for older versions.
+        # Both paths are normalised to return a list of embedding vectors.
+        if not legacy:
+            try:
+                result = await worker_pool.forward_request(
+                    model_id,
+                    "/api/embed",
+                    {"model": ollama_model, "input": raw_input},
+                )
+                vectors = result.get("embeddings", [])
+            except Exception:
+                # Older Ollama (pre-0.3) doesn't have /api/embed — use legacy endpoint.
+                legacy = True
+
         if legacy:
-            # /api/embeddings accepts a single prompt string
+            # /api/embeddings: single prompt string only.
+            prompt = raw_input if isinstance(raw_input, str) else (raw_input[0] if raw_input else "")
             result = await worker_pool.forward_request(
                 model_id,
                 "/api/embeddings",
-                {"model": ollama_model, "prompt": raw_input if isinstance(raw_input, str) else raw_input[0] if raw_input else ""},
+                {"model": ollama_model, "prompt": prompt},
             )
             vectors = result.get("embedding", [])
             if vectors and isinstance(vectors[0], (int, float)):
                 vectors = [vectors]
-        else:
-            # /api/embed accepts input as string or list
-            result = await worker_pool.forward_request(
-                model_id,
-                "/api/embed",
-                {"model": ollama_model, "input": raw_input},
-            )
-            vectors = result.get("embeddings", [])
     else:
         result = await worker_pool.forward_request(
             model_id,

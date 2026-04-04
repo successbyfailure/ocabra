@@ -11,17 +11,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 # Lazy imports for optional heavy deps so py_compile works without them installed.
-_passlib_context = None
 _jwt = None
-
-
-def _get_crypt_context():
-    global _passlib_context
-    if _passlib_context is None:
-        from passlib.context import CryptContext
-
-        _passlib_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
-    return _passlib_context
 
 
 def _get_jwt():
@@ -42,12 +32,17 @@ class AuthError(Exception):
 
 def hash_password(plain: str) -> str:
     """Hash *plain* with bcrypt (cost 12) and return the stored hash string."""
-    return _get_crypt_context().hash(plain)
+    import bcrypt
+
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt(rounds=12)).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     """Return True if *plain* matches the bcrypt *hashed* value."""
-    return _get_crypt_context().verify(plain, hashed)
+    import bcrypt
+
+    hashed_bytes = hashed.encode() if isinstance(hashed, str) else hashed
+    return bcrypt.checkpw(plain.encode(), hashed_bytes)
 
 
 # ── JWT helpers ───────────────────────────────────────────────────────────────

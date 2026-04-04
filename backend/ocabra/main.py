@@ -367,6 +367,16 @@ async def lifespan(app: FastAPI):
         await seed_first_admin(_session)
     logger.info("auth_seed_done")
 
+    # Load persisted config overrides from DB (applied on top of .env values)
+    from ocabra.db.server_config import apply_overrides_to_settings, load_overrides
+    async with _ASL() as _session:
+        _overrides = await load_overrides(_session)
+    if _overrides:
+        apply_overrides_to_settings(settings, _overrides)
+        logger.info("config_overrides_loaded", count=len(_overrides))
+    else:
+        logger.info("config_overrides_none")
+
     logger.info("vllm_backend_registered")
     logger.info("ocabra_ready")
     yield

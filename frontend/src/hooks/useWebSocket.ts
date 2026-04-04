@@ -106,6 +106,13 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
             lastActivityAt: (svc.last_activity_at ?? svc.lastActivityAt ?? null) as string | null,
             lastHealthCheckAt: (svc.last_health_check_at ?? svc.lastHealthCheckAt ?? null) as string | null,
             detail: (svc.detail ?? null) as string | null,
+            isGenerating: Boolean(svc.is_generating ?? svc.isGenerating ?? false),
+            queueDepth: Number(svc.queue_depth ?? svc.queueDepth ?? 0),
+            vramUsedMb: svc.vram_used_mb == null && svc.vramUsedMb == null ? null : Number(svc.vram_used_mb ?? svc.vramUsedMb),
+            gpuUtilPct: svc.gpu_util_pct == null && svc.gpuUtilPct == null ? null : Number(svc.gpu_util_pct ?? svc.gpuUtilPct),
+            cpuPct: svc.cpu_pct == null && svc.cpuPct == null ? null : Number(svc.cpu_pct ?? svc.cpuPct),
+            memUsedMb: svc.mem_used_mb == null && svc.memUsedMb == null ? null : Number(svc.mem_used_mb ?? svc.memUsedMb),
+            memLimitMb: svc.mem_limit_mb == null && svc.memLimitMb == null ? null : Number(svc.mem_limit_mb ?? svc.memLimitMb),
           },
         },
       }
