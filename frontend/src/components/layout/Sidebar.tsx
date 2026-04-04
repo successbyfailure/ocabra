@@ -8,6 +8,8 @@ import {
   BarChart2,
   Settings,
   LogOut,
+  Users,
+  UsersRound,
 } from "lucide-react"
 import { clsx } from "clsx"
 import { useAuthStore } from "@/stores/authStore"
@@ -41,6 +43,11 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/settings",  label: "Settings",   icon: Settings },
 ]
 
+const ADMIN_NAV_ITEMS: NavItem[] = [
+  { to: "/users",  label: "Usuarios", icon: Users,      minRole: "system_admin" },
+  { to: "/groups", label: "Grupos",   icon: UsersRound, minRole: "system_admin" },
+]
+
 export function Sidebar({ open, onClose }: SidebarProps) {
   const user = useAuthStore((s) => s.user)
   const hasRole = useAuthStore((s) => s.hasRole)
@@ -48,6 +55,10 @@ export function Sidebar({ open, onClose }: SidebarProps) {
   const navigate = useNavigate()
 
   const visibleItems = NAV_ITEMS.filter(
+    (item) => !item.minRole || hasRole(item.minRole),
+  )
+
+  const visibleAdminItems = ADMIN_NAV_ITEMS.filter(
     (item) => !item.minRole || hasRole(item.minRole),
   )
 
@@ -75,7 +86,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-2 py-4 space-y-1">
+      <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
         {visibleItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
@@ -94,6 +105,33 @@ export function Sidebar({ open, onClose }: SidebarProps) {
             {label}
           </NavLink>
         ))}
+
+        {/* Admin section — only shown to system_admin */}
+        {visibleAdminItems.length > 0 && (
+          <div className="pt-3">
+            <p className="px-3 pb-1 text-xs font-semibold uppercase tracking-widest text-muted-foreground/60">
+              Administración
+            </p>
+            {visibleAdminItems.map(({ to, label, icon: Icon }) => (
+              <NavLink
+                key={to}
+                to={to}
+                onClick={onClose}
+                className={({ isActive }) =>
+                  clsx(
+                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )
+                }
+              >
+                <Icon size={16} />
+                {label}
+              </NavLink>
+            ))}
+          </div>
+        )}
       </nav>
 
       {/* User info + logout */}

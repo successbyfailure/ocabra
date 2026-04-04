@@ -10,6 +10,8 @@ import { Playground } from "@/pages/Playground"
 import { Stats } from "@/pages/Stats"
 import { Settings } from "@/pages/Settings"
 import { TrtllmEngines } from "@/pages/TrtllmEngines"
+import { Users } from "@/pages/Users"
+import { Groups } from "@/pages/Groups"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -49,6 +51,24 @@ export default function App() {
                   element={
                     <ProtectedRoute minRole="model_manager">
                       <TrtllmEngines />
+                    </ProtectedRoute>
+                  }
+                />
+
+                {/* system_admin only */}
+                <Route
+                  path="/users"
+                  element={
+                    <ProtectedRoute minRole="system_admin">
+                      <Users />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/groups"
+                  element={
+                    <ProtectedRoute minRole="system_admin">
+                      <Groups />
                     </ProtectedRoute>
                   }
                 />
