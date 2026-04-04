@@ -7,6 +7,8 @@ import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
 import { LiteLLMSettings } from "@/components/settings/LiteLLMSettings"
 import { StorageSettings } from "@/components/settings/StorageSettings"
+import { ApiKeyManager } from "@/components/auth/ApiKeyManager"
+import { useCurrentUser } from "@/hooks/useAuth"
 import type { GPUState, LocalModel, ServerConfig } from "@/types"
 
 const EMPTY_CONFIG: ServerConfig = {
@@ -53,6 +55,7 @@ const EMPTY_CONFIG: ServerConfig = {
 }
 
 export function Settings() {
+  const user = useCurrentUser()
   const [loading, setLoading] = useState(true)
   const [config, setConfig] = useState<ServerConfig>(EMPTY_CONFIG)
   const [gpus, setGpus] = useState<GPUState[]>([])
@@ -121,6 +124,11 @@ export function Settings() {
           <LiteLLMSettings config={config} onSave={savePatch} />
           <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
           <GlobalSchedules config={config} onSave={savePatch} />
+          {user !== null && (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <ApiKeyManager />
+            </div>
+          )}
         </div>
       )}
     </div>
