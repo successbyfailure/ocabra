@@ -1,5 +1,8 @@
 import { Routes, Route, Navigate } from "react-router-dom"
+import { useAuth } from "@/hooks/useAuth"
 import { Layout } from "@/components/layout/Layout"
+import { ProtectedRoute } from "@/components/auth/ProtectedRoute"
+import { Login } from "@/pages/Login"
 import { Dashboard } from "@/pages/Dashboard"
 import { Models } from "@/pages/Models"
 import { Explore } from "@/pages/Explore"
@@ -10,18 +13,50 @@ import { TrtllmEngines } from "@/pages/TrtllmEngines"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
+  // Bootstrap auth state once at the application root
+  useAuth()
+
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/models" element={<Models />} />
-        <Route path="/engines" element={<TrtllmEngines />} />
-        <Route path="/explore" element={<Explore />} />
-        <Route path="/playground" element={<Playground />} />
-        <Route path="/stats" element={<Stats />} />
-        <Route path="/settings" element={<Settings />} />
-      </Routes>
-    </Layout>
+    <Routes>
+      {/* Public route */}
+      <Route path="/login" element={<Login />} />
+
+      {/* All protected routes share the app layout */}
+      <Route
+        path="/*"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Routes>
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/models" element={<Models />} />
+                <Route path="/playground" element={<Playground />} />
+                <Route path="/stats" element={<Stats />} />
+                <Route path="/settings" element={<Settings />} />
+
+                {/* model_manager+ only */}
+                <Route
+                  path="/explore"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <Explore />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/engines"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <TrtllmEngines />
+                    </ProtectedRoute>
+                  }
+                />
+              </Routes>
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+    </Routes>
   )
 }
