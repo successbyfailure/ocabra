@@ -561,6 +561,45 @@ export interface Group {
   createdAt: string
 }
 
+// Admin user management
+export interface AdminUser {
+  id: string
+  username: string
+  email: string | null
+  role: UserRole
+  isActive: boolean
+  createdAt: string
+}
+
+export interface GroupMember {
+  userId: string
+  username: string
+  role: UserRole
+}
+
+export interface CreateUserPayload {
+  username: string
+  password: string
+  role: UserRole
+  email?: string | null
+}
+
+export interface UpdateUserPayload {
+  role?: UserRole
+  isActive?: boolean
+  email?: string | null
+}
+
+export interface CreateGroupPayload {
+  name: string
+  description?: string | null
+}
+
+export interface UpdateGroupPayload {
+  name?: string
+  description?: string | null
+}
+
 // WebSocket events
 export type WSEvent =
   | { type: "gpu_stats"; data: GPUState[] }
