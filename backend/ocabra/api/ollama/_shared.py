@@ -4,6 +4,30 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 
+from fastapi import Depends
+
+from ocabra.api._deps_auth import UserContext, get_current_user
+
+async def get_ollama_user(
+    user: UserContext = Depends(get_current_user),
+) -> UserContext:
+    """Resolve auth for Ollama-compatible endpoints.
+
+    Delegates to ``get_current_user`` which already handles:
+    - Bearer API key resolution.
+    - Cookie JWT resolution.
+    - Anonymous access when ``require_api_key_ollama=False``.
+    - HTTP 401 when ``require_api_key_ollama=True`` and no credentials provided.
+
+    Returns:
+        Resolved :class:`UserContext` for the caller.
+
+    Raises:
+        HTTPException 401: When authentication is required but missing or invalid.
+    """
+    return user
+
+
 OPTION_MAP: dict[str, str] = {
     "num_predict": "max_tokens",
     "num_ctx": "max_model_len",

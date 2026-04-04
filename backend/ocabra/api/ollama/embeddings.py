@@ -4,21 +4,30 @@ POST /api/embed      — Ollama v0.3+ embeddings endpoint (supports input arrays
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
 
 from ._mapper import resolve_model
+from ._shared import get_ollama_user
 
 router = APIRouter()
 
 
-async def _run_embeddings(request: Request, body: dict, legacy: bool) -> dict:
+async def _run_embeddings(
+    request: Request,
+    body: dict,
+    legacy: bool,
+    user: UserContext,
+) -> dict:
     """Shared logic for /api/embeddings and /api/embed."""
     ollama_model = str(body.get("model", ""))
 
     model_manager = get_model_manager(request)
-    model_id, _ = await resolve_model(model_manager, ollama_model)
+    model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
+    if resolved_state is None:
+        raise HTTPException(status_code=404, detail=f"Model '{ollama_model}' not found")
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "embeddings", "embeddings")
 
@@ -63,7 +72,10 @@ async def _run_embeddings(request: Request, body: dict, legacy: bool) -> dict:
 
 
 @router.post("/embeddings", summary="Create embeddings (legacy)")
-async def embeddings(request: Request) -> dict:
+async def embeddings(
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+) -> dict:
     """
     Create embeddings from text input (Ollama legacy format).
 
@@ -75,11 +87,14 @@ async def embeddings(request: Request) -> dict:
       - {"model": ..., "embeddings": [[...], ...]}
     """
     body = await request.json()
-    return await _run_embeddings(request, body, legacy=True)
+    return await _run_embeddings(request, body, legacy=True, user=user)
 
 
 @router.post("/embed", summary="Create embeddings")
-async def embed(request: Request) -> dict:
+async def embed(
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+) -> dict:
     """
     Create embeddings from text input (Ollama v0.3+ format).
 
@@ -91,4 +106,4 @@ async def embed(request: Request) -> dict:
       - {"model": ..., "embeddings": [[...], ...]}
     """
     body = await request.json()
-    return await _run_embeddings(request, body, legacy=False)
+    return await _run_embeddings(request, body, legacy=False, user=user)

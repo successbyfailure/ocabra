@@ -7,13 +7,15 @@ import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.model_ref import build_model_ref
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 from ._mapper import OllamaNameMapper
+from ._shared import get_ollama_user
 
 router = APIRouter()
 _mapper = OllamaNameMapper()
@@ -21,15 +23,27 @@ _registry = OllamaRegistry()
 
 
 @router.get("/tags", summary="List models")
-async def list_tags(request: Request) -> dict:
+async def list_tags(
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+) -> dict:
     """
     List all configured models in Ollama /api/tags format.
+
+    Filters models by the caller's group membership unless the caller is an admin.
 
     Returns:
       {"models": [{"name": ..., "model": ..., "size": ..., "details": {...}}, ...]}
     """
     model_manager = request.app.state.model_manager
-    states = await model_manager.list_states()
+    all_states = await model_manager.list_states()
+
+    if user.is_admin:
+        filtered_states = all_states
+    else:
+        filtered_states = [s for s in all_states if s.model_id in user.accessible_model_ids]
+
+    states = filtered_states
     by_id = {state.model_id: state for state in states}
 
     try:
@@ -49,6 +63,12 @@ async def list_tags(request: Request) -> dict:
         if state is None:
             mapped_id = _mapper.to_internal(ollama_name)
             state = by_id.get(mapped_id)
+
+        # Non-admin callers only see models that are in their accessible set
+        # (reflected by `by_id` which is already filtered). Skip Ollama-native
+        # models that have no corresponding oCabra state visible to this user.
+        if not user.is_admin and state is None:
+            continue
 
         canonical_id = state.model_id if state else build_model_ref("ollama", ollama_name)
         backend_model_id = state.backend_model_id if state else ollama_name

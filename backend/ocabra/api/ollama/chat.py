@@ -7,13 +7,14 @@ import json
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
 
 from ._mapper import resolve_model
-from ._shared import build_native_passthrough_body, iter_sse_payloads, now_iso_z, apply_option_map
+from ._shared import build_native_passthrough_body, get_ollama_user, iter_sse_payloads, now_iso_z, apply_option_map
 
 router = APIRouter()
 
@@ -23,7 +24,10 @@ def _native_backend_model_name(requested_model: str, backend_model_id: str | Non
 
 
 @router.post("/chat", summary="Create chat completion")
-async def chat(request: Request):
+async def chat(
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+):
     """
     Create a chat completion in Ollama format.
 
@@ -35,7 +39,9 @@ async def chat(request: Request):
     stream = bool(body.get("stream", True))
 
     model_manager = get_model_manager(request)
-    model_id, _ = await resolve_model(model_manager, ollama_model)
+    model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
+    if resolved_state is None:
+        raise HTTPException(status_code=404, detail=f"Model '{ollama_model}' not found")
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "chat", "chat")
 
@@ -72,7 +78,7 @@ async def chat(request: Request):
     usage = result.get("usage") or {}
     return {
         "model": ollama_model,
-        "created_at": _now_iso_z(),
+        "created_at": now_iso_z(),
         "message": {"role": "assistant", "content": message},
         "done": True,
         "total_duration": total_duration,

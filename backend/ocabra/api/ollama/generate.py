@@ -7,20 +7,24 @@ import json
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
 
 from ._mapper import resolve_model
-from ._shared import apply_option_map, build_native_passthrough_body, iter_sse_payloads, now_iso_z
+from ._shared import apply_option_map, build_native_passthrough_body, get_ollama_user, iter_sse_payloads, now_iso_z
 from .chat import _native_backend_model_name
 
 router = APIRouter()
 
 
 @router.post("/generate", summary="Generate completion")
-async def generate(request: Request):
+async def generate(
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+):
     """
     Generate text from a prompt using Ollama-compatible request/response format.
 
@@ -32,7 +36,9 @@ async def generate(request: Request):
     stream = bool(body.get("stream", True))
 
     model_manager = get_model_manager(request)
-    model_id, _ = await resolve_model(model_manager, ollama_model)
+    model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
+    if resolved_state is None:
+        raise HTTPException(status_code=404, detail=f"Model '{ollama_model}' not found")
     state = await ensure_loaded(model_manager, model_id)
     check_capability(state, "completion", "text generation")
 
