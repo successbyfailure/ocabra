@@ -15,10 +15,11 @@ import shutil
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.trtllm_compile_manager import CompileRequest
 from ocabra.redis_client import subscribe
@@ -56,7 +57,11 @@ class CompileJobCreate(BaseModel):
 
 
 @router.post("/trtllm/compile", status_code=202)
-async def create_compile_job(body: CompileJobCreate, request: Request) -> dict:
+async def create_compile_job(
+    body: CompileJobCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
     """Submit a TensorRT-LLM engine compilation job.
 
     Parameters:
@@ -85,7 +90,10 @@ async def create_compile_job(body: CompileJobCreate, request: Request) -> dict:
 
 
 @router.get("/trtllm/compile")
-async def list_compile_jobs(request: Request) -> list[dict]:
+async def list_compile_jobs(
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> list[dict]:
     """List all TensorRT-LLM compilation jobs (history + active).
 
     Returns:
@@ -97,7 +105,11 @@ async def list_compile_jobs(request: Request) -> list[dict]:
 
 
 @router.get("/trtllm/compile/{job_id}/stream")
-async def stream_compile_job(job_id: str, request: Request) -> StreamingResponse:
+async def stream_compile_job(
+    job_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> StreamingResponse:
     """Stream real-time progress for a compilation job via SSE.
 
     Subscribes to the Redis pub/sub channel for the job and forwards
@@ -170,7 +182,11 @@ async def stream_compile_job(job_id: str, request: Request) -> StreamingResponse
 
 
 @router.delete("/trtllm/compile/{job_id}", status_code=200)
-async def cancel_compile_job(job_id: str, request: Request) -> dict:
+async def cancel_compile_job(
+    job_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
     """Cancel a pending or running compilation job.
 
     Parameters:
@@ -190,7 +206,11 @@ async def cancel_compile_job(job_id: str, request: Request) -> dict:
 
 
 @router.delete("/trtllm/engines/{engine_name}", status_code=200)
-async def delete_engine(engine_name: str, request: Request) -> dict:
+async def delete_engine(
+    engine_name: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
     """Delete a compiled TensorRT-LLM engine from disk and unregister its model.
 
     Parameters:
@@ -251,6 +271,7 @@ async def estimate_compile(
     dtype: str = "fp16",
     max_batch_size: int = 1,
     max_seq_len: int = 4096,
+    _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """Estimate VRAM required to build and serve a TRT-LLM engine.
 
