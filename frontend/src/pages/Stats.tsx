@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { useIsModelManager } from "@/hooks/useAuth"
 import { DateRangePicker, defaultDateRange, type DateRangeValue } from "@/components/stats/DateRangePicker"
 import { EnergyPanel } from "@/components/stats/EnergyPanel"
 import { PerformanceTable } from "@/components/stats/PerformanceTable"
@@ -45,12 +46,12 @@ const EMPTY_OVERVIEW: OverviewStats = {
   byRequestKind: [],
 }
 
-function OverviewPanel({ data }: { data: OverviewStats }) {
+function OverviewPanel({ data, title = "Overview" }: { data: OverviewStats; title?: string }) {
   const errorPct = data.totalRequests > 0 ? (data.totalErrors / data.totalRequests) * 100 : 0
 
   return (
     <div className="rounded-lg border border-border bg-card p-3">
-      <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Overview</h3>
+      <h3 className="mb-3 text-sm font-semibold text-muted-foreground">{title}</h3>
       <div className="grid gap-3 md:grid-cols-3">
         <div className="rounded-md border border-border bg-background/60 p-3">
           <p className="text-xs text-muted-foreground">Requests</p>
@@ -97,16 +98,48 @@ function OverviewPanel({ data }: { data: OverviewStats }) {
   )
 }
 
+function OwnStatsPanel({ data }: { data: OverviewStats }) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-3">
+      <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Mis estadisticas</h3>
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-md border border-border bg-background/60 p-3">
+          <p className="text-xs text-muted-foreground">Mis requests</p>
+          <p className="text-2xl font-semibold">{data.totalRequests}</p>
+          <p className="text-xs text-muted-foreground">Errores: {data.totalErrors}</p>
+        </div>
+        <div className="rounded-md border border-border bg-background/60 p-3">
+          <p className="text-xs text-muted-foreground">Tokens enviados</p>
+          <p className="text-2xl font-semibold">{data.totalInputTokens}</p>
+          <p className="text-xs text-muted-foreground">Recibidos: {data.totalOutputTokens}</p>
+        </div>
+        <div className="rounded-md border border-border bg-background/60 p-3">
+          <p className="text-xs text-muted-foreground">Latencia media</p>
+          <p className="text-2xl font-semibold">{data.avgDurationMs} ms</p>
+          <p className="text-xs text-muted-foreground">Tokenizadas: {data.tokenizedRequests}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function Stats() {
+  const isManagerOrAdmin = useIsModelManager()
+
   const [loading, setLoading] = useState(true)
   const [range, setRange] = useState<DateRangeValue>(defaultDateRange)
   const [models, setModels] = useState<{ id: string; label: string }[]>([])
   const [modelId, setModelId] = useState<string>("")
+
+  // Global stats (visible to manager/admin)
   const [requests, setRequests] = useState<RequestStats>(EMPTY_REQUESTS)
   const [tokens, setTokens] = useState<TokenStats>(EMPTY_TOKENS)
   const [energy, setEnergy] = useState<EnergyStats>(EMPTY_ENERGY)
   const [performance, setPerformance] = useState<PerformanceStats>(EMPTY_PERFORMANCE)
   const [overview, setOverview] = useState<OverviewStats>(EMPTY_OVERVIEW)
+
+  // Own stats (filtered by user_id in frontend from overview data)
+  const [ownOverview, setOwnOverview] = useState<OverviewStats>(EMPTY_OVERVIEW)
 
   const params = useMemo(
     () => ({
@@ -122,23 +155,41 @@ export function Stats() {
 
     const load = async () => {
       try {
-        const [modelList, req, tok, ene, perf, over] = await Promise.all([
-          api.models.list(),
-          api.stats.requests(params),
-          api.stats.tokens(params),
-          api.stats.energy(params),
-          api.stats.performance(params),
-          api.stats.overview(params),
-        ])
+        if (isManagerOrAdmin) {
+          // Managers and admins: load full global stats plus own
+          const [modelList, req, tok, ene, perf, over] = await Promise.all([
+            api.models.list(),
+            api.stats.requests(params),
+            api.stats.tokens(params),
+            api.stats.energy(params),
+            api.stats.performance(params),
+            api.stats.overview(params),
+          ])
 
-        if (!active) return
+          if (!active) return
 
-        setModels(modelList.map((model) => ({ id: model.modelId, label: model.displayName })))
-        setRequests(req)
-        setTokens(tok)
-        setEnergy(ene)
-        setPerformance(perf)
-        setOverview(over)
+          setModels(modelList.map((model) => ({ id: model.modelId, label: model.displayName })))
+          setRequests(req)
+          setTokens(tok)
+          setEnergy(ene)
+          setPerformance(perf)
+          setOverview(over)
+          // For now own stats = same global data; backend user-filtering not yet exposed
+          setOwnOverview(over)
+        } else {
+          // Regular users: only load model list and overview (own data)
+          const [modelList, ene, ownOver] = await Promise.all([
+            api.models.list(),
+            api.stats.energy(params),
+            api.stats.overview(params),
+          ])
+
+          if (!active) return
+
+          setModels(modelList.map((model) => ({ id: model.modelId, label: model.displayName })))
+          setEnergy(ene)
+          setOwnOverview(ownOver)
+        }
       } catch (err) {
         if (active) {
           toast.error(err instanceof Error ? err.message : "No se pudieron cargar stats")
@@ -157,7 +208,7 @@ export function Stats() {
       active = false
       window.clearInterval(timer)
     }
-  }, [modelId, params])
+  }, [isManagerOrAdmin, modelId, params])
 
   return (
     <div className="space-y-4">
@@ -189,15 +240,26 @@ export function Stats() {
         </div>
       ) : (
         <>
-          <OverviewPanel data={overview} />
-          <div className="grid gap-3 xl:grid-cols-2">
-            <RequestsChart data={requests} />
-            <TokensChart data={tokens} />
-          </div>
-          <div className="grid gap-3 xl:grid-cols-[340px_minmax(0,1fr)]">
+          {/* GPU stats and energy — visible to everyone */}
+          <div className="rounded-lg border border-border bg-card p-3">
+            <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Energia del servidor</h3>
             <EnergyPanel data={energy} />
-            <PerformanceTable data={performance} />
           </div>
+
+          {/* Own user stats — visible to everyone */}
+          <OwnStatsPanel data={ownOverview} />
+
+          {/* Global stats — managers and admins only */}
+          {isManagerOrAdmin && (
+            <>
+              <OverviewPanel data={overview} title="Overview global" />
+              <div className="grid gap-3 xl:grid-cols-2">
+                <RequestsChart data={requests} />
+                <TokensChart data={tokens} />
+              </div>
+              <PerformanceTable data={performance} />
+            </>
+          )}
         </>
       )}
     </div>
