@@ -3,6 +3,7 @@ import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ocabra.core.auth_manager import AuthError, decode_access_token
 from ocabra.redis_client import get_redis
 
 router = APIRouter(tags=["websocket"])
@@ -17,6 +18,16 @@ CHANNEL_EVENT_MAP = {
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
+    token = websocket.cookies.get("ocabra_session")
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        decode_access_token(token)
+    except AuthError:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     pubsub = get_redis().pubsub()
     await pubsub.subscribe(*CHANNEL_EVENT_MAP)
