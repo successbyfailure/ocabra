@@ -476,4 +476,10 @@ app.include_router(trtllm_router, prefix="/ocabra")
 # Auth foundation
 from ocabra.api.internal.auth import router as auth_router  # noqa: E402
 app.include_router(auth_router, prefix="/ocabra")
+
+# Auth: user and group management
+from ocabra.api.internal.users import router as users_router  # noqa: E402
+from ocabra.api.internal.groups import router as groups_router  # noqa: E402
+app.include_router(users_router, prefix="/ocabra")
+app.include_router(groups_router, prefix="/ocabra")
 # ─────────────────────────────────────────────────────────────
