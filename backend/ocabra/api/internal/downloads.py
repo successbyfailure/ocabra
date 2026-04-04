@@ -6,11 +6,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
+from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.model_ref import build_model_ref
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
@@ -363,12 +364,17 @@ router = APIRouter(tags=["downloads"], lifespan=_lifespan)
 
 
 @router.get("/downloads", response_model=list[DownloadJob])
-async def list_downloads() -> list[DownloadJob]:
+async def list_downloads(
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> list[DownloadJob]:
     return await download_manager.list_jobs()
 
 
 @router.post("/downloads", response_model=DownloadJob)
-async def enqueue_download(request: DownloadCreateRequest) -> DownloadJob:
+async def enqueue_download(
+    request: DownloadCreateRequest,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> DownloadJob:
     try:
         return await download_manager.enqueue(
             source=request.source,
@@ -381,7 +387,10 @@ async def enqueue_download(request: DownloadCreateRequest) -> DownloadJob:
 
 
 @router.get("/downloads/{job_id}", response_model=DownloadJob)
-async def get_download(job_id: str) -> DownloadJob:
+async def get_download(
+    job_id: str,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> DownloadJob:
     """Get a single download job by ID."""
     job = await download_manager.get_job(job_id)
     if job is None:
@@ -390,7 +399,10 @@ async def get_download(job_id: str) -> DownloadJob:
 
 
 @router.delete("/downloads")
-async def clear_downloads(status: str = "failed,cancelled,completed") -> dict[str, int]:
+async def clear_downloads(
+    status: str = "failed,cancelled,completed",
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, int]:
     """Delete historical download jobs by status (comma-separated). Active jobs are not affected."""
     requested = {s.strip() for s in status.split(",")}
     safe = requested - {"queued", "downloading"}  # never delete active jobs
@@ -399,7 +411,10 @@ async def clear_downloads(status: str = "failed,cancelled,completed") -> dict[st
 
 
 @router.delete("/downloads/{job_id}")
-async def cancel_download(job_id: str) -> dict[str, bool]:
+async def cancel_download(
+    job_id: str,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, bool]:
     try:
         await download_manager.cancel(job_id)
     except KeyError as exc:
@@ -408,7 +423,10 @@ async def cancel_download(job_id: str) -> dict[str, bool]:
 
 
 @router.get("/downloads/{job_id}/stream")
-async def stream_download_progress(job_id: str) -> StreamingResponse:
+async def stream_download_progress(
+    job_id: str,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> StreamingResponse:
     if await download_manager.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Download job not found")
 
