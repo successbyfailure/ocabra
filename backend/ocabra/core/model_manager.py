@@ -119,6 +119,7 @@ class ModelManager:
         # In-flight request tracking: model_id → active request count
         self._in_flight: dict[str, int] = {}
         self._in_flight_lock = Lock()
+        self._stopped: bool = False
 
     def begin_request(self, model_id: str) -> None:
         """Mark one request as in-flight for this model."""
@@ -214,6 +215,10 @@ class ModelManager:
                     task_name=f"load:{model_id}",
                     model_id=model_id,
                 )
+
+    async def stop(self) -> None:
+        """Signal all background loops (e.g. _watch_and_reload) to exit."""
+        self._stopped = True
 
     async def _load_configs_from_db(self) -> None:
         async with database.AsyncSessionLocal() as session:
@@ -744,7 +749,7 @@ class ModelManager:
         deadline = datetime.now(timezone.utc) + timedelta(
             seconds=max(30, int(settings.model_load_wait_timeout_s))
         )
-        while model_id in self._states:
+        while not self._stopped and model_id in self._states:
             state = self._states.get(model_id)
             if not state or not state.auto_reload:
                 return
