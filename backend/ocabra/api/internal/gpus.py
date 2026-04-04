@@ -2,8 +2,9 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 
 import sqlalchemy as sa
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.db.stats import GpuStat
 
 router = APIRouter(tags=["gpus"])
@@ -16,7 +17,10 @@ WINDOW_MAP = {
 
 
 @router.get("/gpus")
-async def list_gpus(request: Request) -> list[dict]:
+async def list_gpus(
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> list[dict]:
     """List current state of all GPUs."""
     gpu_manager = request.app.state.gpu_manager
     states = await gpu_manager.get_all_states()
@@ -24,7 +28,11 @@ async def list_gpus(request: Request) -> list[dict]:
 
 
 @router.get("/gpus/{index}")
-async def get_gpu(index: int, request: Request) -> dict:
+async def get_gpu(
+    index: int,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
     """Get current state of a single GPU."""
     gpu_manager = request.app.state.gpu_manager
     try:
@@ -39,6 +47,7 @@ async def get_gpu_stats(
     index: int,
     request: Request,
     window: str = Query(default="1h", pattern="^(5m|1h|24h)$"),
+    _user: UserContext = Depends(require_role("user")),
 ) -> list[dict]:
     """Get historical GPU stats for a given time window."""
     from ocabra.database import AsyncSessionLocal
