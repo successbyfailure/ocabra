@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.model_config import global_schedule_rows_to_payload, get_global_schedule_rows, replace_global_schedules
@@ -138,7 +139,10 @@ async def _load_global_schedules() -> list[dict[str, Any]]:
 
 
 @router.get("/config", summary="Get server configuration")
-async def get_config(request: Request) -> dict[str, Any]:
+async def get_config(
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict[str, Any]:
     """Return current server configuration (non-secret values)."""
     payload = _build_config_response(request)
     payload["globalSchedules"] = await _load_global_schedules()
@@ -146,7 +150,11 @@ async def get_config(request: Request) -> dict[str, Any]:
 
 
 @router.patch("/config", summary="Patch server configuration")
-async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, Any]:
+async def patch_config(
+    patch: ServerConfigPatch,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict[str, Any]:
     """Patch mutable server configuration values for the running process."""
     payload = patch.model_dump(exclude_unset=True)
     if "models_dir" in payload:
@@ -271,7 +279,10 @@ async def patch_config(patch: ServerConfigPatch, request: Request) -> dict[str, 
 
 
 @router.post("/config/litellm/sync", summary="Sync models to LiteLLM proxy")
-async def sync_litellm(request: Request) -> JSONResponse:
+async def sync_litellm(
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> JSONResponse:
     """
     Manually trigger synchronisation of all loaded models to LiteLLM proxy.
 
