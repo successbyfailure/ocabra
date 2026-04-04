@@ -479,6 +479,31 @@ export interface ServiceState {
   lastActivityAt: string | null
   lastHealthCheckAt: string | null
   detail: string | null
+  // Generation metrics
+  isGenerating: boolean
+  queueDepth: number
+  vramUsedMb: number | null
+  gpuUtilPct: number | null
+  // Container resource metrics
+  cpuPct: number | null
+  memUsedMb: number | null
+  memLimitMb: number | null
+}
+
+export interface HostStats {
+  cpuPct: number
+  cpuCount: number
+  cpuCountPhysical: number
+  loadAvg1m: number
+  loadAvg5m: number
+  loadAvg15m: number
+  memTotalMb: number
+  memUsedMb: number
+  memFreeMb: number
+  memPct: number
+  swapTotalMb: number
+  swapUsedMb: number
+  swapPct: number
 }
 
 // TRT-LLM compile jobs
@@ -503,6 +528,37 @@ export interface CompileJob {
   engineDir: string | null
   startedAt: string | null
   finishedAt: string | null
+}
+
+// Auth types
+export type UserRole = "user" | "model_manager" | "system_admin"
+
+export interface AuthUser {
+  id: string
+  username: string
+  email: string | null
+  role: UserRole
+  createdAt: string
+}
+
+export interface ApiKey {
+  id: string
+  name: string
+  keyPrefix: string
+  expiresAt: string | null
+  lastUsedAt: string | null
+  isRevoked: boolean
+  createdAt: string
+}
+
+export interface Group {
+  id: string
+  name: string
+  description: string
+  isDefault: boolean
+  memberCount: number
+  modelCount: number
+  createdAt: string
 }
 
 // WebSocket events
