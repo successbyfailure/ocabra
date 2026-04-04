@@ -366,6 +366,18 @@ async def _record_stat(
         record_request(model_id=model_id, duration_s=max(duration_ms, 0.0) / 1000.0, status="error" if error_message else "ok")
         record_tokens(model_id=model_id, input_tokens=int(input_tokens or 0), output_tokens=int(output_tokens or 0))
 
+        # Extract user_id set by auth dependency (stored on request.state by get_current_user).
+        auth_user = getattr(request.state, "auth_user", None)
+        user_id = auth_user.user_id if auth_user and not auth_user.is_anonymous else None
+
+        import uuid as _uuid
+        parsed_user_id: _uuid.UUID | None = None
+        if user_id:
+            try:
+                parsed_user_id = _uuid.UUID(str(user_id))
+            except (ValueError, AttributeError):
+                pass
+
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
                 model_id=model_id,
@@ -380,6 +392,7 @@ async def _record_stat(
                 output_tokens=output_tokens,
                 energy_wh=energy_wh,
                 error=error_message,
+                user_id=parsed_user_id,
             )
             session.add(stat)
             await session.commit()
