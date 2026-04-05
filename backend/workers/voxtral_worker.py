@@ -105,6 +105,34 @@ def _resolve_model_path(model_id: str) -> str:
     return hf_id
 
 
+def _find_stage_config(python_bin: str) -> str | None:
+    """Locate the ``voxtral_tts.yaml`` stage config shipped with vllm-omni.
+
+    Searches the site-packages directory of *python_bin*'s environment.
+    """
+    import glob
+    # Derive site-packages from python_bin
+    bin_dir = os.path.dirname(python_bin)
+    base_dir = os.path.dirname(bin_dir)  # e.g. /opt/voxtral-venv
+    patterns = [
+        os.path.join(base_dir, "lib", "python*", "site-packages", "vllm_omni", "model_executor", "stage_configs", "voxtral_tts.yaml"),
+        os.path.join(base_dir, "lib", "python*", "dist-packages", "vllm_omni", "model_executor", "stage_configs", "voxtral_tts.yaml"),
+    ]
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    # Fallback: search globally
+    for pattern in [
+        "/usr/local/lib/python*/site-packages/vllm_omni/model_executor/stage_configs/voxtral_tts.yaml",
+        "/usr/local/lib/python*/dist-packages/vllm_omni/model_executor/stage_configs/voxtral_tts.yaml",
+    ]:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
 def _find_vllm_omni_bin(python_bin: str) -> str | None:
     """Locate the ``vllm-omni`` console script.
 
@@ -139,29 +167,26 @@ async def _start_vllm_omni(model_id: str, port: int, gpu_indices: list[int]) -> 
     # fall back to `python -m vllm_omni.entrypoints.cli.main`.
     vllm_omni_bin = _find_vllm_omni_bin(python_bin)
 
+    # Locate the built-in voxtral_tts.yaml stage config from vllm-omni
+    stage_config = _find_stage_config(python_bin)
+
+    base_args = [
+        "serve", model_path,
+        "--omni",
+        "--port", str(port),
+        "--host", "127.0.0.1",
+        "--served-model-name", model_id,
+        "--dtype", "bfloat16",
+        "--trust-remote-code",
+        "--init-timeout", "600",
+    ]
+    if stage_config:
+        base_args.extend(["--stage-configs-path", stage_config])
+
     if vllm_omni_bin:
-        cmd = [
-            vllm_omni_bin, "serve", model_path,
-            "--port", str(port),
-            "--host", "127.0.0.1",
-            "--served-model-name", model_id,
-            "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.90",
-            "--max-num-seqs", "4",
-            "--trust-remote-code",
-        ]
+        cmd = [vllm_omni_bin] + base_args
     else:
-        cmd = [
-            python_bin, "-m", "vllm_omni.entrypoints.cli.main",
-            "serve", model_path,
-            "--port", str(port),
-            "--host", "127.0.0.1",
-            "--served-model-name", model_id,
-            "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.90",
-            "--max-num-seqs", "4",
-            "--trust-remote-code",
-        ]
+        cmd = [python_bin, "-m", "vllm_omni.entrypoints.cli.main"] + base_args
 
     log_path = f"/tmp/voxtral-worker-{model_id.replace('/', '__')}.log"
     log_file = open(log_path, "ab")  # noqa: SIM115
