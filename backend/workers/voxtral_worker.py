@@ -105,43 +105,63 @@ def _resolve_model_path(model_id: str) -> str:
     return hf_id
 
 
+def _find_vllm_omni_bin(python_bin: str) -> str | None:
+    """Locate the ``vllm-omni`` console script.
+
+    Checks the same bin directory as *python_bin*, then PATH.
+    """
+    import shutil
+    bin_dir = os.path.dirname(python_bin)
+    candidate = os.path.join(bin_dir, "vllm-omni")
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return shutil.which("vllm-omni")
+
+
 async def _start_vllm_omni(model_id: str, port: int, gpu_indices: list[int]) -> asyncio.subprocess.Process:
-    """Launch ``vllm serve MODEL --omni`` on *port*."""
+    """Launch ``vllm-omni serve MODEL`` on *port*."""
     model_path = _resolve_model_path(model_id)
 
-    # Determine which python has vllm-omni
+    # Determine which python/binary to use for vllm-omni.
+    # Priority: VOXTRAL_PYTHON_BIN env → vllm-omni CLI → python -m vllm_omni
     python_bin = sys.executable
     venv_python = os.environ.get("VOXTRAL_PYTHON_BIN", "")
     if venv_python and os.path.isfile(venv_python):
         python_bin = venv_python
-
-    cmd = [
-        python_bin, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", model_path,
-        "--port", str(port),
-        "--host", "127.0.0.1",
-        "--served-model-name", model_id,
-        "--dtype", "bfloat16",
-        "--gpu-memory-utilization", "0.90",
-        "--max-num-seqs", "4",
-        "--trust-remote-code",
-    ]
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     if gpu_indices:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
 
-    # vllm-omni needs the --omni flag; try to detect it
-    try:
-        probe = subprocess.run(
-            [python_bin, "-m", "vllm.entrypoints.openai.api_server", "--help"],
-            capture_output=True, text=True, timeout=15, env=env,
-        )
-        if "--omni" in probe.stdout or "--omni" in probe.stderr:
-            cmd.append("--omni")
-    except Exception:
-        cmd.append("--omni")  # assume it exists
+    # vllm-omni installs a `vllm-omni` console_script that wraps vllm with
+    # omni multimodal support (TTS, etc.).  Use it if available; otherwise
+    # fall back to `python -m vllm_omni.entrypoints.cli.main`.
+    vllm_omni_bin = _find_vllm_omni_bin(python_bin)
+
+    if vllm_omni_bin:
+        cmd = [
+            vllm_omni_bin, "serve", model_path,
+            "--port", str(port),
+            "--host", "127.0.0.1",
+            "--served-model-name", model_id,
+            "--dtype", "bfloat16",
+            "--gpu-memory-utilization", "0.90",
+            "--max-num-seqs", "4",
+            "--trust-remote-code",
+        ]
+    else:
+        cmd = [
+            python_bin, "-m", "vllm_omni.entrypoints.cli.main",
+            "serve", model_path,
+            "--port", str(port),
+            "--host", "127.0.0.1",
+            "--served-model-name", model_id,
+            "--dtype", "bfloat16",
+            "--gpu-memory-utilization", "0.90",
+            "--max-num-seqs", "4",
+            "--trust-remote-code",
+        ]
 
     log_path = f"/tmp/voxtral-worker-{model_id.replace('/', '__')}.log"
     log_file = open(log_path, "ab")  # noqa: SIM115
