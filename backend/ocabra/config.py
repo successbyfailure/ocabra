@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     sglang_trust_remote_code: bool = False
     sglang_disable_radix_cache: bool = False
     sglang_startup_timeout_s: int = 120
+    # Voxtral TTS (vllm-omni)
+    voxtral_python_bin: str = "/opt/voxtral-venv/bin/python"
+    voxtral_startup_timeout_s: int = 300
     # TensorRT-LLM
     tensorrt_llm_enabled: bool = False
     tensorrt_llm_launch_mode: str = "binary"

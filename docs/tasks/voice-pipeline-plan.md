@@ -126,13 +126,63 @@ oCabra ya lo soporta. El cambio es en el cliente.
 
 ### Tabla de archivos — Fase 1
 
-| Archivo | Cambio | Prioridad |
-|---------|--------|-----------|
-| `backend/workers/tts_worker.py` | Encoding real MP3/WAV/PCM + streaming por frases | **Alta** |
-| `workers/tts_worker.py` (stub raíz) | Mismo: respetar `response_format` | Media |
-| `backend/ocabra/api/openai/audio.py` | Apuntar TTS a `/synthesize/stream`, añadir `/audio/voices` | Alta |
-| `backend/ocabra/backends/tts_backend.py` | Asegurar que `forward_stream` pasa `response_format` | Media |
-| `backend/workers/whisper_worker.py` | Verificar aceptación de M4A/AAC | Media |
+| Archivo | Cambio | Estado |
+|---------|--------|--------|
+| `backend/workers/tts_worker.py` | Encoding real MP3/WAV/PCM + streaming por frases | **✅ Hecho** |
+| `workers/tts_worker.py` (stub raíz) | Mismo: respetar `response_format` | **✅ Hecho** |
+| `backend/ocabra/api/openai/audio.py` | Apuntar TTS a `/synthesize/stream`, añadir `/audio/voices` | **✅ Hecho** |
+| `backend/ocabra/backends/tts_backend.py` | `forward_stream` pasa `response_format` | **✅ Ya funcionaba** |
+| `backend/workers/whisper_worker.py` | M4A/AAC via ffmpeg | **✅ Ya funcionaba** |
+
+---
+
+## Fase 1.5 — Voxtral TTS backend (vllm-omni)
+
+### F1.5-1: Voxtral TTS Worker
+
+Voxtral 4B TTS usa `vllm-omni` (fork de vllm para modelos de audio).
+No es compatible con el paquete `qwen_tts` — necesita su propio worker.
+
+**Modelo:** `mistralai/Voxtral-4B-TTS-2603` — 7.5 GB en disco, ~8 GB VRAM, BF16.
+**Requisitos:** `vllm >= 0.18.0` + `vllm-omni >= 0.18.0`.
+**Idiomas:** EN, FR, ES, DE, IT, PT, NL, AR, HI — español nativo.
+**Voces:** 20 presets (jessica, emma, liam, casual_male, professional_female, etc.)
+**Ventaja clave:** TTFB ~70ms en H200; mucho más rápido que Qwen3-TTS.
+
+**Arquitectura implementada:**
+
+```
+audio.py (gateway) → voxtral_backend.py → voxtral_worker.py → vllm-omni server
+                                           (FastAPI wrapper)    (vllm serve --omni)
+```
+
+- `voxtral_worker.py`: FastAPI server que lanza `vllm serve MODEL --omni` como subprocess
+  interno y expone la interfaz estándar (`/health`, `/synthesize`, `/synthesize/stream`, `/voices`).
+- `voxtral_backend.py`: BackendInterface que lanza el worker con el Python de un venv
+  configurable (`voxtral_python_bin`, default `/opt/voxtral-venv/bin/python`).
+- El gateway `audio.py` no necesita cambios — funciona igual que con Qwen3-TTS.
+
+### F1.5-2: Instalación de vllm-omni
+
+El contenedor actual tiene `vllm 0.17.1`. Voxtral necesita `>= 0.18.0 + vllm-omni`.
+Opciones:
+
+1. **Venv dedicado** (recomendado): `/opt/voxtral-venv/` con vllm + vllm-omni.
+   ```bash
+   python3 -m venv /opt/voxtral-venv
+   /opt/voxtral-venv/bin/pip install 'vllm>=0.18.0' 'vllm-omni>=0.18.0'
+   ```
+2. **Docker image**: Usar `vllm/vllm-omni:v0.18.0` como sidecar.
+3. **Upgrade global**: `pip install -U vllm vllm-omni` — riesgo de romper vLLM text.
+
+### Tabla de archivos — Fase 1.5
+
+| Archivo | Cambio | Estado |
+|---------|--------|--------|
+| `backend/workers/voxtral_worker.py` | **Nuevo** — FastAPI wrapper de vllm-omni | ✅ Hecho |
+| `backend/ocabra/backends/voxtral_backend.py` | **Nuevo** — BackendInterface para Voxtral | ✅ Hecho |
+| `backend/ocabra/main.py` | Registrar backend "voxtral" | ✅ Hecho |
+| `backend/ocabra/config.py` | `voxtral_python_bin`, `voxtral_startup_timeout_s` | ✅ Hecho |
 
 ---
 

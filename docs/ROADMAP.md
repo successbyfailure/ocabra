@@ -221,14 +221,23 @@ Columnas: tiempo, modelo, tipo, duración, tokens, usuario, estado.
 **Prioridad: ALTA**  
 **Plan completo:** `docs/tasks/voice-pipeline-plan.md`
 
-### Fase 1 — Tres endpoints oficiales funcionando correctamente
+### Fase 1 — Tres endpoints oficiales funcionando correctamente (✅ COMPLETADA)
 
-| Item | Archivo | Descripción |
-|------|---------|-------------|
-| [VP-1] TTS encoding real | `backend/workers/tts_worker.py` | MP3/WAV/PCM según `response_format`. Actualmente siempre devuelve WAV. Bloqueante para cliente Android. |
-| [VP-2] TTS streaming por frases | `backend/workers/tts_worker.py` + `api/openai/audio.py` | `/synthesize/stream` — sintetizar frase a frase para latencia baja |
-| [VP-3] STT verificar M4A | `backend/workers/whisper_worker.py` | Confirmar aceptación de AAC/M4A desde Android MediaRecorder |
-| [VP-4] Voices endpoint | `backend/ocabra/api/openai/audio.py` | `GET /v1/audio/voices?model=` — expone voces disponibles |
+| Item | Archivo | Estado |
+|------|---------|--------|
+| [VP-1] TTS encoding real | `backend/workers/tts_worker.py` | ✅ MP3/WAV/PCM/FLAC via soundfile+ffmpeg |
+| [VP-2] TTS streaming por frases | `backend/workers/tts_worker.py` + `api/openai/audio.py` | ✅ `/synthesize/stream` |
+| [VP-3] STT verificar M4A | `backend/workers/whisper_worker.py` | ✅ faster-whisper acepta M4A |
+| [VP-4] Voices endpoint | `backend/ocabra/api/openai/audio.py` | ✅ `GET /v1/audio/voices?model=` |
+
+### Fase 1.5 — Voxtral TTS backend (vllm-omni) (EN CURSO)
+
+| Item | Archivo | Estado |
+|------|---------|--------|
+| [VP-9] Voxtral worker | `backend/workers/voxtral_worker.py` | ✅ Wrapper FastAPI + vllm-omni subprocess |
+| [VP-10] Voxtral backend | `backend/ocabra/backends/voxtral_backend.py` | ✅ BackendInterface |
+| [VP-11] Registro backend | `backend/ocabra/main.py` + `config.py` | ✅ `voxtral_python_bin` |
+| [VP-12] Instalar vllm-omni | `/opt/voxtral-venv/` o Dockerfile | ⏳ Pendiente — necesita vllm≥0.18.0 |
 
 ### Fase 2 — OpenAI Realtime API (`GET /v1/realtime`)
 

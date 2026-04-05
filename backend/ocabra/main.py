@@ -269,6 +269,7 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
     from ocabra.backends.vllm_backend import VLLMBackend
+    from ocabra.backends.voxtral_backend import VoxtralBackend
     from ocabra.backends.whisper_backend import WhisperBackend
     worker_pool = WorkerPool()
     worker_pool.register_backend("acestep", AceStepBackend())
@@ -279,6 +280,7 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("sglang", SGLangBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
     worker_pool.register_backend("tts", TTSBackend())
+    worker_pool.register_backend("voxtral", VoxtralBackend())
     worker_pool.register_backend("vllm", VLLMBackend())
     tensorrt_llm_backend = TensorRTLLMBackend()
     if tensorrt_llm_backend.is_enabled():
