@@ -113,7 +113,7 @@ export function TrtllmEngines() {
           ))}
         </div>
       ) : jobs.length === 0 ? (
-        <div className="rounded-lg border border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
+        <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
           No hay engines compilados aún. Usa el botón{" "}
           <Cpu size={13} className="inline text-purple-400" /> en un modelo vLLM para compilar uno.
         </div>
@@ -173,28 +173,28 @@ export function TrtllmEngines() {
                           type="button"
                           onClick={() => void handleLoad(job.engineName)}
                           disabled={busy || isLoaded}
-                          className="rounded-md border border-emerald-500/40 p-1.5 text-emerald-200 disabled:opacity-40"
-                          title="Cargar"
+                          className="rounded-md border border-emerald-500/40 p-1.5 text-emerald-200 disabled:opacity-50"
+                          aria-label={`Cargar ${job.engineName}`}
                         >
-                          <Play size={14} />
+                          <Play size={14} aria-hidden="true" />
                         </button>
                         <button
                           type="button"
                           onClick={() => void handleUnload(job.engineName)}
                           disabled={busy || isUnloaded}
-                          className="rounded-md border border-red-500/40 p-1.5 text-red-200 disabled:opacity-40"
-                          title="Descargar"
+                          className="rounded-md border border-red-500/40 p-1.5 text-red-200 disabled:opacity-50"
+                          aria-label={`Descargar ${job.engineName}`}
                         >
-                          <Square size={14} />
+                          <Square size={14} aria-hidden="true" />
                         </button>
                         <button
                           type="button"
                           onClick={() => void handleDelete(job.engineName)}
                           disabled={busy}
-                          className="rounded-md border border-red-500/40 p-1.5 text-red-200 disabled:opacity-40"
-                          title="Eliminar engine"
+                          className="rounded-md border border-red-500/40 p-1.5 text-red-200 disabled:opacity-50"
+                          aria-label={`Eliminar engine ${job.engineName}`}
                         >
-                          <Trash2 size={14} />
+                          <Trash2 size={14} aria-hidden="true" />
                         </button>
                       </div>
                     </td>
@@ -210,18 +210,28 @@ export function TrtllmEngines() {
 }
 
 function StatusBadge({ status }: { status: string }) {
+  // Consistent with Dashboard ServiceCard and ModelStatusBadge
   const styles: Record<string, string> = {
-    loaded: "bg-emerald-500/20 text-emerald-300",
-    loading: "bg-yellow-500/20 text-yellow-300",
-    unloading: "bg-yellow-500/20 text-yellow-300",
-    unloaded: "bg-muted text-muted-foreground",
-    configured: "bg-muted text-muted-foreground",
-    error: "bg-red-500/20 text-red-300",
-    unregistered: "bg-zinc-500/20 text-zinc-400",
+    loaded: "bg-emerald-500/20 text-emerald-200 border-emerald-500/30",
+    loading: "bg-amber-500/20 text-amber-200 border-amber-500/30",
+    unloading: "bg-amber-500/20 text-amber-200 border-amber-500/30",
+    unloaded: "bg-muted text-muted-foreground border-border",
+    configured: "bg-muted text-muted-foreground border-border",
+    error: "bg-red-500/20 text-red-200 border-red-500/30",
+    unregistered: "bg-muted/50 text-muted-foreground border-border",
+  }
+  const labels: Record<string, string> = {
+    loaded: "Cargado",
+    loading: "Cargando",
+    unloading: "Descargando",
+    unloaded: "Descargado",
+    configured: "Configurado",
+    error: "Error",
+    unregistered: "Sin registrar",
   }
   return (
-    <span className={`rounded px-1.5 py-0.5 text-xs ${styles[status] ?? "bg-muted text-muted-foreground"}`}>
-      {status}
+    <span className={`rounded border px-1.5 py-0.5 text-xs font-medium ${styles[status] ?? "bg-muted text-muted-foreground border-border"}`}>
+      {labels[status] ?? status}
     </span>
   )
 }

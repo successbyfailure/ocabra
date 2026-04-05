@@ -120,7 +120,7 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
             request.voice.lower(), VOICE_MAPPINGS[runtime.family]["alloy"]
         )
 
-        audio_bytes = await asyncio.to_thread(
+        audio_bytes, actual_format = await asyncio.to_thread(
             _synthesize_audio,
             request.input,
             model_voice,
@@ -128,7 +128,7 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
             request.speed,
         )
 
-        media_type = FORMAT_CONTENT_TYPES.get(request.response_format.lower(), "audio/mpeg")
+        media_type = FORMAT_CONTENT_TYPES.get(actual_format, "audio/wav")
         headers = {"X-Model-Voice": model_voice, "X-Model-Family": runtime.family}
         return StreamingResponse(io.BytesIO(audio_bytes), media_type=media_type, headers=headers)
 
@@ -160,9 +160,17 @@ def _infer_tts_family(model_id: str) -> str:
     return "kokoro"
 
 
-def _synthesize_audio(text: str, voice: str, response_format: str, speed: float) -> bytes:
+def _synthesize_audio(text: str, voice: str, response_format: str, speed: float) -> tuple[bytes, str]:
+    """Return (audio_bytes, actual_format).
+
+    This is a placeholder that generates a synthetic tone.  The actual format
+    produced is always WAV regardless of *response_format* because real encoder
+    libraries (e.g. pydub) are not available in this stub.  The caller must use
+    the returned *actual_format* to set the correct Content-Type.
+    """
     del voice  # Voice controls are backend-specific; placeholder signal is deterministic.
-    return _generate_tone(text=text, response_format=response_format, speed=speed)
+    audio_bytes = _generate_tone(text=text, response_format="wav", speed=speed)
+    return audio_bytes, "wav"
 
 
 def _generate_tone(text: str, response_format: str, speed: float) -> bytes:

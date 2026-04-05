@@ -82,7 +82,15 @@ class ApiKey(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("groups.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     user: Mapped[User] = relationship("User", back_populates="api_keys")
+    group: Mapped[Group | None] = relationship("Group", foreign_keys=[group_id])
 
 
 class Group(Base):

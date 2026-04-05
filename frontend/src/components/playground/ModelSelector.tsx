@@ -13,11 +13,13 @@ export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelect
 
   return (
     <div className="space-y-2 rounded-lg border border-border bg-card p-3">
-      <label className="block text-sm text-muted-foreground">
+      <label htmlFor="model-selector" className="block text-sm text-muted-foreground">
         Modelo
         <select
+          id="model-selector"
           value={selectedModelId}
           onChange={(event) => onSelect(event.target.value)}
+          aria-label="Seleccionar modelo"
           className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
         >
           {models.map((model) => (

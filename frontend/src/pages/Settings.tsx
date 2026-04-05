@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import * as Tabs from "@radix-ui/react-tabs"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
@@ -117,15 +118,72 @@ export function Settings() {
           ))}
         </div>
       ) : (
-        <div className="grid gap-4">
-          <GeneralSettings config={config} onSave={savePatch} />
-          <ApiAccessSettings config={config} onSave={savePatch} />
-          <GPUSettings gpus={gpus} config={config} onSave={savePatch} />
-          <BackendRuntimeSettings config={config} onSave={savePatch} />
-          <LiteLLMSettings config={config} onSave={savePatch} />
-          <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
-          <GlobalSchedules config={config} onSave={savePatch} />
-        </div>
+        <Tabs.Root defaultValue="general">
+          <Tabs.List className="flex gap-1 border-b border-border mb-4">
+            <Tabs.Trigger
+              value="general"
+              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+            >
+              General
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="gpus"
+              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+            >
+              GPUs
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="backends"
+              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+            >
+              Backends
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="storage"
+              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+            >
+              Almacenamiento
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="litellm"
+              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+            >
+              LiteLLM
+            </Tabs.Trigger>
+          </Tabs.List>
+
+          <Tabs.Content value="general">
+            <div className="grid gap-4">
+              <GeneralSettings config={config} onSave={savePatch} />
+              <ApiAccessSettings config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="gpus">
+            <div className="grid gap-4">
+              <GPUSettings gpus={gpus} config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="backends">
+            <div className="grid gap-4">
+              <BackendRuntimeSettings config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="storage">
+            <div className="grid gap-4">
+              <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
+              <GlobalSchedules config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="litellm">
+            <div className="grid gap-4">
+              <LiteLLMSettings config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+        </Tabs.Root>
       )}
     </div>
   )

@@ -141,6 +141,7 @@ services:
     volumes:
       - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
       - /docker/ai-models/ocabra/models/hunyuan3d:/workspace/Hunyuan3D-2.1/gradio_cache
+      - /docker/ai-models/ocabra/models/hy3dgen:/root/.cache/hy3dgen
     ports:
       - "${HUNYUAN_PORT:-8480}:8080"
     healthcheck:

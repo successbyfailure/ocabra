@@ -32,6 +32,8 @@ class RequestStat(Base):
     error: Mapped[str | None] = mapped_column(Text)
     # Authenticated user who made the request; NULL for anonymous callers.
     user_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True)
+    # Group associated with the API key used for this request; preserved even if group is deleted.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True, index=True)
 
 
 class GpuStat(Base):

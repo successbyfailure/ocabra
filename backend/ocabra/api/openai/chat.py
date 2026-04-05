@@ -11,17 +11,20 @@ Supports:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+
+from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
     check_capability,
     ensure_loaded,
     get_model_manager,
+    get_openai_user,
     raise_upstream_http_error,
     to_backend_body,
 )
@@ -31,7 +34,10 @@ logger = structlog.get_logger(__name__)
 
 
 @router.post("/chat/completions", summary="Create chat completion")
-async def chat_completions(request: Request) -> Any:
+async def chat_completions(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Create a chat completion. Proxies to the resolved model worker (backend-agnostic).
 
@@ -42,8 +48,10 @@ async def chat_completions(request: Request) -> Any:
     stream: bool = body.get("stream", False)
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "chat", "chat completions")
+    if body.get("tools"):
+        check_capability(state, "tools", "tool calling")
     model_id = state.model_id
 
     worker_pool = request.app.state.worker_pool

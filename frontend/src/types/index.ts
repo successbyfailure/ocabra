@@ -450,6 +450,62 @@ export interface OverviewStats {
   }[]
 }
 
+export interface RecentRequest {
+  id: string
+  modelId: string
+  backendType: string | null
+  requestKind: string | null
+  endpointPath: string | null
+  statusCode: number | null
+  startedAt: string
+  durationMs: number | null
+  inputTokens: number | null
+  outputTokens: number | null
+  error: string | null
+  userId: string | null
+  username: string | null
+  groupId: string | null
+  groupName: string | null
+}
+
+export interface RecentRequestsData {
+  requests: RecentRequest[]
+}
+
+export interface UserStatRow {
+  userId: string
+  username: string
+  totalRequests: number
+  totalErrors: number
+  avgDurationMs: number
+  totalInputTokens: number
+  totalOutputTokens: number
+}
+
+export interface GroupStatRow {
+  groupId: string
+  groupName: string
+  totalRequests: number
+  totalErrors: number
+  avgDurationMs: number
+  totalInputTokens: number
+  totalOutputTokens: number
+}
+
+export interface ByUserStats {
+  byUser: UserStatRow[]
+}
+
+export interface ByGroupStats {
+  byGroup: GroupStatRow[]
+}
+
+export interface MyGroupStats {
+  groupId: string | null
+  groupName: string | null
+  stats: OverviewStats
+}
+
 export interface GPUStatHistoryPoint {
   timestamp: string
   usedVramMb: number
@@ -551,6 +607,7 @@ export interface ApiKey {
   lastUsedAt: string | null
   isRevoked: boolean
   createdAt: string
+  groupId?: string | null
 }
 
 export interface Group {

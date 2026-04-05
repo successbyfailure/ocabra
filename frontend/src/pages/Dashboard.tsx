@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from "react"
+import { Activity, Cpu, Database, Download, Layers, Zap } from "lucide-react"
 import { api } from "@/api/client"
+import { EmptyState } from "@/components/common/EmptyState"
 import { GpuCard } from "@/components/gpu/GpuCard"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
+import { useIsModelManager } from "@/hooks/useAuth"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { HostStats, ServiceState } from "@/types"
+import type { HostStats, RecentRequestsData, ServiceState } from "@/types"
 
 function formatLoadedAgo(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -192,28 +195,33 @@ function ServiceCard({ service }: { service: ServiceState }) {
             </span>
           )}
           {service.isGenerating && (
-            <span className="rounded-md bg-emerald-900/40 px-2 py-0.5 text-emerald-300 border border-emerald-500/30">
-              🎨 Generando{service.queueDepth > 0 ? ` (+${service.queueDepth} en cola)` : ""}
+            <span className="inline-flex items-center gap-1 rounded-md bg-emerald-900/40 px-2 py-0.5 text-emerald-300 border border-emerald-500/30">
+              <Activity size={11} aria-hidden="true" />
+              Generando{service.queueDepth > 0 ? ` (+${service.queueDepth} en cola)` : ""}
             </span>
           )}
           {service.vramUsedMb != null && (
-            <span className="rounded-md bg-muted px-2 py-0.5">
-              💾 {(service.vramUsedMb / 1024).toFixed(1)} GB VRAM
+            <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+              <Database size={11} aria-hidden="true" />
+              {(service.vramUsedMb / 1024).toFixed(1)} GB VRAM
             </span>
           )}
           {service.gpuUtilPct != null && (
-            <span className="rounded-md bg-muted px-2 py-0.5">
-              ⚡ GPU {Math.round(service.gpuUtilPct)}%
+            <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+              <Zap size={11} aria-hidden="true" />
+              GPU {Math.round(service.gpuUtilPct)}%
             </span>
           )}
           {service.cpuPct != null && (
-            <span className="rounded-md bg-muted px-2 py-0.5">
-              🖥 CPU {service.cpuPct.toFixed(1)}%
+            <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+              <Cpu size={11} aria-hidden="true" />
+              CPU {service.cpuPct.toFixed(1)}%
             </span>
           )}
           {service.memUsedMb != null && (
-            <span className="rounded-md bg-muted px-2 py-0.5">
-              🗄 RAM {(service.memUsedMb / 1024).toFixed(1)}
+            <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+              <Layers size={11} aria-hidden="true" />
+              RAM {(service.memUsedMb / 1024).toFixed(1)}
               {service.memLimitMb != null ? `/${(service.memLimitMb / 1024).toFixed(0)}` : ""} GB
             </span>
           )}
@@ -290,7 +298,104 @@ function ServiceCard({ service }: { service: ServiceState }) {
   )
 }
 
+function RecentRequestsSection() {
+  const [data, setData] = useState<RecentRequestsData>({ requests: [] })
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let active = true
+
+    async function load() {
+      try {
+        const result = await api.stats.recent(20)
+        if (active) {
+          setData(result)
+          setLoading(false)
+        }
+      } catch {
+        if (active) setLoading(false)
+      }
+    }
+
+    void load()
+    const timer = window.setInterval(() => { void load() }, 30_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  return (
+    <section className="space-y-4">
+      <h2 className="text-xl font-semibold">Últimas peticiones</h2>
+      {loading ? (
+        <div className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-4 text-sm text-muted-foreground">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" role="status" aria-label="Cargando peticiones recientes" />
+          Cargando…
+        </div>
+      ) : data.requests.length === 0 ? (
+        <EmptyState title="Sin peticiones recientes" description="Las peticiones aparecerán aquí cuando se procesen." />
+      ) : (
+        <div className="overflow-auto rounded-lg border border-border">
+          <table className="min-w-full divide-y divide-border text-sm">
+            <thead className="bg-muted/50">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Hora</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Modelo</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Tipo</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Duración</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Estado</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border bg-card">
+              {data.requests.map((req) => {
+                const statusColor =
+                  req.error
+                    ? "text-red-400"
+                    : req.statusCode != null && req.statusCode < 400
+                      ? "text-emerald-400"
+                      : "text-muted-foreground"
+                const statusLabel =
+                  req.error
+                    ? `Error: ${req.error.substring(0, 40)}`
+                    : req.statusCode != null
+                      ? String(req.statusCode)
+                      : "—"
+                const hora = new Date(req.startedAt).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                })
+                return (
+                  <tr key={req.id} className="hover:bg-muted/30 transition-colors">
+                    <td className="px-3 py-2 font-mono text-xs">{hora}</td>
+                    <td className="px-3 py-2 max-w-[10rem] truncate" title={req.modelId}>{req.modelId}</td>
+                    <td className="px-3 py-2 text-muted-foreground">{req.requestKind ?? req.backendType ?? "—"}</td>
+                    <td className="px-3 py-2 text-right">{req.durationMs != null ? `${req.durationMs} ms` : "—"}</td>
+                    <td className="px-3 py-2 text-right">
+                      {req.inputTokens != null || req.outputTokens != null
+                        ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}`
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-muted-foreground">{req.username ?? "—"}</td>
+                    <td className={`px-3 py-2 text-xs font-medium ${statusColor}`} title={req.error ?? undefined}>
+                      {statusLabel}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export function Dashboard() {
+  const isModelManager = useIsModelManager()
   const [error, setError] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
   const [hostStats, setHostStats] = useState<HostStats | null>(null)
@@ -366,15 +471,22 @@ export function Dashboard() {
 
   return (
     <div className="space-y-8">
+      <div>
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <p className="text-muted-foreground">Estado en tiempo real de GPUs, modelos cargados y servicios de generación.</p>
+      </div>
+
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold">GPU Cards</h2>
+          <h2 className="text-xl font-semibold">GPUs y host</h2>
           <span
+            role="status"
+            aria-live="polite"
             className={`rounded-full px-3 py-1 text-xs font-medium ${
               connected ? "bg-emerald-500/20 text-emerald-200" : "bg-amber-500/20 text-amber-200"
             }`}
           >
-            {connected ? "Live updates connected" : "Reconnecting WebSocket..."}
+            {connected ? "● Live" : "⟳ Reconectando..."}
           </span>
         </div>
 
@@ -384,9 +496,7 @@ export function Dashboard() {
           ))}
           {hostStats && <HostStatsCard stats={hostStats} />}
           {gpus.length === 0 && !hostStats && (
-            <div className="rounded-lg border border-dashed border-border p-8 text-center text-muted-foreground">
-              No GPU stats available.
-            </div>
+            <EmptyState title="Sin datos de GPU" description="No se detectaron GPUs o el servicio de monitoreo no está disponible." />
           )}
         </div>
       </section>
@@ -398,9 +508,7 @@ export function Dashboard() {
             <ServiceCard key={service.serviceId} service={service} />
           ))}
           {serviceList.length === 0 && (
-            <div className="rounded-lg border border-dashed border-border p-6 text-muted-foreground">
-              No hay servicios configurados.
-            </div>
+            <EmptyState title="Sin servicios configurados" description="Añade servicios (ComfyUI, A1111…) en la sección de configuración." />
           )}
         </div>
       </section>
@@ -448,14 +556,12 @@ export function Dashboard() {
             </div>
           ))}
           {activeModels.length === 0 && (
-            <div className="rounded-lg border border-dashed border-border p-6 text-muted-foreground">
-              No hay modelos cargados en este momento.
-            </div>
+            <EmptyState title="Sin modelos cargados" description="Carga un modelo desde la página de Models." />
           )}
         </div>
       </section>
 
-      <section className="space-y-4">
+      <section className="space-y-4" aria-label="Descargas activas">
         <h2 className="text-xl font-semibold">Descargas activas</h2>
         <div className="space-y-3">
           {activeDownloads.map((job) => (
@@ -478,12 +584,12 @@ export function Dashboard() {
             </div>
           ))}
           {activeDownloads.length === 0 && (
-            <div className="rounded-lg border border-dashed border-border p-6 text-muted-foreground">
-              No hay descargas en progreso.
-            </div>
+            <EmptyState icon={<Download size={16} />} title="Sin descargas activas" />
           )}
         </div>
       </section>
+
+      {isModelManager && <RecentRequestsSection />}
 
       {error && (
         <div className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">

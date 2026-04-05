@@ -33,6 +33,7 @@ class PasswordChangeRequest(BaseModel):
 class CreateApiKeyRequest(BaseModel):
     name: str
     expires_in_days: int | None = None
+    group_id: str | None = None
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -271,14 +272,17 @@ async def create_api_key(
     returned.  It is not stored and cannot be recovered.
 
     Args:
-        body: ``{ name, expires_in_days }`` — ``expires_in_days=null`` means no expiry.
+        body: ``{ name, expires_in_days, group_id? }`` — ``expires_in_days=null`` means no expiry.
 
     Returns:
-        ``{ id, name, key_prefix, expires_at, key }``
+        ``{ id, name, key_prefix, expires_at, key, group_id }``
 
     Raises:
         HTTP 401: If the caller is not authenticated.
+        HTTP 400: If group_id is provided but is not a valid UUID.
     """
+    import uuid
+
     from ocabra.core.auth_manager import generate_api_key
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
@@ -287,6 +291,13 @@ async def create_api_key(
     expires_at = None
     if body.expires_in_days is not None:
         expires_at = now + timedelta(days=body.expires_in_days)
+
+    parsed_group_id = None
+    if body.group_id:
+        try:
+            parsed_group_id = uuid.UUID(body.group_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid group_id") from exc
 
     raw_key, key_hash, prefix = generate_api_key()
 
@@ -297,6 +308,7 @@ async def create_api_key(
             key_hash=key_hash,
             key_prefix=prefix,
             expires_at=expires_at,
+            group_id=parsed_group_id,
         )
         session.add(api_key)
         await session.commit()
@@ -310,6 +322,7 @@ async def create_api_key(
         "key_prefix": api_key.key_prefix,
         "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
         "key": raw_key,
+        "group_id": str(api_key.group_id) if api_key.group_id else None,
     }
 
 

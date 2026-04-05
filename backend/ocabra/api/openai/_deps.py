@@ -118,12 +118,19 @@ async def resolve_model(
     return resolved_id, resolved_state
 
 
-async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelState:
+async def ensure_loaded(
+    model_manager: ModelManager,
+    model_id: str,
+    user: UserContext | None = None,
+) -> ModelState:
     """
     Ensure a model is LOADED before forwarding a request.
     Triggers on-demand loading if CONFIGURED, UNLOADED, or ERROR.
     Waits up to settings.model_load_wait_timeout_s if already LOADING.
     On success, updates the model's last-request timestamp and persists it.
+
+    If *user* is provided, model access is filtered by the user's accessible model
+    set (mirrors the filtering done in /v1/models).
     """
     from ocabra.core.model_manager import ModelStatus
 
@@ -136,7 +143,7 @@ async def ensure_loaded(model_manager: ModelManager, model_id: str) -> ModelStat
         if inspect.isawaitable(result):
             await result
 
-    resolved_model_id, state = await resolve_model(model_manager, model_id)
+    resolved_model_id, state = await resolve_model(model_manager, model_id, user=user)
     if state is None:
         raise _openai_error(
             f"The model '{model_id}' does not exist.",

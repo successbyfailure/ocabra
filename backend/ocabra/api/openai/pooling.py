@@ -4,16 +4,19 @@ POST /v1/pooling, /v1/score, /v1/rerank and /v1/classify.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
     _openai_error,
     check_capability,
     ensure_loaded,
     get_model_manager,
+    get_openai_user,
     raise_upstream_http_error,
     to_backend_body,
 )
@@ -221,7 +224,10 @@ def _normalize_rerank_request(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/pooling", summary="Run pooling on a model")
-async def pooling(request: Request) -> Any:
+async def pooling(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Run pooling/embedding-style inference on a model configured with pooling support.
     """
@@ -229,7 +235,7 @@ async def pooling(request: Request) -> Any:
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "pooling", "pooling")
     model_id = state.model_id
 
@@ -241,7 +247,10 @@ async def pooling(request: Request) -> Any:
 
 
 @router.post("/score", summary="Score text pairs")
-async def score(request: Request) -> Any:
+async def score(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Score pairs with a model exposing similarity/score support.
     """
@@ -249,7 +258,7 @@ async def score(request: Request) -> Any:
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "score", "score")
     model_id = state.model_id
 
@@ -261,7 +270,10 @@ async def score(request: Request) -> Any:
 
 
 @router.post("/rerank", summary="Rerank documents for a query")
-async def rerank(request: Request) -> Any:
+async def rerank(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Rerank candidate documents against a query using a reranker-capable model.
     """
@@ -269,7 +281,7 @@ async def rerank(request: Request) -> Any:
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "rerank", "rerank")
     model_id = state.model_id
 
@@ -281,7 +293,10 @@ async def rerank(request: Request) -> Any:
 
 
 @router.post("/classify", summary="Classify inputs with a classification model")
-async def classify(request: Request) -> Any:
+async def classify(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Run text classification on one or many inputs.
     """
@@ -289,7 +304,7 @@ async def classify(request: Request) -> Any:
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "classification", "classification")
     model_id = state.model_id
 

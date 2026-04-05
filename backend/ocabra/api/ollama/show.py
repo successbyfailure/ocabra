@@ -3,10 +3,13 @@ POST /api/show — return details for a model in Ollama format.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ocabra.api._deps_auth import UserContext
+
 from ._mapper import OllamaNameMapper, resolve_model
+from ._shared import get_ollama_user
 
 router = APIRouter()
 _mapper = OllamaNameMapper()
@@ -17,7 +20,11 @@ class ShowRequest(BaseModel):
 
 
 @router.post("/show", summary="Show model details")
-async def show_model(body: ShowRequest, request: Request) -> dict:
+async def show_model(
+    body: ShowRequest,
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+) -> dict:
     """
     Return model details in Ollama /api/show response format.
 
@@ -28,7 +35,7 @@ async def show_model(body: ShowRequest, request: Request) -> dict:
       - modelfile, parameters, template, details, model_info
     """
     model_manager = request.app.state.model_manager
-    model_id, state = await resolve_model(model_manager, body.name)
+    model_id, state = await resolve_model(model_manager, body.name, user=user)
     if state is None:
         state = await model_manager.get_state(model_id)
     if state is None:

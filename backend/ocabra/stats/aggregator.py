@@ -239,6 +239,286 @@ async def get_performance_stats(
     return {"byModel": summaries}
 
 
+async def get_stats_by_user(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return request stats aggregated by user."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    import uuid as _uuid
+    from ocabra.db.auth import User
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+            RequestStat.user_id.isnot(None),
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+        # Load usernames for all user_ids found
+        user_ids = {r.user_id for r in rows if r.user_id}
+        username_map: dict = {}
+        if user_ids:
+            u_result = await session.execute(sa.select(User).where(User.id.in_(user_ids)))
+            for u in u_result.scalars().all():
+                username_map[u.id] = u.username
+
+    by_user: dict = defaultdict(list)
+    for row in rows:
+        by_user[row.user_id].append(row)
+
+    summaries = []
+    for uid, urows in sorted(by_user.items(), key=lambda x: -len(x[1])):
+        n = len(urows)
+        durations = [max(0, int(r.duration_ms or 0)) for r in urows]
+        errors = sum(1 for r in urows if r.error or (r.status_code is not None and r.status_code >= 400))
+        summaries.append({
+            "userId": str(uid),
+            "username": username_map.get(uid, str(uid)),
+            "totalRequests": n,
+            "totalErrors": errors,
+            "avgDurationMs": int(sum(durations) / n) if n else 0,
+            "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in urows),
+            "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in urows),
+        })
+    return {"byUser": summaries}
+
+
+async def get_stats_by_group(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return request stats aggregated by group."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    from ocabra.db.auth import Group
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+            RequestStat.group_id.isnot(None),
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+        group_ids = {r.group_id for r in rows if r.group_id}
+        group_name_map: dict = {}
+        if group_ids:
+            g_result = await session.execute(sa.select(Group).where(Group.id.in_(group_ids)))
+            for g in g_result.scalars().all():
+                group_name_map[g.id] = g.name
+
+    by_group: dict = defaultdict(list)
+    for row in rows:
+        by_group[row.group_id].append(row)
+
+    summaries = []
+    for gid, grows in sorted(by_group.items(), key=lambda x: -len(x[1])):
+        n = len(grows)
+        durations = [max(0, int(r.duration_ms or 0)) for r in grows]
+        errors = sum(1 for r in grows if r.error or (r.status_code is not None and r.status_code >= 400))
+        summaries.append({
+            "groupId": str(gid),
+            "groupName": group_name_map.get(gid, str(gid)),
+            "totalRequests": n,
+            "totalErrors": errors,
+            "avgDurationMs": int(sum(durations) / n) if n else 0,
+            "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in grows),
+            "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in grows),
+        })
+    return {"byGroup": summaries}
+
+
+async def get_recent_requests(limit: int = 20) -> dict:
+    """Return the most recent N requests with user/group info."""
+    from ocabra.db.auth import Group, User
+
+    async with AsyncSessionLocal() as session:
+        q = (
+            sa.select(RequestStat)
+            .order_by(RequestStat.started_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+        user_ids = {r.user_id for r in rows if r.user_id}
+        group_ids = {r.group_id for r in rows if r.group_id}
+
+        username_map: dict = {}
+        if user_ids:
+            u_result = await session.execute(sa.select(User).where(User.id.in_(user_ids)))
+            for u in u_result.scalars().all():
+                username_map[u.id] = u.username
+
+        group_name_map: dict = {}
+        if group_ids:
+            g_result = await session.execute(sa.select(Group).where(Group.id.in_(group_ids)))
+            for g in g_result.scalars().all():
+                group_name_map[g.id] = g.name
+
+    requests_out = []
+    for r in rows:
+        requests_out.append({
+            "id": str(r.id),
+            "modelId": r.model_id,
+            "backendType": r.backend_type,
+            "requestKind": r.request_kind,
+            "endpointPath": r.endpoint_path,
+            "statusCode": r.status_code,
+            "startedAt": r.started_at.isoformat() if r.started_at else None,
+            "durationMs": r.duration_ms,
+            "inputTokens": r.input_tokens,
+            "outputTokens": r.output_tokens,
+            "error": r.error,
+            "userId": str(r.user_id) if r.user_id else None,
+            "username": username_map.get(r.user_id) if r.user_id else None,
+            "groupId": str(r.group_id) if r.group_id else None,
+            "groupName": group_name_map.get(r.group_id) if r.group_id else None,
+        })
+    return {"requests": requests_out}
+
+
+async def get_my_stats(
+    user_id_str: str,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+    model_id: str | None = None,
+) -> dict:
+    """Return overview stats filtered to a specific user."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    import uuid as _uuid
+
+    try:
+        uid = _uuid.UUID(user_id_str)
+    except ValueError:
+        return {
+            "totalRequests": 0, "totalErrors": 0, "avgDurationMs": 0,
+            "tokenizedRequests": 0, "totalInputTokens": 0, "totalOutputTokens": 0,
+            "byBackend": [], "byRequestKind": [],
+        }
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+            RequestStat.user_id == uid,
+        )
+        if model_id:
+            q = q.where(RequestStat.model_id == model_id)
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    # Re-use overview logic
+    total_requests = len(rows)
+    if total_requests == 0:
+        return {
+            "totalRequests": 0, "totalErrors": 0, "avgDurationMs": 0,
+            "tokenizedRequests": 0, "totalInputTokens": 0, "totalOutputTokens": 0,
+            "byBackend": [], "byRequestKind": [],
+        }
+
+    durations = [max(0, int(r.duration_ms or 0)) for r in rows]
+    total_errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
+    tokenized_requests = sum(1 for r in rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0)
+
+    by_backend: dict = defaultdict(list)
+    by_kind: dict = defaultdict(list)
+    for row in rows:
+        by_backend[row.backend_type or "unknown"].append(row)
+        by_kind[row.request_kind or "other"].append(row)
+
+    def _summarize(group_rows, key_name, key_value):
+        g_n = len(group_rows)
+        g_durations = [max(0, int(r.duration_ms or 0)) for r in group_rows]
+        g_errors = sum(1 for r in group_rows if r.error or (r.status_code is not None and r.status_code >= 400))
+        return {
+            key_name: key_value,
+            "totalRequests": g_n,
+            "errorRate": round(g_errors / g_n, 4) if g_n else 0.0,
+            "avgLatencyMs": int(sum(g_durations) / g_n) if g_n else 0,
+            "p95LatencyMs": _percentile(sorted(g_durations), 95),
+        }
+
+    return {
+        "totalRequests": total_requests,
+        "totalErrors": total_errors,
+        "avgDurationMs": int(sum(durations) / total_requests) if total_requests else 0,
+        "tokenizedRequests": tokenized_requests,
+        "totalInputTokens": int(sum(max(0, int(r.input_tokens or 0)) for r in rows)),
+        "totalOutputTokens": int(sum(max(0, int(r.output_tokens or 0)) for r in rows)),
+        "byBackend": [_summarize(g, "backendType", b) for b, g in sorted(by_backend.items())],
+        "byRequestKind": [_summarize(g, "requestKind", k) for k, g in sorted(by_kind.items())],
+    }
+
+
+async def get_my_group_stats(
+    group_ids: list[str],
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return overview stats for a user's groups, plus group name."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    from ocabra.db.auth import Group
+    import uuid as _uuid
+
+    if not group_ids:
+        return {"groupId": None, "groupName": None, "stats": {
+            "totalRequests": 0, "totalErrors": 0, "avgDurationMs": 0,
+            "tokenizedRequests": 0, "totalInputTokens": 0, "totalOutputTokens": 0,
+            "byBackend": [], "byRequestKind": [],
+        }}
+
+    parsed_ids = []
+    for gid in group_ids:
+        try:
+            parsed_ids.append(_uuid.UUID(gid))
+        except ValueError:
+            pass
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+            RequestStat.group_id.in_(parsed_ids),
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+        group_name = None
+        group_id_out = group_ids[0] if group_ids else None
+        if parsed_ids:
+            g = await session.execute(sa.select(Group).where(Group.id == parsed_ids[0]))
+            grp = g.scalar_one_or_none()
+            if grp:
+                group_name = grp.name
+                group_id_out = str(grp.id)
+
+    total = len(rows)
+    if total == 0:
+        return {"groupId": group_id_out, "groupName": group_name, "stats": {
+            "totalRequests": 0, "totalErrors": 0, "avgDurationMs": 0,
+            "tokenizedRequests": 0, "totalInputTokens": 0, "totalOutputTokens": 0,
+            "byBackend": [], "byRequestKind": [],
+        }}
+
+    durations = [max(0, int(r.duration_ms or 0)) for r in rows]
+    errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
+    stats = {
+        "totalRequests": total,
+        "totalErrors": errors,
+        "avgDurationMs": int(sum(durations) / total),
+        "tokenizedRequests": sum(1 for r in rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0),
+        "totalInputTokens": int(sum(max(0, int(r.input_tokens or 0)) for r in rows)),
+        "totalOutputTokens": int(sum(max(0, int(r.output_tokens or 0)) for r in rows)),
+        "byBackend": [],
+        "byRequestKind": [],
+    }
+    return {"groupId": group_id_out, "groupName": group_name, "stats": stats}
+
+
 async def get_token_stats(
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,

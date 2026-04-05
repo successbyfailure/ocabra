@@ -4,15 +4,18 @@ POST /v1/images/generations — image generation endpoint.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
     check_capability,
     ensure_loaded,
     get_model_manager,
+    get_openai_user,
     raise_upstream_http_error,
 )
 
@@ -20,7 +23,10 @@ router = APIRouter()
 
 
 @router.post("/images/generations", summary="Create image")
-async def image_generations(request: Request) -> Any:
+async def image_generations(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Generate images from a text prompt.
     Proxies to the Diffusers backend worker.
@@ -32,7 +38,7 @@ async def image_generations(request: Request) -> Any:
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "image_generation", "image generation")
     model_id = state.model_id
 

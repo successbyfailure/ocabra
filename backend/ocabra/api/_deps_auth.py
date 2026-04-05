@@ -40,6 +40,7 @@ class UserContext:
     group_ids: list[str] = field(default_factory=list)
     accessible_model_ids: set[str] = field(default_factory=set)
     is_anonymous: bool = False
+    key_group_id: str | None = None  # group_id from the API key used for this request
 
     @property
     def is_admin(self) -> bool:
@@ -190,6 +191,8 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
 
     accessible = await _fetch_accessible_models(user.role, group_ids, session)
 
+    key_group_id = str(api_key.group_id) if api_key.group_id is not None else None
+
     return UserContext(
         user_id=str(user.id),
         username=user.username,
@@ -197,6 +200,7 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
         group_ids=group_ids,
         accessible_model_ids=accessible,
         is_anonymous=False,
+        key_group_id=key_group_id,
     )
 
 

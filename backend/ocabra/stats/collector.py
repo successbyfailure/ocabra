@@ -378,6 +378,14 @@ async def _record_stat(
             except (ValueError, AttributeError):
                 pass
 
+        key_group_id = auth_user.key_group_id if auth_user else None
+        parsed_group_id: _uuid.UUID | None = None
+        if key_group_id:
+            try:
+                parsed_group_id = _uuid.UUID(str(key_group_id))
+            except (ValueError, AttributeError):
+                pass
+
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
                 model_id=model_id,
@@ -393,6 +401,7 @@ async def _record_stat(
                 energy_wh=energy_wh,
                 error=error_message,
                 user_id=parsed_user_id,
+                group_id=parsed_group_id,
             )
             session.add(stat)
             await session.commit()

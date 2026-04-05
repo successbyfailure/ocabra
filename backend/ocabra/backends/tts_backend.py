@@ -57,7 +57,7 @@ FORMAT_CONTENT_TYPES = {
     "wav": "audio/wav",
     "pcm": "audio/pcm",
 }
-WORKER_PATH = Path(__file__).resolve().parents[3] / "workers" / "tts_worker.py"
+WORKER_PATH = Path(__file__).resolve().parents[2] / "workers" / "tts_worker.py"
 
 
 @dataclass

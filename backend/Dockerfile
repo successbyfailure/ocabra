@@ -51,6 +51,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ninja-build \
     cuda-toolkit-12-4 \
+    sox \
+    libsox-fmt-all \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
@@ -76,6 +78,8 @@ FROM base AS dev
 ARG SGLANG_VERSION=0.5.9
 COPY pyproject.toml .
 RUN python -m pip install -e ".[dev,vllm,audio]"
+RUN python -m pip install --upgrade "transformers>=5.0"
+RUN python -m pip install "qwen-tts>=0.1.1"
 RUN python -m venv /opt/sglang-venv \
     && /opt/sglang-venv/bin/pip install --upgrade pip setuptools wheel \
     && /opt/sglang-venv/bin/pip install "sglang==${SGLANG_VERSION}"
@@ -87,6 +91,8 @@ FROM base AS production
 ARG SGLANG_VERSION=0.5.9
 COPY pyproject.toml .
 RUN python -m pip install ".[vllm,audio]"
+RUN python -m pip install --upgrade "transformers>=5.0"
+RUN python -m pip install "qwen-tts>=0.1.1"
 RUN python -m venv /opt/sglang-venv \
     && /opt/sglang-venv/bin/pip install --upgrade pip setuptools wheel \
     && /opt/sglang-venv/bin/pip install "sglang==${SGLANG_VERSION}"

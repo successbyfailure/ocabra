@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
+import { AlertTriangle } from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { AudioInterface } from "@/components/playground/AudioInterface"
@@ -82,7 +84,7 @@ export function Playground() {
       </div>
 
       {loading ? (
-        <div className="space-y-2">
+        <div className="space-y-2" role="status" aria-label="Cargando modelos">
           <div className="h-16 animate-pulse rounded-md bg-muted" />
           <div className="h-80 animate-pulse rounded-md bg-muted" />
         </div>
@@ -90,8 +92,16 @@ export function Playground() {
         <>
           <ModelSelector models={models} selectedModelId={selectedModelId} onSelect={setSelectedModelId} />
           {selectedModel && selectedModel.status !== "loaded" && (
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-              El modelo seleccionado no esta cargado ({selectedModel.status}). Las llamadas pueden tardar mientras se carga.
+            <div role="alert" className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" aria-hidden="true" />
+              <div>
+                <span className="font-medium">Modelo no cargado</span>
+                {" — "}estado actual: <span className="font-mono">{selectedModel.status}</span>.
+                {" "}La primera llamada lo cargará automáticamente (puede tardar).{" "}
+                <Link to="/models" className="underline underline-offset-2 hover:text-amber-50">
+                  Gestionar modelos →
+                </Link>
+              </div>
             </div>
           )}
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -112,7 +122,14 @@ export function Playground() {
                 />
               )}
               {mode === "image" && <ImageInterface modelId={selectedModelId} params={params} />}
-              {mode === "audio" && <AudioInterface modelId={selectedModelId} params={params} />}
+              {mode === "audio" && (
+                <AudioInterface
+                  modelId={selectedModelId}
+                  params={params}
+                  canTranscribe={Boolean(selectedModel?.capabilities.audioTranscription)}
+                  canTTS={Boolean(selectedModel?.capabilities.tts)}
+                />
+              )}
             </section>
             <ParamsPanel params={params} onChange={setParams} />
           </div>

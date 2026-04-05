@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
 import { ModelCard } from "@/components/models/ModelCard"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
@@ -218,28 +220,30 @@ export function Models() {
         <p className="text-muted-foreground">Gestion de modelos instalados y ciclo de vida.</p>
       </div>
 
-      {storage && (
-        <div className="rounded-lg border border-border bg-card p-3">
-          <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-            <div>
-              <p className="font-medium">Almacenamiento de modelos</p>
-              <p className="text-xs text-muted-foreground">{storage.path}</p>
+      {storage && (() => {
+        const usedPct = storage.totalBytes > 0 ? Math.max(0, Math.min(100, (storage.usedBytes / storage.totalBytes) * 100)) : 0
+        const barColor = usedPct > 90 ? "bg-red-500" : usedPct > 75 ? "bg-amber-500" : "bg-blue-500"
+        return (
+          <div className="rounded-lg border border-border bg-card p-3">
+            <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+              <div>
+                <p className="font-medium">Almacenamiento de modelos</p>
+                <p className="text-xs text-muted-foreground">{storage.path}</p>
+              </div>
+              <div className="text-right text-xs text-muted-foreground">
+                <p className="font-medium text-foreground">{formatBytes(storage.usedBytes)} usados</p>
+                <p>{formatBytes(storage.freeBytes)} libres de {formatBytes(storage.totalBytes)}</p>
+              </div>
             </div>
-            <div className="text-right text-xs text-muted-foreground">
-              <p>{formatBytes(storage.freeBytes)} libres</p>
-              <p>{formatBytes(storage.usedBytes)} usados de {formatBytes(storage.totalBytes)}</p>
+            <div className="h-3 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={Math.round(usedPct)} aria-valuemin={0} aria-valuemax={100} aria-label="Espacio usado en disco">
+              <div
+                className={`h-full rounded-full transition-[width] ${barColor}`}
+                style={{ width: `${usedPct}%` }}
+              />
             </div>
           </div>
-          <div className="h-3 overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-emerald-500 transition-[width]"
-              style={{
-                width: `${storage.totalBytes > 0 ? Math.max(0, Math.min(100, (storage.freeBytes / storage.totalBytes) * 100)) : 0}%`,
-              }}
-            />
-          </div>
-        </div>
-      )}
+        )
+      })()}
 
       <div className="grid gap-2 rounded-lg border border-border bg-card p-3 md:grid-cols-4">
         <input
@@ -302,51 +306,139 @@ export function Models() {
         </select>
       </div>
 
+      {!loading && (
+        <p className="text-xs text-muted-foreground" aria-live="polite">
+          {filtered.length === modelList.length
+            ? `${modelList.length} modelo${modelList.length !== 1 ? "s" : ""}`
+            : `${filtered.length} de ${modelList.length} modelo${modelList.length !== 1 ? "s" : ""} con los filtros aplicados`}
+        </p>
+      )}
+
       {loading ? (
-        <div className="space-y-2">
+        <div className="space-y-2" role="status" aria-label="Cargando lista de modelos">
           {Array.from({ length: 5 }).map((_, idx) => (
             <div key={`skeleton-${idx}`} className="h-12 animate-pulse rounded-md bg-muted" />
           ))}
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <table className="min-w-full text-left">
-            <thead className="bg-muted/40 text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("name")}>Nombre</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("type")}>Tipo</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("backend")}>Backend</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("policy")}>Policy</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("gpu")}>GPU</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("ctxNative")}>Ctx Nativo</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("ctxConfig")}>Ctx Config</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("io")}>Input / Output</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("vram")}>VRAM</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("size")}>Tamaño</button></th>
-                <th className="px-3 py-2"><button type="button" onClick={() => toggleSort("status")}>Status</button></th>
-                <th className="px-3 py-2">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(({ model }) => (
-                <ModelCard
-                  key={model.modelId}
-                  model={model}
-                  busy={busyModelId === model.modelId}
-                  onLoad={(modelId) => void runAction(modelId, () => loadModel(modelId))}
-                  onUnload={(modelId) => void runAction(modelId, () => unloadModel(modelId))}
-                  onTogglePin={(item) => void togglePin(item)}
-                  onConfigure={(item) => setConfigModel(item)}
-                  onDelete={(item) => setDeleteModel(item)}
-                  onCompile={(item) => setCompileModel(item)}
-                />
-              ))}
-            </tbody>
-          </table>
-          {filtered.length === 0 && (
-            <p className="px-4 py-8 text-center text-sm text-muted-foreground">No hay modelos con esos filtros.</p>
-          )}
-        </div>
+        <Tooltip.Provider delayDuration={300}>
+          <div className="overflow-x-auto rounded-lg border border-border bg-card">
+            <table className="min-w-full text-left">
+              <thead className="bg-muted/40 text-xs uppercase text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2" aria-sort={sortKey === "name" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+                    <button type="button" onClick={() => toggleSort("name")} className="flex items-center gap-1 hover:text-foreground">
+                      Nombre {sortKey === "name" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2" aria-sort={sortKey === "type" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+                    <button type="button" onClick={() => toggleSort("type")} className="hover:text-foreground">
+                      Tipo {sortKey === "type" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button type="button" onClick={() => toggleSort("backend")} className="hover:text-foreground">
+                      Backend {sortKey === "backend" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <button type="button" onClick={() => toggleSort("policy")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
+                          Policy {sortKey === "policy" && (sortDir === "asc" ? "↑" : "↓")}
+                        </button>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md" sideOffset={4}>
+                          <strong>pin</strong>: siempre cargado · <strong>warm</strong>: cargado preventivamente · <strong>on_demand</strong>: carga al primer uso
+                          <Tooltip.Arrow className="fill-border" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button type="button" onClick={() => toggleSort("gpu")} className="hover:text-foreground">
+                      GPU {sortKey === "gpu" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <button type="button" onClick={() => toggleSort("ctxNative")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
+                          Ctx Nativo {sortKey === "ctxNative" && (sortDir === "asc" ? "↑" : "↓")}
+                        </button>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md max-w-xs" sideOffset={4}>
+                          Longitud de contexto máxima soportada por el modelo base (desde los pesos/arquitectura).
+                          <Tooltip.Arrow className="fill-border" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </th>
+                  <th className="px-3 py-2">
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <button type="button" onClick={() => toggleSort("ctxConfig")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
+                          Ctx Config {sortKey === "ctxConfig" && (sortDir === "asc" ? "↑" : "↓")}
+                        </button>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md max-w-xs" sideOffset={4}>
+                          Longitud de contexto configurada para este deployment (puede ser menor que el nativo para ahorrar VRAM).
+                          <Tooltip.Arrow className="fill-border" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button type="button" onClick={() => toggleSort("io")} className="hover:text-foreground">
+                      Input / Output {sortKey === "io" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button type="button" onClick={() => toggleSort("vram")} className="hover:text-foreground">
+                      VRAM {sortKey === "vram" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button type="button" onClick={() => toggleSort("size")} className="hover:text-foreground">
+                      Tamaño {sortKey === "size" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button type="button" onClick={() => toggleSort("status")} className="hover:text-foreground">
+                      Status {sortKey === "status" && (sortDir === "asc" ? "↑" : "↓")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(({ model }) => (
+                  <ModelCard
+                    key={model.modelId}
+                    model={model}
+                    busy={busyModelId === model.modelId}
+                    onLoad={(modelId) => void runAction(modelId, () => loadModel(modelId))}
+                    onUnload={(modelId) => void runAction(modelId, () => unloadModel(modelId))}
+                    onTogglePin={(item) => void togglePin(item)}
+                    onConfigure={(item) => setConfigModel(item)}
+                    onDelete={(item) => setDeleteModel(item)}
+                    onCompile={(item) => setCompileModel(item)}
+                  />
+                ))}
+              </tbody>
+            </table>
+            {filtered.length === 0 && (
+              <EmptyState
+                title="Sin modelos con esos filtros"
+                description="Prueba a ampliar los criterios de búsqueda."
+                className="rounded-none border-0 border-t"
+              />
+            )}
+          </div>
+        </Tooltip.Provider>
       )}
 
       {error && (

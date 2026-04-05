@@ -4,16 +4,19 @@ POST /v1/completions — legacy text completions endpoint.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+
+from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
     check_capability,
     ensure_loaded,
     get_model_manager,
+    get_openai_user,
     raise_upstream_http_error,
     to_backend_body,
 )
@@ -22,7 +25,10 @@ router = APIRouter()
 
 
 @router.post("/completions", summary="Create text completion")
-async def completions(request: Request) -> Any:
+async def completions(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
     """
     Create a text completion. Proxies to the resolved model worker (backend-agnostic).
     """
@@ -31,7 +37,7 @@ async def completions(request: Request) -> Any:
     stream: bool = body.get("stream", False)
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "completion", "text completions")
     model_id = state.model_id
 

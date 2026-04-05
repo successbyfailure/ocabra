@@ -275,7 +275,7 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
           <div>
             <span className="font-semibold text-sm">{group.name}</span>
             {group.isDefault && (
-              <span className="ml-2 inline-flex items-center rounded-full bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300 px-2 py-0.5 text-xs font-medium">
+              <span className="ml-2 inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300 px-2 py-0.5 text-xs font-medium">
                 Default
               </span>
             )}
@@ -321,18 +321,27 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
                 <p className="text-xs text-muted-foreground italic py-1">Ningún modelo asignado aún.</p>
               ) : (
                 <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {models.map((modelId) => (
-                    <div key={modelId} className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-1.5 text-sm">
-                      <span className="font-mono text-xs truncate">{modelId}</span>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmRemoveModel(modelId)}
-                        className="ml-2 shrink-0 rounded p-1 text-muted-foreground hover:text-destructive hover:bg-muted"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  ))}
+                  {models.map((modelId) => {
+                    const meta = allModels.find((m) => m.modelId === modelId)
+                    return (
+                      <div key={modelId} className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-1.5 text-sm">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm">{meta?.displayName ?? modelId}</p>
+                          {meta && meta.displayName !== modelId && (
+                            <p className="font-mono text-xs text-muted-foreground truncate">{modelId}</p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmRemoveModel(modelId)}
+                          className="ml-2 shrink-0 rounded p-1 text-muted-foreground hover:text-destructive hover:bg-muted"
+                          aria-label={`Quitar ${meta?.displayName ?? modelId} del grupo`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>

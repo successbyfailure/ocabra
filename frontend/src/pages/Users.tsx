@@ -1,12 +1,45 @@
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useState, type FormEvent } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Select from "@radix-ui/react-select"
 import { ChevronDown, ChevronUp, Plus, X, KeyRound, RotateCcw, Pencil, Trash2, ShieldOff, ShieldCheck } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import type { AdminUser, ApiKey, UserRole } from "@/types"
+import type { AdminUser, ApiKey, Group, UserRole } from "@/types"
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+function passwordStrength(pw: string): { level: 0 | 1 | 2 | 3; label: string; color: string } {
+  if (!pw) return { level: 0, label: "", color: "" }
+  let score = 0
+  if (pw.length >= 8) score++
+  if (pw.length >= 12) score++
+  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++
+  if (/[0-9]/.test(pw)) score++
+  if (/[^A-Za-z0-9]/.test(pw)) score++
+  if (score <= 1) return { level: 1, label: "Débil", color: "bg-red-500" }
+  if (score <= 3) return { level: 2, label: "Media", color: "bg-amber-500" }
+  return { level: 3, label: "Fuerte", color: "bg-emerald-500" }
+}
+
+function PasswordStrengthBar({ password }: { password: string }) {
+  const { level, label, color } = useMemo(() => passwordStrength(password), [password])
+  if (!password) return null
+  return (
+    <div className="space-y-1">
+      <div className="flex gap-1">
+        {[1, 2, 3].map((i) => (
+          <div
+            key={i}
+            className={`h-1.5 flex-1 rounded-full transition-colors ${i <= level ? color : "bg-muted"}`}
+          />
+        ))}
+      </div>
+      <p className={`text-xs ${level === 1 ? "text-red-400" : level === 2 ? "text-amber-400" : "text-emerald-400"}`}>
+        {label}
+      </p>
+    </div>
+  )
+}
 
 function roleBadge(role: UserRole) {
   const cls: Record<UserRole, string> = {
@@ -148,8 +181,8 @@ function CreateUserModal({ open, onClose, onCreated }: CreateUserModalProps) {
                 autoFocus
               />
             </div>
-            <div>
-              <label htmlFor="cu-password" className="block text-sm font-medium mb-1">Contraseña *</label>
+            <div className="space-y-1.5">
+              <label htmlFor="cu-password" className="block text-sm font-medium">Contraseña *</label>
               <input
                 id="cu-password"
                 type="password"
@@ -157,7 +190,11 @@ function CreateUserModal({ open, onClose, onCreated }: CreateUserModalProps) {
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                 placeholder="••••••••"
+                aria-describedby="cu-password-strength"
               />
+              <div id="cu-password-strength">
+                <PasswordStrengthBar password={password} />
+              </div>
             </div>
             <div>
               <label htmlFor="cu-role" className="block text-sm font-medium mb-1">Rol</label>
@@ -272,15 +309,21 @@ function EditUserModal({ user, onClose, onUpdated }: EditUserModalProps) {
                 placeholder="usuario@ejemplo.com"
               />
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                id="eu-active"
-                type="checkbox"
-                checked={isActive}
-                onChange={(e) => setIsActive(e.target.checked)}
-                className="h-4 w-4 rounded border-border"
-              />
-              <label htmlFor="eu-active" className="text-sm font-medium">Cuenta activa</label>
+            <div className="space-y-1">
+              <div className="flex items-center gap-3">
+                <input
+                  id="eu-active"
+                  type="checkbox"
+                  checked={isActive}
+                  onChange={(e) => setIsActive(e.target.checked)}
+                  className="h-4 w-4 rounded border-border"
+                  aria-describedby="eu-active-desc"
+                />
+                <label htmlFor="eu-active" className="text-sm font-medium">Cuenta activa</label>
+              </div>
+              <p id="eu-active-desc" className="text-xs text-muted-foreground pl-7">
+                Las cuentas inactivas no pueden iniciar sesión ni usar la API. Sus datos se conservan.
+              </p>
             </div>
             {err && <p className="text-sm text-destructive">{err}</p>}
             <div className="flex justify-end gap-2 pt-2">
@@ -478,6 +521,158 @@ function ApiKeysModal({ user, onClose }: ApiKeysModalProps) {
   )
 }
 
+interface CreateKeyForUserModalProps {
+  user: AdminUser | null
+  onClose: () => void
+}
+
+function CreateKeyForUserModal({ user, onClose }: CreateKeyForUserModalProps) {
+  const [name, setName] = useState("")
+  const [expiresInDays, setExpiresInDays] = useState("")
+  const [groupId, setGroupId] = useState<string>("")
+  const [groups, setGroups] = useState<Group[]>([])
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!user) return
+    setName(""); setExpiresInDays(""); setGroupId(""); setErr(null); setCreatedKey(null)
+    api.groups.list()
+      .then(setGroups)
+      .catch(() => setGroups([]))
+  }, [user])
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (!user) return
+    if (!name.trim()) { setErr("El nombre de la key es requerido."); return }
+    setBusy(true)
+    setErr(null)
+    try {
+      const result = await api.users.createKeyForUser(user.id, {
+        name: name.trim(),
+        expiresInDays: expiresInDays ? Number(expiresInDays) : null,
+        groupId: groupId || null,
+      })
+      setCreatedKey(result.key)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Error al crear la key.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function handleCopy() {
+    if (!createdKey) return
+    navigator.clipboard.writeText(createdKey)
+      .then(() => toast.success("Key copiada al portapapeles."))
+      .catch(() => toast.error("No se pudo copiar la key."))
+  }
+
+  function handleClose() {
+    setName(""); setExpiresInDays(""); setGroupId(""); setErr(null); setCreatedKey(null)
+    onClose()
+  }
+
+  return (
+    <Dialog.Root open={!!user} onOpenChange={(v) => { if (!v) handleClose() }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-card p-6 shadow-xl">
+          <div className="mb-4 flex items-center justify-between">
+            <Dialog.Title className="text-lg font-semibold">
+              Crear API Key — <span className="font-mono">{user?.username}</span>
+            </Dialog.Title>
+            <Dialog.Close asChild>
+              <button type="button" className="rounded p-1 hover:bg-muted" onClick={handleClose}>
+                <X size={16} />
+              </button>
+            </Dialog.Close>
+          </div>
+
+          {createdKey ? (
+            <div className="space-y-4">
+              <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-200">
+                API Key creada correctamente. Copia la key ahora — no se mostrará de nuevo.
+              </div>
+              <div className="rounded-md border border-border bg-background/60 p-3 font-mono text-sm break-all">
+                {createdKey}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90"
+                >
+                  Copiar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClose}
+                  className="rounded-md px-4 py-2 text-sm border border-border hover:bg-muted"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label htmlFor="ck-name" className="block text-sm font-medium mb-1">Nombre de la key *</label>
+                <input
+                  id="ck-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  placeholder="mi-aplicacion"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label htmlFor="ck-expires" className="block text-sm font-medium mb-1">Expira en días (opcional)</label>
+                <input
+                  id="ck-expires"
+                  type="number"
+                  min={1}
+                  value={expiresInDays}
+                  onChange={(e) => setExpiresInDays(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  placeholder="30"
+                />
+              </div>
+              <div>
+                <label htmlFor="ck-group" className="block text-sm font-medium mb-1">Grupo (opcional)</label>
+                <select
+                  id="ck-group"
+                  value={groupId}
+                  onChange={(e) => setGroupId(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="">Sin grupo</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>{g.name}</option>
+                  ))}
+                </select>
+              </div>
+              {err && <p className="text-sm text-destructive">{err}</p>}
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={handleClose} className="rounded-md px-4 py-2 text-sm border border-border hover:bg-muted">
+                  Cancelar
+                </button>
+                <button type="submit" disabled={busy} className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+                  {busy ? "Creando…" : "Crear"}
+                </button>
+              </div>
+            </form>
+          )}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
 interface ConfirmDialogProps {
   open: boolean
   title: string
@@ -523,6 +718,7 @@ export function Users() {
   const [editUser, setEditUser] = useState<AdminUser | null>(null)
   const [resetUser, setResetUser] = useState<AdminUser | null>(null)
   const [keysUser, setKeysUser] = useState<AdminUser | null>(null)
+  const [createKeyUser, setCreateKeyUser] = useState<AdminUser | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<AdminUser | null>(null)
   const [confirmToggle, setConfirmToggle] = useState<AdminUser | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -647,6 +843,14 @@ export function Users() {
                       </button>
                       <button
                         type="button"
+                        title="Crear API Key"
+                        onClick={() => setCreateKeyUser(user)}
+                        className="rounded p-1.5 hover:bg-muted text-muted-foreground hover:text-foreground"
+                      >
+                        <Plus size={14} />
+                      </button>
+                      <button
+                        type="button"
                         title={user.isActive ? "Desactivar" : "Activar"}
                         onClick={() => setConfirmToggle(user)}
                         disabled={busy === user.id}
@@ -690,6 +894,10 @@ export function Users() {
       <ApiKeysModal
         user={keysUser}
         onClose={() => setKeysUser(null)}
+      />
+      <CreateKeyForUserModal
+        user={createKeyUser}
+        onClose={() => setCreateKeyUser(null)}
       />
       <ConfirmDialog
         open={!!confirmDelete}

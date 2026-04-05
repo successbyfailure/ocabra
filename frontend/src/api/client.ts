@@ -35,6 +35,10 @@ import type {
   UpdateUserPayload,
   CreateGroupPayload,
   UpdateGroupPayload,
+  RecentRequestsData,
+  ByUserStats,
+  ByGroupStats,
+  MyGroupStats,
 } from "@/types"
 
 const BASE = ""
@@ -931,6 +935,24 @@ export const api = {
       const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
       return request<OverviewStats>("GET", `/ocabra/stats/overview${query}`)
     },
+    recent: (limit = 20) =>
+      request<RecentRequestsData>("GET", `/ocabra/stats/recent?limit=${limit}`),
+    byUser: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to })
+      return request<ByUserStats>("GET", `/ocabra/stats/by-user${query}`)
+    },
+    byGroup: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to })
+      return request<ByGroupStats>("GET", `/ocabra/stats/by-group${query}`)
+    },
+    my: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
+      return request<OverviewStats>("GET", `/ocabra/stats/my${query}`)
+    },
+    myGroup: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to })
+      return request<MyGroupStats>("GET", `/ocabra/stats/my-group${query}`)
+    },
   },
 
   services: {
@@ -1077,6 +1099,12 @@ export const api = {
       (await request<unknown[]>("GET", `/ocabra/users/${encodeURIComponent(id)}/keys`)).map(toApiKey),
     revokeKey: (userId: string, keyId: string): Promise<void> =>
       request<void>("DELETE", `/ocabra/users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}`),
+    createKeyForUser: async (userId: string, payload: { name: string; expiresInDays?: number | null; groupId?: string | null }) =>
+      request<{ id: string; name: string; keyPrefix: string; key: string; expiresAt: string | null; createdAt: string; groupId: string | null }>(
+        "POST",
+        `/ocabra/users/${encodeURIComponent(userId)}/keys`,
+        { name: payload.name, expires_in_days: payload.expiresInDays ?? null, group_id: payload.groupId ?? null }
+      ),
   },
 
   groups: {
@@ -1086,7 +1114,7 @@ export const api = {
       toGroup(
         await request<unknown>("POST", "/ocabra/groups", {
           name: data.name,
-          description: data.description ?? null,
+          description: data.description ?? "",
         }),
       ),
     update: async (id: string, data: UpdateGroupPayload): Promise<Group> =>

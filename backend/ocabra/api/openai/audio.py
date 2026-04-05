@@ -5,13 +5,14 @@ POST /v1/audio/generate — ACE-Step music generation
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import structlog
-from fastapi import APIRouter, Request, UploadFile
+from fastapi import APIRouter, Depends, Request, UploadFile
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 
 from ._deps import (
@@ -19,6 +20,7 @@ from ._deps import (
     check_capability,
     ensure_loaded,
     get_model_manager,
+    get_openai_user,
     raise_upstream_http_error,
 )
 
@@ -39,6 +41,7 @@ _AUDIO_CONTENT_TYPES = {
 async def transcriptions(
     request: Request,
     file: UploadFile,
+    user: Annotated[UserContext, Depends(get_openai_user)],
 ) -> Any:
     """
     Transcribe an audio file using a Whisper model.
@@ -58,7 +61,7 @@ async def transcriptions(
     diarize: str | None = form.get("diarize")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "audio_transcription", "audio transcription")
     model_id = state.model_id
     request.state.stats_model_id = model_id
@@ -147,8 +150,58 @@ async def transcriptions(
     return resp.json()
 
 
+@router.get("/audio/voices", summary="List TTS voices for a model")
+async def list_voices(
+    request: Request,
+    model: str,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
+    """
+    Return available voices, speakers, and model_type for a loaded TTS model.
+
+    Query params:
+        model — canonical model ID (must be loaded and have capability tts=True)
+
+    Response:
+        voices       — list of voice/speaker names
+        model_type   — "base" | "custom_voice" | "placeholder"
+        languages    — list of supported languages
+        supports_voice_clone — bool
+    """
+    model_manager = get_model_manager(request)
+    state = await ensure_loaded(model_manager, model, user=user)
+    check_capability(state, "tts", "text-to-speech")
+    model_id = state.model_id
+
+    worker_pool = request.app.state.worker_pool
+    worker = worker_pool.get_worker(model_id)
+    if not worker:
+        return {
+            "voices": ["alloy", "echo", "fable", "nova", "onyx", "shimmer"],
+            "model_type": "placeholder",
+            "languages": ["Auto"],
+            "supports_voice_clone": False,
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"http://127.0.0.1:{worker.port}/voices")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return {
+            "voices": ["alloy", "echo", "fable", "nova", "onyx", "shimmer"],
+            "model_type": "placeholder",
+            "languages": ["Auto"],
+            "supports_voice_clone": False,
+        }
+
+
 @router.post("/audio/speech", summary="Generate speech")
-async def speech(request: Request) -> StreamingResponse:
+async def speech(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> StreamingResponse:
     """
     Generate speech audio from text using a TTS model.
     Requires a model with capability tts=True.
@@ -162,32 +215,51 @@ async def speech(request: Request) -> StreamingResponse:
     voice: str = body.get("voice", "alloy")
     response_format: str = body.get("response_format", "mp3")
     speed: float = float(body.get("speed", 1.0))
+    language: str = body.get("language", "Auto")
+    reference_audio: str | None = body.get("reference_audio")
+    reference_text: str | None = body.get("reference_text")
+    speaker: str | None = body.get("speaker")
+    instruct: str | None = body.get("instruct")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "tts", "text-to-speech")
     model_id = state.model_id
 
     worker_pool = request.app.state.worker_pool
     worker = worker_pool.get_worker(model_id)
     if not worker:
-        from ._deps import _openai_error
-        raise _openai_error("Model worker not found.", "server_error", status_code=503)
+        raise _openai_error(
+            f"TTS worker unavailable for model '{model_id}'.",
+            "server_error",
+            code="worker_unavailable",
+            status_code=503,
+        )
 
     url = f"http://127.0.0.1:{worker.port}/synthesize"
     content_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
 
     async def _stream_audio():
         async with httpx.AsyncClient(timeout=300.0) as client:
+            payload: dict = {
+                "input": input_text,
+                "voice": voice,
+                "response_format": response_format,
+                "speed": speed,
+                "language": language,
+            }
+            if reference_audio:
+                payload["reference_audio"] = reference_audio
+            if reference_text:
+                payload["reference_text"] = reference_text
+            if speaker:
+                payload["speaker"] = speaker
+            if instruct:
+                payload["instruct"] = instruct
             async with client.stream(
                 "POST",
                 url,
-                json={
-                    "input": input_text,
-                    "voice": voice,
-                    "response_format": response_format,
-                    "speed": speed,
-                },
+                json=payload,
             ) as resp:
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
@@ -201,7 +273,10 @@ async def speech(request: Request) -> StreamingResponse:
 
 
 @router.post("/audio/generate", summary="Generate music")
-async def generate_music(request: Request) -> Response:
+async def generate_music(
+    request: Request,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Response:
     """
     Generate music audio from a text prompt using an ACE-Step model.
     Requires a model with capability music_generation=True.
@@ -229,7 +304,7 @@ async def generate_music(request: Request) -> Response:
         response_format = "mp3"
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id)
+    state = await ensure_loaded(model_manager, model_id, user=user)
     check_capability(state, "music_generation", "music generation")
     model_id = state.model_id
     request.state.stats_model_id = model_id

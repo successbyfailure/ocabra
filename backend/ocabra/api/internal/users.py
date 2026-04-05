@@ -404,3 +404,86 @@ async def revoke_user_api_key(
         await session.commit()
 
     logger.info("user_api_key_revoked", target_user_id=user_id, key_id=key_id, by=caller.username)
+
+
+class CreateUserApiKeyRequest(BaseModel):
+    name: str
+    expires_in_days: int | None = None
+    group_id: str | None = None
+
+
+@router.post("/users/{user_id}/keys", status_code=201)
+async def create_user_api_key(
+    user_id: str,
+    body: CreateUserApiKeyRequest,
+    caller: Annotated[UserContext, Depends(require_role("system_admin"))],
+) -> dict:
+    """Create an API key for a specific user (admin only).
+
+    Requires: system_admin
+
+    Args:
+        user_id: UUID of the target user.
+        body: { name, expires_in_days?, group_id? }
+
+    Returns:
+        { id, name, key_prefix, key, expires_at, created_at, group_id }
+        The raw key is shown only once.
+
+    Raises:
+        HTTP 404: If the user does not exist.
+    """
+    import secrets
+    from ocabra.core.auth_manager import hash_api_key
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.auth import ApiKey, User
+    from sqlalchemy import select
+
+    try:
+        parsed_id = uuid.UUID(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="User not found") from exc
+
+    async with AsyncSessionLocal() as session:
+        user_check = await session.execute(select(User).where(User.id == parsed_id))
+        if user_check.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        raw_key = f"sk-ocabra-{secrets.token_urlsafe(32)}"
+        prefix = raw_key[:16]
+        key_hash = hash_api_key(raw_key)
+
+        expires_at = None
+        if body.expires_in_days:
+            from datetime import timedelta
+            expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days)
+
+        parsed_group_id = None
+        if body.group_id:
+            try:
+                parsed_group_id = uuid.UUID(body.group_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid group_id") from exc
+
+        api_key = ApiKey(
+            user_id=parsed_id,
+            name=body.name,
+            key_hash=key_hash,
+            key_prefix=prefix,
+            expires_at=expires_at,
+            group_id=parsed_group_id,
+        )
+        session.add(api_key)
+        await session.commit()
+        await session.refresh(api_key)
+
+    logger.info("user_api_key_created_by_admin", target_user_id=user_id, key_name=body.name, by=caller.username)
+    return {
+        "id": str(api_key.id),
+        "name": api_key.name,
+        "keyPrefix": api_key.key_prefix,
+        "key": raw_key,
+        "expiresAt": api_key.expires_at.isoformat() if api_key.expires_at else None,
+        "createdAt": api_key.created_at.isoformat(),
+        "groupId": str(api_key.group_id) if api_key.group_id else None,
+    }

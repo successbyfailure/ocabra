@@ -342,7 +342,7 @@ class ServiceManager:
 
         if state.last_unload_at is not None:
             now = datetime.now(timezone.utc)
-            if (now - state.last_unload_at).total_seconds() < 120:
+            if (now - state.last_unload_at).total_seconds() < 15:
                 state.runtime_loaded = False
                 state.active_model_ref = None
                 return
@@ -591,8 +591,9 @@ class ServiceManager:
                 state.status = "idle" if state.service_alive else "unreachable"
                 state.detail = f"unloaded:{reason}"
                 logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
-                if state.docker_container_name:
-                    await self._stop_container(state)
+                # Do NOT stop the container — the REST unload already freed GPU memory.
+                # Stopping would cause Docker to restart it (restart: unless-stopped),
+                # which looks like the service keeps reloading.
             except Exception as exc:
                 state.detail = str(exc)
                 logger.warning(
