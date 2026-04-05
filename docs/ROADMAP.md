@@ -144,15 +144,118 @@ Paths críticos sin tests confirmados en el audit:
 
 ---
 
+## Bloque 7 — Teams, stats ampliadas, admin UX (en implementación)
+
+**Prioridad: ALTA**
+
+### 7.1 Group_id en ApiKeys y RequestStats
+
+- `api_keys`: añadir columna `group_id UUID NULL REFERENCES groups(id) ON DELETE SET NULL`
+- `request_stats`: añadir columna `group_id UUID NULL` (sin FK; se conserva aunque se borre el grupo)
+- Migración Alembic `0009_apikey_group_request_stat_group.py`
+- `UserContext`: añadir `key_group_id: str | None` — se rellena cuando la auth es por API key
+- `_record_stat` en `collector.py`: leer `auth_user.key_group_id` y persitirlo en `RequestStat.group_id`
+- `CreateApiKeyRequest` (propio, `/ocabra/auth/keys`): añadir campo opcional `group_id`
+
+### 7.2 Admin crea keys para otros usuarios
+
+- **Nuevo endpoint:** `POST /ocabra/users/{user_id}/keys` (requiere `system_admin`)
+  - Body: `{ name, expires_in_days?, group_id? }`
+  - Response: `{ id, name, key_prefix, key, expires_at, created_at, group_id }` — key mostrada sólo una vez
+- **UI Users.tsx:** botón "Crear key" por fila de usuario; modal con nombre, expiración y selector de grupo
+- La key creada por el admin puede asignarse a un grupo para que el uso cuente en las stats de ese grupo
+
+### 7.3 Nuevos endpoints de estadísticas
+
+| Endpoint | Rol mínimo | Descripción |
+|----------|-----------|-------------|
+| `GET /ocabra/stats/recent?limit=20` | model_manager | Últimas N peticiones con info de usuario/grupo |
+| `GET /ocabra/stats/by-user?from=&to=` | model_manager | Stats agregadas por usuario |
+| `GET /ocabra/stats/by-group?from=&to=` | model_manager | Stats agregadas por grupo |
+| `GET /ocabra/stats/my?from=&to=&model_id=` | user | Stats del usuario actual |
+| `GET /ocabra/stats/my-group?from=&to=` | user | Stats del grupo del usuario actual |
+
+**Respuestas:**
+- `recent`: `{ requests: [{ id, modelId, backendType, requestKind, statusCode, startedAt, durationMs, inputTokens, outputTokens, error, userId, username, groupId, groupName }] }`
+- `by-user`: `{ byUser: [{ userId, username, totalRequests, totalErrors, avgDurationMs, totalInputTokens, totalOutputTokens }] }`
+- `by-group`: `{ byGroup: [{ groupId, groupName, totalRequests, totalErrors, avgDurationMs, totalInputTokens, totalOutputTokens }] }`
+- `my`: mismo shape que `OverviewStats`
+- `my-group`: `{ groupId, groupName, stats: OverviewStats }`
+
+### 7.4 Settings en tabs (frontend)
+
+Refactorizar `Settings.tsx` usando `@radix-ui/react-tabs`:
+
+| Tab | Componentes |
+|-----|-------------|
+| General | GeneralSettings + ApiAccessSettings |
+| GPUs | GPUSettings |
+| Backends | BackendRuntimeSettings |
+| Almacenamiento | StorageSettings + GlobalSchedules |
+| LiteLLM | LiteLLMSettings |
+
+### 7.5 Stats en tabs (frontend)
+
+Refactorizar `Stats.tsx` con tabs:
+
+| Tab | Visible para |
+|-----|-------------|
+| Resumen | todos (overview global para managers; propio para users) |
+| Por modelo | managers/admins |
+| Por usuario | managers/admins |
+| Por grupo | managers/admins |
+| Mis stats | todos (stats del usuario actual) |
+| Mi grupo | todos (stats del grupo del usuario actual) |
+| Log | managers/admins (últimas N peticiones con detalle) |
+
+### 7.6 Dashboard — log de últimas peticiones
+
+Sección al final del Dashboard: tabla con las últimas 20 peticiones.
+Poll cada 30 s desde `GET /ocabra/stats/recent?limit=20`.
+Columnas: tiempo, modelo, tipo, duración, tokens, usuario, estado.
+
+---
+
+## Bloque 8 — Voice Pipeline (en planificación)
+
+**Prioridad: ALTA**  
+**Plan completo:** `docs/tasks/voice-pipeline-plan.md`
+
+### Fase 1 — Tres endpoints oficiales funcionando correctamente
+
+| Item | Archivo | Descripción |
+|------|---------|-------------|
+| [VP-1] TTS encoding real | `backend/workers/tts_worker.py` | MP3/WAV/PCM según `response_format`. Actualmente siempre devuelve WAV. Bloqueante para cliente Android. |
+| [VP-2] TTS streaming por frases | `backend/workers/tts_worker.py` + `api/openai/audio.py` | `/synthesize/stream` — sintetizar frase a frase para latencia baja |
+| [VP-3] STT verificar M4A | `backend/workers/whisper_worker.py` | Confirmar aceptación de AAC/M4A desde Android MediaRecorder |
+| [VP-4] Voices endpoint | `backend/ocabra/api/openai/audio.py` | `GET /v1/audio/voices?model=` — expone voces disponibles |
+
+### Fase 2 — OpenAI Realtime API (`GET /v1/realtime`)
+
+| Item | Archivo | Descripción |
+|------|---------|-------------|
+| [VP-5] Endpoint WebSocket | `backend/ocabra/api/openai/realtime.py` (nuevo) | `GET /v1/realtime` con upgrade a WS, header `OpenAI-Beta: realtime=v1` |
+| [VP-6] RealtimeSession | `backend/ocabra/core/realtime_session.py` (nuevo) | Gestión de sesión, pipeline STT→LLM→TTS, protocolo de eventos |
+| [VP-7] VAD servidor | `backend/ocabra/core/vad.py` (nuevo) | SimpleVAD por RMS; interfaz para Silero futuro |
+| [VP-8] session.update | En `RealtimeSession` | Configuración de voz, modelo STT, VAD params |
+
+---
+
 ## Orden de ejecución sugerido
 
 ```
 [✅ Hecho]  Auth + gateway + settings persistence
 
-[Ahora]     B6 + A4 + M7  ←── quick wins, < 2h en total
+[En curso]  Bloque 7 (teams/stats/UX) — implementado con equipo de agentes
+              · Backend: group_id en keys+stats, endpoints nuevos
+              · Frontend: settings tabs, stats tabs, dashboard log, admin key UI
 
-[Siguiente] Langfuse       ←── feature autocontenida, plan listo
+[Siguiente] B6 + A4 + M7  ←── quick wins, < 2h en total
+            Langfuse       ←── feature autocontenida, plan listo
             Tests batch    ←── paths críticos
+
+            Bloque 8 Voice Pipeline Fase 1  ←── VP-1 bloqueante para Android
+            Bloque 8 Voice Pipeline Fase 2  ←── Realtime API WebSocket
 
 [Cuando proceda] WS system_alert · OpenAPI docs · first-run script
 ```
