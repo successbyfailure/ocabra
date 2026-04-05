@@ -210,12 +210,62 @@ def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> by
     )
 
 
+def _soundfile_encode(wav_bytes: bytes, fmt: str) -> bytes | None:
+    """Encode WAV bytes to *fmt* using soundfile (in-process, no subprocess).
+
+    Returns encoded bytes on success, ``None`` on failure.
+    Supports: mp3, ogg/opus, flac.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+    except ImportError:
+        return None
+
+    sf_format_map: dict[str, tuple[str, str | None]] = {
+        "mp3":  ("MP3",  None),
+        "opus": ("OGG",  "VORBIS"),
+        "flac": ("FLAC", None),
+    }
+    entry = sf_format_map.get(fmt)
+    if entry is None:
+        return None
+
+    sf_format, sf_subtype = entry
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sr = wf.getframerate()
+            frames = wf.readframes(wf.getnframes())
+        pcm16 = np.frombuffer(frames, dtype=np.int16)
+        samples = pcm16.astype(np.float32) / 32768.0
+
+        out = io.BytesIO()
+        kwargs: dict = {"format": sf_format}
+        if sf_subtype:
+            kwargs["subtype"] = sf_subtype
+        sf.write(out, samples, sr, **kwargs)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
 def _ffmpeg_encode(wav_bytes: bytes, fmt: str) -> bytes:
-    """Encode WAV bytes to *fmt* using ffmpeg. Falls back to WAV on any error."""
+    """Encode WAV bytes to *fmt*.
+
+    Tries soundfile first (fast, in-process).  Falls back to ffmpeg subprocess
+    if available.  Returns original WAV bytes if all methods fail.
+    """
     import logging
+
+    # ---- soundfile (preferred) ----
+    encoded = _soundfile_encode(wav_bytes, fmt)
+    if encoded:
+        return encoded
+
+    # ---- ffmpeg subprocess (fallback) ----
     _codec: dict[str, list[str]] = {
         "mp3":  ["-f", "mp3",  "-codec:a", "libmp3lame", "-q:a", "4"],
-        "opus": ["-f", "ogg",  "-codec:a", "libopus",    "-b:a", "64k"],
+        "opus": ["-f", "ogg",  "-codec:a", "opus", "-strict", "-2", "-b:a", "64k"],
         "aac":  ["-f", "adts", "-codec:a", "aac",        "-b:a", "128k"],
         "flac": ["-f", "flac", "-codec:a", "flac"],
     }
@@ -281,7 +331,11 @@ def _split_sentences(text: str) -> list[str]:
             result.append(buf)
             buf = ""
     if buf:
-        result.append(buf)
+        # Short remainder — merge with last sentence to avoid tiny fragments
+        if result and len(buf) < _MIN_SENTENCE_CHARS:
+            result[-1] = result[-1] + " " + buf
+        else:
+            result.append(buf)
     return result or [text.strip()]
 
 

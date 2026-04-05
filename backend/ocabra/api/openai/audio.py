@@ -262,9 +262,11 @@ async def speech(
             status_code=503,
         )
 
-    # Use /synthesize/stream for progressive sentence-by-sentence synthesis.
-    # Falls back gracefully to the worker's full-text synthesis for single sentences.
-    url = f"http://127.0.0.1:{worker.port}/synthesize/stream"
+    # Use /synthesize/stream for formats that support concatenation (mp3, pcm, opus,
+    # flac).  Fall back to /synthesize for WAV which requires a correct RIFF header.
+    stream_safe = response_format in {"mp3", "pcm", "opus", "flac", "aac"}
+    endpoint = "/synthesize/stream" if stream_safe else "/synthesize"
+    url = f"http://127.0.0.1:{worker.port}{endpoint}"
     content_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
 
     async def _stream_audio():

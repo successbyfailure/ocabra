@@ -235,10 +235,42 @@ def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> by
     )
 
 
+def _soundfile_encode(wav_bytes: bytes, fmt: str) -> bytes | None:
+    try:
+        import numpy as np
+        import soundfile as sf
+    except ImportError:
+        return None
+    sf_map: dict[str, tuple[str, str | None]] = {
+        "mp3": ("MP3", None), "opus": ("OGG", "VORBIS"), "flac": ("FLAC", None),
+    }
+    entry = sf_map.get(fmt)
+    if not entry:
+        return None
+    sf_format, sf_subtype = entry
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sr = wf.getframerate()
+            frames = wf.readframes(wf.getnframes())
+        pcm16 = __import__("numpy").frombuffer(frames, dtype=__import__("numpy").int16)
+        samples = pcm16.astype(__import__("numpy").float32) / 32768.0
+        out = io.BytesIO()
+        kw: dict = {"format": sf_format}
+        if sf_subtype:
+            kw["subtype"] = sf_subtype
+        sf.write(out, samples, sr, **kw)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
 def _ffmpeg_encode(wav_bytes: bytes, fmt: str) -> bytes:
+    encoded = _soundfile_encode(wav_bytes, fmt)
+    if encoded:
+        return encoded
     _codec: dict[str, list[str]] = {
         "mp3":  ["-f", "mp3",  "-codec:a", "libmp3lame", "-q:a", "4"],
-        "opus": ["-f", "ogg",  "-codec:a", "libopus",    "-b:a", "64k"],
+        "opus": ["-f", "ogg",  "-codec:a", "opus", "-strict", "-2", "-b:a", "64k"],
         "aac":  ["-f", "adts", "-codec:a", "aac",        "-b:a", "128k"],
         "flac": ["-f", "flac", "-codec:a", "flac"],
     }
@@ -281,7 +313,10 @@ def _split_sentences(text: str) -> list[str]:
             result.append(buf)
             buf = ""
     if buf:
-        result.append(buf)
+        if result and len(buf) < _MIN_SENTENCE_CHARS:
+            result[-1] = result[-1] + " " + buf
+        else:
+            result.append(buf)
     return result or [text.strip()]
 
 
