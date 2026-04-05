@@ -1,7 +1,8 @@
 """
 POST /v1/audio/transcriptions — Whisper speech-to-text
-POST /v1/audio/speech — TTS text-to-speech
-POST /v1/audio/generate — ACE-Step music generation
+POST /v1/audio/speech        — TTS text-to-speech (streams sentence-by-sentence)
+GET  /v1/audio/voices        — List available voices for a TTS model
+POST /v1/audio/generate      — ACE-Step music generation
 """
 from __future__ import annotations
 
@@ -59,6 +60,25 @@ async def transcriptions(
     prompt: str | None = form.get("prompt")
     temperature: float = float(form.get("temperature", 0.0))
     diarize: str | None = form.get("diarize")
+
+    # Log a warning if the client sends a format that may not be handled by
+    # all Whisper backends (e.g. M4A/AAC from Android MediaRecorder).
+    # faster-whisper decodes via ffmpeg so these work; NeMo models may not.
+    audio_ct = (file.content_type or "").lower()
+    if audio_ct and audio_ct not in {
+        "audio/wav", "audio/wave", "audio/x-wav",
+        "audio/mpeg", "audio/mp3",
+        "audio/ogg", "audio/flac",
+        "audio/webm",
+        "audio/mp4", "audio/m4a", "audio/x-m4a", "video/mp4",  # M4A/AAC
+        "application/octet-stream",
+    }:
+        logger.warning(
+            "transcription_unusual_content_type",
+            model_id=model_id,
+            content_type=audio_ct,
+            filename=file.filename,
+        )
 
     model_manager = get_model_manager(request)
     state = await ensure_loaded(model_manager, model_id, user=user)
@@ -206,7 +226,13 @@ async def speech(
     Generate speech audio from text using a TTS model.
     Requires a model with capability tts=True.
 
+    The worker synthesises text sentence-by-sentence and streams audio chunks
+    progressively, reducing time-to-first-audio for long texts.
+
     Supported response_format: mp3 (default), opus, aac, flac, wav, pcm.
+      - mp3/opus/aac/flac : per-sentence encoded chunks (concatenatable stream).
+      - wav               : streaming RIFF header + raw PCM frames.
+      - pcm               : raw PCM16LE frames, no header.
     Supported voices: alloy, echo, fable, onyx, nova, shimmer (mapped per model).
     """
     body = await request.json()
@@ -236,7 +262,9 @@ async def speech(
             status_code=503,
         )
 
-    url = f"http://127.0.0.1:{worker.port}/synthesize"
+    # Use /synthesize/stream for progressive sentence-by-sentence synthesis.
+    # Falls back gracefully to the worker's full-text synthesis for single sentences.
+    url = f"http://127.0.0.1:{worker.port}/synthesize/stream"
     content_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
 
     async def _stream_audio():

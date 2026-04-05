@@ -4,6 +4,9 @@ import io
 import json
 import math
 import os
+import re
+import struct
+import subprocess
 import wave
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
@@ -44,13 +47,15 @@ VOICE_MAPPINGS: dict[str, dict[str, str]] = {
 }
 
 FORMAT_CONTENT_TYPES = {
-    "mp3": "audio/mpeg",
-    "opus": "audio/opus",
-    "aac": "audio/aac",
+    "mp3":  "audio/mpeg",
+    "opus": "audio/ogg; codecs=opus",
+    "aac":  "audio/aac",
     "flac": "audio/flac",
-    "wav": "audio/wav",
-    "pcm": "audio/pcm",
+    "wav":  "audio/wav",
+    "pcm":  "audio/pcm",
 }
+
+_MIN_SENTENCE_CHARS = 8
 
 
 class SynthesisRequest(BaseModel):
@@ -58,6 +63,11 @@ class SynthesisRequest(BaseModel):
     voice: str = "alloy"
     response_format: str = "mp3"
     speed: float = 1.0
+    language: str = "Auto"
+    reference_audio: str | None = None
+    reference_text: str | None = None
+    speaker: str | None = None
+    instruct: str | None = None
 
 
 class TTSRuntime:
@@ -119,18 +129,58 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
         model_voice = VOICE_MAPPINGS[runtime.family].get(
             request.voice.lower(), VOICE_MAPPINGS[runtime.family]["alloy"]
         )
+        fmt = request.response_format.lower()
 
-        audio_bytes, actual_format = await asyncio.to_thread(
+        wav_bytes, _ = await asyncio.to_thread(
             _synthesize_audio,
             request.input,
             model_voice,
-            request.response_format,
+            "wav",   # always generate WAV internally
             request.speed,
         )
+        encoded, content_type = _encode_audio(wav_bytes, fmt)
 
-        media_type = FORMAT_CONTENT_TYPES.get(actual_format, "audio/wav")
         headers = {"X-Model-Voice": model_voice, "X-Model-Family": runtime.family}
-        return StreamingResponse(io.BytesIO(audio_bytes), media_type=media_type, headers=headers)
+        return StreamingResponse(
+            io.BytesIO(encoded),
+            media_type=content_type,
+            headers={**headers, "Content-Disposition": f'attachment; filename="speech.{fmt}"'},
+        )
+
+    @app.post("/synthesize/stream")
+    async def synthesize_stream(request: SynthesisRequest) -> StreamingResponse:
+        model_voice = VOICE_MAPPINGS[runtime.family].get(
+            request.voice.lower(), VOICE_MAPPINGS[runtime.family]["alloy"]
+        )
+        fmt          = request.response_format.lower()
+        content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/mpeg")
+        sentences    = _split_sentences(request.input)
+
+        async def _generate():
+            wav_header_sent = False
+            for sentence in sentences:
+                wav_bytes, _ = await asyncio.to_thread(
+                    _synthesize_audio, sentence, model_voice, "wav", request.speed,
+                )
+                if not wav_bytes:
+                    continue
+                if fmt == "wav":
+                    if not wav_header_sent:
+                        sr, ch, bits = _wav_params(wav_bytes)
+                        yield _make_streaming_wav_header(sr, ch, bits)
+                        wav_header_sent = True
+                    yield _wav_to_pcm(wav_bytes)
+                elif fmt == "pcm":
+                    yield _wav_to_pcm(wav_bytes)
+                else:
+                    encoded, _ = _encode_audio(wav_bytes, fmt)
+                    yield encoded
+
+        return StreamingResponse(
+            _generate(),
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="speech.{fmt}"'},
+        )
 
     return app
 
@@ -158,6 +208,81 @@ def _infer_tts_family(model_id: str) -> str:
     if "bark" in normalized:
         return "bark"
     return "kokoro"
+
+
+# ---------------------------------------------------------------------------
+# Audio format conversion (stub — same helpers as backend/workers/tts_worker.py)
+# ---------------------------------------------------------------------------
+
+def _wav_params(wav_bytes: bytes) -> tuple[int, int, int]:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        return wf.getframerate(), wf.getnchannels(), wf.getsampwidth() * 8
+
+
+def _wav_to_pcm(wav_bytes: bytes) -> bytes:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        return wf.readframes(wf.getnframes())
+
+
+def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> bytes:
+    byte_rate   = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 0xFFFF_FFFF, b"WAVE",
+        b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
+        b"data", 0xFFFF_FFFF,
+    )
+
+
+def _ffmpeg_encode(wav_bytes: bytes, fmt: str) -> bytes:
+    _codec: dict[str, list[str]] = {
+        "mp3":  ["-f", "mp3",  "-codec:a", "libmp3lame", "-q:a", "4"],
+        "opus": ["-f", "ogg",  "-codec:a", "libopus",    "-b:a", "64k"],
+        "aac":  ["-f", "adts", "-codec:a", "aac",        "-b:a", "128k"],
+        "flac": ["-f", "flac", "-codec:a", "flac"],
+    }
+    codec_args = _codec.get(fmt)
+    if not codec_args:
+        return wav_bytes
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "wav", "-i", "pipe:0", *codec_args, "pipe:1"],
+            input=wav_bytes, capture_output=True, timeout=60,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+    except Exception:
+        pass
+    return wav_bytes
+
+
+def _encode_audio(wav_bytes: bytes, fmt: str) -> tuple[bytes, str]:
+    fmt = fmt.lower().strip()
+    content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/wav")
+    if fmt == "wav":
+        return wav_bytes, content_type
+    if fmt == "pcm":
+        return _wav_to_pcm(wav_bytes), content_type
+    return _ffmpeg_encode(wav_bytes, fmt), content_type
+
+
+def _split_sentences(text: str) -> list[str]:
+    raw = re.split(r"(?<=[.!?…;])\s+|\n+", text.strip())
+    result: list[str] = []
+    buf = ""
+    for part in raw:
+        part = part.strip()
+        if not part:
+            continue
+        buf = (buf + " " + part).strip() if buf else part
+        if len(buf) >= _MIN_SENTENCE_CHARS and re.search(r"[.!?…;]$", buf):
+            result.append(buf)
+            buf = ""
+    if buf:
+        result.append(buf)
+    return result or [text.strip()]
 
 
 def _synthesize_audio(text: str, voice: str, response_format: str, speed: float) -> tuple[bytes, str]:

@@ -19,7 +19,9 @@ import base64
 import io
 import math
 import os
+import re
 import struct
+import subprocess
 import tempfile
 import wave
 from contextlib import asynccontextmanager
@@ -57,6 +59,19 @@ OPENAI_TO_CUSTOMVOICE: dict[str, str] = {
 }
 
 OPENAI_VOICES = ("alloy", "echo", "fable", "nova", "onyx", "shimmer")
+
+FORMAT_CONTENT_TYPES: dict[str, str] = {
+    "mp3":  "audio/mpeg",
+    "opus": "audio/ogg; codecs=opus",
+    "aac":  "audio/aac",
+    "flac": "audio/flac",
+    "wav":  "audio/wav",
+    "pcm":  "audio/pcm",
+}
+
+# Minimum sentence length (chars) before we yield a TTS chunk in stream mode.
+# Prevents synthesizing ultra-short fragments like "Ok." alone.
+_MIN_SENTENCE_CHARS = 8
 
 SUPPORTED_LANGUAGES = [
     "Auto", "Chinese", "English", "Japanese", "Korean",
@@ -162,6 +177,112 @@ def _decode_audio(reference_audio: str) -> str:
     tmp.write(data)
     tmp.close()
     return tmp.name
+
+
+# ---------------------------------------------------------------------------
+# Audio format conversion
+# ---------------------------------------------------------------------------
+
+def _wav_params(wav_bytes: bytes) -> tuple[int, int, int]:
+    """Return (sample_rate, channels, sample_width_bits) from WAV header."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        return wf.getframerate(), wf.getnchannels(), wf.getsampwidth() * 8
+
+
+def _wav_to_pcm(wav_bytes: bytes) -> bytes:
+    """Strip WAV header and return raw PCM16LE frames."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        return wf.readframes(wf.getnframes())
+
+
+def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> bytes:
+    """44-byte RIFF/WAV header with 0xFFFFFFFF sizes for unknown-length streaming.
+
+    Most decoders (including Android MediaPlayer) accept this for progressive playback.
+    """
+    byte_rate   = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 0xFFFF_FFFF, b"WAVE",
+        b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
+        b"data", 0xFFFF_FFFF,
+    )
+
+
+def _ffmpeg_encode(wav_bytes: bytes, fmt: str) -> bytes:
+    """Encode WAV bytes to *fmt* using ffmpeg. Falls back to WAV on any error."""
+    import logging
+    _codec: dict[str, list[str]] = {
+        "mp3":  ["-f", "mp3",  "-codec:a", "libmp3lame", "-q:a", "4"],
+        "opus": ["-f", "ogg",  "-codec:a", "libopus",    "-b:a", "64k"],
+        "aac":  ["-f", "adts", "-codec:a", "aac",        "-b:a", "128k"],
+        "flac": ["-f", "flac", "-codec:a", "flac"],
+    }
+    codec_args = _codec.get(fmt)
+    if not codec_args:
+        return wav_bytes
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "wav", "-i", "pipe:0",
+        *codec_args,
+        "pipe:1",
+    ]
+    try:
+        result = subprocess.run(cmd, input=wav_bytes, capture_output=True, timeout=60)
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+        logging.getLogger(__name__).warning(
+            "ffmpeg encode failed for %s (rc=%d): %s",
+            fmt, result.returncode, result.stderr[:200].decode(errors="replace"),
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("ffmpeg encode error for %s: %s", fmt, exc)
+    return wav_bytes  # fallback to WAV
+
+
+def _encode_audio(wav_bytes: bytes, fmt: str) -> tuple[bytes, str]:
+    """Convert internal WAV bytes to the requested *fmt*.
+
+    Returns (encoded_bytes, content_type).
+    """
+    fmt = fmt.lower().strip()
+    content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/wav")
+    if fmt == "wav":
+        return wav_bytes, content_type
+    if fmt == "pcm":
+        return _wav_to_pcm(wav_bytes), content_type
+    return _ffmpeg_encode(wav_bytes, fmt), content_type
+
+
+# ---------------------------------------------------------------------------
+# Sentence splitting
+# ---------------------------------------------------------------------------
+
+def _split_sentences(text: str) -> list[str]:
+    """Split *text* into sentences suitable for progressive TTS synthesis.
+
+    Fragments shorter than _MIN_SENTENCE_CHARS are merged with the next sentence
+    to avoid synthesising tiny clips (e.g. "Ok.") that sound unnatural in isolation.
+    """
+    # Split on .!?…; followed by whitespace, or on newlines
+    raw = re.split(r"(?<=[.!?…;])\s+|\n+", text.strip())
+
+    result: list[str] = []
+    buf = ""
+    for part in raw:
+        part = part.strip()
+        if not part:
+            continue
+        buf = (buf + " " + part).strip() if buf else part
+        # Yield when buffer ends with a sentence-ending punctuation and is long enough
+        if len(buf) >= _MIN_SENTENCE_CHARS and re.search(r"[.!?…;]$", buf):
+            result.append(buf)
+            buf = ""
+    if buf:
+        result.append(buf)
+    return result or [text.strip()]
 
 
 def _synthesize(
@@ -314,12 +435,14 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
 
     @app.post("/synthesize")
     async def synthesize(body: SynthesizeRequest) -> StreamingResponse:
+        """Synthesise *input* and return a single audio file in *response_format*."""
         if not body.input.strip():
             raise HTTPException(status_code=400, detail="'input' text is required")
 
         speed = max(0.25, min(body.speed, 4.0))
+        fmt   = body.response_format.lower()
 
-        audio_bytes = await asyncio.to_thread(
+        wav_bytes = await asyncio.to_thread(
             _synthesize,
             runtime,
             body.input.strip(),
@@ -331,11 +454,68 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
             body.speaker,
             body.instruct,
         )
+        encoded, content_type = _encode_audio(wav_bytes, fmt)
 
         return StreamingResponse(
-            io.BytesIO(audio_bytes),
-            media_type="audio/wav",
-            headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
+            io.BytesIO(encoded),
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="speech.{fmt}"'},
+        )
+
+    @app.post("/synthesize/stream")
+    async def synthesize_stream(body: SynthesizeRequest) -> StreamingResponse:
+        """Synthesise *input* sentence-by-sentence and stream audio chunks progressively.
+
+        Yields audio in *response_format* as each sentence is ready, reducing
+        time-to-first-audio for long texts (e.g. LLM responses).
+
+        Streaming behaviour per format:
+          - wav  : streaming RIFF header (size=0xFFFFFFFF) followed by raw PCM frames.
+          - pcm  : raw PCM16LE frames, no header.
+          - mp3 / opus / aac / flac : per-sentence encoded chunks (concatenatable stream).
+        """
+        if not body.input.strip():
+            raise HTTPException(status_code=400, detail="'input' text is required")
+
+        speed     = max(0.25, min(body.speed, 4.0))
+        fmt       = body.response_format.lower()
+        sentences = _split_sentences(body.input.strip())
+        content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/mpeg")
+
+        async def _generate():
+            wav_header_sent = False
+            for sentence in sentences:
+                wav_bytes = await asyncio.to_thread(
+                    _synthesize,
+                    runtime,
+                    sentence,
+                    body.voice,
+                    speed,
+                    body.language,
+                    body.reference_audio,
+                    body.reference_text,
+                    body.speaker,
+                    body.instruct,
+                )
+                if not wav_bytes:
+                    continue
+
+                if fmt == "wav":
+                    if not wav_header_sent:
+                        sr, ch, bits = _wav_params(wav_bytes)
+                        yield _make_streaming_wav_header(sr, ch, bits)
+                        wav_header_sent = True
+                    yield _wav_to_pcm(wav_bytes)
+                elif fmt == "pcm":
+                    yield _wav_to_pcm(wav_bytes)
+                else:
+                    encoded, _ = _encode_audio(wav_bytes, fmt)
+                    yield encoded
+
+        return StreamingResponse(
+            _generate(),
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="speech.{fmt}"'},
         )
 
     return app
