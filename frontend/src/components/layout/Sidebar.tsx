@@ -160,7 +160,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
           <LogOut size={14} />
           Cerrar sesión
         </button>
-        <span className="block text-xs text-muted-foreground px-1">v0.1.0</span>
+        <span className="block text-xs text-muted-foreground px-1">v0.5.0</span>
       </div>
     </aside>
   )

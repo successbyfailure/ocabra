@@ -370,7 +370,12 @@ async def lifespan(app: FastAPI):
     logger.info("auth_seed_done")
 
     # Load persisted config overrides from DB (applied on top of .env values)
-    from ocabra.db.server_config import apply_overrides_to_settings, load_overrides
+    from ocabra.db.server_config import (
+        apply_overrides_to_settings,
+        load_overrides,
+        save_override,
+    )
+
     async with _ASL() as _session:
         _overrides = await load_overrides(_session)
     if _overrides:
@@ -378,6 +383,13 @@ async def lifespan(app: FastAPI):
         logger.info("config_overrides_loaded", count=len(_overrides))
     else:
         logger.info("config_overrides_none")
+
+    # Persist JWT secret in DB so sessions survive restarts
+    if "jwt_secret" not in _overrides:
+        async with _ASL() as _session:
+            await save_override(_session, "jwt_secret", settings.jwt_secret)
+            await _session.commit()
+        logger.info("jwt_secret_persisted")
 
     logger.info("vllm_backend_registered")
     logger.info("ocabra_ready")
