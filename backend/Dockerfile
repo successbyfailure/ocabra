@@ -76,6 +76,7 @@ RUN chmod +x /usr/local/bin/bitnet-server /usr/local/bin/llama-server
 # --- dev target ---
 FROM base AS dev
 ARG SGLANG_VERSION=0.5.9
+ARG VLLM_OMNI_VERSION=0.18.0
 COPY pyproject.toml .
 RUN python -m pip install -e ".[dev,vllm,audio]"
 RUN python -m pip install --upgrade "transformers>=5.0"
@@ -83,12 +84,16 @@ RUN python -m pip install "qwen-tts>=0.1.1"
 RUN python -m venv /opt/sglang-venv \
     && /opt/sglang-venv/bin/pip install --upgrade pip setuptools wheel \
     && /opt/sglang-venv/bin/pip install "sglang==${SGLANG_VERSION}"
+RUN python -m venv /opt/voxtral-venv \
+    && /opt/voxtral-venv/bin/pip install --upgrade pip setuptools wheel \
+    && /opt/voxtral-venv/bin/pip install "vllm>=0.18.0" "vllm-omni>=${VLLM_OMNI_VERSION}"
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 
 # --- production target ---
 FROM base AS production
 ARG SGLANG_VERSION=0.5.9
+ARG VLLM_OMNI_VERSION=0.18.0
 COPY pyproject.toml .
 RUN python -m pip install ".[vllm,audio]"
 RUN python -m pip install --upgrade "transformers>=5.0"
@@ -96,6 +101,9 @@ RUN python -m pip install "qwen-tts>=0.1.1"
 RUN python -m venv /opt/sglang-venv \
     && /opt/sglang-venv/bin/pip install --upgrade pip setuptools wheel \
     && /opt/sglang-venv/bin/pip install "sglang==${SGLANG_VERSION}"
+RUN python -m venv /opt/voxtral-venv \
+    && /opt/voxtral-venv/bin/pip install --upgrade pip setuptools wheel \
+    && /opt/voxtral-venv/bin/pip install "vllm>=0.18.0" "vllm-omni>=${VLLM_OMNI_VERSION}"
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 
