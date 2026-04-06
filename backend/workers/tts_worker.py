@@ -474,22 +474,27 @@ def _synthesize_kokoro(
     speed: float,
 ) -> bytes:
     import numpy as np
+    import torch
 
     # Map OpenAI voice to Kokoro voice
     kokoro_voice = OPENAI_TO_KOKORO.get(voice.lower(), voice)
-    # If still not a known kokoro voice, default
     if kokoro_voice not in KOKORO_VOICES and not kokoro_voice.startswith(("af_", "am_", "bf_", "bm_")):
         kokoro_voice = "af_heart"
 
-    # Generate audio segments
     segments = list(rt.kokoro_pipeline(text, voice=kokoro_voice, speed=speed))
     if not segments:
         raise RuntimeError("Kokoro returned no audio segments")
 
-    # Concatenate all audio segments
-    all_audio = np.concatenate([seg.audio for seg in segments])
-    sample_rate = segments[0].sr
-    return _numpy_to_wav(all_audio, sample_rate)
+    # Kokoro returns torch.Tensor audio at 24000 Hz (fixed)
+    parts = []
+    for seg in segments:
+        audio = seg.audio
+        if isinstance(audio, torch.Tensor):
+            audio = audio.cpu().numpy()
+        parts.append(np.asarray(audio, dtype=np.float32))
+
+    all_audio = np.concatenate(parts)
+    return _numpy_to_wav(all_audio, 24000)
 
 
 def _synthesize_bark(
@@ -507,8 +512,9 @@ def _synthesize_bark(
     inputs = {k: v.to(rt.device) for k, v in inputs.items()}
 
     speech = rt.bark_model.generate(**inputs)
-    audio = speech.cpu().numpy().squeeze()
-    sample_rate = rt.bark_model.generation_config.sample_rate
+    audio = speech.cpu().numpy().squeeze().astype(np.float32)
+    # Bark outputs at 24000 Hz
+    sample_rate = getattr(rt.bark_model.generation_config, "sample_rate", 24000)
     return _numpy_to_wav(audio, sample_rate)
 
 
