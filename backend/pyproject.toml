@@ -54,6 +54,7 @@ audio = [
     "pyannote.audio>=3.3",
     "nemo_toolkit[asr]>=2.2",
     "matplotlib>=3.10",
+    "kokoro>=0.9",
 ]
 
 [tool.setuptools.packages.find]

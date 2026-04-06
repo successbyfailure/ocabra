@@ -88,13 +88,67 @@ class TTSRuntime:
         self.model_id: str = ""
         self.gpu_indices: list[int] = []
         self.device: str = "cpu"
-        self.qwen_model: Any = None   # Qwen3TTSModel wrapper
-        self.model_type: str = "placeholder"  # "base" | "custom_voice" | "placeholder"
+        self.family: str = "placeholder"  # "qwen" | "kokoro" | "bark" | "placeholder"
+        self.qwen_model: Any = None       # Qwen3TTSModel wrapper
+        self.qwen_type: str = "base"      # "base" | "custom_voice"
+        self.kokoro_pipeline: Any = None   # kokoro.KPipeline
+        self.bark_model: Any = None       # BarkModel
+        self.bark_processor: Any = None   # AutoProcessor
         self.speakers: list[str] = []
         self.error: str | None = None
 
 
 runtime = TTSRuntime()
+
+
+# Kokoro preset voices
+KOKORO_VOICES: list[str] = [
+    "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
+    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_liam", "am_michael", "am_onyx",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+]
+
+OPENAI_TO_KOKORO: dict[str, str] = {
+    "alloy": "af_alloy",
+    "echo": "am_echo",
+    "fable": "bm_fable",
+    "onyx": "am_onyx",
+    "nova": "af_nova",
+    "shimmer": "af_sky",
+}
+
+BARK_SPEAKERS: list[str] = [
+    "v2/en_speaker_0", "v2/en_speaker_1", "v2/en_speaker_2",
+    "v2/en_speaker_3", "v2/en_speaker_4", "v2/en_speaker_5",
+    "v2/en_speaker_6", "v2/en_speaker_7", "v2/en_speaker_8",
+    "v2/en_speaker_9",
+]
+
+OPENAI_TO_BARK: dict[str, str] = {
+    "alloy": "v2/en_speaker_0",
+    "echo": "v2/en_speaker_1",
+    "fable": "v2/en_speaker_2",
+    "onyx": "v2/en_speaker_3",
+    "nova": "v2/en_speaker_4",
+    "shimmer": "v2/en_speaker_5",
+}
+
+
+# ---------------------------------------------------------------------------
+# Model family detection
+# ---------------------------------------------------------------------------
+
+def _detect_family(model_id: str) -> str:
+    low = model_id.lower()
+    if "kokoro" in low:
+        return "kokoro"
+    if "bark" in low:
+        return "bark"
+    if "qwen" in low:
+        return "qwen"
+    return "qwen"  # default
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +184,31 @@ def _load_qwen_tts(model_id: str, device: str) -> tuple[Any, str]:
     )
     model_type: str = getattr(qwen_model.model, "tts_model_type", "base")
     return qwen_model, model_type
+
+
+def _load_kokoro(model_id: str, device: str) -> Any:
+    """Load Kokoro TTS pipeline."""
+    from kokoro import KPipeline  # type: ignore[import]
+
+    # Kokoro uses language codes for pipeline init: a=American, b=British, j=Japanese, etc.
+    # Default to American English
+    pipeline = KPipeline(lang_code="a", device=device)
+    return pipeline
+
+
+def _load_bark(model_id: str, device: str) -> tuple[Any, Any]:
+    """Load Bark TTS model; returns (model, processor)."""
+    import torch
+    from transformers import AutoProcessor, BarkModel  # type: ignore[import]
+
+    path = _resolve_model_path(model_id)
+    processor = AutoProcessor.from_pretrained(path)
+    model = BarkModel.from_pretrained(
+        path,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    )
+    model = model.to(device)
+    return model, processor
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +418,100 @@ def _split_sentences(text: str) -> list[str]:
     return result or [text.strip()]
 
 
+def _synthesize_qwen(
+    rt: TTSRuntime,
+    text: str,
+    voice: str,
+    speed: float,
+    language: str,
+    reference_audio: str | None,
+    reference_text: str | None,
+    speaker: str | None,
+    instruct: str | None,
+) -> bytes:
+    if rt.qwen_type == "custom_voice":
+        resolved_speaker = speaker or OPENAI_TO_CUSTOMVOICE.get(voice, "Ryan")
+        wavs, sr = rt.qwen_model.generate_custom_voice(
+            text=text,
+            speaker=resolved_speaker,
+            language=language or "Auto",
+            instruct=instruct or None,
+        )
+    elif rt.qwen_type == "base":
+        if not reference_audio:
+            wavs, sr = rt.qwen_model.generate_voice_clone(
+                text=text,
+                language=language or "Auto",
+                ref_audio=None,
+                x_vector_only_mode=True,
+            )
+        else:
+            ref_path = _decode_audio(reference_audio)
+            try:
+                wavs, sr = rt.qwen_model.generate_voice_clone(
+                    text=text,
+                    language=language or "Auto",
+                    ref_audio=ref_path,
+                    ref_text=reference_text or None,
+                )
+            finally:
+                try:
+                    os.unlink(ref_path)
+                except OSError:
+                    pass
+    else:
+        raise RuntimeError(f"Unknown Qwen TTS model type: {rt.qwen_type}")
+
+    if wavs and len(wavs) > 0:
+        return _numpy_to_wav(wavs[0], sr)
+    raise RuntimeError("Qwen TTS returned empty audio")
+
+
+def _synthesize_kokoro(
+    rt: TTSRuntime,
+    text: str,
+    voice: str,
+    speed: float,
+) -> bytes:
+    import numpy as np
+
+    # Map OpenAI voice to Kokoro voice
+    kokoro_voice = OPENAI_TO_KOKORO.get(voice.lower(), voice)
+    # If still not a known kokoro voice, default
+    if kokoro_voice not in KOKORO_VOICES and not kokoro_voice.startswith(("af_", "am_", "bf_", "bm_")):
+        kokoro_voice = "af_heart"
+
+    # Generate audio segments
+    segments = list(rt.kokoro_pipeline(text, voice=kokoro_voice, speed=speed))
+    if not segments:
+        raise RuntimeError("Kokoro returned no audio segments")
+
+    # Concatenate all audio segments
+    all_audio = np.concatenate([seg.audio for seg in segments])
+    sample_rate = segments[0].sr
+    return _numpy_to_wav(all_audio, sample_rate)
+
+
+def _synthesize_bark(
+    rt: TTSRuntime,
+    text: str,
+    voice: str,
+) -> bytes:
+    import numpy as np
+
+    bark_voice = OPENAI_TO_BARK.get(voice.lower(), voice)
+    if bark_voice not in BARK_SPEAKERS:
+        bark_voice = "v2/en_speaker_0"
+
+    inputs = rt.bark_processor(text, voice_preset=bark_voice, return_tensors="pt")
+    inputs = {k: v.to(rt.device) for k, v in inputs.items()}
+
+    speech = rt.bark_model.generate(**inputs)
+    audio = speech.cpu().numpy().squeeze()
+    sample_rate = rt.bark_model.generation_config.sample_rate
+    return _numpy_to_wav(audio, sample_rate)
+
+
 def _synthesize(
     rt: TTSRuntime,
     text: str,
@@ -353,53 +526,21 @@ def _synthesize(
     import logging
     log = logging.getLogger(__name__)
 
-    if rt.qwen_model is None:
-        return _generate_tone(text=text, speed=speed)
-
     try:
-        if rt.model_type == "custom_voice":
-            # Use preset speakers: speaker param takes priority; fall back to OpenAI→speaker mapping
-            resolved_speaker = speaker or OPENAI_TO_CUSTOMVOICE.get(voice, "Ryan")
-            wavs, sr = rt.qwen_model.generate_custom_voice(
-                text=text,
-                speaker=resolved_speaker,
-                language=language or "Auto",
-                instruct=instruct or None,
+        if rt.family == "qwen":
+            return _synthesize_qwen(
+                rt, text, voice, speed, language,
+                reference_audio, reference_text, speaker, instruct,
             )
-        elif rt.model_type == "base":
-            # Voice cloning — requires reference audio
-            if not reference_audio:
-                # Without reference audio fall back to a default speaker embedding via x-vector mode
-                wavs, sr = rt.qwen_model.generate_voice_clone(
-                    text=text,
-                    language=language or "Auto",
-                    ref_audio=None,
-                    x_vector_only_mode=True,
-                )
-            else:
-                ref_path = _decode_audio(reference_audio)
-                try:
-                    wavs, sr = rt.qwen_model.generate_voice_clone(
-                        text=text,
-                        language=language or "Auto",
-                        ref_audio=ref_path,
-                        ref_text=reference_text or None,
-                    )
-                finally:
-                    try:
-                        os.unlink(ref_path)
-                    except OSError:
-                        pass
+        elif rt.family == "kokoro":
+            return _synthesize_kokoro(rt, text, voice, speed)
+        elif rt.family == "bark":
+            return _synthesize_bark(rt, text, voice)
         else:
-            return _generate_tone(text=text, speed=speed)
-
-        if wavs and len(wavs) > 0:
-            return _numpy_to_wav(wavs[0], sr)
-        return _generate_tone(text=text, speed=speed)
-
+            raise RuntimeError(f"No TTS engine loaded (family={rt.family})")
     except Exception as exc:
-        log.warning("TTS synthesis error (%s): %s", rt.model_type, exc, exc_info=True)
-        return _generate_tone(text=text, speed=speed)
+        log.error("TTS synthesis error (%s): %s", rt.family, exc, exc_info=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -426,65 +567,109 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        import logging
+        log = logging.getLogger(__name__)
+
         use_cuda = os.getenv("CUDA_VISIBLE_DEVICES") not in {None, "", "-1"}
         runtime.device = "cuda" if use_cuda else "cpu"
+        runtime.family = _detect_family(model_id)
 
         try:
-            qwen_model, model_type = await asyncio.to_thread(
-                _load_qwen_tts, model_id, runtime.device
-            )
-            runtime.qwen_model = qwen_model
-            runtime.model_type = model_type
+            if runtime.family == "qwen":
+                qwen_model, qwen_type = await asyncio.to_thread(
+                    _load_qwen_tts, model_id, runtime.device
+                )
+                runtime.qwen_model = qwen_model
+                runtime.qwen_type = qwen_type
+                if qwen_type == "custom_voice" and hasattr(qwen_model.model, "get_supported_speakers"):
+                    try:
+                        runtime.speakers = list(qwen_model.model.get_supported_speakers())
+                    except Exception:
+                        runtime.speakers = list(CUSTOMVOICE_SPEAKERS)
+                log.info("Loaded Qwen3-TTS (%s)", qwen_type)
+
+            elif runtime.family == "kokoro":
+                pipeline = await asyncio.to_thread(_load_kokoro, model_id, runtime.device)
+                runtime.kokoro_pipeline = pipeline
+                runtime.speakers = list(KOKORO_VOICES)
+                log.info("Loaded Kokoro TTS")
+
+            elif runtime.family == "bark":
+                bark_model, bark_processor = await asyncio.to_thread(
+                    _load_bark, model_id, runtime.device
+                )
+                runtime.bark_model = bark_model
+                runtime.bark_processor = bark_processor
+                runtime.speakers = list(BARK_SPEAKERS)
+                log.info("Loaded Bark TTS")
+
+            else:
+                raise RuntimeError(f"Unknown TTS family: {runtime.family}")
+
             runtime.error = None
-            # Populate speakers from model
-            if model_type == "custom_voice" and hasattr(qwen_model.model, "get_supported_speakers"):
-                try:
-                    runtime.speakers = list(qwen_model.model.get_supported_speakers())
-                except Exception:
-                    runtime.speakers = list(CUSTOMVOICE_SPEAKERS)
+
         except Exception as exc:
-            runtime.qwen_model = None
-            runtime.model_type = "placeholder"
+            runtime.family = "placeholder"
             runtime.error = str(exc)
-            import logging
-            logging.getLogger(__name__).error("Failed to load TTS model: %s", exc)
+            log.error("Failed to load TTS model '%s': %s", model_id, exc)
 
         yield
 
         runtime.qwen_model = None
+        runtime.kokoro_pipeline = None
+        runtime.bark_model = None
+        runtime.bark_processor = None
 
     app = FastAPI(title="oCabra TTS Worker", lifespan=lifespan)
 
+    def _is_loaded() -> bool:
+        if runtime.family == "qwen":
+            return runtime.qwen_model is not None
+        if runtime.family == "kokoro":
+            return runtime.kokoro_pipeline is not None
+        if runtime.family == "bark":
+            return runtime.bark_model is not None
+        return False
+
     @app.get("/health")
     async def health() -> JSONResponse:
-        return JSONResponse({"status": "ok", "model_loaded": runtime.qwen_model is not None})
+        if not _is_loaded():
+            raise HTTPException(status_code=503, detail=runtime.error or "Model not loaded")
+        return JSONResponse({"status": "ok", "model_loaded": True, "family": runtime.family})
 
     @app.get("/info")
     async def info() -> JSONResponse:
         return JSONResponse({
             "backend": "tts",
             "model_id": runtime.model_id,
-            "model_type": runtime.model_type,
+            "family": runtime.family,
             "gpu_indices": runtime.gpu_indices,
             "device": runtime.device,
-            "loaded": runtime.qwen_model is not None,
+            "loaded": _is_loaded(),
             "error": runtime.error,
         })
 
     @app.get("/voices")
     async def voices() -> JSONResponse:
-        if runtime.model_type == "custom_voice":
-            speakers = runtime.speakers or CUSTOMVOICE_SPEAKERS
-            voices_list = speakers
+        if runtime.family == "kokoro":
+            voices_list = list(KOKORO_VOICES)
+            languages = ["English", "British English", "Japanese", "Korean", "Chinese"]
+        elif runtime.family == "bark":
+            voices_list = list(BARK_SPEAKERS)
+            languages = ["English"]
+        elif runtime.family == "qwen" and runtime.qwen_type == "custom_voice":
+            voices_list = runtime.speakers or list(CUSTOMVOICE_SPEAKERS)
+            languages = list(SUPPORTED_LANGUAGES)
         else:
-            speakers = []
             voices_list = list(OPENAI_VOICES)
+            languages = list(SUPPORTED_LANGUAGES)
+
         return JSONResponse({
             "voices": voices_list,
-            "model_type": runtime.model_type,
-            "speakers": speakers,
-            "languages": SUPPORTED_LANGUAGES,
-            "supports_voice_clone": runtime.model_type == "base",
+            "model_type": runtime.family,
+            "speakers": runtime.speakers,
+            "languages": languages,
+            "supports_voice_clone": runtime.family == "qwen" and runtime.qwen_type == "base",
         })
 
     @app.post("/synthesize")
@@ -492,6 +677,8 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
         """Synthesise *input* and return a single audio file in *response_format*."""
         if not body.input.strip():
             raise HTTPException(status_code=400, detail="'input' text is required")
+        if not _is_loaded():
+            raise HTTPException(status_code=503, detail=runtime.error or "Model not loaded")
 
         speed = max(0.25, min(body.speed, 4.0))
         fmt   = body.response_format.lower()
@@ -518,18 +705,11 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
 
     @app.post("/synthesize/stream")
     async def synthesize_stream(body: SynthesizeRequest) -> StreamingResponse:
-        """Synthesise *input* sentence-by-sentence and stream audio chunks progressively.
-
-        Yields audio in *response_format* as each sentence is ready, reducing
-        time-to-first-audio for long texts (e.g. LLM responses).
-
-        Streaming behaviour per format:
-          - wav  : streaming RIFF header (size=0xFFFFFFFF) followed by raw PCM frames.
-          - pcm  : raw PCM16LE frames, no header.
-          - mp3 / opus / aac / flac : per-sentence encoded chunks (concatenatable stream).
-        """
+        """Synthesise *input* sentence-by-sentence and stream audio chunks progressively."""
         if not body.input.strip():
             raise HTTPException(status_code=400, detail="'input' text is required")
+        if not _is_loaded():
+            raise HTTPException(status_code=503, detail=runtime.error or "Model not loaded")
 
         speed     = max(0.25, min(body.speed, 4.0))
         fmt       = body.response_format.lower()
