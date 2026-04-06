@@ -363,14 +363,28 @@ async def _lifespan(_app) -> AsyncGenerator[None, None]:
 router = APIRouter(tags=["downloads"], lifespan=_lifespan)
 
 
-@router.get("/downloads", response_model=list[DownloadJob])
+@router.get(
+    "/downloads",
+    response_model=list[DownloadJob],
+    summary="List download jobs",
+    description="Return all download jobs (active, queued, completed, failed) ordered by most recent first.",
+)
 async def list_downloads(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[DownloadJob]:
     return await download_manager.list_jobs()
 
 
-@router.post("/downloads", response_model=DownloadJob)
+@router.post(
+    "/downloads",
+    response_model=DownloadJob,
+    summary="Enqueue a download",
+    description=(
+        "Queue a model download from HuggingFace, Ollama, or BitNet. "
+        "The model is auto-registered on completion if register_config is provided."
+    ),
+    responses={400: {"description": "Invalid source or missing artifact for bitnet"}},
+)
 async def enqueue_download(
     request: DownloadCreateRequest,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -386,7 +400,13 @@ async def enqueue_download(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/downloads/{job_id}", response_model=DownloadJob)
+@router.get(
+    "/downloads/{job_id}",
+    response_model=DownloadJob,
+    summary="Get download job",
+    description="Return the current state of a single download job by its ID.",
+    responses={404: {"description": "Download job not found"}},
+)
 async def get_download(
     job_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -398,7 +418,14 @@ async def get_download(
     return job
 
 
-@router.delete("/downloads")
+@router.delete(
+    "/downloads",
+    summary="Clear download history",
+    description=(
+        "Delete historical download jobs by status (comma-separated). "
+        "Active jobs (queued, downloading) are never deleted."
+    ),
+)
 async def clear_downloads(
     status: str = "failed,cancelled,completed",
     _user: UserContext = Depends(require_role("model_manager")),
@@ -410,7 +437,12 @@ async def clear_downloads(
     return {"deleted": deleted}
 
 
-@router.delete("/downloads/{job_id}")
+@router.delete(
+    "/downloads/{job_id}",
+    summary="Cancel a download",
+    description="Cancel an active or queued download job. Already-completed jobs are left unchanged.",
+    responses={404: {"description": "Download job not found"}},
+)
 async def cancel_download(
     job_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -422,7 +454,12 @@ async def cancel_download(
     return {"ok": True}
 
 
-@router.get("/downloads/{job_id}/stream")
+@router.get(
+    "/downloads/{job_id}/stream",
+    summary="Stream download progress",
+    description="Subscribe to real-time Server-Sent Events for download progress updates.",
+    responses={404: {"description": "Download job not found"}},
+)
 async def stream_download_progress(
     job_id: str,
     _user: UserContext = Depends(require_role("model_manager")),

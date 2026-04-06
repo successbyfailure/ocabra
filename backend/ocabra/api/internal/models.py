@@ -45,7 +45,11 @@ class ModelMemoryEstimateRequest(BaseModel):
     run_probe: bool = False
 
 
-@router.get("/models")
+@router.get(
+    "/models",
+    summary="List all models",
+    description="Return every configured model with its runtime state, capabilities, and disk size.",
+)
 async def list_models(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
@@ -62,7 +66,11 @@ async def list_models(
     return payloads
 
 
-@router.get("/models/storage")
+@router.get(
+    "/models/storage",
+    summary="Get models storage usage",
+    description="Return filesystem usage (total, used, free bytes) for the configured models directory.",
+)
 async def get_models_storage(
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
@@ -84,7 +92,12 @@ async def get_models_storage(
     }
 
 
-@router.get("/models/{model_id:path}")
+@router.get(
+    "/models/{model_id:path}",
+    summary="Get model state",
+    description="Return the full runtime state, capabilities, and disk size of a single model.",
+    responses={404: {"description": "Model not found"}},
+)
 async def get_model(
     model_id: str,
     request: Request,
@@ -99,7 +112,12 @@ async def get_model(
     return await _serialize_model_state(request, state, ollama_sizes)
 
 
-@router.post("/models")
+@router.post(
+    "/models",
+    summary="Register a new model",
+    description="Create a model configuration entry. The model is not loaded until an explicit load request.",
+    responses={400: {"description": "Invalid model configuration"}},
+)
 async def add_model(
     body: AddModelRequest,
     request: Request,
@@ -122,7 +140,15 @@ async def add_model(
     return state.to_dict()
 
 
-@router.post("/models/{model_id:path}/load")
+@router.post(
+    "/models/{model_id:path}/load",
+    summary="Load model onto GPU",
+    description="Start the backend worker process and load the model weights into GPU VRAM.",
+    responses={
+        404: {"description": "Model not found"},
+        409: {"description": "Model already loaded or insufficient VRAM"},
+    },
+)
 async def load_model(
     model_id: str,
     request: Request,
@@ -146,7 +172,12 @@ async def load_model(
     return updated.to_dict()
 
 
-@router.post("/models/{model_id:path}/unload")
+@router.post(
+    "/models/{model_id:path}/unload",
+    summary="Unload model from GPU",
+    description="Stop the backend worker process and free the GPU VRAM occupied by this model.",
+    responses={404: {"description": "Model not found"}},
+)
 async def unload_model(
     model_id: str,
     request: Request,
@@ -162,7 +193,15 @@ async def unload_model(
     return updated.to_dict()
 
 
-@router.patch("/models/{model_id:path}")
+@router.patch(
+    "/models/{model_id:path}",
+    summary="Update model configuration",
+    description="Patch mutable fields such as load_policy, preferred_gpu, display_name, or extra_config.",
+    responses={
+        400: {"description": "Invalid configuration value"},
+        404: {"description": "Model not found"},
+    },
+)
 async def update_model(
     model_id: str,
     body: ModelPatch,
@@ -182,7 +221,15 @@ async def update_model(
     return updated.to_dict()
 
 
-@router.post("/models/{model_id:path}/memory-estimate")
+@router.post(
+    "/models/{model_id:path}/memory-estimate",
+    summary="Estimate model memory requirements",
+    description=(
+        "Compute a VRAM estimate for the model under the given configuration. "
+        "Uses heuristic sizing by default; set run_probe=true for a runtime validation (vLLM only)."
+    ),
+    responses={404: {"description": "Model not found"}},
+)
 async def estimate_model_memory(
     model_id: str,
     body: ModelMemoryEstimateRequest,
@@ -205,7 +252,18 @@ async def estimate_model_memory(
     )
 
 
-@router.delete("/models/{model_id:path}")
+@router.delete(
+    "/models/{model_id:path}",
+    summary="Delete a model",
+    description=(
+        "Remove the model configuration from the database and optionally delete "
+        "the model files from disk. The model is unloaded first if currently loaded."
+    ),
+    responses={
+        400: {"description": "Path traversal refused"},
+        404: {"description": "Model not found"},
+    },
+)
 async def delete_model(
     model_id: str,
     request: Request,

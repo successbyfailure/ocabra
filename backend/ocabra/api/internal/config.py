@@ -138,7 +138,15 @@ async def _load_global_schedules() -> list[dict[str, Any]]:
     return global_schedule_rows_to_payload(rows)
 
 
-@router.get("/config", summary="Get server configuration")
+@router.get(
+    "/config",
+    summary="Get server configuration",
+    description=(
+        "Return all server configuration values including GPU defaults, idle eviction, "
+        "backend tuning, LiteLLM integration, energy pricing, and global schedules. "
+        "Sensitive keys (e.g. litellmAdminKey) are masked."
+    ),
+)
 async def get_config(
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),
@@ -149,7 +157,16 @@ async def get_config(
     return payload
 
 
-@router.patch("/config", summary="Patch server configuration")
+@router.patch(
+    "/config",
+    summary="Patch server configuration",
+    description=(
+        "Update one or more mutable server configuration values. Changes are applied "
+        "to the running process and persisted to the database. "
+        "modelsDir is read-only and cannot be changed at runtime."
+    ),
+    responses={400: {"description": "Invalid configuration value or read-only field"}},
+)
 async def patch_config(
     patch: ServerConfigPatch,
     request: Request,
@@ -331,7 +348,11 @@ async def patch_config(
     return response
 
 
-@router.post("/config/litellm/sync", summary="Sync models to LiteLLM proxy")
+@router.post(
+    "/config/litellm/sync",
+    summary="Sync models to LiteLLM proxy",
+    description="Manually trigger synchronisation of all loaded models to the configured LiteLLM proxy instance.",
+)
 async def sync_litellm(
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),

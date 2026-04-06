@@ -19,6 +19,12 @@ CHANNEL_EVENT_MAP = {
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
+    """Real-time event stream over WebSocket.
+
+    Requires a valid ``ocabra_session`` cookie. Forwards Redis pub/sub
+    events (gpu_stats, model_event, service_event, download_progress,
+    system_alert) as JSON frames to the client.
+    """
     token = websocket.cookies.get("ocabra_session")
     if not token:
         await websocket.close(code=1008)

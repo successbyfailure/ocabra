@@ -16,7 +16,11 @@ WINDOW_MAP = {
 }
 
 
-@router.get("/gpus")
+@router.get(
+    "/gpus",
+    summary="List all GPUs",
+    description="Return the live state of every GPU: VRAM usage, utilization, temperature, power draw, and running processes.",
+)
 async def list_gpus(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
@@ -27,7 +31,12 @@ async def list_gpus(
     return [asdict(s) for s in states]
 
 
-@router.get("/gpus/{index}")
+@router.get(
+    "/gpus/{index}",
+    summary="Get GPU state",
+    description="Return the live state of a single GPU by its index.",
+    responses={404: {"description": "GPU index not found"}},
+)
 async def get_gpu(
     index: int,
     request: Request,
@@ -42,7 +51,14 @@ async def get_gpu(
         raise HTTPException(status_code=404, detail=f"GPU {index} not found")
 
 
-@router.get("/gpus/{index}/stats")
+@router.get(
+    "/gpus/{index}/stats",
+    summary="Get GPU historical stats",
+    description=(
+        "Return time-series GPU statistics (utilization, VRAM, power, temperature) "
+        "for the given window. Supported windows: 5m, 1h, 24h."
+    ),
+)
 async def get_gpu_stats(
     index: int,
     request: Request,

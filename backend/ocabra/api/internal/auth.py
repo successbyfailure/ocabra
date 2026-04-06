@@ -62,7 +62,12 @@ def _set_session_cookie(response: Response, token: str, remember: bool) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.post("/auth/login")
+@router.post(
+    "/auth/login",
+    summary="Login",
+    description="Authenticate with username/password and receive a session cookie plus access token.",
+    responses={401: {"description": "Invalid credentials or inactive account"}},
+)
 async def login(body: LoginRequest, response: Response) -> dict:
     """Authenticate a user and issue a session cookie.
 
@@ -113,7 +118,11 @@ async def login(body: LoginRequest, response: Response) -> dict:
     }
 
 
-@router.post("/auth/logout")
+@router.post(
+    "/auth/logout",
+    summary="Logout",
+    description="Invalidate the current session by deleting the cookie and revoking the JWT.",
+)
 async def logout(
     response: Response,
     request: Request,
@@ -152,7 +161,12 @@ async def logout(
     return {"ok": True}
 
 
-@router.get("/auth/me")
+@router.get(
+    "/auth/me",
+    summary="Get current user",
+    description="Return the profile of the currently authenticated user.",
+    responses={401: {"description": "Not authenticated"}},
+)
 async def me(
     user: Annotated[UserContext, Depends(require_role("user"))],
 ) -> dict:
@@ -184,7 +198,15 @@ async def me(
     }
 
 
-@router.put("/auth/password")
+@router.put(
+    "/auth/password",
+    summary="Change own password",
+    description="Change the authenticated user's password. Requires the current password for verification.",
+    responses={
+        400: {"description": "Current password is incorrect"},
+        401: {"description": "Not authenticated"},
+    },
+)
 async def change_password(
     body: PasswordChangeRequest,
     user: Annotated[UserContext, Depends(require_role("user"))],
@@ -223,7 +245,12 @@ async def change_password(
     return {"ok": True}
 
 
-@router.get("/auth/keys")
+@router.get(
+    "/auth/keys",
+    summary="List own API keys",
+    description="Return all API keys belonging to the authenticated user, ordered by creation date.",
+    responses={401: {"description": "Not authenticated"}},
+)
 async def list_api_keys(
     user: Annotated[UserContext, Depends(require_role("user"))],
 ) -> list[dict]:
@@ -261,7 +288,19 @@ async def list_api_keys(
     ]
 
 
-@router.post("/auth/keys", status_code=201)
+@router.post(
+    "/auth/keys",
+    status_code=201,
+    summary="Create API key",
+    description=(
+        "Generate a new API key for the authenticated user. "
+        "The raw key is returned only once in the response and cannot be recovered."
+    ),
+    responses={
+        400: {"description": "Invalid group_id"},
+        401: {"description": "Not authenticated"},
+    },
+)
 async def create_api_key(
     body: CreateApiKeyRequest,
     user: Annotated[UserContext, Depends(require_role("user"))],
@@ -326,7 +365,16 @@ async def create_api_key(
     }
 
 
-@router.delete("/auth/keys/{key_id}", status_code=204)
+@router.delete(
+    "/auth/keys/{key_id}",
+    status_code=204,
+    summary="Revoke API key",
+    description="Revoke one of the authenticated user's API keys. The key can no longer be used for authentication.",
+    responses={
+        401: {"description": "Not authenticated"},
+        404: {"description": "Key not found or does not belong to the caller"},
+    },
+)
 async def revoke_api_key(
     key_id: str,
     user: Annotated[UserContext, Depends(require_role("user"))],

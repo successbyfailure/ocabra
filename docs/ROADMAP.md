@@ -61,9 +61,9 @@ Implementado:
 
 ---
 
-## ✅ Bloque 5 — Cobertura de tests (COMPLETADO — parcial)
+## ✅ Bloque 5 — Cobertura de tests (COMPLETADO)
 
-58 tests escritos cubriendo paths críticos:
+109 tests cubriendo paths críticos y flujos e2e:
 
 | Test file | Función | Tests |
 |-----------|---------|-------|
@@ -71,19 +71,18 @@ Implementado:
 | `test_config_patch.py` | `patch_config()` schema + runtime | 12 |
 | `test_model_manager_config.py` | `update_config()` whitelist | 17 |
 | `test_worker_lifecycle.py` | Port lifecycle, worker registration, forward errors, backends | 15 |
-
-Pendiente: flujos e2e load/unload por backend, TRT-LLM compile mock.
+| `test_langfuse_tracer.py` | Langfuse integration (disabled, streaming, content, sampling) | 11 |
+| `test_load_unload_e2e.py` | Load/unload cycle, eviction, auto-reload, idle, policies | 17 |
+| `test_trtllm_compile.py` | Compile jobs, Docker cmd, phases, cancel, failure handling | 23 |
 
 ---
 
-## Bloque 6 — Operativo / deuda técnica menor
+## ✅ Bloque 6 — Operativo / deuda técnica menor (COMPLETADO)
 
-| Item | Descripción | Effort |
-|------|-------------|--------|
-| Limpiar entrada `tensorrt_llm/Qwen3-32B-AWQ-fp16` | Registro en BD apunta a engine_dir inexistente; falla con error correcto pero ensucia el inventario | 5 min (SQL directo) |
-| Validación TRT-LLM con múltiples engines en producción | Cargar/descargar 2+ engines sin huérfanos ni conflictos de puertos | Manual |
-| Documentación OpenAPI enriquecida | Añadir ejemplos y descripciones ricas a endpoints `/ocabra/*` | 2-3h |
-| Script first-run / instalación | Guía de puesta en marcha desde cero en nuevo host | 1-2h |
+- [x] Limpiar entrada `tensorrt_llm/Qwen3-32B-AWQ-fp16` del inventario (SQL directo)
+- [x] Documentación OpenAPI enriquecida — summaries, descriptions y responses en todos los endpoints `/ocabra/*`
+- [x] Script first-run (`setup.sh`) + guía de instalación (`docs/INSTALL.md`)
+- [ ] Validación TRT-LLM con múltiples engines en producción (requiere prueba manual con hardware)
 
 ---
 
@@ -143,8 +142,5 @@ Implementado:
 [✅ Hecho]  Bloque 7 — Teams, stats, admin UX
 [✅ Hecho]  Bloque 8 — Voice Pipeline (Fase 1 + 1.5 + 2)
 
-[Pendiente] Documentación OpenAPI enriquecida
-            Script first-run / instalación
-            Tests e2e: flujos load/unload por backend, TRT-LLM compile mock
-            Limpiar entrada tensorrt_llm/Qwen3-32B-AWQ-fp16 del inventario
+[Pendiente] Validación manual TRT-LLM multi-engine en producción
 ```

@@ -12,7 +12,11 @@ from ocabra.api._deps_auth import UserContext, require_role
 router = APIRouter(tags=["stats"])
 
 
-@router.get("/stats/requests", summary="Request statistics")
+@router.get(
+    "/stats/requests",
+    summary="Request statistics",
+    description="Return aggregated request counts, error rates, and latency percentiles for the given time window.",
+)
 async def request_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -26,7 +30,11 @@ async def request_stats(
     return await get_request_stats(from_dt, to_dt, model_id or model_id_camel)
 
 
-@router.get("/stats/energy", summary="Energy statistics")
+@router.get(
+    "/stats/energy",
+    summary="Energy statistics",
+    description="Return total kWh consumption and estimated cost, broken down per GPU.",
+)
 async def energy_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -38,7 +46,11 @@ async def energy_stats(
     return await get_energy_stats(from_dt, to_dt)
 
 
-@router.get("/stats/performance", summary="Performance statistics")
+@router.get(
+    "/stats/performance",
+    summary="Performance statistics",
+    description="Return per-model performance metrics: latency, throughput, tokens/s, load times, and uptime.",
+)
 async def performance_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -52,7 +64,11 @@ async def performance_stats(
     return await get_performance_stats(model_id or model_id_camel, from_dt, to_dt)
 
 
-@router.get("/stats/tokens", summary="Token statistics")
+@router.get(
+    "/stats/tokens",
+    summary="Token statistics",
+    description="Return total input/output token counts with a time-series breakdown, optionally filtered by model.",
+)
 async def token_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -66,7 +82,11 @@ async def token_stats(
     return await get_token_stats(from_dt, to_dt, model_id or model_id_camel)
 
 
-@router.get("/stats/overview", summary="Overview statistics")
+@router.get(
+    "/stats/overview",
+    summary="Overview statistics",
+    description="Return high-level stats (requests, errors, tokens) segmented by backend type and request kind.",
+)
 async def overview_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -80,7 +100,11 @@ async def overview_stats(
     return await get_overview_stats(from_dt, to_dt, model_id or model_id_camel)
 
 
-@router.get("/stats/recent", summary="Recent requests log")
+@router.get(
+    "/stats/recent",
+    summary="Recent requests log",
+    description="Return the most recent inference requests with user, group, and timing details.",
+)
 async def recent_requests(
     limit: int = Query(20, ge=1, le=200),
     user: UserContext = Depends(require_role("model_manager")),
@@ -99,7 +123,11 @@ async def recent_requests(
     return await get_recent_requests(limit)
 
 
-@router.get("/stats/by-user", summary="Stats aggregated by user")
+@router.get(
+    "/stats/by-user",
+    summary="Stats aggregated by user",
+    description="Return request totals, error counts, and token usage grouped by user.",
+)
 async def stats_by_user(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -115,7 +143,11 @@ async def stats_by_user(
     return await get_stats_by_user(from_dt, to_dt)
 
 
-@router.get("/stats/by-group", summary="Stats aggregated by group")
+@router.get(
+    "/stats/by-group",
+    summary="Stats aggregated by group",
+    description="Return request totals, error counts, and token usage grouped by group.",
+)
 async def stats_by_group(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -131,7 +163,11 @@ async def stats_by_group(
     return await get_stats_by_group(from_dt, to_dt)
 
 
-@router.get("/stats/my", summary="Own user stats")
+@router.get(
+    "/stats/my",
+    summary="Own user stats",
+    description="Return overview statistics filtered to the currently authenticated user's requests.",
+)
 async def my_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
@@ -147,7 +183,11 @@ async def my_stats(
     return await get_my_stats(user.user_id, from_dt, to_dt, model_id)
 
 
-@router.get("/stats/my-group", summary="Own group stats")
+@router.get(
+    "/stats/my-group",
+    summary="Own group stats",
+    description="Return overview statistics for the groups the current user belongs to.",
+)
 async def my_group_stats(
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),

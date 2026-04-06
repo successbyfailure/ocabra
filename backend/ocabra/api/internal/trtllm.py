@@ -56,7 +56,12 @@ class CompileJobCreate(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────
 
 
-@router.post("/trtllm/compile", status_code=202)
+@router.post(
+    "/trtllm/compile",
+    status_code=202,
+    summary="Submit TRT-LLM compilation job",
+    description="Queue a TensorRT-LLM engine compilation. Returns a job_id and stream_url for SSE progress.",
+)
 async def create_compile_job(
     body: CompileJobCreate,
     request: Request,
@@ -89,7 +94,11 @@ async def create_compile_job(
     }
 
 
-@router.get("/trtllm/compile")
+@router.get(
+    "/trtllm/compile",
+    summary="List TRT-LLM compilation jobs",
+    description="Return all compilation jobs (active, completed, failed) ordered by most recent first.",
+)
 async def list_compile_jobs(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -104,7 +113,12 @@ async def list_compile_jobs(
     return [j.to_dict() for j in jobs]
 
 
-@router.get("/trtllm/compile/{job_id}/stream")
+@router.get(
+    "/trtllm/compile/{job_id}/stream",
+    summary="Stream compilation progress",
+    description="Subscribe to real-time SSE events for a compilation job until it reaches a terminal state.",
+    responses={404: {"description": "Compilation job not found"}},
+)
 async def stream_compile_job(
     job_id: str,
     request: Request,
@@ -181,7 +195,16 @@ async def stream_compile_job(
     )
 
 
-@router.delete("/trtllm/compile/{job_id}", status_code=200)
+@router.delete(
+    "/trtllm/compile/{job_id}",
+    status_code=200,
+    summary="Cancel compilation job",
+    description="Cancel a pending or running TRT-LLM compilation job.",
+    responses={
+        404: {"description": "Compilation job not found"},
+        409: {"description": "Job already in a terminal state"},
+    },
+)
 async def cancel_compile_job(
     job_id: str,
     request: Request,
@@ -205,7 +228,13 @@ async def cancel_compile_job(
     return state.to_dict()
 
 
-@router.delete("/trtllm/engines/{engine_name}", status_code=200)
+@router.delete(
+    "/trtllm/engines/{engine_name}",
+    status_code=200,
+    summary="Delete TRT-LLM engine",
+    description="Delete a compiled engine from disk, unregister its model, and remove associated compile job records.",
+    responses={400: {"description": "Path traversal refused"}},
+)
 async def delete_engine(
     engine_name: str,
     request: Request,
@@ -263,7 +292,14 @@ async def delete_engine(
     return {"engine_name": engine_name, "deleted": True}
 
 
-@router.get("/trtllm/estimate")
+@router.get(
+    "/trtllm/estimate",
+    summary="Estimate TRT-LLM VRAM requirements",
+    description=(
+        "Heuristic estimate of VRAM and disk space required to build and serve a TRT-LLM engine. "
+        "Checks current GPU free VRAM and returns warnings if resources are tight."
+    ),
+)
 async def estimate_compile(
     request: Request,
     model_id: str,

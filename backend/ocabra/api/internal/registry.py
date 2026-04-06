@@ -25,8 +25,8 @@ _local_scanner = LocalScanner()
 _bitnet_registry = BitnetRegistry()
 
 
-@router.get("/registry/hf/search", response_model=list[HFModelCard])
-@router.get("/registry/hf", response_model=list[HFModelCard])
+@router.get("/registry/hf/search", response_model=list[HFModelCard], summary="Search HuggingFace models")
+@router.get("/registry/hf", response_model=list[HFModelCard], summary="Search HuggingFace models")
 async def search_hf_models(
     q: str = Query(default="", description="Text query"),
     task: str | None = Query(default=None, description="HF pipeline task"),
@@ -36,7 +36,12 @@ async def search_hf_models(
     return await _hf_registry.search(query=q, task=task, limit=limit)
 
 
-@router.get("/registry/hf/{repo_id:path}/variants", response_model=list[HFModelVariant])
+@router.get(
+    "/registry/hf/{repo_id:path}/variants",
+    response_model=list[HFModelVariant],
+    summary="List HuggingFace model variants",
+    description="Return downloadable variants (GGUF files, safetensors shards, etc.) for a HuggingFace repo.",
+)
 async def get_hf_variants(
     repo_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -44,7 +49,12 @@ async def get_hf_variants(
     return await _hf_registry.get_variants(repo_id)
 
 
-@router.get("/registry/hf/{repo_id:path}", response_model=HFModelDetail)
+@router.get(
+    "/registry/hf/{repo_id:path}",
+    response_model=HFModelDetail,
+    summary="Get HuggingFace model detail",
+    description="Return detailed metadata for a single HuggingFace repository.",
+)
 async def get_hf_model_detail(
     repo_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -54,8 +64,8 @@ async def get_hf_model_detail(
 
 
 
-@router.get("/registry/bitnet/search", response_model=list[HFModelCard])
-@router.get("/registry/bitnet", response_model=list[HFModelCard])
+@router.get("/registry/bitnet/search", response_model=list[HFModelCard], summary="Search BitNet models")
+@router.get("/registry/bitnet", response_model=list[HFModelCard], summary="Search BitNet models")
 async def search_bitnet_models(
     q: str = Query(default="", description="Text query"),
     limit: int = Query(default=20, ge=1, le=100),
@@ -64,15 +74,20 @@ async def search_bitnet_models(
     return await _bitnet_registry.search(query=q, limit=limit)
 
 
-@router.get("/registry/bitnet/{repo_id:path}/variants", response_model=list[HFModelVariant])
+@router.get(
+    "/registry/bitnet/{repo_id:path}/variants",
+    response_model=list[HFModelVariant],
+    summary="List BitNet model variants",
+    description="Return downloadable GGUF variants for a BitNet repository.",
+)
 async def get_bitnet_variants(
     repo_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[HFModelVariant]:
     return await _bitnet_registry.get_variants(repo_id=repo_id)
 
-@router.get("/registry/ollama/search", response_model=list[OllamaModelCard])
-@router.get("/registry/ollama", response_model=list[OllamaModelCard])
+@router.get("/registry/ollama/search", response_model=list[OllamaModelCard], summary="Search Ollama models")
+@router.get("/registry/ollama", response_model=list[OllamaModelCard], summary="Search Ollama models")
 async def search_ollama_models(
     q: str = Query(default="", description="Text query"),
     _user: UserContext = Depends(require_role("model_manager")),
@@ -80,7 +95,12 @@ async def search_ollama_models(
     return await _ollama_registry.search(query=q)
 
 
-@router.get("/registry/ollama/{model_name}/variants", response_model=list[OllamaModelVariant])
+@router.get(
+    "/registry/ollama/{model_name}/variants",
+    response_model=list[OllamaModelVariant],
+    summary="List Ollama model variants",
+    description="Return available tags/variants for an Ollama model.",
+)
 async def get_ollama_variants(
     model_name: str,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -88,7 +108,12 @@ async def get_ollama_variants(
     return await _ollama_registry.get_variants(model_name=model_name)
 
 
-@router.get("/registry/local", response_model=list[LocalModel])
+@router.get(
+    "/registry/local",
+    response_model=list[LocalModel],
+    summary="List local models",
+    description="Scan the models directory and return all locally available model files.",
+)
 async def list_local_models(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[LocalModel]:

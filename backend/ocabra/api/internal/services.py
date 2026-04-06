@@ -18,7 +18,11 @@ class ServicePatch(BaseModel):
     enabled: bool
 
 
-@router.get("/services")
+@router.get(
+    "/services",
+    summary="List all services",
+    description="Return the state of all registered interactive services (ComfyUI, A1111, Hunyuan, etc.).",
+)
 async def list_services(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
@@ -28,7 +32,12 @@ async def list_services(
     return [state.to_dict() for state in states]
 
 
-@router.get("/services/{service_id}")
+@router.get(
+    "/services/{service_id}",
+    summary="Get service state",
+    description="Return the full state of a single interactive service.",
+    responses={404: {"description": "Service not found"}},
+)
 async def get_service(
     service_id: str,
     request: Request,
@@ -42,7 +51,12 @@ async def get_service(
     return state.to_dict()
 
 
-@router.patch("/services/{service_id}")
+@router.patch(
+    "/services/{service_id}",
+    summary="Enable or disable a service",
+    description="Toggle the enabled flag for a service. Disabled services are excluded from scheduling.",
+    responses={404: {"description": "Service not found"}},
+)
 async def patch_service(
     service_id: str,
     body: ServicePatch,
@@ -58,7 +72,12 @@ async def patch_service(
     return state.to_dict()
 
 
-@router.post("/services/{service_id}/refresh")
+@router.post(
+    "/services/{service_id}/refresh",
+    summary="Refresh service state",
+    description="Run a health check and runtime probe to update the service state.",
+    responses={404: {"description": "Service not found"}},
+)
 async def refresh_service(
     service_id: str,
     request: Request,
@@ -72,7 +91,15 @@ async def refresh_service(
     return state.to_dict()
 
 
-@router.patch("/services/{service_id}/runtime")
+@router.patch(
+    "/services/{service_id}/runtime",
+    summary="Update service runtime state",
+    description="Mark a service as having its runtime/weights loaded or unloaded, and optionally set the active model reference.",
+    responses={
+        404: {"description": "Service not found"},
+        409: {"description": "Conflicting runtime state"},
+    },
+)
 async def patch_service_runtime(
     service_id: str,
     body: ServiceRuntimePatch,
@@ -94,7 +121,12 @@ async def patch_service_runtime(
     return state.to_dict()
 
 
-@router.post("/services/{service_id}/touch")
+@router.post(
+    "/services/{service_id}/touch",
+    summary="Touch service activity",
+    description="Update last_activity_at to reset the idle eviction timer. Called by the gateway proxy on each proxied request.",
+    responses={404: {"description": "Service not found"}},
+)
 async def touch_service(
     service_id: str,
     request: Request,
@@ -113,7 +145,16 @@ async def touch_service(
     return state.to_dict()
 
 
-@router.post("/services/{service_id}/start")
+@router.post(
+    "/services/{service_id}/start",
+    summary="Start a service",
+    description="Start the Docker container for an interactive service.",
+    responses={
+        404: {"description": "Service not found"},
+        409: {"description": "Service is already running"},
+        502: {"description": "Failed to start the service container"},
+    },
+)
 async def start_service(
     service_id: str,
     request: Request,
@@ -131,7 +172,11 @@ async def start_service(
     return state.to_dict()
 
 
-@router.get("/services/{service_id}/generations")
+@router.get(
+    "/services/{service_id}/generations",
+    summary="List service generations",
+    description="Return recent generation events for a service, ordered newest first.",
+)
 async def get_service_generations(
     service_id: str,
     request: Request,
@@ -168,7 +213,16 @@ async def get_service_generations(
     ]
 
 
-@router.post("/services/{service_id}/unload")
+@router.post(
+    "/services/{service_id}/unload",
+    summary="Unload service runtime",
+    description="Unload the runtime/weights from a service to free GPU VRAM.",
+    responses={
+        404: {"description": "Service not found"},
+        409: {"description": "Service is not in an unloadable state"},
+        502: {"description": "Unload request to the service failed"},
+    },
+)
 async def unload_service(
     service_id: str,
     request: Request,
