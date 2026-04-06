@@ -37,6 +37,19 @@ async def publish(channel: str, data: Any) -> None:
     await get_redis().publish(channel, json.dumps(data))
 
 
+async def publish_system_alert(level: str, message: str) -> None:
+    """Broadcast a system_alert event via the ``system:alerts`` Redis channel.
+
+    Parameters
+    ----------
+    level:
+        Severity – ``"warn"`` or ``"error"``.
+    message:
+        Human-readable description of the alert.
+    """
+    await publish("system:alerts", {"level": level, "message": message})
+
+
 async def set_key(key: str, data: Any, ttl: int | None = None) -> None:
     """Set a Redis key with optional TTL in seconds."""
     payload = json.dumps(data)

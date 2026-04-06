@@ -39,24 +39,31 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 | Frontend serve | Nginx |
 | Reverse proxy | Caddy |
 
-## Estado actual (2026-04-04)
+## Estado actual (2026-04-06)
 
-**Todas las fases del plan original (0–5) están implementadas y en producción.**
-**El sistema de autenticación y el gateway de servicios también están implementados.**
+**Todas las fases del plan original (0–5) y el roadmap completo están implementados y en producción.**
+**Versión: 0.5.0**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
-El trabajo pendiente está en `docs/ROADMAP.md`.
+El trabajo restante (menor) está en `docs/ROADMAP.md`.
 
 ### Implementado en código
 
 - Fases 0–5 completas.
 - IDs canónicas de modelo `backend/model`, con alias `backend_model_id` en OpenAI `/v1/*`.
-- Backends first-class: `vllm`, `diffusers`, `whisper`, `tts`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
-- **Auth system completo**: JWT (cookie HTTP-only), API keys por usuario (`sk-ocabra-...`), 3 roles (`user`, `model_manager`, `system_admin`), grupos de acceso a modelos.
+- Backends first-class: `vllm`, `diffusers`, `whisper`, `tts`, `voxtral`, `ollama`, `llama_cpp`, `sglang`, `tensorrt_llm`, `bitnet`, `acestep`.
+- **Auth system completo**: JWT (cookie HTTP-only), API keys por usuario (`sk-ocabra-...`), 3 roles (`user`, `model_manager`, `system_admin`), grupos de acceso a modelos con `group_id` en API keys y request stats.
 - Modo sin key configurable por separado para OpenAI y Ollama (anonymous → solo grupo default).
 - **Settings persistidos en BD** (`server_config`): `PATCH /ocabra/config` persiste en PostgreSQL; `.env` solo establece valores iniciales.
 - **Gateway de servicios** (`gateway/`): proxy para HunyuanVideo, ComfyUI, A1111, AceStep con directorio autenticado.
-- UI Settings alineada con `/ocabra/config`; `globalSchedules` persiste en `eviction_schedules` (BD).
+- **Stats ampliadas**: endpoints `recent`, `by-user`, `by-group`, `my`, `my-group`; admin puede crear keys para otros usuarios.
+- **Langfuse**: Integración de observabilidad LLM opcional (desactivada por defecto). Trazas para streaming y non-streaming.
+- **Voice Pipeline completo**:
+  - TTS con encoding real (MP3/WAV/PCM/FLAC) y streaming por frases
+  - Voxtral TTS backend (vllm-omni)
+  - OpenAI Realtime API WebSocket (`/v1/realtime`) con pipeline STT→LLM→TTS y VAD
+- **WebSocket system_alert**: alertas de temperatura GPU y fallos de carga de modelos.
+- UI Settings y Stats con tabs (Radix); dashboard con log de últimas peticiones.
 - Configuración por modelo con estimación rápida de memoria y probe real de engine vLLM.
 - Endpoints expuestos: `/ocabra/models/storage`, `/metrics`, `/health`, `/ready`, `/ocabra/services/*`, `/ocabra/host/stats`.
 - Stats persistidos: `request_stats`, `gpu_stats`, `model_load_stats`.
@@ -66,6 +73,7 @@ El trabajo pendiente está en `docs/ROADMAP.md`.
 - `last_request_at` persistido en Redis; rehidratado al arrancar.
 - CORS restringido a `localhost/127.0.0.1` via `allow_origin_regex`.
 - Frontend servido por Nginx; Caddy como reverse proxy.
+- **Tests**: 69 tests cubriendo path traversal, config patch, model manager config, worker lifecycle, y Langfuse tracer.
 
 ### Validaciones end-to-end confirmadas
 
@@ -74,19 +82,19 @@ El trabajo pendiente está en `docs/ROADMAP.md`.
 - `TensorRT-LLM`: `tensorrt_llm/Qwen3-8B-fp16` — carga, respuesta, descarga sin huérfanos.
 - `vLLM`: `vllm/Qwen/Qwen3.5-0.8B` y `vllm/Qwen/Qwen3-32B-AWQ` (con `max_model_len=7800`).
 - Compatibilidad Ollama: `/api/chat`, `/api/generate`, `/api/embed` (con fallback a `/api/embeddings` para Ollama < 0.3).
-- Tests backend en verde: `test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`.
+- Tests backend en verde: `test_service_manager.py`, `test_llama_cpp_backend.py`, `test_sglang_backend.py`, `test_tensorrt_llm_backend.py`, `test_path_traversal.py`, `test_config_patch.py`, `test_model_manager_config.py`, `test_worker_lifecycle.py`, `test_langfuse_tracer.py`.
 
 ### Referencia operativa
 
 - Benchmark baseline: `docs/benchmarks/qwen3-backends-2026-04-03.md` (`vllm`, `tensorrt_llm`, `ollama` sobre Qwen3).
 
-### Pendiente
+### Pendiente menor
 
-Ver `docs/ROADMAP.md`. Resumen:
-- **Langfuse**: Integración de observabilidad (plan en `docs/tasks/langfuse-integration-plan.md`).
-- **Fixes menores**: B6 (`ModelPatch` null reset), A4 (shutdown en `_watch_and_reload`), M7 (`HFModelVariant` Literal).
-- **Tests**: Cobertura de paths críticos y flujos e2e por backend.
-- **Operativo**: Limpiar `tensorrt_llm/Qwen3-32B-AWQ-fp16` del inventario; validar TRT-LLM con múltiples engines.
+Ver `docs/ROADMAP.md`:
+- Documentación OpenAPI enriquecida
+- Script first-run / instalación
+- Tests e2e: flujos load/unload por backend, TRT-LLM compile mock
+- Limpiar `tensorrt_llm/Qwen3-32B-AWQ-fp16` del inventario
 
 ---
 

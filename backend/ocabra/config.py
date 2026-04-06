@@ -199,6 +199,15 @@ class Settings(BaseSettings):
     # with ACESTEP_MODE=api). Example: http://acestep:8001
     acestep_external_api_url: str = ""
 
+    # Langfuse observability (desactivado por defecto)
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = ""
+    langfuse_secret_key: str | None = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_capture_content: bool = False
+    langfuse_sample_rate: float = 1.0
+    langfuse_flush_interval_s: float = 2.0
+
     # Energy
     energy_cost_eur_kwh: float = 0.15
 
@@ -218,6 +227,8 @@ class Settings(BaseSettings):
     gateway_service_token: str = ""
 
     @field_validator(
+        "langfuse_public_key",
+        "langfuse_secret_key",
         "vllm_attention_backend",
         "vllm_tensor_parallel_size",
         "vllm_max_model_len",

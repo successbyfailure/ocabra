@@ -343,14 +343,14 @@ Para la primera implementación, omitir tool calls y documentarlo. Añadir en Fa
 
 ### Tabla de archivos — Fase 2
 
-| Archivo | Cambio |
-|---------|--------|
-| `backend/ocabra/api/openai/realtime.py` | **Nuevo** — endpoint WebSocket `/v1/realtime` |
-| `backend/ocabra/core/realtime_session.py` | **Nuevo** — gestión de sesión, pipeline, VAD |
-| `backend/ocabra/core/vad.py` | **Nuevo** — SimpleVAD (RMS) con interfaz para Silero futuro |
-| `backend/ocabra/main.py` | Incluir `realtime.router` |
-| `backend/pyproject.toml` | Añadir `websockets` si no está (FastAPI usa `starlette` que ya lo incluye) |
-| `backend/workers/tts_worker.py` | Requiere F1-1 y F1-2 completados |
+| Archivo | Cambio | Estado |
+|---------|--------|--------|
+| `backend/ocabra/api/openai/realtime.py` | **Nuevo** — endpoint WebSocket `/v1/realtime` | ✅ Hecho |
+| `backend/ocabra/core/realtime_session.py` | **Nuevo** — gestión de sesión, pipeline, VAD | ✅ Hecho |
+| `backend/ocabra/core/vad.py` | **Nuevo** — SimpleVAD (RMS) con interfaz para Silero futuro | ✅ Hecho |
+| `backend/ocabra/api/openai/__init__.py` | Incluir `realtime.router` | ✅ Hecho |
+| `backend/pyproject.toml` | `websockets` ya incluido via `starlette` | ✅ Ya existía |
+| `backend/workers/tts_worker.py` | Requiere F1-1 y F1-2 completados | ✅ Ya completado |
 
 ---
 

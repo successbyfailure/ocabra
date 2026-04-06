@@ -414,6 +414,11 @@ async def lifespan(app: FastAPI):
     await trtllm_compile_manager.stop()
     await gpu_manager.stop()
 
+    if settings.langfuse_enabled:
+        from ocabra.integrations.langfuse_tracer import shutdown as langfuse_shutdown
+
+        await langfuse_shutdown()
+
     from ocabra.redis_client import close_redis
     await close_redis()
 

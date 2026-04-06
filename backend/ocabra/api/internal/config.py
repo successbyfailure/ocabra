@@ -326,7 +326,10 @@ async def patch_config(
     if "download_dir" in payload:
         overrides["download_dir"] = str(payload["download_dir"])
     if "max_temperature_c" in payload:
-        overrides["max_temperature_c"] = int(payload["max_temperature_c"])
+        max_temp = int(payload["max_temperature_c"])
+        overrides["max_temperature_c"] = max_temp
+        if hasattr(request.app.state, "gpu_manager"):
+            request.app.state.gpu_manager.max_temperature_c = max_temp
 
     response = _build_config_response(request)
     response["globalSchedules"] = await _load_global_schedules()

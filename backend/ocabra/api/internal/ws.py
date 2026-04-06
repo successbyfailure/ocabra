@@ -13,6 +13,7 @@ CHANNEL_EVENT_MAP = {
     "model:events": "model_event",
     "service:events": "service_event",
     "download:progress": "download_progress",
+    "system:alerts": "system_alert",
 }
 
 

@@ -25,7 +25,7 @@ from ocabra.core.model_manager_helpers import (
 from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
 from ocabra.db.model_config import ModelConfig
 from ocabra.db.stats import ModelLoadStat
-from ocabra.redis_client import get_key, publish, set_key
+from ocabra.redis_client import get_key, publish, publish_system_alert, set_key
 
 logger = structlog.get_logger(__name__)
 
@@ -487,6 +487,18 @@ class ModelManager:
                     self._worker_pool.release_port(assigned_port)
                 await self._publish_event(model_id, "load_failed")
                 logger.error("model_load_failed", model_id=model_id, error=str(e))
+                from ocabra.core.scheduler import InsufficientVRAMError
+
+                if isinstance(e, InsufficientVRAMError):
+                    await publish_system_alert(
+                        "error",
+                        f"VRAM exhausted while loading '{model_id}': {e}",
+                    )
+                else:
+                    await publish_system_alert(
+                        "error",
+                        f"Failed to load model '{model_id}': {e}",
+                    )
                 raise
 
         return state

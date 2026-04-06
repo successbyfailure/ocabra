@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocabra"
-version = "0.1.0"
+version = "0.5.0"
 description = "Multi-GPU AI model server with OpenAI and Ollama API compatibility"
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +27,7 @@ dependencies = [
     "docker>=7.0",
     "bcrypt>=4.0",
     "PyJWT>=2.8.0",
+    "langfuse>=2.0",
 ]
 
 [project.optional-dependencies]

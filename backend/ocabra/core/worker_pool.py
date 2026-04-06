@@ -1,3 +1,5 @@
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -49,9 +51,7 @@ class WorkerPool:
             self._used_ports.discard(info.port)
 
     async def assign_port(self) -> int:
-        for port in range(
-            settings.worker_port_range_start, settings.worker_port_range_end
-        ):
+        for port in range(settings.worker_port_range_start, settings.worker_port_range_end):
             if port not in self._used_ports:
                 self._used_ports.add(port)
                 return port
@@ -60,9 +60,7 @@ class WorkerPool:
     def release_port(self, port: int) -> None:
         self._used_ports.discard(port)
 
-    async def forward_request(
-        self, model_id: str, path: str, body: dict
-    ) -> Any:
+    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
@@ -71,14 +69,27 @@ class WorkerPool:
             url = f"{base}{path}"
         else:
             url = f"http://127.0.0.1:{worker.port}{path}"
+        start = time.monotonic()
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(url, json=body)
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+        if settings.langfuse_enabled:
+            from ocabra.integrations.langfuse_tracer import trace_generation
 
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
+            asyncio.create_task(
+                trace_generation(
+                    model_id=model_id,
+                    path=path,
+                    request_body=body,
+                    response_body=result,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    user_id=body.get("user"),
+                )
+            )
+        return result
+
+    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
@@ -87,8 +98,25 @@ class WorkerPool:
             url = f"{base}{path}"
         else:
             url = f"http://127.0.0.1:{worker.port}{path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", url, json=body) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
+
+        async def _raw_stream() -> AsyncIterator[bytes]:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with client.stream("POST", url, json=body) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+
+        if settings.langfuse_enabled:
+            from ocabra.integrations.langfuse_tracer import wrap_stream
+
+            async for chunk in wrap_stream(
+                _raw_stream(),
+                model_id=model_id,
+                path=path,
+                request_body=body,
+                user_id=body.get("user"),
+            ):
+                yield chunk
+        else:
+            async for chunk in _raw_stream():
+                yield chunk

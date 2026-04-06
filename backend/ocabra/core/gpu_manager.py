@@ -7,7 +7,7 @@ import pynvml
 import structlog
 
 from ocabra.config import settings
-from ocabra.redis_client import publish, set_key
+from ocabra.redis_client import publish, publish_system_alert, set_key
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +42,8 @@ class GPUManager:
         self._poll_task: asyncio.Task | None = None
         self._poll_history: dict[int, list[dict]] = {}
         self._running: bool = False
+        self._last_temp_alert: dict[int, float] = {}
+        self.max_temperature_c: int = 88
 
     async def start(self) -> None:
         try:
@@ -211,6 +213,7 @@ class GPUManager:
                     self._poll_history[i].append(asdict(state))
                     await set_key(f"gpu:state:{i}", asdict(state), ttl=5)
                 await publish("gpu:stats", states)
+                await self._check_temperature_alerts()
                 # Aggregate to DB every 30 polls (~60s)
                 if self._poll_history and len(self._poll_history[0]) >= 30:
                     await self._persist_stats()
@@ -244,6 +247,21 @@ class GPUManager:
     def get_state_nowait(self, index: int) -> GPUState | None:
         """Return the most recently cached GPU state without awaiting the poll loop."""
         return self._states.get(index)
+
+    async def _check_temperature_alerts(self) -> None:
+        now = asyncio.get_event_loop().time()
+        for idx, state in self._states.items():
+            if state.temperature_c < self.max_temperature_c:
+                continue
+            last = self._last_temp_alert.get(idx, 0.0)
+            if now - last < 120:
+                continue
+            self._last_temp_alert[idx] = now
+            await publish_system_alert(
+                "warn",
+                f"GPU {idx} ({state.name}) temperature is {state.temperature_c}°C "
+                f"(threshold: {self.max_temperature_c}°C)",
+            )
 
     async def get_all_states(self) -> list[GPUState]:
         return list(self._states.values())
