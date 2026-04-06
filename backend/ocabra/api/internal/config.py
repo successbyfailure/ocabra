@@ -78,19 +78,14 @@ class ServerConfigPatch(BaseModel):
     require_api_key_ollama: bool | None = Field(default=None, alias="requireApiKeyOllama")
 
 
-def _config_overrides(request: Request) -> dict[str, Any]:
-    if not hasattr(request.app.state, "config_overrides"):
-        request.app.state.config_overrides = {}
-    return request.app.state.config_overrides
-
-
 def _masked_admin_key(value: str) -> str:
     return "***" if value else ""
 
 
 def _build_config_response(request: Request) -> dict[str, Any]:
-    overrides = _config_overrides(request)
-    default_download_dir = f"{settings.models_dir.rstrip('/')}/downloads"
+    effective_download_dir = (
+        settings.download_dir or f"{settings.models_dir.rstrip('/')}/downloads"
+    )
     return {
         "defaultGpuIndex": settings.default_gpu_index,
         "idleTimeoutSeconds": settings.idle_timeout_seconds,
@@ -107,8 +102,8 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "litellmAutoSync": settings.litellm_auto_sync,
         "energyCostEurKwh": settings.energy_cost_eur_kwh,
         "modelsDir": settings.models_dir,
-        "downloadDir": overrides.get("download_dir", default_download_dir),
-        "maxTemperatureC": overrides.get("max_temperature_c", 88),
+        "downloadDir": effective_download_dir,
+        "maxTemperatureC": settings.max_temperature_c,
         "vllmGpuMemoryUtilization": settings.vllm_gpu_memory_utilization,
         "vllmMaxNumSeqs": settings.vllm_max_num_seqs,
         "vllmMaxNumBatchedTokens": settings.vllm_max_num_batched_tokens,
@@ -322,14 +317,14 @@ async def patch_config(
         settings.require_api_key_ollama = bool(payload["require_api_key_ollama"])
         await _persist("require_api_key_ollama", settings.require_api_key_ollama)
 
-    overrides = _config_overrides(request)
     if "download_dir" in payload:
-        overrides["download_dir"] = str(payload["download_dir"])
+        settings.download_dir = str(payload["download_dir"])
+        await _persist("download_dir", settings.download_dir)
     if "max_temperature_c" in payload:
-        max_temp = int(payload["max_temperature_c"])
-        overrides["max_temperature_c"] = max_temp
+        settings.max_temperature_c = int(payload["max_temperature_c"])
+        await _persist("max_temperature_c", settings.max_temperature_c)
         if hasattr(request.app.state, "gpu_manager"):
-            request.app.state.gpu_manager.max_temperature_c = max_temp
+            request.app.state.gpu_manager.max_temperature_c = settings.max_temperature_c
 
     response = _build_config_response(request)
     response["globalSchedules"] = await _load_global_schedules()

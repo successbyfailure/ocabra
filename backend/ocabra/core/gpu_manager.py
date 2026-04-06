@@ -43,7 +43,7 @@ class GPUManager:
         self._poll_history: dict[int, list[dict]] = {}
         self._running: bool = False
         self._last_temp_alert: dict[int, float] = {}
-        self.max_temperature_c: int = 88
+        self.max_temperature_c: int = settings.max_temperature_c
 
     async def start(self) -> None:
         try:
