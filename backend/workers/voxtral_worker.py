@@ -312,23 +312,68 @@ def _map_voice(voice: str) -> str:
 # Synthesis via vllm-omni
 # ---------------------------------------------------------------------------
 
+_LANG_CODE_MAP: dict[str, str] = {
+    "en": "English", "fr": "French", "es": "Spanish", "de": "German",
+    "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+# Simple heuristic patterns for language detection (used when language=Auto)
+_LANG_HINTS: list[tuple[str, re.Pattern]] = [
+    ("Spanish",    re.compile(r"[¿¡ñáéíóúü]", re.IGNORECASE)),
+    ("French",     re.compile(r"[àâçèêëîïôùûüÿœæ]|(?:qu'|l'|d'|n'|c')", re.IGNORECASE)),
+    ("German",     re.compile(r"[äöüß]|(?:sch|ch(?:t|s))", re.IGNORECASE)),
+    ("Portuguese", re.compile(r"[ãõçà]|ção|ões", re.IGNORECASE)),
+    ("Italian",    re.compile(r"(?:zione|mente|ello|ella|gli|ghi)", re.IGNORECASE)),
+    ("Arabic",     re.compile(r"[\u0600-\u06FF]")),
+    ("Hindi",      re.compile(r"[\u0900-\u097F]")),
+]
+
+
+def _detect_language(text: str) -> str:
+    """Best-effort language detection from text characters."""
+    for lang, pattern in _LANG_HINTS:
+        if pattern.search(text):
+            return lang
+    return ""
+
+
+def _normalize_language(lang: str, text: str = "") -> str:
+    """Normalize language code/name to the full name expected by Voxtral."""
+    lang = lang.strip()
+    if not lang or lang.lower() == "auto":
+        return _detect_language(text)
+    mapped = _LANG_CODE_MAP.get(lang.lower())
+    if mapped:
+        return mapped
+    if lang.capitalize() in SUPPORTED_LANGUAGES:
+        return lang.capitalize()
+    return lang
+
+
 async def _synthesize_via_vllm(
     text: str,
     voice: str,
+    language: str = "Auto",
     response_format: str = "wav",
 ) -> bytes:
     """Call the vllm-omni /v1/audio/speech endpoint and return audio bytes."""
     mapped_voice = _map_voice(voice)
 
+    payload: dict[str, Any] = {
+        "model": runtime.model_id,
+        "input": text,
+        "voice": mapped_voice,
+        "response_format": "wav",  # always get WAV, encode ourselves
+    }
+    norm_lang = _normalize_language(language, text)
+    if norm_lang:
+        payload["language"] = norm_lang
+
     async with httpx.AsyncClient(timeout=300.0) as client:
         r = await client.post(
             f"http://127.0.0.1:{runtime.vllm_port}/v1/audio/speech",
-            json={
-                "model": runtime.model_id,
-                "input": text,
-                "voice": mapped_voice,
-                "response_format": "wav",  # always get WAV, encode ourselves
-            },
+            json=payload,
         )
         r.raise_for_status()
         return r.content
@@ -428,7 +473,7 @@ def create_app(model_id: str, port: int, gpu_indices: list[int], vllm_port: int)
             raise HTTPException(status_code=503, detail=runtime.error or "Not ready")
 
         fmt = body.response_format.lower()
-        wav_bytes = await _synthesize_via_vllm(body.input.strip(), body.voice)
+        wav_bytes = await _synthesize_via_vllm(body.input.strip(), body.voice, body.language)
         encoded, content_type = _encode_audio(wav_bytes, fmt)
 
         return StreamingResponse(
@@ -451,7 +496,7 @@ def create_app(model_id: str, port: int, gpu_indices: list[int], vllm_port: int)
         async def _generate():
             wav_header_sent = False
             for sentence in sentences:
-                wav_bytes = await _synthesize_via_vllm(sentence, body.voice)
+                wav_bytes = await _synthesize_via_vllm(sentence, body.voice, body.language)
                 if not wav_bytes:
                     continue
                 if fmt == "wav":
