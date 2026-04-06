@@ -2,15 +2,21 @@ from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+import structlog
+
 from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
 from ocabra.config import settings
 from ocabra.registry.ollama_registry import OllamaRegistry
+
+logger = structlog.get_logger(__name__)
 
 
 class OllamaBackend(BackendInterface):
     def __init__(self) -> None:
         self._registry = OllamaRegistry()
         self._loaded: set[str] = set()
+        self._caps_cache: dict[str, BackendCapabilities] = {}
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         _ = kwargs
@@ -37,17 +43,53 @@ class OllamaBackend(BackendInterface):
         return model_id in loaded
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
+        cached = self._caps_cache.get(model_id)
+        if cached is not None:
+            return cached
+
         model = model_id.lower()
         embeds = "embed" in model or "nomic-embed" in model or "mxbai-embed" in model
         vision = "llava" in model or "vision" in model or "vl" in model
-        return BackendCapabilities(
+        tools = False
+        context_length = 8192
+
+        # Query Ollama /api/show for accurate capabilities
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.post(
+                    f"{settings.ollama_base_url}/api/show",
+                    json={"name": model_id},
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    template = data.get("template", "")
+                    # Ollama templates include {{.Tools}} or {{.ToolCalls}} when
+                    # the model supports function calling
+                    tools = "{{.Tools}}" in template or ".ToolCalls" in template
+                    # Detect vision from template or family
+                    family = data.get("details", {}).get("family", "")
+                    if "vl" in family or "vision" in family or "llava" in family:
+                        vision = True
+                    # Extract context length from model_info or parameters
+                    model_info = data.get("model_info", {})
+                    for key, val in model_info.items():
+                        if "context_length" in key and isinstance(val, (int, float)):
+                            context_length = int(val)
+                            break
+        except Exception as exc:
+            logger.debug("ollama_show_failed", model_id=model_id, error=str(exc))
+
+        caps = BackendCapabilities(
             chat=not embeds,
             completion=not embeds,
             embeddings=embeds,
             vision=vision,
+            tools=tools,
             streaming=True,
-            context_length=8192,
+            context_length=context_length,
         )
+        self._caps_cache[model_id] = caps
+        return caps
 
     async def get_vram_estimate_mb(self, model_id: str) -> int:
         _ = model_id
