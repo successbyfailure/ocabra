@@ -4,6 +4,7 @@ POST /v1/audio/speech        — TTS text-to-speech (streams sentence-by-sentenc
 GET  /v1/audio/voices        — List available voices for a TTS model
 POST /v1/audio/generate      — ACE-Step music generation
 """
+
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -19,10 +20,13 @@ from ocabra.config import settings
 from ._deps import (
     _openai_error,
     check_capability,
-    ensure_loaded,
+    compute_worker_key,
     get_model_manager,
     get_openai_user,
+    get_profile_registry,
+    merge_profile_defaults,
     raise_upstream_http_error,
+    resolve_profile,
 )
 
 router = APIRouter()
@@ -63,14 +67,20 @@ async def transcriptions(
 
     # Log a warning if the client sends a format that may not be handled by
     # all Whisper backends (e.g. M4A/AAC from Android MediaRecorder).
-    # faster-whisper decodes via ffmpeg so these work; NeMo models may not.
     audio_ct = (file.content_type or "").lower()
     if audio_ct and audio_ct not in {
-        "audio/wav", "audio/wave", "audio/x-wav",
-        "audio/mpeg", "audio/mp3",
-        "audio/ogg", "audio/flac",
+        "audio/wav",
+        "audio/wave",
+        "audio/x-wav",
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/ogg",
+        "audio/flac",
         "audio/webm",
-        "audio/mp4", "audio/m4a", "audio/x-m4a", "video/mp4",  # M4A/AAC
+        "audio/mp4",
+        "audio/m4a",
+        "audio/x-m4a",
+        "video/mp4",  # M4A/AAC
         "application/octet-stream",
     }:
         logger.warning(
@@ -81,10 +91,17 @@ async def transcriptions(
         )
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
     check_capability(state, "audio_transcription", "audio transcription")
-    model_id = state.model_id
-    request.state.stats_model_id = model_id
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool
     audio_bytes = await file.read()
@@ -93,19 +110,18 @@ async def transcriptions(
     last_error: Exception | None = None
 
     for attempt in range(2):
-        worker = worker_pool.get_worker(model_id)
+        worker = worker_pool.get_worker(worker_key)
         backend = await worker_pool.get_backend(state.backend_type)
         worker_healthy = bool(worker) and await backend.health_check(state.backend_model_id)
 
         if not worker or not worker_healthy:
             if attempt == 0:
                 reason = "worker_missing" if not worker else "worker_unhealthy"
-                # Recover stale state where ModelManager says LOADED but worker is missing/dead.
-                await model_manager.unload(model_id, reason=reason)
-                await model_manager.load(model_id)
+                await model_manager.unload(worker_key, reason=reason)
+                await model_manager.load(worker_key)
                 continue
             raise _openai_error(
-                f"Whisper worker unavailable for model '{model_id}'.",
+                f"Whisper worker unavailable for model '{worker_key}'.",
                 "server_error",
                 code="worker_unavailable",
                 status_code=503,
@@ -128,7 +144,13 @@ async def transcriptions(
 
                 resp = await client.post(
                     url,
-                    files={"file": (file.filename or "audio", audio_bytes, file.content_type or "audio/mpeg")},
+                    files={
+                        "file": (
+                            file.filename or "audio",
+                            audio_bytes,
+                            file.content_type or "audio/mpeg",
+                        )
+                    },
                     data=form_data,
                 )
                 resp.raise_for_status()
@@ -137,17 +159,17 @@ async def transcriptions(
             last_error = exc
             logger.warning(
                 "whisper_worker_transport_error",
-                model_id=model_id,
+                model_id=worker_key,
                 worker_port=worker.port,
                 attempt=attempt + 1,
                 error=str(exc),
             )
             if attempt == 0:
-                await model_manager.unload(model_id, reason="worker_transport_error")
-                await model_manager.load(model_id)
+                await model_manager.unload(worker_key, reason="worker_transport_error")
+                await model_manager.load(worker_key)
                 continue
             raise _openai_error(
-                f"Whisper worker unavailable for model '{model_id}'.",
+                f"Whisper worker unavailable for model '{worker_key}'.",
                 "server_error",
                 code="worker_unavailable",
                 status_code=503,
@@ -157,7 +179,7 @@ async def transcriptions(
 
     if resp is None:
         raise _openai_error(
-            f"Failed to reach Whisper worker for model '{model_id}': {last_error}",
+            f"Failed to reach Whisper worker for model '{worker_key}': {last_error}",
             "server_error",
             code="worker_unavailable",
             status_code=503,
@@ -180,7 +202,7 @@ async def list_voices(
     Return available voices, speakers, and model_type for a loaded TTS model.
 
     Query params:
-        model — canonical model ID (must be loaded and have capability tts=True)
+        model — profile_id (or legacy canonical model ID)
 
     Response:
         voices       — list of voice/speaker names
@@ -189,12 +211,19 @@ async def list_voices(
         supports_voice_clone — bool
     """
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model, user=user)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
     check_capability(state, "tts", "text-to-speech")
-    model_id = state.model_id
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
 
     worker_pool = request.app.state.worker_pool
-    worker = worker_pool.get_worker(model_id)
+    worker = worker_pool.get_worker(worker_key)
     if not worker:
         return {
             "voices": ["alloy", "echo", "fable", "nova", "onyx", "shimmer"],
@@ -237,26 +266,36 @@ async def speech(
     """
     body = await request.json()
     model_id: str = body.get("model", "")
-    input_text: str = body.get("input", "")
-    voice: str = body.get("voice", "alloy")
-    response_format: str = body.get("response_format", "mp3")
-    speed: float = float(body.get("speed", 1.0))
-    language: str = body.get("language", "Auto")
-    reference_audio: str | None = body.get("reference_audio")
-    reference_text: str | None = body.get("reference_text")
-    speaker: str | None = body.get("speaker")
-    instruct: str | None = body.get("instruct")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
     check_capability(state, "tts", "text-to-speech")
-    model_id = state.model_id
+
+    merged_body = merge_profile_defaults(profile, body)
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+
+    input_text: str = merged_body.get("input", "")
+    voice: str = merged_body.get("voice", "alloy")
+    response_format: str = merged_body.get("response_format", "mp3")
+    speed: float = float(merged_body.get("speed", 1.0))
+    language: str = merged_body.get("language", "Auto")
+    reference_audio: str | None = merged_body.get("reference_audio") or merged_body.get("voice_ref")
+    reference_text: str | None = merged_body.get("reference_text")
+    speaker: str | None = merged_body.get("speaker")
+    instruct: str | None = merged_body.get("instruct")
 
     worker_pool = request.app.state.worker_pool
-    worker = worker_pool.get_worker(model_id)
+    worker = worker_pool.get_worker(worker_key)
     if not worker:
         raise _openai_error(
-            f"TTS worker unavailable for model '{model_id}'.",
+            f"TTS worker unavailable for model '{worker_key}'.",
             "server_error",
             code="worker_unavailable",
             status_code=503,
@@ -312,11 +351,11 @@ async def generate_music(
     Requires a model with capability music_generation=True.
 
     Request body (JSON):
-        model           — canonical model ID, e.g. "acestep/turbo" (required)
+        model           — profile_id or canonical model ID (required)
         prompt          — music description, e.g. "upbeat jazz with piano" (required)
         lyrics          — optional song lyrics
-        audio_duration  — duration in seconds (10–600, default chosen by model)
-        bpm             — tempo in BPM (30–300)
+        audio_duration  — duration in seconds (10-600, default chosen by model)
+        bpm             — tempo in BPM (30-300)
         key_scale       — e.g. "C Major"
         time_signature  — e.g. "4"
         inference_steps — diffusion steps (default 8 for turbo)
@@ -334,29 +373,42 @@ async def generate_music(
         response_format = "mp3"
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
     check_capability(state, "music_generation", "music generation")
-    model_id = state.model_id
-    request.state.stats_model_id = model_id
+
+    merged_body = merge_profile_defaults(profile, body)
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool
-    worker = worker_pool.get_worker(model_id)
+    worker = worker_pool.get_worker(worker_key)
     backend = await worker_pool.get_backend(state.backend_type)
 
     if not worker or not await backend.health_check(state.backend_model_id):
         raise _openai_error(
-            f"ACE-Step worker unavailable for model '{model_id}'.",
+            f"ACE-Step worker unavailable for model '{worker_key}'.",
             "server_error",
             code="worker_unavailable",
             status_code=503,
         )
 
     try:
-        result = await backend.forward_request(model_id, "/generate", body)
+        result = await backend.forward_request(worker_key, "/generate", merged_body)
     except TimeoutError as exc:
-        raise _openai_error(str(exc), "server_error", code="generation_timeout", status_code=504) from exc
+        raise _openai_error(
+            str(exc), "server_error", code="generation_timeout", status_code=504
+        ) from exc
     except RuntimeError as exc:
-        raise _openai_error(str(exc), "server_error", code="generation_failed", status_code=500) from exc
+        raise _openai_error(
+            str(exc), "server_error", code="generation_failed", status_code=500
+        ) from exc
 
     if not isinstance(result, tuple) or len(result) < 2:
         raise _openai_error(

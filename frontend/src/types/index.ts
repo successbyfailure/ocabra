@@ -80,6 +80,7 @@ export interface ModelState {
   errorMessage?: string | null
   schedules?: EvictionSchedule[]
   extraConfig?: BackendExtraConfig
+  profiles?: ModelProfile[]
 }
 
 export interface ModelsStorageStats {
@@ -657,6 +658,45 @@ export interface CreateGroupPayload {
 export interface UpdateGroupPayload {
   name?: string
   description?: string | null
+}
+
+// Model profiles
+export type ProfileCategory = "llm" | "tts" | "stt" | "image" | "music"
+
+export interface ModelProfile {
+  profileId: string
+  baseModelId: string
+  displayName: string | null
+  description: string | null
+  category: ProfileCategory
+  loadOverrides: Record<string, unknown> | null
+  requestDefaults: Record<string, unknown> | null
+  assets: Record<string, unknown> | null
+  enabled: boolean
+  isDefault: boolean
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export interface ProfileCreate {
+  profileId: string
+  displayName?: string
+  description?: string
+  category: string
+  loadOverrides?: Record<string, unknown>
+  requestDefaults?: Record<string, unknown>
+  enabled?: boolean
+  isDefault?: boolean
+}
+
+export interface ProfileUpdate {
+  displayName?: string
+  description?: string
+  category?: string
+  loadOverrides?: Record<string, unknown>
+  requestDefaults?: Record<string, unknown>
+  enabled?: boolean
+  isDefault?: boolean
 }
 
 // WebSocket events

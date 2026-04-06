@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -25,7 +25,7 @@ def _sample_job(job_id: str = "job-1") -> DownloadJob:
         speed_mb_s=12.0,
         eta_seconds=90,
         error=None,
-        started_at=datetime(2026, 3, 23, tzinfo=timezone.utc),
+        started_at=datetime(2026, 3, 23, tzinfo=UTC),
         completed_at=None,
     )
 
@@ -69,8 +69,12 @@ async def test_download_manager_publishes_global_and_job_channels() -> None:
 
 
 def test_websocket_forwards_global_download_progress() -> None:
+    from ocabra.core.auth_manager import create_access_token
+
     app = FastAPI()
     app.include_router(ws_router, prefix="/ocabra")
+
+    token = create_access_token(user_id="test-user", role="user")
 
     job = DownloadJob(
         job_id="job-2",
@@ -83,7 +87,7 @@ def test_websocket_forwards_global_download_progress() -> None:
         speed_mb_s=None,
         eta_seconds=None,
         error=None,
-        started_at=datetime(2026, 3, 23, tzinfo=timezone.utc),
+        started_at=datetime(2026, 3, 23, tzinfo=UTC),
         completed_at=None,
     )
     payload = job.model_dump_json()
@@ -91,7 +95,7 @@ def test_websocket_forwards_global_download_progress() -> None:
     fake_redis = SimpleNamespace(pubsub=lambda: fake_pubsub)
 
     with patch("ocabra.api.internal.ws.get_redis", return_value=fake_redis):
-        with TestClient(app) as client:
+        with TestClient(app, cookies={"ocabra_session": token}) as client:
             with client.websocket_connect("/ocabra/ws") as websocket:
                 message = websocket.receive_json()
 

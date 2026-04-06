@@ -87,6 +87,9 @@ RUN python -m venv /opt/sglang-venv \
 RUN python -m venv /opt/voxtral-venv \
     && /opt/voxtral-venv/bin/pip install --upgrade pip setuptools wheel \
     && /opt/voxtral-venv/bin/pip install "vllm>=0.18.0" "vllm-omni>=${VLLM_OMNI_VERSION}"
+RUN python -m venv /opt/chatterbox-venv \
+    && /opt/chatterbox-venv/bin/pip install --upgrade pip setuptools wheel \
+    && /opt/chatterbox-venv/bin/pip install "chatterbox-tts>=0.1.7"
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 
@@ -104,6 +107,9 @@ RUN python -m venv /opt/sglang-venv \
 RUN python -m venv /opt/voxtral-venv \
     && /opt/voxtral-venv/bin/pip install --upgrade pip setuptools wheel \
     && /opt/voxtral-venv/bin/pip install "vllm>=0.18.0" "vllm-omni>=${VLLM_OMNI_VERSION}"
+RUN python -m venv /opt/chatterbox-venv \
+    && /opt/chatterbox-venv/bin/pip install --upgrade pip setuptools wheel \
+    && /opt/chatterbox-venv/bin/pip install "chatterbox-tts>=0.1.7"
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 

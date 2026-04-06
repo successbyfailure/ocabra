@@ -6,7 +6,7 @@ Uses MockBackend (no real GPU/processes needed).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -105,7 +105,7 @@ class TestModelLifecycle:
             await model_manager.load(model_id)
             state = await model_manager.get_state(model_id)
             assert state is not None
-            state.last_request_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+            state.last_request_at = datetime(2020, 1, 1, tzinfo=UTC)
 
             await model_manager.check_idle_evictions()
             await asyncio.sleep(0.05)

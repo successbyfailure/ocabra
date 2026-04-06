@@ -9,15 +9,13 @@ dependencies that touch external services.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ocabra.core.auth_manager import hash_password, generate_api_key
-
+from ocabra.core.auth_manager import generate_api_key, hash_password
 
 # ── App factory ───────────────────────────────────────────────────────────────
 
@@ -102,7 +100,7 @@ def test_login_success_sets_cookie():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session):
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
         client = TestClient(app)
         resp = client.post(
             "/ocabra/auth/login",
@@ -128,7 +126,7 @@ def test_login_wrong_password_returns_401():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session):
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
         client = TestClient(app)
         resp = client.post(
             "/ocabra/auth/login",
@@ -150,7 +148,7 @@ def test_login_unknown_user_returns_401():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session):
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
         client = TestClient(app)
         resp = client.post(
             "/ocabra/auth/login",
@@ -162,7 +160,6 @@ def test_login_unknown_user_returns_401():
 
 def test_login_remember_me_sets_longer_cookie():
     """remember=True must produce a cookie with a longer max_age than remember=False."""
-    from ocabra.config import settings
 
     app = _make_app()
     user = _make_db_user(username="carol", password="pass")
@@ -175,7 +172,7 @@ def test_login_remember_me_sets_longer_cookie():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session):
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
         client = TestClient(app, cookies={})
 
         resp_short = client.post(
@@ -221,25 +218,21 @@ def test_me_with_valid_session_returns_user():
     group_result = MagicMock()
     group_result.scalars.return_value.all.return_value = []
 
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
-
     mock_session = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    # Return user_select_result for user lookups, group_result for group queries
+    # Auth: 2 calls (user lookup + group ids). _fetch_accessible_models skips
+    # DB call because group_ids is empty. Then /me endpoint re-fetches user.
     mock_session.execute.side_effect = [
         user_select_result,   # _resolve_jwt_cookie: load user
         group_result,          # _resolve_jwt_cookie: load group ids
-        group_model_result,    # _fetch_accessible_models: fetch group models
         user_select_result,   # me endpoint: re-fetch user
     ]
 
     with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
+        patch("ocabra.database.AsyncSessionLocal", return_value=mock_session),
+        patch("ocabra.redis_client.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
     ):
         client = TestClient(app, cookies={"ocabra_session": token})
         resp = client.get("/ocabra/auth/me")
@@ -264,7 +257,7 @@ def test_me_without_session_returns_401():
     # /ocabra/ is not /v1/ or /api/ so the require_api_key flags don't apply —
     # the anonymous user is returned by get_current_user. But require_role("user")
     # rejects anonymous callers with 401.
-    with patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session):
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
         client = TestClient(app)
         resp = client.get("/ocabra/auth/me")
 
@@ -282,7 +275,7 @@ def test_logout_clears_cookie():
     user = _make_db_user(username="eve")
     token = create_access_token(user_id=str(user.id), role="user")
 
-    with patch("ocabra.api.internal.auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))):
+    with patch("ocabra.redis_client.get_redis", new=AsyncMock(side_effect=Exception("no redis"))):
         client = TestClient(app, cookies={"ocabra_session": token})
         resp = client.post("/ocabra/auth/logout")
 
@@ -297,45 +290,31 @@ def test_logout_clears_cookie():
 
 def test_change_password_success():
     """PUT /ocabra/auth/password with correct current_password returns ok."""
-    from ocabra.core.auth_manager import create_access_token
+    from ocabra.api._deps_auth import UserContext, get_current_user
 
     app = _make_app()
     user = _make_db_user(username="frank", password="oldpass")
-    token = create_access_token(user_id=str(user.id), role="user")
 
     # Mutable user object so we can verify password update
     user.hashed_password = hash_password("oldpass")
 
+    _user_ctx = UserContext(
+        user_id=str(user.id), username="frank", role="user",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user_ctx
+
     user_result = MagicMock()
     user_result.scalar_one_or_none.return_value = user
 
-    group_result = MagicMock()
-    group_result.scalars.return_value.all.return_value = []
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute.return_value = user_result
+    mock_session.commit = AsyncMock()
 
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
-
-    mock_session_auth = AsyncMock()
-    mock_session_auth.__aenter__ = AsyncMock(return_value=mock_session_auth)
-    mock_session_auth.__aexit__ = AsyncMock(return_value=False)
-    mock_session_auth.execute.side_effect = [
-        user_result,        # _resolve_jwt_cookie
-        group_result,       # group ids
-        group_model_result, # group models
-    ]
-
-    mock_session_endpoint = AsyncMock()
-    mock_session_endpoint.__aenter__ = AsyncMock(return_value=mock_session_endpoint)
-    mock_session_endpoint.__aexit__ = AsyncMock(return_value=False)
-    mock_session_endpoint.execute.return_value = user_result
-    mock_session_endpoint.commit = AsyncMock()
-
-    with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session_auth),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session_endpoint),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
-    ):
-        client = TestClient(app, cookies={"ocabra_session": token})
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
         resp = client.put(
             "/ocabra/auth/password",
             json={"current_password": "oldpass", "new_password": "newpass"},
@@ -347,41 +326,27 @@ def test_change_password_success():
 
 def test_change_password_wrong_current_returns_400():
     """PUT /ocabra/auth/password with wrong current_password returns 400."""
-    from ocabra.core.auth_manager import create_access_token
+    from ocabra.api._deps_auth import UserContext, get_current_user
 
     app = _make_app()
     user = _make_db_user(username="grace", password="correctpass")
-    token = create_access_token(user_id=str(user.id), role="user")
+
+    _user_ctx = UserContext(
+        user_id=str(user.id), username="grace", role="user",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user_ctx
 
     user_result = MagicMock()
     user_result.scalar_one_or_none.return_value = user
 
-    group_result = MagicMock()
-    group_result.scalars.return_value.all.return_value = []
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute.return_value = user_result
 
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
-
-    mock_session_auth = AsyncMock()
-    mock_session_auth.__aenter__ = AsyncMock(return_value=mock_session_auth)
-    mock_session_auth.__aexit__ = AsyncMock(return_value=False)
-    mock_session_auth.execute.side_effect = [
-        user_result,
-        group_result,
-        group_model_result,
-    ]
-
-    mock_session_endpoint = AsyncMock()
-    mock_session_endpoint.__aenter__ = AsyncMock(return_value=mock_session_endpoint)
-    mock_session_endpoint.__aexit__ = AsyncMock(return_value=False)
-    mock_session_endpoint.execute.return_value = user_result
-
-    with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session_auth),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session_endpoint),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
-    ):
-        client = TestClient(app, cookies={"ocabra_session": token})
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
         resp = client.put(
             "/ocabra/auth/password",
             json={"current_password": "wrongpass", "new_password": "newpass"},
@@ -395,20 +360,16 @@ def test_change_password_wrong_current_returns_400():
 
 def test_create_api_key_returns_key_value_once():
     """POST /ocabra/auth/keys must return the raw key in the response body."""
-    from ocabra.core.auth_manager import create_access_token
+    from ocabra.api._deps_auth import UserContext, get_current_user
 
     app = _make_app()
     user = _make_db_user(username="henry")
-    token = create_access_token(user_id=str(user.id), role="user")
 
-    user_result = MagicMock()
-    user_result.scalar_one_or_none.return_value = user
-
-    group_result = MagicMock()
-    group_result.scalars.return_value.all.return_value = []
-
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
+    _user_ctx = UserContext(
+        user_id=str(user.id), username="henry", role="user",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user_ctx
 
     created_key = MagicMock()
     created_key.id = uuid.uuid4()
@@ -416,34 +377,20 @@ def test_create_api_key_returns_key_value_once():
     created_key.key_prefix = "sk-ocabra-XXXXXXXXXX…"
     created_key.expires_at = None
 
-    mock_session_auth = AsyncMock()
-    mock_session_auth.__aenter__ = AsyncMock(return_value=mock_session_auth)
-    mock_session_auth.__aexit__ = AsyncMock(return_value=False)
-    mock_session_auth.execute.side_effect = [
-        user_result,
-        group_result,
-        group_model_result,
-    ]
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.commit = AsyncMock()
+    mock_session.refresh = AsyncMock(return_value=None)
 
-    mock_session_endpoint = AsyncMock()
-    mock_session_endpoint.__aenter__ = AsyncMock(return_value=mock_session_endpoint)
-    mock_session_endpoint.__aexit__ = AsyncMock(return_value=False)
-    mock_session_endpoint.commit = AsyncMock()
-    mock_session_endpoint.refresh = AsyncMock(return_value=None)
-
-    # After session.add + commit + refresh, the api_key object returned is 'created_key'
     def _add(obj):
         obj.id = created_key.id
-        obj.key_prefix = obj.key_prefix  # keep whatever was set
+        obj.key_prefix = obj.key_prefix
 
-    mock_session_endpoint.add.side_effect = _add
+    mock_session.add = MagicMock(side_effect=_add)
 
-    with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session_auth),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session_endpoint),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
-    ):
-        client = TestClient(app, cookies={"ocabra_session": token})
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
         resp = client.post(
             "/ocabra/auth/keys",
             json={"name": "my-key"},
@@ -458,30 +405,22 @@ def test_create_api_key_returns_key_value_once():
 
 def test_create_api_key_without_expiry():
     """POST /ocabra/auth/keys without expires_in_days sets expires_at to null."""
-    from ocabra.core.auth_manager import create_access_token
+    from ocabra.api._deps_auth import UserContext, get_current_user
 
     app = _make_app()
     user = _make_db_user(username="igor")
-    token = create_access_token(user_id=str(user.id), role="user")
 
-    user_result = MagicMock()
-    user_result.scalar_one_or_none.return_value = user
+    _user_ctx = UserContext(
+        user_id=str(user.id), username="igor", role="user",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user_ctx
 
-    group_result = MagicMock()
-    group_result.scalars.return_value.all.return_value = []
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
-
-    mock_session_auth = AsyncMock()
-    mock_session_auth.__aenter__ = AsyncMock(return_value=mock_session_auth)
-    mock_session_auth.__aexit__ = AsyncMock(return_value=False)
-    mock_session_auth.execute.side_effect = [user_result, group_result, group_model_result]
-
-    mock_session_endpoint = AsyncMock()
-    mock_session_endpoint.__aenter__ = AsyncMock(return_value=mock_session_endpoint)
-    mock_session_endpoint.__aexit__ = AsyncMock(return_value=False)
-    mock_session_endpoint.commit = AsyncMock()
-    mock_session_endpoint.refresh = AsyncMock(return_value=None)
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.commit = AsyncMock()
+    mock_session.refresh = AsyncMock(return_value=None)
 
     captured = {}
 
@@ -489,14 +428,10 @@ def test_create_api_key_without_expiry():
         captured["key"] = obj
         obj.id = uuid.uuid4()
 
-    mock_session_endpoint.add.side_effect = _add
+    mock_session.add = MagicMock(side_effect=_add)
 
-    with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session_auth),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session_endpoint),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
-    ):
-        client = TestClient(app, cookies={"ocabra_session": token})
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
         resp = client.post("/ocabra/auth/keys", json={"name": "no-expiry-key"})
 
     assert resp.status_code == 201
@@ -506,40 +441,28 @@ def test_create_api_key_without_expiry():
 
 def test_list_api_keys_shows_prefix_not_value():
     """GET /ocabra/auth/keys returns key_prefix but NOT the raw key value."""
-    from ocabra.core.auth_manager import create_access_token
+    from ocabra.api._deps_auth import UserContext, get_current_user
 
     app = _make_app()
     user = _make_db_user(username="julia")
-    token = create_access_token(user_id=str(user.id), role="user")
     key_row, _raw = _make_api_key_row(user=user)
 
-    user_result = MagicMock()
-    user_result.scalar_one_or_none.return_value = user
-
-    group_result = MagicMock()
-    group_result.scalars.return_value.all.return_value = []
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
+    _user_ctx = UserContext(
+        user_id=str(user.id), username="julia", role="user",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user_ctx
 
     keys_result = MagicMock()
     keys_result.scalars.return_value.all.return_value = [key_row]
 
-    mock_session_auth = AsyncMock()
-    mock_session_auth.__aenter__ = AsyncMock(return_value=mock_session_auth)
-    mock_session_auth.__aexit__ = AsyncMock(return_value=False)
-    mock_session_auth.execute.side_effect = [user_result, group_result, group_model_result]
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute.return_value = keys_result
 
-    mock_session_endpoint = AsyncMock()
-    mock_session_endpoint.__aenter__ = AsyncMock(return_value=mock_session_endpoint)
-    mock_session_endpoint.__aexit__ = AsyncMock(return_value=False)
-    mock_session_endpoint.execute.return_value = keys_result
-
-    with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session_auth),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session_endpoint),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
-    ):
-        client = TestClient(app, cookies={"ocabra_session": token})
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
         resp = client.get("/ocabra/auth/keys")
 
     assert resp.status_code == 200
@@ -552,42 +475,30 @@ def test_list_api_keys_shows_prefix_not_value():
 
 def test_revoke_api_key_sets_revoked():
     """DELETE /ocabra/auth/keys/{key_id} must set is_revoked = True on the key."""
-    from ocabra.core.auth_manager import create_access_token
+    from ocabra.api._deps_auth import UserContext, get_current_user
 
     app = _make_app()
     user = _make_db_user(username="kate")
-    token = create_access_token(user_id=str(user.id), role="user")
     key_row, _raw = _make_api_key_row(user=user)
     key_row.is_revoked = False  # start not revoked
 
-    user_result = MagicMock()
-    user_result.scalar_one_or_none.return_value = user
-
-    group_result = MagicMock()
-    group_result.scalars.return_value.all.return_value = []
-    group_model_result = MagicMock()
-    group_model_result.scalars.return_value.all.return_value = []
+    _user_ctx = UserContext(
+        user_id=str(user.id), username="kate", role="user",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user_ctx
 
     key_result = MagicMock()
     key_result.scalar_one_or_none.return_value = key_row
 
-    mock_session_auth = AsyncMock()
-    mock_session_auth.__aenter__ = AsyncMock(return_value=mock_session_auth)
-    mock_session_auth.__aexit__ = AsyncMock(return_value=False)
-    mock_session_auth.execute.side_effect = [user_result, group_result, group_model_result]
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute.return_value = key_result
+    mock_session.commit = AsyncMock()
 
-    mock_session_endpoint = AsyncMock()
-    mock_session_endpoint.__aenter__ = AsyncMock(return_value=mock_session_endpoint)
-    mock_session_endpoint.__aexit__ = AsyncMock(return_value=False)
-    mock_session_endpoint.execute.return_value = key_result
-    mock_session_endpoint.commit = AsyncMock()
-
-    with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session_auth),
-        patch("ocabra.api.internal.auth.AsyncSessionLocal", return_value=mock_session_endpoint),
-        patch("ocabra.api._deps_auth.get_redis", new=AsyncMock(side_effect=Exception("no redis"))),
-    ):
-        client = TestClient(app, cookies={"ocabra_session": token})
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
         resp = client.delete(f"/ocabra/auth/keys/{key_row.id}")
 
     assert resp.status_code == 204
@@ -598,8 +509,8 @@ async def test_revoked_key_cannot_authenticate():
     """A revoked API key must not authenticate — _resolve_api_key returns None."""
     from ocabra.api._deps_auth import _resolve_api_key
 
-    user = _make_db_user(username="leo")
-    raw_key, key_hash, prefix = generate_api_key()
+    _make_db_user(username="leo")
+    raw_key, _key_hash, _prefix = generate_api_key()
 
     revoked_result = MagicMock()
     revoked_result.scalar_one_or_none.return_value = None  # WHERE is_revoked=False fails
@@ -615,9 +526,8 @@ async def test_expired_key_cannot_authenticate():
     """An expired API key must not authenticate — _resolve_api_key returns None."""
     from ocabra.api._deps_auth import _resolve_api_key
 
-    user = _make_db_user(username="mia")
-    raw_key, key_hash, prefix = generate_api_key()
-    past = datetime.now(UTC) - timedelta(days=1)
+    _make_db_user(username="mia")
+    raw_key, _key_hash, _prefix = generate_api_key()
 
     expired_result = MagicMock()
     expired_result.scalar_one_or_none.return_value = None  # WHERE expires_at > now fails

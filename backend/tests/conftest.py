@@ -26,10 +26,24 @@ if _APP_AVAILABLE:
 
     @pytest_asyncio.fixture
     async def async_client() -> AsyncGenerator:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            yield client
+        from ocabra.api._deps_auth import UserContext, get_current_user
+
+        _admin_ctx = UserContext(
+            user_id=None,
+            username="__test__",
+            role="system_admin",
+            group_ids=[],
+            accessible_model_ids=set(),
+            is_anonymous=False,
+        )
+        app.dependency_overrides[get_current_user] = lambda: _admin_ctx
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                yield client
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
 
     @pytest.fixture
     def sync_client():

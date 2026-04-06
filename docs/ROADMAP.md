@@ -131,6 +131,111 @@ Implementado:
 
 ---
 
+## En progreso — Bloque 9 — Model Profiles (Fase 6)
+
+Plan completo en `docs/PLAN.md` (Fase 6) y `docs/tasks/model-profiles-chatterbox-swarm-plan.md`.
+
+Separación entre modelos base (internos, admin) y perfiles públicos (clientes).
+Los perfiles son la interfaz pública de `/v1/models` y de toda la inferencia.
+
+| Item | Descripción | Estado |
+|------|-------------|--------|
+| Tabla `ModelProfile` + migración | DB schema, FK a `model_configs`, cascada | En progreso |
+| `core/profile_registry.py` | CRUD, cache, resolución de perfiles | En progreso |
+| Endpoints REST `/ocabra/profiles/*` | CRUD + upload de assets | En progreso |
+| `/ocabra/models` con `profiles[]` | Anidación de perfiles en respuesta admin | En progreso |
+| `resolve_profile()` en `/v1/*` y `/api/*` | Resolución pública por `profile_id` | En progreso |
+| Worker key por `(base_model_id, load_overrides_hash)` | Workers compartidos/dedicados | En progreso |
+| Fallback legacy `LEGACY_MODEL_ID_FALLBACK` | Compatibilidad temporal con `model_id` canónico | En progreso |
+| UI de perfiles en Models | CRUD, upload audio, toggle enabled/default | En progreso |
+| Contratos y tests | `docs/CONTRACTS.md` sección 8, test stubs | En progreso |
+
+---
+
+## En progreso — Bloque 10 — Chatterbox TTS (Fase 7 parcial)
+
+Plan completo en `docs/PLAN.md` (Fase 7, Stream A) y `docs/tasks/model-profiles-chatterbox-swarm-plan.md`.
+
+Backend first-class para Chatterbox Multilingual (Resemble AI, MIT, 23 idiomas, voice cloning).
+El motor de fine-tuning (Fase 7, Stream B/C) queda fuera de esta oleada.
+
+| Item | Descripción | Estado |
+|------|-------------|--------|
+| `chatterbox_backend.py` | BackendInterface para Chatterbox | En progreso |
+| `chatterbox_worker.py` | Worker FastAPI con synthesize/stream/voices | En progreso |
+| Registro en `main.py` | `register_backend("chatterbox", ...)` | En progreso |
+| Detección en scanner/registry | HuggingFace y local scanner | En progreso |
+| Voice cloning via `voice_ref` | Path controlado por oCabra (asset de perfil) | En progreso |
+| Tests backend | load/unload, synthesize, streaming, voice cloning | En progreso |
+
+---
+
+## Pendiente — Bloque 11 — Resiliencia de backends y gestión avanzada de recursos
+
+Inspirado en análisis comparativo con LocalAI y AnythingLLM. Objetivo: mejorar la
+estabilidad, el aislamiento de fallos y la eficiencia en el uso de VRAM.
+
+### 11.1 — Evicción LRU + umbral de VRAM
+
+Añadir al `model_manager` un WatchDog que monitorice la VRAM real vía `gpu_manager` y
+evicte automáticamente modelos WARM por LRU cuando la VRAM usada supere un umbral
+configurable (`vram_eviction_threshold`, default 0.90). Antes de cargar un modelo nuevo,
+comprobar si hay espacio suficiente y evictar preventivamente si no lo hay.
+
+| Item | Descripción | Estado |
+|------|-------------|--------|
+| Setting `vram_eviction_threshold` | Configurable en `config.py` y `server_config` | Pendiente |
+| LRU tracking en `model_manager` | Timestamp de último uso por modelo cargado | Pendiente |
+| Pre-load VRAM check | Antes de `load()`, consultar VRAM disponible y evictar si falta | Pendiente |
+| Background watchdog | Loop async que monitoriza VRAM y evicta si se supera el umbral | Pendiente |
+| Tests | Evicción LRU, umbral, pre-load check | Pendiente |
+
+### 11.2 — Aislamiento por proceso (gRPC/subprocess)
+
+Formalizar el patrón de ejecución de backends como subprocesos independientes con
+health checks y restart automático on crash. Un fallo en un backend (OOM CUDA, segfault)
+no debe afectar al servidor principal ni a otros modelos cargados.
+
+| Item | Descripción | Estado |
+|------|-------------|--------|
+| `BackendProcessManager` | Clase que gestiona el ciclo de vida de subprocesos backend | Pendiente |
+| Health check periódico | Ping/heartbeat a cada worker, marcado ERROR si no responde | Pendiente |
+| Auto-restart on crash | Reinicio automático con backoff exponencial | Pendiente |
+| Crash isolation | Fallo de un backend no afecta a otros ni al servidor principal | Pendiente |
+| Migrar backends existentes | Adaptar vLLM, Diffusers, Whisper, TTS al nuevo patrón | Pendiente |
+| Tests | Crash recovery, health check failure, restart backoff | Pendiente |
+
+### 11.3 — Interfaz unificada multi-modal en BackendInterface
+
+Extender `BackendInterface` con métodos opcionales por modalidad (`generate_text`,
+`generate_image`, `transcribe`, `synthesize_speech`, `embed`, `rerank`) y un
+`get_capabilities()` que declare qué soporta cada backend. Simplifica el routing
+desde las capas API (OpenAI / Ollama) sin conocer el tipo de backend.
+
+| Item | Descripción | Estado |
+|------|-------------|--------|
+| Extender `BackendInterface` | Métodos opcionales por modalidad con `NotImplementedError` default | Pendiente |
+| `get_capabilities()` | Retorna set de capacidades (`text_generation`, `embedding`, `tts`, etc.) | Pendiente |
+| Routing por capability | Las capas API consultan capabilities en lugar de tipo de backend | Pendiente |
+| Migrar backends existentes | Cada backend implementa solo los métodos de su modalidad | Pendiente |
+| Tests | Capabilities reporting, routing, fallback en método no soportado | Pendiente |
+
+### 11.4 — Busy timeout / health watchdog
+
+Protección contra backends colgados. Si una inferencia supera un timeout configurable
+por backend, marcar el modelo como ERROR, cancelar la request y reiniciar el worker.
+
+| Item | Descripción | Estado |
+|------|-------------|--------|
+| Setting `busy_timeout_seconds` | Configurable por backend en `config.py` (default: 300s) | Pendiente |
+| Request timeout tracking | Registrar inicio de cada request activa por worker | Pendiente |
+| Watchdog loop | Async loop que detecta requests que exceden el timeout | Pendiente |
+| Acción on timeout | Marcar modelo ERROR, cancelar request, reiniciar worker | Pendiente |
+| Métricas | Contador de timeouts por modelo/backend en stats | Pendiente |
+| Tests | Timeout detection, model ERROR transition, worker restart | Pendiente |
+
+---
+
 ## Orden de ejecución sugerido
 
 ```
@@ -142,5 +247,8 @@ Implementado:
 [✅ Hecho]  Bloque 7 — Teams, stats, admin UX
 [✅ Hecho]  Bloque 8 — Voice Pipeline (Fase 1 + 1.5 + 2)
 
-[Pendiente] Validación manual TRT-LLM multi-engine en producción
+[En progreso] Bloque 9 — Model Profiles (Fase 6)
+[En progreso] Bloque 10 — Chatterbox TTS (Fase 7 parcial)
+[Pendiente]   Bloque 11 — Resiliencia de backends y gestión avanzada de recursos
+[Pendiente]   Validación manual TRT-LLM multi-engine en producción
 ```

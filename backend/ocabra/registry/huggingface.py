@@ -44,6 +44,7 @@ _BACKEND_BY_LIBRARY = {
     "bark": "tts",
     "coqui": "tts",
     "kokoro": "tts",
+    "chatterbox": "chatterbox",
 }
 
 _UNSUPPORTED_TOKENIZER_CLASSES = {"tokenizersbackend", "tokenizersbackendfast"}
@@ -457,6 +458,10 @@ class HuggingFaceRegistry:
         if "diffusers" in normalized_tags:
             return "diffusers"
         if normalized_tags & {"text-to-speech", "tts"}:
+            # Check for Chatterbox specifically before generic TTS
+            repo_name_early = (repo_id or "").lower()
+            if "chatterbox" in repo_name_early or normalized_library == "chatterbox":
+                return "chatterbox"
             return "tts"
         if normalized_tags & {"automatic-speech-recognition", "asr", "whisper"}:
             return "whisper"
@@ -471,6 +476,8 @@ class HuggingFaceRegistry:
             names, normalized_task, normalized_library, normalized_tags, repo_name
         ):
             return "diffusers"
+        if "chatterbox" in repo_name or normalized_library == "chatterbox":
+            return "chatterbox"
         if self._looks_like_tts_repo(repo_name, normalized_tags, normalized_library, names):
             return "tts"
         return "vllm"
@@ -487,6 +494,8 @@ class HuggingFaceRegistry:
         if backend_hint == "diffusers":
             return "model_index.json" in lowered
         if backend_hint == "tts":
+            return any(name.endswith((".safetensors", ".bin")) for name in lowered)
+        if backend_hint == "chatterbox":
             return any(name.endswith((".safetensors", ".bin")) for name in lowered)
         if backend_hint == "whisper":
             return any(name.endswith((".safetensors", ".bin", ".pt", ".nemo")) for name in lowered)
@@ -622,6 +631,8 @@ class HuggingFaceRegistry:
         if backend_hint == "diffusers":
             return "model_index.json"
         if backend_hint == "tts":
+            return ".safetensors|.bin"
+        if backend_hint == "chatterbox":
             return ".safetensors|.bin"
         if backend_hint == "whisper":
             return ".nemo|.safetensors|.bin|.pt"

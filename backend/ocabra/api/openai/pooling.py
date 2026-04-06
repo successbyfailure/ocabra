@@ -14,19 +14,20 @@ from ocabra.api._deps_auth import UserContext
 from ._deps import (
     _openai_error,
     check_capability,
-    ensure_loaded,
+    compute_worker_key,
     get_model_manager,
     get_openai_user,
+    get_profile_registry,
+    merge_profile_defaults,
     raise_upstream_http_error,
+    resolve_profile,
     to_backend_body,
 )
 
 router = APIRouter()
 
 
-def _normalize_non_empty_text(
-    value: Any, *, param: str, code: str, message: str
-) -> str:
+def _normalize_non_empty_text(value: Any, *, param: str, code: str, message: str) -> str:
     if isinstance(value, str) and value.strip():
         return value
     raise _openai_error(
@@ -37,11 +38,11 @@ def _normalize_non_empty_text(
     )
 
 
-def _normalize_non_empty_text_list(
-    value: Any, *, param: str, code: str, message: str
-) -> list[str]:
-    if isinstance(value, list) and value and all(
-        isinstance(item, str) and item.strip() for item in value
+def _normalize_non_empty_text_list(value: Any, *, param: str, code: str, message: str) -> list[str]:
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(item, str) and item.strip() for item in value)
     ):
         return value
     raise _openai_error(
@@ -73,8 +74,10 @@ def _normalize_classification_input(body: dict[str, Any]) -> dict[str, Any]:
         body["model"] = model_id
         body["input"] = input_value
         return body
-    if isinstance(input_value, list) and input_value and all(
-        isinstance(item, str) and item.strip() for item in input_value
+    if (
+        isinstance(input_value, list)
+        and input_value
+        and all(isinstance(item, str) and item.strip() for item in input_value)
     ):
         body["model"] = model_id
         body["input"] = input_value
@@ -223,6 +226,42 @@ def _normalize_rerank_request(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+async def _resolve_and_forward(
+    request: Request,
+    body: dict[str, Any],
+    capability: str,
+    endpoint_label: str,
+    forward_path: str,
+    user: UserContext,
+) -> Any:
+    """Shared helper: resolve profile, merge defaults, forward request."""
+    model_id: str = body.get("model", "")
+
+    model_manager = get_model_manager(request)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
+    check_capability(state, capability, endpoint_label)
+
+    merged_body = merge_profile_defaults(profile, body)
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+
+    worker_pool = request.app.state.worker_pool
+    try:
+        return await worker_pool.forward_request(
+            worker_key,
+            forward_path,
+            to_backend_body(state, merged_body),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise_upstream_http_error(exc)
+
+
 @router.post("/pooling", summary="Run pooling on a model")
 async def pooling(
     request: Request,
@@ -232,18 +271,7 @@ async def pooling(
     Run pooling/embedding-style inference on a model configured with pooling support.
     """
     body = await request.json()
-    model_id: str = body.get("model", "")
-
-    model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
-    check_capability(state, "pooling", "pooling")
-    model_id = state.model_id
-
-    worker_pool = request.app.state.worker_pool
-    try:
-        return await worker_pool.forward_request(model_id, "/pooling", to_backend_body(state, body))
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
+    return await _resolve_and_forward(request, body, "pooling", "pooling", "/pooling", user)
 
 
 @router.post("/score", summary="Score text pairs")
@@ -255,18 +283,7 @@ async def score(
     Score pairs with a model exposing similarity/score support.
     """
     body = _normalize_score_request(await request.json())
-    model_id: str = body.get("model", "")
-
-    model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
-    check_capability(state, "score", "score")
-    model_id = state.model_id
-
-    worker_pool = request.app.state.worker_pool
-    try:
-        return await worker_pool.forward_request(model_id, "/score", to_backend_body(state, body))
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
+    return await _resolve_and_forward(request, body, "score", "score", "/score", user)
 
 
 @router.post("/rerank", summary="Rerank documents for a query")
@@ -278,18 +295,7 @@ async def rerank(
     Rerank candidate documents against a query using a reranker-capable model.
     """
     body = _normalize_rerank_request(await request.json())
-    model_id: str = body.get("model", "")
-
-    model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
-    check_capability(state, "rerank", "rerank")
-    model_id = state.model_id
-
-    worker_pool = request.app.state.worker_pool
-    try:
-        return await worker_pool.forward_request(model_id, "/rerank", to_backend_body(state, body))
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
+    return await _resolve_and_forward(request, body, "rerank", "rerank", "/rerank", user)
 
 
 @router.post("/classify", summary="Classify inputs with a classification model")
@@ -301,15 +307,6 @@ async def classify(
     Run text classification on one or many inputs.
     """
     body = _normalize_classification_input(await request.json())
-    model_id: str = body.get("model", "")
-
-    model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
-    check_capability(state, "classification", "classification")
-    model_id = state.model_id
-
-    worker_pool = request.app.state.worker_pool
-    try:
-        return await worker_pool.forward_request(model_id, "/classify", to_backend_body(state, body))
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
+    return await _resolve_and_forward(
+        request, body, "classification", "classification", "/classify", user
+    )

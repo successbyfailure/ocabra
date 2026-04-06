@@ -92,7 +92,6 @@ class TestLiteLLMSync:
     @pytest.mark.asyncio
     async def test_sync_handles_http_error(self):
         """sync_all() should return error in result on HTTP failure."""
-        import httpx
 
         mm = MagicMock()
         mm.list_states = AsyncMock(return_value=[

@@ -7,6 +7,9 @@ import type {
   GPUStatHistory,
   ModelState,
   ModelPatchRequest,
+  ModelProfile,
+  ProfileCreate,
+  ProfileUpdate,
   DownloadJob,
   DownloadSource,
   HFModelCard,
@@ -425,6 +428,28 @@ function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
   }
 }
 
+function toModelProfile(raw: unknown): ModelProfile {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    profileId: String(data.profile_id ?? data.profileId ?? ""),
+    baseModelId: String(data.base_model_id ?? data.baseModelId ?? ""),
+    displayName: (data.display_name ?? data.displayName ?? null) as string | null,
+    description: (data.description ?? null) as string | null,
+    category: String(data.category ?? "llm") as ModelProfile["category"],
+    loadOverrides: isRecord(data.load_overrides ?? data.loadOverrides)
+      ? ((data.load_overrides ?? data.loadOverrides) as Record<string, unknown>)
+      : null,
+    requestDefaults: isRecord(data.request_defaults ?? data.requestDefaults)
+      ? ((data.request_defaults ?? data.requestDefaults) as Record<string, unknown>)
+      : null,
+    assets: isRecord(data.assets) ? (data.assets as Record<string, unknown>) : null,
+    enabled: Boolean(data.enabled ?? true),
+    isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
+    createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
+    updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
+  }
+}
+
 function toModelState(raw: unknown): ModelState {
   const data = isRecord(raw) ? raw : {}
   const schedulesRaw = data.schedules
@@ -462,6 +487,9 @@ function toModelState(raw: unknown): ModelState {
     errorMessage: (data.error_message ?? data.errorMessage ?? null) as string | null,
     schedules,
     extraConfig: toBackendExtraConfig(data.extra_config ?? data.extraConfig),
+    profiles: Array.isArray(data.profiles)
+      ? data.profiles.map(toModelProfile)
+      : undefined,
   }
 }
 
@@ -860,6 +888,68 @@ export const api = {
         run_probe: Boolean(body.runProbe),
       }).then(toModelMemoryEstimate),
     delete: (modelId: string) => request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
+  },
+
+  profiles: {
+    listByModel: async (modelId: string): Promise<ModelProfile[]> =>
+      (await request<unknown[]>("GET", `/ocabra/models/${encodeURIComponent(modelId)}/profiles`)).map(toModelProfile),
+
+    create: async (modelId: string, data: ProfileCreate): Promise<ModelProfile> =>
+      toModelProfile(
+        await request<unknown>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/profiles`, {
+          profile_id: data.profileId,
+          display_name: data.displayName,
+          description: data.description,
+          category: data.category,
+          load_overrides: data.loadOverrides,
+          request_defaults: data.requestDefaults,
+          enabled: data.enabled,
+          is_default: data.isDefault,
+        }),
+      ),
+
+    get: async (profileId: string): Promise<ModelProfile> =>
+      toModelProfile(await request<unknown>("GET", `/ocabra/profiles/${encodeURIComponent(profileId)}`)),
+
+    update: async (profileId: string, data: ProfileUpdate): Promise<ModelProfile> =>
+      toModelProfile(
+        await request<unknown>("PATCH", `/ocabra/profiles/${encodeURIComponent(profileId)}`, {
+          ...(data.displayName !== undefined && { display_name: data.displayName }),
+          ...(data.description !== undefined && { description: data.description }),
+          ...(data.category !== undefined && { category: data.category }),
+          ...(data.loadOverrides !== undefined && { load_overrides: data.loadOverrides }),
+          ...(data.requestDefaults !== undefined && { request_defaults: data.requestDefaults }),
+          ...(data.enabled !== undefined && { enabled: data.enabled }),
+          ...(data.isDefault !== undefined && { is_default: data.isDefault }),
+        }),
+      ),
+
+    delete: async (profileId: string): Promise<void> => {
+      await request<unknown>("DELETE", `/ocabra/profiles/${encodeURIComponent(profileId)}`)
+    },
+
+    uploadAsset: async (profileId: string, file: File): Promise<ModelProfile> => {
+      const form = new FormData()
+      form.append("file", file)
+      const res = await fetch(`${BASE}/ocabra/profiles/${encodeURIComponent(profileId)}/assets`, {
+        method: "POST",
+        body: form,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail ?? res.statusText)
+      }
+      const json = (await res.json()) as Record<string, unknown>
+      return toModelProfile(json.profile)
+    },
+
+    deleteAsset: async (profileId: string, assetKey: string): Promise<ModelProfile> => {
+      const raw = await request<Record<string, unknown>>(
+        "DELETE",
+        `/ocabra/profiles/${encodeURIComponent(profileId)}/assets/${encodeURIComponent(assetKey)}`,
+      )
+      return toModelProfile(raw.profile)
+    },
   },
 
   downloads: {

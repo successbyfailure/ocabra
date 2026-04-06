@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     sglang_trust_remote_code: bool = False
     sglang_disable_radix_cache: bool = False
     sglang_startup_timeout_s: int = 120
+    # Chatterbox TTS
+    chatterbox_python_bin: str = "/opt/chatterbox-venv/bin/python"
+    chatterbox_model_name: str = "ResembleAI/chatterbox-turbo"
     # Voxtral TTS (vllm-omni)
     voxtral_python_bin: str = "/opt/voxtral-venv/bin/python"
     voxtral_startup_timeout_s: int = 300
@@ -224,6 +227,12 @@ class Settings(BaseSettings):
     # API access control
     require_api_key_openai: bool = True
     require_api_key_ollama: bool = True
+
+    # Profile resolution
+    # When True, canonical model_id (containing '/') is resolved to its default
+    # profile with a deprecation warning.  Set to False to enforce profile_id-only
+    # access (returns 404 for raw model IDs).
+    legacy_model_id_fallback: bool = True
 
     # Gateway service-to-service token (empty = disabled)
     gateway_service_token: str = ""

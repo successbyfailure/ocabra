@@ -8,6 +8,7 @@ Supports:
 - JSON mode (response_format)
 - All standard parameters (temperature, top_p, max_tokens, stop, seed, etc.)
 """
+
 from __future__ import annotations
 
 import json
@@ -22,10 +23,13 @@ from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
     check_capability,
-    ensure_loaded,
+    compute_worker_key,
     get_model_manager,
     get_openai_user,
+    get_profile_registry,
+    merge_profile_defaults,
     raise_upstream_http_error,
+    resolve_profile,
     to_backend_body,
 )
 
@@ -48,23 +52,36 @@ async def chat_completions(
     stream: bool = body.get("stream", False)
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
     check_capability(state, "chat", "chat completions")
     if body.get("tools"):
         check_capability(state, "tools", "tool calling")
-    model_id = state.model_id
+
+    merged_body = merge_profile_defaults(profile, body)
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
 
     worker_pool = request.app.state.worker_pool
 
     if stream:
         return StreamingResponse(
-            _stream_chat(worker_pool, model_id, to_backend_body(state, body)),
+            _stream_chat(worker_pool, worker_key, to_backend_body(state, merged_body)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     try:
-        result = await worker_pool.forward_request(model_id, "/v1/chat/completions", to_backend_body(state, body))
+        result = await worker_pool.forward_request(
+            worker_key,
+            "/v1/chat/completions",
+            to_backend_body(state, merged_body),
+        )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
     return result
@@ -76,8 +93,8 @@ async def _stream_chat(worker_pool, model_id: str, body: dict):
         async for chunk in worker_pool.forward_stream(model_id, "/v1/chat/completions", body):
             yield chunk
     except Exception as e:
-        error_payload = json.dumps({
-            "error": {"message": str(e), "type": "server_error", "code": "stream_error"}
-        })
+        error_payload = json.dumps(
+            {"error": {"message": str(e), "type": "server_error", "code": "stream_error"}}
+        )
         yield f"data: {error_payload}\n\n".encode()
         yield b"data: [DONE]\n\n"

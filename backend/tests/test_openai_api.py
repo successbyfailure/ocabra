@@ -5,6 +5,7 @@ Uses FastAPI TestClient with mocked ModelManager and WorkerPool.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -12,17 +13,67 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
+# Profile helpers
+# ---------------------------------------------------------------------------
+
+def _make_test_profile(profile_id, base_model_id, category="llm", **kwargs):
+    """Create a SimpleNamespace that mimics a ModelProfile for tests."""
+    return SimpleNamespace(
+        profile_id=profile_id,
+        base_model_id=base_model_id,
+        display_name=kwargs.get("display_name", profile_id),
+        description=None,
+        category=category,
+        load_overrides=kwargs.get("load_overrides", {}),
+        request_defaults=kwargs.get("request_defaults", {}),
+        assets=kwargs.get("assets", {}),
+        enabled=True,
+        is_default=True,
+    )
+
+
+class FakeProfileRegistry:
+    def __init__(self, profiles=None):
+        self._profiles = {p.profile_id: p for p in (profiles or [])}
+
+    async def get(self, profile_id):
+        return self._profiles.get(profile_id)
+
+    async def list_enabled(self):
+        return [p for p in self._profiles.values() if p.enabled]
+
+    async def list_by_model(self, base_model_id):
+        return [p for p in self._profiles.values() if p.base_model_id == base_model_id]
+
+    async def list_all(self):
+        return list(self._profiles.values())
+
+
+# ---------------------------------------------------------------------------
 # Test app factory
 # ---------------------------------------------------------------------------
 
 def _make_app(model_state=None, worker_result=None):
     """Create a minimal FastAPI app with mocked state."""
+    from ocabra.api._deps_auth import UserContext, get_current_user
     from ocabra.api.openai import router as openai_router
+    from ocabra.api.openai._deps import get_openai_user
     from ocabra.backends.base import BackendCapabilities
     from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
+    _admin_ctx = UserContext(
+        user_id=None, username=None, role="system_admin",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+
     app = FastAPI()
     app.include_router(openai_router, prefix="/v1")
+
+    # Override both auth callables so no real DB/Redis is needed
+    async def _fake_user():
+        return _admin_ctx
+    app.dependency_overrides[get_current_user] = _fake_user
+    app.dependency_overrides[get_openai_user] = _fake_user
 
     # Mock model manager
     mm = MagicMock()
@@ -56,6 +107,14 @@ def _make_app(model_state=None, worker_result=None):
 
     app.state.model_manager = mm
     app.state.worker_pool = wp
+
+    # Build a default profile that matches the model state
+    profile = _make_test_profile(
+        profile_id=model_state.model_id,
+        base_model_id=model_state.model_id,
+        category="llm",
+    )
+    app.state.profile_registry = FakeProfileRegistry([profile])
 
     return app
 
@@ -243,12 +302,17 @@ class TestChatCompletions:
             load_policy=LoadPolicy.ON_DEMAND,
             capabilities=BackendCapabilities(chat=True, streaming=True),
         )
-        app = _make_app(worker_result={"object": "chat.completion", "choices": []})
+        app = _make_app(
+            model_state=configured_state,
+            worker_result={"object": "chat.completion", "choices": []},
+        )
 
-        # First call returns CONFIGURED, after load returns LOADED
+        # _ensure_worker_loaded calls get_state once, then _do_ensure_loaded
+        # calls it again; after load() it calls a third time.
         app.state.model_manager.get_state = AsyncMock(side_effect=[
-            configured_state,  # initial check
-            loaded_state,      # after load call
+            configured_state,  # _ensure_worker_loaded check
+            configured_state,  # _do_ensure_loaded initial check (CONFIGURED → triggers load)
+            loaded_state,      # _do_ensure_loaded post-load check
         ])
         app.state.model_manager.load = AsyncMock(return_value=loaded_state)
 
@@ -300,10 +364,16 @@ class TestChatCompletions:
             capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
         )
         app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        # Add a profile with a slug-friendly id that maps to the model
+        profile = _make_test_profile(
+            profile_id="mistral-7b",
+            base_model_id="ollama/mistral:7b",
+        )
+        app.state.profile_registry = FakeProfileRegistry([profile])
         client = TestClient(app)
 
         resp = client.post("/v1/chat/completions", json={
-            "model": "mistral:7b",
+            "model": "mistral-7b",
             "messages": [{"role": "user", "content": "Hi"}],
         })
 
@@ -327,11 +397,17 @@ class TestModelLookupAliases:
             capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
         )
         app = _make_app(model_state=state)
+        # Add a profile with slug-friendly id for retrieval
+        profile = _make_test_profile(
+            profile_id="mistral-7b",
+            base_model_id="ollama/mistral:7b",
+        )
+        app.state.profile_registry = FakeProfileRegistry([profile])
         client = TestClient(app)
 
-        resp = client.get("/v1/models/mistral:7b")
+        resp = client.get("/v1/models/mistral-7b")
         assert resp.status_code == 200
-        assert resp.json()["id"] == "ollama/mistral:7b"
+        assert resp.json()["id"] == "mistral-7b"
 
     def test_upstream_400_is_propagated_not_500(self):
         app = _make_app()
@@ -690,6 +766,7 @@ class TestPoolingEndpoints:
             load_policy=LoadPolicy.ON_DEMAND,
             capabilities=BackendCapabilities(chat=True, streaming=True),
         )
+        # Use the pooling endpoint since it also calls resolve_profile
         app = _make_app(model_state=configured_state)
         app.state.model_manager.get_state = AsyncMock(return_value=configured_state)
         app.state.model_manager.load = AsyncMock(
@@ -924,7 +1001,11 @@ class TestModelErrorRecovery:
         )
 
         app = _make_app(model_state=loaded_state, worker_result={"object": "chat.completion", "choices": []})
-        app.state.model_manager.get_state = AsyncMock(side_effect=[error_state, loaded_state])
+        # resolve_profile -> _ensure_worker_loaded -> get_state (1st: returns error_state)
+        # -> _do_ensure_loaded -> get_state (2nd: error_state) -> load -> get_state (3rd: loaded)
+        app.state.model_manager.get_state = AsyncMock(
+            side_effect=[error_state, error_state, loaded_state]
+        )
         app.state.model_manager.load = AsyncMock(return_value=loaded_state)
 
         client = TestClient(app)
@@ -955,7 +1036,9 @@ class TestModelErrorRecovery:
             error_message="status probe failed",
         )
 
+        # Profile is auto-created by _make_app matching model_state.model_id
         app = _make_app(model_state=error_state)
+        # get_state is called multiple times: _ensure_worker_loaded (1st) + _do_ensure_loaded (2nd)
         app.state.model_manager.get_state = AsyncMock(return_value=error_state)
         app.state.model_manager.load = AsyncMock(side_effect=RuntimeError("worker startup timeout"))
 

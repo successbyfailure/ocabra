@@ -2,12 +2,21 @@
 POST /api/embeddings — Ollama legacy embeddings endpoint.
 POST /api/embed      — Ollama v0.3+ embeddings endpoint (supports input arrays).
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext
-from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
+from ocabra.api.openai._deps import (
+    check_capability,
+    compute_worker_key,
+    ensure_loaded,
+    get_model_manager,
+    get_profile_registry,
+    merge_profile_defaults,
+    resolve_profile,
+)
 
 from ._mapper import resolve_model
 from ._shared import get_ollama_user
@@ -25,14 +34,35 @@ async def _run_embeddings(
     ollama_model = str(body.get("model", ""))
 
     model_manager = get_model_manager(request)
-    model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
-    if resolved_state is None:
-        raise HTTPException(status_code=404, detail=f"Model '{ollama_model}' not found")
-    state = await ensure_loaded(model_manager, model_id)
+    profile_registry = get_profile_registry(request)
+
+    # Try profile resolution first
+    try:
+        profile, state = await resolve_profile(
+            ollama_model,
+            model_manager,
+            profile_registry,
+            user=user,
+        )
+        merged_body = merge_profile_defaults(profile, body)
+        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    except HTTPException as profile_exc:
+        # Fallback to legacy Ollama resolution for native Ollama models
+        model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
+        if resolved_state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model '{ollama_model}' not found",
+            ) from profile_exc
+        state = await ensure_loaded(model_manager, model_id)
+        merged_body = body
+        worker_key = model_id
+        profile = None
+
     check_capability(state, "embeddings", "embeddings")
 
     worker_pool = request.app.state.worker_pool
-    raw_input = body.get("input") or body.get("prompt") or ""
+    raw_input = merged_body.get("input") or merged_body.get("prompt") or ""
 
     if state.backend_type == "ollama":
         # Try /api/embed first (Ollama v0.3+); fall back to /api/embeddings for older versions.
@@ -40,7 +70,7 @@ async def _run_embeddings(
         if not legacy:
             try:
                 result = await worker_pool.forward_request(
-                    model_id,
+                    worker_key,
                     "/api/embed",
                     {"model": ollama_model, "input": raw_input},
                 )
@@ -51,9 +81,11 @@ async def _run_embeddings(
 
         if legacy:
             # /api/embeddings: single prompt string only.
-            prompt = raw_input if isinstance(raw_input, str) else (raw_input[0] if raw_input else "")
+            prompt = (
+                raw_input if isinstance(raw_input, str) else (raw_input[0] if raw_input else "")
+            )
             result = await worker_pool.forward_request(
-                model_id,
+                worker_key,
                 "/api/embeddings",
                 {"model": ollama_model, "prompt": prompt},
             )
@@ -62,7 +94,7 @@ async def _run_embeddings(
                 vectors = [vectors]
     else:
         result = await worker_pool.forward_request(
-            model_id,
+            worker_key,
             "/v1/embeddings",
             {"model": state.backend_model_id, "input": raw_input},
         )
@@ -87,7 +119,7 @@ async def embeddings(
     Create embeddings from text input (Ollama legacy format).
 
     Parameters:
-      - model: Ollama model name or internal model id
+      - model: profile_id or Ollama model name
       - input: a string (use /api/embed for array support)
 
     Response:
@@ -106,7 +138,7 @@ async def embed(
     Create embeddings from text input (Ollama v0.3+ format).
 
     Parameters:
-      - model: Ollama model name or internal model id
+      - model: profile_id or Ollama model name
       - input: a string or a list of strings
 
     Response:

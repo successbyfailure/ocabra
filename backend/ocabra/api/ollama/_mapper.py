@@ -1,6 +1,7 @@
 """
 Helpers to map model names between Ollama and oCabra internal IDs.
 """
+
 from __future__ import annotations
 
 import re
@@ -28,9 +29,9 @@ class OllamaNameMapper:
             _normalize_ollama_name(key): val for key, val in _DEFAULT_OLLAMA_TO_INTERNAL.items()
         }
         if extra_map:
-            self._ollama_to_internal.update({
-                _normalize_ollama_name(key): val for key, val in extra_map.items()
-            })
+            self._ollama_to_internal.update(
+                {_normalize_ollama_name(key): val for key, val in extra_map.items()}
+            )
         self._internal_to_ollama: dict[str, str] = {
             internal: ollama for ollama, internal in self._ollama_to_internal.items()
         }
@@ -136,7 +137,11 @@ async def resolve_model(
         if parsed_backend == "ollama":
             exact_state = await model_manager.get_state(exact_name)
             if exact_state is not None:
-                if user is not None and not user.is_admin and exact_name not in user.accessible_model_ids:
+                if (
+                    user is not None
+                    and not user.is_admin
+                    and exact_name not in user.accessible_model_ids
+                ):
                     return exact_name, None
                 return exact_name, exact_state
 
@@ -144,11 +149,17 @@ async def resolve_model(
             ollama_canonical = build_model_ref("ollama", exact_name)
             native_state = await model_manager.get_state(ollama_canonical)
             if native_state is not None:
-                if user is not None and not user.is_admin and ollama_canonical not in user.accessible_model_ids:
+                if (
+                    user is not None
+                    and not user.is_admin
+                    and ollama_canonical not in user.accessible_model_ids
+                ):
                     return ollama_canonical, None
                 return ollama_canonical, native_state
 
-    resolved_model_id, resolved_state = await resolve_openai_model(model_manager, exact_name, user=user)
+    resolved_model_id, resolved_state = await resolve_openai_model(
+        model_manager, exact_name, user=user
+    )
     if resolved_state is not None:
         return resolved_model_id, resolved_state
 
@@ -159,3 +170,40 @@ async def resolve_model(
         if not user.is_admin and model_id not in user.accessible_model_ids:
             return model_id, None
     return model_id, mapped_state
+
+
+async def resolve_ollama_profile(
+    model_manager,
+    profile_registry,
+    requested_name: str,
+    user: UserContext | None = None,
+):
+    """Resolve an Ollama model name via profiles, with legacy fallback.
+
+    Tries profile resolution first (via ``resolve_profile``), then falls
+    back to the legacy ``resolve_model`` path for native Ollama models.
+
+    Returns:
+        Tuple of ``(profile | None, model_id, ModelState | None)``.
+    """
+    from ocabra.api.openai._deps import resolve_profile as _resolve_profile
+
+    # Try profile resolution first (profile_id might be a slug like "chat")
+    try:
+        profile, state = await _resolve_profile(
+            requested_name,
+            model_manager,
+            profile_registry,
+            user=user,
+        )
+        return profile, state
+    except Exception:
+        pass
+
+    # Fallback: resolve as native Ollama model
+    model_id, state = await resolve_model(model_manager, requested_name, user=user)
+    if state is not None:
+        # Build a minimal "virtual" profile for the legacy path
+        return None, state
+
+    return None, None

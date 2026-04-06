@@ -1,6 +1,7 @@
 """
 POST /api/chat — Ollama chat compatibility endpoint.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,10 +12,24 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
-from ocabra.api.openai._deps import check_capability, ensure_loaded, get_model_manager
+from ocabra.api.openai._deps import (
+    check_capability,
+    compute_worker_key,
+    ensure_loaded,
+    get_model_manager,
+    get_profile_registry,
+    merge_profile_defaults,
+    resolve_profile,
+)
 
-from ._mapper import resolve_model
-from ._shared import build_native_passthrough_body, get_ollama_user, iter_sse_payloads, now_iso_z, apply_option_map
+from ._mapper import resolve_model  # noqa: I001
+from ._shared import (
+    apply_option_map,
+    build_native_passthrough_body,
+    get_ollama_user,
+    iter_sse_payloads,
+    now_iso_z,
+)
 
 router = APIRouter()
 
@@ -39,16 +54,37 @@ async def chat(
     stream = bool(body.get("stream", True))
 
     model_manager = get_model_manager(request)
-    model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
-    if resolved_state is None:
-        raise HTTPException(status_code=404, detail=f"Model '{ollama_model}' not found")
-    state = await ensure_loaded(model_manager, model_id)
+    profile_registry = get_profile_registry(request)
+
+    # Try profile resolution first
+    try:
+        profile, state = await resolve_profile(
+            ollama_model,
+            model_manager,
+            profile_registry,
+            user=user,
+        )
+        merged_body = merge_profile_defaults(profile, body)
+        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    except HTTPException as profile_exc:
+        # Fallback to legacy Ollama resolution for native Ollama models
+        model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
+        if resolved_state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model '{ollama_model}' not found",
+            ) from profile_exc
+        state = await ensure_loaded(model_manager, model_id)
+        merged_body = body
+        worker_key = model_id
+        profile = None
+
     check_capability(state, "chat", "chat")
 
     worker_pool = request.app.state.worker_pool
     if state.backend_type == "ollama":
         upstream_body = build_native_passthrough_body(
-            body,
+            merged_body,
             model=_native_backend_model_name(ollama_model, state.backend_model_id),
             stream=stream,
             content_keys=("messages",),
@@ -56,23 +92,23 @@ async def chat(
         )
         if stream:
             return StreamingResponse(
-                worker_pool.forward_stream(model_id, "/api/chat", upstream_body),
+                worker_pool.forward_stream(worker_key, "/api/chat", upstream_body),
                 media_type="application/x-ndjson",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return await worker_pool.forward_request(model_id, "/api/chat", upstream_body)
+        return await worker_pool.forward_request(worker_key, "/api/chat", upstream_body)
 
-    vllm_body = _build_vllm_chat_body(body, state.backend_model_id, stream)
+    vllm_body = _build_vllm_chat_body(merged_body, state.backend_model_id, stream)
 
     if stream:
         return StreamingResponse(
-            _stream_chat(worker_pool, model_id, ollama_model, vllm_body),
+            _stream_chat(worker_pool, worker_key, ollama_model, vllm_body),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     started_ns = time.monotonic_ns()
-    result = await worker_pool.forward_request(model_id, "/v1/chat/completions", vllm_body)
+    result = await worker_pool.forward_request(worker_key, "/v1/chat/completions", vllm_body)
     message = _extract_chat_message(result)
     total_duration = time.monotonic_ns() - started_ns
     usage = result.get("usage") or {}

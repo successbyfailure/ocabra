@@ -1,6 +1,10 @@
 """
 GET /api/tags — list installed models in Ollama-compatible format.
+
+With the profile system enabled, this endpoint exposes **enabled profiles**
+rather than raw model entries.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -28,14 +32,73 @@ async def list_tags(
     user: UserContext = Depends(get_ollama_user),
 ) -> dict:
     """
-    List all configured models in Ollama /api/tags format.
+    List all enabled profiles in Ollama /api/tags format.
 
-    Filters models by the caller's group membership unless the caller is an admin.
+    Filters profiles by the caller's group membership unless the caller is
+    an admin.
 
     Returns:
       {"models": [{"name": ..., "model": ..., "size": ..., "details": {...}}, ...]}
     """
     model_manager = request.app.state.model_manager
+    profile_registry = getattr(request.app.state, "profile_registry", None)
+
+    # If profile registry is available, list profiles; otherwise fall back to
+    # the legacy model-based listing.
+    if profile_registry is not None:
+        return await _list_tags_from_profiles(
+            model_manager,
+            profile_registry,
+            user,
+        )
+
+    return await _list_tags_legacy(model_manager, user)
+
+
+async def _list_tags_from_profiles(model_manager, profile_registry, user: UserContext) -> dict:
+    """Build Ollama-format tags from enabled profiles."""
+    enabled_profiles = await profile_registry.list_enabled()
+
+    models: list[dict] = []
+    for profile in enabled_profiles:
+        # Access control
+        if not user.is_admin and profile.profile_id not in user.accessible_model_ids:
+            continue
+
+        base_state = await model_manager.get_state(profile.base_model_id)
+
+        backend_model_id = base_state.backend_model_id if base_state else profile.base_model_id
+        loaded_at = base_state.loaded_at if base_state and base_state.loaded_at else None
+        modified_at = _to_iso_z(loaded_at)
+        vram_mb = base_state.vram_used_mb if base_state else 0
+        size_bytes = _estimate_size_bytes(backend_model_id, vram_mb)
+
+        models.append(
+            {
+                "name": profile.profile_id,
+                "model": profile.profile_id,
+                "modified_at": modified_at,
+                "size": size_bytes,
+                "digest": "sha256:" + hashlib.sha256(
+                    profile.profile_id.encode("utf-8")
+                ).hexdigest(),
+                "details": {
+                    "parent_model": profile.base_model_id,
+                    "format": _infer_format(backend_model_id),
+                    "family": profile.category,
+                    "families": [profile.category],
+                    "parameter_size": "unknown",
+                    "quantization_level": "F16",
+                },
+                "loaded": bool(base_state and base_state.status.value == "loaded"),
+            }
+        )
+
+    return {"models": models}
+
+
+async def _list_tags_legacy(model_manager, user: UserContext) -> dict:
+    """Legacy listing when profile registry is not available."""
     all_states = await model_manager.list_states()
 
     if user.is_admin:
@@ -50,7 +113,10 @@ async def list_tags(
         installed_details = await _registry.list_installed_details()
         loaded = set(await _registry.list_loaded())
     except Exception:
-        installed_details = [{"name": _mapper.to_ollama(state.model_id), "size": 0, "modified_at": ""} for state in states]
+        installed_details = [
+            {"name": _mapper.to_ollama(state.model_id), "size": 0, "modified_at": ""}
+            for state in states
+        ]
         loaded = {str(item.get("name") or "") for item in installed_details}
 
     models: list[dict] = []
@@ -64,9 +130,6 @@ async def list_tags(
             mapped_id = _mapper.to_internal(ollama_name)
             state = by_id.get(mapped_id)
 
-        # Non-admin callers only see models that are in their accessible set
-        # (reflected by `by_id` which is already filtered). Skip Ollama-native
-        # models that have no corresponding oCabra state visible to this user.
         if not user.is_admin and state is None:
             continue
 
@@ -74,7 +137,11 @@ async def list_tags(
         backend_model_id = state.backend_model_id if state else ollama_name
 
         remote_modified = str(item.get("modified_at") or "")
-        modified_at = _to_iso_z(state.loaded_at if state else None) if state and state.loaded_at else (remote_modified or _to_iso_z(None))
+        modified_at = (
+            _to_iso_z(state.loaded_at if state else None)
+            if state and state.loaded_at
+            else (remote_modified or _to_iso_z(None))
+        )
         family = ollama_name.split(":", 1)[0]
         is_loaded = ollama_name in loaded
         size_bytes = int(item.get("size") or 0)

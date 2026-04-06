@@ -2,19 +2,71 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+# ---------------------------------------------------------------------------
+# Profile helpers (shared pattern with test_openai_api)
+# ---------------------------------------------------------------------------
+
+def _make_test_profile(profile_id, base_model_id, category="llm", **kwargs):
+    """Create a SimpleNamespace that mimics a ModelProfile for tests."""
+    return SimpleNamespace(
+        profile_id=profile_id,
+        base_model_id=base_model_id,
+        display_name=kwargs.get("display_name", profile_id),
+        description=None,
+        category=category,
+        load_overrides=kwargs.get("load_overrides", {}),
+        request_defaults=kwargs.get("request_defaults", {}),
+        assets=kwargs.get("assets", {}),
+        enabled=True,
+        is_default=True,
+    )
+
+
+class FakeProfileRegistry:
+    def __init__(self, profiles=None):
+        self._profiles = {p.profile_id: p for p in (profiles or [])}
+
+    async def get(self, profile_id):
+        return self._profiles.get(profile_id)
+
+    async def list_enabled(self):
+        return [p for p in self._profiles.values() if p.enabled]
+
+    async def list_by_model(self, base_model_id):
+        return [p for p in self._profiles.values() if p.base_model_id == base_model_id]
+
+    async def list_all(self):
+        return list(self._profiles.values())
+
 
 def _make_app(model_state=None, worker_result=None) -> FastAPI:
+    from ocabra.api._deps_auth import UserContext, get_current_user
     from ocabra.api.ollama import router as ollama_router
+    from ocabra.api.ollama._shared import get_ollama_user
+    from ocabra.api.openai._deps import get_openai_user
     from ocabra.backends.base import BackendCapabilities
     from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
+    _admin_ctx = UserContext(
+        user_id=None, username=None, role="system_admin",
+        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+    )
+
     app = FastAPI()
     app.include_router(ollama_router)
+
+    # Override all auth callables so no real DB/Redis is needed
+    async def _fake_user():
+        return _admin_ctx
+    app.dependency_overrides[get_current_user] = _fake_user
+    app.dependency_overrides[get_ollama_user] = _fake_user
+    app.dependency_overrides[get_openai_user] = _fake_user
 
     if model_state is None:
         model_state = ModelState(
@@ -31,6 +83,7 @@ def _make_app(model_state=None, worker_result=None) -> FastAPI:
     mm.list_states = AsyncMock(return_value=[model_state])
     mm.load = AsyncMock(return_value=model_state)
     mm.delete_model = AsyncMock(return_value=None)
+    mm.touch_last_request_at = AsyncMock()
 
     wp = MagicMock()
     wp.forward_request = AsyncMock(return_value=worker_result or {})
@@ -38,6 +91,10 @@ def _make_app(model_state=None, worker_result=None) -> FastAPI:
 
     app.state.model_manager = mm
     app.state.worker_pool = wp
+
+    # Profile registry — empty by default; Ollama endpoints fall back to
+    # legacy name resolution when no profile matches.
+    app.state.profile_registry = FakeProfileRegistry()
     return app
 
 
@@ -92,7 +149,7 @@ def test_name_resolution_delegates_to_openai_resolution_when_no_native_ollama_ma
 
     delegated_state = object()
 
-    async def fake_openai_resolve(model_manager, requested_name):
+    async def fake_openai_resolve(model_manager, requested_name, user=None):
         assert requested_name == "some-alias"
         return "vllm/delegated-model", delegated_state
 

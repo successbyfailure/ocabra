@@ -7,11 +7,12 @@ import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
 import { ModelCard } from "@/components/models/ModelCard"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
+import { ProfileModal } from "@/components/models/ProfileModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import { getModelContextSummary } from "@/lib/modelContext"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
-import type { BackendExtraConfig, BackendType, LoadPolicy, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
+import type { BackendExtraConfig, BackendType, LoadPolicy, ModelProfile, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
 
 function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
   if (model.capabilities.imageGeneration) return "image"
@@ -37,6 +38,11 @@ export function Models() {
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
   const [storage, setStorage] = useState<ModelsStorageStats | null>(null)
+
+  // Profile modal state
+  const [profileModalModel, setProfileModalModel] = useState<ModelState | null>(null)
+  const [profileModalProfile, setProfileModalProfile] = useState<ModelProfile | null>(null)
+  const [profileModalOpen, setProfileModalOpen] = useState(false)
 
   useWebSocket()
 
@@ -212,6 +218,24 @@ export function Models() {
       })
     })
   }
+
+  const openProfileModal = (model: ModelState, profile: ModelProfile | null) => {
+    setProfileModalModel(model)
+    setProfileModalProfile(profile)
+    setProfileModalOpen(true)
+  }
+
+  const handleToggleProfileEnabled = async (profile: ModelProfile) => {
+    try {
+      await api.profiles.update(profile.profileId, { enabled: !profile.enabled })
+      toast.success(profile.enabled ? "Perfil desactivado" : "Perfil activado")
+      await refresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error al cambiar estado del perfil")
+    }
+  }
+
+  const deleteModelProfiles = deleteModel?.profiles ?? []
 
   return (
     <div className="space-y-5">
@@ -411,6 +435,7 @@ export function Models() {
                       Status {sortKey === "status" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
                   </th>
+                  <th className="px-3 py-2 text-center">Perfiles</th>
                   <th className="px-3 py-2">Acciones</th>
                 </tr>
               </thead>
@@ -426,6 +451,8 @@ export function Models() {
                     onConfigure={(item) => setConfigModel(item)}
                     onDelete={(item) => setDeleteModel(item)}
                     onCompile={(item) => setCompileModel(item)}
+                    onEditProfile={openProfileModal}
+                    onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
                   />
                 ))}
               </tbody>
@@ -462,6 +489,24 @@ export function Models() {
         onLoadNow={(modelId) => void runAction(modelId, () => loadModel(modelId))}
       />
 
+      {/* Profile create/edit modal */}
+      {profileModalModel && (
+        <ProfileModal
+          open={profileModalOpen}
+          onOpenChange={(next) => {
+            setProfileModalOpen(next)
+            if (!next) {
+              setProfileModalModel(null)
+              setProfileModalProfile(null)
+            }
+          }}
+          model={profileModalModel}
+          profile={profileModalProfile}
+          onSaved={() => void refresh()}
+        />
+      )}
+
+      {/* Delete model dialog with cascade warning */}
       <Dialog.Root open={Boolean(deleteModel)} onOpenChange={(next) => !next && setDeleteModel(null)}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
@@ -470,6 +515,16 @@ export function Models() {
             <Dialog.Description className="mt-1 text-sm text-muted-foreground">
               Esta accion eliminara la configuracion y los archivos del modelo.
             </Dialog.Description>
+            {deleteModelProfiles.length > 0 && (
+              <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+                <p className="font-medium text-amber-200">
+                  Se eliminaran {deleteModelProfiles.length} perfil{deleteModelProfiles.length !== 1 ? "es" : ""}:
+                </p>
+                <p className="mt-1 text-xs text-amber-300/80">
+                  {deleteModelProfiles.map((p) => p.profileId).join(", ")}
+                </p>
+              </div>
+            )}
             <div className="mt-4 flex justify-end gap-2">
               <Dialog.Close className="rounded-md border border-border px-3 py-2 text-sm hover:bg-muted">
                 Cancelar

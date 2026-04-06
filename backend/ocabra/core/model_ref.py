@@ -10,6 +10,7 @@ KNOWN_BACKEND_TYPES = {
     "diffusers",
     "whisper",
     "tts",
+    "chatterbox",
     "voxtral",
     "ollama",
 }

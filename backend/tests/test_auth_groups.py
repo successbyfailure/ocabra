@@ -19,7 +19,6 @@ from ocabra.api._deps_auth import (
     get_current_user,
 )
 
-
 # ── _fetch_accessible_models ──────────────────────────────────────────────────
 
 
@@ -129,7 +128,7 @@ async def test_anonymous_context_filters_out_none_model_ids():
 
 def test_anonymous_access_allowed_when_require_key_false():
     """When require_api_key is False, unauthenticated requests to /v1/ are allowed."""
-    from fastapi import FastAPI, Depends
+    from fastapi import Depends, FastAPI
     from fastapi.testclient import TestClient
 
     app = FastAPI()
@@ -147,7 +146,7 @@ def test_anonymous_access_allowed_when_require_key_false():
     mock_session.execute.return_value = rows_result
 
     with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session),
+        patch("ocabra.database.AsyncSessionLocal", return_value=mock_session),
         patch("ocabra.config.settings") as mock_settings,
     ):
         mock_settings.require_api_key_openai = False
@@ -181,7 +180,7 @@ async def test_anonymous_only_sees_default_group_models():
 
 def test_anonymous_blocked_when_require_key_true():
     """When require_api_key_openai is True, unauthenticated /v1/ requests return 401."""
-    from fastapi import FastAPI, Depends
+    from fastapi import Depends, FastAPI
     from fastapi.testclient import TestClient
 
     app = FastAPI()
@@ -195,7 +194,7 @@ def test_anonymous_blocked_when_require_key_true():
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     with (
-        patch("ocabra.api._deps_auth.AsyncSessionLocal", return_value=mock_session),
+        patch("ocabra.database.AsyncSessionLocal", return_value=mock_session),
         patch("ocabra.config.settings") as mock_settings,
     ):
         mock_settings.require_api_key_openai = True

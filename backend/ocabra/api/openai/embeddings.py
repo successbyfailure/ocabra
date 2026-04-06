@@ -1,6 +1,7 @@
 """
 POST /v1/embeddings — text embeddings endpoint.
 """
+
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -12,10 +13,13 @@ from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
     check_capability,
-    ensure_loaded,
+    compute_worker_key,
     get_model_manager,
     get_openai_user,
+    get_profile_registry,
+    merge_profile_defaults,
     raise_upstream_http_error,
+    resolve_profile,
     to_backend_body,
 )
 
@@ -35,12 +39,25 @@ async def embeddings(
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
-    state = await ensure_loaded(model_manager, model_id, user=user)
+    profile_registry = get_profile_registry(request)
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
     check_capability(state, "embeddings", "embeddings")
-    model_id = state.model_id
+
+    merged_body = merge_profile_defaults(profile, body)
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
 
     worker_pool = request.app.state.worker_pool
     try:
-        return await worker_pool.forward_request(model_id, "/v1/embeddings", to_backend_body(state, body))
+        return await worker_pool.forward_request(
+            worker_key,
+            "/v1/embeddings",
+            to_backend_body(state, merged_body),
+        )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)

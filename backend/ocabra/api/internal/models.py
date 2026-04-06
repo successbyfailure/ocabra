@@ -79,7 +79,9 @@ async def get_models_storage(
     try:
         stats = await asyncio.to_thread(os.statvfs, models_dir)
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to read models storage stats: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Unable to read models storage stats: {exc}"
+        ) from exc
 
     total_bytes = int(stats.f_frsize * stats.f_blocks)
     free_bytes = int(stats.f_frsize * stats.f_bavail)
@@ -161,6 +163,7 @@ async def load_model(
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     from ocabra.core.model_manager import ModelStatus
     from ocabra.core.scheduler import InsufficientVRAMError
+
     if state.status == ModelStatus.LOADED:
         raise HTTPException(status_code=409, detail="Model is already loaded")
     try:
@@ -242,7 +245,9 @@ async def estimate_model_memory(
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
-    extra_config = body.extra_config if isinstance(body.extra_config, dict) else state.extra_config or {}
+    extra_config = (
+        body.extra_config if isinstance(body.extra_config, dict) else state.extra_config or {}
+    )
     return await _build_model_memory_estimate(
         request=request,
         state=state,
@@ -302,7 +307,9 @@ async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
             parts = model_id.split("/", 1)
             ollama_name = parts[1] if len(parts) == 2 else model_id
             proc = await asyncio.create_subprocess_exec(
-                "ollama", "rm", ollama_name,
+                "ollama",
+                "rm",
+                ollama_name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -371,15 +378,16 @@ async def _resolve_disk_size_bytes(
     if backend_type == "ollama":
         return ollama_sizes.get(backend_model_id.strip().lower())
     if backend_type == "tensorrt_llm":
-        path = _resolve_extra_config_path(state.extra_config, "engine_dir") or _resolve_tensorrt_engine_path(backend_model_id)
+        path = _resolve_extra_config_path(
+            state.extra_config, "engine_dir"
+        ) or _resolve_tensorrt_engine_path(backend_model_id)
         if path is None or not path.exists():
             return None
         return await asyncio.to_thread(_compute_path_size_bytes, path)
 
-    path = (
-        _resolve_extra_config_path(state.extra_config, "model_path", "base_model_id")
-        or _resolve_local_model_path(backend_model_id)
-    )
+    path = _resolve_extra_config_path(
+        state.extra_config, "model_path", "base_model_id"
+    ) or _resolve_local_model_path(backend_model_id)
     if path is None or not path.exists():
         return None
     return await asyncio.to_thread(_compute_path_size_bytes, path)
@@ -461,7 +469,8 @@ async def _build_model_memory_estimate(
                 {
                     "source": "runtime_probe",
                     "model_loading_memory_mb": profile.get("model_loading_memory_mb"),
-                    "estimated_kv_cache_mb": profile.get("available_kv_cache_mb") or estimate["estimated_kv_cache_mb"],
+                    "estimated_kv_cache_mb": profile.get("available_kv_cache_mb")
+                    or estimate["estimated_kv_cache_mb"],
                     "estimated_max_context_length": profile.get("estimated_max_model_len")
                     or profile.get("gpu_kv_cache_tokens"),
                     "maximum_concurrency": profile.get("maximum_concurrency"),
@@ -483,16 +492,18 @@ async def _build_model_memory_estimate(
         return estimate
 
     if state.backend_type == "tensorrt_llm":
-        engine_path = _resolve_extra_config_path(extra_config, "engine_dir") or _resolve_tensorrt_engine_path(
-            state.backend_model_id
-        )
+        engine_path = _resolve_extra_config_path(
+            extra_config, "engine_dir"
+        ) or _resolve_tensorrt_engine_path(state.backend_model_id)
         tp_size = _resolve_tensor_parallel_size(state, extra_config)
         estimate.update(
             {
                 "estimated_engine_mb_per_gpu": heuristic_mb or None,
                 "engine_present": bool(engine_path and engine_path.exists()),
                 "fits_current_gpu": (
-                    heuristic_mb <= total_vram_mb if total_vram_mb is not None and heuristic_mb > 0 else None
+                    heuristic_mb <= total_vram_mb
+                    if total_vram_mb is not None and heuristic_mb > 0
+                    else None
                 ),
                 "tensor_parallel_size": tp_size,
             }
@@ -509,9 +520,13 @@ async def _build_model_memory_estimate(
         {
             "estimated_weights_mb": heuristic_mb or None,
             "fits_current_gpu": (
-                heuristic_mb <= total_vram_mb if total_vram_mb is not None and heuristic_mb > 0 else None
+                heuristic_mb <= total_vram_mb
+                if total_vram_mb is not None and heuristic_mb > 0
+                else None
             ),
-            "notes": ["Estimación heurística basada en el tamaño de los artefactos locales del modelo."],
+            "notes": [
+                "Estimación heurística basada en el tamaño de los artefactos locales del modelo."
+            ],
         }
     )
     return estimate
@@ -525,6 +540,17 @@ async def _serialize_model_state(
     item = state.to_dict()
     item["disk_size_bytes"] = await _resolve_disk_size_bytes(state, ollama_sizes)
     item["capabilities"] = await _resolve_capabilities_payload(request, state, item["capabilities"])
+
+    # Attach profiles if the registry is available
+    profile_registry = getattr(request.app.state, "profile_registry", None)
+    if profile_registry is not None:
+        from ocabra.schemas.profiles import ProfileOut
+
+        profiles = await profile_registry.list_by_model(state.model_id)
+        item["profiles"] = [ProfileOut.model_validate(p).model_dump(mode="json") for p in profiles]
+    else:
+        item["profiles"] = []
+
     return item
 
 
@@ -533,24 +559,27 @@ async def _resolve_capabilities_payload(
     state,
     current_payload: dict,
 ) -> dict:
-    has_meaningful_caps = any(
-        bool(current_payload.get(key))
-        for key in (
-            "chat",
-            "completion",
-            "tools",
-            "vision",
-            "embeddings",
-            "pooling",
-            "rerank",
-            "classification",
-            "score",
-            "reasoning",
-            "streaming",
-            "audio_transcription",
-            "tts",
+    has_meaningful_caps = (
+        any(
+            bool(current_payload.get(key))
+            for key in (
+                "chat",
+                "completion",
+                "tools",
+                "vision",
+                "embeddings",
+                "pooling",
+                "rerank",
+                "classification",
+                "score",
+                "reasoning",
+                "streaming",
+                "audio_transcription",
+                "tts",
+            )
         )
-    ) or int(current_payload.get("context_length") or 0) > 0
+        or int(current_payload.get("context_length") or 0) > 0
+    )
 
     if has_meaningful_caps and not (
         state.backend_type == "tensorrt_llm"
@@ -629,9 +658,9 @@ def _resolve_tensor_parallel_size(state, extra_config: dict[str, Any]) -> int | 
             if isinstance(value, int) and value > 0:
                 return value
     if state.backend_type == "tensorrt_llm":
-        engine_path = _resolve_extra_config_path(extra_config, "engine_dir") or _resolve_tensorrt_engine_path(
-            state.backend_model_id
-        )
+        engine_path = _resolve_extra_config_path(
+            extra_config, "engine_dir"
+        ) or _resolve_tensorrt_engine_path(state.backend_model_id)
         if engine_path is not None and engine_path.exists():
             scan_dir = engine_path / "engine" if (engine_path / "engine").is_dir() else engine_path
             try:
@@ -647,8 +676,7 @@ def _resolve_tensor_parallel_size(state, extra_config: dict[str, Any]) -> int | 
 
 def _to_camel_key(value: str) -> str:
     return "".join(
-        part.capitalize() if index else part
-        for index, part in enumerate(value.split("_"))
+        part.capitalize() if index else part for index, part in enumerate(value.split("_"))
     )
 
 
@@ -668,10 +696,9 @@ def _resolve_context_length_fallback(state) -> int:
                 return value
 
     backend_model_id = getattr(state, "backend_model_id", "")
-    model_path = (
-        _resolve_extra_config_path(extra_config, "model_path", "base_model_id")
-        or _resolve_local_model_path(backend_model_id)
-    )
+    model_path = _resolve_extra_config_path(
+        extra_config, "model_path", "base_model_id"
+    ) or _resolve_local_model_path(backend_model_id)
     if model_path is None:
         return 0
 
@@ -735,8 +762,10 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
         candidate_stems.add(variant_stem)
         candidate_stems.add(Path(variant_stem).stem)
     gguf_candidates = [
-        path for path in base.rglob("*.gguf")
-        if path.name == leaf or any(path.stem == stem or path.stem.endswith(stem) for stem in candidate_stems)
+        path
+        for path in base.rglob("*.gguf")
+        if path.name == leaf
+        or any(path.stem == stem or path.stem.endswith(stem) for stem in candidate_stems)
     ]
     if gguf_candidates:
         return max(gguf_candidates, key=lambda path: path.stat().st_mtime)
@@ -744,7 +773,9 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
     # Optional HF cache layout fallback.
     hf_cache_dir = (settings.hf_cache_dir or "").strip()
     if hf_cache_dir:
-        cache_root = Path(hf_cache_dir) / "hub" / f"models--{model_id.split('::', 1)[0].replace('/', '--')}"
+        cache_root = (
+            Path(hf_cache_dir) / "hub" / f"models--{model_id.split('::', 1)[0].replace('/', '--')}"
+        )
         snapshots_dir = cache_root / "snapshots"
         if snapshots_dir.exists() and snapshots_dir.is_dir():
             refs_main = cache_root / "refs" / "main"

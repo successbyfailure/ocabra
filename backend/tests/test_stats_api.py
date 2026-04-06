@@ -1,7 +1,10 @@
+import uuid
 from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from ocabra.api._deps_auth import UserContext, get_current_user
 
 
 def _make_app() -> FastAPI:
@@ -9,6 +12,19 @@ def _make_app() -> FastAPI:
 
     app = FastAPI()
     app.include_router(stats_router, prefix="/ocabra")
+
+    # Override auth: inject a model_manager-level user so require_role passes
+    async def _fake_user():
+        return UserContext(
+            user_id=str(uuid.uuid4()),
+            username="test-model-manager",
+            role="model_manager",
+            group_ids=[],
+            accessible_model_ids=set(),
+            is_anonymous=False,
+        )
+    app.dependency_overrides[get_current_user] = _fake_user
+
     return app
 
 

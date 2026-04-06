@@ -28,9 +28,7 @@ else:
 
 structlog.configure(
     processors=_processors,
-    wrapper_class=structlog.make_filtering_bound_logger(
-        logging.getLevelName(settings.log_level)
-    ),
+    wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelName(settings.log_level)),
     logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
     cache_logger_on_first_use=True,
 )
@@ -160,7 +158,9 @@ def _find_tokenizer_for_engine(engine_name: str, models_root) -> str | None:
         return str(exact)
 
     # Strip common suffixes: -fp16, -bf16, -int8, -fp8, -test, -v2, -v3 etc.
-    stripped = re.sub(r"[-_](fp16|bf16|int8|fp8|int4|test|v\d+)(\b.*)?$", "", engine_name, flags=re.IGNORECASE)
+    stripped = re.sub(
+        r"[-_](fp16|bf16|int8|fp8|int4|test|v\d+)(\b.*)?$", "", engine_name, flags=re.IGNORECASE
+    )
     if stripped != engine_name:
         candidate = hf_root / stripped
         if candidate.exists() and has_tokenizer(candidate):
@@ -212,6 +212,7 @@ async def _scan_and_register_trtllm_engines(model_manager) -> None:
 
         try:
             import json
+
             cfg = json.loads((engine_subdir / "config.json").read_text())
             build_cfg = cfg.get("build_config", {})
             tokenizer_path = _find_tokenizer_for_engine(engine_name, engines_root.parent)
@@ -244,12 +245,14 @@ async def lifespan(app: FastAPI):
     logger.info("starting_ocabra", version=settings.app_version)
 
     from ocabra.redis_client import init_redis
+
     await init_redis()
     logger.info("redis_connected")
 
     # Stream 1-A: GPU Manager + Scheduler
     from ocabra.core.gpu_manager import GPUManager
     from ocabra.core.scheduler import GPUScheduler
+
     gpu_manager = GPUManager()
     await gpu_manager.start()
     gpu_scheduler = GPUScheduler(gpu_manager)
@@ -262,6 +265,7 @@ async def lifespan(app: FastAPI):
     from ocabra.core.model_manager import ModelManager
     from ocabra.backends.acestep_backend import AceStepBackend
     from ocabra.backends.bitnet_backend import BitnetBackend
+    from ocabra.backends.chatterbox_backend import ChatterboxBackend
     from ocabra.backends.diffusers_backend import DiffusersBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.ollama_backend import OllamaBackend
@@ -271,6 +275,7 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.vllm_backend import VLLMBackend
     from ocabra.backends.voxtral_backend import VoxtralBackend
     from ocabra.backends.whisper_backend import WhisperBackend
+
     worker_pool = WorkerPool()
     worker_pool.register_backend("acestep", AceStepBackend())
     worker_pool.register_backend("diffusers", DiffusersBackend())
@@ -280,6 +285,7 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("sglang", SGLangBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
     worker_pool.register_backend("tts", TTSBackend())
+    worker_pool.register_backend("chatterbox", ChatterboxBackend())
     worker_pool.register_backend("voxtral", VoxtralBackend())
     worker_pool.register_backend("vllm", VLLMBackend())
     tensorrt_llm_backend = TensorRTLLMBackend()
@@ -311,6 +317,7 @@ async def lifespan(app: FastAPI):
 
     await model_manager.start()
     from ocabra.registry.ollama_registry import OllamaRegistry
+
     try:
         installed_ollama = await OllamaRegistry().list_installed()
         loaded_ollama = await OllamaRegistry().list_loaded()
@@ -322,6 +329,7 @@ async def lifespan(app: FastAPI):
     logger.info("model_manager_ready")
 
     from ocabra.core.service_manager import ServiceManager
+
     service_manager = ServiceManager()
     await service_manager.start()
     app.state.service_manager = service_manager
@@ -330,6 +338,7 @@ async def lifespan(app: FastAPI):
     logger.info("service_manager_ready")
 
     from ocabra.core.trtllm_compile_manager import TrtllmCompileManager
+
     trtllm_compile_manager = TrtllmCompileManager(model_manager=model_manager)
     await trtllm_compile_manager.start()
     app.state.trtllm_compile_manager = trtllm_compile_manager
@@ -362,9 +371,20 @@ async def lifespan(app: FastAPI):
         name="service-health-loop",
     )
 
+    # Profile Registry
+    from ocabra.core.profile_registry import ProfileRegistry
+
+    profile_registry = ProfileRegistry()
+    from ocabra.database import AsyncSessionLocal as _ASL
+
+    async with _ASL() as _session:
+        await profile_registry.load_all(_session)
+    app.state.profile_registry = profile_registry
+    logger.info("profile_registry_ready")
+
     # Auth: seed first admin if the users table is empty
     from ocabra.core.auth_manager import seed_first_admin
-    from ocabra.database import AsyncSessionLocal as _ASL
+
     async with _ASL() as _session:
         await seed_first_admin(_session)
     logger.info("auth_seed_done")
@@ -432,6 +452,7 @@ async def lifespan(app: FastAPI):
         await langfuse_shutdown()
 
     from ocabra.redis_client import close_redis
+
     await close_redis()
 
     logger.info("ocabra_stopped")
@@ -453,6 +474,7 @@ app.add_middleware(
 
 # Stream 3-A: Stats middleware for /v1/* endpoints
 from ocabra.stats.collector import StatsMiddleware  # noqa: E402
+
 app.add_middleware(StatsMiddleware)
 
 # ── ROUTERS ──────────────────────────────────────────────────
@@ -463,11 +485,13 @@ app.include_router(health_router)
 
 # Stream 1-A: GPU Manager
 from ocabra.api.internal.gpus import router as gpus_router
+
 app.include_router(gpus_router, prefix="/ocabra")
 
 # Stream 1-B: Model Manager + WebSocket
 from ocabra.api.internal.models import router as models_router
 from ocabra.api.internal.ws import router as ws_router
+
 app.include_router(models_router, prefix="/ocabra")
 app.include_router(ws_router, prefix="/ocabra")
 
@@ -484,31 +508,42 @@ app.include_router(host_router, prefix="/ocabra")
 
 # Stream 3-A: OpenAI API
 from ocabra.api.openai import router as openai_router  # noqa: E402
+
 app.include_router(openai_router, prefix="/v1")
 
 # Stream 3-B: Ollama API
 from ocabra.api.ollama import router as ollama_router  # noqa: E402
+
 app.include_router(ollama_router)
 
 # Stream 5: Metrics, Config, Stats
 from ocabra.api.metrics import router as metrics_router  # noqa: E402
 from ocabra.api.internal.config import router as config_router  # noqa: E402
 from ocabra.api.internal.stats import router as stats_router  # noqa: E402
+
 app.include_router(metrics_router)
 app.include_router(config_router, prefix="/ocabra")
 app.include_router(stats_router, prefix="/ocabra")
 
 # C-7: TensorRT-LLM compile
 from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
+
 app.include_router(trtllm_router, prefix="/ocabra")
 
 # Auth foundation
 from ocabra.api.internal.auth import router as auth_router  # noqa: E402
+
 app.include_router(auth_router, prefix="/ocabra")
 
 # Auth: user and group management
 from ocabra.api.internal.users import router as users_router  # noqa: E402
 from ocabra.api.internal.groups import router as groups_router  # noqa: E402
+
 app.include_router(users_router, prefix="/ocabra")
 app.include_router(groups_router, prefix="/ocabra")
+
+# Profiles
+from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
+
+app.include_router(profiles_router, prefix="/ocabra")
 # ─────────────────────────────────────────────────────────────

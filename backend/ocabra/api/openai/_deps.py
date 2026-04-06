@@ -1,13 +1,18 @@
 """
 Shared dependencies for OpenAI API endpoints.
+
+Provides model/profile resolution, capability checks, and request forwarding
+helpers used by all ``/v1/*`` endpoint modules.
 """
+
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import inspect
+import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -17,6 +22,8 @@ from ocabra.api._deps_auth import UserContext, get_current_user
 
 if TYPE_CHECKING:
     from ocabra.core.model_manager import ModelManager, ModelState
+    from ocabra.core.profile_registry import ProfileRegistry
+    from ocabra.db.model_config import ModelProfile
 
 logger = structlog.get_logger(__name__)
 
@@ -116,6 +123,330 @@ async def resolve_model(
             return resolved_id, None
 
     return resolved_id, resolved_state
+
+
+# ── Worker key helpers ───────────────────────────────────────────
+
+
+def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:
+    """Derive a worker key from a base model id and optional load overrides.
+
+    When *load_overrides* is empty or ``None`` the key equals *base_model_id*
+    (shared worker). Otherwise a short hash is appended so that different
+    override combinations get separate workers.
+    """
+    if not load_overrides:
+        return base_model_id
+    # Deterministic JSON → hash
+    canonical = json.dumps(load_overrides, sort_keys=True, separators=(",", ":"))
+    short_hash = hashlib.sha256(canonical.encode()).hexdigest()[:12]
+    return f"{base_model_id}::{short_hash}"
+
+
+# ── Profile resolution ───────────────────────────────────────────
+
+
+def get_profile_registry(request: Request) -> ProfileRegistry:
+    """Return the :class:`ProfileRegistry` stored on ``app.state``."""
+    registry = getattr(request.app.state, "profile_registry", None)
+    if registry is None:
+        raise _openai_error(
+            "Profile registry not available.",
+            "server_error",
+            code="service_unavailable",
+            status_code=503,
+        )
+    return registry
+
+
+async def resolve_profile(
+    profile_id: str,
+    model_manager: ModelManager,
+    profile_registry: ProfileRegistry,
+    *,
+    user: UserContext | None = None,
+) -> tuple[ModelProfile, ModelState]:
+    """Resolve a *profile_id* to its ``(ModelProfile, ModelState)`` pair.
+
+    Resolution order:
+
+    1. Exact match in :class:`ProfileRegistry` by *profile_id*. The profile
+       must be enabled.
+    2. **Legacy fallback** (when ``settings.legacy_model_id_fallback`` is
+       ``True``): if *profile_id* contains ``/`` it looks like a canonical
+       ``model_id``; find the model and its default profile, log a
+       deprecation warning.
+    3. If nothing matches, raise HTTP 404.
+
+    Access control: when *user* is provided and the resolved profile id is
+    not in the user's ``accessible_model_ids`` set the profile is treated as
+    not found (404) to avoid leaking existence.
+    """
+    from ocabra.config import settings
+
+    requested = str(profile_id or "").strip()
+    if not requested:
+        raise _openai_error(
+            "The 'model' field is required.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+
+    # 1. Direct profile lookup
+    profile = await profile_registry.get(requested)
+    if profile is not None:
+        if not profile.enabled:
+            raise _openai_error(
+                f"The model '{requested}' is not available.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                status_code=404,
+            )
+        # Access control on profile_id
+        if user is not None and not user.is_admin and requested not in user.accessible_model_ids:
+            raise _openai_error(
+                f"The model '{requested}' does not exist.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                status_code=404,
+            )
+        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        state = await _ensure_worker_loaded(
+            model_manager,
+            profile.base_model_id,
+            worker_key,
+            profile.load_overrides,
+        )
+        return profile, state
+
+    # 2. Legacy fallback: canonical model_id with '/'
+    if "/" in requested and settings.legacy_model_id_fallback:
+        logger.warning(
+            "legacy_model_id_fallback",
+            requested=requested,
+            hint="Clients should migrate to profile_id. "
+            "Set LEGACY_MODEL_ID_FALLBACK=false to disable.",
+        )
+        # Find the model
+        model_state = await model_manager.get_state(requested)
+        if model_state is not None:
+            # Access control on model_id
+            if (
+                user is not None
+                and not user.is_admin
+                and requested not in user.accessible_model_ids
+            ):
+                raise _openai_error(
+                    f"The model '{requested}' does not exist.",
+                    "invalid_request_error",
+                    param="model",
+                    code="model_not_found",
+                    status_code=404,
+                )
+            # Find default profile for this model
+            profiles = await profile_registry.list_by_model(requested)
+            default_profile = next((p for p in profiles if p.is_default and p.enabled), None)
+            if default_profile is None:
+                # Try any enabled profile
+                default_profile = next((p for p in profiles if p.enabled), None)
+            if default_profile is not None:
+                worker_key = compute_worker_key(
+                    default_profile.base_model_id,
+                    default_profile.load_overrides,
+                )
+                state = await _ensure_worker_loaded(
+                    model_manager,
+                    default_profile.base_model_id,
+                    worker_key,
+                    default_profile.load_overrides,
+                )
+                return default_profile, state
+
+    # 3. Nothing matched → 404
+    raise _openai_error(
+        f"The model '{requested}' does not exist.",
+        "invalid_request_error",
+        param="model",
+        code="model_not_found",
+        status_code=404,
+    )
+
+
+async def _ensure_worker_loaded(
+    model_manager: ModelManager,
+    base_model_id: str,
+    worker_key: str,
+    load_overrides: dict | None,
+) -> ModelState:
+    """Ensure the worker identified by *worker_key* is loaded.
+
+    When *worker_key* differs from *base_model_id* (non-empty overrides),
+    we check if a virtual model entry already exists in ModelManager; if not,
+    we create one by cloning the base model's state and applying
+    ``load_overrides`` as extra config.
+
+    Returns the :class:`ModelState` of the loaded worker.
+    """
+    # If worker_key == base_model_id, just use the normal path
+    if worker_key == base_model_id:
+        state = await model_manager.get_state(base_model_id)
+        if state is None:
+            raise _openai_error(
+                f"Base model '{base_model_id}' is not configured.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                status_code=404,
+            )
+        # Delegate to the existing ensure_loaded for actual loading
+        return await _do_ensure_loaded(model_manager, base_model_id)
+
+    # Dedicated worker: check if a state already exists for this key
+    state = await model_manager.get_state(worker_key)
+    if state is not None:
+        return await _do_ensure_loaded(model_manager, worker_key)
+
+    # Clone from base model
+    base_state = await model_manager.get_state(base_model_id)
+    if base_state is None:
+        raise _openai_error(
+            f"Base model '{base_model_id}' is not configured.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+
+    merged_extra = {**base_state.extra_config, **(load_overrides or {})}
+    try:
+        await model_manager.add_model(
+            model_id=worker_key,
+            backend_type=base_state.backend_type,
+            display_name=f"{base_state.display_name} (override)",
+            load_policy=base_state.load_policy.value,
+            auto_reload=base_state.auto_reload,
+            preferred_gpu=base_state.preferred_gpu,
+            extra_config=merged_extra,
+            create_diarized_variant=False,
+        )
+    except Exception:
+        # May already exist from concurrent request
+        pass
+
+    return await _do_ensure_loaded(model_manager, worker_key)
+
+
+async def _do_ensure_loaded(
+    model_manager: ModelManager,
+    model_id: str,
+) -> ModelState:
+    """Core loading logic extracted from ``ensure_loaded``.
+
+    Triggers on-demand loading, waits for LOADING state, and touches
+    ``last_request_at``.
+    """
+    from ocabra.core.model_manager import ModelStatus
+
+    state = await model_manager.get_state(model_id)
+    if state is None:
+        raise _openai_error(
+            f"The model '{model_id}' does not exist.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+
+    async def _touch(resolved_id: str, request_at: datetime) -> None:
+        state.last_request_at = request_at
+        touch = getattr(model_manager, "touch_last_request_at", None)
+        if touch is None:
+            return
+        result = touch(resolved_id, request_at)
+        if inspect.isawaitable(result):
+            await result
+
+    if state.status == ModelStatus.LOADED:
+        await _touch(model_id, datetime.now(UTC))
+        return state
+
+    if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED, ModelStatus.ERROR):
+        try:
+            await model_manager.load(model_id)
+        except Exception as exc:
+            from ocabra.core.scheduler import InsufficientVRAMError
+
+            if isinstance(exc, InsufficientVRAMError):
+                raise _openai_error(
+                    str(exc),
+                    "invalid_request_error",
+                    code="insufficient_vram",
+                    status_code=409,
+                ) from exc
+            raise _openai_error(
+                f"Failed to load model '{model_id}': {exc}",
+                "server_error",
+                code="model_load_failed",
+                status_code=503,
+            ) from exc
+
+        state = await model_manager.get_state(model_id)
+        if state and state.status == ModelStatus.LOADED:
+            await _touch(model_id, datetime.now(UTC))
+            return state
+
+    if state and state.status == ModelStatus.LOADING:
+        for _ in range(_ensure_load_timeout_s()):
+            await asyncio.sleep(1)
+            state = await model_manager.get_state(model_id)
+            if state and state.status == ModelStatus.LOADED:
+                await _touch(model_id, datetime.now(UTC))
+                return state
+        raise _openai_error(
+            f"Model '{model_id}' did not finish loading in time.",
+            "server_error",
+            code="model_load_timeout",
+            status_code=503,
+        )
+
+    detail_suffix = ""
+    if state and state.error_message:
+        detail_suffix = f" detail: {state.error_message}"
+
+    raise _openai_error(
+        (
+            f"Model '{model_id}' is not available "
+            f"(status: {state.status.value if state else 'unknown'}).{detail_suffix}"
+        ),
+        "server_error",
+        code="model_unavailable",
+        status_code=503,
+    )
+
+
+def merge_profile_defaults(profile: ModelProfile, body: dict) -> dict:
+    """Merge a profile's ``request_defaults`` and ``assets`` into a request body.
+
+    The profile's ``request_defaults`` serve as a base; the client body
+    overrides anything explicitly set. Asset injection (e.g. ``voice_ref``)
+    is applied *after* the merge and cannot be overridden by the client.
+    """
+    defaults = profile.request_defaults or {}
+    merged: dict[str, Any] = {**defaults, **body}
+
+    # Asset injection — controlled paths that clients cannot override
+    assets = profile.assets or {}
+    voice_ref_info = assets.get("voice_ref")
+    if isinstance(voice_ref_info, dict) and voice_ref_info.get("path"):
+        merged["voice_ref"] = voice_ref_info["path"]
+    elif isinstance(voice_ref_info, str) and voice_ref_info:
+        merged["voice_ref"] = voice_ref_info
+
+    return merged
 
 
 async def ensure_loaded(

@@ -2,9 +2,9 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ocabra.database import Base
 
@@ -12,9 +12,7 @@ from ocabra.database import Base
 class ModelConfig(Base):
     __tablename__ = "model_configs"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     model_id: Mapped[str] = mapped_column(String(512), unique=True, nullable=False, index=True)
     display_name: Mapped[str | None] = mapped_column(String(512))
     backend_type: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -22,20 +20,55 @@ class ModelConfig(Base):
     auto_reload: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     preferred_gpu: Mapped[int | None] = mapped_column(Integer)
     extra_config: Mapped[dict | None] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    profiles: Mapped[list["ModelProfile"]] = relationship(
+        "ModelProfile",
+        back_populates="base_model",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ModelProfile(Base):
+    """A public-facing profile derived from a base model.
+
+    Each model can have multiple profiles with different load overrides,
+    request defaults, and attached assets (e.g. voice reference audio).
+    """
+
+    __tablename__ = "model_profiles"
+
+    profile_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    base_model_id: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey("model_configs.model_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    display_name: Mapped[str | None] = mapped_column(String(512))
+    description: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="llm")
+    load_overrides: Mapped[dict | None] = mapped_column(JSONB)
+    request_defaults: Mapped[dict | None] = mapped_column(JSONB)
+    assets: Mapped[dict | None] = mapped_column(JSONB)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    base_model: Mapped["ModelConfig"] = relationship("ModelConfig", back_populates="profiles")
 
 
 class EvictionSchedule(Base):
     __tablename__ = "eviction_schedules"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # NULL = schedule global (aplica a todos los modelos)
     model_id: Mapped[str | None] = mapped_column(String(512), index=True)
     cron_expr: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -43,9 +76,7 @@ class EvictionSchedule(Base):
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     label: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 GLOBAL_SCHEDULE_START_ACTION = "evict_all"
@@ -94,7 +125,11 @@ def global_schedule_payload_to_rows(
     normalized_days = _normalize_days(days)
     start_total_minutes = start_hour * 60 + start_minute
     end_total_minutes = end_hour * 60 + end_minute
-    end_days = normalized_days if end_total_minutes > start_total_minutes else _shift_days(normalized_days, 1)
+    end_days = (
+        normalized_days
+        if end_total_minutes > start_total_minutes
+        else _shift_days(normalized_days, 1)
+    )
 
     label = str(schedule_id).strip()
     if not label:

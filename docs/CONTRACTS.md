@@ -524,7 +524,170 @@ server_config (
 
 ---
 
-## 8. Variables de entorno (contratos de configuración)
+## 8. Model Profiles — Contrato de perfiles de modelo
+
+### 8.1 ModelProfile (DB → ProfileRegistry → API)
+
+```python
+# backend/ocabra/db/model_config.py
+
+class ModelProfile(Base):
+    __tablename__ = "model_profiles"
+
+    profile_id: str           # PK, slug sin /, lowercase, solo guiones y alfanuméricos
+    base_model_id: str        # FK model_configs.model_id, ON DELETE CASCADE
+    display_name: str
+    description: str | None
+    category: str             # "llm" | "tts" | "stt" | "image" | "music"
+    load_overrides: dict      # JSONB, merge con extra_config del modelo base al cargar
+    request_defaults: dict    # JSONB, inyectados como defaults en body de request
+    assets: dict              # JSONB, {"voice_ref": "/data/profiles/{profile_id}/reference.wav", ...}
+    enabled: bool             # default True
+    is_default: bool          # default False, max 1 por base_model_id
+    created_at: datetime
+    updated_at: datetime
+```
+
+Validaciones:
+- `profile_id`: regex `^[a-z0-9]+(-[a-z0-9]+)*$` (slug, no `/`, no espacios, no mayúsculas).
+- `is_default`: si se marca True, cualquier otro perfil del mismo `base_model_id` con `is_default=True` se desactiva automáticamente.
+- `base_model_id`: debe existir en `model_configs.model_id`. Cascada al borrar el modelo.
+
+### 8.2 Resolución de perfiles (ProfileRegistry → OpenAI/Ollama API)
+
+```python
+# backend/ocabra/core/profile_registry.py
+
+async def resolve_profile(profile_id: str) -> tuple[ModelProfile, ModelState]:
+    """
+    1. Buscar profile_id en ProfileRegistry (cache + BD)
+    2. Si no existe o disabled → HTTPException 404
+    3. ensure_loaded(base_model_id, load_overrides=profile.load_overrides)
+    4. Retornar (profile, state)
+    """
+
+async def forward_with_profile(
+    profile: ModelProfile,
+    state: ModelState,
+    body: dict,
+) -> Any:
+    """
+    1. merged = {**profile.request_defaults, **body}  # body del cliente prevalece
+    2. Inyectar assets (voice_ref, lora_path, etc.) en merged
+    3. forward_request(state.worker_key, path, merged)
+    """
+```
+
+### 8.3 Worker key (ModelManager)
+
+```
+worker_key = f"{base_model_id}:{hash(sorted(load_overrides.items()))}"
+```
+
+- `load_overrides` vacío o idéntico entre perfiles → mismo worker (compartido).
+- `load_overrides` diferente → worker separado (dedicado).
+- Esto permite que perfiles como `chat` y `chat-creative` (que solo difieren en `request_defaults`) compartan worker, mientras que `chat` y `chat-long` (que difieren en `load_overrides`) usen workers separados.
+
+### 8.4 Assets de perfil (ProfileRegistry → filesystem)
+
+```
+Asset storage: /data/profiles/{profile_id}/{filename}
+Upload: POST /ocabra/profiles/{profile_id}/assets (multipart)
+Delete: DELETE /ocabra/profiles/{profile_id}/assets/{asset_key}
+```
+
+Seguridad:
+- Path traversal: validar que la ruta resultante esté dentro de `/data/profiles/{profile_id}/`.
+- `profile_id` ya está validado como slug (sin `/`, sin `..`).
+- Filenames sanitizados antes de escribir al disco.
+
+### 8.5 Backend Chatterbox
+
+```python
+# backend/ocabra/backends/chatterbox_backend.py
+
+class ChatterboxBackend(BackendInterface):
+    backend_type = "chatterbox"
+    # Capabilities: tts=True, streaming=True
+    # VRAM estimate: 4096 MB (Turbo) | 8192 MB (Full)
+```
+
+Worker endpoints (`backend/workers/chatterbox_worker.py`):
+```
+GET  /health                       → {"status": "ok"}
+GET  /info                         → {"model": str, "languages": list[str], "supports_voice_clone": bool}
+GET  /voices                       → {"voices": [...], "supports_voice_clone": true}
+POST /synthesize                   → audio bytes (Content-Type según formato solicitado)
+POST /synthesize/stream            → chunked audio (Transfer-Encoding: chunked)
+```
+
+Contratos de seguridad:
+- `voice_ref`: path controlado por oCabra (asset del perfil), NO ruta libre del cliente.
+- El worker recibe la ruta resuelta desde el backend, nunca un path enviado directamente por el usuario final.
+
+### 8.6 Exposición pública de perfiles
+
+```
+/v1/models                          → solo lista perfiles habilitados (profile_id como "id")
+/v1/models/{id}                     → solo acepta profile_id
+/v1/chat/completions, /v1/audio/speech, etc. → model= es profile_id
+/ocabra/models                      → lista modelos internos con profiles[] anidado (admin only)
+```
+
+Legacy fallback (configurable `LEGACY_MODEL_ID_FALLBACK`, default `true` en v0.6, `false` en v0.7):
+- Si `model=` contiene `/` y coincide con un `model_id` canónico:
+  1. Buscar perfil default del modelo.
+  2. Si existe → usar ese perfil + emitir deprecation warning en logs.
+  3. Si no hay perfil default → 404.
+- Si `LEGACY_MODEL_ID_FALLBACK=false` → 404 directamente para IDs con `/`.
+
+### 8.7 Endpoints REST de perfiles
+
+Base URL: `/ocabra/`
+
+```
+GET    /ocabra/profiles                              → list[ModelProfile]
+GET    /ocabra/profiles/{profile_id}                 → ModelProfile
+POST   /ocabra/profiles                              → ModelProfile
+  body: {
+    profile_id: str,          # slug requerido
+    base_model_id: str,       # FK a model_configs.model_id
+    display_name: str,
+    description?: str|null,
+    category: "llm"|"tts"|"stt"|"image"|"music",
+    load_overrides?: dict,
+    request_defaults?: dict,
+    enabled?: bool,
+    is_default?: bool
+  }
+PATCH  /ocabra/profiles/{profile_id}                 → ModelProfile
+  body: {
+    display_name?: str,
+    description?: str|null,
+    category?: str,
+    load_overrides?: dict,
+    request_defaults?: dict,
+    enabled?: bool,
+    is_default?: bool
+  }
+DELETE /ocabra/profiles/{profile_id}                 → {"ok": true}
+POST   /ocabra/profiles/{profile_id}/assets          → ModelProfile  (multipart upload)
+DELETE /ocabra/profiles/{profile_id}/assets/{asset_key} → ModelProfile
+```
+
+### 8.8 Redis — Keys y canales adicionales para perfiles
+
+```
+# Canal pub/sub
+profile:events              → {"event": "created"|"updated"|"deleted", "profile_id": str}
+
+# Key (cache)
+profile:state:{profile_id}  → ModelProfile (JSON, TTL: none)
+```
+
+---
+
+## 9. Variables de entorno (contratos de configuración)
 
 ```bash
 # Base de datos
