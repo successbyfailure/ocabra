@@ -25,6 +25,52 @@ interface VoiceInfo {
 
 const OPENAI_VOICES = ["alloy", "echo", "fable", "nova", "onyx", "shimmer"]
 
+/**
+ * Convert any browser-recorded audio Blob (WebM, OGG, etc.) to PCM16 WAV
+ * using the Web Audio API so the backend receives a valid WAV file.
+ */
+async function blobToWav(blob: Blob, targetSr = 16000): Promise<Blob> {
+  const ctx = new OfflineAudioContext(1, 1, targetSr)
+  const arrayBuf = await blob.arrayBuffer()
+  const decoded = await ctx.decodeAudioData(arrayBuf)
+
+  // Resample to targetSr mono
+  const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetSr), targetSr)
+  const src = offline.createBufferSource()
+  src.buffer = decoded
+  src.connect(offline.destination)
+  src.start()
+  const rendered = await offline.startRendering()
+
+  const pcm = rendered.getChannelData(0)
+  const pcm16 = new Int16Array(pcm.length)
+  for (let i = 0; i < pcm.length; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[i]))
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+
+  // Build WAV header + PCM data
+  const wavBuf = new ArrayBuffer(44 + pcm16.byteLength)
+  const view = new DataView(wavBuf)
+  const writeStr = (off: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)) }
+  writeStr(0, "RIFF")
+  view.setUint32(4, 36 + pcm16.byteLength, true)
+  writeStr(8, "WAVE")
+  writeStr(12, "fmt ")
+  view.setUint32(16, 16, true)          // PCM subchunk size
+  view.setUint16(20, 1, true)           // PCM format
+  view.setUint16(22, 1, true)           // mono
+  view.setUint32(24, targetSr, true)    // sample rate
+  view.setUint32(28, targetSr * 2, true) // byte rate
+  view.setUint16(32, 2, true)           // block align
+  view.setUint16(34, 16, true)          // bits per sample
+  writeStr(36, "data")
+  view.setUint32(40, pcm16.byteLength, true)
+  new Int16Array(wavBuf, 44).set(pcm16)
+
+  return new Blob([wavBuf], { type: "audio/wav" })
+}
+
 export function AudioInterface({ modelId, params, canTranscribe = true, canTTS = true }: AudioInterfaceProps) {
   // Transcription state
   const [recording, setRecording] = useState(false)
@@ -186,11 +232,14 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
         language,
       }
 
-      // Voice cloning: attach reference audio as base64
+      // Voice cloning: convert reference audio to WAV and attach as base64
       if (supportsVoiceClone && refAudioBlob) {
-        const arrayBuf = await refAudioBlob.arrayBuffer()
-        const b64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuf)))
-        body.reference_audio = b64
+        const wavBlob = await blobToWav(refAudioBlob)
+        const arrayBuf = await wavBlob.arrayBuffer()
+        const bytes = new Uint8Array(arrayBuf)
+        let binary = ""
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+        body.reference_audio = btoa(binary)
         if (refText.trim()) body.reference_text = refText.trim()
       }
 
@@ -341,7 +390,7 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
           {supportsVoiceClone && (
             <div className="rounded-md border border-border/60 bg-muted/20 p-3 space-y-2">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Audio de referencia para clonación (opcional)
+                Audio de referencia para clonación (recomendado +5s)
               </p>
               <div className="flex flex-wrap gap-2">
                 {!refRecording ? (
