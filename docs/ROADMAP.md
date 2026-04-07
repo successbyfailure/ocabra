@@ -172,8 +172,11 @@ El motor de fine-tuning (Fase 7, Stream B/C) queda fuera de esta oleada.
 
 ## Pendiente — Bloque 11 — Resiliencia de backends y gestión avanzada de recursos
 
+**Plan detallado:** `docs/tasks/backend-resilience-plan.md`
+
 Inspirado en análisis comparativo con LocalAI y AnythingLLM. Objetivo: mejorar la
 estabilidad, el aislamiento de fallos y la eficiencia en el uso de VRAM.
+Orden recomendado: 11.3 → 11.1 → 11.4 → 11.2 (de menor a mayor riesgo).
 
 ### 11.1 — Evicción LRU + umbral de VRAM
 

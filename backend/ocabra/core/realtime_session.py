@@ -96,10 +96,13 @@ class RealtimeSession:
         model_manager: ModelManager,
         user: UserContext | None = None,
     ) -> None:
+        from ocabra.config import settings
+
         self.ws = ws
         self.llm_model_id = model_id
-        self.stt_model_id: str | None = None
-        self.tts_model_id: str | None = None
+        # Apply server-configured defaults for STT/TTS models
+        self.stt_model_id: str | None = settings.realtime_default_stt_model or None
+        self.tts_model_id: str | None = settings.realtime_default_tts_model or None
         self.voice = "alloy"
         self.instructions = ""
         self.audio_buffer = bytearray()
@@ -116,12 +119,39 @@ class RealtimeSession:
         self._session_id = f"sess_{uuid.uuid4().hex[:24]}"
         self._cancel_event = asyncio.Event()
         self._response_task: asyncio.Task[None] | None = None
+        self._background_load_task: asyncio.Task[None] | None = None
+        self._llm_ready = asyncio.Event()
+        self._tts_ready = asyncio.Event()
 
     # ── Public entry point ──────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Main session loop: receive client events and dispatch them."""
+        """Main session loop: receive client events and dispatch them.
+
+        Cold-start strategy:
+        1. Load STT first (blocking) — needed immediately for audio input
+        2. Send session.created — client can start talking
+        3. Load LLM + TTS in background — needed when first speech turn ends
+        By the time the user finishes their first sentence (~3-10s),
+        LLM and TTS are likely loaded.
+        """
+        # Mark models that are already loaded as ready
+        if self._worker_pool.get_worker(self.llm_model_id):
+            self._llm_ready.set()
+        if not self.tts_model_id or self._worker_pool.get_worker(self.tts_model_id):
+            self._tts_ready.set()
+
+        # Phase 1: Load STT synchronously — smallest model, needed first
+        await self._load_model_with_progress("stt", self.stt_model_id)
+
+        # Phase 2: Session is usable — send created, client can start talking
         await self._send_session_created()
+
+        # Phase 3: Load LLM + TTS in background while user speaks
+        if not self._llm_ready.is_set() or not self._tts_ready.is_set():
+            self._background_load_task = asyncio.create_task(
+                self._load_remaining_models(), name="realtime-bg-load"
+            )
 
         try:
             while True:
@@ -137,6 +167,57 @@ class RealtimeSession:
         except Exception:
             # WebSocketDisconnect or other connection errors — handled by caller
             raise
+
+    async def _load_model_with_progress(self, role: str, model_id: str | None) -> bool:
+        """Load a single model, sending progress events. Returns True if ready.
+
+        Safe to call concurrently for the same model — model_manager.load()
+        holds a per-model lock so the second caller waits for the first.
+        """
+        if not model_id:
+            return False
+        if self._worker_pool.get_worker(model_id):
+            return True
+        try:
+            state = await self._model_manager.get_state(model_id)
+            if not state:
+                await self._send_error(f"Model '{model_id}' ({role}) not configured", "model_not_found")
+                return False
+            if state.status.value == "loaded":
+                return True
+
+            logger.info("realtime_cold_start_loading", model_id=model_id, role=role)
+            await self._send_event(
+                "session.loading",
+                model=model_id,
+                role=role,
+                message=f"Loading {role}: {state.display_name or model_id}",
+            )
+            await self._model_manager.load(model_id)
+            logger.info("realtime_cold_start_loaded", model_id=model_id, role=role)
+            return True
+        except Exception as exc:
+            logger.warning("realtime_auto_load_failed", model_id=model_id, role=role, error=str(exc))
+            await self._send_error(f"Failed to load {role} model '{model_id}': {exc}", "model_load_error")
+            return False
+
+    async def _load_remaining_models(self) -> None:
+        """Background task: load LLM and TTS in parallel after session starts."""
+        async def _load_llm():
+            ok = await self._load_model_with_progress("llm", self.llm_model_id)
+            if ok:
+                self._llm_ready.set()
+
+        async def _load_tts():
+            if self.tts_model_id:
+                ok = await self._load_model_with_progress("tts", self.tts_model_id)
+                if ok:
+                    self._tts_ready.set()
+            else:
+                self._tts_ready.set()
+
+        # Load LLM and TTS concurrently
+        await asyncio.gather(_load_llm(), _load_tts(), return_exceptions=True)
 
     # ── Event dispatch ──────────────────────────────────────────────────
 
@@ -182,14 +263,21 @@ class RealtimeSession:
         if "output_audio_format" in session_cfg:
             self.output_audio_format = session_cfg["output_audio_format"]
 
-        # STT model from input_audio_transcription
+        # STT model from input_audio_transcription (OpenAI standard)
         iat = session_cfg.get("input_audio_transcription")
         if isinstance(iat, dict) and "model" in iat:
             self.stt_model_id = iat["model"]
 
-        # TTS model (extension: not in official API, but useful)
+        # TTS model (extension: not in official API, but useful for oCabra)
         if "tts_model" in session_cfg:
             self.tts_model_id = session_cfg["tts_model"]
+
+        # Auto-load changed models (STT sync, LLM+TTS in background)
+        if iat or "tts_model" in session_cfg:
+            await self._load_model_with_progress("stt", self.stt_model_id)
+            if "tts_model" in session_cfg and self.tts_model_id:
+                self._tts_ready.clear()
+                asyncio.create_task(self._load_remaining_models())
 
         # VAD configuration
         turn_detection = session_cfg.get("turn_detection")
@@ -341,6 +429,20 @@ class RealtimeSession:
         output_item_id = _new_item_id()
         start_time = time.monotonic()
 
+        # Wait for LLM to be ready (may still be loading from cold start)
+        if not self._llm_ready.is_set():
+            await self._send_event(
+                "session.loading",
+                model=self.llm_model_id,
+                role="llm",
+                message="Waiting for LLM to finish loading...",
+            )
+            try:
+                await asyncio.wait_for(self._llm_ready.wait(), timeout=300)
+            except TimeoutError:
+                await self._send_error("LLM model failed to load within timeout", "model_load_timeout")
+                return
+
         await self._send_event(
             "response.created",
             response={
@@ -482,8 +584,14 @@ class RealtimeSession:
 
         worker = self._worker_pool.get_worker(self.stt_model_id)
         if not worker:
-            logger.warning("realtime_stt_worker_missing", model_id=self.stt_model_id)
-            return ""
+            try:
+                await self._model_manager.load(self.stt_model_id)
+                worker = self._worker_pool.get_worker(self.stt_model_id)
+            except Exception:
+                pass
+            if not worker:
+                logger.warning("realtime_stt_worker_missing", model_id=self.stt_model_id)
+                return ""
 
         url = f"http://127.0.0.1:{worker.port}/transcribe"
 
@@ -510,8 +618,15 @@ class RealtimeSession:
         """
         worker = self._worker_pool.get_worker(self.llm_model_id)
         if not worker:
-            logger.warning("realtime_llm_worker_missing", model_id=self.llm_model_id)
-            return
+            # Try on-demand load as fallback
+            try:
+                await self._model_manager.load(self.llm_model_id)
+                worker = self._worker_pool.get_worker(self.llm_model_id)
+            except Exception as exc:
+                logger.warning("realtime_llm_load_failed", model_id=self.llm_model_id, error=str(exc))
+            if not worker:
+                logger.warning("realtime_llm_worker_missing", model_id=self.llm_model_id)
+                return
 
         state = await self._model_manager.get_state(self.llm_model_id)
         if not state:
@@ -574,10 +689,24 @@ class RealtimeSession:
         if not self.tts_model_id:
             return
 
+        # Wait for TTS to be ready (may still be loading)
+        if not self._tts_ready.is_set():
+            try:
+                await asyncio.wait_for(self._tts_ready.wait(), timeout=60)
+            except TimeoutError:
+                logger.warning("realtime_tts_load_timeout", model_id=self.tts_model_id)
+                return  # Skip audio, text transcript was already sent
+
         worker = self._worker_pool.get_worker(self.tts_model_id)
         if not worker:
-            logger.warning("realtime_tts_worker_missing", model_id=self.tts_model_id)
-            return
+            try:
+                await self._model_manager.load(self.tts_model_id)
+                worker = self._worker_pool.get_worker(self.tts_model_id)
+            except Exception:
+                pass
+            if not worker:
+                logger.warning("realtime_tts_worker_missing", model_id=self.tts_model_id)
+                return
 
         url = f"http://127.0.0.1:{worker.port}/synthesize"
 

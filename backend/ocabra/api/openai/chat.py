@@ -43,9 +43,13 @@ async def chat_completions(
     user: Annotated[UserContext, Depends(get_openai_user)],
 ) -> Any:
     """
-    Create a chat completion. Proxies to the resolved model worker (backend-agnostic).
+    Generate a chat completion from a conversation history.
 
-    Triggers on-demand model loading if the model is configured but not loaded.
+    **Supports**: streaming (SSE), tool/function calling, vision (image_url),
+    JSON mode (`response_format`), and all standard OpenAI parameters.
+
+    The `model` field accepts a **profile_id** (recommended) or a canonical model_id.
+    Models are loaded on demand if not already in GPU.
     """
     body = await request.json()
     model_id: str = body.get("model", "")

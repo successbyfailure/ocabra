@@ -82,7 +82,9 @@ async def _schedule_maintenance_loop(gpu_scheduler, stop_event: asyncio.Event) -
     logger.info("schedule_maintenance_loop_stopped")
 
 
-async def _ollama_inventory_loop(model_manager, stop_event: asyncio.Event) -> None:
+async def _ollama_inventory_loop(
+    model_manager, stop_event: asyncio.Event, profile_registry=None
+) -> None:
     from ocabra.registry.ollama_registry import OllamaRegistry
 
     interval_s = max(5, int(settings.ollama_inventory_sync_interval_seconds))
@@ -92,7 +94,13 @@ async def _ollama_inventory_loop(model_manager, stop_event: asyncio.Event) -> No
         try:
             installed = await registry.list_installed()
             loaded = await registry.list_loaded()
-            await model_manager.sync_ollama_inventory(installed, loaded)
+            added = await model_manager.sync_ollama_inventory(installed, loaded)
+            # Auto-create default profiles for newly discovered models
+            if added and profile_registry:
+                from ocabra.database import AsyncSessionLocal as _ASL
+
+                async with _ASL() as _session:
+                    await profile_registry.ensure_default_profiles(_session)
         except Exception as exc:
             logger.warning("ollama_inventory_loop_error", error=str(exc))
 
@@ -316,6 +324,14 @@ async def lifespan(app: FastAPI):
         logger.info("litellm_sync_enabled")
 
     await model_manager.start()
+
+    from ocabra.core.backend_process_manager import BackendProcessManager
+
+    backend_process_manager = BackendProcessManager(model_manager, worker_pool, settings)
+    await backend_process_manager.start()
+    app.state.backend_process_manager = backend_process_manager
+    logger.info("backend_process_manager_ready")
+
     from ocabra.registry.ollama_registry import OllamaRegistry
 
     try:
@@ -356,10 +372,7 @@ async def lifespan(app: FastAPI):
         name="schedule-maintenance-loop",
     )
     ollama_inventory_stop = asyncio.Event()
-    ollama_inventory_task = asyncio.create_task(
-        _ollama_inventory_loop(model_manager, ollama_inventory_stop),
-        name="ollama-inventory-loop",
-    )
+    # ollama_inventory_task created after profile_registry (below)
     service_idle_stop = asyncio.Event()
     service_idle_task = asyncio.create_task(
         _service_idle_unload_loop(service_manager, service_idle_stop),
@@ -379,8 +392,22 @@ async def lifespan(app: FastAPI):
 
     async with _ASL() as _session:
         await profile_registry.load_all(_session)
+    async with _ASL() as _session:
+        default_count = await profile_registry.ensure_default_profiles(_session)
+        if default_count:
+            logger.info("default_profiles_seeded", count=default_count)
+    async with _ASL() as _session:
+        diarized_count = await profile_registry.ensure_diarized_profiles(_session)
+        if diarized_count:
+            logger.info("diarized_profiles_seeded", count=diarized_count)
     app.state.profile_registry = profile_registry
     logger.info("profile_registry_ready")
+
+    # Start ollama inventory loop now that profile_registry is available
+    ollama_inventory_task = asyncio.create_task(
+        _ollama_inventory_loop(model_manager, ollama_inventory_stop, profile_registry),
+        name="ollama-inventory-loop",
+    )
 
     # Auth: seed first admin if the users table is empty
     from ocabra.core.auth_manager import seed_first_admin
@@ -443,6 +470,7 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await service_health_task
 
+    await backend_process_manager.stop()
     await trtllm_compile_manager.stop()
     await gpu_manager.stop()
 
@@ -458,14 +486,185 @@ async def lifespan(app: FastAPI):
     logger.info("ocabra_stopped")
 
 
+_API_DESCRIPTION = """
+# oCabra — Multi-GPU AI Model Server
+
+Compatible con las APIs de **OpenAI** (`/v1/`) y **Ollama** (`/api/`).
+
+## Autenticacion
+
+Todas las peticiones requieren API key en la cabecera:
+
+```
+Authorization: Bearer sk-...
+```
+
+Las API keys se crean desde el dashboard de oCabra o via la API interna.
+
+## Modelos
+
+El campo `model` acepta el **profile_id** del modelo (ej: `qwen3-8b`, `kokoro-82m`).
+Consulta `GET /v1/models` para ver los modelos disponibles.
+
+## Capacidades
+
+| Capacidad | Endpoint | Backends |
+|-----------|----------|----------|
+| **Chat / Completions** | `/v1/chat/completions` | vllm, sglang, llama_cpp, ollama, bitnet, tensorrt_llm |
+| **Embeddings** | `/v1/embeddings` | vllm, sglang, llama_cpp, ollama |
+| **Text-to-Speech** | `/v1/audio/speech` | tts (Kokoro, Bark, Qwen3-TTS), chatterbox, voxtral |
+| **Speech-to-Text** | `/v1/audio/transcriptions` | whisper (faster-whisper, Whisper) |
+| **Generacion de imagenes** | `/v1/images/generations` | diffusers |
+| **Generacion de musica** | `/v1/audio/generate` | acestep |
+| **Reranking** | `/v1/rerank` | vllm |
+
+## Formatos de audio (TTS)
+
+`mp3` (default), `wav`, `opus`, `flac`, `pcm`, `aac`
+
+## Voces TTS
+
+Dependen del modelo. Usa `GET /v1/audio/voices?model=<profile_id>` para consultar las voces disponibles.
+"""
+
 app = FastAPI(
     title="oCabra",
-    description="Multi-GPU AI model server — OpenAI & Ollama compatible",
+    description=_API_DESCRIPTION,
     version=settings.app_version,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+
+def _custom_openapi():
+    """Enrich the auto-generated OpenAPI spec with typed request schemas."""
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    from ocabra.api.openai._schemas import (
+        ChatCompletionRequest,
+        CompletionRequest,
+        EmbeddingRequest,
+        ImageGenerationRequest,
+        MusicGenerationRequest,
+        RerankRequest,
+        SpeechRequest,
+    )
+
+    # Inject Pydantic schemas into components
+    schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+    for model_cls in (
+        ChatCompletionRequest,
+        CompletionRequest,
+        EmbeddingRequest,
+        SpeechRequest,
+        ImageGenerationRequest,
+        RerankRequest,
+        MusicGenerationRequest,
+    ):
+        schemas[model_cls.__name__] = model_cls.model_json_schema(
+            ref_template="#/components/schemas/{model}"
+        )
+
+    # Map endpoints → schemas
+    endpoint_schemas = {
+        "/v1/chat/completions": "ChatCompletionRequest",
+        "/v1/completions": "CompletionRequest",
+        "/v1/embeddings": "EmbeddingRequest",
+        "/v1/audio/speech": "SpeechRequest",
+        "/v1/images/generations": "ImageGenerationRequest",
+        "/v1/rerank": "RerankRequest",
+        "/v1/audio/generate": "MusicGenerationRequest",
+    }
+
+    for path, schema_name in endpoint_schemas.items():
+        if path in schema.get("paths", {}):
+            for method_info in schema["paths"][path].values():
+                if isinstance(method_info, dict) and "summary" in method_info:
+                    method_info["requestBody"] = {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": f"#/components/schemas/{schema_name}"}
+                            }
+                        },
+                    }
+
+    # Add WebSocket endpoints (Swagger can't auto-generate these)
+    paths = schema.setdefault("paths", {})
+    paths["/v1/realtime"] = {
+        "get": {
+            "tags": ["OpenAI Realtime"],
+            "summary": "Realtime audio session (WebSocket)",
+            "description": (
+                "**WebSocket** endpoint for bidirectional audio streaming.\n\n"
+                "Establishes a session that coordinates STT → LLM → TTS in real-time.\n\n"
+                "### Connection\n"
+                "```\n"
+                "ws://<host>/v1/realtime?model=<profile_id>\n"
+                "Authorization: Bearer <api_key>\n"
+                "```\n\n"
+                "### Client → Server events\n"
+                "| Event | Descripcion |\n"
+                "|-------|-------------|\n"
+                "| `session.update` | Configurar sesion (modalities, voice, instructions, "
+                "turn_detection, input_audio_format, output_audio_format) |\n"
+                "| `input_audio_buffer.append` | Enviar chunk de audio PCM16 (base64) |\n"
+                "| `input_audio_buffer.commit` | Forzar procesamiento del buffer |\n"
+                "| `input_audio_buffer.clear` | Limpiar buffer de audio |\n"
+                "| `response.create` | Solicitar respuesta del LLM |\n"
+                "| `response.cancel` | Cancelar respuesta en curso |\n\n"
+                "### Server → Client events\n"
+                "| Event | Descripcion |\n"
+                "|-------|-------------|\n"
+                "| `session.created` | Sesion iniciada (devuelve session config) |\n"
+                "| `session.updated` | Config de sesion actualizada |\n"
+                "| `input_audio_buffer.speech_started` | VAD detecto inicio de habla |\n"
+                "| `input_audio_buffer.speech_stopped` | VAD detecto fin de habla |\n"
+                "| `input_audio_buffer.committed` | Buffer procesado |\n"
+                "| `conversation.item.created` | Nuevo item en conversacion |\n"
+                "| `response.created` | Respuesta iniciada |\n"
+                "| `response.audio.delta` | Chunk de audio TTS (base64 PCM16) |\n"
+                "| `response.audio.done` | Audio TTS completado |\n"
+                "| `response.audio_transcript.delta` | Texto parcial de la respuesta |\n"
+                "| `response.audio_transcript.done` | Texto completo de la respuesta |\n"
+                "| `response.done` | Respuesta completada |\n"
+                "| `error` | Error en la sesion |\n\n"
+                "### Audio formats\n"
+                "- Input: `pcm16` (16-bit PCM, 16kHz, mono, little-endian)\n"
+                "- Output: `pcm16` (configurable via session.update)\n"
+            ),
+            "parameters": [
+                {
+                    "name": "model",
+                    "in": "query",
+                    "required": True,
+                    "description": "Profile ID del modelo LLM para la sesion",
+                    "schema": {"type": "string", "example": "qwen3-8b"},
+                }
+            ],
+            "responses": {
+                "101": {"description": "WebSocket upgrade exitoso"},
+                "1008": {"description": "Autenticacion requerida (WebSocket close)"},
+            },
+        }
+    }
+
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
 
 app.add_middleware(
     CORSMiddleware,
@@ -483,28 +682,22 @@ from ocabra.api.health import router as health_router  # noqa: E402
 
 app.include_router(health_router)
 
-# Stream 1-A: GPU Manager
+# ── Internal routers (hidden from /docs — admin dashboard only) ──
 from ocabra.api.internal.gpus import router as gpus_router
-
-app.include_router(gpus_router, prefix="/ocabra")
-
-# Stream 1-B: Model Manager + WebSocket
 from ocabra.api.internal.models import router as models_router
 from ocabra.api.internal.ws import router as ws_router
-
-app.include_router(models_router, prefix="/ocabra")
-app.include_router(ws_router, prefix="/ocabra")
-
-# Stream 1-C: Registry + Downloads
 from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
 from ocabra.api.internal.registry import router as registry_router  # noqa: E402
 from ocabra.api.internal.services import router as services_router  # noqa: E402
 from ocabra.api.internal.host import router as host_router  # noqa: E402
 
-app.include_router(registry_router, prefix="/ocabra")
-app.include_router(downloads_router, prefix="/ocabra")
-app.include_router(services_router, prefix="/ocabra")
-app.include_router(host_router, prefix="/ocabra")
+app.include_router(gpus_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(ws_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(registry_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(downloads_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(services_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(host_router, prefix="/ocabra", include_in_schema=False)
 
 # Stream 3-A: OpenAI API
 from ocabra.api.openai import router as openai_router  # noqa: E402
@@ -516,34 +709,23 @@ from ocabra.api.ollama import router as ollama_router  # noqa: E402
 
 app.include_router(ollama_router)
 
-# Stream 5: Metrics, Config, Stats
+# Stream 5: Metrics (public), Config/Stats/TRT/Auth/Users/Groups/Profiles (internal)
 from ocabra.api.metrics import router as metrics_router  # noqa: E402
 from ocabra.api.internal.config import router as config_router  # noqa: E402
 from ocabra.api.internal.stats import router as stats_router  # noqa: E402
-
-app.include_router(metrics_router)
-app.include_router(config_router, prefix="/ocabra")
-app.include_router(stats_router, prefix="/ocabra")
-
-# C-7: TensorRT-LLM compile
 from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
-
-app.include_router(trtllm_router, prefix="/ocabra")
-
-# Auth foundation
 from ocabra.api.internal.auth import router as auth_router  # noqa: E402
-
-app.include_router(auth_router, prefix="/ocabra")
-
-# Auth: user and group management
 from ocabra.api.internal.users import router as users_router  # noqa: E402
 from ocabra.api.internal.groups import router as groups_router  # noqa: E402
-
-app.include_router(users_router, prefix="/ocabra")
-app.include_router(groups_router, prefix="/ocabra")
-
-# Profiles
 from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
 
-app.include_router(profiles_router, prefix="/ocabra")
+app.include_router(metrics_router)
+app.include_router(config_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(stats_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(trtllm_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(auth_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(users_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(groups_router, prefix="/ocabra", include_in_schema=False)
+
+app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
 # ─────────────────────────────────────────────────────────────
