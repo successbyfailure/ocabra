@@ -308,29 +308,45 @@ async def speech(
     url = f"http://127.0.0.1:{worker.port}{endpoint}"
     content_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
 
+    payload: dict = {
+        "input": input_text,
+        "voice": voice,
+        "response_format": response_format,
+        "speed": speed,
+        "language": language,
+    }
+    if reference_audio:
+        payload["reference_audio"] = reference_audio
+    if reference_text:
+        payload["reference_text"] = reference_text
+    if speaker:
+        payload["speaker"] = speaker
+    if instruct:
+        payload["instruct"] = instruct
+
+    if not stream_safe:
+        # Non-streaming (WAV): fetch full response so errors propagate correctly
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code >= 400:
+                detail = resp.text[:300] if resp.text else f"Worker error {resp.status_code}"
+                raise _openai_error(detail, "server_error", status_code=resp.status_code)
+            return StreamingResponse(
+                iter([resp.content]),
+                media_type=content_type,
+                headers={"Content-Disposition": f'attachment; filename="speech.{response_format}"'},
+            )
+
     async def _stream_audio():
         async with httpx.AsyncClient(timeout=300.0) as client:
-            payload: dict = {
-                "input": input_text,
-                "voice": voice,
-                "response_format": response_format,
-                "speed": speed,
-                "language": language,
-            }
-            if reference_audio:
-                payload["reference_audio"] = reference_audio
-            if reference_text:
-                payload["reference_text"] = reference_text
-            if speaker:
-                payload["speaker"] = speaker
-            if instruct:
-                payload["instruct"] = instruct
-            async with client.stream(
-                "POST",
-                url,
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
+            async with client.stream("POST", url, json=payload) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    raise _openai_error(
+                        body.decode(errors="replace")[:300],
+                        "server_error",
+                        status_code=resp.status_code,
+                    )
                 async for chunk in resp.aiter_bytes():
                     yield chunk
 

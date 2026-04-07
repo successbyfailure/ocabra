@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import logging
 import os
 import re
 import struct
@@ -129,7 +130,9 @@ def _patch_perth_watermarker() -> None:
 
     if perth.PerthImplicitWatermarker is None:
         perth.PerthImplicitWatermarker = perth.DummyWatermarker
-        logger.warning("perth_implicit_watermarker_unavailable, using DummyWatermarker")
+        logging.getLogger(__name__).warning(
+            "perth_implicit_watermarker_unavailable, using DummyWatermarker"
+        )
 
 
 def _load_chatterbox(model_id: str, device: str) -> tuple[Any, int, bool]:
@@ -349,10 +352,37 @@ def _load_voice_ref(voice_ref: str) -> Any:
     return wav, sr
 
 
+def _decode_reference_audio(base64_audio: str) -> str:
+    """Decode base64-encoded audio to a temporary WAV file. Returns file path."""
+    import base64
+    import tempfile
+
+    data = base64.b64decode(base64_audio)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.write(data)
+    tmp.close()
+    return tmp.name
+
+
+def _resolve_voice_ref(
+    voice_ref: str | None, reference_audio: str | None
+) -> str | None:
+    """Resolve voice reference from either a file path or base64 audio.
+
+    Returns a file path (possibly temporary) or None.
+    """
+    if voice_ref and os.path.isfile(voice_ref):
+        return voice_ref
+    if reference_audio:
+        return _decode_reference_audio(reference_audio)
+    return None
+
+
 def _synthesize(
     rt: ChatterboxRuntime,
     text: str,
     voice_ref: str | None = None,
+    reference_audio: str | None = None,
     exaggeration: float = 0.5,
     cfg_weight: float = 0.5,
 ) -> bytes:
@@ -363,15 +393,25 @@ def _synthesize(
         "text": text,
     }
 
-    # Voice cloning via reference audio
-    if voice_ref and os.path.isfile(voice_ref):
-        audio_prompt, sr = _load_voice_ref(voice_ref)
-        kwargs["audio_prompt"] = audio_prompt
+    # Voice cloning via reference audio (file path or base64)
+    resolved_ref = _resolve_voice_ref(voice_ref, reference_audio)
+    tmp_ref = None
+    if resolved_ref:
+        # Track if we created a temp file that needs cleanup
+        if resolved_ref != voice_ref:
+            tmp_ref = resolved_ref
+        kwargs["audio_prompt_path"] = resolved_ref
 
-    with torch.inference_mode():
-        wav = rt.model.generate(**kwargs)
-
-    return _tensor_to_wav(wav, rt.sample_rate)
+    try:
+        with torch.inference_mode():
+            wav = rt.model.generate(**kwargs)
+        return _tensor_to_wav(wav, rt.sample_rate)
+    finally:
+        if tmp_ref:
+            try:
+                os.unlink(tmp_ref)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -380,12 +420,20 @@ def _synthesize(
 
 
 class SynthesizeRequest(BaseModel):
-    text: str
+    text: str | None = None
+    input: str | None = None  # OpenAI-compat alias for text
     voice: str = "default"
     language: str = "en"
     speed: float = 1.0
     response_format: str = "mp3"
     voice_ref: str | None = None  # path to reference audio for voice cloning
+    reference_audio: str | None = None  # base64-encoded reference audio (OpenAI-compat)
+    reference_text: str | None = None  # transcript of reference audio (unused but accepted)
+
+    @property
+    def resolved_text(self) -> str:
+        """Return text content, preferring 'input' (OpenAI) over 'text'."""
+        return (self.input or self.text or "").strip()
 
 
 def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
@@ -470,19 +518,23 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
 
     @app.post("/synthesize")
     async def synthesize(body: SynthesizeRequest) -> StreamingResponse:
-        if not body.text.strip():
+        if not body.resolved_text:
             raise HTTPException(status_code=400, detail="'text' is required")
         if not _is_loaded():
             raise HTTPException(status_code=503, detail=runtime.error or "Model not loaded")
 
         fmt = body.response_format.lower()
 
-        wav_bytes = await asyncio.to_thread(
-            _synthesize,
-            runtime,
-            body.text.strip(),
-            body.voice_ref,
-        )
+        try:
+            wav_bytes = await asyncio.to_thread(
+                _synthesize,
+                runtime,
+                body.resolved_text,
+                body.voice_ref,
+                body.reference_audio,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         encoded, content_type = _encode_audio(wav_bytes, fmt)
 
         return StreamingResponse(
@@ -493,13 +545,13 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
 
     @app.post("/synthesize/stream")
     async def synthesize_stream(body: SynthesizeRequest) -> StreamingResponse:
-        if not body.text.strip():
+        if not body.resolved_text:
             raise HTTPException(status_code=400, detail="'text' is required")
         if not _is_loaded():
             raise HTTPException(status_code=503, detail=runtime.error or "Model not loaded")
 
         fmt = body.response_format.lower()
-        sentences = _split_sentences(body.text.strip())
+        sentences = _split_sentences(body.resolved_text)
         content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/mpeg")
 
         async def _generate():
@@ -510,6 +562,7 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
                     runtime,
                     sentence,
                     body.voice_ref,
+                    body.reference_audio,
                 )
                 if not wav_bytes:
                     continue

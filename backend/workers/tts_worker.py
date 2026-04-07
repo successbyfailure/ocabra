@@ -439,11 +439,10 @@ def _synthesize_qwen(
         )
     elif rt.qwen_type == "base":
         if not reference_audio:
-            wavs, sr = rt.qwen_model.generate_voice_clone(
-                text=text,
-                language=language or "Auto",
-                ref_audio=None,
-                x_vector_only_mode=True,
+            raise ValueError(
+                "Qwen3-TTS Base model requires 'reference_audio' (base64-encoded audio) "
+                "for voice cloning. Use a CustomVoice model variant for speaker-based "
+                "synthesis without a reference audio."
             )
         else:
             ref_path = _decode_audio(reference_audio)
@@ -689,18 +688,21 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
         speed = max(0.25, min(body.speed, 4.0))
         fmt   = body.response_format.lower()
 
-        wav_bytes = await asyncio.to_thread(
-            _synthesize,
-            runtime,
-            body.input.strip(),
-            body.voice,
-            speed,
-            body.language,
-            body.reference_audio,
-            body.reference_text,
-            body.speaker,
-            body.instruct,
-        )
+        try:
+            wav_bytes = await asyncio.to_thread(
+                _synthesize,
+                runtime,
+                body.input.strip(),
+                body.voice,
+                speed,
+                body.language,
+                body.reference_audio,
+                body.reference_text,
+                body.speaker,
+                body.instruct,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         encoded, content_type = _encode_audio(wav_bytes, fmt)
 
         return StreamingResponse(
