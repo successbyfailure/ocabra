@@ -67,9 +67,25 @@ class OllamaBackend(BackendInterface):
                 if r.status_code == 200:
                     data = r.json()
                     template = data.get("template", "")
-                    # Ollama templates include {{.Tools}} or {{.ToolCalls}} when
-                    # the model supports function calling
+                    # Tool support: check template markers OR known model families
                     tools = "{{.Tools}}" in template or ".ToolCalls" in template
+                    if not tools:
+                        family = data.get("details", {}).get("family", "")
+                        # Modern model families support tools natively in Ollama
+                        # even without template markers
+                        _tool_families = {
+                            "gemma4", "gemma3", "gemma2",
+                            "qwen3", "qwen2.5", "qwen2",
+                            "llama4", "llama3.3", "llama3.2", "llama3.1", "llama3",
+                            "mistral", "mixtral", "ministral",
+                            "phi4", "phi3.5", "phi3",
+                            "command-r",
+                            "deepseek", "deepseek2",
+                            "nemotron",
+                            "devstral",
+                            "glm-4",
+                        }
+                        tools = family.lower() in _tool_families
                     # Detect vision from template or family
                     family = data.get("details", {}).get("family", "")
                     if "vl" in family or "vision" in family or "llava" in family:
