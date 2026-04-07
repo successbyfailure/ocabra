@@ -517,53 +517,8 @@ def test_apply_capability_fallbacks_prefers_tensorrt_extra_config_context_length
     assert merged.context_length == 8192
 
 
-def test_diarized_variant_helpers_for_whisper_models() -> None:
-    from ocabra.core.model_manager import ModelState
-    from ocabra.core.model_manager_helpers import (
-        build_diarized_extra_config,
-        diarized_variant_model_id,
-        is_diarized_model_id,
-        should_auto_create_diarized_variant,
-    )
-
-    base = ModelState(
-        model_id="nvidia/parakeet-tdt-0.6b-v3",
-        display_name="parakeet",
-        backend_type="whisper",
-    )
-    assert should_auto_create_diarized_variant(base) is True
-    assert diarized_variant_model_id(base.model_id) == "nvidia/parakeet-tdt-0.6b-v3::diarize"
-
-    diarized_id_state = ModelState(
-        model_id="openai/whisper-medium::diarize",
-        display_name="wm",
-        backend_type="whisper",
-    )
-    assert should_auto_create_diarized_variant(diarized_id_state) is False
-    assert is_diarized_model_id(diarized_id_state.model_id, {}) is True
-
-    diarized_cfg_state = ModelState(
-        model_id="openai/whisper-medium",
-        display_name="wm",
-        backend_type="whisper",
-        extra_config={"diarization_enabled": True},
-    )
-    assert should_auto_create_diarized_variant(diarized_cfg_state) is False
-
-    diarized_nested_cfg_state = ModelState(
-        model_id="openai/whisper-medium",
-        display_name="wm",
-        backend_type="whisper",
-        extra_config={"whisper": {"diarizationEnabled": True}},
-    )
-    assert should_auto_create_diarized_variant(diarized_nested_cfg_state) is False
-
-    non_whisper = ModelState(
-        model_id="gpt-oss:20b",
-        display_name="gpt",
-        backend_type="ollama",
-    )
-    assert should_auto_create_diarized_variant(non_whisper) is False
+def test_build_diarized_extra_config() -> None:
+    from ocabra.core.model_manager_helpers import build_diarized_extra_config
 
     merged = build_diarized_extra_config({"base_model_id": "/path/model.nemo"})
     assert merged["diarization_enabled"] is True

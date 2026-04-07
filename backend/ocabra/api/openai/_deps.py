@@ -331,7 +331,6 @@ async def _ensure_worker_loaded(
             auto_reload=base_state.auto_reload,
             preferred_gpu=base_state.preferred_gpu,
             extra_config=merged_extra,
-            create_diarized_variant=False,
         )
     except Exception:
         # May already exist from concurrent request

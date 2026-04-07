@@ -1,37 +1,10 @@
 """Pure helper functions for model manager lifecycle concerns."""
+
 from __future__ import annotations
 
 
-def is_diarized_model_id(model_id: str, extra_config: dict | None = None) -> bool:
-    lowered = model_id.lower()
-    if "diariz" in lowered:
-        return True
-    cfg = extra_config or {}
-    whisper_cfg = cfg.get("whisper") if isinstance(cfg.get("whisper"), dict) else {}
-    return bool(
-        cfg.get("diarization_enabled") is True
-        or whisper_cfg.get("diarization_enabled") is True
-        or whisper_cfg.get("diarizationEnabled") is True
-    )
-
-
-def diarized_variant_model_id(model_id: str) -> str:
-    if model_id.endswith("::diarize"):
-        return model_id
-    return f"{model_id}::diarize"
-
-
-def should_auto_create_diarized_variant(state) -> bool:
-    if state.backend_type != "whisper":
-        return False
-    if "::" in state.backend_model_id:
-        return False
-    if is_diarized_model_id(state.backend_model_id, state.extra_config):
-        return False
-    return True
-
-
 def build_diarized_extra_config(base_extra_config: dict | None) -> dict:
+    """Build extra_config with diarization enabled, used by profile creation."""
     merged = dict(base_extra_config or {})
     merged["diarization_enabled"] = True
     whisper_cfg = merged.get("whisper") if isinstance(merged.get("whisper"), dict) else {}

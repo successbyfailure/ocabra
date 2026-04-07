@@ -214,6 +214,139 @@ class ProfileRegistry:
         self._profiles[profile_id] = db_profile
         return db_profile
 
+    # ── Auto-seed diarized profiles for whisper models ────────
+
+    async def ensure_diarized_profiles(self, session: AsyncSession) -> int:
+        """For each base whisper model without a diarized profile, create one.
+
+        Returns the number of profiles created.
+        """
+        import re
+
+        from ocabra.core.model_manager_helpers import build_diarized_extra_config
+
+        result = await session.execute(
+            select(ModelConfig).where(ModelConfig.backend_type == "whisper")
+        )
+        whisper_models = [m for m in result.scalars().all() if "::" not in m.model_id]
+
+        created = 0
+        for model in whisper_models:
+            # Check if a diarized profile already exists for this base model
+            existing = [
+                p
+                for p in self._profiles.values()
+                if p.base_model_id == model.model_id
+                and p.load_overrides
+                and p.load_overrides.get("diarization_enabled") is True
+            ]
+            if existing:
+                continue
+
+            # Derive slug from model display name
+            raw_name = model.display_name or model.model_id
+            if "/" in model.model_id:
+                parts = model.model_id.split("/", 1)
+                raw_name = model.display_name or parts[1] if len(parts) > 1 else raw_name
+            slug = re.sub(r"[^a-z0-9\-.]", "", raw_name.lower().replace("/", "-").replace(" ", "-"))
+            slug = re.sub(r"-{2,}", "-", slug).strip("-")
+            profile_id = f"{slug}-diarized"
+
+            if profile_id in self._profiles:
+                continue
+
+            try:
+                await self.create(
+                    session,
+                    profile_id=profile_id,
+                    base_model_id=model.model_id,
+                    display_name=f"{model.display_name or raw_name} (Diarized)",
+                    category="stt",
+                    load_overrides=build_diarized_extra_config(model.extra_config),
+                    request_defaults={"diarize": True},
+                    enabled=True,
+                    is_default=False,
+                )
+                created += 1
+                logger.info(
+                    "diarized_profile_auto_created",
+                    profile_id=profile_id,
+                    base_model_id=model.model_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "diarized_profile_auto_create_failed",
+                    profile_id=profile_id,
+                    base_model_id=model.model_id,
+                    error=str(exc),
+                )
+        return created
+
+    # ── Auto-seed default profiles for models without any ─────
+
+    _BACKEND_CATEGORY: dict[str, str] = {
+        "vllm": "llm", "llama_cpp": "llm", "sglang": "llm",
+        "tensorrt_llm": "llm", "bitnet": "llm", "ollama": "llm",
+        "whisper": "stt", "tts": "tts", "voxtral": "tts",
+        "chatterbox": "tts", "diffusers": "image", "acestep": "music",
+    }
+
+    async def ensure_default_profiles(self, session: AsyncSession) -> int:
+        """Create a default profile for every model_config that has no profiles.
+
+        Returns the number of profiles created.
+        """
+        import re
+
+        result = await session.execute(select(ModelConfig))
+        all_models = result.scalars().all()
+
+        # Models that already have at least one profile
+        models_with_profiles = {p.base_model_id for p in self._profiles.values()}
+
+        created = 0
+        for model in all_models:
+            if model.model_id in models_with_profiles:
+                continue
+            if "::" in model.model_id:
+                continue  # skip legacy diarized variants
+
+            # Derive slug
+            raw_name = model.display_name or model.model_id
+            if "/" in model.model_id:
+                parts = model.model_id.split("/", 1)
+                if parts[0] in self._BACKEND_CATEGORY:
+                    raw_name = model.display_name or parts[1]
+            slug = re.sub(r"[^a-z0-9\-.]", "", raw_name.lower().replace("/", "-").replace("_", "-").replace(" ", "-"))
+            slug = re.sub(r"-{2,}", "-", slug).strip("-")
+            if not slug:
+                slug = re.sub(r"[^a-z0-9\-.]", "", model.model_id.lower().replace("/", "-"))
+                slug = re.sub(r"-{2,}", "-", slug).strip("-")
+            if not slug or slug in self._profiles:
+                continue
+
+            category = self._BACKEND_CATEGORY.get(model.backend_type or "", "llm")
+            try:
+                await self.create(
+                    session,
+                    profile_id=slug,
+                    base_model_id=model.model_id,
+                    display_name=model.display_name or raw_name,
+                    category=category,
+                    enabled=True,
+                    is_default=True,
+                )
+                created += 1
+                logger.info("default_profile_auto_created", profile_id=slug, base_model_id=model.model_id)
+            except Exception as exc:
+                logger.warning(
+                    "default_profile_auto_create_failed",
+                    profile_id=slug,
+                    base_model_id=model.model_id,
+                    error=str(exc),
+                )
+        return created
+
     # ── Helpers ───────────────────────────────────────────────
 
     async def _clear_default(self, session: AsyncSession, base_model_id: str) -> None:
