@@ -377,6 +377,42 @@ async def get_recent_requests(limit: int = 20) -> dict:
             "username": username_map.get(r.user_id) if r.user_id else None,
             "groupId": str(r.group_id) if r.group_id else None,
             "groupName": group_name_map.get(r.group_id) if r.group_id else None,
+            "apiKeyName": getattr(r, "api_key_name", None),
+        })
+    return {"requests": requests_out}
+
+
+async def get_recent_requests_for_user(user_id: str, limit: int = 20) -> dict:
+    """Return the most recent N requests for a specific user."""
+    import uuid as _uuid
+
+    parsed_uid = _uuid.UUID(str(user_id))
+
+    async with AsyncSessionLocal() as session:
+        q = (
+            sa.select(RequestStat)
+            .where(RequestStat.user_id == parsed_uid)
+            .order_by(RequestStat.started_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    requests_out = []
+    for r in rows:
+        requests_out.append({
+            "id": str(r.id),
+            "modelId": r.model_id,
+            "backendType": r.backend_type,
+            "requestKind": r.request_kind,
+            "endpointPath": r.endpoint_path,
+            "statusCode": r.status_code,
+            "startedAt": r.started_at.isoformat() if r.started_at else None,
+            "durationMs": r.duration_ms,
+            "inputTokens": r.input_tokens,
+            "outputTokens": r.output_tokens,
+            "error": r.error,
+            "apiKeyName": getattr(r, "api_key_name", None),
         })
     return {"requests": requests_out}
 

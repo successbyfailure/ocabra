@@ -41,6 +41,7 @@ class UserContext:
     accessible_model_ids: set[str] = field(default_factory=set)
     is_anonymous: bool = False
     key_group_id: str | None = None  # group_id from the API key used for this request
+    api_key_name: str | None = None  # name/label of the API key used
 
     @property
     def is_admin(self) -> bool:
@@ -201,6 +202,7 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
         accessible_model_ids=accessible,
         is_anonymous=False,
         key_group_id=key_group_id,
+        api_key_name=api_key.name,
     )
 
 

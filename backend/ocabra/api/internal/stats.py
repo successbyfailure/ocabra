@@ -124,6 +124,22 @@ async def recent_requests(
 
 
 @router.get(
+    "/stats/my-recent",
+    summary="Own recent requests log",
+    description="Return the current user's most recent inference requests.",
+)
+async def my_recent_requests(
+    limit: int = Query(20, ge=1, le=200),
+    user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Return the current user's most recent requests."""
+    if user.is_anonymous or not user.user_id:
+        return {"requests": []}
+    from ocabra.stats.aggregator import get_recent_requests_for_user
+    return await get_recent_requests_for_user(user.user_id, limit)
+
+
+@router.get(
     "/stats/by-user",
     summary="Stats aggregated by user",
     description="Return request totals, error counts, and token usage grouped by user.",

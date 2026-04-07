@@ -6,6 +6,7 @@ import {
   Search,
   MessageSquare,
   BarChart2,
+  ScrollText,
   Settings,
   LogOut,
   Users,
@@ -41,6 +42,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/explore",   label: "Explore",    icon: Search,         minRole: "model_manager" },
   { to: "/playground",label: "Playground", icon: MessageSquare },
   { to: "/stats",     label: "Stats",      icon: BarChart2 },
+  { to: "/logs",      label: "Logs",       icon: ScrollText },
   { to: "/api-keys",  label: "API Keys",   icon: Key },
   { to: "/settings",  label: "Settings",   icon: Settings },
 ]

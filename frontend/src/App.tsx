@@ -13,6 +13,7 @@ import { TrtllmEngines } from "@/pages/TrtllmEngines"
 import { Users } from "@/pages/Users"
 import { Groups } from "@/pages/Groups"
 import { ApiKeys } from "@/pages/ApiKeys"
+import { Logs } from "@/pages/Logs"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -38,6 +39,7 @@ export default function App() {
                 <Route path="/stats" element={<Stats />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/api-keys" element={<ApiKeys />} />
+                <Route path="/logs" element={<Logs />} />
 
                 {/* model_manager+ only */}
                 <Route

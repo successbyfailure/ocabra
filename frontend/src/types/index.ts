@@ -376,6 +376,8 @@ export interface ServerConfig {
   globalSchedules: EvictionSchedule[]
   requireApiKeyOpenai: boolean
   requireApiKeyOllama: boolean
+  realtimeDefaultSttModel: string
+  realtimeDefaultTtsModel: string
 }
 
 export interface StatsParams {
@@ -467,6 +469,7 @@ export interface RecentRequest {
   username: string | null
   groupId: string | null
   groupName: string | null
+  apiKeyName: string | null
 }
 
 export interface RecentRequestsData {

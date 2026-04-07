@@ -34,6 +34,8 @@ class RequestStat(Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True)
     # Group associated with the API key used for this request; preserved even if group is deleted.
     group_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True, index=True)
+    # Name/label of the API key used; stored denormalized so it survives key deletion.
+    api_key_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 class GpuStat(Base):

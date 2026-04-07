@@ -692,6 +692,8 @@ function toServerConfig(raw: unknown): ServerConfig {
     globalSchedules,
     requireApiKeyOpenai: Boolean(data.requireApiKeyOpenai ?? data.require_api_key_openai ?? true),
     requireApiKeyOllama: Boolean(data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true),
+    realtimeDefaultSttModel: String(data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? ""),
+    realtimeDefaultTtsModel: String(data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? ""),
   }
 }
 
@@ -1027,6 +1029,8 @@ export const api = {
     },
     recent: (limit = 20) =>
       request<RecentRequestsData>("GET", `/ocabra/stats/recent?limit=${limit}`),
+    myRecent: (limit = 20) =>
+      request<RecentRequestsData>("GET", `/ocabra/stats/my-recent?limit=${limit}`),
     byUser: (params: StatsParams) => {
       const query = buildQuery({ from: params.from, to: params.to })
       return request<ByUserStats>("GET", `/ocabra/stats/by-user${query}`)
