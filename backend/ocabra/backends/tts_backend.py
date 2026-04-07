@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 
 logger = structlog.get_logger(__name__)
 
@@ -67,6 +67,10 @@ class _TTSWorker:
 
 
 class TTSBackend(BackendInterface):
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.AUDIO_SPEECH}
     def __init__(self) -> None:
         self._workers: dict[str, _TTSWorker] = {}
 

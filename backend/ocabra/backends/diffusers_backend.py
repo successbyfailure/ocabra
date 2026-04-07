@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -26,6 +26,10 @@ _SIZE_MAP: dict[str, tuple[int, int]] = {
 
 
 class DiffusersBackend(BackendInterface):
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.IMAGE_GENERATION}
     def __init__(self) -> None:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._workers: dict[str, WorkerInfo] = {}

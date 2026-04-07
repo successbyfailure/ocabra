@@ -1,4 +1,6 @@
 import asyncio
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -14,13 +16,9 @@ import ocabra.database as database
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import (
-    build_diarized_extra_config,
-    diarized_variant_model_id,
     estimate_bitnet_vram_from_config,
-    is_diarized_model_id,
     resolve_bitnet_gpu_layers,
     resolve_bitnet_option,
-    should_auto_create_diarized_variant,
 )
 from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
 from ocabra.db.model_config import ModelConfig
@@ -106,6 +104,13 @@ class ModelState:
             "extra_config": self.extra_config,
         }
 
+@dataclass
+class ActiveRequest:
+    request_id: str
+    model_id: str
+    started_at: float  # time.time()
+
+
 class ModelManager:
     def __init__(self, worker_pool, gpu_manager=None, gpu_scheduler=None) -> None:
         self._worker_pool = worker_pool
@@ -116,57 +121,196 @@ class ModelManager:
         self._load_locks: dict[str, asyncio.Lock] = {}
         self._persisted_model_ids: set[str] = set()
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
-        # In-flight request tracking: model_id → active request count
+        # In-flight request tracking
         self._in_flight: dict[str, int] = {}
         self._in_flight_lock = Lock()
+        self._active_requests: dict[str, ActiveRequest] = {}  # request_id -> ActiveRequest
+        self._timeout_counts: dict[str, int] = {}  # model_id -> timeout count
+        self._busy_watchdog_task: asyncio.Task | None = None
+        self._vram_watchdog_task: asyncio.Task | None = None
         self._stopped: bool = False
 
-    def begin_request(self, model_id: str) -> None:
-        """Mark one request as in-flight for this model."""
+    def begin_request(self, model_id: str) -> str:
+        """Mark one request as in-flight. Returns request_id."""
+        request_id = str(uuid.uuid4())
         with self._in_flight_lock:
             self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
+            self._active_requests[request_id] = ActiveRequest(
+                request_id=request_id,
+                model_id=model_id,
+                started_at=time.time(),
+            )
+        return request_id
 
-    def end_request(self, model_id: str) -> None:
-        """Mark one in-flight request for this model as complete."""
+    def end_request(self, model_id: str, request_id: str | None = None) -> None:
+        """Mark one in-flight request as complete.
+
+        Legacy compat: request_id=None just decrements count.
+        Also updates last_request_at in-memory for LRU accuracy.
+        """
         with self._in_flight_lock:
+            if request_id and request_id in self._active_requests:
+                del self._active_requests[request_id]
             count = self._in_flight.get(model_id, 0)
             if count <= 1:
                 self._in_flight.pop(model_id, None)
             else:
                 self._in_flight[model_id] = count - 1
+        # Update last_request_at in memory for LRU eviction ordering
+        state = self._states.get(model_id)
+        if state:
+            state.last_request_at = datetime.now(timezone.utc)
 
     def is_busy(self, model_id: str) -> bool:
         """Return True if there are in-flight requests for this model."""
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0) > 0
 
-    async def _ensure_diarized_variants_for_whisper_models(self) -> None:
-        snapshot = list(self._states.values())
-        for state in snapshot:
-            if not should_auto_create_diarized_variant(state):
-                continue
-            diarized_backend_model_id = diarized_variant_model_id(state.backend_model_id)
-            diarized_model_id = build_model_ref(state.backend_type, diarized_backend_model_id)
-            if diarized_model_id in self._states:
-                continue
+    async def _busy_watchdog(self) -> None:
+        """Loop every 10s checking for requests that exceed busy_timeout_seconds."""
+        while True:
             try:
-                await self.add_model(
-                    model_id=diarized_model_id,
-                    backend_type=state.backend_type,
-                    display_name=f"{state.display_name} (diarized)",
-                    load_policy=state.load_policy.value,
-                    auto_reload=state.auto_reload,
-                    preferred_gpu=state.preferred_gpu,
-                    extra_config=build_diarized_extra_config(state.extra_config),
-                    create_diarized_variant=False,
-                )
+                await asyncio.sleep(10)
+                timeout_s = max(30, int(getattr(settings, "busy_timeout_seconds", 300)))
+                now = time.time()
+                with self._in_flight_lock:
+                    snapshot = list(self._active_requests.values())
+                for req in snapshot:
+                    elapsed = now - req.started_at
+                    if elapsed > timeout_s:
+                        logger.error(
+                            "request_busy_timeout",
+                            request_id=req.request_id,
+                            model_id=req.model_id,
+                            elapsed_s=f"{elapsed:.0f}",
+                            timeout_s=timeout_s,
+                        )
+                        with self._in_flight_lock:
+                            self._active_requests.pop(req.request_id, None)
+                            count = self._in_flight.get(req.model_id, 0)
+                            if count <= 1:
+                                self._in_flight.pop(req.model_id, None)
+                            else:
+                                self._in_flight[req.model_id] = count - 1
+                        self._timeout_counts[req.model_id] = (
+                            self._timeout_counts.get(req.model_id, 0) + 1
+                        )
+                        action = getattr(settings, "busy_timeout_action", "mark_error")
+                        if action == "restart_worker":
+                            try:
+                                await self.unload(req.model_id, reason="busy_timeout")
+                            except Exception as exc:
+                                logger.warning(
+                                    "busy_timeout_unload_failed",
+                                    model_id=req.model_id,
+                                    error=str(exc),
+                                )
+                        else:  # mark_error
+                            state = self._states.get(req.model_id)
+                            if state:
+                                state.status = ModelStatus.ERROR
+                                state.error_message = (
+                                    f"Request {req.request_id} timed out "
+                                    f"after {elapsed:.0f}s"
+                                )
+                                await self._publish_event(req.model_id, "busy_timeout")
+                                try:
+                                    await publish_system_alert(
+                                        "warning",
+                                        f"Model '{req.model_id}' marked ERROR: "
+                                        f"request timed out after {elapsed:.0f}s",
+                                    )
+                                except Exception:
+                                    pass
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
-                logger.warning(
-                    "diarized_variant_auto_create_failed",
-                    model_id=state.model_id,
-                    diarized_model_id=diarized_model_id,
-                    error=str(exc),
-                )
+                logger.warning("busy_watchdog_error", error=str(exc))
+
+    # ------------------------------------------------------------------
+    # 11.1 — LRU eviction + VRAM watchdog
+    # ------------------------------------------------------------------
+
+    def _get_eviction_candidates(self, gpu_index: int) -> list[str]:
+        """Return model_ids loaded on gpu_index, ordered by LRU (oldest first).
+
+        Only includes WARM or ON_DEMAND models (never PIN).
+        Excludes models with in-flight requests.
+        """
+        fallback_time = datetime.min.replace(tzinfo=timezone.utc)
+        candidates = []
+        for model_id, state in self._states.items():
+            if state.status != ModelStatus.LOADED:
+                continue
+            if state.load_policy == LoadPolicy.PIN:
+                continue
+            if gpu_index not in (state.current_gpu or []):
+                continue
+            if self.is_busy(model_id):
+                continue
+            candidates.append(state)
+        candidates.sort(
+            key=lambda s: s.last_request_at or s.loaded_at or fallback_time,
+        )
+        return [s.model_id for s in candidates]
+
+    async def _evict_for_space(self, gpu_index: int, needed_mb: int) -> int:
+        """Evict LRU models from gpu_index until needed_mb is freed.
+
+        Returns MB freed. Does not evict PIN or busy models.
+        """
+        freed = 0
+        for model_id in self._get_eviction_candidates(gpu_index):
+            if freed >= needed_mb:
+                break
+            state = self._states.get(model_id)
+            if not state:
+                continue
+            vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
+            logger.info(
+                "vram_eviction",
+                model_id=model_id,
+                gpu_index=gpu_index,
+                vram_mb=vram_per_gpu,
+                reason="vram_pressure",
+            )
+            await self.unload(model_id, reason="vram_pressure")
+            freed += vram_per_gpu
+        return freed
+
+    async def _vram_watchdog(self) -> None:
+        """Background loop: proactively evict when VRAM exceeds threshold."""
+        interval_s = max(1, int(settings.idle_eviction_check_interval_seconds))
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+                if not self._gpu_manager:
+                    continue
+                threshold = float(getattr(settings, "vram_eviction_threshold", 0.90))
+                gpu_states = await self._gpu_manager.get_all_states()
+                for gpu_state in gpu_states:
+                    if gpu_state.total_vram_mb <= 0:
+                        continue
+                    ratio = gpu_state.used_vram_mb / gpu_state.total_vram_mb
+                    if ratio > threshold:
+                        over_mb = gpu_state.used_vram_mb - int(
+                            gpu_state.total_vram_mb * threshold
+                        )
+                        if over_mb > 0:
+                            logger.warning(
+                                "vram_threshold_exceeded",
+                                gpu_index=gpu_state.index,
+                                used_mb=gpu_state.used_vram_mb,
+                                total_mb=gpu_state.total_vram_mb,
+                                ratio=f"{ratio:.2f}",
+                                threshold=f"{threshold:.2f}",
+                                evicting_mb=over_mb,
+                            )
+                            await self._evict_for_space(gpu_state.index, over_mb)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("vram_watchdog_error", error=str(exc))
 
     def set_gpu_manager(self, gpu_manager) -> None:
         self._gpu_manager = gpu_manager
@@ -205,7 +349,6 @@ class ModelManager:
 
     async def start(self) -> None:
         await self._load_configs_from_db()
-        await self._ensure_diarized_variants_for_whisper_models()
         await self._hydrate_last_request_at_from_redis()
         for model_id, state in self._states.items():
             if state.load_policy == LoadPolicy.PIN:
@@ -215,10 +358,23 @@ class ModelManager:
                     task_name=f"load:{model_id}",
                     model_id=model_id,
                 )
+        self._busy_watchdog_task = asyncio.create_task(
+            self._busy_watchdog(), name="busy-watchdog"
+        )
+        self._vram_watchdog_task = asyncio.create_task(
+            self._vram_watchdog(), name="vram-watchdog"
+        )
 
     async def stop(self) -> None:
-        """Signal all background loops (e.g. _watch_and_reload) to exit."""
+        """Signal all background loops to exit."""
         self._stopped = True
+        for task_attr in ("_busy_watchdog_task", "_vram_watchdog_task"):
+            task = getattr(self, task_attr, None)
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                setattr(self, task_attr, None)
 
     async def _load_configs_from_db(self) -> None:
         async with database.AsyncSessionLocal() as session:
@@ -409,6 +565,22 @@ class ModelManager:
                     )
                 else:
                     gpu_indices = [settings.default_gpu_index]
+
+                # Pre-load: try to evict LRU models if VRAM is insufficient
+                if gpu_managed and self._gpu_manager and gpu_indices:
+                    for gpu_idx in gpu_indices:
+                        available = await self._gpu_manager.get_free_vram(gpu_idx)
+                        if vram_needed > available:
+                            freed = await self._evict_for_space(
+                                gpu_idx, vram_needed - available
+                            )
+                            if freed < (vram_needed - available):
+                                from ocabra.core.scheduler import InsufficientVRAMError
+
+                                raise InsufficientVRAMError(
+                                    f"GPU {gpu_idx}: need {vram_needed} MB, "
+                                    f"only {available + freed} MB available after eviction"
+                                )
 
                 # vLLM checks against a fraction of total VRAM, not only model weights.
                 if state.backend_type == "vllm" and self._gpu_manager:
@@ -918,7 +1090,6 @@ class ModelManager:
         auto_reload: bool = False,
         preferred_gpu: int | None = None,
         extra_config: dict | None = None,
-        create_diarized_variant: bool = True,
     ) -> "ModelState":
         normalized_model_id, backend_model_id = normalize_model_ref(backend_type, model_id)
         normalized_backend = str(backend_type or "").strip().lower()
@@ -953,29 +1124,6 @@ class ModelManager:
         self._load_locks[normalized_model_id] = asyncio.Lock()
         self._persisted_model_ids.add(normalized_model_id)
         self._notify_event_listeners("register", state)
-
-        if create_diarized_variant and should_auto_create_diarized_variant(state):
-            diarized_backend_model_id = diarized_variant_model_id(backend_model_id)
-            diarized_model_id = build_model_ref(normalized_backend, diarized_backend_model_id)
-            if diarized_model_id not in self._states:
-                try:
-                    await self.add_model(
-                        model_id=diarized_model_id,
-                        backend_type=normalized_backend,
-                        display_name=f"{display_name or backend_model_id} (diarized)",
-                        load_policy=load_policy,
-                        auto_reload=auto_reload,
-                        preferred_gpu=preferred_gpu,
-                        extra_config=build_diarized_extra_config(extra_config),
-                        create_diarized_variant=False,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "diarized_variant_auto_create_failed",
-                        model_id=model_id,
-                        diarized_model_id=diarized_model_id,
-                        error=str(exc),
-                    )
         return state
 
     async def update_config(self, model_id: str, patch: dict) -> "ModelState":

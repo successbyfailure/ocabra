@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 from ocabra.registry.ollama_registry import OllamaRegistry
 
@@ -13,6 +13,10 @@ logger = structlog.get_logger(__name__)
 
 
 class OllamaBackend(BackendInterface):
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
     def __init__(self) -> None:
         self._registry = OllamaRegistry()
         self._loaded: set[str] = set()

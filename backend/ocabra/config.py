@@ -138,12 +138,43 @@ class Settings(BaseSettings):
     diffusers_allow_tf32: bool = True
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0
+    # 11.1: Proactive VRAM eviction threshold (fraction 0.0-1.0).
+    # When used VRAM exceeds this fraction, the VRAM watchdog evicts LRU models.
+    vram_eviction_threshold: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of total VRAM above which LRU models are proactively evicted.",
+    )
 
     # OpenAI audio uploads
     # Maximum allowed size per multipart part (in MB) for /v1/audio/transcriptions.
     openai_audio_max_part_size_mb: int = 256
     # Whisper worker startup deadline (seconds). Diarization cold starts may need extra time.
     whisper_startup_timeout_s: int = 300
+
+    # Realtime API defaults (STT/TTS models for /v1/realtime sessions)
+    realtime_default_stt_model: str = ""
+    realtime_default_tts_model: str = ""
+
+    # 11.4: Busy timeout for individual requests
+    busy_timeout_seconds: int = Field(
+        default=300,
+        ge=30,
+        description="Max seconds for a single request before the model is marked ERROR.",
+    )
+    busy_timeout_action: str = Field(
+        default="mark_error",
+        description="Action on busy timeout: 'mark_error' or 'restart_worker'.",
+    )
+
+    # 11.2: Worker health monitoring and auto-restart
+    worker_health_check_interval_seconds: int = Field(default=10, ge=1)
+    auto_restart_workers: bool = Field(default=True)
+    max_worker_restarts: int = Field(
+        default=3, ge=0, description="Consecutive restarts before giving up."
+    )
+    worker_restart_backoff_seconds: float = Field(default=5.0, ge=1.0)
 
     # Model lifecycle
     idle_timeout_seconds: int = 300

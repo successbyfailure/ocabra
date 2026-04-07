@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -23,6 +23,10 @@ _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_work
 
 
 class LlamaCppBackend(BackendInterface):
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
     def __init__(self) -> None:
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}

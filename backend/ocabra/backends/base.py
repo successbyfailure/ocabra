@@ -1,7 +1,17 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from typing import Any
+
+
+class ModalityType(StrEnum):
+    TEXT_GENERATION = "text_generation"
+    EMBEDDINGS = "embeddings"
+    IMAGE_GENERATION = "image_generation"
+    AUDIO_TRANSCRIPTION = "audio_transcription"
+    AUDIO_SPEECH = "audio_speech"
+    RERANKING = "reranking"
 
 
 @dataclass
@@ -67,3 +77,71 @@ class BackendInterface(ABC):
         self, model_id: str, path: str, body: dict
     ) -> AsyncIterator[bytes]:
         """Forward a streaming request to the worker."""
+
+    # ------------------------------------------------------------------
+    # Multi-modal interface (optional — subclasses override as needed)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        """Return the set of modalities this backend can handle.
+
+        Subclasses MUST override this to declare their capabilities.
+        """
+        return set()
+
+    async def generate_text(
+        self, model_id: str, messages: list[dict], **kwargs: Any
+    ) -> dict:
+        """Generate a text completion. Override in text-capable backends."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support text generation"
+        )
+
+    async def stream_text(
+        self, model_id: str, messages: list[dict], **kwargs: Any
+    ) -> AsyncIterator[bytes]:
+        """Stream a text completion. Override in text-capable backends."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support text streaming"
+        )
+
+    async def generate_embeddings(
+        self, model_id: str, input: list[str], **kwargs: Any
+    ) -> dict:
+        """Generate embeddings for the given input texts."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support embeddings"
+        )
+
+    async def generate_image(
+        self, model_id: str, prompt: str, **kwargs: Any
+    ) -> dict:
+        """Generate an image from a text prompt."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support image generation"
+        )
+
+    async def transcribe(
+        self, model_id: str, audio: bytes, **kwargs: Any
+    ) -> dict:
+        """Transcribe audio to text."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support audio transcription"
+        )
+
+    async def synthesize_speech(
+        self, model_id: str, text: str, **kwargs: Any
+    ) -> bytes:
+        """Synthesize speech from text. Returns raw audio bytes."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support speech synthesis"
+        )
+
+    async def rerank(
+        self, model_id: str, query: str, documents: list[str], **kwargs: Any
+    ) -> dict:
+        """Rerank documents by relevance to the query."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support reranking"
+        )

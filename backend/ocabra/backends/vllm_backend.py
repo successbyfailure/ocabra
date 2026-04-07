@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -74,6 +74,10 @@ _MIN_VLLM_VRAM_MB = 2048
 
 
 class VLLMBackend(BackendInterface):
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
     """
     Manages vLLM subprocess workers.
 

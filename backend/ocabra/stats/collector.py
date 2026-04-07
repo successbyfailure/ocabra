@@ -118,18 +118,19 @@ class StatsMiddleware(BaseHTTPMiddleware):
         # Track in-flight requests so the pressure eviction loop can avoid
         # evicting models that are currently serving a request.
         inflight_model_id = _extract_model_id(request=request, body=request_payload)
+        inflight_request_id: str | None = None
         try:
             mm = request.app.state.model_manager
         except AttributeError:
             mm = None
         if mm and inflight_model_id:
-            mm.begin_request(inflight_model_id)
+            inflight_request_id = mm.begin_request(inflight_model_id)
 
         try:
             response = await call_next(request)
         except Exception as exc:
             if mm and inflight_model_id:
-                mm.end_request(inflight_model_id)
+                mm.end_request(inflight_model_id, inflight_request_id)
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
                 asyncio.create_task(_record_stat(
@@ -173,7 +174,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 finally:
                     duration_ms = (time.monotonic() - start) * 1000
                     if mm and inflight_model_id:
-                        mm.end_request(inflight_model_id)
+                        mm.end_request(inflight_model_id, inflight_request_id)
                     if model_id:
                         all_body = b"".join(chunks)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
@@ -192,7 +193,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         # Non-streaming: end in-flight immediately, buffer body, extract tokens.
         if mm and inflight_model_id:
-            mm.end_request(inflight_model_id)
+            mm.end_request(inflight_model_id, inflight_request_id)
 
         duration_ms = (time.monotonic() - start) * 1000
         error_message = f"HTTP {response.status_code}" if response.status_code >= 400 else None
@@ -386,6 +387,8 @@ async def _record_stat(
             except (ValueError, AttributeError):
                 pass
 
+        api_key_name = auth_user.api_key_name if auth_user else None
+
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
                 model_id=model_id,
@@ -402,6 +405,7 @@ async def _record_stat(
                 error=error_message,
                 user_id=parsed_user_id,
                 group_id=parsed_group_id,
+                api_key_name=api_key_name,
             )
             session.add(stat)
             await session.commit()

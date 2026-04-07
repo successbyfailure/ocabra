@@ -4,10 +4,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 
 
 class MockBackend(BackendInterface):
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.TEXT_GENERATION}
     def __init__(self, load_delay: float = 0.01, vram_mb: int = 4096) -> None:
         self._load_delay = load_delay
         self._vram_mb = vram_mb

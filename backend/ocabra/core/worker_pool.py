@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendInterface, WorkerInfo
+from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -120,3 +120,24 @@ class WorkerPool:
         else:
             async for chunk in _raw_stream():
                 yield chunk
+
+    # ------------------------------------------------------------------
+    # Modality helpers
+    # ------------------------------------------------------------------
+
+    def get_backends_for_modality(self, modality: ModalityType) -> list[str]:
+        """Return names of registered backends that support the given modality.
+
+        Excludes disabled backends.
+        """
+        return [
+            name
+            for name, backend in self._backends.items()
+            if name not in self._disabled_backends
+            and modality in backend.supported_modalities()
+        ]
+
+    def supports_modality(self, backend_name: str, modality: ModalityType) -> bool:
+        """Quick check for API layer validation."""
+        backend = self._backends.get(backend_name)
+        return backend is not None and modality in backend.supported_modalities()
