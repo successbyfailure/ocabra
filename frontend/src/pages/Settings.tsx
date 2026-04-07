@@ -54,6 +54,8 @@ const EMPTY_CONFIG: ServerConfig = {
   globalSchedules: [],
   requireApiKeyOpenai: true,
   requireApiKeyOllama: true,
+  realtimeDefaultSttModel: "",
+  realtimeDefaultTtsModel: "",
 }
 
 export function Settings() {

@@ -76,6 +76,14 @@ class ServerConfigPatch(BaseModel):
     global_schedules: list[EvictionSchedulePayload] | None = Field(default=None, alias="globalSchedules")
     require_api_key_openai: bool | None = Field(default=None, alias="requireApiKeyOpenai")
     require_api_key_ollama: bool | None = Field(default=None, alias="requireApiKeyOllama")
+    realtime_default_stt_model: str | None = Field(
+        default=None, alias="realtimeDefaultSttModel",
+        description="Default STT model for Realtime API sessions (profile_id or model_id)",
+    )
+    realtime_default_tts_model: str | None = Field(
+        default=None, alias="realtimeDefaultTtsModel",
+        description="Default TTS model for Realtime API sessions (profile_id or model_id)",
+    )
 
 
 def _masked_admin_key(value: str) -> str:
@@ -129,6 +137,8 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "globalSchedules": [],
         "requireApiKeyOpenai": settings.require_api_key_openai,
         "requireApiKeyOllama": settings.require_api_key_ollama,
+        "realtimeDefaultSttModel": settings.realtime_default_stt_model,
+        "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
     }
 
 
@@ -333,6 +343,12 @@ async def patch_config(
     if "require_api_key_ollama" in payload:
         settings.require_api_key_ollama = bool(payload["require_api_key_ollama"])
         await _persist("require_api_key_ollama", settings.require_api_key_ollama)
+    if "realtime_default_stt_model" in payload:
+        settings.realtime_default_stt_model = str(payload["realtime_default_stt_model"] or "")
+        await _persist("realtime_default_stt_model", settings.realtime_default_stt_model)
+    if "realtime_default_tts_model" in payload:
+        settings.realtime_default_tts_model = str(payload["realtime_default_tts_model"] or "")
+        await _persist("realtime_default_tts_model", settings.realtime_default_tts_model)
 
     if "download_dir" in payload:
         settings.download_dir = str(payload["download_dir"])
