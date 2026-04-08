@@ -110,10 +110,26 @@ async def realtime_ws(
 
     worker_pool = websocket.app.state.worker_pool
     model_manager = websocket.app.state.model_manager
+    profile_registry = websocket.app.state.profile_registry
+
+    # Resolve profile_id → canonical model_id (same as REST endpoints)
+    resolved_model_id = model
+    profile = await profile_registry.get(model)
+    if profile and profile.enabled:
+        resolved_model_id = profile.base_model_id
+    elif "/" not in model:
+        # Not a profile and not a canonical id — try legacy fallback
+        states = await model_manager.list_states()
+        match = next(
+            (s for s in states if s.backend_model_id == model or s.model_id == model),
+            None,
+        )
+        if match:
+            resolved_model_id = match.model_id
 
     session = RealtimeSession(
         ws=websocket,
-        model_id=model,
+        model_id=resolved_model_id,
         worker_pool=worker_pool,
         model_manager=model_manager,
     )
