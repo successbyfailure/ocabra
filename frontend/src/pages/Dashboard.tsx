@@ -103,27 +103,18 @@ function ServiceCard({ service }: { service: ServiceState }) {
   const [busy, setBusy] = useState(false)
   const [unloadError, setUnloadError] = useState<string | null>(null)
 
-  const statusColor =
-    service.status === "active"
-      ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/30"
-      : service.status === "idle"
-        ? "bg-blue-500/20 text-blue-200 border-blue-500/30"
-        : service.status === "unreachable"
-          ? "bg-red-500/20 text-red-200 border-red-500/30"
-          : service.status === "disabled"
-            ? "bg-amber-500/20 text-amber-200 border-amber-500/30"
-            : "bg-muted text-muted-foreground border-border"
-
-  const statusLabel =
-    service.status === "active"
-      ? "Activo"
-      : service.status === "idle"
-        ? "Inactivo"
-        : service.status === "unreachable"
-          ? "No disponible"
-          : service.status === "disabled"
-            ? "Desactivado"
-            : "Desconocido"
+  const statusMap: Record<string, { color: string; label: string }> = {
+    active: { color: "bg-emerald-500/20 text-emerald-200 border-emerald-500/30", label: "Activo" },
+    idle: { color: "bg-blue-500/20 text-blue-200 border-blue-500/30", label: "Inactivo" },
+    unreachable: { color: "bg-red-500/20 text-red-200 border-red-500/30", label: "No disponible" },
+    disabled: { color: "bg-amber-500/20 text-amber-200 border-amber-500/30", label: "Desactivado" },
+    building: { color: "bg-violet-500/20 text-violet-200 border-violet-500/30 animate-pulse", label: "Construyendo" },
+    starting: { color: "bg-sky-500/20 text-sky-200 border-sky-500/30 animate-pulse", label: "Arrancando" },
+  }
+  const { color: statusColor, label: statusLabel } = statusMap[service.status] ?? {
+    color: "bg-muted text-muted-foreground border-border",
+    label: "Desconocido",
+  }
 
   async function handleUnload() {
     setBusy(true)
@@ -273,7 +264,7 @@ function ServiceCard({ service }: { service: ServiceState }) {
         >
           Actualizar
         </button>
-        {service.enabled && !service.serviceAlive && (
+        {service.enabled && !service.serviceAlive && !["building", "starting"].includes(service.status) && (
           <button
             type="button"
             onClick={() => void handleStart()}

@@ -36,6 +36,8 @@ class ServiceState:
     unload_payload: dict[str, Any] | None = None
     post_unload_flush_path: str | None = None
     docker_container_name: str | None = None
+    # Compose service name (used by `docker compose up -d <name>`)
+    compose_service_name: str | None = None
     # When True, treat the service as model-loaded whenever it is alive.
     runtime_loaded_when_alive: bool = False
     preferred_gpu: int | None = None
@@ -131,6 +133,7 @@ class ServiceManager:
                 runtime_check_key="runtime_loaded",
                 unload_path="/runtime/unload",
                 docker_container_name=settings.hunyuan_docker_container,
+                compose_service_name="hunyuan",
             ),
             "comfyui": ServiceState(
                 service_id="comfyui",
@@ -145,6 +148,7 @@ class ServiceManager:
                 unload_path="/free",
                 unload_payload={"unload_models": True, "free_memory": True},
                 docker_container_name=settings.comfyui_docker_container,
+                compose_service_name="comfyui",
                 runtime_loaded_when_alive=True,
             ),
             "a1111": ServiceState(
@@ -162,6 +166,7 @@ class ServiceManager:
                 unload_path="/sdapi/v1/unload-checkpoint",
                 post_unload_flush_path="/free-memory",
                 docker_container_name=settings.a1111_docker_container,
+                compose_service_name="a1111",
             ),
             "acestep": ServiceState(
                 service_id="acestep",
@@ -174,6 +179,7 @@ class ServiceManager:
                 idle_unload_after_seconds=settings.acestep_idle_unload_seconds,
                 generation_grace_period_s=settings.acestep_generation_grace_period_s,
                 docker_container_name=settings.acestep_docker_container,
+                compose_service_name="acestep",
                 runtime_loaded_when_alive=True,
                 idle_action="stop",
             ),
@@ -271,6 +277,9 @@ class ServiceManager:
 
     async def refresh(self, service_id: str) -> ServiceState:
         state = self._require(service_id)
+        # Don't overwrite transient build/start status — _start_container_bg owns it
+        if state.status in ("building", "starting"):
+            return state
         now = datetime.now(timezone.utc)
         if not state.enabled:
             container_running = await self._is_container_running(state)
@@ -529,8 +538,10 @@ class ServiceManager:
         state = self._require(service_id)
         if not state.enabled:
             raise RuntimeError(f"Service '{service_id}' is disabled")
-        if state.docker_container_name and not state.service_alive:
-            await self._start_container(state)
+        if state.status in ("building", "starting"):
+            return state  # already in progress
+        if (state.docker_container_name or state.compose_service_name) and not state.service_alive:
+            asyncio.create_task(self._start_container_bg(state))
         return state
 
     async def unload(self, service_id: str, reason: str = "manual") -> ServiceState:
@@ -934,8 +945,10 @@ class ServiceManager:
         code, _out, err = await self._run_docker_command("restart", state.docker_container_name)
         if code == 0:
             state.service_alive = False
-            state.status = "restarting"
+            state.status = "starting"
+            state.detail = "restarting container"
             logger.info("container_restarted", container=state.docker_container_name)
+            await self._publish_state(state, "service_starting")
             return
         logger.warning(
             "container_restart_failed",
@@ -944,16 +957,115 @@ class ServiceManager:
         )
 
     async def _start_container(self, state: ServiceState) -> None:
-        if not state.docker_container_name:
+        """Start a container, trying docker start first, then docker compose up."""
+        # Try plain `docker start` first (container already exists)
+        if state.docker_container_name:
+            code, _out, _err = await self._run_docker_command("start", state.docker_container_name)
+            if code == 0:
+                logger.info("container_started", container=state.docker_container_name)
+                return
+
+        # Fallback: `docker compose up -d` (builds image if needed)
+        if state.compose_service_name:
+            await self._compose_up(state)
             return
-        code, _out, err = await self._run_docker_command("start", state.docker_container_name)
-        if code == 0:
-            logger.info("container_started", container=state.docker_container_name)
-            return
+
         logger.warning(
             "container_start_failed",
-            container=state.docker_container_name,
-            error=err or f"exit_code={code}",
+            service_id=state.service_id,
+            error="no container or compose service configured",
+        )
+
+    async def _compose_up(self, state: ServiceState) -> None:
+        """Run `docker compose up -d <service>` (builds if image missing)."""
+        compose_dir = settings.compose_project_dir
+        code, _out, err = await self._run_docker_compose(
+            "-f", f"{compose_dir}/docker-compose.yml",
+            "--env-file", f"{compose_dir}/.env",
+            "up", "-d", "--build", state.compose_service_name,
+        )
+        if code == 0:
+            logger.info("compose_up_ok", service=state.compose_service_name)
+            return
+        raise RuntimeError(
+            f"docker compose up failed for {state.compose_service_name}: "
+            f"{err or f'exit_code={code}'}"
+        )
+
+    async def _start_container_bg(self, state: ServiceState) -> None:
+        """Background task: build/start container and wait until healthy."""
+        try:
+            # Phase 1 — check if container exists and can be started quickly
+            container_exists = False
+            if state.docker_container_name:
+                code, _out, _err = await self._run_docker_command(
+                    "inspect", "-f", "{{.State.Status}}", state.docker_container_name,
+                )
+                container_exists = code == 0
+
+            if container_exists:
+                state.status = "starting"
+                state.detail = "starting container"
+                await self._publish_state(state, "service_starting")
+                code, _out, _err = await self._run_docker_command("start", state.docker_container_name)
+                if code != 0:
+                    raise RuntimeError(f"docker start failed: exit_code={code}")
+            elif state.compose_service_name:
+                # Need compose up (may build image first)
+                state.status = "building"
+                state.detail = "building image and creating container"
+                await self._publish_state(state, "service_building")
+                await self._compose_up(state)
+                state.status = "starting"
+                state.detail = "container created, waiting for health check"
+                await self._publish_state(state, "service_starting")
+            else:
+                raise RuntimeError("no container or compose service configured")
+
+            # Phase 2 — poll until the service health check passes
+            state.status = "starting"
+            state.detail = "waiting for service to become healthy"
+            await self._publish_state(state, "service_starting")
+
+            max_wait = 600  # 10 minutes max for heavy images
+            poll_interval = 3
+            elapsed = 0
+            while elapsed < max_wait:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+                alive = await self._check_service_alive(state)
+                if alive:
+                    state.service_alive = True
+                    state.status = "idle"
+                    state.detail = None
+                    logger.info("service_started", service_id=state.service_id, elapsed_s=elapsed)
+                    await self._publish_state(state, "health_checked")
+                    return
+
+            # Timed out waiting for health
+            state.status = "unreachable"
+            state.detail = f"timeout after {max_wait}s waiting for health check"
+            logger.warning("service_start_timeout", service_id=state.service_id)
+            await self._publish_state(state, "health_checked")
+
+        except Exception as exc:
+            state.status = "unreachable"
+            state.detail = f"start failed: {exc}"
+            logger.error("service_start_failed", service_id=state.service_id, error=str(exc))
+            await self._publish_state(state, "health_checked")
+
+    async def _run_docker_compose(self, *args: str) -> tuple[int, str, str]:
+        process = await asyncio.create_subprocess_exec(
+            "docker", "compose",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return (
+            process.returncode or 0,
+            stdout.decode("utf-8", errors="ignore").strip(),
+            stderr.decode("utf-8", errors="ignore").strip(),
         )
 
     # ── Redis persistence ─────────────────────────────────────────────────

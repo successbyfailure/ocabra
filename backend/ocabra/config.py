@@ -235,6 +235,9 @@ class Settings(BaseSettings):
     # with ACESTEP_MODE=api). Example: http://acestep:8001
     acestep_external_api_url: str = ""
 
+    # Docker Compose project directory (for `docker compose up -d <service>`)
+    compose_project_dir: str = "/opt/ocabra"
+
     # Langfuse observability (desactivado por defecto)
     langfuse_enabled: bool = False
     langfuse_public_key: str | None = ""

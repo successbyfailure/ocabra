@@ -524,7 +524,7 @@ export interface GPUStatHistory {
   points: GPUStatHistoryPoint[]
 }
 
-export type ServiceStatus = "unknown" | "idle" | "active" | "unreachable" | "disabled"
+export type ServiceStatus = "unknown" | "idle" | "active" | "unreachable" | "disabled" | "building" | "starting"
 
 export interface ServiceState {
   serviceId: string

@@ -65,6 +65,8 @@ services:
       - /docker/ai-models/ocabra/models:/data/models
       - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
+      - ./.env:/opt/ocabra/.env:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,6 +126,7 @@ services:
     restart: unless-stopped
 
   hunyuan:
+    profiles: ["services"]
     build:
       context: ./Hunyuan3D-2.1
       dockerfile: docker/Dockerfile
@@ -155,6 +158,7 @@ services:
     restart: unless-stopped
 
   comfyui:
+    profiles: ["services"]
     build:
       context: ./services/comfyui
       dockerfile: Dockerfile
@@ -184,6 +188,7 @@ services:
     restart: unless-stopped
 
   a1111:
+    profiles: ["services"]
     build:
       context: ./services/a1111
       dockerfile: Dockerfile
@@ -216,6 +221,7 @@ services:
     restart: unless-stopped
 
   acestep:
+    profiles: ["services"]
     build:
       context: /docker/ACE-Step-1.5
       dockerfile: Dockerfile
@@ -261,6 +267,7 @@ services:
     restart: unless-stopped
 
   gateway:
+    profiles: ["services"]
     build:
       context: ./gateway
       dockerfile: Dockerfile
