@@ -308,8 +308,8 @@ class ProfileRegistry:
         for model in all_models:
             if model.model_id in models_with_profiles:
                 continue
-            if "::" in model.model_id:
-                continue  # skip legacy diarized variants
+            if "::" in model.model_id and model.backend_type not in ("bitnet", "llama_cpp"):
+                continue  # skip legacy diarized variants (but not GGUF models that use :: as file separator)
 
             # Derive slug
             raw_name = model.display_name or model.model_id
