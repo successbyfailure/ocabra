@@ -84,6 +84,14 @@ class ServerConfigPatch(BaseModel):
         default=None, alias="realtimeDefaultTtsModel",
         description="Default TTS model for Realtime API sessions (profile_id or model_id)",
     )
+    federation_enabled: bool | None = Field(
+        default=None, alias="federationEnabled",
+        description="Enable/disable federation mode for multi-node inference (hot toggle)",
+    )
+    federation_node_name: str | None = Field(
+        default=None, alias="federationNodeName",
+        description="Human-readable name for this node in the federation",
+    )
 
 
 def _masked_admin_key(value: str) -> str:
@@ -139,6 +147,8 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "requireApiKeyOllama": settings.require_api_key_ollama,
         "realtimeDefaultSttModel": settings.realtime_default_stt_model,
         "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
+        "federationEnabled": settings.federation_enabled,
+        "federationNodeName": settings.federation_node_name,
     }
 
 
@@ -349,6 +359,33 @@ async def patch_config(
     if "realtime_default_tts_model" in payload:
         settings.realtime_default_tts_model = str(payload["realtime_default_tts_model"] or "")
         await _persist("realtime_default_tts_model", settings.realtime_default_tts_model)
+
+    if "federation_node_name" in payload:
+        settings.federation_node_name = str(payload["federation_node_name"] or "")
+        await _persist("federation_node_name", settings.federation_node_name)
+
+    if "federation_enabled" in payload:
+        new_val = bool(payload["federation_enabled"])
+        old_val = settings.federation_enabled
+        settings.federation_enabled = new_val
+        await _persist("federation_enabled", new_val)
+
+        if new_val and not old_val:
+            # Start federation manager on the fly
+            fm = getattr(request.app.state, "federation_manager", None)
+            if fm is None:
+                from ocabra.core.federation import FederationManager
+                from ocabra.database import AsyncSessionLocal as _ASL
+
+                fm = FederationManager(settings, _ASL)
+                await fm.start()
+                request.app.state.federation_manager = fm
+        elif not new_val and old_val:
+            # Stop federation manager
+            fm = getattr(request.app.state, "federation_manager", None)
+            if fm is not None:
+                await fm.stop()
+                request.app.state.federation_manager = None
 
     if "download_dir" in payload:
         settings.download_dir = str(payload["download_dir"])
