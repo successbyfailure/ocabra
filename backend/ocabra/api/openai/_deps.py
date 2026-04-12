@@ -427,6 +427,11 @@ async def _do_ensure_loaded(
     )
 
 
+def get_federation_manager(request: Request):
+    """Return the FederationManager from app state, or None if disabled."""
+    return getattr(request.app.state, "federation_manager", None)
+
+
 def merge_profile_defaults(profile: ModelProfile, body: dict) -> dict:
     """Merge a profile's ``request_defaults`` and ``assets`` into a request body.
 

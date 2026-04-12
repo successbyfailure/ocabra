@@ -438,6 +438,17 @@ async def lifespan(app: FastAPI):
             await _session.commit()
         logger.info("jwt_secret_persisted")
 
+    # Federation manager (optional, only if enabled)
+    if settings.federation_enabled:
+        from ocabra.core.federation import FederationManager
+
+        federation_manager = FederationManager(settings, _ASL)
+        await federation_manager.start()
+        app.state.federation_manager = federation_manager
+        logger.info("federation_manager_ready")
+    else:
+        app.state.federation_manager = None
+
     logger.info("vllm_backend_registered")
     logger.info("ocabra_ready")
     yield
@@ -469,6 +480,9 @@ async def lifespan(app: FastAPI):
     service_health_task.cancel()
     with suppress(asyncio.CancelledError):
         await service_health_task
+
+    if getattr(app.state, "federation_manager", None) is not None:
+        await app.state.federation_manager.stop()
 
     await backend_process_manager.stop()
     await trtllm_compile_manager.stop()
@@ -698,6 +712,9 @@ app.include_router(registry_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(downloads_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(services_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(host_router, prefix="/ocabra", include_in_schema=False)
+from ocabra.api.internal.federation import router as federation_router  # noqa: E402
+
+app.include_router(federation_router, prefix="/ocabra", include_in_schema=False)
 
 # Stream 3-A: OpenAI API
 from ocabra.api.openai import router as openai_router  # noqa: E402

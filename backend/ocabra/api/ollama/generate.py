@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
@@ -16,6 +17,7 @@ from ocabra.api.openai._deps import (
     check_capability,
     compute_worker_key,
     ensure_loaded,
+    get_federation_manager,
     get_model_manager,
     get_profile_registry,
     merge_profile_defaults,
@@ -52,6 +54,33 @@ async def generate(
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
+
+    # --- Federation hook ---
+    federation_manager = get_federation_manager(request)
+    if federation_manager is not None:
+        from ocabra.config import settings as _settings
+
+        if _settings.federation_enabled:
+            from ocabra.core.federation import resolve_federated
+
+            target, peer = await resolve_federated(ollama_model, model_manager, federation_manager)
+            if target == "remote":
+                request.state.federation_remote_node_id = peer.peer_id
+                if stream:
+                    return StreamingResponse(
+                        federation_manager.proxy_stream(peer, "POST", request.url.path, body),
+                        media_type="application/x-ndjson",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    )
+                resp = await federation_manager.proxy_request(
+                    peer, "POST", request.url.path, body,
+                )
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"),
+                )
+    # --- End federation hook ---
 
     # Try profile resolution first
     try:

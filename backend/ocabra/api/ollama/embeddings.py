@@ -6,12 +6,14 @@ POST /api/embed      — Ollama v0.3+ embeddings endpoint (supports input arrays
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     check_capability,
     compute_worker_key,
     ensure_loaded,
+    get_federation_manager,
     get_model_manager,
     get_profile_registry,
     merge_profile_defaults,
@@ -35,6 +37,34 @@ async def _run_embeddings(
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
+
+    # --- Federation hook ---
+    federation_manager = get_federation_manager(request)
+    if federation_manager is not None:
+        from ocabra.config import settings as _settings
+
+        if _settings.federation_enabled:
+            from ocabra.core.federation import resolve_federated
+
+            target, peer = await resolve_federated(ollama_model, model_manager, federation_manager)
+            if target == "remote":
+                request.state.federation_remote_node_id = peer.peer_id
+                # Determine which Ollama embed path to use
+                embed_path = "/api/embed" if not legacy else "/api/embeddings"
+                resp = await federation_manager.proxy_request(
+                    peer, "POST", embed_path, body,
+                )
+                import json as _json
+
+                try:
+                    return _json.loads(resp.content)
+                except Exception:
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type"),
+                    )
+    # --- End federation hook ---
 
     # Try profile resolution first
     try:

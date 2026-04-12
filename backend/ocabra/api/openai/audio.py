@@ -21,6 +21,7 @@ from ._deps import (
     _openai_error,
     check_capability,
     compute_worker_key,
+    get_federation_manager,
     get_model_manager,
     get_openai_user,
     get_profile_registry,
@@ -269,6 +270,24 @@ async def speech(
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
+
+    # --- Federation hook ---
+    federation_manager = get_federation_manager(request)
+    if federation_manager is not None:
+        from ocabra.config import settings as _settings
+
+        if _settings.federation_enabled:
+            from ocabra.core.federation import resolve_federated
+
+            target, peer = await resolve_federated(model_id, model_manager, federation_manager)
+            if target == "remote":
+                request.state.federation_remote_node_id = peer.peer_id
+                # TTS is streaming audio — proxy as stream
+                return StreamingResponse(
+                    federation_manager.proxy_stream(peer, "POST", request.url.path, body),
+                    media_type="audio/mpeg",
+                )
+    # --- End federation hook ---
 
     profile, state = await resolve_profile(
         model_id,

@@ -326,6 +326,7 @@ async def _record_stat(
     request_kind: str,
     input_tokens: int | None,
     output_tokens: int | None,
+    remote_node_id: str | None = None,
 ) -> None:
     """Write a RequestStat row to the database and update Prometheus counters."""
     try:
@@ -389,6 +390,10 @@ async def _record_stat(
 
         api_key_name = auth_user.api_key_name if auth_user else None
 
+        # Federation: check if the request was proxied to a remote node.
+        if remote_node_id is None:
+            remote_node_id = getattr(request.state, "federation_remote_node_id", None)
+
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
                 model_id=model_id,
@@ -406,6 +411,7 @@ async def _record_stat(
                 user_id=parsed_user_id,
                 group_id=parsed_group_id,
                 api_key_name=api_key_name,
+                remote_node_id=remote_node_id,
             )
             session.add(stat)
             await session.commit()

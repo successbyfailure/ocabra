@@ -271,6 +271,26 @@ class Settings(BaseSettings):
     # Gateway service-to-service token (empty = disabled)
     gateway_service_token: str = ""
 
+    # Federation (multi-node peer-to-peer inference)
+    federation_enabled: bool = Field(
+        default=False, description="Enable federation mode for multi-node inference"
+    )
+    federation_node_id: str = Field(
+        default="", description="Unique identifier for this node (auto-generated if empty)"
+    )
+    federation_node_name: str = Field(
+        default="", description="Human-readable name for this node"
+    )
+    federation_heartbeat_interval: int = Field(
+        default=30, ge=5, description="Seconds between heartbeat polls to peers"
+    )
+    federation_proxy_timeout_s: int = Field(
+        default=300, ge=10, description="Timeout for proxied requests to peers"
+    )
+    federation_verify_ssl: bool = Field(
+        default=True, description="Verify TLS certificates for peer connections"
+    )
+
     @field_validator(
         "langfuse_public_key",
         "langfuse_secret_key",
