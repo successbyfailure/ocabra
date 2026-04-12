@@ -412,3 +412,170 @@ async def test_worker_key_deterministic():
     key1 = compute_worker_key("vllm/model", {"a": 1, "b": 2})
     key2 = compute_worker_key("vllm/model", {"b": 2, "a": 1})
     assert key1 == key2
+
+
+# ---------------------------------------------------------------------------
+# Ollama profile resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ollama_resolve_profile_first(model_manager, enabled_profile):
+    """Ollama endpoints should resolve by profile_id before trying legacy model names."""
+    from ocabra.api.openai._deps import resolve_profile
+
+    registry = _FakeProfileRegistry([enabled_profile])
+    profile, state = await resolve_profile(
+        "chat",
+        model_manager,
+        registry,
+    )
+    assert profile.profile_id == "chat"
+    assert state.model_id == "vllm/Qwen/Qwen3-8B"
+
+
+@pytest.mark.asyncio
+async def test_ollama_resolve_profile_with_user_access(model_manager, enabled_profile):
+    """Profile resolution respects user access control."""
+    from ocabra.api.openai._deps import resolve_profile
+
+    registry = _FakeProfileRegistry([enabled_profile])
+
+    # User with access to this profile
+    user_ok = type("UserContext", (), {
+        "is_admin": False,
+        "accessible_model_ids": {"chat"},
+    })()
+    profile, state = await resolve_profile(
+        "chat", model_manager, registry, user=user_ok
+    )
+    assert profile.profile_id == "chat"
+
+    # User without access
+    user_no = type("UserContext", (), {
+        "is_admin": False,
+        "accessible_model_ids": set(),
+    })()
+    with pytest.raises(Exception) as exc_info:
+        await resolve_profile("chat", model_manager, registry, user=user_no)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ollama_resolve_profile_admin_bypass(model_manager, enabled_profile):
+    """Admin users can access any profile regardless of group membership."""
+    from ocabra.api.openai._deps import resolve_profile
+
+    registry = _FakeProfileRegistry([enabled_profile])
+
+    admin_user = type("UserContext", (), {
+        "is_admin": True,
+        "accessible_model_ids": set(),
+    })()
+    profile, state = await resolve_profile(
+        "chat", model_manager, registry, user=admin_user
+    )
+    assert profile.profile_id == "chat"
+
+
+# ---------------------------------------------------------------------------
+# Chatterbox voice_ref path validation
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceRefPathValidation:
+    """Test that chatterbox worker rejects voice_ref paths outside controlled dirs."""
+
+    def test_safe_data_profiles_path(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert _is_voice_ref_path_safe("/data/profiles/tts-glados/reference.wav")
+
+    def test_safe_data_models_path(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert _is_voice_ref_path_safe("/data/models/some-model/audio.wav")
+
+    def test_safe_tmp_path(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert _is_voice_ref_path_safe("/tmp/decoded-audio.wav")
+
+    def test_reject_etc_passwd(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert not _is_voice_ref_path_safe("/etc/passwd")
+
+    def test_reject_traversal(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert not _is_voice_ref_path_safe("/data/profiles/../../../etc/passwd")
+
+    def test_reject_home_dir(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert not _is_voice_ref_path_safe("/home/user/evil.wav")
+
+    def test_reject_empty(self):
+        from workers.chatterbox_worker import _is_voice_ref_path_safe
+
+        assert not _is_voice_ref_path_safe("")
+
+    def test_resolve_voice_ref_rejects_unsafe_path(self):
+        from workers.chatterbox_worker import _resolve_voice_ref
+
+        result = _resolve_voice_ref("/etc/passwd", None)
+        assert result is None
+
+    def test_resolve_voice_ref_accepts_safe_nonexistent(self):
+        """Safe path that doesn't exist on disk returns None (no file)."""
+        from workers.chatterbox_worker import _resolve_voice_ref
+
+        result = _resolve_voice_ref("/data/profiles/nonexistent.wav", None)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Local scanner Chatterbox detection
+# ---------------------------------------------------------------------------
+
+
+class TestLocalScannerBackendDetection:
+    """Test that local_scanner detects model backends correctly."""
+
+    def test_detect_chatterbox(self, tmp_path):
+        from ocabra.registry.local_scanner import LocalScanner
+
+        scanner = LocalScanner()
+        model_dir = tmp_path / "ResembleAI--chatterbox-turbo"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+        assert scanner._detect_hf_backend(model_dir) == "chatterbox"
+
+    def test_detect_whisper(self, tmp_path):
+        from ocabra.registry.local_scanner import LocalScanner
+
+        scanner = LocalScanner()
+        model_dir = tmp_path / "openai--whisper-large-v3"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text('{"model_type": "whisper"}')
+        assert scanner._detect_hf_backend(model_dir) == "whisper"
+
+    def test_detect_diffusers(self, tmp_path):
+        from ocabra.registry.local_scanner import LocalScanner
+
+        scanner = LocalScanner()
+        model_dir = tmp_path / "stable-diffusion-v1-5"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+        (model_dir / "model_index.json").write_text("{}")
+        assert scanner._detect_hf_backend(model_dir) == "diffusers"
+
+    def test_detect_default_vllm(self, tmp_path):
+        from ocabra.registry.local_scanner import LocalScanner
+
+        scanner = LocalScanner()
+        model_dir = tmp_path / "Qwen--Qwen3-8B"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+        assert scanner._detect_hf_backend(model_dir) == "vllm"

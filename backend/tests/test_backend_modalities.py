@@ -19,7 +19,9 @@ def _collect_backends() -> list[type[BackendInterface]]:
         return _BACKEND_CLASSES
 
     from ocabra.backends._mock import MockBackend
+    from ocabra.backends.acestep_backend import AceStepBackend
     from ocabra.backends.bitnet_backend import BitnetBackend
+    from ocabra.backends.chatterbox_backend import ChatterboxBackend
     from ocabra.backends.diffusers_backend import DiffusersBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.ollama_backend import OllamaBackend
@@ -27,6 +29,7 @@ def _collect_backends() -> list[type[BackendInterface]]:
     from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
     from ocabra.backends.vllm_backend import VLLMBackend
+    from ocabra.backends.voxtral_backend import VoxtralBackend
     from ocabra.backends.whisper_backend import WhisperBackend
 
     _BACKEND_CLASSES.extend([
@@ -36,8 +39,11 @@ def _collect_backends() -> list[type[BackendInterface]]:
         OllamaBackend,
         BitnetBackend,
         DiffusersBackend,
+        AceStepBackend,
         WhisperBackend,
         TTSBackend,
+        ChatterboxBackend,
+        VoxtralBackend,
         TensorRTLLMBackend,
         MockBackend,
     ])

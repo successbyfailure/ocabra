@@ -364,15 +364,42 @@ def _decode_reference_audio(base64_audio: str) -> str:
     return tmp.name
 
 
+_ALLOWED_VOICE_REF_DIRS = (
+    "/data/profiles/",
+    "/data/models/",
+    "/tmp/",
+)
+
+
+def _is_voice_ref_path_safe(path: str) -> bool:
+    """Check that a voice_ref path is within an allowed oCabra-controlled directory.
+
+    Prevents path traversal attacks by resolving the real path and checking
+    it starts with one of the allowed prefixes.
+    """
+    try:
+        resolved = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    return any(resolved.startswith(prefix) for prefix in _ALLOWED_VOICE_REF_DIRS)
+
+
 def _resolve_voice_ref(
     voice_ref: str | None, reference_audio: str | None
 ) -> str | None:
     """Resolve voice reference from either a file path or base64 audio.
 
+    Only paths within oCabra-controlled directories are accepted.
     Returns a file path (possibly temporary) or None.
     """
-    if voice_ref and os.path.isfile(voice_ref):
-        return voice_ref
+    if voice_ref:
+        if not _is_voice_ref_path_safe(voice_ref):
+            logging.getLogger(__name__).warning(
+                "voice_ref path rejected (outside allowed dirs): %s", voice_ref
+            )
+            return None
+        if os.path.isfile(voice_ref):
+            return voice_ref
     if reference_audio:
         return _decode_reference_audio(reference_audio)
     return None
