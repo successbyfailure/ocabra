@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-04-06
+Última actualización: 2026-04-12
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -131,127 +131,98 @@ Implementado:
 
 ---
 
-## En progreso — Bloque 9 — Model Profiles (Fase 6)
+## ✅ Bloque 9 — Model Profiles (Fase 6) (COMPLETADO)
 
-Plan completo en `docs/PLAN.md` (Fase 6) y `docs/tasks/model-profiles-chatterbox-swarm-plan.md`.
+Plan en `docs/tasks/model-profiles-chatterbox-swarm-plan.md`.
 
-Separación entre modelos base (internos, admin) y perfiles públicos (clientes).
-Los perfiles son la interfaz pública de `/v1/models` y de toda la inferencia.
-
-| Item | Descripción | Estado |
-|------|-------------|--------|
-| Tabla `ModelProfile` + migración | DB schema, FK a `model_configs`, cascada | En progreso |
-| `core/profile_registry.py` | CRUD, cache, resolución de perfiles | En progreso |
-| Endpoints REST `/ocabra/profiles/*` | CRUD + upload de assets | En progreso |
-| `/ocabra/models` con `profiles[]` | Anidación de perfiles en respuesta admin | En progreso |
-| `resolve_profile()` en `/v1/*` y `/api/*` | Resolución pública por `profile_id` | En progreso |
-| Worker key por `(base_model_id, load_overrides_hash)` | Workers compartidos/dedicados | En progreso |
-| Fallback legacy `LEGACY_MODEL_ID_FALLBACK` | Compatibilidad temporal con `model_id` canónico | En progreso |
-| UI de perfiles en Models | CRUD, upload audio, toggle enabled/default | En progreso |
-| Contratos y tests | `docs/CONTRACTS.md` sección 8, test stubs | En progreso |
+Implementado:
+- `ModelProfile` DB + migración `0010`, `profile_registry.py` con CRUD y cache
+- Endpoints REST `/ocabra/profiles/*` con upload de assets
+- `resolve_profile()` en `/v1/*` y `/api/*` con fallback legacy configurable
+- Worker sharing por `(base_model_id, load_overrides_hash)`
+- UI de perfiles en Models (`ProfileModal.tsx`)
+- Validación de `voice_ref` restringida a paths controlados
+- Detección correcta de backends en local scanner
 
 ---
 
-## En progreso — Bloque 10 — Chatterbox TTS (Fase 7 parcial)
+## ✅ Bloque 10 — Chatterbox TTS (Fase 7 parcial) (COMPLETADO)
 
-Plan completo en `docs/PLAN.md` (Fase 7, Stream A) y `docs/tasks/model-profiles-chatterbox-swarm-plan.md`.
+Plan en `docs/tasks/model-profiles-chatterbox-swarm-plan.md`.
 
-Backend first-class para Chatterbox Multilingual (Resemble AI, MIT, 23 idiomas, voice cloning).
-El motor de fine-tuning (Fase 7, Stream B/C) queda fuera de esta oleada.
-
-| Item | Descripción | Estado |
-|------|-------------|--------|
-| `chatterbox_backend.py` | BackendInterface para Chatterbox | En progreso |
-| `chatterbox_worker.py` | Worker FastAPI con synthesize/stream/voices | En progreso |
-| Registro en `main.py` | `register_backend("chatterbox", ...)` | En progreso |
-| Detección en scanner/registry | HuggingFace y local scanner | En progreso |
-| Voice cloning via `voice_ref` | Path controlado por oCabra (asset de perfil) | En progreso |
-| Tests backend | load/unload, synthesize, streaming, voice cloning | En progreso |
+Implementado:
+- `chatterbox_backend.py` — BackendInterface completo (304 líneas)
+- `chatterbox_worker.py` — Worker FastAPI con synthesize/stream/voices (610 líneas)
+- Registro en `main.py`, config con `chatterbox_python_bin`
+- Detección en HuggingFace registry y local scanner
+- Voice cloning via `voice_ref` con path traversal protection
+- 28 idiomas, mapeo de voces OpenAI, formatos múltiples
 
 ---
 
-## Pendiente — Bloque 11 — Resiliencia de backends y gestión avanzada de recursos
+## ✅ Bloque 11 — Resiliencia de backends (COMPLETADO)
 
-**Plan detallado:** `docs/tasks/backend-resilience-plan.md`
+Plan en `docs/tasks/backend-resilience-plan.md`.
 
-Inspirado en análisis comparativo con LocalAI y AnythingLLM. Objetivo: mejorar la
-estabilidad, el aislamiento de fallos y la eficiencia en el uso de VRAM.
-Orden recomendado: 11.3 → 11.1 → 11.4 → 11.2 (de menor a mayor riesgo).
+### 11.1 — Evicción LRU + umbral de VRAM ✅
+- `vram_eviction_threshold` en config, `_get_eviction_candidates()`, `_evict_for_space()`
+- Pre-load VRAM check con evicción preventiva, `_vram_watchdog()` background loop
+- 7 tests
 
-### 11.1 — Evicción LRU + umbral de VRAM
+### 11.2 — Aislamiento por proceso ✅
+- `BackendProcessManager` con health loop, detección de PID muerto, auto-restart con backoff exponencial
+- Settings: `worker_health_check_interval_seconds`, `auto_restart_workers`, `max_worker_restarts`
+- Integrado en `main.py` lifespan. 7 tests
 
-Añadir al `model_manager` un WatchDog que monitorice la VRAM real vía `gpu_manager` y
-evicte automáticamente modelos WARM por LRU cuando la VRAM usada supere un umbral
-configurable (`vram_eviction_threshold`, default 0.90). Antes de cargar un modelo nuevo,
-comprobar si hay espacio suficiente y evictar preventivamente si no lo hay.
+### 11.3 — Interfaz unificada multi-modal ✅
+- `ModalityType` enum, métodos opcionales tipados en `BackendInterface`
+- `supported_modalities()` en los 13 backends
+- Helpers `get_backends_for_modality()` y `supports_modality()` en WorkerPool. 17 tests
 
-| Item | Descripción | Estado |
-|------|-------------|--------|
-| Setting `vram_eviction_threshold` | Configurable en `config.py` y `server_config` | Pendiente |
-| LRU tracking en `model_manager` | Timestamp de último uso por modelo cargado | Pendiente |
-| Pre-load VRAM check | Antes de `load()`, consultar VRAM disponible y evictar si falta | Pendiente |
-| Background watchdog | Loop async que monitoriza VRAM y evicta si se supera el umbral | Pendiente |
-| Tests | Evicción LRU, umbral, pre-load check | Pendiente |
-
-### 11.2 — Aislamiento por proceso (gRPC/subprocess)
-
-Formalizar el patrón de ejecución de backends como subprocesos independientes con
-health checks y restart automático on crash. Un fallo en un backend (OOM CUDA, segfault)
-no debe afectar al servidor principal ni a otros modelos cargados.
-
-| Item | Descripción | Estado |
-|------|-------------|--------|
-| `BackendProcessManager` | Clase que gestiona el ciclo de vida de subprocesos backend | Pendiente |
-| Health check periódico | Ping/heartbeat a cada worker, marcado ERROR si no responde | Pendiente |
-| Auto-restart on crash | Reinicio automático con backoff exponencial | Pendiente |
-| Crash isolation | Fallo de un backend no afecta a otros ni al servidor principal | Pendiente |
-| Migrar backends existentes | Adaptar vLLM, Diffusers, Whisper, TTS al nuevo patrón | Pendiente |
-| Tests | Crash recovery, health check failure, restart backoff | Pendiente |
-
-### 11.3 — Interfaz unificada multi-modal en BackendInterface
-
-Extender `BackendInterface` con métodos opcionales por modalidad (`generate_text`,
-`generate_image`, `transcribe`, `synthesize_speech`, `embed`, `rerank`) y un
-`get_capabilities()` que declare qué soporta cada backend. Simplifica el routing
-desde las capas API (OpenAI / Ollama) sin conocer el tipo de backend.
-
-| Item | Descripción | Estado |
-|------|-------------|--------|
-| Extender `BackendInterface` | Métodos opcionales por modalidad con `NotImplementedError` default | Pendiente |
-| `get_capabilities()` | Retorna set de capacidades (`text_generation`, `embedding`, `tts`, etc.) | Pendiente |
-| Routing por capability | Las capas API consultan capabilities en lugar de tipo de backend | Pendiente |
-| Migrar backends existentes | Cada backend implementa solo los métodos de su modalidad | Pendiente |
-| Tests | Capabilities reporting, routing, fallback en método no soportado | Pendiente |
-
-### 11.4 — Busy timeout / health watchdog
-
-Protección contra backends colgados. Si una inferencia supera un timeout configurable
-por backend, marcar el modelo como ERROR, cancelar la request y reiniciar el worker.
-
-| Item | Descripción | Estado |
-|------|-------------|--------|
-| Setting `busy_timeout_seconds` | Configurable por backend en `config.py` (default: 300s) | Pendiente |
-| Request timeout tracking | Registrar inicio de cada request activa por worker | Pendiente |
-| Watchdog loop | Async loop que detecta requests que exceden el timeout | Pendiente |
-| Acción on timeout | Marcar modelo ERROR, cancelar request, reiniciar worker | Pendiente |
-| Métricas | Contador de timeouts por modelo/backend en stats | Pendiente |
-| Tests | Timeout detection, model ERROR transition, worker restart | Pendiente |
+### 11.4 — Busy timeout / health watchdog ✅
+- `ActiveRequest` dataclass, `begin_request()` retorna request_id
+- `_busy_watchdog()` loop, `_timeout_counts` metrics
+- `busy_timeout_seconds` y `busy_timeout_action` configurables. 10 tests
 
 ---
 
-## Orden de ejecución sugerido
+## ✅ Bloque 12 — Federación P2P (COMPLETADO)
+
+Plan en `docs/tasks/federation-plan.md`.
+
+Implementado (5 fases):
+- **Fase 1**: `FederationManager` con heartbeat, DB `federation_peers`, cifrado Fernet, CRUD endpoints, circuit breaker
+- **Fase 2**: Proxy transparente (`proxy_request`/`proxy_stream`), `resolve_federated()`, load balancing con bias local, hooks en todos los endpoints OpenAI y Ollama
+- **Fase 3**: Inventario federado en `/v1/models`, `/api/tags`, `/ocabra/models` con deduplicación
+- **Fase 4**: UI completa — tab Federation en Settings, badges remotos en Models, panel en Dashboard, WebSocket events
+- **Fase 5**: Operaciones remotas (load/unload/download/GPUs) para peers con `access_level=full`
+- 54 tests de federación
+
+---
+
+## Pendiente — Bloque 13 — Backends Modulares
+
+Plan en `docs/tasks/modular-backends-plan.md`.
+
+Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI.
+5 fases: infraestructura → migrar backends → OCI → imagen slim → frontend.
+
+---
+
+## Orden de ejecución
 
 ```
 [✅ Hecho]  Auth + gateway + settings persistence
-[✅ Hecho]  Bloque 2 — Quick fixes (B6, A4, M7, WS system_alert)
+[✅ Hecho]  Bloque 2 — Quick fixes
 [✅ Hecho]  Bloque 3 — Settings en BD
 [✅ Hecho]  Bloque 4 — Langfuse
-[✅ Hecho]  Bloque 5 — Tests (paths críticos cubiertos; faltan e2e load/unload y TRT-LLM compile)
+[✅ Hecho]  Bloque 5 — Tests
 [✅ Hecho]  Bloque 7 — Teams, stats, admin UX
-[✅ Hecho]  Bloque 8 — Voice Pipeline (Fase 1 + 1.5 + 2)
-
-[En progreso] Bloque 9 — Model Profiles (Fase 6)
-[En progreso] Bloque 10 — Chatterbox TTS (Fase 7 parcial)
-[Pendiente]   Bloque 11 — Resiliencia de backends y gestión avanzada de recursos
+[✅ Hecho]  Bloque 8 — Voice Pipeline
+[✅ Hecho]  Bloque 9 — Model Profiles (Fase 6)
+[✅ Hecho]  Bloque 10 — Chatterbox TTS (Fase 7 parcial)
+[✅ Hecho]  Bloque 11 — Resiliencia de backends
+[✅ Hecho]  Bloque 12 — Federación P2P
+[Pendiente]   Bloque 13 — Backends Modulares
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 ```

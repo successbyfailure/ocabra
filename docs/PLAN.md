@@ -39,13 +39,12 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 | Frontend serve | Nginx |
 | Reverse proxy | Caddy |
 
-## Estado actual (2026-04-06)
+## Estado actual (2026-04-12)
 
-**Todas las fases del plan original (0–5) y el roadmap completo están implementados y en producción.**
-**Versión: 0.5.0**
+**Fases 0–8 completadas e implementadas. Versión: 0.6.0**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
-El trabajo restante (menor) está en `docs/ROADMAP.md`.
+El trabajo restante está en `docs/ROADMAP.md`.
 
 ### Implementado en código
 
@@ -73,7 +72,11 @@ El trabajo restante (menor) está en `docs/ROADMAP.md`.
 - `last_request_at` persistido en Redis; rehidratado al arrancar.
 - CORS restringido a `localhost/127.0.0.1` via `allow_origin_regex`.
 - Frontend servido por Nginx; Caddy como reverse proxy.
-- **Tests**: 69 tests cubriendo path traversal, config patch, model manager config, worker lifecycle, y Langfuse tracer.
+- **Model Profiles (Fase 6)**: Separación modelos/perfiles. `ModelProfile` con CRUD, resolución por `profile_id`, fallback legacy, worker sharing por `(base_model_id, load_overrides_hash)`, assets de perfil, UI en Models.
+- **Chatterbox TTS (Fase 7 parcial)**: Backend first-class para Chatterbox Multilingual (23 idiomas, voice cloning). Worker FastAPI, validación de `voice_ref`, detección en scanner/registry.
+- **Resiliencia de backends (Bloque 11)**: Interfaz unificada multi-modal (`ModalityType`, `supported_modalities()`), evicción LRU + umbral VRAM, busy timeout con `ActiveRequest` tracking, `BackendProcessManager` con health checks y auto-restart.
+- **Federación P2P (Bloque 12)**: Modo federado peer-to-peer completo. `FederationManager` con heartbeat, cifrado Fernet, proxy transparente, load balancing, inventario federado en `/v1/models` y `/api/tags`, UI de gestión de peers, operaciones remotas.
+- **Tests**: 586+ tests cubriendo path traversal, config, model manager, worker lifecycle, Langfuse, profiles, modalities, eviction, busy timeout, process manager, y federación (54 tests).
 
 ### Validaciones end-to-end confirmadas
 
@@ -90,14 +93,13 @@ El trabajo restante (menor) está en `docs/ROADMAP.md`.
 
 ### Próximas fases
 
-- **Fase 6 — Model Profiles**: Separación modelos/perfiles. Los modelos son internos (admin); los perfiles son la interfaz pública (`/v1/models`). Permite servir múltiples configuraciones del mismo modelo base (ej: `chat`, `chat-long`, `tts-glados`, `stt-diarized`) con workers compartidos o dedicados según `load_overrides`.
-- **Fase 7 — Chatterbox TTS + Fine-tuning**: Nuevo backend Chatterbox Multilingual (23 idiomas, MIT, voice cloning). Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
+- **Backends Modulares**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`.
+- **Fine-tuning de voz**: Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
 
 ### Pendiente menor
 
 Ver `docs/ROADMAP.md`:
-- Documentación OpenAPI enriquecida
-- Script first-run / instalación
+- Validación TRT-LLM multi-engine en producción (requiere prueba manual)
 - Tests e2e: flujos load/unload por backend, TRT-LLM compile mock
 - Limpiar `tensorrt_llm/Qwen3-32B-AWQ-fp16` del inventario
 
