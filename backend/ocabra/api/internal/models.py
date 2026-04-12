@@ -21,9 +21,11 @@ class ModelPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = None
+    backend_type: str | None = None
     load_policy: str | None = None
     auto_reload: bool | None = None
     preferred_gpu: int | None = None
+    vram_estimate_mb: int | None = None
     extra_config: dict | None = None
 
 
