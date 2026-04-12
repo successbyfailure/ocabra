@@ -707,6 +707,8 @@ function toServerConfig(raw: unknown): ServerConfig {
     requireApiKeyOllama: Boolean(data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true),
     realtimeDefaultSttModel: String(data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? ""),
     realtimeDefaultTtsModel: String(data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? ""),
+    federationEnabled: Boolean(data.federationEnabled ?? data.federation_enabled ?? false),
+    federationNodeName: String(data.federationNodeName ?? data.federation_node_name ?? ""),
   }
 }
 

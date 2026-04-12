@@ -383,6 +383,8 @@ export interface ServerConfig {
   requireApiKeyOllama: boolean
   realtimeDefaultSttModel: string
   realtimeDefaultTtsModel: string
+  federationEnabled: boolean
+  federationNodeName: string
 }
 
 export interface StatsParams {

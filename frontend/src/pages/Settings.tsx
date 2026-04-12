@@ -57,6 +57,8 @@ const EMPTY_CONFIG: ServerConfig = {
   requireApiKeyOllama: true,
   realtimeDefaultSttModel: "",
   realtimeDefaultTtsModel: "",
+  federationEnabled: false,
+  federationNodeName: "",
 }
 
 export function Settings() {

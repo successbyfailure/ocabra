@@ -207,9 +207,11 @@ function AddPeerDialog({
   )
 }
 
-export function FederationSettings({ config: _config, onSave: _onSave }: FederationSettingsProps) {
+export function FederationSettings({ config, onSave }: FederationSettingsProps) {
   const [peers, setPeers] = useState<FederationPeer[]>([])
   const [loading, setLoading] = useState(true)
+  const [togglingFederation, setTogglingFederation] = useState(false)
+  const federationEnabled = config.federationEnabled ?? false
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [editPeer, setEditPeer] = useState<FederationPeer | null>(null)
   const [testingPeerId, setTestingPeerId] = useState<string | null>(null)
@@ -314,17 +316,51 @@ export function FederationSettings({ config: _config, onSave: _onSave }: Federat
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setEditPeer(null)
-                setAddDialogOpen(true)
-              }}
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
-            >
-              <Plus size={14} />
-              Agregar peer
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                disabled={togglingFederation}
+                onClick={async () => {
+                  setTogglingFederation(true)
+                  try {
+                    await onSave({ federationEnabled: !federationEnabled } as Partial<ServerConfig>)
+                    toast.success(federationEnabled ? "Federacion desactivada" : "Federacion activada")
+                    if (!federationEnabled) {
+                      // Just enabled — reload peers after a short delay for manager to start
+                      setTimeout(() => { void loadPeers() }, 1000)
+                    }
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Error")
+                  } finally {
+                    setTogglingFederation(false)
+                  }
+                }}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${
+                  federationEnabled ? "bg-emerald-500" : "bg-muted-foreground/30"
+                }`}
+                role="switch"
+                aria-checked={federationEnabled}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                    federationEnabled ? "translate-x-5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+              {federationEnabled && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditPeer(null)
+                    setAddDialogOpen(true)
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+                >
+                  <Plus size={14} />
+                  Agregar peer
+                </button>
+              )}
+            </div>
           </div>
 
           {peers.length > 0 && (
@@ -339,7 +375,15 @@ export function FederationSettings({ config: _config, onSave: _onSave }: Federat
           )}
         </div>
 
-        {loading ? (
+        {!federationEnabled ? (
+          <div className="rounded-lg border border-dashed border-border bg-card/50 px-6 py-8 text-center">
+            <Network size={32} className="mx-auto text-muted-foreground/50" />
+            <p className="mt-2 text-sm font-medium text-muted-foreground">Federacion desactivada</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Activa el modo federado para conectar multiples nodos oCabra y compartir modelos entre ellos.
+            </p>
+          </div>
+        ) : loading ? (
           <div className="space-y-2">
             {Array.from({ length: 2 }).map((_, idx) => (
               <div key={`fed-skel-${idx}`} className="h-20 animate-pulse rounded-lg bg-muted" />
