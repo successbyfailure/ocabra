@@ -18,15 +18,16 @@ _ollama_registry = OllamaRegistry()
 
 
 class ModelPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    display_name: str | None = None
-    backend_type: str | None = None
-    load_policy: str | None = None
-    auto_reload: bool | None = None
-    preferred_gpu: int | None = None
-    vram_estimate_mb: int | None = None
-    extra_config: dict | None = None
+    display_name: str | None = Field(default=None, alias="displayName")
+    backend_type: str | None = Field(default=None, alias="backendType")
+    load_policy: str | None = Field(default=None, alias="loadPolicy")
+    auto_reload: bool | None = Field(default=None, alias="autoReload")
+    preferred_gpu: int | None = Field(default=None, alias="preferredGpu")
+    vram_estimate_mb: int | None = Field(default=None, alias="vramEstimateMb")
+    extra_config: dict | None = Field(default=None, alias="extraConfig")
+    schedules: list | None = Field(default=None, alias="schedules")
 
 
 class AddModelRequest(BaseModel):
