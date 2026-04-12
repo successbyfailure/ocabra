@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Activity, Cpu, Database, Download, Layers, Zap } from "lucide-react"
+import { Activity, Cpu, Database, Download, Globe, Layers, Network, Zap } from "lucide-react"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { GpuCard } from "@/components/gpu/GpuCard"
@@ -11,7 +11,7 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { HostStats, RecentRequestsData, ServiceState } from "@/types"
+import type { FederationPeer, HostStats, RecentRequestsData, ServiceState } from "@/types"
 
 function formatLoadedAgo(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -289,6 +289,61 @@ function ServiceCard({ service }: { service: ServiceState }) {
   )
 }
 
+function FederationSummary() {
+  const [peers, setPeers] = useState<FederationPeer[]>([])
+
+  useEffect(() => {
+    let active = true
+
+    async function load() {
+      try {
+        const data = await api.federation.getPeers()
+        if (active) setPeers(data)
+      } catch {
+        // Federation may not be enabled
+      }
+    }
+
+    void load()
+    const timer = window.setInterval(() => { void load() }, 30_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  const onlinePeers = peers.filter((p) => p.enabled && p.online)
+  if (onlinePeers.length === 0) return null
+
+  const totalModels = onlinePeers.reduce((acc, p) => acc + p.models.length, 0)
+  const totalGpus = onlinePeers.reduce((acc, p) => acc + p.gpus.length, 0)
+
+  return (
+    <section className="space-y-2">
+      <h2 className="text-xl font-semibold">Federacion</h2>
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="flex flex-wrap items-center gap-5 text-sm">
+          <div className="flex items-center gap-2">
+            <Network size={16} className="text-muted-foreground" />
+            <span className="font-medium">{onlinePeers.length}</span>
+            <span className="text-muted-foreground">nodo{onlinePeers.length !== 1 ? "s" : ""} online</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Globe size={16} className="text-muted-foreground" />
+            <span className="font-medium">{totalModels}</span>
+            <span className="text-muted-foreground">modelo{totalModels !== 1 ? "s" : ""} remotos</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Cpu size={16} className="text-muted-foreground" />
+            <span className="font-medium">{totalGpus}</span>
+            <span className="text-muted-foreground">GPU{totalGpus !== 1 ? "s" : ""} remota{totalGpus !== 1 ? "s" : ""}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function RecentRequestsSection() {
   const [data, setData] = useState<RecentRequestsData>({ requests: [] })
   const [loading, setLoading] = useState(true)
@@ -503,6 +558,8 @@ export function Dashboard() {
           )}
         </div>
       </section>
+
+      <FederationSummary />
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold">Modelos activos</h2>

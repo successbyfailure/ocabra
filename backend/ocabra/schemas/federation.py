@@ -94,3 +94,32 @@ class PeerTestResult(BaseModel):
     node_name: str | None = None
     latency_ms: float | None = None
     error: str | None = None
+
+
+# ── Phase 5: Remote operations schemas ──────────────────────────
+
+
+class RemoteLoadRequest(BaseModel):
+    """Optional configuration for remote model load.
+
+    All fields are optional; when omitted the peer uses its own defaults.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    preferred_gpu: int | None = Field(default=None, description="GPU index on the peer to load onto")
+    extra_config: dict[str, Any] | None = Field(default=None, description="Extra backend-specific configuration")
+
+
+class RemoteDownloadRequest(BaseModel):
+    """Request body for triggering a model download on a remote peer.
+
+    Mirrors the local POST /ocabra/downloads request schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., pattern=r"^(huggingface|ollama|bitnet)$", description="Download source")
+    model_ref: str = Field(..., min_length=1, description="Model reference (e.g. 'org/model-name')")
+    artifact: str | None = Field(default=None, description="Specific artifact/file to download")
+    register_config: dict[str, Any] | None = Field(default=None, description="Auto-register config after download")

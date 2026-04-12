@@ -126,7 +126,25 @@ export function ModelCard({
               </button>
             )}
             <div>
-              <div className="font-medium">{model.displayName}</div>
+              <div className="flex items-center gap-1.5">
+                <span className={`font-medium${model.federation?.remote ? " opacity-75" : ""}`}>{model.displayName}</span>
+                {model.federation?.remote && (
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-medium text-violet-200">
+                        <Share2 size={9} />
+                        Remote
+                      </span>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md" sideOffset={4}>
+                        Modelo federado desde nodo: {model.federation.nodeName || model.federation.nodeId}
+                        <Tooltip.Arrow className="fill-border" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                )}
+              </div>
               <div className="text-xs text-muted-foreground">{model.modelId}</div>
             </div>
           </div>

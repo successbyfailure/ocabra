@@ -16,6 +16,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
+from starlette.responses import StreamingResponse
+
+from ocabra.core.federation import PeerState
 from ocabra.schemas.federation import (
     HeartbeatGpu,
     HeartbeatLoad,
@@ -25,6 +28,8 @@ from ocabra.schemas.federation import (
     PeerOut,
     PeerTestResult,
     PeerUpdate,
+    RemoteDownloadRequest,
+    RemoteLoadRequest,
 )
 
 logger = structlog.get_logger(__name__)
@@ -304,3 +309,252 @@ async def test_peer(
     if result.get("error") == "Peer not found":
         raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
     return PeerTestResult(**result)
+
+
+# ── Phase 5: Remote operations (access_level == "full") ─────────
+
+
+async def _get_full_access_peer(
+    peer_id: str, request: Request
+) -> PeerState:
+    """Get a peer with full access level, or raise 403/404.
+
+    Args:
+        peer_id: UUID string of the peer.
+        request: FastAPI request (used to extract FederationManager).
+
+    Returns:
+        PeerState with access_level == "full".
+
+    Raises:
+        HTTPException 404: Peer not found or offline.
+        HTTPException 403: Peer does not have full access level.
+    """
+    fm = _get_federation_manager(request)
+    peers = fm.get_all_peers()
+    peer = next((p for p in peers if p.peer_id == peer_id), None)
+    if peer is None:
+        raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
+    if peer.access_level != "full":
+        raise HTTPException(
+            status_code=403,
+            detail=f"Peer '{peer.name}' does not have 'full' access level",
+        )
+    if not peer.online:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Peer '{peer.name}' is currently offline",
+        )
+    return peer
+
+
+@router.post(
+    "/federation/peers/{peer_id}/models/{model_id}/load",
+    summary="Remote model load",
+    description=(
+        "Proxy a model load request to a remote peer. "
+        "Requires the peer to have access_level='full'."
+    ),
+    responses={
+        403: {"description": "Peer does not have full access"},
+        404: {"description": "Peer not found"},
+        502: {"description": "Peer is offline or returned an error"},
+    },
+)
+async def remote_load_model(
+    peer_id: str,
+    model_id: str,
+    request: Request,
+    body: RemoteLoadRequest | None = None,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Load a model on a remote peer.
+
+    Args:
+        peer_id: UUID of the target peer.
+        model_id: Model identifier to load on the peer.
+        body: Optional load configuration (preferred_gpu, extra_config).
+
+    Returns:
+        The peer's response as a JSON dict.
+    """
+    peer = await _get_full_access_peer(peer_id, request)
+    fm = _get_federation_manager(request)
+    payload = body.model_dump(exclude_none=True) if body else {}
+    try:
+        resp = await fm.proxy_request(
+            peer=peer,
+            path=f"/ocabra/models/{model_id}/load",
+            body=payload,
+            headers=dict(request.headers),
+        )
+        return resp.json()
+    except Exception as exc:
+        logger.warning(
+            "remote_load_failed",
+            peer=peer.name,
+            model_id=model_id,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to load model on peer '{peer.name}': {exc}",
+        ) from exc
+
+
+@router.post(
+    "/federation/peers/{peer_id}/models/{model_id}/unload",
+    summary="Remote model unload",
+    description=(
+        "Proxy a model unload request to a remote peer. "
+        "Requires the peer to have access_level='full'."
+    ),
+    responses={
+        403: {"description": "Peer does not have full access"},
+        404: {"description": "Peer not found"},
+        502: {"description": "Peer is offline or returned an error"},
+    },
+)
+async def remote_unload_model(
+    peer_id: str,
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Unload a model on a remote peer.
+
+    Args:
+        peer_id: UUID of the target peer.
+        model_id: Model identifier to unload on the peer.
+
+    Returns:
+        The peer's response as a JSON dict.
+    """
+    peer = await _get_full_access_peer(peer_id, request)
+    fm = _get_federation_manager(request)
+    try:
+        resp = await fm.proxy_request(
+            peer=peer,
+            path=f"/ocabra/models/{model_id}/unload",
+            body={},
+            headers=dict(request.headers),
+        )
+        return resp.json()
+    except Exception as exc:
+        logger.warning(
+            "remote_unload_failed",
+            peer=peer.name,
+            model_id=model_id,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to unload model on peer '{peer.name}': {exc}",
+        ) from exc
+
+
+@router.post(
+    "/federation/peers/{peer_id}/downloads",
+    summary="Remote model download",
+    description=(
+        "Trigger a model download on a remote peer and stream back SSE progress. "
+        "Requires the peer to have access_level='full'."
+    ),
+    responses={
+        403: {"description": "Peer does not have full access"},
+        404: {"description": "Peer not found"},
+        502: {"description": "Peer is offline or returned an error"},
+    },
+)
+async def remote_download(
+    peer_id: str,
+    body: RemoteDownloadRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> StreamingResponse:
+    """Trigger a model download on a remote peer and stream progress via SSE.
+
+    Args:
+        peer_id: UUID of the target peer.
+        body: Download request (source, model_ref, artifact, register_config).
+
+    Returns:
+        StreamingResponse with SSE events relaying the peer's download progress.
+    """
+    peer = await _get_full_access_peer(peer_id, request)
+    fm = _get_federation_manager(request)
+    payload = body.model_dump(exclude_none=True)
+
+    async def _stream():
+        try:
+            async for chunk in fm.proxy_stream(
+                peer=peer,
+                path="/ocabra/downloads",
+                body=payload,
+                headers=dict(request.headers),
+            ):
+                yield chunk
+        except Exception as exc:
+            logger.warning(
+                "remote_download_stream_error",
+                peer=peer.name,
+                error=str(exc),
+            )
+            yield f"data: {{\"error\": \"{exc}\"}}\n\n".encode()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get(
+    "/federation/peers/{peer_id}/gpus",
+    summary="Remote GPU monitoring",
+    description=(
+        "Proxy a GPU status request to a remote peer. "
+        "Requires the peer to have access_level='full'."
+    ),
+    responses={
+        403: {"description": "Peer does not have full access"},
+        404: {"description": "Peer not found"},
+        502: {"description": "Peer is offline or returned an error"},
+    },
+)
+async def remote_gpus(
+    peer_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> list[dict]:
+    """Get GPU status from a remote peer.
+
+    Args:
+        peer_id: UUID of the target peer.
+
+    Returns:
+        List of GPU status dicts from the peer.
+    """
+    peer = await _get_full_access_peer(peer_id, request)
+    fm = _get_federation_manager(request)
+    try:
+        resp = await fm.proxy_request(
+            peer=peer,
+            path="/ocabra/gpus",
+            body={},
+            headers=dict(request.headers),
+        )
+        return resp.json()
+    except Exception as exc:
+        logger.warning(
+            "remote_gpus_failed",
+            peer=peer.name,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to get GPUs from peer '{peer.name}': {exc}",
+        ) from exc

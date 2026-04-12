@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { api } from "@/api/client"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
+import { FederationSettings } from "@/components/settings/FederationSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
@@ -152,6 +153,12 @@ export function Settings() {
             >
               LiteLLM
             </Tabs.Trigger>
+            <Tabs.Trigger
+              value="federation"
+              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+            >
+              Federation
+            </Tabs.Trigger>
           </Tabs.List>
 
           <Tabs.Content value="general">
@@ -183,6 +190,12 @@ export function Settings() {
           <Tabs.Content value="litellm">
             <div className="grid gap-4">
               <LiteLLMSettings config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="federation">
+            <div className="grid gap-4">
+              <FederationSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
         </Tabs.Root>

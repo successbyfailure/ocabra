@@ -3,6 +3,9 @@ GET /api/tags — list installed models in Ollama-compatible format.
 
 With the profile system enabled, this endpoint exposes **enabled profiles**
 rather than raw model entries.
+
+When federation is enabled and peers are online, remote models from federated
+nodes are merged into the listing with deduplication.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
@@ -35,13 +39,15 @@ async def list_tags(
     List all enabled profiles in Ollama /api/tags format.
 
     Filters profiles by the caller's group membership unless the caller is
-    an admin.
+    an admin. When federation is enabled, remote models from online peers
+    are merged with deduplication.
 
     Returns:
       {"models": [{"name": ..., "model": ..., "size": ..., "details": {...}}, ...]}
     """
     model_manager = request.app.state.model_manager
     profile_registry = getattr(request.app.state, "profile_registry", None)
+    federation_manager = getattr(request.app.state, "federation_manager", None)
 
     # If profile registry is available, list profiles; otherwise fall back to
     # the legacy model-based listing.
@@ -50,16 +56,27 @@ async def list_tags(
             model_manager,
             profile_registry,
             user,
+            federation_manager=federation_manager,
         )
 
     return await _list_tags_legacy(model_manager, user)
 
 
-async def _list_tags_from_profiles(model_manager, profile_registry, user: UserContext) -> dict:
+async def _list_tags_from_profiles(
+    model_manager,
+    profile_registry,
+    user: UserContext,
+    *,
+    federation_manager=None,
+) -> dict:
     """Build Ollama-format tags from enabled profiles."""
     enabled_profiles = await profile_registry.list_enabled()
 
     models: list[dict] = []
+    local_model_ids: set[str] = set()
+    local_profile_ids: set[str] = set()
+    entry_index_by_model_id: dict[str, int] = {}
+
     for profile in enabled_profiles:
         # Access control
         if not user.is_admin and profile.profile_id not in user.accessible_model_ids:
@@ -73,26 +90,94 @@ async def _list_tags_from_profiles(model_manager, profile_registry, user: UserCo
         vram_mb = base_state.vram_used_mb if base_state else 0
         size_bytes = _estimate_size_bytes(backend_model_id, vram_mb)
 
-        models.append(
-            {
-                "name": profile.profile_id,
-                "model": profile.profile_id,
-                "modified_at": modified_at,
-                "size": size_bytes,
-                "digest": "sha256:" + hashlib.sha256(
-                    profile.profile_id.encode("utf-8")
-                ).hexdigest(),
-                "details": {
-                    "parent_model": profile.base_model_id,
-                    "format": _infer_format(backend_model_id),
-                    "family": profile.category,
-                    "families": [profile.category],
-                    "parameter_size": "unknown",
-                    "quantization_level": "F16",
-                },
-                "loaded": bool(base_state and base_state.status.value == "loaded"),
-            }
-        )
+        local_model_ids.add(profile.base_model_id)
+        local_profile_ids.add(profile.profile_id)
+
+        entry: dict[str, Any] = {
+            "name": profile.profile_id,
+            "model": profile.profile_id,
+            "modified_at": modified_at,
+            "size": size_bytes,
+            "digest": "sha256:" + hashlib.sha256(
+                profile.profile_id.encode("utf-8")
+            ).hexdigest(),
+            "details": {
+                "parent_model": profile.base_model_id,
+                "format": _infer_format(backend_model_id),
+                "family": profile.category,
+                "families": [profile.category],
+                "parameter_size": "unknown",
+                "quantization_level": "F16",
+            },
+            "loaded": bool(base_state and base_state.status.value == "loaded"),
+        }
+
+        entry_index_by_model_id[profile.base_model_id] = len(models)
+        models.append(entry)
+
+    # ── Federation: merge remote models ─────────────────────────
+    if federation_manager is not None:
+        remote_models = federation_manager.get_remote_models()
+        for model_id, peers in remote_models.items():
+            if model_id in local_model_ids:
+                # Model exists locally — annotate with remote availability
+                idx = entry_index_by_model_id.get(model_id)
+                if idx is not None and idx < len(models):
+                    models[idx]["federation"] = {
+                        "remote": False,
+                        "also_available_on": [
+                            {"node_name": p.name, "node_id": p.peer_id}
+                            for p in peers
+                        ],
+                    }
+            else:
+                # Check if any profile from remote overlaps with local profiles
+                remote_profiles: set[str] = set()
+                for peer in peers:
+                    for m in peer.models:
+                        if m.get("model_id") == model_id:
+                            remote_profiles.update(m.get("profiles", []))
+                if remote_profiles & local_profile_ids:
+                    continue
+
+                first_peer = peers[0]
+                display_id = model_id
+                for m in first_peer.models:
+                    if m.get("model_id") == model_id:
+                        model_profiles = m.get("profiles", [])
+                        if model_profiles:
+                            display_id = model_profiles[0]
+                        break
+
+                models.append(
+                    {
+                        "name": display_id,
+                        "model": display_id,
+                        "modified_at": _to_iso_z(None),
+                        "size": 0,
+                        "digest": "sha256:" + hashlib.sha256(
+                            model_id.encode("utf-8")
+                        ).hexdigest(),
+                        "details": {
+                            "parent_model": model_id,
+                            "format": "unknown",
+                            "family": "remote",
+                            "families": ["remote"],
+                            "parameter_size": "unknown",
+                            "quantization_level": "unknown",
+                        },
+                        "loaded": True,
+                        "federation": {
+                            "remote": True,
+                            "node_name": first_peer.name,
+                            "node_id": first_peer.peer_id,
+                            "available_on": [
+                                {"node_name": p.name, "node_id": p.peer_id}
+                                for p in peers
+                            ],
+                        },
+                    }
+                )
 
     return {"models": models}
 

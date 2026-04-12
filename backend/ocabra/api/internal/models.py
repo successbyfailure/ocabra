@@ -48,21 +48,84 @@ class ModelMemoryEstimateRequest(BaseModel):
 @router.get(
     "/models",
     summary="List all models",
-    description="Return every configured model with its runtime state, capabilities, and disk size.",
+    description="Return every configured model with its runtime state, capabilities, and disk size. "
+    "When federation is enabled, includes federation metadata showing which remote nodes "
+    "have each model, and adds remote-only models as read-only entries.",
 )
 async def list_models(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> list[dict]:
-    """List all configured models and their runtime state."""
+    """List all configured models and their runtime state.
+
+    When federation is enabled, each model includes a ``federation`` section
+    with a ``nodes`` list indicating where it is available. Remote-only models
+    (not configured locally) appear as read-only entries.
+    """
     mm = request.app.state.model_manager
     await _sync_ollama_inventory(mm)
     states = await mm.list_states()
     ollama_sizes = await _get_ollama_sizes_bytes()
+
+    federation_manager = getattr(request.app.state, "federation_manager", None)
+    remote_models: dict[str, list] = {}
+    if federation_manager is not None:
+        remote_models = federation_manager.get_remote_models()
+
+    local_model_ids: set[str] = set()
     payloads = []
     for state in states:
         item = await _serialize_model_state(request, state, ollama_sizes)
+        local_model_ids.add(state.model_id)
+
+        # Add federation metadata if enabled
+        if federation_manager is not None:
+            peers_for_model = remote_models.get(state.model_id, [])
+            item["federation"] = {
+                "local": True,
+                "nodes": [
+                    {"node_name": "local", "node_id": federation_manager.node_id},
+                ] + [
+                    {"node_name": p.name, "node_id": p.peer_id}
+                    for p in peers_for_model
+                ],
+            }
+
         payloads.append(item)
+
+    # Add remote-only models (not configured locally)
+    if federation_manager is not None:
+        for model_id, peers in remote_models.items():
+            if model_id in local_model_ids:
+                continue
+            first_peer = peers[0]
+            # Find model info from the first peer's model list
+            model_info: dict = {}
+            for m in first_peer.models:
+                if m.get("model_id") == model_id:
+                    model_info = m
+                    break
+            payloads.append(
+                {
+                    "model_id": model_id,
+                    "backend_type": "remote",
+                    "backend_model_id": model_id,
+                    "display_name": model_id.split("/")[-1] if "/" in model_id else model_id,
+                    "status": "remote",
+                    "capabilities": {},
+                    "profiles": model_info.get("profiles", []),
+                    "disk_size_bytes": None,
+                    "federation": {
+                        "local": False,
+                        "read_only": True,
+                        "nodes": [
+                            {"node_name": p.name, "node_id": p.peer_id}
+                            for p in peers
+                        ],
+                    },
+                }
+            )
+
     return payloads
 
 

@@ -81,6 +81,11 @@ export interface ModelState {
   schedules?: EvictionSchedule[]
   extraConfig?: BackendExtraConfig
   profiles?: ModelProfile[]
+  federation?: {
+    remote: boolean
+    nodeName: string
+    nodeId: string
+  } | null
 }
 
 export interface ModelsStorageStats {
@@ -702,6 +707,61 @@ export interface ProfileUpdate {
   isDefault?: boolean
 }
 
+// Federation types
+export interface FederationPeerGpu {
+  index: number
+  name: string
+  total_vram_mb: number
+  free_vram_mb: number
+}
+
+export interface FederationPeerModel {
+  model_id: string
+  status: string
+  profiles: string[]
+}
+
+export interface FederationPeerLoad {
+  active_requests: number
+  gpu_utilization_avg_pct: number
+}
+
+export interface FederationPeer {
+  peer_id: string
+  name: string
+  url: string
+  access_level: "inference" | "full"
+  enabled: boolean
+  online: boolean
+  last_heartbeat: string | null
+  latency_ms?: number
+  gpus: FederationPeerGpu[]
+  models: FederationPeerModel[]
+  load: FederationPeerLoad
+}
+
+export interface FederationPeerCreate {
+  name: string
+  url: string
+  api_key: string
+  access_level: "inference" | "full"
+}
+
+export interface FederationPeerUpdate {
+  name?: string
+  url?: string
+  api_key?: string
+  access_level?: "inference" | "full"
+  enabled?: boolean
+}
+
+export interface FederationTestResult {
+  success: boolean
+  latency_ms: number | null
+  error?: string
+  node_info?: Record<string, unknown>
+}
+
 // WebSocket events
 export type WSEvent =
   | { type: "gpu_stats"; data: GPUState[] }
@@ -709,3 +769,7 @@ export type WSEvent =
   | { type: "download_progress"; data: { jobId: string; pct: number; speedMbS: number } }
   | { type: "service_event"; data: { event: string; serviceId: string; status: ServiceStatus; service: ServiceState } }
   | { type: "system_alert"; data: { level: "warn" | "error"; message: string } }
+  | { type: "peer_online"; data: { peer_id: string; name: string } }
+  | { type: "peer_offline"; data: { peer_id: string; name: string } }
+  | { type: "remote_model_loaded"; data: { peer_id: string; model_id: string } }
+  | { type: "remote_model_unloaded"; data: { peer_id: string; model_id: string } }

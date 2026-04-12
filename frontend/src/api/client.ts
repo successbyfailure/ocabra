@@ -42,6 +42,10 @@ import type {
   ByUserStats,
   ByGroupStats,
   MyGroupStats,
+  FederationPeer,
+  FederationPeerCreate,
+  FederationPeerUpdate,
+  FederationTestResult,
 } from "@/types"
 
 const BASE = ""
@@ -490,6 +494,15 @@ function toModelState(raw: unknown): ModelState {
     profiles: Array.isArray(data.profiles)
       ? data.profiles.map(toModelProfile)
       : undefined,
+    federation: (() => {
+      const fed = isRecord(data.federation) ? data.federation : null
+      if (!fed || !fed.remote) return null
+      return {
+        remote: Boolean(fed.remote),
+        nodeName: String(fed.node_name ?? fed.nodeName ?? ""),
+        nodeId: String(fed.node_id ?? fed.nodeId ?? ""),
+      }
+    })(),
   }
 }
 
@@ -694,6 +707,58 @@ function toServerConfig(raw: unknown): ServerConfig {
     requireApiKeyOllama: Boolean(data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true),
     realtimeDefaultSttModel: String(data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? ""),
     realtimeDefaultTtsModel: String(data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? ""),
+  }
+}
+
+function toFederationPeer(raw: unknown): FederationPeer {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    peer_id: String(d.peer_id ?? d.peerId ?? ""),
+    name: String(d.name ?? ""),
+    url: String(d.url ?? ""),
+    access_level: String(d.access_level ?? d.accessLevel ?? "inference") as "inference" | "full",
+    enabled: Boolean(d.enabled ?? true),
+    online: Boolean(d.online ?? false),
+    last_heartbeat: (d.last_heartbeat ?? d.lastHeartbeat ?? null) as string | null,
+    latency_ms: d.latency_ms != null ? Number(d.latency_ms) : (d.latencyMs != null ? Number(d.latencyMs) : undefined),
+    gpus: Array.isArray(d.gpus)
+      ? d.gpus.map((g) => {
+          const gpu = isRecord(g) ? g : {}
+          return {
+            index: Number(gpu.index ?? 0),
+            name: String(gpu.name ?? "GPU"),
+            total_vram_mb: Number(gpu.total_vram_mb ?? gpu.totalVramMb ?? 0),
+            free_vram_mb: Number(gpu.free_vram_mb ?? gpu.freeVramMb ?? 0),
+          }
+        })
+      : [],
+    models: Array.isArray(d.models)
+      ? d.models.map((m) => {
+          const model = isRecord(m) ? m : {}
+          return {
+            model_id: String(model.model_id ?? model.modelId ?? ""),
+            status: String(model.status ?? "unknown"),
+            profiles: Array.isArray(model.profiles) ? model.profiles.map(String) : [],
+          }
+        })
+      : [],
+    load: (() => {
+      const load = isRecord(d.load) ? d.load : {}
+      return {
+        active_requests: Number(load.active_requests ?? load.activeRequests ?? 0),
+        gpu_utilization_avg_pct: Number(load.gpu_utilization_avg_pct ?? load.gpuUtilizationAvgPct ?? 0),
+      }
+    })(),
+  }
+}
+
+function toFederationTestResult(raw: unknown): FederationTestResult {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    success: Boolean(d.success ?? false),
+    latency_ms: d.latency_ms != null ? Number(d.latency_ms) : null,
+    error: (d.error ?? undefined) as string | undefined,
+    node_info: isRecord(d.node_info) ? (d.node_info as Record<string, unknown>) : undefined,
   }
 }
 
@@ -1276,6 +1341,41 @@ export const api = {
         ...removeGroupIds.map((gid) => api.groups.removeModel(gid, modelId)),
       ])
     },
+  },
+
+  federation: {
+    getPeers: async (): Promise<FederationPeer[]> =>
+      (await request<unknown[]>("GET", "/ocabra/federation/peers")).map(toFederationPeer),
+
+    addPeer: async (data: FederationPeerCreate): Promise<FederationPeer> =>
+      toFederationPeer(
+        await request<unknown>("POST", "/ocabra/federation/peers", {
+          name: data.name,
+          url: data.url,
+          api_key: data.api_key,
+          access_level: data.access_level,
+        }),
+      ),
+
+    updatePeer: async (id: string, data: FederationPeerUpdate): Promise<FederationPeer> =>
+      toFederationPeer(
+        await request<unknown>("PATCH", `/ocabra/federation/peers/${encodeURIComponent(id)}`, {
+          ...(data.name !== undefined && { name: data.name }),
+          ...(data.url !== undefined && { url: data.url }),
+          ...(data.api_key !== undefined && { api_key: data.api_key }),
+          ...(data.access_level !== undefined && { access_level: data.access_level }),
+          ...(data.enabled !== undefined && { enabled: data.enabled }),
+        }),
+      ),
+
+    deletePeer: async (id: string): Promise<void> => {
+      await request<unknown>("DELETE", `/ocabra/federation/peers/${encodeURIComponent(id)}`)
+    },
+
+    testPeer: async (id: string): Promise<FederationTestResult> =>
+      toFederationTestResult(
+        await request<unknown>("POST", `/ocabra/federation/peers/${encodeURIComponent(id)}/test`),
+      ),
   },
 }
 
