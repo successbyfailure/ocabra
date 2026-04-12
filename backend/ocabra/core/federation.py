@@ -314,11 +314,12 @@ class FederationManager:
         interval = max(5, self._settings.federation_heartbeat_interval)
         logger.info("federation_heartbeat_loop_started", interval_s=interval)
         while True:
+            await asyncio.sleep(interval)
             try:
+                logger.debug("federation_heartbeat_polling", peer_count=len(self._peers))
                 await self._poll_all_peers()
             except Exception as exc:
                 logger.warning("federation_heartbeat_loop_error", error=str(exc))
-            await asyncio.sleep(interval)
 
     async def _poll_all_peers(self) -> None:
         """Poll all enabled peers concurrently."""
@@ -329,10 +330,20 @@ class FederationManager:
                 continue
             # Skip offline peers until their backoff expires.
             if not peer.online and peer._next_retry_at > now:
+                logger.debug(
+                    "federation_peer_backoff_skip",
+                    peer=peer.name,
+                    retry_in_s=round(peer._next_retry_at - now, 1),
+                )
                 continue
             tasks.append(self._poll_peer(peer))
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning("federation_poll_task_error", error=str(r))
+        elif self._peers:
+            logger.debug("federation_no_peers_to_poll", total=len(self._peers))
 
     async def _poll_peer(self, peer: PeerState) -> None:
         """Send a single heartbeat request to a peer."""
@@ -353,7 +364,12 @@ class FederationManager:
             peer.gpus = data.get("gpus", [])
             peer.models = data.get("models", [])
             peer.load = data.get("load", {})
-            logger.debug("federation_peer_heartbeat_ok", peer=peer.name)
+            logger.info(
+                "federation_peer_heartbeat_ok",
+                peer=peer.name,
+                models_count=len(peer.models),
+                gpus_count=len(peer.gpus),
+            )
         except Exception as exc:
             peer.consecutive_failures += 1
             if peer.consecutive_failures >= _MAX_FAILURES:
@@ -370,7 +386,7 @@ class FederationManager:
                     _MAX_BACKOFF_S,
                 )
                 peer._next_retry_at = time.monotonic() + backoff
-            logger.debug(
+            logger.warning(
                 "federation_peer_heartbeat_failed",
                 peer=peer.name,
                 error=str(exc),
