@@ -474,7 +474,12 @@ async def _build_model_memory_estimate(
         if getattr(state, "preferred_gpu", None) is not None
         else settings.default_gpu_index
     )
-    gpu_state = await gpu_manager.get_state(gpu_index) if gpu_manager is not None else None
+    gpu_state = None
+    if gpu_manager is not None:
+        try:
+            gpu_state = await gpu_manager.get_state(gpu_index)
+        except (KeyError, IndexError):
+            pass
     total_vram_mb = int(getattr(gpu_state, "total_vram_mb", 0) or 0) or None
     free_vram_mb = int(getattr(gpu_state, "free_vram_mb", 0) or 0) or None
 

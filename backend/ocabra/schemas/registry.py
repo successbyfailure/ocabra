@@ -86,7 +86,7 @@ class HFModelVariant(BaseModel):
     size_gb: float | None
     format: str
     quantization: str | None
-    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "voxtral", "ollama"]
+    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "ollama"]
     is_default: bool = False
     installable: bool = True
     compatibility: str = "unknown"
@@ -117,7 +117,7 @@ class LocalModel(BaseModel):
     model_ref: str
     path: str
     source: Literal["huggingface", "gguf", "ollama"]
-    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "voxtral", "ollama"]
+    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "ollama"]
     size_gb: float | None
 
 

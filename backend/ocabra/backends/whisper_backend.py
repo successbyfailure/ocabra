@@ -179,7 +179,7 @@ class WhisperBackend(BackendInterface):
         base_model_id = _resolve_worker_model_id(model_id, {})
         base_normalized = base_model_id.lower()
 
-        for key, size_mb in KNOWN_VRAM_MB.items():
+        for key, size_mb in sorted(KNOWN_VRAM_MB.items(), key=lambda x: len(x[0]), reverse=True):
             if key in normalized or key in base_normalized:
                 return size_mb + (
                     DIARIZATION_OVERHEAD_MB if _should_enable_diarization(model_id, {}) else 0
