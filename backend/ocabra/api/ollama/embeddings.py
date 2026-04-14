@@ -5,8 +5,11 @@ POST /api/embed      — Ollama v0.3+ embeddings endpoint (supports input arrays
 
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
+
+logger = structlog.get_logger(__name__)
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
@@ -78,8 +81,20 @@ async def _run_embeddings(
         worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
     except HTTPException as profile_exc:
         # Fallback to legacy Ollama resolution for native Ollama models
+        logger.debug(
+            "embed_profile_miss",
+            model=ollama_model,
+            profile_status=profile_exc.status_code,
+        )
         model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
         if resolved_state is None:
+            logger.warning(
+                "embed_model_not_found",
+                model=ollama_model,
+                resolved_id=model_id,
+                is_anonymous=user.is_anonymous if user else None,
+                accessible_count=len(user.accessible_model_ids) if user else None,
+            )
             raise HTTPException(
                 status_code=404,
                 detail=f"Model '{ollama_model}' not found",

@@ -78,8 +78,13 @@ async def _list_tags_from_profiles(
     entry_index_by_model_id: dict[str, int] = {}
 
     for profile in enabled_profiles:
-        # Access control
-        if not user.is_admin and profile.profile_id not in user.accessible_model_ids:
+        # Access control: check both profile_id and base_model_id since
+        # group_models stores canonical model_ids while clients use profile_ids.
+        if (
+            not user.is_admin
+            and profile.profile_id not in user.accessible_model_ids
+            and profile.base_model_id not in user.accessible_model_ids
+        ):
             continue
 
         base_state = await model_manager.get_state(profile.base_model_id)

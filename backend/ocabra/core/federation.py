@@ -612,9 +612,15 @@ async def resolve_federated(
     from fastapi import HTTPException
 
     from ocabra.core.model_manager import ModelStatus
+    from ocabra.core.model_ref import _split_canonical_model_ref, build_model_ref
 
     # 1. Check if loaded locally
+    # If model_id is not canonical (e.g. "qwen3:8b" from Ollama), also try
+    # the canonical form "ollama/<model_id>".
     state = await model_manager.get_state(model_id)
+    if state is None and _split_canonical_model_ref(model_id) is None:
+        canonical = build_model_ref("ollama", model_id)
+        state = await model_manager.get_state(canonical)
     if state is not None and state.status == ModelStatus.LOADED:
         # Model is loaded — still ask the load balancer if a peer is better
         if federation_manager is not None:
@@ -636,6 +642,12 @@ async def resolve_federated(
     if federation_manager is not None:
         remote_models = federation_manager.get_remote_models()
         remote_peers = remote_models.get(model_id, [])
+        # Also try canonical form for Ollama names
+        if not remote_peers and _split_canonical_model_ref(model_id) is None:
+            canonical = build_model_ref("ollama", model_id)
+            remote_peers = remote_models.get(canonical, [])
+            if remote_peers:
+                model_id = canonical
         if remote_peers:
             best_peer = federation_manager.find_best_peer(model_id)
             if best_peer is not None:

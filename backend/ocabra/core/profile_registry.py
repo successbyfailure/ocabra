@@ -12,7 +12,7 @@ from ocabra.db.model_config import ModelConfig, ModelProfile
 
 logger = structlog.get_logger(__name__)
 
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9.\-:]*$")
 _MAX_PROFILE_ID_LEN = 512
 
 
@@ -317,10 +317,10 @@ class ProfileRegistry:
                 parts = model.model_id.split("/", 1)
                 if parts[0] in self._BACKEND_CATEGORY:
                     raw_name = model.display_name or parts[1]
-            slug = re.sub(r"[^a-z0-9\-.]", "", raw_name.lower().replace("/", "-").replace("_", "-").replace(" ", "-"))
+            slug = re.sub(r"[^a-z0-9\-.:]", "", raw_name.lower().replace("/", "-").replace("_", "-").replace(" ", "-"))
             slug = re.sub(r"-{2,}", "-", slug).strip("-")
             if not slug:
-                slug = re.sub(r"[^a-z0-9\-.]", "", model.model_id.lower().replace("/", "-"))
+                slug = re.sub(r"[^a-z0-9\-.:]", "", model.model_id.lower().replace("/", "-"))
                 slug = re.sub(r"-{2,}", "-", slug).strip("-")
             if not slug or slug in self._profiles:
                 continue

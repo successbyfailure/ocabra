@@ -96,7 +96,7 @@ async def create_user(
     """
     from ocabra.core.auth_manager import hash_password
     from ocabra.database import AsyncSessionLocal
-    from ocabra.db.auth import User
+    from ocabra.db.auth import Group, User, UserGroup
     from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
@@ -114,6 +114,15 @@ async def create_user(
             is_active=True,
         )
         session.add(new_user)
+        await session.flush()
+
+        # Add user to the default group so they can see models immediately.
+        default_group = (
+            await session.execute(select(Group).where(Group.is_default.is_(True)))
+        ).scalar_one_or_none()
+        if default_group is not None:
+            session.add(UserGroup(user_id=new_user.id, group_id=default_group.id))
+
         await session.commit()
         await session.refresh(new_user)
 

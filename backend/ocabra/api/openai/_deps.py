@@ -205,8 +205,15 @@ async def resolve_profile(
                 code="model_not_found",
                 status_code=404,
             )
-        # Access control on profile_id
-        if user is not None and not user.is_admin and requested not in user.accessible_model_ids:
+        # Access control: check both profile_id and base_model_id since
+        # group_models stores canonical model_ids (e.g. "ollama/qwen3:8b")
+        # while clients send profile_ids (e.g. "qwen3:8b").
+        if (
+            user is not None
+            and not user.is_admin
+            and requested not in user.accessible_model_ids
+            and profile.base_model_id not in user.accessible_model_ids
+        ):
             raise _openai_error(
                 f"The model '{requested}' does not exist.",
                 "invalid_request_error",
@@ -267,6 +274,12 @@ async def resolve_profile(
                 return default_profile, state
 
     # 3. Nothing matched → 404
+    logger.warning(
+        "resolve_profile_not_found",
+        requested=requested,
+        has_slash="/" in requested,
+        legacy_fallback=settings.legacy_model_id_fallback if "/" in requested else None,
+    )
     raise _openai_error(
         f"The model '{requested}' does not exist.",
         "invalid_request_error",
@@ -352,6 +365,7 @@ async def _do_ensure_loaded(
 
     state = await model_manager.get_state(model_id)
     if state is None:
+        logger.warning("ensure_loaded_state_missing", model_id=model_id)
         raise _openai_error(
             f"The model '{model_id}' does not exist.",
             "invalid_request_error",
