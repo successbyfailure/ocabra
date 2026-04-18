@@ -110,73 +110,79 @@ async def transcriptions(
     resp: httpx.Response | None = None
     last_error: Exception | None = None
 
-    for attempt in range(2):
-        worker = worker_pool.get_worker(worker_key)
-        backend = await worker_pool.get_backend(state.backend_type)
-        worker_healthy = bool(worker) and await backend.health_check(state.backend_model_id)
+    inflight_request_id = model_manager.begin_request(worker_key)
+    try:
+        for attempt in range(2):
+            worker = worker_pool.get_worker(worker_key)
+            backend = await worker_pool.get_backend(state.backend_type)
+            worker_healthy = bool(worker) and await backend.health_check(state.backend_model_id)
 
-        if not worker or not worker_healthy:
-            if attempt == 0:
-                reason = "worker_missing" if not worker else "worker_unhealthy"
-                await model_manager.unload(worker_key, reason=reason)
-                await model_manager.load(worker_key)
-                continue
-            raise _openai_error(
-                f"Whisper worker unavailable for model '{worker_key}'.",
-                "server_error",
-                code="worker_unavailable",
-                status_code=503,
-            )
-
-        url = f"http://127.0.0.1:{worker.port}/transcribe"
-
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                form_data: dict[str, str] = {
-                    "response_format": response_format,
-                    "temperature": str(temperature),
-                }
-                if language:
-                    form_data["language"] = language
-                if prompt:
-                    form_data["prompt"] = prompt
-                if diarize is not None:
-                    form_data["diarize"] = diarize
-
-                resp = await client.post(
-                    url,
-                    files={
-                        "file": (
-                            file.filename or "audio",
-                            audio_bytes,
-                            file.content_type or "audio/mpeg",
-                        )
-                    },
-                    data=form_data,
+            if not worker or not worker_healthy:
+                if attempt == 0:
+                    reason = "worker_missing" if not worker else "worker_unhealthy"
+                    await model_manager.unload(worker_key, reason=reason)
+                    await model_manager.load(worker_key)
+                    await model_manager.touch_last_request_at(worker_key)
+                    continue
+                raise _openai_error(
+                    f"Whisper worker unavailable for model '{worker_key}'.",
+                    "server_error",
+                    code="worker_unavailable",
+                    status_code=503,
                 )
-                resp.raise_for_status()
-            break
-        except httpx.TransportError as exc:
-            last_error = exc
-            logger.warning(
-                "whisper_worker_transport_error",
-                model_id=worker_key,
-                worker_port=worker.port,
-                attempt=attempt + 1,
-                error=str(exc),
-            )
-            if attempt == 0:
-                await model_manager.unload(worker_key, reason="worker_transport_error")
-                await model_manager.load(worker_key)
-                continue
-            raise _openai_error(
-                f"Whisper worker unavailable for model '{worker_key}'.",
-                "server_error",
-                code="worker_unavailable",
-                status_code=503,
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise_upstream_http_error(exc)
+
+            url = f"http://127.0.0.1:{worker.port}/transcribe"
+
+            try:
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    form_data: dict[str, str] = {
+                        "response_format": response_format,
+                        "temperature": str(temperature),
+                    }
+                    if language:
+                        form_data["language"] = language
+                    if prompt:
+                        form_data["prompt"] = prompt
+                    if diarize is not None:
+                        form_data["diarize"] = diarize
+
+                    resp = await client.post(
+                        url,
+                        files={
+                            "file": (
+                                file.filename or "audio",
+                                audio_bytes,
+                                file.content_type or "audio/mpeg",
+                            )
+                        },
+                        data=form_data,
+                    )
+                    resp.raise_for_status()
+                break
+            except httpx.TransportError as exc:
+                last_error = exc
+                logger.warning(
+                    "whisper_worker_transport_error",
+                    model_id=worker_key,
+                    worker_port=worker.port,
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
+                if attempt == 0:
+                    await model_manager.unload(worker_key, reason="worker_transport_error")
+                    await model_manager.load(worker_key)
+                    await model_manager.touch_last_request_at(worker_key)
+                    continue
+                raise _openai_error(
+                    f"Whisper worker unavailable for model '{worker_key}'.",
+                    "server_error",
+                    code="worker_unavailable",
+                    status_code=503,
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise_upstream_http_error(exc)
+    finally:
+        model_manager.end_request(worker_key, inflight_request_id)
 
     if resp is None:
         raise _openai_error(

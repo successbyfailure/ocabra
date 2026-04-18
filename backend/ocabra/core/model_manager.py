@@ -975,6 +975,8 @@ class ModelManager:
                 continue
             if state.last_request_at is None:
                 continue
+            if self.is_busy(model_id):
+                continue
             idle_s = (now - state.last_request_at).total_seconds()
             if idle_s > settings.idle_timeout_seconds:
                 logger.info("idle_eviction", model_id=model_id, idle_s=int(idle_s))
