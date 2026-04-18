@@ -550,8 +550,13 @@ def _run_transcription(
         diarization_turns = _collect_diarization_turns(annotation)
         speakers = _attach_speakers(segment_list, diarization_turns)
 
+    if diarization_turns is not None:
+        final_text = _to_text(segment_list)
+    else:
+        final_text = " ".join(part.strip() for part in text_parts if part).strip()
+
     payload = {
-        "text": " ".join(part.strip() for part in text_parts if part).strip(),
+        "text": final_text,
         "segments": segment_list,
         "language": getattr(info, "language", language or "unknown"),
     }
