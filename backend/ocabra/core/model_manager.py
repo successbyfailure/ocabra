@@ -71,6 +71,8 @@ class ModelState:
     worker_info: WorkerInfo | None = None
     error_message: str | None = None
     extra_config: dict = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
     def __post_init__(self) -> None:
@@ -102,6 +104,8 @@ class ModelState:
             "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
             "error_message": self.error_message,
             "extra_config": self.extra_config,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 @dataclass
@@ -423,6 +427,8 @@ class ModelManager:
                 auto_reload=cfg.auto_reload,
                 preferred_gpu=cfg.preferred_gpu,
                 extra_config=cfg.extra_config or {},
+                created_at=cfg.created_at,
+                updated_at=cfg.updated_at,
             )
             self._load_locks[canonical_model_id] = asyncio.Lock()
             self._persisted_model_ids.add(canonical_model_id)
