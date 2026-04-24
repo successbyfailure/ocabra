@@ -29,6 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} ${LLAMA_CPP_REPO} /build/llama.cpp
 ARG LLAMA_CUDA_ARCHITECTURES="75;80;86;89;90"
+# Recent llama.cpp pulls in driver API symbols (e.g. cuGetErrorString) and
+# links against libcuda.so.1, which only ships with the NVIDIA driver at
+# runtime. The CUDA devel image provides a stub at .../stubs/libcuda.so for
+# link-time resolution; exposing it via LIBRARY_PATH lets ld see it without
+# adding a runtime dependency.
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH}
 RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=ON \
