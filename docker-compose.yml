@@ -65,6 +65,7 @@ services:
       - /docker/ai-models/ocabra/models:/data/models
       - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
       - ./data/openai_files:/data/openai_files
+      - backends_data:/data/backends
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
@@ -318,3 +319,4 @@ services:
 
 volumes:
   a1111_venv:
+  backends_data:

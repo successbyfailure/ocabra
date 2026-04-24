@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # Models storage
     models_dir: str = "/data/models"
     download_dir: str = ""  # default: {models_dir}/downloads
+    # Bloque 15 — Modular backends install root (one subdir per backend).
+    backends_dir: str = "/data/backends"
     max_temperature_c: int = 88
     hf_cache_dir: str = "/data/hf_cache"
     ai_models_root: str = "/docker/ai-models"
