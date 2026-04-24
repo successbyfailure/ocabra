@@ -8,9 +8,11 @@ from ocabra.config import settings
 from ocabra.database import Base
 
 # Import all models so Alembic can detect them
+import ocabra.db.agents  # noqa: F401  (Agent + AgentMCPServer)
+import ocabra.db.mcp  # noqa: F401  (MCPServer)
 import ocabra.db.model_config  # noqa: F401  (includes ModelConfig + ModelProfile)
 import ocabra.db.openai_batches  # noqa: F401  (OpenAIFile + OpenAIBatch)
-import ocabra.db.stats  # noqa: F401
+import ocabra.db.stats  # noqa: F401  (RequestStat, ToolCallStat, ...)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

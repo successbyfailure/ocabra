@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ocabra.database import Base
@@ -38,6 +38,22 @@ class RequestStat(Base):
     api_key_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # Node ID of the remote peer when the request was proxied via federation.
     remote_node_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Agent that originated this request (NULL for non-agent traffic).
+    # Set on both the root request and every intermediate hop.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # When this stat is an intermediate tool-loop hop, points at the root request_stat.
+    # Root requests have ``parent_request_id = NULL`` and ``agent_id`` populated.
+    parent_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("request_stats.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
 
 class GpuStat(Base):
@@ -117,4 +133,52 @@ class ServerStat(Base):
 
     __table_args__ = (
         Index("ix_server_stats_recorded_at", "recorded_at"),
+    )
+
+
+class ToolCallStat(Base):
+    """One row per MCP tool_call executed inside an agent tool-loop.
+
+    Linked to the root ``request_stats`` row via ``request_stat_id`` when
+    available (the root is the entry point created by the StatsMiddleware for
+    the HTTP request that invoked the agent).  ``tool_args_redacted`` must
+    already have secrets redacted by the AgentExecutor — we never persist raw
+    args.  ``result_summary`` is truncated to ``mcp_result_max_bytes`` (text).
+    """
+
+    __tablename__ = "tool_call_stats"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    request_stat_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("request_stats.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    mcp_server_alias: Mapped[str] = mapped_column(String(128), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    tool_args_redacted: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ok")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hop_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_tool_call_stats_alias_tool",
+            "mcp_server_alias",
+            "tool_name",
+        ),
     )
