@@ -12,6 +12,7 @@ import {
   Users,
   UsersRound,
   Key,
+  Package,
 } from "lucide-react"
 import { clsx } from "clsx"
 import { useAuthStore } from "@/stores/authStore"
@@ -48,8 +49,9 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 const ADMIN_NAV_ITEMS: NavItem[] = [
-  { to: "/users",  label: "Usuarios", icon: Users,      minRole: "system_admin" },
-  { to: "/groups", label: "Grupos",   icon: UsersRound, minRole: "system_admin" },
+  { to: "/backends", label: "Backends", icon: Package,     minRole: "system_admin" },
+  { to: "/users",    label: "Usuarios", icon: Users,       minRole: "system_admin" },
+  { to: "/groups",   label: "Grupos",   icon: UsersRound,  minRole: "system_admin" },
 ]
 
 export function Sidebar({ open, onClose }: SidebarProps) {
