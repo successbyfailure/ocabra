@@ -642,3 +642,22 @@ Smoke script `scripts/smoke_bloque15.sh` pasa 5/5 casos contra la app real dentr
 5. `POST /ocabra/backends/whisper/install {"method":"oci"}` → 501 (Fase 3 pendiente)
 
 Validado también a través de Caddy (`http://localhost:8484/ocabra/backends` con cookie JWT de `system_admin`): lista completa con los 12 backends esperados.
+
+### Hito Fase 4 — slim image + install end-to-end validado (2026-04-25)
+
+- Deuda #9 (llama.cpp build) resuelta: stub `libcuda.so.1` + `LIBRARY_PATH` + `-Wl,-rpath-link` en Dockerfile.
+- `backend/Dockerfile.slim` entregado: `python:3.11-slim-bookworm` + FastAPI + ffmpeg/libsndfile1/sox + docker CLI. **987 MB vs 54 GB** fat (55×). Build ~2 min vs ~40 min.
+- `docker-compose.slim.yml` override que arranca `ocabra-api:slim` sin tocar el `ocabra-api:latest` (→ fat, rollback).
+- Deudas 9a/9b/psutil cerradas: `BackendInstallSpec.pip_extra_index_urls` + `include_core_runtime`; `settings.backends_fat_image` (default True, slim pone False) para que `start()` marque backends sin metadata como `not_installed` en slim.
+- **Install end-to-end de whisper sobre slim verificado**: `POST /ocabra/backends/whisper/install method=source` dispara SSE con progreso real, crea `/data/backends/whisper/venv/`, ejecuta pip con los args correctos:
+  ```
+  venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+      torch>=2.5 torchaudio>=2.5 faster-whisper>=1.1 soundfile>=0.12 \
+      transformers>=4.47 pyannote.audio>=3.3 nemo_toolkit[asr]>=2.2 \
+      librosa>=0.10 matplotlib>=3.10 numpy
+  ```
+  El contrato (spec → installer → venv → pip con índice CUDA + core runtime previo) está validado de punta a punta. Tests `tests/core/` = 24/24.
+
+### Deuda nueva descubierta: install no se cancela al desconectar el cliente SSE
+
+Si el cliente cierra la conexión SSE a `POST /install` mientras pip está descargando, el proceso pip sigue vivo en el contenedor (el subprocess sobrevive la cancelación del handler). Esto tiene dos caras: buena (el usuario puede cerrar la pestaña y el install termina) y mala (el `BackendModuleState.install_status` se queda en `"installing"` para siempre si el generator no llega a yieldear el estado final). Fix pendiente: detectar el pip terminado fuera del handler (task background o tick periódico) y actualizar estado a `installed`/`error`. Añadir a la lista de deudas como **9f**.
