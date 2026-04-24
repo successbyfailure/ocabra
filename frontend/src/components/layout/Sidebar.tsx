@@ -15,6 +15,8 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Package,
+  Sparkles,
+  Plug,
 } from "lucide-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { clsx } from "clsx"
@@ -44,6 +46,8 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard",  icon: LayoutDashboard },
   { to: "/models",    label: "Models",     icon: Boxes },
+  { to: "/agents",    label: "Agents",     icon: Sparkles,       minRole: "model_manager" },
+  { to: "/mcp-servers", label: "MCP Servers", icon: Plug,        minRole: "model_manager" },
   { to: "/engines",   label: "Engines",    icon: Cpu,            minRole: "model_manager" },
   { to: "/explore",   label: "Explore",    icon: Search,         minRole: "model_manager" },
   { to: "/playground",label: "Playground", icon: MessageSquare },

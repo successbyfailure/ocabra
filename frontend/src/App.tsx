@@ -15,6 +15,8 @@ import { Users } from "@/pages/Users"
 import { Groups } from "@/pages/Groups"
 import { ApiKeys } from "@/pages/ApiKeys"
 import { Logs } from "@/pages/Logs"
+import { Agents } from "@/pages/Agents"
+import { MCPServers } from "@/pages/MCPServers"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -64,6 +66,22 @@ export default function App() {
                   element={
                     <ProtectedRoute minRole="system_admin">
                       <Backends />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/agents"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <Agents />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/mcp-servers"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <MCPServers />
                     </ProtectedRoute>
                   }
                 />
