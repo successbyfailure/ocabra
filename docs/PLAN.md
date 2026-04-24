@@ -39,9 +39,9 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 | Frontend serve | Nginx |
 | Reverse proxy | Caddy |
 
-## Estado actual (2026-04-12)
+## Estado actual (2026-04-18)
 
-**Fases 0–8 completadas e implementadas. Versión: 0.6.0**
+**Fases 0–8 completadas e implementadas. Bloques 1–14 completados. Versión: 0.6.0**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
 El trabajo restante está en `docs/ROADMAP.md`.
@@ -76,6 +76,8 @@ El trabajo restante está en `docs/ROADMAP.md`.
 - **Chatterbox TTS (Fase 7 parcial)**: Backend first-class para Chatterbox Multilingual (23 idiomas, voice cloning). Worker FastAPI, validación de `voice_ref`, detección en scanner/registry.
 - **Resiliencia de backends (Bloque 11)**: Interfaz unificada multi-modal (`ModalityType`, `supported_modalities()`), evicción LRU + umbral VRAM, busy timeout con `ActiveRequest` tracking, `BackendProcessManager` con health checks y auto-restart.
 - **Federación P2P (Bloque 12)**: Modo federado peer-to-peer completo. `FederationManager` con heartbeat, cifrado Fernet, proxy transparente, load balancing, inventario federado en `/v1/models` y `/api/tags`, UI de gestión de peers, operaciones remotas.
+- **Observabilidad de potencia + stats ampliadas (Bloque 13)**: Contenedor `hw-monitor` (RAPL CPU + NVML GPU → Redis + tabla `server_stats` vía migración `0015`). `cost_calculator.py` y endpoints `/ocabra/stats/by-api-key`, `/server-power`, `/federation`, detalle por usuario. Paneles frontend: `ApiKeyPanel`, `CostSavingsCard`, `FederationPanel`, `UserDetailPanel`, `EnergyPanel` rediseñado, layout renovado. Benchmark harness en `benchmark/`.
+- **OpenAI Batches + Files API + ACL de modelos (Bloque 14)**: Files API (`/v1/files` — upload/retrieve/delete/content) y Batches API (`/v1/batches` — create/retrieve/list/cancel) con migración `0016`. `BatchProcessor` en background despacha in-process vía `ASGITransport` impersonando al owner con `X-Gateway-Token` + `X-Internal-User-Id`. Endpoints soportados dentro de batches: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. `/ocabra/models` ahora filtra por `accessible_model_ids` para no-admin (igual que `/v1/models`).
 - **Tests**: 586+ tests cubriendo path traversal, config, model manager, worker lifecycle, Langfuse, profiles, modalities, eviction, busy timeout, process manager, y federación (54 tests).
 
 ### Validaciones end-to-end confirmadas
@@ -95,6 +97,7 @@ El trabajo restante está en `docs/ROADMAP.md`.
 
 - **Backends Modulares**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`.
 - **Fine-tuning de voz**: Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
+- **UI de Batches**: Listado y descarga de batches del usuario desde el dashboard (backend ya expuesto, falta la vista).
 
 ### Pendiente menor
 

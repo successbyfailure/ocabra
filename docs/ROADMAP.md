@@ -200,7 +200,30 @@ Implementado (5 fases):
 
 ---
 
-## Pendiente — Bloque 13 — Backends Modulares
+## ✅ Bloque 13 — Observabilidad de potencia + stats ampliadas (COMPLETADO)
+
+Implementado:
+- Servicio `hw-monitor/` (contenedor dedicado) lee potencia CPU por RAPL (`/sys/class/powercap`) y GPU vía NVML, publica en Redis y persiste en `server_stats` (migración `0015`). GPU Manager consume snapshots de Redis con fallback a pynvml.
+- Agregador de stats ampliado con `cost_calculator.py` (coste estimado por petición), endpoints `/ocabra/stats/by-api-key`, `/ocabra/stats/server-power`, `/ocabra/stats/federation`, detalle por usuario.
+- Nuevos paneles frontend: `ApiKeyPanel`, `CostSavingsCard`, `FederationPanel`, `UserDetailPanel`, `EnergyPanel` rediseñado. Layout (Header/Sidebar/Layout) y página Stats rehechos.
+- Componentes comunes reutilizables: `ConfirmDialog`, `Skeleton`, `StyledSelect`.
+- Gateway con portal de servicios y páginas mejoradas.
+- Benchmark harness en `benchmark/run_benchmark.py`.
+
+---
+
+## ✅ Bloque 14 — OpenAI Batches + Files API + ACL de modelos (COMPLETADO)
+
+Implementado:
+- **OpenAI Files API** (`/v1/files` · `POST`/`GET`/`DELETE`, `GET /v1/files/{id}/content`) con almacenamiento en disco (`/data/openai_files`, volumen `./data/openai_files`). Tabla `openai_files`.
+- **OpenAI Batches API** (`/v1/batches` · `POST`/`GET`/`cancel`) con tabla `openai_batches` y migración `0016`. Soporta `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
+- **BatchProcessor** (`backend/ocabra/core/batch_processor.py`): loop en background, dispatch in-process vía `httpx.ASGITransport`, impersonación del owner con `X-Gateway-Token` + `X-Internal-User-Id` (añadido soporte en `_deps_auth.py`). Concurrencia configurable (`batch_max_concurrency=4`), poll cada `batch_poll_interval_seconds=5`, timeout por petición `batch_request_timeout_seconds=600`.
+- **Fix ACL `/ocabra/models`**: ahora filtra por `accessible_model_ids` para usuarios no-admin (igual que `/v1/models`). Verificado con usuario de grupo limitado: 1 modelo visible vs. todos antes.
+- Smoke test e2e: upload JSONL → create batch → procesado completo con output JSONL descargable vía Files API.
+
+---
+
+## Pendiente — Bloque 15 — Backends Modulares
 
 Plan en `docs/tasks/modular-backends-plan.md`.
 
@@ -223,6 +246,9 @@ Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim
 [✅ Hecho]  Bloque 10 — Chatterbox TTS (Fase 7 parcial)
 [✅ Hecho]  Bloque 11 — Resiliencia de backends
 [✅ Hecho]  Bloque 12 — Federación P2P
-[Pendiente]   Bloque 13 — Backends Modulares
+[✅ Hecho]  Bloque 13 — Observabilidad de potencia + stats ampliadas
+[✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
+[Pendiente]   Bloque 15 — Backends Modulares
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
+[Pendiente]   UI para listar/descargar batches del usuario
 ```
