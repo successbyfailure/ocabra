@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: ACE-Step 1.5 (music generation)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-acestep:latest-cuda12
+# Estimated size    : ~7 GB (torch + diffusers + DiT weights NOT bundled)
+# Variants          : cuda12 (default)
+# Key deps          : installed from https://github.com/ace-step/ACE-Step-1.5
+#                     via `uv sync`; its own venv is relocated to /backend/venv.
+# Runtime entry     : /backend/venv/bin/python -m acestep.api ...  (handled by
+#                     acestep_backend.py which launches the ACE-Step server)
+# Notes             : ACE-Step uses `uv` for deps. We clone the project into
+#                     /backend/project and build its venv at /backend/venv so
+#                     acestep_backend.py finds the canonical <backend>/venv/bin/python.
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+ARG ACESTEP_REPO=https://github.com/ace-step/ACE-Step-1.5
+ARG ACESTEP_REF=main
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG ACESTEP_REPO
+ARG ACESTEP_REF
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_PROJECT_ENVIRONMENT=/backend/venv
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+        git \
+        ffmpeg \
+        libsndfile1 \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (ACE-Step's build tool) and clone the project.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+RUN git clone --depth 1 --branch ${ACESTEP_REF} ${ACESTEP_REPO} /backend/project
+
+# Create venv at the canonical /backend/venv location and sync deps.
+WORKDIR /backend/project
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel \
+    && /backend/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        "torch>=2.5" "torchaudio>=2.5"
+
+# uv sync into our pre-created venv (ACE-Step declares deps in pyproject.toml).
+RUN UV_PROJECT_ENVIRONMENT=/backend/venv uv sync --frozen || \
+    UV_PROJECT_ENVIRONMENT=/backend/venv uv sync
+
+RUN mkdir -p /backend/workers /backend/bin
+RUN cp /usr/bin/ffmpeg /backend/bin/ffmpeg || true
+
+RUN echo "{\"backend_type\": \"acestep\", \"python_bin\": \"/backend/venv/bin/python\", \"project_dir\": \"/backend/project\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-acestep" \
+      org.opencontainers.image.description="ACE-Step 1.5 music generation backend for oCabra" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: TensorRT-LLM  (special case)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-tensorrt-llm:latest-cuda12
+# Estimated size    : ~18 GB  (TensorRT + tensorrt_llm + torch + nccl + CUDA libs)
+# Variants          : cuda12 only (TensorRT is NVIDIA-specific)
+# Key deps          : tensorrt_llm  (distributed primarily as NVIDIA NGC image,
+#                     not a clean pip wheel — version matters heavily)
+#
+# TODO — INCERTIDUMBRE: tensorrt_llm_backend.py supports two launch_mode values:
+#   - "binary"   -> calls `trtllm-serve` from a local venv/python bin
+#   - "docker"   -> delegates to `docker run nvcr.io/nvidia/tensorrt-llm:...`
+# For the OCI-distributed modular backend we target the binary mode. Confirm
+# with the human whether we bundle:
+#   (a) the NGC upstream image as-is (trivial, but huge and licensed by NVIDIA), or
+#   (b) a pip-installable tensorrt_llm build into a local venv (requires matching
+#       TensorRT/CUDA versions on the host and is fragile).
+#
+# The Dockerfile below takes approach (b) as a best-effort scaffold. Expect to
+# revisit once NVIDIA's pip channel is pinned for the project.
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ARG TRT_LLM_VERSION=0.17.0
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG TRT_LLM_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+        git \
+        openmpi-bin \
+        libopenmpi-dev \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+# NOTE: tensorrt_llm wheels are published on NVIDIA's pypi mirror.
+# We intentionally leave the exact pip index / version unpinned here;
+# the CI matrix must pin the matching CUDA + driver combo.
+# If the build fails in CI, the human should substitute a specific
+# NGC-derived wheel URL here.
+RUN /backend/venv/bin/pip install \
+        --extra-index-url https://pypi.nvidia.com \
+        "tensorrt_llm==${TRT_LLM_VERSION}" \
+        || echo "tensorrt_llm wheel install failed — see TODO at top of Dockerfile"
+
+RUN mkdir -p /backend/workers /backend/bin
+
+RUN echo "{\"backend_type\": \"tensorrt_llm\", \"version\": \"${TRT_LLM_VERSION}\", \"python_bin\": \"/backend/venv/bin/python\", \"notes\": \"scaffold only — see Dockerfile TODO\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+ARG TRT_LLM_VERSION
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-tensorrt-llm" \
+      org.opencontainers.image.description="TensorRT-LLM backend for oCabra (scaffold)" \
+      org.opencontainers.image.version="${TRT_LLM_VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

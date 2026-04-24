@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: SGLang
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-sglang:latest-cuda12
+# Estimated size    : ~9 GB (torch + sglang + flashinfer wheels)
+# Variants          : cuda12 (default)
+# Key deps          : sglang==0.5.9, torch (installed by sglang)
+# Runtime entry     : /backend/venv/bin/python -m sglang.launch_server ...
+#                     (driven by backend/ocabra/workers/sglang_worker.py which
+#                      runs in the ocabra main venv; only the sglang venv ships here)
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+ARG BACKEND_VERSION=0.5.9
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG BACKEND_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+RUN /backend/venv/bin/pip install "sglang==${BACKEND_VERSION}"
+
+RUN mkdir -p /backend/workers /backend/bin
+
+RUN echo "{\"backend_type\": \"sglang\", \"version\": \"${BACKEND_VERSION}\", \"python_bin\": \"/backend/venv/bin/python\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+ARG BACKEND_VERSION
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-sglang" \
+      org.opencontainers.image.description="SGLang LLM inference backend for oCabra" \
+      org.opencontainers.image.version="${BACKEND_VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

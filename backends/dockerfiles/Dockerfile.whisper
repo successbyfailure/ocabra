@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: faster-whisper (+ NeMo ASR + pyannote diarization)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-whisper:latest-cuda12
+# Estimated size    : ~4.5 GB (torch + nemo + pyannote + faster-whisper)
+# Variants          : cuda12 (default), cpu
+# Key deps          : faster-whisper>=1.1, soundfile>=0.12, transformers>=4.47,
+#                     pyannote.audio>=3.3, nemo_toolkit[asr]>=2.2, librosa,
+#                     numpy, torch, torchaudio, fastapi, uvicorn, httpx, matplotlib
+# Runtime entry     : /backend/venv/bin/python /backend/workers/whisper_worker.py
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+FROM ${BASE_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+        ffmpeg \
+        libsndfile1 \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+# PyTorch is a transitive dep of several of these; pin CUDA wheels explicitly.
+RUN /backend/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        "torch>=2.5" \
+        "torchaudio>=2.5"
+
+RUN /backend/venv/bin/pip install \
+        "faster-whisper>=1.1" \
+        "soundfile>=0.12" \
+        "transformers>=4.47" \
+        "pyannote.audio>=3.3" \
+        "nemo_toolkit[asr]>=2.2" \
+        "librosa>=0.10" \
+        "matplotlib>=3.10" \
+        "numpy" \
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.32" \
+        "httpx>=0.28" \
+        "pydantic>=2.10"
+
+RUN mkdir -p /backend/workers /backend/bin
+
+# Copy worker script (context must be repo root).
+COPY backend/workers/whisper_worker.py /backend/workers/whisper_worker.py
+
+RUN echo "{\"backend_type\": \"whisper\", \"python_bin\": \"/backend/venv/bin/python\", \"worker\": \"/backend/workers/whisper_worker.py\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-whisper" \
+      org.opencontainers.image.description="faster-whisper + NeMo ASR + pyannote for oCabra" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

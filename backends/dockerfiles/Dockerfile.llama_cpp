@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: llama.cpp (native binary build)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-llama-cpp:latest-cuda12
+# Estimated size    : ~250 MB (native binaries + CUDA ggml shared libs)
+# Variants          : cuda12 (default), cpu (rebuild with -DGGML_CUDA=OFF)
+# Key deps          : none Python. Native binary `llama-server` + libggml*.so.
+# Build target      : llama-server. CUDA archs 61;70;75;80;86;89 (covers RTX 3060/3090).
+# Runtime entry     : /backend/bin/llama-server  (invoked by llama_cpp_worker.py
+#                     which runs in the ocabra main venv)
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp
+ARG LLAMA_CPP_REF=master
+ARG LLAMA_CUDA_ARCHITECTURES="61;70;75;80;86;89"
+ARG ENABLE_CUDA=ON
+ARG BUILD_JOBS=4
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG LLAMA_CPP_REPO
+ARG LLAMA_CPP_REF
+ARG LLAMA_CUDA_ARCHITECTURES
+ARG ENABLE_CUDA
+ARG BUILD_JOBS
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        build-essential \
+        cmake \
+        git \
+        ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} ${LLAMA_CPP_REPO} /build/llama.cpp
+
+RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_CUDA=${ENABLE_CUDA} \
+        -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES}" \
+        -DLLAMA_CURL=OFF \
+    && cmake --build /build/llama.cpp/build --target llama-server -j${BUILD_JOBS}
+
+# Stage output into /backend so the scratch final layer is one clean copy.
+RUN mkdir -p /backend/bin /backend/lib /backend/workers \
+    && cp /build/llama.cpp/build/bin/llama-server /backend/bin/llama-server \
+    && (cp /build/llama.cpp/build/bin/lib*.so* /backend/lib/ 2>/dev/null || true) \
+    && chmod +x /backend/bin/llama-server \
+    && echo "{\"backend_type\": \"llama_cpp\", \"python_bin\": null, \"extra_bins\": {\"llama_server\": \"/backend/bin/llama-server\"}}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-llama-cpp" \
+      org.opencontainers.image.description="llama.cpp native server (CUDA) for oCabra" \
+      org.opencontainers.image.licenses="MIT"
+
+COPY --from=builder /backend /backend

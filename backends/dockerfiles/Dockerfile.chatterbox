@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: Chatterbox TTS
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-chatterbox:latest-cuda12
+# Estimated size    : ~4.5 GB
+# Variants          : cuda12 (default), cpu
+# Key deps          : chatterbox-tts>=0.1.7, torch>=2.5, torchaudio, soundfile,
+#                     numpy, fastapi, uvicorn, httpx
+# Runtime entry     : /backend/venv/bin/python /backend/workers/chatterbox_worker.py
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+FROM ${BASE_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+        ffmpeg \
+        libsndfile1 \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+RUN /backend/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        "torch>=2.5" \
+        "torchaudio>=2.5"
+
+RUN /backend/venv/bin/pip install \
+        "chatterbox-tts>=0.1.7" \
+        "soundfile>=0.12" \
+        "numpy" \
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.32" \
+        "httpx>=0.28" \
+        "pydantic>=2.10"
+
+RUN mkdir -p /backend/workers /backend/bin
+RUN cp /usr/bin/ffmpeg /backend/bin/ffmpeg || true
+
+COPY backend/workers/chatterbox_worker.py /backend/workers/chatterbox_worker.py
+
+RUN echo "{\"backend_type\": \"chatterbox\", \"python_bin\": \"/backend/venv/bin/python\", \"worker\": \"/backend/workers/chatterbox_worker.py\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-chatterbox" \
+      org.opencontainers.image.description="Chatterbox TTS backend for oCabra" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

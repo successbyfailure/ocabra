@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: BitNet (Microsoft 1.58-bit inference)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-bitnet:latest-cuda12
+# Estimated size    : ~200 MB (bitnet-server + ggml shared libs)
+# Variants          : cuda12 (optional — defaults to CPU kernels because BitNet
+#                     pretuned kernels are CPU-first), cpu
+# Key deps          : none Python. Native `bitnet-server` + libllama/libggml .so.
+# Build args        : BITNET_PRETUNED_MODEL (default bitnet_b1_58-3B)
+#                     BITNET_KERNEL_FLAVOR  (default tl2)
+#                     BITNET_ENABLE_CUDA    (default false)
+# Runtime entry     : /backend/bin/bitnet-server  (invoked by bitnet backend,
+#                     which runs in the ocabra main venv)
+# Notes             : Reuses backend/scripts/build_bitnet.sh (same script used
+#                     by the fat Dockerfile). Context must be repo root.
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ARG BITNET_COMMIT=main
+ARG BITNET_PRETUNED_MODEL=bitnet_b1_58-3B
+ARG BITNET_KERNEL_FLAVOR=tl2
+ARG BITNET_BUILD_JOBS=8
+ARG BITNET_ENABLE_CUDA=false
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG BITNET_COMMIT
+ARG BITNET_PRETUNED_MODEL
+ARG BITNET_KERNEL_FLAVOR
+ARG BITNET_BUILD_JOBS
+ARG BITNET_ENABLE_CUDA
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    BITNET_COMMIT=${BITNET_COMMIT} \
+    BITNET_PRETUNED_MODEL=${BITNET_PRETUNED_MODEL} \
+    BITNET_KERNEL_FLAVOR=${BITNET_KERNEL_FLAVOR} \
+    BITNET_BUILD_JOBS=${BITNET_BUILD_JOBS} \
+    BITNET_ENABLE_CUDA=${BITNET_ENABLE_CUDA}
+
+WORKDIR /build
+COPY backend/scripts/build_bitnet.sh /tmp/build_bitnet.sh
+RUN chmod +x /tmp/build_bitnet.sh && /tmp/build_bitnet.sh
+
+# Reshape /out into the /backend/ layout expected by BackendInstaller.
+RUN mkdir -p /backend/bin /backend/lib /backend/workers \
+    && cp /out/bitnet-server /backend/bin/bitnet-server \
+    && (cp -a /out/lib/. /backend/lib/ 2>/dev/null || true) \
+    && chmod +x /backend/bin/bitnet-server \
+    && echo "{\"backend_type\": \"bitnet\", \"python_bin\": null, \"extra_bins\": {\"bitnet_server\": \"/backend/bin/bitnet-server\"}}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-bitnet" \
+      org.opencontainers.image.description="BitNet 1.58-bit inference server for oCabra" \
+      org.opencontainers.image.licenses="MIT"
+
+COPY --from=builder /backend /backend
