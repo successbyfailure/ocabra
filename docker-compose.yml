@@ -1,14 +1,13 @@
 services:
   api:
+    # Default: slim image (no AI backends pre-installed). Backends are
+    # installed on demand into /data/backends via BackendInstaller.
+    # For a rollback to the legacy fat image with everything pre-installed,
+    # use:  docker compose -f docker-compose.yml -f docker-compose.fat.yml ...
     build:
       context: ./backend
-      dockerfile: Dockerfile
-      args:
-        BITNET_COMMIT: ${BITNET_COMMIT:-main}
-        BITNET_PRETUNED_MODEL: ${BITNET_PRETUNED_MODEL:-bitnet_b1_58-3B}
-        BITNET_KERNEL_FLAVOR: ${BITNET_KERNEL_FLAVOR:-tl2}
-        BITNET_BUILD_JOBS: ${BITNET_BUILD_JOBS:-8}
-        BITNET_ENABLE_CUDA: ${BITNET_ENABLE_CUDA:-false}
+      dockerfile: Dockerfile.slim
+    image: ocabra-api:slim
     runtime: nvidia
     ipc: host
     shm_size: "8gb"

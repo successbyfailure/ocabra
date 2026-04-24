@@ -1,0 +1,32 @@
+# docker-compose override for the legacy fat API image.
+#
+# Use this when you need a rollback to the all-backends-pre-installed image,
+# typically because you depend on backends not yet migrated to install_spec
+# (acestep, bitnet, llama_cpp, tensorrt_llm).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.fat.yml build api
+#   docker compose -f docker-compose.yml -f docker-compose.fat.yml up -d api
+#
+# The default docker-compose.yml uses Dockerfile.slim. This override switches
+# the api service back to the fat Dockerfile and re-injects the BITNET build
+# args used by the bitnet-builder stage.
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        BITNET_COMMIT: ${BITNET_COMMIT:-main}
+        BITNET_PRETUNED_MODEL: ${BITNET_PRETUNED_MODEL:-bitnet_b1_58-3B}
+        BITNET_KERNEL_FLAVOR: ${BITNET_KERNEL_FLAVOR:-tl2}
+        BITNET_BUILD_JOBS: ${BITNET_BUILD_JOBS:-8}
+        BITNET_ENABLE_CUDA: ${BITNET_ENABLE_CUDA:-false}
+    image: ocabra-api:fat
+    environment:
+      # Tell BackendInstaller to keep the legacy "built-in" reconciliation
+      # path so unmigrated backends (acestep, bitnet, llama_cpp,
+      # tensorrt_llm) and migrated ones without metadata.json appear as
+      # already installed.
+      BACKENDS_FAT_IMAGE: "true"
