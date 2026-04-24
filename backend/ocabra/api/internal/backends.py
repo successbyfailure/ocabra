@@ -200,6 +200,35 @@ async def install_backend(
     )
 
 
+@router.get(
+    "/backends/{backend_type}/install",
+    summary="Install a backend (GET alias for EventSource)",
+    description=(
+        "GET variant of install that accepts `method` as a query parameter. Exists "
+        "because the browser `EventSource` API only issues GET requests. Same SSE "
+        "behaviour as POST."
+    ),
+    responses={
+        404: {"description": "Backend not registered"},
+        409: {"description": "Install already in progress"},
+        400: {"description": "Invalid install method for this backend"},
+        501: {"description": "OCI install not implemented yet (Fase 3)"},
+    },
+)
+async def install_backend_get(
+    backend_type: str,
+    request: Request,
+    method: str = "source",
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> StreamingResponse:
+    return await install_backend(
+        backend_type,
+        InstallRequest(method=method),
+        request,
+        _user,
+    )
+
+
 @router.post(
     "/backends/{backend_type}/uninstall",
     response_model=BackendStateResponse,
