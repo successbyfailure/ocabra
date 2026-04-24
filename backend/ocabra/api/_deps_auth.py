@@ -259,6 +259,41 @@ async def get_current_user(request: Request) -> UserContext:
     # 0. Gateway service token (internal calls — no DB needed)
     gw_token = request.headers.get("X-Gateway-Token", "")
     if gw_token and settings.gateway_service_token and gw_token == settings.gateway_service_token:
+        # Optional impersonation for the batch processor: act as the batch owner
+        # so per-user access controls and stats attribution still apply.
+        impersonate_id = request.headers.get("X-Internal-User-Id", "")
+        if impersonate_id:
+            try:
+                from ocabra.db.auth import User, UserGroup
+
+                async with AsyncSessionLocal() as session:
+                    user = (await session.execute(
+                        select(User).where(User.id == _uuid.UUID(impersonate_id))
+                    )).scalar_one_or_none()
+                    if user is not None and user.is_active:
+                        group_ids = [
+                            str(gid)
+                            for gid in (await session.execute(
+                                select(UserGroup.group_id).where(UserGroup.user_id == user.id)
+                            )).scalars().all()
+                        ]
+                        accessible = await _fetch_accessible_models(
+                            user.role, group_ids, session
+                        )
+                        ctx = UserContext(
+                            user_id=str(user.id),
+                            username=user.username,
+                            role=user.role,
+                            group_ids=group_ids,
+                            accessible_model_ids=accessible,
+                            is_anonymous=False,
+                            api_key_name=request.headers.get("X-Internal-Key-Name") or None,
+                        )
+                        request.state.auth_user = ctx
+                        return ctx
+            except Exception as exc:
+                logger.warning("auth_impersonate_failed", error=str(exc))
+
         ctx = UserContext(
             user_id=None,
             username="__gateway__",

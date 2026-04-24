@@ -64,6 +64,7 @@ services:
     volumes:
       - /docker/ai-models/ocabra/models:/data/models
       - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
+      - ./data/openai_files:/data/openai_files
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
@@ -110,6 +111,26 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  hw-monitor:
+    build:
+      context: ./hw-monitor
+      dockerfile: Dockerfile
+    privileged: true
+    runtime: nvidia
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://ocabra:${POSTGRES_PASSWORD:-ocabra}@postgres:5432/ocabra
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - /sys/class/powercap:/sys/class/powercap:ro
+      - /sys/class/hwmon:/sys/class/hwmon:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   ollama:

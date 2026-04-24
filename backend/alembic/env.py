@@ -9,6 +9,7 @@ from ocabra.database import Base
 
 # Import all models so Alembic can detect them
 import ocabra.db.model_config  # noqa: F401  (includes ModelConfig + ModelProfile)
+import ocabra.db.openai_batches  # noqa: F401  (OpenAIFile + OpenAIBatch)
 import ocabra.db.stats  # noqa: F401
 
 config = context.config

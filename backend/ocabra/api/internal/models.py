@@ -57,9 +57,11 @@ class ModelMemoryEstimateRequest(BaseModel):
 )
 async def list_models(
     request: Request,
-    _user: UserContext = Depends(require_role("user")),
+    user: UserContext = Depends(require_role("user")),
 ) -> list[dict]:
     """List all configured models and their runtime state.
+
+    Non-admin users only see models they have access to via their groups.
 
     When federation is enabled, each model includes a ``federation`` section
     with a ``nodes`` list indicating where it is available. Remote-only models
@@ -75,9 +77,24 @@ async def list_models(
     if federation_manager is not None:
         remote_models = federation_manager.get_remote_models()
 
+    profile_registry = getattr(request.app.state, "profile_registry", None)
+
+    async def _is_accessible(model_id: str) -> bool:
+        """True if the user can access the model (admin or any of its profiles in their set)."""
+        if user.is_admin:
+            return True
+        if model_id in user.accessible_model_ids:
+            return True
+        if profile_registry is None:
+            return False
+        profiles = await profile_registry.list_by_model(model_id)
+        return any(p.profile_id in user.accessible_model_ids for p in profiles)
+
     local_model_ids: set[str] = set()
     payloads = []
     for state in states:
+        if not await _is_accessible(state.model_id):
+            continue
         item = await _serialize_model_state(request, state, ollama_sizes)
         local_model_ids.add(state.model_id)
 
@@ -100,6 +117,8 @@ async def list_models(
     if federation_manager is not None:
         for model_id, peers in remote_models.items():
             if model_id in local_model_ids:
+                continue
+            if not await _is_accessible(model_id):
                 continue
             first_peer = peers[0]
             # Find model info from the first peer's model list

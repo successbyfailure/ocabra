@@ -450,6 +450,15 @@ async def lifespan(app: FastAPI):
         app.state.federation_manager = None
 
     logger.info("vllm_backend_registered")
+
+    # OpenAI Batches API processor
+    from ocabra.core.batch_processor import BatchProcessor
+
+    batch_processor = BatchProcessor(app)
+    await batch_processor.start()
+    app.state.batch_processor = batch_processor
+    logger.info("batch_processor_ready")
+
     logger.info("ocabra_ready")
     yield
 
@@ -480,6 +489,9 @@ async def lifespan(app: FastAPI):
     service_health_task.cancel()
     with suppress(asyncio.CancelledError):
         await service_health_task
+
+    if getattr(app.state, "batch_processor", None) is not None:
+        await app.state.batch_processor.stop()
 
     if getattr(app.state, "federation_manager", None) is not None:
         await app.state.federation_manager.stop()
