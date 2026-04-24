@@ -10,6 +10,7 @@ import { Playground } from "@/pages/Playground"
 import { Stats } from "@/pages/Stats"
 import { Settings } from "@/pages/Settings"
 import { TrtllmEngines } from "@/pages/TrtllmEngines"
+import { Backends } from "@/pages/Backends"
 import { Users } from "@/pages/Users"
 import { Groups } from "@/pages/Groups"
 import { ApiKeys } from "@/pages/ApiKeys"
@@ -55,6 +56,14 @@ export default function App() {
                   element={
                     <ProtectedRoute minRole="model_manager">
                       <TrtllmEngines />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/backends"
+                  element={
+                    <ProtectedRoute minRole="system_admin">
+                      <Backends />
                     </ProtectedRoute>
                   }
                 />

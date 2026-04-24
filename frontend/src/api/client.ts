@@ -799,6 +799,40 @@ function buildQuery(params: Record<string, string | number | undefined>): string
   return query ? `?${query}` : ""
 }
 
+export function toBackendModuleState(raw: unknown): import("@/types").BackendModuleState {
+  const d = isRecord(raw) ? raw : {}
+  const status = String(
+    d.install_status ?? d.installStatus ?? "not_installed",
+  ) as import("@/types").BackendInstallStatus
+  const alwaysAvailable = Boolean(d.always_available ?? d.alwaysAvailable ?? false)
+  const installSource = (d.install_source ?? d.installSource ?? null) as
+    | import("@/types").BackendInstallSource
+  return {
+    backendType: String(d.backend_type ?? d.backendType ?? ""),
+    displayName: String(d.display_name ?? d.displayName ?? d.backend_type ?? d.backendType ?? ""),
+    description: String(d.description ?? ""),
+    tags: Array.isArray(d.tags) ? (d.tags as unknown[]).map(String) : [],
+    installStatus: alwaysAvailable && status === "installed" ? "built-in" : status,
+    installedVersion: (d.installed_version ?? d.installedVersion ?? null) as string | null,
+    installedAt: (d.installed_at ?? d.installedAt ?? null) as string | null,
+    installSource,
+    estimatedSizeMb: Number(d.estimated_size_mb ?? d.estimatedSizeMb ?? 0),
+    actualSizeMb:
+      d.actual_size_mb == null && d.actualSizeMb == null
+        ? null
+        : Number(d.actual_size_mb ?? d.actualSizeMb),
+    modelsLoaded: Number(d.models_loaded ?? d.modelsLoaded ?? 0),
+    hasUpdate: Boolean(d.has_update ?? d.hasUpdate ?? false),
+    installProgress:
+      d.install_progress == null && d.installProgress == null
+        ? null
+        : Number(d.install_progress ?? d.installProgress),
+    installDetail: (d.install_detail ?? d.installDetail ?? null) as string | null,
+    error: (d.error ?? null) as string | null,
+    alwaysAvailable,
+  }
+}
+
 function toServiceState(raw: unknown): ServiceState {
   const data = isRecord(raw) ? raw : {}
   return {
@@ -1138,6 +1172,45 @@ export const api = {
         totalGpuPowerW: raw.totalGpuPowerW ?? raw.total_gpu_power_w ?? null,
         totalPowerW: raw.totalPowerW ?? raw.total_power_w ?? null,
       } as ServerPower
+    },
+  },
+
+  backends: {
+    list: async (): Promise<import("@/types").BackendModuleState[]> =>
+      (await request<unknown[]>("GET", "/ocabra/backends")).map(toBackendModuleState),
+    get: async (backendType: string): Promise<import("@/types").BackendModuleState> =>
+      toBackendModuleState(
+        await request<unknown>("GET", `/ocabra/backends/${encodeURIComponent(backendType)}`),
+      ),
+    // NOTE: POST /install is modelled as GET here because EventSource only supports GET.
+    // The backend exposes the install endpoint as GET so SSE works with a query param.
+    install: (
+      backendType: string,
+      method: import("@/types").BackendInstallMethod = "oci",
+    ): EventSource => {
+      const qs = new URLSearchParams({ method })
+      return new EventSource(
+        `/ocabra/backends/${encodeURIComponent(backendType)}/install?${qs.toString()}`,
+      )
+    },
+    uninstall: async (
+      backendType: string,
+    ): Promise<import("@/types").BackendModuleState | null> => {
+      const raw = await request<unknown>(
+        "POST",
+        `/ocabra/backends/${encodeURIComponent(backendType)}/uninstall`,
+      )
+      return raw ? toBackendModuleState(raw) : null
+    },
+    logs: async (backendType: string): Promise<string> => {
+      const res = await fetch(
+        `${BASE}/ocabra/backends/${encodeURIComponent(backendType)}/logs`,
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail ?? res.statusText)
+      }
+      return res.text()
     },
   },
 

@@ -820,6 +820,16 @@ export interface FederationTestResult {
   node_info?: Record<string, unknown>
 }
 
+// Backend modules (Bloque 15) — re-exported for convenience.
+export type {
+  BackendInstallStatus,
+  BackendInstallMethod,
+  BackendInstallSource,
+  BackendModuleState,
+} from "./backends"
+
+import type { BackendModuleState } from "./backends"
+
 // WebSocket events
 export type WSEvent =
   | { type: "gpu_stats"; data: GPUState[] }
@@ -831,3 +841,6 @@ export type WSEvent =
   | { type: "peer_offline"; data: { peer_id: string; name: string } }
   | { type: "remote_model_loaded"; data: { peer_id: string; model_id: string } }
   | { type: "remote_model_unloaded"; data: { peer_id: string; model_id: string } }
+  | { type: "backend_installed"; data: BackendModuleState }
+  | { type: "backend_uninstalled"; data: { backendType: string } }
+  | { type: "backend_progress"; data: BackendModuleState }

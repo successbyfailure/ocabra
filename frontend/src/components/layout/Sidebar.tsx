@@ -14,6 +14,7 @@ import {
   BookOpen,
   ChevronsLeft,
   ChevronsRight,
+  Package,
 } from "lucide-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { clsx } from "clsx"
@@ -54,8 +55,9 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 const ADMIN_NAV_ITEMS: NavItem[] = [
-  { to: "/users",  label: "Usuarios", icon: Users,      minRole: "system_admin" },
-  { to: "/groups", label: "Grupos",   icon: UsersRound, minRole: "system_admin" },
+  { to: "/backends", label: "Backends", icon: Package,     minRole: "system_admin" },
+  { to: "/users",    label: "Usuarios", icon: Users,       minRole: "system_admin" },
+  { to: "/groups",   label: "Grupos",   icon: UsersRound,  minRole: "system_admin" },
 ]
 
 function NavItemLink({

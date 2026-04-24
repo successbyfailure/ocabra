@@ -4,6 +4,7 @@ import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useDownloadStore } from "@/stores/downloadStore"
 import { useServiceStore } from "@/stores/serviceStore"
+import { useBackendsStore } from "@/stores/backendsStore"
 
 const getWebSocketUrl = () =>
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
@@ -144,6 +145,7 @@ export function useWebSocket() {
   const updateModel = useModelStore((state) => state.updateModel)
   const updateJob = useDownloadStore((state) => state.updateJob)
   const updateService = useServiceStore((state) => state.updateService)
+  const handleBackendEvent = useBackendsStore((state) => state.handleWSEvent)
 
   useEffect(() => {
     let cancelled = false
@@ -175,6 +177,12 @@ export function useWebSocket() {
             })
           } else if (event.type === "service_event") {
             updateService(event.data.serviceId, event.data.service)
+          } else if (
+            event.type === "backend_installed" ||
+            event.type === "backend_uninstalled" ||
+            event.type === "backend_progress"
+          ) {
+            handleBackendEvent(event.type, event.data)
           }
 
           setLastEvent(event)
@@ -200,7 +208,7 @@ export function useWebSocket() {
       }
       wsRef.current?.close()
     }
-  }, [setGpus, updateJob, updateModel, updateService])
+  }, [setGpus, updateJob, updateModel, updateService, handleBackendEvent])
 
   return { connected, lastEvent }
 }
