@@ -75,6 +75,35 @@ docker compose up -d
 curl http://localhost:8484/health
 ```
 
+## Image variants (Bloque 15 — Fase 4)
+
+The `api` service ships in two flavours; the default since 2026-04-25 is **slim**.
+
+| Variant | Image | Size | Backends |
+|---------|-------|------|----------|
+| **slim** (default) | `ocabra-api:slim` | ~987 MB | None pre-installed; install on demand via `POST /ocabra/backends/{type}/install` |
+| **fat** (rollback) | `ocabra-api:fat`  | ~51 GB  | All backends pre-installed in the image (legacy behaviour) |
+
+### Default — slim
+
+```bash
+docker compose up -d --build api
+```
+
+After the api comes up, install the backends you need from the **Backends** page in the UI (or via the API). Each backend gets its own `/data/backends/<name>/venv/` and consumes disk only when installed. Backends that have not yet been migrated to `install_spec` (acestep, bitnet, llama_cpp, tensorrt_llm) appear as "built-in" but are NOT actually present on slim — for those you still need fat.
+
+### Fallback — fat
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.fat.yml up -d --build api
+```
+
+Use this when you depend on backends that are not yet installable on slim (the four listed above), or when you want the historical "everything works out of the box" experience. The fat image enables `BACKENDS_FAT_IMAGE=true` so the UI shows every backend as `built-in/installed`.
+
+### Switching between variants
+
+The on-disk install state for slim lives in the `backends_data` Docker volume (`/data/backends`). Switching between slim and fat does not delete it; whatever you installed on slim stays available the next time you boot slim, and is simply ignored when you boot fat (the fat image uses its own pre-installed copies).
+
 ## Configuration Reference
 
 Key variables in `.env` (see `.env.example` for the full list):

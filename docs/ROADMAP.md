@@ -223,7 +223,7 @@ Implementado:
 
 ---
 
-## 🚧 Bloque 15 — Backends Modulares (EN CURSO desde 2026-04-24)
+## 🚧 Bloque 15 — Backends Modulares (EN CURSO; Fase 1, 4, 5 + 7 backends en Fase 2 entregados)
 
 Plan en `docs/tasks/modular-backends-plan.md`.
 
@@ -240,13 +240,19 @@ Equipo de agentes paralelos entregó Fases 1, 3 (draft) y 5 en el mismo día:
 | **Fase 3 — Dockerfiles (draft)** | ✅ Merged | 11 Dockerfiles OCI en `backends/dockerfiles/` con `ARG BASE_IMAGE` multi-variante (cuda12/cpu/rocm), `FROM scratch` final, OCI labels, README con CI matrix skeleton. |
 | **Fase 5 — Frontend** | ✅ Merged | Página `/backends` (rol `system_admin`), `BackendCard` con 6 estados, `BackendStatusBadge`, `InstallProgressBar` SSE, `ConfirmUninstallDialog`, Zustand store con mock fallback, WebSocket live updates, `api.backends.*` en cliente, entrada en Sidebar. |
 
+### Avance acumulado
+
+- ✅ **Fase 1 — Infra backend**: `BackendInstallSpec`, `BackendInstaller`, router `/ocabra/backends`, SSE de instalación, tests.
+- ✅ **Fase 4 — Imagen slim**: `Dockerfile.slim` (~987 MB) + `docker-compose.yml` por defecto a slim, `docker-compose.fat.yml` como override de rollback, `BACKENDS_FAT_IMAGE` flag.
+- ✅ **Fase 5 — Frontend**: página `/backends` + cards + SSE + WebSocket events.
+- ✅ **Fase 2 — 7 de 11 backends migrados a `install_spec`** y validados con install end-to-end sobre slim:
+  - `whisper` (~6.3 GB), `tts` (~5.7 GB), `diffusers` (~4.9 GB), `chatterbox` (~6.0 GB), `sglang` (~10.3 GB), `voxtral` (~11.1 GB), `vllm` (~9.7 GB) → 52.9 GB en `/data/backends`.
+  - `whisper` y `tts/kokoro` además validados con `load()` real sobre GPU 1.
+
 ### Pendiente del bloque 15
 
-- **Fase 2 — Migrar cada backend a `install_spec`**: hasta que se haga, todos los backends existentes se marcan como `install_source="built-in"` (compatibilidad total con la imagen fat actual).
+- **Fase 2 — Migrar los 4 backends restantes**: `acestep`, `bitnet`, `llama_cpp`, `tensorrt_llm`. Necesitan extensiones del contrato (`apt_packages`, `extra_bins`, `git_repo`, `post_install_script`) y/o **Fase 3 OCI** porque compilan binarios nativos o vienen de NGC.
 - **Fase 3 — CI pipeline + implementar `method="oci"`**: el endpoint devuelve `501` hasta que las imágenes OCI estén publicadas en `ghcr.io/ocabra/backend-*`. Resolver incógnitas de Agente B: TensorRT-LLM (NGC vs wheel), ACE-Step pin, variantes CPU con torch CPU index, runners CI (disk cleanup o self-hosted).
-- **Fase 4 — Imagen Docker slim**: `Dockerfile` principal sin backends pre-instalados + guía de primer arranque.
-- **Refactor menor**: `WorkerPool.registered_backends()` público para no acceder a `_backends` privado desde `main.py` (Agente A lo dejó documentado).
-- **Eliminar mock fallback del frontend**: el store tiene `// TODO: remove mock once Agent A merges` — ahora que el backend existe, el mock solo debe dispararse con la flag explícita.
 
 ---
 
