@@ -10,7 +10,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -57,8 +63,76 @@ class WhisperBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.AUDIO_TRANSCRIPTION}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for the whisper backend (Bloque 15 Fase 2).
+
+        The ``pip_packages`` list mirrors the ``audio`` extra in ``pyproject.toml``
+        plus the transitive runtime deps actually imported by
+        ``workers/whisper_worker.py`` (``torch``, ``torchaudio``, ``numpy``,
+        ``librosa``).  Version pins track the draft ``Dockerfile.whisper``.
+        """
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-whisper",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "torch>=2.5",
+                "torchaudio>=2.5",
+                "faster-whisper>=1.1",
+                "soundfile>=0.12",
+                "transformers>=4.47",
+                "pyannote.audio>=3.3",
+                "nemo_toolkit[asr]>=2.2",
+                "librosa>=0.10",
+                "matplotlib>=3.10",
+                "numpy",
+            ],
+            estimated_size_mb=4500,
+            display_name="Whisper (faster-whisper)",
+            description=(
+                "Speech-to-text backend based on faster-whisper with optional "
+                "speaker diarization"
+            ),
+            tags=["STT", "GPU", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._workers: dict[str, _WhisperWorker] = {}
+
+    def _resolve_python_bin(self) -> str:
+        """Return the python interpreter used to launch the whisper worker.
+
+        Reads ``<backends_dir>/whisper/metadata.json`` (written by
+        :class:`~ocabra.core.backend_installer.BackendInstaller` on install)
+        and returns its ``python_bin`` entry when present.  Falls back to
+        :data:`sys.executable` so the fat image keeps working when no modular
+        install has happened yet.
+        """
+
+        try:
+            metadata_path = Path(settings.backends_dir) / "whisper" / "metadata.json"
+        except Exception:
+            return sys.executable
+
+        if not metadata_path.exists():
+            return sys.executable
+
+        try:
+            meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "whisper_metadata_unreadable",
+                path=str(metadata_path),
+                error=str(exc),
+            )
+            return sys.executable
+
+        python_bin = meta.get("python_bin")
+        if isinstance(python_bin, str) and python_bin:
+            return python_bin
+        return sys.executable
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         existing = self._workers.get(model_id)
@@ -85,8 +159,9 @@ class WhisperBackend(BackendInterface):
         if diarization_enabled and settings.hf_token and not env.get("HF_TOKEN"):
             env["HF_TOKEN"] = settings.hf_token
 
+        python_bin = self._resolve_python_bin()
         args = [
-            sys.executable,
+            python_bin,
             str(WORKER_PATH),
             "--model-id",
             worker_model_id,
