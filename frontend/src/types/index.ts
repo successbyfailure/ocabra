@@ -844,3 +844,8 @@ export type WSEvent =
   | { type: "backend_installed"; data: BackendModuleState }
   | { type: "backend_uninstalled"; data: { backendType: string } }
   | { type: "backend_progress"; data: BackendModuleState }
+  | { type: "agent_updated"; data: { slug: string } }
+  | {
+      type: "mcp_server_health_changed"
+      data: { id: string; health_status: "unknown" | "healthy" | "unhealthy"; last_error?: string | null }
+    }
