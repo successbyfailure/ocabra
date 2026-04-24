@@ -423,6 +423,10 @@ class BackendInstaller:
                     "uvicorn[standard]>=0.32",
                     "httpx>=0.28",
                     "pydantic>=2.10",
+                    # python-multipart is required by FastAPI when worker
+                    # endpoints use Form/File parameters (whisper /transcribe,
+                    # diffusers /generate uploads, etc.).
+                    "python-multipart>=0.0.20",
                 ]
                 self._log(
                     backend_type,
