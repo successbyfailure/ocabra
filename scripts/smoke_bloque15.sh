@@ -28,12 +28,15 @@ rc=\$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/c.txt \\
   http://localhost:8000/ocabra/backends/nope)
 [ \"\$rc\" = '404' ] || { echo \"expected 404 for nope, got \$rc\"; exit 1; }
 
-# 4. Uninstalling a built-in is rejected with 409.
+# 4. Uninstalling an always-available backend is rejected with 409.
+#    ollama is external (no install_spec) and must always reject uninstall.
 rc=\$(curl -s -o /dev/null -w '%{http_code}' -X POST -b /tmp/c.txt \\
-  http://localhost:8000/ocabra/backends/whisper/uninstall)
-[ \"\$rc\" = '409' ] || { echo \"expected 409 for built-in uninstall, got \$rc\"; exit 1; }
+  http://localhost:8000/ocabra/backends/ollama/uninstall)
+[ \"\$rc\" = '409' ] || { echo \"expected 409 for ollama uninstall, got \$rc\"; exit 1; }
 
-# 5. OCI install is still 501 until Fase 3 lands.
+# 5. OCI install is still 501 until Fase 3 lands. Use a backend that has
+#    an install_spec (whisper) so we exercise the method check, not the
+#    'always-available' rejection.
 rc=\$(curl -s -o /dev/null -w '%{http_code}' -X POST -b /tmp/c.txt \\
   -H 'Content-Type: application/json' -d '{\"method\":\"oci\"}' \\
   http://localhost:8000/ocabra/backends/whisper/install)
