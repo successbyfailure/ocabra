@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -9,7 +10,14 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
+from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -71,8 +79,62 @@ class TTSBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.AUDIO_SPEECH}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for the tts backend (Bloque 15 Fase 2).
+
+        ``pip_packages`` mirrors the worker imports + ``Dockerfile.tts``.  Pulls
+        torch CUDA wheels via ``pip_extra_index_urls`` and seeds the venv with
+        the FastAPI core runtime so ``tts_worker.py`` can boot.
+        """
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-tts",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "torch>=2.5",
+                "torchaudio>=2.5",
+                "transformers>=5.0",
+                "qwen-tts>=0.1.1",
+                "kokoro>=0.9",
+                "soundfile>=0.12",
+                "numpy",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            estimated_size_mb=5000,
+            display_name="TTS (Qwen3-TTS / Kokoro / Bark)",
+            description=(
+                "Text-to-speech backend serving Qwen3-TTS, Kokoro and Bark "
+                "voices through a unified worker"
+            ),
+            tags=["TTS", "GPU", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._workers: dict[str, _TTSWorker] = {}
+
+    def _resolve_python_bin(self) -> str:
+        """Return the python interpreter that should launch the tts worker.
+
+        Reads ``<backends_dir>/tts/metadata.json`` (written by the
+        :class:`~ocabra.core.backend_installer.BackendInstaller` on a source
+        install) and returns its ``python_bin`` entry when present.  Falls
+        back to :data:`sys.executable` for the fat image where TTS deps live
+        in the main interpreter.
+        """
+
+        try:
+            meta_path = Path(settings.backends_dir) / "tts" / "metadata.json"
+            if not meta_path.exists():
+                return sys.executable
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return sys.executable
+        bin_path = meta.get("python_bin") if isinstance(meta, dict) else None
+        return str(bin_path) if bin_path else sys.executable
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         existing = self._workers.get(model_id)
@@ -92,7 +154,7 @@ class TTSBackend(BackendInterface):
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
 
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
+            self._resolve_python_bin(),
             str(WORKER_PATH),
             "--model-id",
             model_id,
