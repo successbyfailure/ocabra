@@ -12,7 +12,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -43,8 +49,50 @@ class SGLangBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for the sglang backend (Bloque 15 Fase 2)."""
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-sglang",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "sglang==0.5.9",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            estimated_size_mb=9000,
+            display_name="SGLang",
+            description="High-throughput LLM inference engine focused on structured generation",
+            tags=["LLM", "GPU", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
+
+    def _resolve_python_bin(self) -> str:
+        """Pick the python that runs the sglang server inside the worker.
+
+        Priority: ``<backends_dir>/sglang/metadata.json`` > legacy
+        ``settings.sglang_python_bin`` > :data:`sys.executable`.
+        """
+
+        try:
+            meta_path = Path(settings.backends_dir) / "sglang" / "metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                bin_path = meta.get("python_bin") if isinstance(meta, dict) else None
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        legacy = (settings.sglang_python_bin or "").strip()
+        if legacy and Path(legacy).is_file():
+            return legacy
+        return sys.executable
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
@@ -61,7 +109,7 @@ class SGLangBackend(BackendInterface):
             settings.sglang_tensor_parallel_size,
         ) or max(1, len(gpu_indices))
 
-        sglang_python = settings.sglang_python_bin.strip() if settings.sglang_python_bin else sys.executable
+        sglang_python = self._resolve_python_bin()
         cmd = [
             sys.executable,
             str(_WORKER_PATH),

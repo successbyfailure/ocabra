@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -13,7 +14,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -83,8 +90,61 @@ class ChatterboxBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.AUDIO_SPEECH}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for chatterbox (Bloque 15 Fase 2)."""
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-chatterbox",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "torch>=2.5",
+                "torchaudio>=2.5",
+                "chatterbox-tts>=0.1.7",
+                "soundfile>=0.12",
+                "numpy",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            estimated_size_mb=4500,
+            display_name="Chatterbox (Resemble AI)",
+            description=(
+                "Multilingual TTS with zero-shot voice cloning across 28 "
+                "languages (Resemble AI Chatterbox)"
+            ),
+            tags=["TTS", "GPU", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._workers: dict[str, _ChatterboxWorker] = {}
+
+    def _resolve_python_bin(self) -> str:
+        """Pick the python that should launch the chatterbox worker.
+
+        Priority:
+        1. ``<backends_dir>/chatterbox/metadata.json`` -> ``python_bin``
+           (modular install via :class:`BackendInstaller`).
+        2. ``settings.chatterbox_python_bin`` (legacy fat-image venv at
+           ``/opt/chatterbox-venv``).
+        3. :data:`sys.executable` as a final fallback.
+        """
+
+        try:
+            meta_path = Path(settings.backends_dir) / "chatterbox" / "metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                bin_path = meta.get("python_bin") if isinstance(meta, dict) else None
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        legacy = settings.chatterbox_python_bin
+        if legacy and Path(legacy).is_file():
+            return str(legacy)
+        return sys.executable
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs: Any) -> WorkerInfo:
         existing = self._workers.get(model_id)
@@ -98,9 +158,8 @@ class ChatterboxBackend(BackendInterface):
         if port == 0:
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
-        python_bin = settings.chatterbox_python_bin
-        if not os.path.isfile(python_bin):
-            python_bin = sys.executable
+        python_bin = self._resolve_python_bin()
+        if python_bin == sys.executable and not Path(settings.chatterbox_python_bin).is_file():
             logger.warning(
                 "chatterbox_python_bin_missing",
                 configured=settings.chatterbox_python_bin,

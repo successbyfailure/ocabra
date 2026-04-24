@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import socket
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -74,16 +81,53 @@ _MIN_VLLM_VRAM_MB = 2048
 
 
 class VLLMBackend(BackendInterface):
-
-    @classmethod
-    def supported_modalities(cls) -> set[ModalityType]:
-        return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
     """
     Manages vLLM subprocess workers.
 
     One VLLMBackend instance is shared by the WorkerPool.  It keeps a
     registry of running processes keyed by model_id.
     """
+
+    @classmethod
+    def supported_modalities(cls) -> set[ModalityType]:
+        return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for vllm (Bloque 15 Fase 2)."""
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-vllm",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "vllm==0.17.1",
+                "torch>=2.5",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            estimated_size_mb=9500,
+            display_name="vLLM",
+            description="High-throughput LLM inference engine with PagedAttention",
+            tags=["LLM", "GPU", "CUDA"],
+        )
+
+    def _resolve_python_bin(self) -> str:
+        """Pick the python that runs the vllm OpenAI server.
+
+        Priority: ``<backends_dir>/vllm/metadata.json`` > :data:`sys.executable`.
+        """
+
+        try:
+            meta_path = Path(settings.backends_dir) / "vllm" / "metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                bin_path = meta.get("python_bin") if isinstance(meta, dict) else None
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+        except (OSError, json.JSONDecodeError):
+            pass
+        return sys.executable
 
     def __init__(self) -> None:
         # model_id → (process, port)
@@ -234,7 +278,7 @@ class VLLMBackend(BackendInterface):
         ) or len(gpu_indices)
 
         cmd = [
-            "python",
+            self._resolve_python_bin(),
             "-m",
             "vllm.entrypoints.openai.api_server",
             "--model",

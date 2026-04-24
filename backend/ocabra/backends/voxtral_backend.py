@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -12,7 +13,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -38,8 +45,57 @@ class VoxtralBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.AUDIO_SPEECH}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for voxtral (Bloque 15 Fase 2).
+
+        Voxtral wraps the vllm-omni stack, so the venv pulls vllm + vllm-omni.
+        """
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-voxtral",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "vllm>=0.18.0",
+                "vllm-omni>=0.18.0",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            estimated_size_mb=10000,
+            display_name="Voxtral (vllm-omni)",
+            description=(
+                "Multimodal speech backend wrapping vllm-omni for Voxtral 4B "
+                "and similar audio LLMs"
+            ),
+            tags=["TTS", "GPU", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._workers: dict[str, _VoxtralWorker] = {}
+
+    def _resolve_python_bin(self) -> str:
+        """Pick the python that vllm-omni runs inside.
+
+        Priority: ``<backends_dir>/voxtral/metadata.json`` > legacy
+        ``settings.voxtral_python_bin`` > :data:`sys.executable`.
+        """
+
+        try:
+            meta_path = Path(settings.backends_dir) / "voxtral" / "metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                bin_path = meta.get("python_bin") if isinstance(meta, dict) else None
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        legacy = settings.voxtral_python_bin
+        if legacy and Path(legacy).is_file():
+            return str(legacy)
+        return sys.executable
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs: Any) -> WorkerInfo:
         existing = self._workers.get(model_id)
@@ -53,10 +109,10 @@ class VoxtralBackend(BackendInterface):
         if port == 0:
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
-        # Determine the Python binary: prefer voxtral venv, fall back to system
-        python_bin = settings.voxtral_python_bin
-        if not os.path.isfile(python_bin):
-            python_bin = sys.executable
+        python_bin = self._resolve_python_bin()
+        if python_bin == sys.executable and not (
+            settings.voxtral_python_bin and Path(settings.voxtral_python_bin).is_file()
+        ):
             logger.warning(
                 "voxtral_python_bin_missing",
                 configured=settings.voxtral_python_bin,
