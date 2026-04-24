@@ -315,6 +315,41 @@ async def lifespan(app: FastAPI):
     app.state.worker_pool = worker_pool
     app.state.model_manager = model_manager
 
+    # Bloque 15 — Modular backends installer.
+    # Fase 1 runs in observational mode: every currently registered backend is
+    # surfaced as "built-in / installed" so the UI can list them.  Installing
+    # or uninstalling from source works end-to-end, but the fat image keeps
+    # pre-installing every backend for now (migration happens in Fase 2).
+    from pathlib import Path
+
+    from ocabra.core.backend_installer import BackendInstaller
+
+    backend_installer = BackendInstaller(
+        backends_dir=Path(settings.backends_dir),
+        worker_pool=worker_pool,
+        backend_registry={
+            "acestep": worker_pool._backends.get("acestep"),
+            "diffusers": worker_pool._backends.get("diffusers"),
+            "bitnet": worker_pool._backends.get("bitnet"),
+            "llama_cpp": worker_pool._backends.get("llama_cpp"),
+            "ollama": worker_pool._backends.get("ollama"),
+            "sglang": worker_pool._backends.get("sglang"),
+            "whisper": worker_pool._backends.get("whisper"),
+            "tts": worker_pool._backends.get("tts"),
+            "chatterbox": worker_pool._backends.get("chatterbox"),
+            "voxtral": worker_pool._backends.get("voxtral"),
+            "vllm": worker_pool._backends.get("vllm"),
+        },
+    )
+    # Drop entries that are not actually registered (should not happen in Fase 1,
+    # but keeps the installer resilient to partial boot).
+    backend_installer._backends = {
+        k: v for k, v in backend_installer._backends.items() if v is not None
+    }
+    await backend_installer.start()
+    app.state.backend_installer = backend_installer
+    logger.info("backend_installer_ready")
+
     if settings.litellm_auto_sync:
         from ocabra.integrations.litellm_sync import LiteLLMSync
 
@@ -724,6 +759,11 @@ app.include_router(registry_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(downloads_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(services_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(host_router, prefix="/ocabra", include_in_schema=False)
+
+# Bloque 15 — Modular backends router
+from ocabra.api.internal.backends import router as backends_router  # noqa: E402
+
+app.include_router(backends_router, prefix="/ocabra", include_in_schema=False)
 from ocabra.api.internal.federation import router as federation_router  # noqa: E402
 
 app.include_router(federation_router, prefix="/ocabra", include_in_schema=False)
