@@ -456,6 +456,15 @@ async def lifespan(app: FastAPI):
             await _session.commit()
         logger.info("jwt_secret_persisted")
 
+    # MCP registry (agents + MCP, Fase 1)
+    from ocabra.agents.mcp_registry import MCPRegistry, set_registry
+
+    mcp_registry = MCPRegistry(session_factory=_ASL)
+    await mcp_registry.start()
+    app.state.mcp_registry = mcp_registry
+    set_registry(mcp_registry)
+    logger.info("mcp_registry_ready")
+
     # Federation manager (optional, only if enabled)
     if settings.federation_enabled:
         from ocabra.core.federation import FederationManager
@@ -513,6 +522,10 @@ async def lifespan(app: FastAPI):
 
     if getattr(app.state, "federation_manager", None) is not None:
         await app.state.federation_manager.stop()
+
+    if getattr(app.state, "mcp_registry", None) is not None:
+        await app.state.mcp_registry.stop()
+        set_registry(None)
 
     await backend_process_manager.stop()
     await trtllm_compile_manager.stop()
@@ -780,4 +793,11 @@ app.include_router(users_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(groups_router, prefix="/ocabra", include_in_schema=False)
 
 app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
+
+# Agents + MCP (plan: docs/tasks/agents-mcp-plan.md)
+from ocabra.api.internal.agents import router as agents_router  # noqa: E402
+from ocabra.api.internal.mcp_servers import router as mcp_servers_router  # noqa: E402
+
+app.include_router(agents_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(mcp_servers_router, prefix="/ocabra", include_in_schema=False)
 # ─────────────────────────────────────────────────────────────

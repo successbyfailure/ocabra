@@ -175,7 +175,74 @@ async def list_models(
                     }
                 )
 
+    # ── Agents (plan: docs/tasks/agents-mcp-plan.md — "Inventario de modelos")
+    try:
+        agent_entries = await _list_agent_model_entries(user, now_ts)
+    except Exception as exc:  # noqa: BLE001 — never block /v1/models on agent lookup
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "openai_models_agent_listing_failed", error=str(exc)
+        )
+        agent_entries = []
+    data.extend(agent_entries)
+
     return {"object": "list", "data": data}
+
+
+async def _list_agent_model_entries(
+    user: UserContext, now_ts: int
+) -> list[dict[str, Any]]:
+    """Return ``[{id: 'agent/<slug>', owned_by: 'ocabra-agent', ...}, ...]``.
+
+    Filtering mirrors ``/v1/models``: admins see every agent; other callers
+    only see agents whose ``group_id`` is NULL (public) or in their group set.
+    """
+    import sqlalchemy as sa
+    from sqlalchemy.orm import selectinload
+
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.agents import Agent
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            (
+                await session.execute(
+                    sa.select(Agent)
+                    .options(selectinload(Agent.mcp_links))
+                    .order_by(Agent.slug)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    result: list[dict[str, Any]] = []
+    group_set = set(user.group_ids or [])
+    for row in rows:
+        if not user.is_admin:
+            if row.group_id is not None and str(row.group_id) not in group_set:
+                continue
+        result.append(
+            {
+                "id": f"agent/{row.slug}",
+                "object": "model",
+                "created": now_ts,
+                "owned_by": "ocabra-agent",
+                "ocabra": {
+                    "kind": "agent",
+                    "display_name": row.display_name,
+                    "description": row.description,
+                    "base_model_id": row.base_model_id,
+                    "profile_id": row.profile_id,
+                    "tool_choice_default": row.tool_choice_default,
+                    "require_approval": row.require_approval,
+                    "max_tool_hops": row.max_tool_hops,
+                    "mcp_server_count": len(row.mcp_links or []),
+                },
+            }
+        )
+    return result
 
 
 @router.get("/models/{model_id:path}", summary="Retrieve a model")

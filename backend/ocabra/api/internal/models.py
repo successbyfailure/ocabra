@@ -113,6 +113,16 @@ async def list_models(
 
         payloads.append(item)
 
+    # Add agent entries (plan: docs/tasks/agents-mcp-plan.md — Inventario).
+    try:
+        payloads.extend(await _list_agent_entries(user))
+    except Exception as exc:  # noqa: BLE001
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "internal_models_agent_listing_failed", error=str(exc)
+        )
+
     # Add remote-only models (not configured locally)
     if federation_manager is not None:
         for model_id, peers in remote_models.items():
@@ -950,3 +960,59 @@ def _read_first_positive_int(path: Path, keys: tuple[str, ...]) -> int:
         if numeric > 0:
             return numeric
     return 0
+
+
+async def _list_agent_entries(user: UserContext) -> list[dict]:
+    """Return agent entries formatted for ``GET /ocabra/models``.
+
+    See ``docs/tasks/agents-mcp-plan.md`` section "Inventario de modelos".
+    Admins see every agent; other callers are filtered by ``group_id``.
+    """
+    import sqlalchemy as sa
+    from sqlalchemy.orm import selectinload
+
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.agents import Agent
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            (
+                await session.execute(
+                    sa.select(Agent)
+                    .options(selectinload(Agent.mcp_links))
+                    .order_by(Agent.slug)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    group_set = set(user.group_ids or [])
+    entries: list[dict] = []
+    for row in rows:
+        if not user.is_admin:
+            if row.group_id is not None and str(row.group_id) not in group_set:
+                continue
+        entries.append(
+            {
+                "model_id": f"agent/{row.slug}",
+                "backend_type": "ocabra-agent",
+                "backend_model_id": f"agent/{row.slug}",
+                "display_name": row.display_name,
+                "description": row.description,
+                "status": "configured",
+                "capabilities": {"chat": True, "tools": True},
+                "profiles": [],
+                "disk_size_bytes": None,
+                "ocabra": {
+                    "kind": "agent",
+                    "base_model_id": row.base_model_id,
+                    "profile_id": row.profile_id,
+                    "tool_choice_default": row.tool_choice_default,
+                    "require_approval": row.require_approval,
+                    "max_tool_hops": row.max_tool_hops,
+                    "mcp_server_count": len(row.mcp_links or []),
+                },
+            }
+        )
+    return entries
