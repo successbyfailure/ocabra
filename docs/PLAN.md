@@ -39,7 +39,7 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 | Frontend serve | Nginx |
 | Reverse proxy | Caddy |
 
-## Estado actual (2026-04-18)
+## Estado actual (2026-04-24)
 
 **Fases 0–8 completadas e implementadas. Bloques 1–14 completados. Versión: 0.6.0**
 
@@ -95,7 +95,7 @@ El trabajo restante está en `docs/ROADMAP.md`.
 
 ### Próximas fases
 
-- **Backends Modulares**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`.
+- **Bloque 15 — Backends Modulares (EN CURSO, 2026-04-24)**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`. Equipo de agentes paralelos trabajando en Fase 1 (infra), Fase 3 (Dockerfiles) y Fase 5 (frontend).
 - **Fine-tuning de voz**: Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
 - **UI de Batches**: Listado y descarga de batches del usuario desde el dashboard (backend ya expuesto, falta la vista).
 

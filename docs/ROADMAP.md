@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-04-12
+Última actualización: 2026-04-24
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -223,12 +223,24 @@ Implementado:
 
 ---
 
-## Pendiente — Bloque 15 — Backends Modulares
+## 🚧 Bloque 15 — Backends Modulares (EN CURSO desde 2026-04-24)
 
 Plan en `docs/tasks/modular-backends-plan.md`.
 
 Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI.
 5 fases: infraestructura → migrar backends → OCI → imagen slim → frontend.
+
+### Estado del arranque (2026-04-24)
+
+Equipo de agentes paralelos asignado a fases no-solapadas (worktrees aislados):
+
+| Agente | Alcance | Fase |
+|--------|---------|------|
+| **Agente A — Core** | `core/backend_installer.py`, `backends/base.py` (dataclass), `api/internal/backends.py`, `config.py`, `main.py` (registro), tests | Fase 1 |
+| **Agente B — Dockerfiles** | `backends/dockerfiles/Dockerfile.*` (11 ficheros scaffolding para distribución OCI) | Fase 3 (draft) |
+| **Agente C — Frontend** | `frontend/src/pages/Backends.tsx` + componentes + store + rutas + cliente API | Fase 5 |
+
+Fase 2 (migrar backends uno a uno a `install_spec`) y Fase 4 (imagen slim) quedan para después del merge del MVP.
 
 ---
 
@@ -248,7 +260,7 @@ Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim
 [✅ Hecho]  Bloque 12 — Federación P2P
 [✅ Hecho]  Bloque 13 — Observabilidad de potencia + stats ampliadas
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
-[Pendiente]   Bloque 15 — Backends Modulares
+[🚧 En curso] Bloque 15 — Backends Modulares (equipo paralelo en Fases 1, 3-draft, 5)
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
