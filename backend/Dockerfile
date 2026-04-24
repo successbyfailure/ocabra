@@ -29,17 +29,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} ${LLAMA_CPP_REPO} /build/llama.cpp
 ARG LLAMA_CUDA_ARCHITECTURES="75;80;86;89;90"
-# Recent llama.cpp pulls in driver API symbols (e.g. cuGetErrorString) and
-# links against libcuda.so.1, which only ships with the NVIDIA driver at
-# runtime. The CUDA devel image provides a stub at .../stubs/libcuda.so for
-# link-time resolution; exposing it via LIBRARY_PATH lets ld see it without
-# adding a runtime dependency.
+# Recent llama.cpp pulls in driver API symbols (cuMemCreate, cuGetErrorString,
+# ...) and its libggml-cuda.so records a DT_NEEDED on libcuda.so.1 — which
+# only ships with the NVIDIA driver at runtime. The CUDA devel image provides
+# a stub at /usr/local/cuda/lib64/stubs/libcuda.so (unsuffixed), so we:
+#   1. Symlink it to libcuda.so.1 so the linker's rpath-link search matches
+#      the SONAME that libggml-cuda.so records.
+#   2. Set LIBRARY_PATH for the compile/link steps and pass -rpath-link via
+#      LDFLAGS so the transitive check when linking llama-server finds it.
+# Neither affects the final image — the stub is only used at build time.
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so \
+           /usr/local/cuda/lib64/stubs/libcuda.so.1
 ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH}
+ENV LDFLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs"
 RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES}" \
-    -DLLAMA_CURL=OFF
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs"
 RUN cmake --build /build/llama.cpp/build --target llama-server -j4
 
 FROM docker:28-cli AS docker-cli
