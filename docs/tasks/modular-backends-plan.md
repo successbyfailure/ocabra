@@ -661,3 +661,25 @@ Validado también a través de Caddy (`http://localhost:8484/ocabra/backends` co
 ### Deuda nueva descubierta: install no se cancela al desconectar el cliente SSE
 
 Si el cliente cierra la conexión SSE a `POST /install` mientras pip está descargando, el proceso pip sigue vivo en el contenedor (el subprocess sobrevive la cancelación del handler). Esto tiene dos caras: buena (el usuario puede cerrar la pestaña y el install termina) y mala (el `BackendModuleState.install_status` se queda en `"installing"` para siempre si el generator no llega a yieldear el estado final). Fix pendiente: detectar el pip terminado fuera del handler (task background o tick periódico) y actualizar estado a `installed`/`error`. Añadir a la lista de deudas como **9f**.
+
+**Resuelto (2026-04-25)**: `install()` lanza la instalación como `asyncio.Task` detached y une al consumer SSE vía `asyncio.Queue`. Si el consumer es cancelado, el task sigue vivo y aterriza el estado final (`installed`/`error`) en `self._states`. Test `test_install_survives_consumer_cancellation` cubre el flujo. Commit `27dc571`.
+
+### Hito final Fase 4 — load() validado end-to-end en slim (2026-04-25)
+
+Pipeline completo verificado:
+
+1. Slim image arrancada (`ocabra-api:slim`, 987 MB) con `BACKENDS_FAT_IMAGE=false`.
+2. `GET /ocabra/backends` → whisper marcado `not_installed` (los otros 11 siguen `built-in` hasta migrarse).
+3. `POST /ocabra/backends/whisper/install method=source` → SSE con progreso, venv creado, pip instala torch CUDA + faster-whisper + nemo + pyannote. Tras descubrir que faltaba `python-multipart` en el core runtime (commit `2f921a3`), el venv quedó completo en 6.5 GB.
+4. `metadata.json` escrito automáticamente por el installer; tras restart el state es `installed/source/1.2.1`.
+5. `POST /ocabra/models/whisper/Systran/faster-whisper-base/load` → worker subprocess arrancado vía `/data/backends/whisper/venv/bin/python`, modelo cargado en GPU 1 con 500 MB VRAM en **35 segundos** desde slim. `audio_transcription: true`.
+
+Tamaños comparativos:
+
+| Imagen | Tamaño | Build con cache | Build limpio |
+|--------|--------|-----------------|--------------|
+| `ocabra-api:fat` (Dockerfile) | 51.1 GB | ~5 min | ~40 min |
+| `ocabra-api:slim` (Dockerfile.slim) | 987 MB | ~30 s | ~2 min |
+| Whisper venv on disk (slim runtime) | 6.5 GB | — | — |
+
+La imagen "slim + whisper instalado" pesa 987 MB + 6.5 GB = 7.5 GB efectivos vs 51 GB del fat. Cuando se migren los demás backends, cada uno aporta su disco SOLO si el usuario lo instala — patrón pay-as-you-use.
