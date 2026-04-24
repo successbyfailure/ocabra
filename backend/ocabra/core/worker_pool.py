@@ -30,6 +30,10 @@ class WorkerPool:
         self._disabled_backends[backend_type] = reason
         logger.info("backend_disabled", backend_type=backend_type, reason=reason)
 
+    def registered_backends(self) -> dict[str, BackendInterface]:
+        """Snapshot of currently registered (enabled) backends, keyed by backend_type."""
+        return dict(self._backends)
+
     async def get_backend(self, backend_type: str) -> BackendInterface:
         if backend_type in self._disabled_backends:
             raise RuntimeError(

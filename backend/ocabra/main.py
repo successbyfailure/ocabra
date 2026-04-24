@@ -327,25 +327,8 @@ async def lifespan(app: FastAPI):
     backend_installer = BackendInstaller(
         backends_dir=Path(settings.backends_dir),
         worker_pool=worker_pool,
-        backend_registry={
-            "acestep": worker_pool._backends.get("acestep"),
-            "diffusers": worker_pool._backends.get("diffusers"),
-            "bitnet": worker_pool._backends.get("bitnet"),
-            "llama_cpp": worker_pool._backends.get("llama_cpp"),
-            "ollama": worker_pool._backends.get("ollama"),
-            "sglang": worker_pool._backends.get("sglang"),
-            "whisper": worker_pool._backends.get("whisper"),
-            "tts": worker_pool._backends.get("tts"),
-            "chatterbox": worker_pool._backends.get("chatterbox"),
-            "voxtral": worker_pool._backends.get("voxtral"),
-            "vllm": worker_pool._backends.get("vllm"),
-        },
+        backend_registry=worker_pool.registered_backends(),
     )
-    # Drop entries that are not actually registered (should not happen in Fase 1,
-    # but keeps the installer resilient to partial boot).
-    backend_installer._backends = {
-        k: v for k, v in backend_installer._backends.items() if v is not None
-    }
     await backend_installer.start()
     app.state.backend_installer = backend_installer
     logger.info("backend_installer_ready")

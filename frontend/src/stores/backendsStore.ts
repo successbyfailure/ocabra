@@ -5,7 +5,8 @@ import type {
   BackendModuleState,
 } from "@/types"
 
-// TODO: remove mock once Agent A merges the /ocabra/backends API.
+// Mock fixture used only when VITE_MOCK_BACKENDS=1. Kept for offline/dev work —
+// the real /ocabra/backends API is the default source of truth.
 const MOCK_BACKENDS: BackendModuleState[] = [
   {
     backendType: "vllm",
@@ -151,23 +152,8 @@ export const useBackendsStore = create<BackendsStore>((set, get) => ({
       const data = await api.backends.list()
       set({ backends: sortBackends(data), loading: false, usingMock: false })
     } catch (err) {
-      // Fallback to mock while the backend endpoint doesn't exist yet.
-      // Triggers on 404 as well as network/parse errors during development.
       const message = err instanceof Error ? err.message : "unknown error"
-      const is404 =
-        message.includes("404") ||
-        message.toLowerCase().includes("not found") ||
-        message.toLowerCase().includes("failed to fetch")
-      if (is404) {
-        set({
-          backends: sortBackends(MOCK_BACKENDS),
-          loading: false,
-          usingMock: true,
-          error: null,
-        })
-      } else {
-        set({ loading: false, error: message })
-      }
+      set({ loading: false, error: message, usingMock: false })
     }
   },
 
