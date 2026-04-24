@@ -614,6 +614,19 @@ debe resolverse o promoverse a issue antes de cerrar el bloque 15.
 
 8. **`install_progress` granularidad.** El installer actual emite 4-5 pasos (`venv → pip → metadata → register`). Para pip con deps grandes (vllm, torch) el usuario ve "Installing pip packages..." durante varios minutos sin actualización. Mejora futura: parsear stdout de pip para reportar wheels individuales.
 
+9a. **`BackendInstallSpec` no soporta `pip_extra_index_urls` (descubierto en Fase 2 piloto, 2026-04-24).** Whisper necesita `torch==2.x+cu124` desde `https://download.pytorch.org/whl/cu124`; sin ese índice el `pip install torch>=2.5` instala el wheel CPU-only de PyPI. Bloqueante para cualquier backend GPU que haga `install method=source`. Acción: extender el dataclass con `pip_extra_index_urls: list[str] = []` y propagarlo en `BackendInstaller._install_from_source()`.
+
+9b. **Core runtime deps en venvs aislados.** Los workers (whisper, diffusers, etc.) importan `fastapi`, `uvicorn`, `httpx`, `pydantic` porque son FastAPI apps. Cuando el `install_spec` monta un venv aislado en `/data/backends/<name>/venv`, esas deps deben estar disponibles ahí. Opciones:
+   - Añadirlas a cada `install_spec` (duplicación pero aislamiento real)
+   - Añadir un campo `BackendInstallSpec.include_core_runtime: bool = True` y que el installer instale automáticamente `fastapi uvicorn httpx pydantic` antes de las `pip_packages` del backend.
+   - Compartir `site-packages` del core con `venv --system-site-packages`. Pierde aislamiento pero es el atajo. **Recomendación**: segunda opción.
+
+9c. **Apt packages no cubiertos por `install_spec`.** Whisper necesita `ffmpeg` y `libsndfile1`, TTS necesita `ffmpeg`, chatterbox también. Hoy están en el `Dockerfile` base. Cuando pasemos a slim: o los mantenemos en la imagen base (razonable — son dependencias de audio comunes), o extendemos `BackendInstallSpec` con `apt_packages: list[str]` + lógica de `apt-get install` en el installer (requiere container con apt disponible). **Recomendación**: imagen slim base incluye `ffmpeg + libsndfile1 + libsox` porque los comparten muchos backends.
+
+9d. **Optional extras para backends con deps pesadas.** `nemo_toolkit[asr]` pesa ~1.2 GB y solo se usa para Parakeet/Canary, no para whisper estándar. Extender `BackendInstallSpec` con `pip_packages_optional: dict[str, list[str]]` (ej. `{"nemo": ["nemo_toolkit[asr]>=2.2"]}`) y que el UI permita al usuario tickear extras al instalar.
+
+9e. **HF_TOKEN requerido post-migración para funcionalidades gated** (diarización en whisper, algunos TTS). El `install()` en sí no lo necesita, pero el primer `load()` del modelo gated fallará con mensaje poco claro si no está configurado. Añadir pre-check en `BackendInstaller.install()` o warning en el panel frontend cuando un backend declara `gated_models: bool = True`.
+
 9. **Rebuild de imágenes Docker bloqueado (descubierto durante el smoke test 2026-04-24).** Dos fallos independientes impidieron el rebuild limpio de `ocabra-api` y `ocabra-frontend`:
    - `backend/Dockerfile` falla al compilar `llama-server` con `cmake --build ... -j4` (exit 2, stderr truncado). Cache-first builds lo evitan, pero `--no-cache` lo revela.
    - Frontend `node:20-alpine` falla al pullearse con `tls: certificate not valid` del mirror de Cloudflare (transitorio).
