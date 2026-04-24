@@ -1,6 +1,9 @@
 # oCabra — Plan de Backends Modulares
 
-Última actualización: 2026-04-12
+Última actualización: 2026-04-24
+
+**Estado**: Fase 1 ✅ · Fase 3 (draft de Dockerfiles) ✅ · Fase 5 ✅ · Fases 2, 3-CI, 4 pendientes.
+Ver sección "Registro de decisiones y deudas" al final.
 
 ---
 
@@ -460,21 +463,21 @@ Al hacer click en "Instalar":
 
 ## Fases de implementación
 
-### Fase 1 — Infraestructura base
+### Fase 1 — Infraestructura base ✅ (2026-04-24)
 
-- [ ] `BackendInstallSpec` dataclass en `backends/base.py`
-- [ ] `BackendInstaller` en `core/backend_installer.py`
-  - `start()`: escanear `/data/backends/`, detectar instalados, registrar
-  - `install()` desde source (venv + pip): flujo básico
-  - `uninstall()`: verificar que no hay modelos cargados, borrar directorio
-  - `is_installed()`, `list_states()`, `get_state()`
-- [ ] `install_spec` property en cada backend (puede retornar None)
-- [ ] Settings: `backends_dir` en `config.py`
-- [ ] Volumen `backends_data` en `docker-compose.yml`
-- [ ] Adaptar `main.py`: usar BackendInstaller en lugar de registro hardcodeado
-- [ ] API endpoints: `GET /ocabra/backends`, `POST .../install`, `POST .../uninstall`
-- [ ] SSE de progreso de instalación (reutilizar patrón de downloads)
-- [ ] Tests: install, uninstall, scan, register/deregister
+- [x] `BackendInstallSpec` dataclass en `backends/base.py`
+- [x] `BackendInstaller` en `core/backend_installer.py`
+  - [x] `start()`: escanear `/data/backends/`, detectar instalados, registrar
+  - [x] `install()` desde source (venv + pip): flujo básico
+  - [x] `uninstall()`: verificar que no hay modelos cargados, borrar directorio
+  - [x] `is_installed()`, `list_states()`, `get_state()`
+- [x] `install_spec` property en `BackendInterface` con default `None` (por backend aún pendiente → Fase 2)
+- [x] Settings: `backends_dir` en `config.py` + `BACKENDS_DIR` en `.env.example`
+- [x] Volumen `backends_data` en `docker-compose.yml`
+- [x] Adaptar `main.py`: `BackendInstaller` instanciado en `lifespan` y registrado via `worker_pool._backends`
+- [x] API endpoints: `GET /ocabra/backends`, `GET/POST .../install` (ambas variantes SSE), `POST .../uninstall`, `GET .../logs`
+- [x] SSE de progreso de instalación
+- [x] Tests: 13 en verde (`backend/tests/core/test_backend_installer.py`)
 
 ### Fase 2 — Migrar backends a install_spec
 
@@ -497,9 +500,9 @@ Backends sin migración (siempre disponibles):
 
 ### Fase 3 — Distribución OCI
 
-- [ ] Dockerfiles por backend en `backends/dockerfiles/`
-- [ ] CI pipeline para build y push a registry
-- [ ] `install()` desde OCI: pull → create → cp → rm
+- [x] Dockerfiles por backend en `backends/dockerfiles/` (11 ficheros + README + `.dockerignore`, 2026-04-24)
+- [ ] CI pipeline para build y push a registry (skeleton GitHub Actions en `backends/dockerfiles/README.md`)
+- [ ] `install()` desde OCI: pull → create → cp → rm (endpoint devuelve 501 hasta entonces)
 - [ ] Hardware detection para elegir variante (cuda12/cpu)
 - [ ] `metadata.json` con digest OCI para detección de updates
 - [ ] Endpoint de check de actualizaciones
@@ -511,14 +514,14 @@ Backends sin migración (siempre disponibles):
 - [ ] Mantener imagen "fat" como opción para quienes quieran todo pre-instalado
 - [ ] Documentación de primer arranque (instalar backends desde la UI)
 
-### Fase 5 — Frontend
+### Fase 5 — Frontend ✅ (2026-04-24)
 
-- [ ] Página/sección "Backends" en Settings
-- [ ] Cards con estado, versión, tamaño
-- [ ] Botones install/uninstall con confirmación
-- [ ] Barra de progreso SSE durante instalación
-- [ ] Eventos WebSocket para cambios de estado
-- [ ] Indicadores en la página Models (qué backend usa cada modelo)
+- [x] Página `/backends` (no en Settings sino como ruta propia, rol `system_admin`)
+- [x] Cards con estado, versión, tamaño, tags, conteo de modelos cargados
+- [x] Botones install/uninstall con confirmación bloqueante si hay modelos cargados
+- [x] Barra de progreso SSE durante instalación
+- [x] Eventos WebSocket `backend_installed` / `backend_uninstalled` / `backend_progress` cableados en el store
+- [ ] Indicadores en la página Models (qué backend usa cada modelo) — pendiente, fuera del MVP
 
 ---
 
@@ -567,3 +570,46 @@ la experiencia completa.
 - Hot-reload de backends sin reiniciar workers (los workers se reinician al load)
 - Versionado semántico con rollback automático
 - Backend plugins de terceros (system de plugins extensible)
+
+---
+
+## Registro de decisiones y deudas (2026-04-24)
+
+Este registro se creó durante el merge del MVP (Fases 1 + 3-draft + 5). Cada entrada
+debe resolverse o promoverse a issue antes de cerrar el bloque 15.
+
+### Decisiones de diseño tomadas durante la integración
+
+1. **Reconciliación blanda con la imagen "fat" actual.** Cuando `BackendInstaller.start()` encuentra un backend registrado que no tiene `metadata.json`, lo marca como `install_source="built-in"` + `install_status=INSTALLED` en lugar de `NOT_INSTALLED`. Evita que la imagen actual deje de funcionar mientras Fase 2 migra los backends uno a uno. Cuando cada backend empiece a escribir su propio `metadata.json` durante el install, la marca "built-in" se sobrescribe.
+
+2. **`GET` además de `POST` en `/ocabra/backends/{type}/install`.** El navegador `EventSource` solo emite GET, y el frontend lo necesita para el SSE. La variante GET acepta `method` como query param y delega al handler POST. Ambas siguen disponibles — la POST queda para clientes no-browser.
+
+3. **`always_available && status=="installed"` → badge "built-in" en UI.** Ollama y similares reportan `install_status=installed` pero no deben mostrar botón de desinstalar. El helper `toBackendModuleState` del cliente hace el mapeo.
+
+4. **Mock fallback silencioso en el frontend.** Si `GET /ocabra/backends` devuelve 404 o fetch error, el store carga 5 backends mock y simula SSE con `setInterval`. Flag opcional `VITE_MOCK_BACKENDS=1` lo fuerza. Útil durante el desarrollo en paralelo con el backend; ahora que el backend está merged, el mock solo debería dispararse con la flag explícita — ver deuda #4 abajo.
+
+5. **`method="oci"` devuelve 501.** El endpoint valida el string pero rechaza OCI hasta que Fase 3 publique las imágenes y el installer implemente `docker pull + cp`.
+
+6. **Tests HTTP con app aislada.** `test_backend_installer.py` monta una mini-FastAPI app para los endpoints en lugar de importar `ocabra.main:app` (que dispara lifespan completo con DB/Redis/GPU). Patrón a replicar en otros tests de routers aislables.
+
+### Deudas técnicas abiertas
+
+1. **`WorkerPool._backends` accedido como privado desde `main.py`.** Agente A no añadió un método público para respetar el ownership del stream 1-B. Cuando alguien toque `worker_pool.py`, exponer `WorkerPool.registered_backends()` y migrar `main.py`.
+
+2. **Fase 2 no arrancada.** Todos los backends aparecen como `built-in` hasta que se migren uno a uno a `install_spec` real. Orden sugerido en el plan: `tts → whisper → diffusers → vllm → sglang → chatterbox → voxtral → llama_cpp → bitnet → acestep → tensorrt_llm`.
+
+3. **Incógnitas heredadas del draft de Dockerfiles (Agente B)** que bloquean la CI:
+   - **TensorRT-LLM**: el distribution path real es la imagen NGC de NVIDIA, no un wheel limpio. Dockerfile marcado con TODO y excluido del matrix default. Decidir: repackage NGC vs pin wheel `pypi.nvidia.com`.
+   - **ACE-Step**: `uv sync` contra upstream puede fallar si pinnean torch incompatible. Plan B: fijar `ACESTEP_REF` a commit conocido.
+   - **Variantes CPU**: `BASE_IMAGE` parametrizado pero sin validar. Whisper/Diffusers/TTS necesitarán `--extra-index-url https://download.pytorch.org/whl/cpu`. Matrix CPU commentada en README hasta validar.
+   - **GitHub runners ubuntu-22.04 (~14 GB libres)**: vllm/sglang/voxtral/tensorrt_llm no caben. Decidir: disk-cleanup step o self-hosted runner.
+
+4. **Mock fallback del frontend debe apagarse por defecto.** Ahora mismo salta automáticamente si el backend responde error; con el backend ya mergeado, conviene que solo se active con `VITE_MOCK_BACKENDS=1` para que los errores reales sean visibles. Editar `backendsStore.ts` y quitar el `TODO: remove mock once Agent A merges`.
+
+5. **Indicadores de backend en la página Models.** Fase 5 no incluyó badges "este modelo usa vLLM / Diffusers" en Models.tsx. Tarea menor, útil para que el usuario sepa qué pasa si desinstala un backend.
+
+6. **Ruff en `api/internal/`**: 247 errores B008/ASYNC230/240/F401/I001 preexistentes. No tocados por Agente A para no divergir del estilo del repo. Candidato a sweep separado.
+
+7. **Volumen `backends_data` nombrado.** `docker-compose.yml` lo declara como volumen docker nombrado, no bind mount. Si alguien quiere inspeccionar `/data/backends` desde el host, tendrá que añadir bind mount local — documentar en `docs/INSTALL.md` cuando se promocione a GA.
+
+8. **`install_progress` granularidad.** El installer actual emite 4-5 pasos (`venv → pip → metadata → register`). Para pip con deps grandes (vllm, torch) el usuario ve "Installing pip packages..." durante varios minutos sin actualización. Mejora futura: parsear stdout de pip para reportar wheels individuales.
