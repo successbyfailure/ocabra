@@ -230,17 +230,23 @@ Plan en `docs/tasks/modular-backends-plan.md`.
 Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI.
 5 fases: infraestructura → migrar backends → OCI → imagen slim → frontend.
 
-### Estado del arranque (2026-04-24)
+### MVP mergeado (2026-04-24)
 
-Equipo de agentes paralelos asignado a fases no-solapadas (worktrees aislados):
+Equipo de agentes paralelos entregó Fases 1, 3 (draft) y 5 en el mismo día:
 
-| Agente | Alcance | Fase |
-|--------|---------|------|
-| **Agente A — Core** | `core/backend_installer.py`, `backends/base.py` (dataclass), `api/internal/backends.py`, `config.py`, `main.py` (registro), tests | Fase 1 |
-| **Agente B — Dockerfiles** | `backends/dockerfiles/Dockerfile.*` (11 ficheros scaffolding para distribución OCI) | Fase 3 (draft) |
-| **Agente C — Frontend** | `frontend/src/pages/Backends.tsx` + componentes + store + rutas + cliente API | Fase 5 |
+| Fase | Estado | Entregables |
+|------|--------|-------------|
+| **Fase 1 — Infra backend** | ✅ Merged | `BackendInstallSpec` dataclass, `BackendInstaller` con source install/uninstall/scan, router `/ocabra/backends` (POST+GET SSE, uninstall, logs), volumen `backends_data`, 13 tests en verde. Commits `77428d7`→`27d4b3e` + `2a8e65d` (GET alias para EventSource). |
+| **Fase 3 — Dockerfiles (draft)** | ✅ Merged | 11 Dockerfiles OCI en `backends/dockerfiles/` con `ARG BASE_IMAGE` multi-variante (cuda12/cpu/rocm), `FROM scratch` final, OCI labels, README con CI matrix skeleton. |
+| **Fase 5 — Frontend** | ✅ Merged | Página `/backends` (rol `system_admin`), `BackendCard` con 6 estados, `BackendStatusBadge`, `InstallProgressBar` SSE, `ConfirmUninstallDialog`, Zustand store con mock fallback, WebSocket live updates, `api.backends.*` en cliente, entrada en Sidebar. |
 
-Fase 2 (migrar backends uno a uno a `install_spec`) y Fase 4 (imagen slim) quedan para después del merge del MVP.
+### Pendiente del bloque 15
+
+- **Fase 2 — Migrar cada backend a `install_spec`**: hasta que se haga, todos los backends existentes se marcan como `install_source="built-in"` (compatibilidad total con la imagen fat actual).
+- **Fase 3 — CI pipeline + implementar `method="oci"`**: el endpoint devuelve `501` hasta que las imágenes OCI estén publicadas en `ghcr.io/ocabra/backend-*`. Resolver incógnitas de Agente B: TensorRT-LLM (NGC vs wheel), ACE-Step pin, variantes CPU con torch CPU index, runners CI (disk cleanup o self-hosted).
+- **Fase 4 — Imagen Docker slim**: `Dockerfile` principal sin backends pre-instalados + guía de primer arranque.
+- **Refactor menor**: `WorkerPool.registered_backends()` público para no acceder a `_backends` privado desde `main.py` (Agente A lo dejó documentado).
+- **Eliminar mock fallback del frontend**: el store tiene `// TODO: remove mock once Agent A merges` — ahora que el backend existe, el mock solo debe dispararse con la flag explícita.
 
 ---
 
@@ -260,7 +266,7 @@ Fase 2 (migrar backends uno a uno a `install_spec`) y Fase 4 (imagen slim) queda
 [✅ Hecho]  Bloque 12 — Federación P2P
 [✅ Hecho]  Bloque 13 — Observabilidad de potencia + stats ampliadas
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
-[🚧 En curso] Bloque 15 — Backends Modulares (equipo paralelo en Fases 1, 3-draft, 5)
+[🚧 En curso] Bloque 15 — Backends Modulares (Fases 1+3-draft+5 mergeadas; pendientes 2, 3-CI, 4)
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
