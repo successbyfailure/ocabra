@@ -1,8 +1,40 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
+
+
+@dataclass
+class BackendInstallSpec:
+    """Declarative installation spec for a modular backend.
+
+    Each backend that wants to be installable/uninstallable at runtime exposes an
+    instance of this class through :pyattr:`BackendInterface.install_spec`.
+
+    Attributes:
+        oci_image: Fully-qualified OCI image used for pre-built distribution.
+        oci_tags: Mapping of hardware variant → tag (e.g. ``{"cuda12": "latest-cuda12"}``).
+        oci_extract_path: Path inside the OCI image that contains the backend tree.
+        pip_packages: Packages to install when using the ``source`` install method.
+        post_install_script: Optional script path (relative to repo) to run after install.
+        estimated_size_mb: Approximate on-disk footprint reported to the UI.
+        display_name: Human-friendly name shown on the UI.
+        description: Short description of the backend.
+        tags: Labels for filtering on the UI (e.g. ``["LLM", "GPU", "CUDA"]``).
+        python_version: Python version required for ``source`` installs.
+    """
+
+    oci_image: str
+    oci_tags: dict[str, str] = field(default_factory=dict)
+    oci_extract_path: str = "/backend"
+    pip_packages: list[str] = field(default_factory=list)
+    post_install_script: str | None = None
+    estimated_size_mb: int = 0
+    display_name: str = ""
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+    python_version: str = "3.11"
 
 
 class ModalityType(StrEnum):
@@ -48,6 +80,16 @@ class WorkerInfo:
 
 
 class BackendInterface(ABC):
+    @property
+    def install_spec(self) -> BackendInstallSpec | None:
+        """Return the installation spec for this backend, or ``None``.
+
+        Returning ``None`` means the backend is pre-installed in the image, is an
+        external service (e.g. Ollama), or otherwise does not participate in the
+        modular install/uninstall flow.
+        """
+        return None
+
     @abstractmethod
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         """Load the model. Returns WorkerInfo with the running process."""
