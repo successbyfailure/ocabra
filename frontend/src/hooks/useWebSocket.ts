@@ -5,6 +5,8 @@ import { useModelStore } from "@/stores/modelStore"
 import { useDownloadStore } from "@/stores/downloadStore"
 import { useServiceStore } from "@/stores/serviceStore"
 import { useBackendsStore } from "@/stores/backendsStore"
+import { useAgentsStore } from "@/stores/agentsStore"
+import { useMCPStore } from "@/stores/mcpStore"
 
 const getWebSocketUrl = () =>
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
@@ -146,6 +148,8 @@ export function useWebSocket() {
   const updateJob = useDownloadStore((state) => state.updateJob)
   const updateService = useServiceStore((state) => state.updateService)
   const handleBackendEvent = useBackendsStore((state) => state.handleWSEvent)
+  const handleAgentEvent = useAgentsStore((state) => state.handleWSEvent)
+  const handleMCPEvent = useMCPStore((state) => state.handleWSEvent)
 
   useEffect(() => {
     let cancelled = false
@@ -183,6 +187,10 @@ export function useWebSocket() {
             event.type === "backend_progress"
           ) {
             handleBackendEvent(event.type, event.data)
+          } else if (event.type === "agent_updated") {
+            handleAgentEvent(event.type, event.data)
+          } else if (event.type === "mcp_server_health_changed") {
+            handleMCPEvent(event.type, event.data)
           }
 
           setLastEvent(event)
@@ -208,7 +216,7 @@ export function useWebSocket() {
       }
       wsRef.current?.close()
     }
-  }, [setGpus, updateJob, updateModel, updateService, handleBackendEvent])
+  }, [setGpus, updateJob, updateModel, updateService, handleBackendEvent, handleAgentEvent, handleMCPEvent])
 
   return { connected, lastEvent }
 }
