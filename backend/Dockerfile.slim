@@ -24,7 +24,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    BACKENDS_FAT_IMAGE=false
 
 # Audio/video system deps (shared by whisper, tts, diffusers-image2audio,
 # chatterbox, voxtral). Keeping them in the base image avoids re-installing

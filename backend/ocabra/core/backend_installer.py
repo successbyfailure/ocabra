@@ -112,9 +112,16 @@ class BackendInstaller:
         worker_pool: WorkerPool,
         *,
         backend_registry: dict[str, BackendInterface] | None = None,
+        assume_fat_image: bool = True,
     ) -> None:
         self._backends_dir = Path(backends_dir)
         self._worker_pool = worker_pool
+        # On the fat image the oCabra container has every backend's pip deps
+        # pre-installed, so a backend with an install_spec but no metadata is
+        # treated as "built-in" to stay backwards compatible.  On the slim
+        # image the same situation means the backend is genuinely not
+        # installed and the UI should offer an install button.
+        self._assume_fat_image = assume_fat_image
         # backend_type → instance (lazy-instantiated source of truth for specs
         # + a way to re-register after an install).  Fase 1 expects the caller
         # to pre-populate this from ``main.py`` using the instances that are
@@ -193,11 +200,10 @@ class BackendInstaller:
                     estimated_size_mb=spec.estimated_size_mb,
                     actual_size_mb=meta.get("size_mb"),
                 )
-            else:
-                # No metadata on disk — treat as built-in (pre-installed in
-                # the fat image) so we don't disable currently working
-                # backends.  Fase 2 migrates each backend to write its own
-                # metadata on first boot.
+            elif self._assume_fat_image:
+                # No metadata on disk but the fat image has every backend
+                # pre-installed — keep it usable.  Fase 2 will migrate each
+                # backend to write its own metadata on first boot.
                 self._states[backend_type] = BackendModuleState(
                     backend_type=backend_type,
                     display_name=spec.display_name or backend_type,
@@ -206,6 +212,19 @@ class BackendInstaller:
                     install_status=BackendInstallStatus.INSTALLED,
                     install_source="built-in",
                     estimated_size_mb=spec.estimated_size_mb,
+                )
+            else:
+                # Slim image and no metadata → genuinely not installed.
+                self._states[backend_type] = BackendModuleState(
+                    backend_type=backend_type,
+                    display_name=spec.display_name or backend_type,
+                    description=spec.description,
+                    tags=list(spec.tags),
+                    install_status=BackendInstallStatus.NOT_INSTALLED,
+                    estimated_size_mb=spec.estimated_size_mb,
+                )
+                self._worker_pool.register_disabled_backend(
+                    backend_type, "not installed"
                 )
 
         logger.info(

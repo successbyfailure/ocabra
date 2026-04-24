@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     download_dir: str = ""  # default: {models_dir}/downloads
     # Bloque 15 — Modular backends install root (one subdir per backend).
     backends_dir: str = "/data/backends"
+    # True on the fat image (all backends pre-installed): unknown backends
+    # without metadata.json are reported as "built-in" so they stay usable.
+    # Set to False on the slim image so the same backends show as
+    # "not_installed" and the UI surfaces the install button.
+    backends_fat_image: bool = True
     max_temperature_c: int = 88
     hf_cache_dir: str = "/data/hf_cache"
     ai_models_root: str = "/docker/ai-models"

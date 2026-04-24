@@ -98,6 +98,35 @@ async def test_start_empty_dir_creates_and_marks_builtins(
 
 
 @pytest.mark.asyncio
+async def test_start_slim_image_marks_unknown_backends_as_not_installed(
+    worker_pool: WorkerPool, backends_dir: Path
+) -> None:
+    """On the slim image, backends with install_spec but no metadata.json
+    should report NOT_INSTALLED, not built-in — they really aren't installed."""
+
+    slim_installer = BackendInstaller(
+        backends_dir=backends_dir,
+        worker_pool=worker_pool,
+        backend_registry={
+            "mock": _InstallableMockBackend(),
+            "ollama": _AlwaysAvailableMockBackend(),
+        },
+        assume_fat_image=False,
+    )
+    await slim_installer.start()
+
+    states = {s.backend_type: s for s in slim_installer.list_states()}
+
+    # Always-available backend still reports installed regardless of image.
+    assert states["ollama"].install_status == BackendInstallStatus.INSTALLED
+    assert states["ollama"].install_source == "built-in"
+
+    # Modular backend without metadata is NOT installed on the slim image.
+    assert states["mock"].install_status == BackendInstallStatus.NOT_INSTALLED
+    assert states["mock"].install_source is None
+
+
+@pytest.mark.asyncio
 async def test_start_detects_installed_metadata(
     installer: BackendInstaller, backends_dir: Path
 ) -> None:

@@ -1,14 +1,16 @@
 # docker-compose override for the slim API image (Bloque 15 Fase 4).
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.slim.yml up -d --build api
+#   docker compose -f docker-compose.yml -f docker-compose.slim.yml build api
+#   docker compose -f docker-compose.yml -f docker-compose.slim.yml up -d api
 #
-# This overrides only the `api` service to use `backend/Dockerfile.slim` which
-# ships without any AI backends pre-installed. Backends are installed at
-# runtime into the `backends_data` volume via the BackendInstaller.
-#
+# The slim image ships without any AI backends pre-installed. Backends are
+# installed at runtime into the `backends_data` volume via BackendInstaller.
 # The rest of the stack (postgres, redis, caddy, frontend, gateway, hw-monitor)
 # is unchanged.
+#
+# Uses image tag ocabra-api:slim so the fat image keeps owning
+# ocabra-api:latest and remains the rollback target.
 
 services:
   api:
@@ -16,3 +18,4 @@ services:
       context: ./backend
       dockerfile: Dockerfile.slim
       args: {}
+    image: ocabra-api:slim

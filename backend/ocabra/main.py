@@ -328,6 +328,7 @@ async def lifespan(app: FastAPI):
         backends_dir=Path(settings.backends_dir),
         worker_pool=worker_pool,
         backend_registry=worker_pool.registered_backends(),
+        assume_fat_image=settings.backends_fat_image,
     )
     await backend_installer.start()
     app.state.backend_installer = backend_installer
