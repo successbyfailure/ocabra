@@ -613,3 +613,19 @@ debe resolverse o promoverse a issue antes de cerrar el bloque 15.
 7. **Volumen `backends_data` nombrado.** `docker-compose.yml` lo declara como volumen docker nombrado, no bind mount. Si alguien quiere inspeccionar `/data/backends` desde el host, tendrá que añadir bind mount local — documentar en `docs/INSTALL.md` cuando se promocione a GA.
 
 8. **`install_progress` granularidad.** El installer actual emite 4-5 pasos (`venv → pip → metadata → register`). Para pip con deps grandes (vllm, torch) el usuario ve "Installing pip packages..." durante varios minutos sin actualización. Mejora futura: parsear stdout de pip para reportar wheels individuales.
+
+9. **Rebuild de imágenes Docker bloqueado (descubierto durante el smoke test 2026-04-24).** Dos fallos independientes impidieron el rebuild limpio de `ocabra-api` y `ocabra-frontend`:
+   - `backend/Dockerfile` falla al compilar `llama-server` con `cmake --build ... -j4` (exit 2, stderr truncado). Cache-first builds lo evitan, pero `--no-cache` lo revela.
+   - Frontend `node:20-alpine` falla al pullearse con `tls: certificate not valid` del mirror de Cloudflare (transitorio).
+   Workaround usado para validar el MVP: `docker cp` de los ficheros nuevos al contenedor vivo + `docker compose restart api`, y `npx vite build --outDir /tmp/...` + `docker cp` del bundle al frontend. **Antes del próximo deploy real hay que diagnosticar el fallo de llama.cpp y reintentar el pull de node.**
+
+### Validación end-to-end (2026-04-24)
+
+Smoke script `scripts/smoke_bloque15.sh` pasa 5/5 casos contra la app real dentro del contenedor:
+1. `GET /ocabra/backends` → 12 backends, todos `install_status=installed, install_source=built-in`
+2. `GET /ocabra/backends/ollama` → detalle correcto
+3. `GET /ocabra/backends/nope` → 404
+4. `POST /ocabra/backends/whisper/uninstall` → 409 (built-in protegido)
+5. `POST /ocabra/backends/whisper/install {"method":"oci"}` → 501 (Fase 3 pendiente)
+
+Validado también a través de Caddy (`http://localhost:8484/ocabra/backends` con cookie JWT de `system_admin`): lista completa con los 12 backends esperados.
