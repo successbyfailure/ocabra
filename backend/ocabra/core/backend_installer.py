@@ -130,6 +130,10 @@ class BackendInstaller:
         self._backends: dict[str, BackendInterface] = dict(backend_registry or {})
         self._states: dict[str, BackendModuleState] = {}
         self._install_locks: dict[str, asyncio.Lock] = {}
+        # Detached install tasks per backend.  Decouples the actual install
+        # from the SSE consumer so that a client disconnection does not orphan
+        # the state machine half-way through pip (deuda 9f).
+        self._install_tasks: dict[str, asyncio.Task[None]] = {}
         # Last install log per backend (in-memory ring buffer) — exposed via
         # ``GET /ocabra/backends/{type}/logs``.
         self._install_logs: dict[str, list[str]] = {}
@@ -285,8 +289,8 @@ class BackendInstaller:
         if backend_type not in self._backends:
             raise KeyError(f"Backend '{backend_type}' is not registered")
 
-        lock = self._install_locks.setdefault(backend_type, asyncio.Lock())
-        if lock.locked():
+        existing_task = self._install_tasks.get(backend_type)
+        if existing_task is not None and not existing_task.done():
             raise BackendAlreadyInstallingError(
                 f"Backend '{backend_type}' is already being installed"
             )
@@ -303,11 +307,60 @@ class BackendInstaller:
                 f"Backend '{backend_type}' is always-available and cannot be installed"
             )
 
-        async with lock:
-            self._install_logs[backend_type] = []
+        # Run the actual install as a detached task: a client disconnect must
+        # not orphan the state machine (deuda 9f).  We bridge the task and
+        # the SSE consumer through an unbounded asyncio.Queue.  The task
+        # always emits a terminal sentinel (``None``) so consumers exit.
+        queue: asyncio.Queue[BackendModuleState | None] = asyncio.Queue()
+        lock = self._install_locks.setdefault(backend_type, asyncio.Lock())
 
-            async for state in self._install_from_source(backend_type, backend, spec):
+        async def _runner() -> None:
+            async with lock:
+                self._install_logs[backend_type] = []
+                try:
+                    async for state in self._install_from_source(
+                        backend_type, backend, spec
+                    ):
+                        # _install_from_source already mutates self._states.
+                        queue.put_nowait(state)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "backend_install_runner_failed", backend_type=backend_type
+                    )
+                    err_state = self._states.get(backend_type)
+                    if err_state is None:
+                        err_state = BackendModuleState(
+                            backend_type=backend_type,
+                            display_name=spec.display_name or backend_type,
+                            description=spec.description,
+                            tags=list(spec.tags),
+                            install_status=BackendInstallStatus.ERROR,
+                            estimated_size_mb=spec.estimated_size_mb,
+                        )
+                    err_state.install_status = BackendInstallStatus.ERROR
+                    err_state.error = str(exc)
+                    err_state.install_progress = None
+                    err_state.install_detail = None
+                    self._states[backend_type] = err_state
+                    queue.put_nowait(err_state)
+                finally:
+                    queue.put_nowait(None)
+
+        task = asyncio.create_task(
+            _runner(), name=f"install-{backend_type}"
+        )
+        self._install_tasks[backend_type] = task
+
+        try:
+            while True:
+                state = await queue.get()
+                if state is None:
+                    return
                 yield state
+        except asyncio.CancelledError:
+            # Client disconnected; the install task keeps running on its
+            # own and will land the final state in self._states.
+            raise
 
     async def _install_from_source(
         self,

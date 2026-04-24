@@ -321,6 +321,59 @@ async def test_install_source_skips_core_runtime_when_opted_out(
 
 
 @pytest.mark.asyncio
+async def test_install_survives_consumer_cancellation(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deuda 9f: cancelling the SSE consumer must NOT leave state stuck on
+    'installing' — the detached task keeps running and lands the final state."""
+
+    await installer.start()
+
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _slow_run(self, backend_type: str, argv: list[str]) -> None:  # noqa: ANN001
+        self._log(backend_type, f"MOCK $ {' '.join(argv)}")
+        if argv[1:3] == ["-m", "venv"]:
+            venv_dir = Path(argv[-1])
+            (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+            (venv_dir / "bin" / "pip").write_text("#!/bin/sh\nexit 0\n")
+            (venv_dir / "bin" / "pip").chmod(0o755)
+            (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+            (venv_dir / "bin" / "python").chmod(0o755)
+            return
+        # First pip install call: pause until the consumer is gone, then
+        # let the rest of the install run to completion.
+        if not started.is_set():
+            started.set()
+            await proceed.wait()
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _slow_run)
+
+    gen = installer.install("mock", method="source").__aiter__()
+    # Pull a couple of states until the runner is paused on the slow step.
+    await gen.__anext__()
+    await gen.__anext__()
+
+    # The runner is now waiting on `proceed`. Simulate the SSE client going
+    # away by closing the generator without consuming further states.
+    await gen.aclose()
+
+    # Release the runner: it should keep going and eventually mark INSTALLED.
+    proceed.set()
+
+    # Wait for the install task to finish on its own.
+    task = installer._install_tasks["mock"]
+    await asyncio.wait_for(task, timeout=2.0)
+
+    final = installer.get_state("mock")
+    assert final.install_status == BackendInstallStatus.INSTALLED
+    assert (backends_dir / "mock" / METADATA_FILENAME).exists()
+
+
+@pytest.mark.asyncio
 async def test_install_oci_not_implemented(installer: BackendInstaller) -> None:
     await installer.start()
     with pytest.raises(NotImplementedError):
