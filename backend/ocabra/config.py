@@ -317,6 +317,34 @@ class Settings(BaseSettings):
         default=True, description="Verify TLS certificates for peer connections"
     )
 
+    # Agents + MCP (plan: docs/tasks/agents-mcp-plan.md)
+    mcp_tools_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=0,
+        description="TTL for cached tools/list responses from MCP servers.",
+    )
+    mcp_default_tool_timeout_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Default per-tool-call timeout when the agent does not override it.",
+    )
+    mcp_max_concurrent_tool_calls: int = Field(
+        default=8,
+        ge=1,
+        description="Max concurrent tool_calls dispatched by the AgentExecutor per turn.",
+    )
+    mcp_result_max_bytes: int = Field(
+        default=262144,
+        ge=1024,
+        description="Maximum size (bytes) of a tool_call result payload before truncation.",
+    )
+    mcp_stdio_allowed: bool = Field(
+        default=True,
+        description=(
+            "If false, MCP servers with transport=stdio cannot be created even by admins."
+        ),
+    )
+
     @field_validator(
         "langfuse_public_key",
         "langfuse_secret_key",
