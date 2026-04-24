@@ -2,21 +2,29 @@ import { useEffect, useMemo, useState } from "react"
 import * as Tabs from "@radix-ui/react-tabs"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { StyledSelect } from "@/components/common/StyledSelect"
 import { useIsModelManager } from "@/hooks/useAuth"
 import { DateRangePicker, defaultDateRange, type DateRangeValue } from "@/components/stats/DateRangePicker"
 import { EnergyPanel } from "@/components/stats/EnergyPanel"
 import { PerformanceTable } from "@/components/stats/PerformanceTable"
 import { RequestsChart } from "@/components/stats/RequestsChart"
 import { TokensChart } from "@/components/stats/TokensChart"
+import { CostSavingsCard } from "@/components/stats/CostSavingsCard"
+import { UserDetailPanel } from "@/components/stats/UserDetailPanel"
+import { ApiKeyPanel } from "@/components/stats/ApiKeyPanel"
+import { FederationPanel } from "@/components/stats/FederationPanel"
 import type {
+  ByApiKeyStats,
   ByGroupStats,
   ByUserStats,
   EnergyStats,
+  FederationStats,
   MyGroupStats,
   OverviewStats,
   PerformanceStats,
   RecentRequestsData,
   RequestStats,
+  ServerPower,
   TokenStats,
 } from "@/types"
 
@@ -59,8 +67,10 @@ const EMPTY_OVERVIEW: OverviewStats = {
 
 const EMPTY_BY_USER: ByUserStats = { byUser: [] }
 const EMPTY_BY_GROUP: ByGroupStats = { byGroup: [] }
+const EMPTY_BY_API_KEY: ByApiKeyStats = { byApiKey: [] }
 const EMPTY_MY_GROUP: MyGroupStats = { groupId: null, groupName: null, stats: EMPTY_OVERVIEW }
 const EMPTY_RECENT: RecentRequestsData = { requests: [] }
+const EMPTY_FEDERATION: FederationStats = { localCount: 0, remoteCount: 0, byNode: [] }
 
 function OverviewPanel({ data, title = "Overview" }: { data: OverviewStats; title?: string }) {
   const errorPct = data.totalRequests > 0 ? (data.totalErrors / data.totalRequests) * 100 : 0
@@ -89,24 +99,42 @@ function OverviewPanel({ data, title = "Overview" }: { data: OverviewStats; titl
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <div className="rounded-md border border-border bg-background/40 p-3">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Por backend</p>
-          <div className="space-y-1 text-sm">
-            {data.byBackend.map((row) => (
-              <p key={row.backendType}>
-                {row.backendType}: {row.totalRequests} req, {row.avgLatencyMs} ms avg, {(row.errorRate * 100).toFixed(1)}% err
-              </p>
-            ))}
-            {data.byBackend.length === 0 ? <p className="text-muted-foreground">Sin datos</p> : null}
+          <div className="space-y-2">
+            {(() => {
+              const maxReq = Math.max(1, ...data.byBackend.map((r) => r.totalRequests))
+              return data.byBackend.map((row) => (
+                <div key={row.backendType} className="space-y-0.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-medium">{row.backendType}</span>
+                    <span className="text-muted-foreground">{row.totalRequests} req · {row.avgLatencyMs} ms · {(row.errorRate * 100).toFixed(1)}% err</span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                    <div className="h-full rounded-full bg-primary/60 transition-all" style={{ width: `${(row.totalRequests / maxReq) * 100}%` }} />
+                  </div>
+                </div>
+              ))
+            })()}
+            {data.byBackend.length === 0 && <p className="text-sm text-muted-foreground">Sin datos</p>}
           </div>
         </div>
         <div className="rounded-md border border-border bg-background/40 p-3">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Por tipo request</p>
-          <div className="space-y-1 text-sm">
-            {data.byRequestKind.map((row) => (
-              <p key={row.requestKind}>
-                {row.requestKind}: {row.totalRequests} req, {row.avgLatencyMs} ms avg, {(row.errorRate * 100).toFixed(1)}% err
-              </p>
-            ))}
-            {data.byRequestKind.length === 0 ? <p className="text-muted-foreground">Sin datos</p> : null}
+          <div className="space-y-2">
+            {(() => {
+              const maxReq = Math.max(1, ...data.byRequestKind.map((r) => r.totalRequests))
+              return data.byRequestKind.map((row) => (
+                <div key={row.requestKind} className="space-y-0.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-medium">{row.requestKind}</span>
+                    <span className="text-muted-foreground">{row.totalRequests} req · {row.avgLatencyMs} ms · {(row.errorRate * 100).toFixed(1)}% err</span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                    <div className="h-full rounded-full bg-cyan-500/60 transition-all" style={{ width: `${(row.totalRequests / maxReq) * 100}%` }} />
+                  </div>
+                </div>
+              ))
+            })()}
+            {data.byRequestKind.length === 0 && <p className="text-sm text-muted-foreground">Sin datos</p>}
           </div>
         </div>
       </div>
@@ -132,46 +160,78 @@ function OwnStatsPanel({ data }: { data: OverviewStats }) {
         <div className="rounded-md border border-border bg-background/60 p-3">
           <p className="text-xs text-muted-foreground">Latencia media</p>
           <p className="text-2xl font-semibold">{data.avgDurationMs} ms</p>
-          <p className="text-xs text-muted-foreground">Tokenizadas: {data.tokenizedRequests}</p>
+          <p className="text-xs text-muted-foreground">
+            {data.estimatedCostUsd != null && data.estimatedCostUsd > 0
+              ? `Equiv. OpenAI: $${data.estimatedCostUsd.toFixed(2)}`
+              : `Tokenizadas: ${data.tokenizedRequests}`}
+          </p>
         </div>
       </div>
     </div>
   )
 }
 
-function ByUserPanel({ data }: { data: ByUserStats }) {
+function ByUserPanel({
+  data,
+  params,
+}: {
+  data: ByUserStats
+  params: { from: string; to: string; modelId?: string }
+}) {
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
+  const selectedUser = data.byUser.find((u) => u.userId === selectedUserId)
+
   return (
-    <div className="rounded-lg border border-border bg-card p-3">
-      <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Stats por usuario</h3>
-      {data.byUser.length === 0 ? (
-        <p className="text-sm text-muted-foreground py-4 text-center">Sin datos</p>
-      ) : (
-        <div className="overflow-auto">
-          <table className="min-w-full divide-y divide-border text-sm">
-            <thead className="bg-muted/50">
-              <tr>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Requests</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Errores</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Lat. media</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens in</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens out</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border bg-card">
-              {data.byUser.map((row) => (
-                <tr key={row.userId} className="hover:bg-muted/30">
-                  <td className="px-3 py-2 font-mono">{row.username}</td>
-                  <td className="px-3 py-2 text-right">{row.totalRequests}</td>
-                  <td className="px-3 py-2 text-right">{row.totalErrors}</td>
-                  <td className="px-3 py-2 text-right">{row.avgDurationMs} ms</td>
-                  <td className="px-3 py-2 text-right">{row.totalInputTokens}</td>
-                  <td className="px-3 py-2 text-right">{row.totalOutputTokens}</td>
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-card p-3">
+        <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Stats por usuario</h3>
+        {data.byUser.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">Sin datos</p>
+        ) : (
+          <div className="overflow-auto">
+            <table className="min-w-full divide-y divide-border text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Requests</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Errores</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Lat. media</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens in</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens out</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Energia (Wh)</th>
+                  <th className="px-3 py-2 text-right font-medium text-muted-foreground">Coste ref.</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-border bg-card">
+                {data.byUser.map((row) => (
+                  <tr
+                    key={row.userId}
+                    className={`cursor-pointer transition-colors ${selectedUserId === row.userId ? "bg-primary/10" : "hover:bg-muted/30"}`}
+                    onClick={() => setSelectedUserId(selectedUserId === row.userId ? null : row.userId)}
+                  >
+                    <td className="px-3 py-2 font-mono">{row.username}</td>
+                    <td className="px-3 py-2 text-right">{row.totalRequests}</td>
+                    <td className="px-3 py-2 text-right">{row.totalErrors}</td>
+                    <td className="px-3 py-2 text-right">{row.avgDurationMs} ms</td>
+                    <td className="px-3 py-2 text-right">{row.totalInputTokens.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right">{row.totalOutputTokens.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right">{(row.totalEnergyWh ?? 0).toFixed(1)}</td>
+                    <td className="px-3 py-2 text-right text-orange-400">${(row.estimatedCostUsd ?? 0).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {selectedUserId && selectedUser && (
+        <UserDetailPanel
+          userId={selectedUserId}
+          username={selectedUser.username}
+          params={params}
+          onClose={() => setSelectedUserId(null)}
+        />
       )}
     </div>
   )
@@ -194,6 +254,8 @@ function ByGroupPanel({ data }: { data: ByGroupStats }) {
                 <th className="px-3 py-2 text-right font-medium text-muted-foreground">Lat. media</th>
                 <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens in</th>
                 <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens out</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Energia (Wh)</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Coste ref.</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border bg-card">
@@ -203,8 +265,10 @@ function ByGroupPanel({ data }: { data: ByGroupStats }) {
                   <td className="px-3 py-2 text-right">{row.totalRequests}</td>
                   <td className="px-3 py-2 text-right">{row.totalErrors}</td>
                   <td className="px-3 py-2 text-right">{row.avgDurationMs} ms</td>
-                  <td className="px-3 py-2 text-right">{row.totalInputTokens}</td>
-                  <td className="px-3 py-2 text-right">{row.totalOutputTokens}</td>
+                  <td className="px-3 py-2 text-right">{row.totalInputTokens.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right">{row.totalOutputTokens.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right">{(row.totalEnergyWh ?? 0).toFixed(1)}</td>
+                  <td className="px-3 py-2 text-right text-orange-400">${(row.estimatedCostUsd ?? 0).toFixed(2)}</td>
                 </tr>
               ))}
             </tbody>
@@ -225,7 +289,7 @@ function MyGroupPanel({ data }: { data: MyGroupStats }) {
         Mi grupo{data.groupName ? ` — ${data.groupName}` : ""}
       </h3>
       {data.groupId == null ? (
-        <p className="text-sm text-muted-foreground py-4 text-center">No perteneces a ningún grupo.</p>
+        <p className="text-sm text-muted-foreground py-4 text-center">No perteneces a ningun grupo.</p>
       ) : (
         <div className="grid gap-3 md:grid-cols-3">
           <div className="rounded-md border border-border bg-background/60 p-3">
@@ -263,7 +327,7 @@ function RequestLogPanel({ data }: { data: RecentRequestsData }) {
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Hora</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Modelo</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Tipo</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Duración</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Duracion</th>
                 <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens in/out</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Estado</th>
@@ -331,7 +395,10 @@ export function Stats() {
   const [overview, setOverview] = useState<OverviewStats>(EMPTY_OVERVIEW)
   const [byUser, setByUser] = useState<ByUserStats>(EMPTY_BY_USER)
   const [byGroup, setByGroup] = useState<ByGroupStats>(EMPTY_BY_GROUP)
+  const [byApiKey, setByApiKey] = useState<ByApiKeyStats>(EMPTY_BY_API_KEY)
   const [recent, setRecent] = useState<RecentRequestsData>(EMPTY_RECENT)
+  const [federationStats, setFederationStats] = useState<FederationStats>(EMPTY_FEDERATION)
+  const [serverPower, setServerPower] = useState<ServerPower | null>(null)
 
   // Own stats
   const [myStats, setMyStats] = useState<OverviewStats>(EMPTY_OVERVIEW)
@@ -346,13 +413,15 @@ export function Stats() {
     [modelId, range.from, range.to],
   )
 
+  const hasFederation = federationStats.localCount + federationStats.remoteCount > 0
+
   useEffect(() => {
     let active = true
 
     const load = async () => {
       try {
         if (isManagerOrAdmin) {
-          const [modelList, req, tok, ene, perf, over, bu, bg, rec, my, mg] = await Promise.all([
+          const [modelList, req, tok, ene, perf, over, bu, bg, bak, rec, my, mg, fed, sp] = await Promise.all([
             api.models.list(),
             api.stats.requests(params),
             api.stats.tokens(params),
@@ -361,9 +430,12 @@ export function Stats() {
             api.stats.overview(params),
             api.stats.byUser(params),
             api.stats.byGroup(params),
+            api.stats.byApiKey(params).catch(() => EMPTY_BY_API_KEY),
             api.stats.recent(20),
             api.stats.my(params),
             api.stats.myGroup(params),
+            api.stats.federation(params).catch(() => EMPTY_FEDERATION),
+            api.stats.serverPower().catch(() => null),
           ])
 
           if (!active) return
@@ -376,15 +448,19 @@ export function Stats() {
           setOverview(over)
           setByUser(bu)
           setByGroup(bg)
+          setByApiKey(bak)
           setRecent(rec)
           setMyStats(my)
           setMyGroup(mg)
+          setFederationStats(fed)
+          setServerPower(sp)
         } else {
-          const [modelList, ene, my, mg] = await Promise.all([
+          const [modelList, ene, my, mg, sp] = await Promise.all([
             api.models.list(),
             api.stats.energy(params),
             api.stats.my(params),
             api.stats.myGroup(params),
+            api.stats.serverPower().catch(() => null),
           ])
 
           if (!active) return
@@ -393,6 +469,7 @@ export function Stats() {
           setEnergy(ene)
           setMyStats(my)
           setMyGroup(mg)
+          setServerPower(sp)
         }
       } catch (err) {
         if (active) {
@@ -425,23 +502,27 @@ export function Stats() {
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-semibold">Stats</h1>
-        <p className="text-muted-foreground">Requests, tokens, latencia, energia y rendimiento.</p>
+        <p className="text-muted-foreground">Requests, tokens, latencia, energia, costes y rendimiento.</p>
       </div>
 
-      <DateRangePicker value={range} onChange={setRange} />
-
-      <select
-        value={modelId}
-        onChange={(event) => setModelId(event.target.value)}
-        className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm md:w-80"
-      >
-        <option value="">Todos los modelos</option>
-        {models.map((model) => (
-          <option key={model.id} value={model.id}>
-            {model.label}
-          </option>
-        ))}
-      </select>
+      {/* Filter bar */}
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border bg-card p-3">
+        <div className="flex-1 min-w-[200px]">
+          <DateRangePicker value={range} onChange={setRange} />
+        </div>
+        <div className="min-w-[200px] md:w-80">
+          <StyledSelect
+            value={modelId}
+            onValueChange={setModelId}
+            className="w-full"
+            placeholder="Todos los modelos"
+            options={[
+              { value: "", label: "Todos los modelos" },
+              ...models.map((model) => ({ value: model.id, label: model.label })),
+            ]}
+          />
+        </div>
+      </div>
 
       {loading ? (
         <div className="space-y-3">
@@ -451,24 +532,33 @@ export function Stats() {
         </div>
       ) : (
         <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
-          <Tabs.List className="flex border-b border-border overflow-x-auto" aria-label="Secciones de estadísticas">
-            {/* Global / admin tabs */}
+          <Tabs.List className="flex border-b border-border overflow-x-auto" aria-label="Secciones de estadisticas">
             <Tabs.Trigger value="overview" className={tabTriggerClass("overview")}>
               Resumen
             </Tabs.Trigger>
             {isManagerOrAdmin && (
               <Tabs.Trigger value="models" className={tabTriggerClass("models")}>
-                Por modelo
+                Modelos
               </Tabs.Trigger>
             )}
             {isManagerOrAdmin && (
               <Tabs.Trigger value="by-user" className={tabTriggerClass("by-user")}>
-                Por usuario
+                Usuarios
               </Tabs.Trigger>
             )}
             {isManagerOrAdmin && (
               <Tabs.Trigger value="by-group" className={tabTriggerClass("by-group")}>
-                Por grupo
+                Grupos
+              </Tabs.Trigger>
+            )}
+            {isManagerOrAdmin && (
+              <Tabs.Trigger value="api-keys" className={tabTriggerClass("api-keys")}>
+                API Keys
+              </Tabs.Trigger>
+            )}
+            {isManagerOrAdmin && hasFederation && (
+              <Tabs.Trigger value="federation" className={tabTriggerClass("federation")}>
+                Federacion
               </Tabs.Trigger>
             )}
             {isManagerOrAdmin && (
@@ -476,23 +566,21 @@ export function Stats() {
                 Log
               </Tabs.Trigger>
             )}
-            {/* Separator between global and personal */}
-            <div className="mx-1 self-stretch border-l border-border/60" aria-hidden="true" />
-            {/* Personal tabs */}
-            <Tabs.Trigger value="my-stats" className={tabTriggerClass("my-stats")}>
-              Mis stats
-            </Tabs.Trigger>
-            <Tabs.Trigger value="my-group" className={tabTriggerClass("my-group")}>
-              Mi grupo
-            </Tabs.Trigger>
           </Tabs.List>
 
           <div className="pt-4">
             <Tabs.Content value="overview" className="space-y-4">
+              {/* Cost savings card (admin only, when there's data) */}
+              {isManagerOrAdmin && (overview.estimatedCostUsd ?? 0) > 0 && (
+                <CostSavingsCard overview={overview} energy={energy} />
+              )}
+
+              {/* Energy panel */}
               <div className="rounded-lg border border-border bg-card p-3">
                 <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Energia del servidor</h3>
-                <EnergyPanel data={energy} />
+                <EnergyPanel data={energy} serverPower={serverPower} />
               </div>
+
               {isManagerOrAdmin ? (
                 <>
                   <OverviewPanel data={overview} title="Overview global" />
@@ -501,9 +589,13 @@ export function Stats() {
                     <TokensChart data={tokens} />
                   </div>
                 </>
-              ) : (
+              ) : null}
+
+              {/* Personal stats — always shown at bottom of overview */}
+              <div className="grid gap-4 lg:grid-cols-2">
                 <OwnStatsPanel data={myStats} />
-              )}
+                <MyGroupPanel data={myGroup} />
+              </div>
             </Tabs.Content>
 
             {isManagerOrAdmin && (
@@ -514,7 +606,7 @@ export function Stats() {
 
             {isManagerOrAdmin && (
               <Tabs.Content value="by-user">
-                <ByUserPanel data={byUser} />
+                <ByUserPanel data={byUser} params={params} />
               </Tabs.Content>
             )}
 
@@ -524,13 +616,17 @@ export function Stats() {
               </Tabs.Content>
             )}
 
-            <Tabs.Content value="my-stats">
-              <OwnStatsPanel data={myStats} />
-            </Tabs.Content>
+            {isManagerOrAdmin && (
+              <Tabs.Content value="api-keys">
+                <ApiKeyPanel data={byApiKey} />
+              </Tabs.Content>
+            )}
 
-            <Tabs.Content value="my-group">
-              <MyGroupPanel data={myGroup} />
-            </Tabs.Content>
+            {isManagerOrAdmin && hasFederation && (
+              <Tabs.Content value="federation">
+                <FederationPanel data={federationStats} />
+              </Tabs.Content>
+            )}
 
             {isManagerOrAdmin && (
               <Tabs.Content value="log">

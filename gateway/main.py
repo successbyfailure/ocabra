@@ -73,6 +73,34 @@ async def _start_service_bg(service_id: str) -> None:
         logger.warning("start_service_failed service=%s error=%s", service_id, exc)
 
 
+async def _check_user_auth(request: Request) -> dict | None:
+    """Validate user authentication by forwarding credentials to ocabra /ocabra/auth/me.
+
+    Checks Authorization header (Bearer token) and ocabra_session cookie.
+    Returns user dict on success, None on failure.
+    """
+    headers: dict[str, str] = {}
+    auth = request.headers.get("authorization", "")
+    if auth:
+        headers["Authorization"] = auth
+    cookie = request.cookies.get("ocabra_session", "")
+    if cookie:
+        headers["Cookie"] = f"ocabra_session={cookie}"
+    if not headers:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                f"{OCABRA_API_URL}/ocabra/auth/me",
+                headers={**headers, **_service_headers()},
+            )
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Internal gateway API  (/_gw/*)
 # ---------------------------------------------------------------------------
@@ -174,6 +202,24 @@ async def ws_catch_all(websocket: WebSocket, path: str) -> None:
         await websocket.close(code=4004, reason="Unknown host")
         return
 
+    # Auth check for WebSocket: verify cookie from upgrade headers
+    cookie = websocket.cookies.get("ocabra_session", "")
+    if cookie:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(
+                    f"{OCABRA_API_URL}/ocabra/auth/me",
+                    headers={"Cookie": f"ocabra_session={cookie}", **_service_headers()},
+                )
+                if r.status_code != 200:
+                    await websocket.close(code=4401, reason="Unauthorized")
+                    return
+        except Exception:
+            pass  # If API unreachable, allow (same as HTTP blind proxy)
+    else:
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+
     state = await _get_service_state(service["service_id"])
     if state and not state.get("service_alive", False):
         await websocket.close(code=4503, reason="Service not ready — load the page first")
@@ -198,6 +244,12 @@ async def http_catch_all(request: Request, path: str) -> Response:
     service = SERVICE_BY_HOST.get(host)
     if service is None:
         return HTMLResponse(not_found_page(host), status_code=404)
+
+    # ── Auth check: user must be logged in to access services ──
+    user = await _check_user_auth(request)
+    if user is None:
+        from pages import login_page
+        return HTMLResponse(login_page(service.get("display_name", "servicio")), status_code=401)
 
     service_id = service["service_id"]
     state = await _get_service_state(service_id)

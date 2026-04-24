@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react"
 import * as Tabs from "@radix-ui/react-tabs"
+import {
+  Settings as SettingsIcon,
+  Cpu,
+  Server,
+  HardDrive,
+  Link,
+  Network,
+} from "lucide-react"
 import { toast } from "sonner"
+import { SkeletonList } from "@/components/common/Skeleton"
 import { api } from "@/api/client"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
@@ -61,6 +70,9 @@ const EMPTY_CONFIG: ServerConfig = {
   federationNodeName: "",
 }
 
+const TAB_TRIGGER =
+  "inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
+
 export function Settings() {
   const [loading, setLoading] = useState(true)
   const [config, setConfig] = useState<ServerConfig>(EMPTY_CONFIG)
@@ -117,48 +129,32 @@ export function Settings() {
       </div>
 
       {loading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 5 }).map((_, idx) => (
-            <div key={`settings-skeleton-${idx}`} className="h-40 animate-pulse rounded-lg bg-muted" />
-          ))}
-        </div>
+        <SkeletonList count={5} className="h-40" />
       ) : (
         <Tabs.Root defaultValue="general">
-          <Tabs.List className="flex gap-1 border-b border-border mb-4">
-            <Tabs.Trigger
-              value="general"
-              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
-            >
+          <Tabs.List className="flex gap-1 border-b border-border mb-4 overflow-x-auto flex-nowrap whitespace-nowrap">
+            <Tabs.Trigger value="general" className={TAB_TRIGGER}>
+              <SettingsIcon size={14} />
               General
             </Tabs.Trigger>
-            <Tabs.Trigger
-              value="gpus"
-              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
-            >
+            <Tabs.Trigger value="gpus" className={TAB_TRIGGER}>
+              <Cpu size={14} />
               GPUs
             </Tabs.Trigger>
-            <Tabs.Trigger
-              value="backends"
-              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
-            >
+            <Tabs.Trigger value="backends" className={TAB_TRIGGER}>
+              <Server size={14} />
               Backends
             </Tabs.Trigger>
-            <Tabs.Trigger
-              value="storage"
-              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
-            >
+            <Tabs.Trigger value="storage" className={TAB_TRIGGER}>
+              <HardDrive size={14} />
               Almacenamiento
             </Tabs.Trigger>
-            <Tabs.Trigger
-              value="litellm"
-              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
-            >
+            <Tabs.Trigger value="litellm" className={TAB_TRIGGER}>
+              <Link size={14} />
               LiteLLM
             </Tabs.Trigger>
-            <Tabs.Trigger
-              value="federation"
-              className="px-4 py-2 text-sm font-medium rounded-t-md transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:bg-transparent"
-            >
+            <Tabs.Trigger value="federation" className={TAB_TRIGGER}>
+              <Network size={14} />
               Federation
             </Tabs.Trigger>
           </Tabs.List>

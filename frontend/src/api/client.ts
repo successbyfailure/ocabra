@@ -42,6 +42,10 @@ import type {
   ByUserStats,
   ByGroupStats,
   MyGroupStats,
+  ByApiKeyStats,
+  UserDetailStats,
+  FederationStats,
+  ServerPower,
   FederationPeer,
   FederationPeerCreate,
   FederationPeerUpdate,
@@ -1113,6 +1117,27 @@ export const api = {
     myGroup: (params: StatsParams) => {
       const query = buildQuery({ from: params.from, to: params.to })
       return request<MyGroupStats>("GET", `/ocabra/stats/my-group${query}`)
+    },
+    byApiKey: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to })
+      return request<ByApiKeyStats>("GET", `/ocabra/stats/by-api-key${query}`)
+    },
+    userDetail: (userId: string, params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to })
+      return request<UserDetailStats>("GET", `/ocabra/stats/user/${encodeURIComponent(userId)}/detail${query}`)
+    },
+    federation: (params: StatsParams) => {
+      const query = buildQuery({ from: params.from, to: params.to })
+      return request<FederationStats>("GET", `/ocabra/stats/federation${query}`)
+    },
+    serverPower: async (): Promise<ServerPower> => {
+      const raw = await request<Record<string, unknown>>("GET", `/ocabra/stats/server-power`)
+      return {
+        cpuPowerW: raw.cpuPowerW ?? raw.cpu_power_w ?? null,
+        cpuTempC: raw.cpuTempC ?? raw.cpu_temp_c ?? null,
+        totalGpuPowerW: raw.totalGpuPowerW ?? raw.total_gpu_power_w ?? null,
+        totalPowerW: raw.totalPowerW ?? raw.total_power_w ?? null,
+      } as ServerPower
     },
   },
 

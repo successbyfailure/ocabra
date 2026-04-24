@@ -1,4 +1,4 @@
-import { NavLink, useNavigate } from "react-router-dom"
+import { NavLink } from "react-router-dom"
 import {
   LayoutDashboard,
   Boxes,
@@ -8,18 +8,22 @@ import {
   BarChart2,
   ScrollText,
   Settings,
-  LogOut,
   Users,
   UsersRound,
   Key,
+  BookOpen,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import { clsx } from "clsx"
 import { useAuthStore } from "@/stores/authStore"
-import { api } from "@/api/client"
 
 interface SidebarProps {
   open: boolean
   onClose: () => void
+  collapsed: boolean
+  onToggleCollapse: () => void
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -33,6 +37,7 @@ interface NavItem {
   label: string
   icon: React.ElementType
   minRole?: "model_manager" | "system_admin"
+  external?: boolean
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -45,6 +50,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/logs",      label: "Logs",       icon: ScrollText },
   { to: "/api-keys",  label: "API Keys",   icon: Key },
   { to: "/settings",  label: "Settings",   icon: Settings },
+  { to: "/docs",      label: "API Docs",   icon: BookOpen, external: true },
 ]
 
 const ADMIN_NAV_ITEMS: NavItem[] = [
@@ -52,11 +58,74 @@ const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: "/groups", label: "Grupos",   icon: UsersRound, minRole: "system_admin" },
 ]
 
-export function Sidebar({ open, onClose }: SidebarProps) {
+function NavItemLink({
+  item,
+  collapsed,
+  onClose,
+}: {
+  item: NavItem
+  collapsed: boolean
+  onClose: () => void
+}) {
+  const { to, label, icon: Icon, external } = item
+
+  const link = external ? (
+    <a
+      href={to}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={clsx(
+        "flex items-center gap-3 rounded-md text-sm font-medium transition-colors",
+        collapsed ? "justify-center px-2 py-2" : "px-3 py-2",
+        "text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      <Icon size={16} className="shrink-0" />
+      {!collapsed && label}
+    </a>
+  ) : (
+    <NavLink
+      to={to}
+      onClick={onClose}
+      className={({ isActive }) =>
+        clsx(
+          "flex items-center gap-3 rounded-md text-sm font-medium transition-colors",
+          collapsed ? "justify-center px-2 py-2" : "px-3 py-2",
+          isActive
+            ? "bg-primary/10 text-primary"
+            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        )
+      }
+    >
+      <Icon size={16} className="shrink-0" />
+      {!collapsed && label}
+    </NavLink>
+  )
+
+  if (collapsed) {
+    return (
+      <Tooltip.Root>
+        <Tooltip.Trigger asChild>{link}</Tooltip.Trigger>
+        <Tooltip.Portal>
+          <Tooltip.Content
+            side="right"
+            sideOffset={8}
+            className="z-50 rounded-md border border-border bg-popover px-2.5 py-1 text-xs shadow-md"
+          >
+            {label}
+            <Tooltip.Arrow className="fill-border" />
+          </Tooltip.Content>
+        </Tooltip.Portal>
+      </Tooltip.Root>
+    )
+  }
+
+  return link
+}
+
+export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarProps) {
   const user = useAuthStore((s) => s.user)
   const hasRole = useAuthStore((s) => s.hasRole)
-  const logout = useAuthStore((s) => s.logout)
-  const navigate = useNavigate()
 
   const visibleItems = NAV_ITEMS.filter(
     (item) => !item.minRole || hasRole(item.minRole),
@@ -66,104 +135,84 @@ export function Sidebar({ open, onClose }: SidebarProps) {
     (item) => !item.minRole || hasRole(item.minRole),
   )
 
-  async function handleLogout() {
-    try {
-      await api.auth.logout()
-    } catch {
-      // Ignore errors — session may already be gone
-    }
-    logout()
-    navigate("/login", { replace: true })
-  }
-
   return (
-    <aside
-      className={clsx(
-        "fixed inset-y-0 left-0 z-30 w-56 flex flex-col border-r border-border bg-card transition-transform lg:static lg:translate-x-0",
-        open ? "translate-x-0" : "-translate-x-full",
-      )}
-    >
-      {/* Logo */}
-      <div className="flex items-center gap-2 px-5 py-5 border-b border-border">
-        <span className="text-xl font-bold tracking-tight text-foreground">oCabra</span>
-        <span className="text-xs text-muted-foreground mt-0.5">AI Server</span>
-      </div>
+    <Tooltip.Provider delayDuration={200}>
+      <aside
+        className={clsx(
+          "fixed inset-y-0 left-0 z-30 flex flex-col border-r border-border bg-card transition-all duration-200 lg:static lg:translate-x-0",
+          collapsed ? "w-16" : "w-56",
+          open ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        {/* Logo */}
+        <div className={clsx(
+          "flex items-center border-b border-border",
+          collapsed ? "justify-center px-2 py-5" : "gap-2 px-5 py-5",
+        )}>
+          <span className="text-xl font-bold tracking-tight text-foreground">
+            {collapsed ? "oC" : "oCabra"}
+          </span>
+          {!collapsed && (
+            <span className="text-xs text-muted-foreground mt-0.5">AI Server</span>
+          )}
+        </div>
 
-      {/* Nav */}
-      <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
-        {visibleItems.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            onClick={onClose}
-            className={({ isActive }) =>
-              clsx(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
-                isActive
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )
-            }
+        {/* Nav */}
+        <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
+          {visibleItems.map((item) => (
+            <NavItemLink key={item.to} item={item} collapsed={collapsed} onClose={onClose} />
+          ))}
+
+          {/* Admin section */}
+          {visibleAdminItems.length > 0 && (
+            <div className="pt-3">
+              {!collapsed && (
+                <p className="px-3 pb-1 text-xs font-semibold uppercase tracking-widest text-muted-foreground/60">
+                  Admin
+                </p>
+              )}
+              {visibleAdminItems.map((item) => (
+                <NavItemLink key={item.to} item={item} collapsed={collapsed} onClose={onClose} />
+              ))}
+            </div>
+          )}
+        </nav>
+
+        {/* User info (only when expanded) + collapse toggle */}
+        <div className="border-t border-border px-2 py-3 space-y-2">
+          {!collapsed && user && (
+            <div className="flex items-center gap-3 px-2">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/20 text-sm font-semibold text-primary uppercase">
+                {user.username.charAt(0)}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-foreground">{user.username}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {ROLE_LABELS[user.role] ?? user.role}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Collapse toggle (desktop only) */}
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className={clsx(
+              "hidden lg:flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+              collapsed && "justify-center px-2",
+            )}
+            title={collapsed ? "Expandir sidebar" : "Colapsar sidebar"}
           >
-            <Icon size={16} />
-            {label}
-          </NavLink>
-        ))}
+            {collapsed ? <ChevronsRight size={14} /> : <ChevronsLeft size={14} />}
+            {!collapsed && "Colapsar"}
+          </button>
 
-        {/* Admin section — only shown to system_admin */}
-        {visibleAdminItems.length > 0 && (
-          <div className="pt-3">
-            <p className="px-3 pb-1 text-xs font-semibold uppercase tracking-widest text-muted-foreground/60">
-              Administración
-            </p>
-            {visibleAdminItems.map(({ to, label, icon: Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                onClick={onClose}
-                className={({ isActive }) =>
-                  clsx(
-                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )
-                }
-              >
-                <Icon size={16} />
-                {label}
-              </NavLink>
-            ))}
-          </div>
-        )}
-      </nav>
-
-      {/* User info + logout */}
-      <div className="border-t border-border px-4 py-3 space-y-2">
-        {user && (
-          <div className="flex items-center gap-3">
-            {/* Avatar initial */}
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/20 text-sm font-semibold text-primary uppercase">
-              {user.username.charAt(0)}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-foreground">{user.username}</p>
-              <p className="truncate text-xs text-muted-foreground">
-                {ROLE_LABELS[user.role] ?? user.role}
-              </p>
-            </div>
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        >
-          <LogOut size={14} />
-          Cerrar sesión
-        </button>
-        <span className="block text-xs text-muted-foreground px-1">v0.5.0</span>
-      </div>
-    </aside>
+          {!collapsed && (
+            <span className="block text-xs text-muted-foreground px-3">v0.5.0</span>
+          )}
+        </div>
+      </aside>
+    </Tooltip.Provider>
   )
 }

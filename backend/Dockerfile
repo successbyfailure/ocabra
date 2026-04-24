@@ -28,7 +28,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} ${LLAMA_CPP_REPO} /build/llama.cpp
-RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build -DCMAKE_BUILD_TYPE=Release
+ARG LLAMA_CUDA_ARCHITECTURES="75;80;86;89;90"
+RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES}" \
+    -DLLAMA_CURL=OFF
 RUN cmake --build /build/llama.cpp/build --target llama-server -j4
 
 FROM docker:28-cli AS docker-cli

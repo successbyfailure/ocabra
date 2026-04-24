@@ -12,6 +12,10 @@ import { useWebSocket } from "@/hooks/useWebSocket"
 import { getModelContextSummary } from "@/lib/modelContext"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
+import { Search } from "lucide-react"
+import { ConfirmDialog } from "@/components/common/ConfirmDialog"
+import { SkeletonList } from "@/components/common/Skeleton"
+import { StyledSelect } from "@/components/common/StyledSelect"
 import type { BackendExtraConfig, BackendType, LoadPolicy, ModelProfile, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
 
 function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
@@ -38,6 +42,9 @@ export function Models() {
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
   const [storage, setStorage] = useState<ModelsStorageStats | null>(null)
+
+  // Confirm dialog state
+  const [confirmAction, setConfirmAction] = useState<{ modelId: string; action: "load" | "unload" } | null>(null)
 
   // Profile modal state
   const [profileModalModel, setProfileModalModel] = useState<ModelState | null>(null)
@@ -270,64 +277,66 @@ export function Models() {
       })()}
 
       <div className="grid gap-2 rounded-lg border border-border bg-card p-3 md:grid-cols-4">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Buscar modelo"
-          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Buscar modelo"
+            className="w-full rounded-md border border-border bg-background pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+          />
+        </div>
+
+        <StyledSelect
+          value={statusFilter}
+          onValueChange={(v) => setStatusFilter(v as ModelStatus | "all")}
+          className="w-full"
+          options={[
+            { value: "all", label: "Status: todos" },
+            { value: "configured", label: "configured" },
+            { value: "loading", label: "loading" },
+            { value: "loaded", label: "loaded" },
+            { value: "unloading", label: "unloading" },
+            { value: "unloaded", label: "unloaded" },
+            { value: "error", label: "error" },
+          ]}
         />
 
-        <select
-          value={statusFilter}
-          onChange={(event) => setStatusFilter(event.target.value as ModelStatus | "all")}
-          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
-        >
-          <option value="all">Status: todos</option>
-          <option value="configured">configured</option>
-          <option value="loading">loading</option>
-          <option value="loaded">loaded</option>
-          <option value="unloading">unloading</option>
-          <option value="unloaded">unloaded</option>
-          <option value="error">error</option>
-        </select>
-
-        <select
+        <StyledSelect
           value={typeFilter}
-          onChange={(event) => setTypeFilter(event.target.value as "all" | "llm" | "image" | "audio" | "pooling")}
-          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
-        >
-          <option value="all">Tipo: todos</option>
-          <option value="llm">llm</option>
-          <option value="pooling">pooling</option>
-          <option value="image">image</option>
-          <option value="audio">audio</option>
-        </select>
+          onValueChange={(v) => setTypeFilter(v as "all" | "llm" | "image" | "audio" | "pooling")}
+          className="w-full"
+          options={[
+            { value: "all", label: "Tipo: todos" },
+            { value: "llm", label: "llm" },
+            { value: "pooling", label: "pooling" },
+            { value: "image", label: "image" },
+            { value: "audio", label: "audio" },
+          ]}
+        />
 
-        <select
+        <StyledSelect
           value={backendFilter}
-          onChange={(event) => setBackendFilter(event.target.value as BackendType | "all")}
-          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
-        >
-          <option value="all">Backend: todos</option>
-          {Array.from(new Set(modelList.map((model) => model.backendType))).sort().map((backend) => (
-            <option key={backend} value={backend}>
-              {backend}
-            </option>
-          ))}
-        </select>
+          onValueChange={(v) => setBackendFilter(v as BackendType | "all")}
+          className="w-full"
+          options={[
+            { value: "all", label: "Backend: todos" },
+            ...Array.from(new Set(modelList.map((model) => model.backendType))).sort().map((backend) => ({
+              value: backend,
+              label: backend,
+            })),
+          ]}
+        />
 
-        <select
+        <StyledSelect
           value={gpuFilter}
-          onChange={(event) => setGpuFilter(event.target.value)}
-          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
-        >
-          <option value="all">GPU: todas</option>
-          {gpus.map((gpu) => (
-            <option key={gpu.index} value={gpu.index}>
-              GPU {gpu.index}
-            </option>
-          ))}
-        </select>
+          onValueChange={setGpuFilter}
+          className="w-full"
+          options={[
+            { value: "all", label: "GPU: todas" },
+            ...gpus.map((gpu) => ({ value: String(gpu.index), label: `GPU ${gpu.index}` })),
+          ]}
+        />
       </div>
 
       {!loading && (
@@ -339,11 +348,7 @@ export function Models() {
       )}
 
       {loading ? (
-        <div className="space-y-2" role="status" aria-label="Cargando lista de modelos">
-          {Array.from({ length: 5 }).map((_, idx) => (
-            <div key={`skeleton-${idx}`} className="h-12 animate-pulse rounded-md bg-muted" />
-          ))}
-        </div>
+        <SkeletonList count={5} />
       ) : (
         <Tooltip.Provider delayDuration={300}>
           <div className="overflow-x-auto rounded-lg border border-border bg-card">
@@ -360,7 +365,7 @@ export function Models() {
                       Tipo {sortKey === "type" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
                   </th>
-                  <th className="px-3 py-2">
+                  <th className="px-3 py-2 hidden lg:table-cell">
                     <button type="button" onClick={() => toggleSort("backend")} className="hover:text-foreground">
                       Backend {sortKey === "backend" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
@@ -385,7 +390,7 @@ export function Models() {
                       GPU {sortKey === "gpu" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
                   </th>
-                  <th className="px-3 py-2">
+                  <th className="px-3 py-2 hidden xl:table-cell">
                     <Tooltip.Root>
                       <Tooltip.Trigger asChild>
                         <button type="button" onClick={() => toggleSort("ctxNative")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
@@ -400,7 +405,7 @@ export function Models() {
                       </Tooltip.Portal>
                     </Tooltip.Root>
                   </th>
-                  <th className="px-3 py-2">
+                  <th className="px-3 py-2 hidden xl:table-cell">
                     <Tooltip.Root>
                       <Tooltip.Trigger asChild>
                         <button type="button" onClick={() => toggleSort("ctxConfig")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
@@ -415,7 +420,7 @@ export function Models() {
                       </Tooltip.Portal>
                     </Tooltip.Root>
                   </th>
-                  <th className="px-3 py-2">
+                  <th className="px-3 py-2 hidden xl:table-cell">
                     <button type="button" onClick={() => toggleSort("io")} className="hover:text-foreground">
                       Input / Output {sortKey === "io" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
@@ -425,7 +430,7 @@ export function Models() {
                       VRAM {sortKey === "vram" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
                   </th>
-                  <th className="px-3 py-2">
+                  <th className="px-3 py-2 hidden lg:table-cell">
                     <button type="button" onClick={() => toggleSort("size")} className="hover:text-foreground">
                       Tamaño {sortKey === "size" && (sortDir === "asc" ? "↑" : "↓")}
                     </button>
@@ -445,8 +450,8 @@ export function Models() {
                     key={model.modelId}
                     model={model}
                     busy={busyModelId === model.modelId}
-                    onLoad={(modelId) => void runAction(modelId, () => loadModel(modelId))}
-                    onUnload={(modelId) => void runAction(modelId, () => unloadModel(modelId))}
+                    onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
+                    onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
                     onTogglePin={(item) => void togglePin(item)}
                     onConfigure={(item) => setConfigModel(item)}
                     onDelete={(item) => setDeleteModel(item)}
@@ -546,6 +551,29 @@ export function Models() {
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+
+      {/* Confirm Load/Unload */}
+      <ConfirmDialog
+        open={Boolean(confirmAction)}
+        onOpenChange={(open) => !open && setConfirmAction(null)}
+        title={confirmAction?.action === "load" ? "Cargar modelo" : "Descargar modelo"}
+        description={
+          confirmAction?.action === "load"
+            ? `Se cargara el modelo "${confirmAction.modelId}" en GPU. Esto consumira VRAM.`
+            : `Se descargara el modelo "${confirmAction?.modelId}" de GPU y liberara VRAM.`
+        }
+        confirmLabel={confirmAction?.action === "load" ? "Cargar" : "Descargar"}
+        variant={confirmAction?.action === "unload" ? "danger" : "default"}
+        onConfirm={() => {
+          if (!confirmAction) return
+          const { modelId, action } = confirmAction
+          if (action === "load") {
+            void runAction(modelId, () => loadModel(modelId))
+          } else {
+            void runAction(modelId, () => unloadModel(modelId))
+          }
+        }}
+      />
     </div>
   )
 }

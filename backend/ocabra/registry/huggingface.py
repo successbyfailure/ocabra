@@ -199,6 +199,8 @@ class HuggingFaceRegistry:
                     compatibility=self._compatibility_from_vllm_support(vllm_support),
                     compatibility_reason=self._compatibility_reason_from_support(vllm_support),
                     vllm_support=vllm_support,
+                    created_at=getattr(model, "created_at", None),
+                    last_modified=getattr(model, "last_modified", None),
                 )
             )
         return cards

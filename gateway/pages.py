@@ -221,6 +221,96 @@ p  {{ color:#6b7280; font-size:14px; }}
 
 
 # ---------------------------------------------------------------------------
+# Login page (shown when accessing a service without auth)
+# ---------------------------------------------------------------------------
+
+
+def login_page(service_name: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>oCabra — Iniciar sesion</title>
+<style>{_BASE_CSS}
+body {{ display:flex; align-items:center; justify-content:center; padding:24px; }}
+.login-card {{
+    width: 100%; max-width: 360px;
+    background: #111827; border: 1px solid #1f2937;
+    border-radius: 12px; padding: 36px 32px;
+}}
+.login-card h1 {{ font-size: 20px; font-weight: 700; color: #f9fafb; margin-bottom: 4px; }}
+.login-card p  {{ font-size: 13px; color: #6b7280; margin-bottom: 24px; }}
+.field {{ margin-bottom: 16px; }}
+.field label {{ display: block; font-size: 13px; color: #9ca3af; margin-bottom: 6px; }}
+.field input {{
+    width: 100%; padding: 9px 12px; background: #1f2937;
+    border: 1px solid #374151; border-radius: 6px; color: #f9fafb;
+    font-size: 14px; outline: none;
+}}
+.field input:focus {{ border-color: #3b82f6; }}
+.login-btn {{
+    width: 100%; padding: 10px; background: #2563eb; color: #fff;
+    border: none; border-radius: 6px; font-size: 14px; font-weight: 500;
+    cursor: pointer; margin-top: 4px;
+}}
+.login-btn:hover {{ background: #1d4ed8; }}
+.login-btn:disabled {{ opacity: .5; cursor: not-allowed; }}
+.login-error {{ color: #f87171; font-size: 13px; margin-top: 10px; min-height: 18px; }}
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>oCabra</h1>
+  <p>Inicia sesion para acceder a {service_name}</p>
+  <div class="field">
+    <label>Usuario</label>
+    <input type="text" id="login-user" autocomplete="username" placeholder="usuario" />
+  </div>
+  <div class="field">
+    <label>Contrasena</label>
+    <input type="password" id="login-pass" autocomplete="current-password" placeholder="••••••••" />
+  </div>
+  <button class="login-btn" id="login-btn" onclick="doLogin()">Entrar</button>
+  <p class="login-error" id="login-error"></p>
+</div>
+<script>
+async function doLogin() {{
+  const btn  = document.getElementById('login-btn');
+  const err  = document.getElementById('login-error');
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  if (!user || !pass) {{ err.textContent = 'Introduce usuario y contrasena'; return; }}
+  btn.disabled = true; err.textContent = '';
+  try {{
+    const r = await fetch('/_gw/auth/login', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ username: user, password: pass }}),
+    }});
+    const data = await r.json();
+    if (!r.ok) {{ err.textContent = data.detail || 'Error de autenticacion'; btn.disabled = false; return; }}
+    // Set session cookie so the gateway can verify on next page load
+    document.cookie = 'ocabra_session=' + data.access_token + '; path=/; SameSite=Lax; max-age=86400';
+    location.reload();
+  }} catch (e) {{
+    err.textContent = 'Error de conexion';
+    btn.disabled = false;
+  }}
+}}
+document.getElementById('login-pass').addEventListener('keydown', e => {{
+  if (e.key === 'Enter') doLogin();
+}});
+document.getElementById('login-user').addEventListener('keydown', e => {{
+  if (e.key === 'Enter') document.getElementById('login-pass').focus();
+}});
+document.getElementById('login-user').focus();
+</script>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
 # Directory page
 # ---------------------------------------------------------------------------
 

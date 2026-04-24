@@ -81,6 +81,8 @@ export interface ModelState {
   schedules?: EvictionSchedule[]
   extraConfig?: BackendExtraConfig
   profiles?: ModelProfile[]
+  createdAt?: string | null
+  updatedAt?: string | null
   federation?: {
     remote: boolean
     nodeName: string
@@ -286,6 +288,8 @@ export interface HFModelCard {
   compatibility?: string
   compatibilityReason?: string | null
   vllmSupport?: HFVLLMSupport | null
+  createdAt?: string | null
+  lastModified?: string | null
 }
 
 export interface HFModelDetail extends HFModelCard {
@@ -406,6 +410,8 @@ export interface EnergyStats {
   totalKwh: number
   estimatedCostEur: number
   byGpu: { gpuIndex: number; totalKwh: number; powerDrawW: number }[]
+  cpuKwh?: number
+  totalServerKwh?: number
 }
 
 export interface PerformanceStats {
@@ -444,6 +450,8 @@ export interface OverviewStats {
   tokenizedRequests: number
   totalInputTokens: number
   totalOutputTokens: number
+  estimatedCostUsd?: number
+  totalEnergyWh?: number
   byBackend: {
     backendType: string
     totalRequests: number
@@ -491,6 +499,8 @@ export interface UserStatRow {
   avgDurationMs: number
   totalInputTokens: number
   totalOutputTokens: number
+  totalEnergyWh?: number
+  estimatedCostUsd?: number
 }
 
 export interface GroupStatRow {
@@ -501,6 +511,8 @@ export interface GroupStatRow {
   avgDurationMs: number
   totalInputTokens: number
   totalOutputTokens: number
+  totalEnergyWh?: number
+  estimatedCostUsd?: number
 }
 
 export interface ByUserStats {
@@ -515,6 +527,50 @@ export interface MyGroupStats {
   groupId: string | null
   groupName: string | null
   stats: OverviewStats
+}
+
+export interface ApiKeyStatRow {
+  apiKeyName: string
+  userId: string | null
+  username: string | null
+  totalRequests: number
+  totalErrors: number
+  avgDurationMs: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalEnergyWh: number
+  estimatedCostUsd: number
+}
+
+export interface ByApiKeyStats {
+  byApiKey: ApiKeyStatRow[]
+}
+
+export interface UserDetailStats {
+  userId: string
+  username: string
+  totalRequests: number
+  totalErrors: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalEnergyWh: number
+  estimatedCostUsd: number
+  topModels: { modelId: string; requests: number; inputTokens: number; outputTokens: number }[]
+  byRequestKind: { requestKind: string; count: number }[]
+  tokenSeries: { timestamp: string; inputTokens: number; outputTokens: number }[]
+}
+
+export interface FederationStats {
+  localCount: number
+  remoteCount: number
+  byNode: { nodeId: string; count: number; avgDurationMs: number }[]
+}
+
+export interface ServerPower {
+  cpuPowerW: number | null
+  cpuTempC: number | null
+  totalGpuPowerW: number | null
+  totalPowerW: number | null
 }
 
 export interface GPUStatHistoryPoint {

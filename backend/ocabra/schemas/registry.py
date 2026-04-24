@@ -70,6 +70,8 @@ class HFModelCard(BaseModel):
     compatibility: str = "unknown"
     compatibility_reason: str | None = None
     vllm_support: HFVLLMSupport | None = None
+    created_at: datetime | None = None
+    last_modified: datetime | None = None
 
 
 class HFModelDetail(HFModelCard):

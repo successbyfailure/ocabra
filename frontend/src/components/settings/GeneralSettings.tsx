@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { StyledSelect } from "@/components/common/StyledSelect"
 import type { ServerConfig } from "@/types"
 
 interface GeneralSettingsProps {
@@ -67,19 +68,21 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
   return (
     <section className="space-y-3 rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">General</h2>
-      <label className="block text-sm text-muted-foreground">
-        Log level
-        <select
+      <div className="space-y-1">
+        <span className="text-sm text-muted-foreground">Log level</span>
+        <StyledSelect
           value={logLevel}
-          onChange={(event) => setLogLevel(event.target.value)}
-          className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-        >
-          <option value="debug">debug</option>
-          <option value="info">info</option>
-          <option value="warning">warning</option>
-          <option value="error">error</option>
-        </select>
-      </label>
+          onValueChange={setLogLevel}
+          className="w-full"
+          options={[
+            { value: "debug", label: "debug" },
+            { value: "info", label: "info" },
+            { value: "warning", label: "warning" },
+            { value: "error", label: "error" },
+          ]}
+        />
+        <p className="text-xs text-muted-foreground/70">Nivel de detalle de los logs del servidor</p>
+      </div>
 
       <div className="grid gap-2 md:grid-cols-2">
         <label className="text-sm text-muted-foreground">
@@ -91,6 +94,7 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
             onChange={(event) => setIdleTimeoutSeconds(Number(event.target.value))}
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
+          <p className="text-xs text-muted-foreground/70 mt-1">Tiempo en segundos antes de descargar modelos inactivos</p>
         </label>
 
         <label className="text-sm text-muted-foreground">
@@ -103,6 +107,7 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
             onChange={(event) => setEnergyCostEurKwh(Number(event.target.value))}
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
+          <p className="text-xs text-muted-foreground/70 mt-1">Coste de electricidad para calcular el gasto energetico</p>
         </label>
       </div>
 
@@ -111,36 +116,32 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
         Modelos STT y TTS por defecto para sesiones /v1/realtime (WebSocket de audio bidireccional).
       </p>
       <div className="grid gap-2 md:grid-cols-2">
-        <label className="text-sm text-muted-foreground">
-          Modelo STT (Whisper)
-          <select
+        <div className="space-y-1">
+          <span className="text-sm text-muted-foreground">Modelo STT (Whisper)</span>
+          <StyledSelect
             value={realtimeDefaultSttModel}
-            onChange={(e) => setRealtimeDefaultSttModel(e.target.value)}
-            className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-          >
-            <option value="">— Sin configurar —</option>
-            {sttModels.map((m) => (
-              <option key={m.modelId} value={m.modelId}>
-                {m.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm text-muted-foreground">
-          Modelo TTS
-          <select
+            onValueChange={setRealtimeDefaultSttModel}
+            className="w-full"
+            placeholder="— Sin configurar —"
+            options={[
+              { value: "", label: "— Sin configurar —" },
+              ...sttModels.map((m) => ({ value: m.modelId, label: m.displayName })),
+            ]}
+          />
+        </div>
+        <div className="space-y-1">
+          <span className="text-sm text-muted-foreground">Modelo TTS</span>
+          <StyledSelect
             value={realtimeDefaultTtsModel}
-            onChange={(e) => setRealtimeDefaultTtsModel(e.target.value)}
-            className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-          >
-            <option value="">— Sin configurar —</option>
-            {ttsModels.map((m) => (
-              <option key={m.modelId} value={m.modelId}>
-                {m.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
+            onValueChange={setRealtimeDefaultTtsModel}
+            className="w-full"
+            placeholder="— Sin configurar —"
+            options={[
+              { value: "", label: "— Sin configurar —" },
+              ...ttsModels.map((m) => ({ value: m.modelId, label: m.displayName })),
+            ]}
+          />
+        </div>
       </div>
 
       <button

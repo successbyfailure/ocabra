@@ -1,4 +1,5 @@
 import asyncio
+import json as _json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -74,6 +75,12 @@ class WorkerPool:
             resp = await client.post(url, json=body)
             resp.raise_for_status()
             result = resp.json()
+        # Normalize reasoning → reasoning_content for chat completions
+        if "/chat/completions" in path:
+            for choice in result.get("choices", []):
+                msg = choice.get("message") or choice.get("delta")
+                if msg and "reasoning" in msg:
+                    msg["reasoning_content"] = msg.pop("reasoning")
         if settings.langfuse_enabled:
             from ocabra.integrations.langfuse_tracer import trace_generation
 
@@ -106,11 +113,17 @@ class WorkerPool:
                     async for chunk in resp.aiter_bytes():
                         yield chunk
 
+        # Normalize reasoning → reasoning_content for chat completions
+        is_chat = "/chat/completions" in path
+        source: AsyncIterator[bytes] = _raw_stream()
+        if is_chat:
+            source = self._normalize_reasoning_stream(source)
+
         if settings.langfuse_enabled:
             from ocabra.integrations.langfuse_tracer import wrap_stream
 
             async for chunk in wrap_stream(
-                _raw_stream(),
+                source,
                 model_id=model_id,
                 path=path,
                 request_body=body,
@@ -118,8 +131,57 @@ class WorkerPool:
             ):
                 yield chunk
         else:
-            async for chunk in _raw_stream():
+            async for chunk in source:
                 yield chunk
+
+    # ------------------------------------------------------------------
+    # SSE normalisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _normalize_reasoning_stream(
+        raw: AsyncIterator[bytes],
+    ) -> AsyncIterator[bytes]:
+        """Normalize ``reasoning`` → ``reasoning_content`` in SSE delta chunks.
+
+        Both vLLM and Ollama emit a non-standard ``"reasoning"`` key inside
+        ``choices[].delta``.  The de-facto standard (DeepSeek / OpenAI) is
+        ``"reasoning_content"``.  This pass rewrites the field name so that
+        downstream clients receive a consistent schema without touching the
+        actual content.
+
+        The function reassembles byte chunks into complete SSE lines, edits
+        only the JSON payload of ``data:`` lines, and re-emits valid SSE.
+        """
+        buf = b""
+        async for chunk in raw:
+            buf += chunk
+            # Process all complete lines in the buffer
+            while b"\n" in buf:
+                line_bytes, buf = buf.split(b"\n", 1)
+                line = line_bytes.rstrip(b"\r")
+
+                if line.startswith(b"data: ") and line != b"data: [DONE]":
+                    try:
+                        payload = _json.loads(line[6:])
+                        changed = False
+                        for choice in payload.get("choices", []):
+                            delta = choice.get("delta")
+                            if delta and "reasoning" in delta:
+                                delta["reasoning_content"] = delta.pop("reasoning")
+                                changed = True
+                        if changed:
+                            line = b"data: " + _json.dumps(
+                                payload, ensure_ascii=False,
+                            ).encode()
+                    except (_json.JSONDecodeError, KeyError, TypeError):
+                        pass  # forward as-is
+
+                yield line + b"\n"
+
+        # Flush any remaining bytes (no trailing newline)
+        if buf:
+            yield buf
 
     # ------------------------------------------------------------------
     # Modality helpers

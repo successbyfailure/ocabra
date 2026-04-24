@@ -216,3 +216,86 @@ async def my_group_stats(
     """
     from ocabra.stats.aggregator import get_my_group_stats
     return await get_my_group_stats(user.group_ids, from_dt, to_dt)
+
+
+@router.get(
+    "/stats/by-api-key",
+    summary="Stats aggregated by API key",
+    description="Return request totals, error counts, and token usage grouped by API key name.",
+)
+async def stats_by_api_key(
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return request statistics grouped by API key.
+
+    Returns:
+        { byApiKey: [{ apiKeyName, userId, username, totalRequests, totalErrors,
+                       avgDurationMs, totalInputTokens, totalOutputTokens,
+                       totalEnergyWh, estimatedCostUsd }] }
+    """
+    from ocabra.stats.aggregator import get_stats_by_api_key
+    return await get_stats_by_api_key(from_dt, to_dt)
+
+
+@router.get(
+    "/stats/user/{user_id}/detail",
+    summary="Detailed stats for a user",
+    description="Return detailed request stats, top models, and token time series for a specific user.",
+)
+async def user_detail_stats(
+    user_id: str,
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return detailed statistics for a specific user.
+
+    Args:
+        user_id: UUID of the user to query.
+
+    Returns:
+        { userId, username, totalRequests, totalErrors, totalInputTokens,
+          totalOutputTokens, totalEnergyWh, estimatedCostUsd,
+          topModels, byRequestKind, tokenSeries }
+    """
+    from ocabra.stats.aggregator import get_user_detail
+    return await get_user_detail(user_id, from_dt, to_dt)
+
+
+@router.get(
+    "/stats/federation",
+    summary="Federation statistics",
+    description="Return request distribution between local and remote federated nodes.",
+)
+async def federation_stats(
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return federation request distribution: local vs. remote nodes.
+
+    Returns:
+        { localCount, remoteCount, byNode: [{ nodeId, count, avgDurationMs }] }
+    """
+    from ocabra.stats.aggregator import get_federation_stats
+    return await get_federation_stats(from_dt, to_dt)
+
+
+@router.get(
+    "/stats/server-power",
+    summary="Current server power readings",
+    description="Return the latest server power snapshot from Redis.",
+)
+async def server_power(
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Return current server power readings from Redis.
+
+    Returns:
+        The ``server:power`` Redis key contents, or an empty dict if unavailable.
+    """
+    from ocabra.redis_client import get_key
+    data = await get_key("server:power")
+    return data if isinstance(data, dict) else {}

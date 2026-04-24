@@ -11,7 +11,8 @@ from math import ceil
 import sqlalchemy as sa
 
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.stats import GpuStat, ModelLoadStat, RequestStat
+from ocabra.db.stats import GpuStat, ModelLoadStat, RequestStat, ServerStat
+from ocabra.stats.cost_calculator import estimate_cost_for_rows
 
 
 def _normalize_window(
@@ -145,10 +146,35 @@ async def get_energy_stats(
             }
         )
 
+    # CPU / server energy from ServerStat table
+    async with AsyncSessionLocal() as session:
+        sq = sa.select(ServerStat).where(
+            ServerStat.recorded_at >= from_dt,
+            ServerStat.recorded_at <= to_dt,
+        ).order_by(ServerStat.recorded_at)
+        s_result = await session.execute(sq)
+        s_rows = s_result.scalars().all()
+
+    cpu_energy_wh = 0.0
+    if s_rows:
+        ordered_s = sorted(s_rows, key=lambda r: r.recorded_at)
+        for i, row in enumerate(ordered_s):
+            start = row.recorded_at
+            end = ordered_s[i + 1].recorded_at if i + 1 < len(ordered_s) else to_dt
+            if end <= start:
+                continue
+            interval_s = (end - start).total_seconds()
+            cpu_energy_wh += float(row.cpu_power_w or 0.0) * interval_s / 3600.0
+
+    cpu_kwh = cpu_energy_wh / 1000.0
+    total_server_kwh = total_kwh + cpu_kwh
+
     return {
         "totalKwh": round(total_kwh, 4),
         "estimatedCostEur": round(total_kwh * settings.energy_cost_eur_kwh, 4),
         "byGpu": gpu_summaries,
+        "cpuKwh": round(cpu_kwh, 4),
+        "totalServerKwh": round(total_server_kwh, 4),
     }
 
 
@@ -282,6 +308,8 @@ async def get_stats_by_user(
             "avgDurationMs": int(sum(durations) / n) if n else 0,
             "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in urows),
             "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in urows),
+            "totalEnergyWh": round(sum(r.energy_wh or 0 for r in urows), 2),
+            "estimatedCostUsd": round(estimate_cost_for_rows(urows), 4),
         })
     return {"byUser": summaries}
 
@@ -327,6 +355,8 @@ async def get_stats_by_group(
             "avgDurationMs": int(sum(durations) / n) if n else 0,
             "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in grows),
             "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in grows),
+            "totalEnergyWh": round(sum(r.energy_wh or 0 for r in grows), 2),
+            "estimatedCostUsd": round(estimate_cost_for_rows(grows), 4),
         })
     return {"byGroup": summaries}
 
@@ -637,6 +667,8 @@ async def get_overview_stats(
             "tokenizedRequests": 0,
             "totalInputTokens": 0,
             "totalOutputTokens": 0,
+            "totalEnergyWh": 0.0,
+            "estimatedCostUsd": 0.0,
             "byBackend": [],
             "byRequestKind": [],
         }
@@ -672,6 +704,8 @@ async def get_overview_stats(
         "tokenizedRequests": tokenized_requests,
         "totalInputTokens": int(total_input_tokens),
         "totalOutputTokens": int(total_output_tokens),
+        "totalEnergyWh": round(sum(r.energy_wh or 0 for r in rows), 2),
+        "estimatedCostUsd": round(estimate_cost_for_rows(rows), 4),
         "byBackend": [
             _summarize(group_rows, "backendType", backend)
             for backend, group_rows in sorted(by_backend.items(), key=lambda item: item[0])
@@ -680,4 +714,192 @@ async def get_overview_stats(
             _summarize(group_rows, "requestKind", kind)
             for kind, group_rows in sorted(by_kind.items(), key=lambda item: item[0])
         ],
+    }
+
+
+async def get_stats_by_api_key(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return request stats aggregated by API key name."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    from ocabra.db.auth import User
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+            RequestStat.api_key_name.isnot(None),
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+        user_ids = {r.user_id for r in rows if r.user_id}
+        username_map: dict = {}
+        if user_ids:
+            u_result = await session.execute(sa.select(User).where(User.id.in_(user_ids)))
+            for u in u_result.scalars().all():
+                username_map[u.id] = u.username
+
+    by_key: dict[str, list] = defaultdict(list)
+    for row in rows:
+        by_key[row.api_key_name].append(row)
+
+    summaries = []
+    for key_name, krows in sorted(by_key.items(), key=lambda x: -len(x[1])):
+        n = len(krows)
+        durations = [max(0, int(r.duration_ms or 0)) for r in krows]
+        errors = sum(1 for r in krows if r.error or (r.status_code is not None and r.status_code >= 400))
+        # Pick the first user_id found for this key
+        uid = next((r.user_id for r in krows if r.user_id), None)
+        summaries.append({
+            "apiKeyName": key_name,
+            "userId": str(uid) if uid else None,
+            "username": username_map.get(uid, str(uid)) if uid else None,
+            "totalRequests": n,
+            "totalErrors": errors,
+            "avgDurationMs": int(sum(durations) / n) if n else 0,
+            "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in krows),
+            "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in krows),
+            "totalEnergyWh": round(sum(r.energy_wh or 0 for r in krows), 2),
+            "estimatedCostUsd": round(estimate_cost_for_rows(krows), 4),
+        })
+    return {"byApiKey": summaries}
+
+
+async def get_user_detail(
+    user_id: str,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return detailed stats for a single user."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    import uuid as _uuid
+    from ocabra.db.auth import User
+
+    try:
+        uid = _uuid.UUID(str(user_id))
+    except ValueError:
+        return {
+            "userId": user_id, "username": user_id,
+            "totalRequests": 0, "totalErrors": 0,
+            "totalInputTokens": 0, "totalOutputTokens": 0,
+            "totalEnergyWh": 0.0, "estimatedCostUsd": 0.0,
+            "topModels": [], "byRequestKind": [], "tokenSeries": [],
+        }
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+            RequestStat.user_id == uid,
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+        username = str(uid)
+        u_result = await session.execute(sa.select(User).where(User.id == uid))
+        u_obj = u_result.scalar_one_or_none()
+        if u_obj:
+            username = u_obj.username
+
+    n = len(rows)
+    if n == 0:
+        return {
+            "userId": str(uid), "username": username,
+            "totalRequests": 0, "totalErrors": 0,
+            "totalInputTokens": 0, "totalOutputTokens": 0,
+            "totalEnergyWh": 0.0, "estimatedCostUsd": 0.0,
+            "topModels": [], "byRequestKind": [], "tokenSeries": [],
+        }
+
+    errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
+    total_input = sum(max(0, int(r.input_tokens or 0)) for r in rows)
+    total_output = sum(max(0, int(r.output_tokens or 0)) for r in rows)
+
+    # Top models
+    by_model: dict[str, dict] = defaultdict(lambda: {"requests": 0, "inputTokens": 0, "outputTokens": 0})
+    for r in rows:
+        m = by_model[r.model_id]
+        m["requests"] += 1
+        m["inputTokens"] += max(0, int(r.input_tokens or 0))
+        m["outputTokens"] += max(0, int(r.output_tokens or 0))
+    top_models = sorted(
+        [{"modelId": mid, **vals} for mid, vals in by_model.items()],
+        key=lambda x: -x["requests"],
+    )[:10]
+
+    # By request kind
+    by_kind: dict[str, int] = defaultdict(int)
+    for r in rows:
+        by_kind[r.request_kind or "other"] += 1
+    by_request_kind = [{"requestKind": k, "count": c} for k, c in sorted(by_kind.items())]
+
+    # Token time series (per-minute)
+    per_minute: dict[datetime, dict[str, int]] = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0})
+    for r in rows:
+        if r.started_at:
+            bucket = _truncate_minute(r.started_at)
+            per_minute[bucket]["inputTokens"] += max(0, int(r.input_tokens or 0))
+            per_minute[bucket]["outputTokens"] += max(0, int(r.output_tokens or 0))
+    token_series = [
+        {"timestamp": ts.isoformat(), **counts}
+        for ts, counts in sorted(per_minute.items())
+    ]
+
+    return {
+        "userId": str(uid),
+        "username": username,
+        "totalRequests": n,
+        "totalErrors": errors,
+        "totalInputTokens": int(total_input),
+        "totalOutputTokens": int(total_output),
+        "totalEnergyWh": round(sum(r.energy_wh or 0 for r in rows), 2),
+        "estimatedCostUsd": round(estimate_cost_for_rows(rows), 4),
+        "topModels": top_models,
+        "byRequestKind": by_request_kind,
+        "tokenSeries": token_series,
+    }
+
+
+async def get_federation_stats(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return federation request distribution: local vs. remote nodes."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    local_count = 0
+    remote_count = 0
+    by_node: dict[str, list] = defaultdict(list)
+
+    for r in rows:
+        if r.remote_node_id is None:
+            local_count += 1
+        else:
+            remote_count += 1
+            by_node[r.remote_node_id].append(r)
+
+    node_summaries = []
+    for node_id, nrows in sorted(by_node.items()):
+        n = len(nrows)
+        durations = [max(0, int(r.duration_ms or 0)) for r in nrows]
+        node_summaries.append({
+            "nodeId": node_id,
+            "count": n,
+            "avgDurationMs": int(sum(durations) / n) if n else 0,
+        })
+
+    return {
+        "localCount": local_count,
+        "remoteCount": remote_count,
+        "byNode": node_summaries,
     }

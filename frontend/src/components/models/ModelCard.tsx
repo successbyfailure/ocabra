@@ -1,9 +1,11 @@
 import { useState } from "react"
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import {
   ChevronDown,
   ChevronRight,
   Cpu,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -146,31 +148,37 @@ export function ModelCard({
                 )}
               </div>
               <div className="text-xs text-muted-foreground">{model.modelId}</div>
+              {(model.createdAt || model.updatedAt) && (
+                <div className="text-[10px] text-muted-foreground/60 mt-0.5">
+                  {model.createdAt && `Registrado ${new Date(model.createdAt).toLocaleDateString()}`}
+                  {model.updatedAt && model.createdAt !== model.updatedAt && ` · Actualizado ${new Date(model.updatedAt).toLocaleDateString()}`}
+                </div>
+              )}
             </div>
           </div>
         </td>
         <td className="px-3 py-3 text-muted-foreground">{modelType(model)}</td>
-        <td className="px-3 py-3 text-muted-foreground">{model.backendType}</td>
+        <td className="px-3 py-3 text-muted-foreground hidden lg:table-cell">{model.backendType}</td>
         <td className="px-3 py-3">
           <LoadPolicyBadge policy={model.loadPolicy} />
         </td>
         <td className="px-3 py-3 text-muted-foreground">
           {model.currentGpu.join(", ") || (model.preferredGpu ?? "-")}
         </td>
-        <td className="px-3 py-3 text-muted-foreground">
+        <td className="px-3 py-3 text-muted-foreground hidden xl:table-cell">
           <div>{formatTokenCount(context.nativeContext)}</div>
           <div className="text-xs opacity-70">nativo</div>
         </td>
-        <td className="px-3 py-3 text-muted-foreground">
+        <td className="px-3 py-3 text-muted-foreground hidden xl:table-cell">
           <div>{formatTokenCount(context.configuredContext)}</div>
           <div className="text-xs opacity-70">configurado</div>
         </td>
-        <td className="px-3 py-3 text-muted-foreground">
+        <td className="px-3 py-3 text-muted-foreground hidden xl:table-cell">
           <div>{formatTokenCount(context.maxInputTokens)} / {formatTokenCount(context.maxOutputTokens)}</div>
           <div className="text-xs opacity-70">input / output</div>
         </td>
         <td className="px-3 py-3 text-muted-foreground">{model.vramUsedMb.toLocaleString()} MB</td>
-        <td className="px-3 py-3 text-muted-foreground">{formatDiskSize(model.diskSizeBytes)}</td>
+        <td className="px-3 py-3 text-muted-foreground hidden lg:table-cell">{formatDiskSize(model.diskSizeBytes)}</td>
         <td className="px-3 py-3">
           <ModelStatusBadge status={model.status} />
         </td>
@@ -178,7 +186,8 @@ export function ModelCard({
           {profileCount}
         </td>
         <td className="px-3 py-3">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            {/* Primary actions: Load / Unload */}
             <button
               type="button"
               onClick={() => onLoad(model.modelId)}
@@ -197,44 +206,59 @@ export function ModelCard({
             >
               <Square size={14} />
             </button>
-            <button
-              type="button"
-              onClick={() => onTogglePin(model)}
-              disabled={busy}
-              className="rounded-md border border-border p-1.5 text-foreground hover:bg-muted disabled:opacity-40"
-              title={model.loadPolicy === "pin" ? "Unpin" : "Pin"}
-            >
-              {model.loadPolicy === "pin" ? <PinOff size={14} /> : <Pin size={14} />}
-            </button>
-            <button
-              type="button"
-              onClick={() => onConfigure(model)}
-              disabled={busy}
-              className="rounded-md border border-border p-1.5 text-foreground hover:bg-muted disabled:opacity-40"
-              title="Configure"
-            >
-              <Pencil size={14} />
-            </button>
-            {onCompile && model.backendType === "vllm" && (
-              <button
-                type="button"
-                onClick={() => onCompile(model)}
-                disabled={busy}
-                className="rounded-md border border-purple-500/40 p-1.5 text-purple-300 hover:bg-purple-500/10 disabled:opacity-40"
-                title="Compilar engine TensorRT-LLM"
-              >
-                <Cpu size={14} />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => onDelete(model)}
-              disabled={busy}
-              className="rounded-md border border-red-500/40 p-1.5 text-red-200 disabled:opacity-40"
-              title="Delete"
-            >
-              <Trash2 size={14} />
-            </button>
+
+            {/* Secondary actions: dropdown */}
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  disabled={busy}
+                  className="rounded-md border border-border p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+                  title="Mas acciones"
+                >
+                  <MoreHorizontal size={14} />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  className="z-50 min-w-[180px] rounded-md border border-border bg-card p-1 shadow-md"
+                  sideOffset={4}
+                  align="end"
+                >
+                  <DropdownMenu.Item
+                    className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer outline-none hover:bg-muted focus:bg-muted"
+                    onSelect={() => onTogglePin(model)}
+                  >
+                    {model.loadPolicy === "pin" ? <PinOff size={14} /> : <Pin size={14} />}
+                    {model.loadPolicy === "pin" ? "Unpin" : "Pin"}
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer outline-none hover:bg-muted focus:bg-muted"
+                    onSelect={() => onConfigure(model)}
+                  >
+                    <Pencil size={14} />
+                    Configurar
+                  </DropdownMenu.Item>
+                  {onCompile && model.backendType === "vllm" && (
+                    <DropdownMenu.Item
+                      className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer outline-none hover:bg-muted focus:bg-muted text-purple-300"
+                      onSelect={() => onCompile(model)}
+                    >
+                      <Cpu size={14} />
+                      Compilar TRT
+                    </DropdownMenu.Item>
+                  )}
+                  <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                  <DropdownMenu.Item
+                    className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer outline-none hover:bg-muted focus:bg-muted text-red-400"
+                    onSelect={() => onDelete(model)}
+                  >
+                    <Trash2 size={14} />
+                    Eliminar
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
           </div>
         </td>
       </tr>
@@ -261,8 +285,8 @@ export function ModelCard({
           profile.loadOverrides !== null &&
           Object.keys(profile.loadOverrides).length > 0
         return (
-          <tr key={profile.profileId} className="border-b border-border/30 bg-muted/10 text-sm">
-            <td className="py-2 pl-10 pr-3">
+          <tr key={profile.profileId} className="border-b border-border/30 border-l-2 border-l-primary/30 bg-muted/10 text-sm">
+            <td className="py-2 pl-12 pr-3">
               <div className="font-mono text-xs">{profile.profileId}</div>
             </td>
             <td className="px-3 py-2">
@@ -270,7 +294,7 @@ export function ModelCard({
                 {profile.displayName || "-"}
               </span>
             </td>
-            <td className="px-3 py-2">
+            <td className="px-3 py-2 hidden lg:table-cell">
               <CategoryBadge category={profile.category} />
             </td>
             <td className="px-3 py-2">
@@ -298,7 +322,7 @@ export function ModelCard({
                 </span>
               )}
             </td>
-            <td className="px-3 py-2" colSpan={2}>
+            <td className="px-3 py-2 hidden xl:table-cell" colSpan={2}>
               <Tooltip.Provider delayDuration={200}>
                 <Tooltip.Root>
                   <Tooltip.Trigger asChild>
@@ -325,7 +349,7 @@ export function ModelCard({
                 </Tooltip.Root>
               </Tooltip.Provider>
             </td>
-            <td className="px-3 py-2" colSpan={4} />
+            <td className="px-3 py-2 hidden xl:table-cell" colSpan={4} />
             <td className="px-3 py-2" />
             <td className="px-3 py-2">
               <div className="flex items-center gap-2">
@@ -343,8 +367,8 @@ export function ModelCard({
         )
       })}
       {expanded && (
-        <tr className="border-b border-border/60 bg-muted/5 text-sm">
-          <td colSpan={13} className="py-2 pl-10 pr-3">
+        <tr className="border-b border-border/60 border-l-2 border-l-primary/30 bg-muted/5 text-sm">
+          <td colSpan={13} className="py-2 pl-12 pr-3">
             <button
               type="button"
               onClick={() => onEditProfile(model, null)}

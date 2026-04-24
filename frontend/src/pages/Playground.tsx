@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { AlertTriangle } from "lucide-react"
+import { AlertTriangle, MessageSquarePlus, SlidersHorizontal } from "lucide-react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { api } from "@/api/client"
@@ -32,6 +32,10 @@ export function Playground() {
   const [models, setModels] = useState<ModelState[]>([])
   const [selectedModelId, setSelectedModelId] = useState("")
   const [params, setParams] = useState<PlaygroundParams>(DEFAULT_PARAMS)
+  const [showParams, setShowParams] = useState(() =>
+    typeof window !== "undefined" && window.innerWidth >= 1280,
+  )
+  const [chatKey, setChatKey] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -90,24 +94,52 @@ export function Playground() {
         </div>
       ) : (
         <>
-          <ModelSelector models={models} selectedModelId={selectedModelId} onSelect={setSelectedModelId} />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex-1 min-w-0">
+              <ModelSelector models={models} selectedModelId={selectedModelId} onSelect={setSelectedModelId} />
+            </div>
+            <button
+              type="button"
+              onClick={() => setChatKey((k) => k + 1)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+            >
+              <MessageSquarePlus size={14} />
+              Nueva conversacion
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowParams((p) => !p)}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                showParams
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+              title={showParams ? "Ocultar parametros" : "Mostrar parametros"}
+            >
+              <SlidersHorizontal size={14} />
+              <span className="hidden sm:inline">Params</span>
+            </button>
+          </div>
+
           {selectedModel && selectedModel.status !== "loaded" && (
             <div role="alert" className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
               <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" aria-hidden="true" />
               <div>
                 <span className="font-medium">Modelo no cargado</span>
                 {" — "}estado actual: <span className="font-mono">{selectedModel.status}</span>.
-                {" "}La primera llamada lo cargará automáticamente (puede tardar).{" "}
+                {" "}La primera llamada lo cargara automaticamente (puede tardar).{" "}
                 <Link to="/models" className="underline underline-offset-2 hover:text-amber-50">
-                  Gestionar modelos →
+                  Gestionar modelos
                 </Link>
               </div>
             </div>
           )}
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-            <section>
+
+          <div className={`grid gap-4 transition-all duration-200 ${showParams ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
+            <section className="h-[calc(100vh-16rem)] min-h-[400px]">
               {mode === "chat" && (
                 <ChatInterface
+                  key={chatKey}
                   modelId={selectedModelId}
                   backendType={selectedModel?.backendType ?? null}
                   params={params}
@@ -131,7 +163,7 @@ export function Playground() {
                 />
               )}
             </section>
-            <ParamsPanel params={params} onChange={setParams} />
+            {showParams && <ParamsPanel params={params} onChange={setParams} />}
           </div>
         </>
       )}

@@ -1,5 +1,21 @@
+import { Calendar } from "lucide-react"
 import type { HFModelCard } from "@/types"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
+
+function formatRelativeDate(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  const now = Date.now()
+  const diff = now - d.getTime()
+  const days = Math.floor(diff / 86400000)
+  if (days < 1) return "hoy"
+  if (days < 30) return `hace ${days}d`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `hace ${months}m`
+  const years = Math.floor(months / 12)
+  return `hace ${years}a`
+}
 
 interface HFModelCardProps {
   model: HFModelCard
@@ -47,6 +63,12 @@ export function HFModelCard({ model, onInstall }: HFModelCardProps) {
         <span className="rounded bg-muted px-2 py-0.5">size {sizeLabel}</span>
         <span className="rounded bg-muted px-2 py-0.5">backend {model.suggestedBackend}</span>
         {supportLabel && <span className="rounded bg-muted px-2 py-0.5">vllm {supportLabel}</span>}
+        {model.lastModified && (
+          <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5" title={`Actualizado: ${new Date(model.lastModified).toLocaleDateString()}`}>
+            <Calendar size={10} />
+            {formatRelativeDate(model.lastModified)}
+          </span>
+        )}
         {model.gated && <span className="rounded bg-amber-500/20 px-2 py-0.5 text-amber-200">gated</span>}
         {model.compatibility === "warning" && (
           <span className="rounded bg-amber-500/20 px-2 py-0.5 text-amber-200">compat warning</span>

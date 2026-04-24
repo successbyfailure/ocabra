@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Tabs from "@radix-ui/react-tabs"
+import { ChevronDown, ChevronRight, Search, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { DownloadQueue } from "@/components/downloads/DownloadQueue"
@@ -25,6 +26,23 @@ interface InstallTarget {
   modelRef: string
   title: string
   ollamaBase?: string
+}
+
+function AdvancedDetails({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Detalles avanzados
+      </button>
+      {open && <div className="space-y-2">{children}</div>}
+    </div>
+  )
 }
 
 export function getProbePreconfigurationNotice(variant: HFModelVariant | null): string | null {
@@ -393,30 +411,46 @@ export function Explore() {
         <p className="text-muted-foreground">Buscar modelos en HuggingFace, BitNet y Ollama.</p>
       </div>
 
-      <input
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder="Buscar modelo"
-        className="w-full rounded-lg border border-border bg-card px-3 py-2"
-      />
+      <div className="relative">
+        {loading ? (
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        ) : (
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        )}
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Buscar modelo"
+          className="w-full rounded-lg border border-border bg-card pl-10 pr-9 py-2 focus:outline-none focus:ring-2 focus:ring-primary/50"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
 
       <Tabs.Root value={activeTab} onValueChange={(value) => setActiveTab(value as "hf" | "bitnet" | "ollama")}>
-        <Tabs.List className="inline-flex rounded-lg border border-border bg-card p-1">
+        <Tabs.List className="flex gap-1 border-b border-border">
           <Tabs.Trigger
             value="hf"
-            className="rounded-md px-3 py-1.5 text-sm text-muted-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground"
+            className="px-4 py-2 text-sm font-medium transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary"
           >
             HuggingFace
           </Tabs.Trigger>
           <Tabs.Trigger
             value="bitnet"
-            className="rounded-md px-3 py-1.5 text-sm text-muted-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground"
+            className="px-4 py-2 text-sm font-medium transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary"
           >
             BitNet
           </Tabs.Trigger>
           <Tabs.Trigger
             value="ollama"
-            className="rounded-md px-3 py-1.5 text-sm text-muted-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground"
+            className="px-4 py-2 text-sm font-medium transition-colors text-muted-foreground hover:text-foreground data-[state=active]:text-foreground data-[state=active]:border-b-2 data-[state=active]:border-primary"
           >
             Ollama
           </Tabs.Trigger>
@@ -631,50 +665,54 @@ export function Explore() {
                       {selectedHFVariant.compatibilityReason}
                     </div>
                   )}
-                  {selectedHFVariant?.vllmSupport && (
-                    <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                      {`vLLM: ${selectedHFVariant.vllmSupport.label}`}
-                      {selectedHFVariant.vllmSupport.modelImpl
-                        ? ` · model_impl=${selectedHFVariant.vllmSupport.modelImpl}`
-                        : ""}
-                      {selectedHFVariant.vllmSupport.runner
-                        ? ` · runner=${selectedHFVariant.vllmSupport.runner}`
-                        : ""}
-                      {selectedHFVariant.vllmSupport.requiredOverrides.length > 0
-                        ? ` · requiere ${selectedHFVariant.vllmSupport.requiredOverrides.join(", ")}`
-                        : ""}
-                      {probeStatusLabel
-                        ? ` · probe=${probeStatusLabel}`
-                        : ""}
-                    </div>
-                  )}
-                  {selectedHFVariant?.vllmSupport?.runtimeProbe && (
-                    <div className="rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
-                      {`Recomendacion verificada por probe`}
-                      {selectedHFVariant.vllmSupport.runtimeProbe.recommendedModelImpl
-                        ? ` · model_impl=${selectedHFVariant.vllmSupport.runtimeProbe.recommendedModelImpl}`
-                        : ""}
-                      {selectedHFVariant.vllmSupport.runtimeProbe.recommendedRunner
-                        ? ` · runner=${selectedHFVariant.vllmSupport.runtimeProbe.recommendedRunner}`
-                        : ""}
-                      {selectedHFVariant.vllmSupport.runtimeProbe.reason
-                        ? ` · ${selectedHFVariant.vllmSupport.runtimeProbe.reason}`
-                        : ""}
-                      {selectedHFVariant.vllmSupport.runtimeProbe.observedAt
-                        ? ` · observado=${selectedHFVariant.vllmSupport.runtimeProbe.observedAt}`
-                        : ""}
-                      {probeOverrideHint ? ` · ${probeOverrideHint}` : ""}
-                    </div>
-                  )}
-                  {probePreconfigurationNotice && (
-                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                      {probePreconfigurationNotice}
-                    </div>
-                  )}
-                  {recipeProbeDifferenceNotice && (
-                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                      {recipeProbeDifferenceNotice}
-                    </div>
+                  {(selectedHFVariant?.vllmSupport || probePreconfigurationNotice || recipeProbeDifferenceNotice) && (
+                    <AdvancedDetails>
+                      {selectedHFVariant?.vllmSupport && (
+                        <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                          {`vLLM: ${selectedHFVariant.vllmSupport.label}`}
+                          {selectedHFVariant.vllmSupport.modelImpl
+                            ? ` · model_impl=${selectedHFVariant.vllmSupport.modelImpl}`
+                            : ""}
+                          {selectedHFVariant.vllmSupport.runner
+                            ? ` · runner=${selectedHFVariant.vllmSupport.runner}`
+                            : ""}
+                          {selectedHFVariant.vllmSupport.requiredOverrides.length > 0
+                            ? ` · requiere ${selectedHFVariant.vllmSupport.requiredOverrides.join(", ")}`
+                            : ""}
+                          {probeStatusLabel
+                            ? ` · probe=${probeStatusLabel}`
+                            : ""}
+                        </div>
+                      )}
+                      {selectedHFVariant?.vllmSupport?.runtimeProbe && (
+                        <div className="rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
+                          {`Recomendacion verificada por probe`}
+                          {selectedHFVariant.vllmSupport.runtimeProbe.recommendedModelImpl
+                            ? ` · model_impl=${selectedHFVariant.vllmSupport.runtimeProbe.recommendedModelImpl}`
+                            : ""}
+                          {selectedHFVariant.vllmSupport.runtimeProbe.recommendedRunner
+                            ? ` · runner=${selectedHFVariant.vllmSupport.runtimeProbe.recommendedRunner}`
+                            : ""}
+                          {selectedHFVariant.vllmSupport.runtimeProbe.reason
+                            ? ` · ${selectedHFVariant.vllmSupport.runtimeProbe.reason}`
+                            : ""}
+                          {selectedHFVariant.vllmSupport.runtimeProbe.observedAt
+                            ? ` · observado=${selectedHFVariant.vllmSupport.runtimeProbe.observedAt}`
+                            : ""}
+                          {probeOverrideHint ? ` · ${probeOverrideHint}` : ""}
+                        </div>
+                      )}
+                      {probePreconfigurationNotice && (
+                        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                          {probePreconfigurationNotice}
+                        </div>
+                      )}
+                      {recipeProbeDifferenceNotice && (
+                        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                          {recipeProbeDifferenceNotice}
+                        </div>
+                      )}
+                    </AdvancedDetails>
                   )}
                   {selectedHFVariant?.vllmSupport?.recipeId && (
                     <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">

@@ -1,10 +1,32 @@
 import { useEffect, useState } from "react"
+import { ChevronDown, ChevronRight } from "lucide-react"
 import { toast } from "sonner"
 import type { ServerConfig } from "@/types"
 
 interface BackendRuntimeSettingsProps {
   config: ServerConfig
   onSave: (patch: Partial<ServerConfig>) => Promise<void>
+}
+
+function SectionHeader({
+  title,
+  open,
+  onToggle,
+}: {
+  title: string
+  open: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex w-full items-center justify-between gap-2 rounded-md bg-muted/30 px-3 py-2 text-sm font-medium cursor-pointer hover:bg-muted/50 transition-colors"
+    >
+      {title}
+      {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+    </button>
+  )
 }
 
 export function BackendRuntimeSettings({ config, onSave }: BackendRuntimeSettingsProps) {
@@ -32,6 +54,18 @@ export function BackendRuntimeSettings({ config, onSave }: BackendRuntimeSetting
   const [tensorrtLlmContextLength, setTensorRTLLMContextLength] = useState(config.tensorrtLlmContextLength ?? 0)
   const [openaiAudioMaxPartSizeMb, setOpenAIAudioMaxPartSizeMb] = useState(config.openaiAudioMaxPartSizeMb)
   const [whisperStartupTimeoutSeconds, setWhisperStartupTimeoutSeconds] = useState(config.whisperStartupTimeoutSeconds)
+
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    vllm: true,
+    sglang: false,
+    llamacpp: false,
+    diffusers: false,
+    audio: false,
+    tensorrt: false,
+  })
+
+  const toggleSection = (key: string) =>
+    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }))
 
   useEffect(() => {
     setVLLMGpuMemoryUtilization(config.vllmGpuMemoryUtilization)
@@ -94,257 +128,199 @@ export function BackendRuntimeSettings({ config, onSave }: BackendRuntimeSetting
     }
   }
 
+  const inputClass = "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+  const checkboxClass = "accent-primary h-4 w-4"
+
   return (
-    <section className="space-y-4 rounded-lg border border-border bg-card p-4">
+    <section className="space-y-3 rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Backend defaults</h2>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-3 rounded-md border border-border/70 p-3">
-          <h3 className="text-sm font-medium">vLLM</h3>
-          <label className="block text-sm text-muted-foreground">
-            GPU memory utilization
-            <input
-              type="number"
-              min={0.1}
-              max={0.99}
-              step="0.01"
-              value={vllmGpuMemoryUtilization}
-              onChange={(event) => setVLLMGpuMemoryUtilization(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            Max concurrent sequences
-            <input
-              type="number"
-              min={0}
-              value={vllmMaxNumSeqs}
-              onChange={(event) => setVLLMMaxNumSeqs(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            Max batched tokens
-            <input
-              type="number"
-              min={0}
-              value={vllmMaxNumBatchedTokens}
-              onChange={(event) => setVLLMMaxNumBatchedTokens(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={vllmEnablePrefixCaching}
-              onChange={(event) => setVLLMEnablePrefixCaching(event.target.checked)}
-            />
-            Prefix caching
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={vllmEnforceEager}
-              onChange={(event) => setVLLMEnforceEager(event.target.checked)}
-            />
-            Enforce eager
-          </label>
-        </div>
+      {/* vLLM */}
+      <div className="space-y-2">
+        <SectionHeader title="vLLM" open={openSections.vllm} onToggle={() => toggleSection("vllm")} />
+        {openSections.vllm && (
+          <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+            <label className="block text-sm text-muted-foreground">
+              GPU memory utilization
+              <input type="number" min={0.1} max={0.99} step="0.01" value={vllmGpuMemoryUtilization}
+                onChange={(e) => setVLLMGpuMemoryUtilization(Number(e.target.value))} className={inputClass} />
+              <p className="text-xs text-muted-foreground/70 mt-1">Fraccion de VRAM que vLLM puede usar. Reducir si hay OOM.</p>
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Max concurrent sequences
+              <input type="number" min={0} value={vllmMaxNumSeqs}
+                onChange={(e) => setVLLMMaxNumSeqs(Number(e.target.value))} className={inputClass} />
+              <p className="text-xs text-muted-foreground/70 mt-1">Maximo de secuencias procesadas en paralelo (0 = default).</p>
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Max batched tokens
+              <input type="number" min={0} value={vllmMaxNumBatchedTokens}
+                onChange={(e) => setVLLMMaxNumBatchedTokens(Number(e.target.value))} className={inputClass} />
+            </label>
+            <div className="flex flex-col gap-2 justify-end">
+              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={vllmEnablePrefixCaching} className={checkboxClass}
+                  onChange={(e) => setVLLMEnablePrefixCaching(e.target.checked)} />
+                Prefix caching
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={vllmEnforceEager} className={checkboxClass}
+                  onChange={(e) => setVLLMEnforceEager(e.target.checked)} />
+                Enforce eager
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
 
-        <div className="space-y-3 rounded-md border border-border/70 p-3">
-          <h3 className="text-sm font-medium">SGLang</h3>
-          <label className="block text-sm text-muted-foreground">
-            Mem fraction static
-            <input
-              type="number"
-              min={0.1}
-              max={0.99}
-              step="0.01"
-              value={sglangMemFractionStatic}
-              onChange={(event) => setSGLangMemFractionStatic(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            Context length
-            <input
-              type="number"
-              min={0}
-              value={sglangContextLength}
-              onChange={(event) => setSGLangContextLength(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={sglangDisableRadixCache}
-              onChange={(event) => setSGLangDisableRadixCache(event.target.checked)}
-            />
-            Disable radix cache
-          </label>
-        </div>
+      {/* SGLang */}
+      <div className="space-y-2">
+        <SectionHeader title="SGLang" open={openSections.sglang} onToggle={() => toggleSection("sglang")} />
+        {openSections.sglang && (
+          <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+            <label className="block text-sm text-muted-foreground">
+              Mem fraction static
+              <input type="number" min={0.1} max={0.99} step="0.01" value={sglangMemFractionStatic}
+                onChange={(e) => setSGLangMemFractionStatic(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Context length
+              <input type="number" min={0} value={sglangContextLength}
+                onChange={(e) => setSGLangContextLength(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+              <input type="checkbox" checked={sglangDisableRadixCache} className={checkboxClass}
+                onChange={(e) => setSGLangDisableRadixCache(e.target.checked)} />
+              Disable radix cache
+            </label>
+          </div>
+        )}
+      </div>
 
-        <div className="space-y-3 rounded-md border border-border/70 p-3">
-          <h3 className="text-sm font-medium">llama.cpp / BitNet</h3>
-          <label className="block text-sm text-muted-foreground">
-            llama.cpp GPU layers
-            <input
-              type="number"
-              min={0}
-              value={llamaCppGpuLayers}
-              onChange={(event) => setLlamaCppGpuLayers(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            llama.cpp ctx size
-            <input
-              type="number"
-              min={1}
-              value={llamaCppCtxSize}
-              onChange={(event) => setLlamaCppCtxSize(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={llamaCppFlashAttn}
-              onChange={(event) => setLlamaCppFlashAttn(event.target.checked)}
-            />
-            llama.cpp flash attention
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            BitNet GPU layers
-            <input
-              type="number"
-              min={0}
-              value={bitnetGpuLayers}
-              onChange={(event) => setBitnetGpuLayers(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            BitNet ctx size
-            <input
-              type="number"
-              min={1}
-              value={bitnetCtxSize}
-              onChange={(event) => setBitnetCtxSize(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={bitnetFlashAttn}
-              onChange={(event) => setBitnetFlashAttn(event.target.checked)}
-            />
-            BitNet flash attention
-          </label>
-        </div>
+      {/* llama.cpp / BitNet */}
+      <div className="space-y-2">
+        <SectionHeader title="llama.cpp / BitNet" open={openSections.llamacpp} onToggle={() => toggleSection("llamacpp")} />
+        {openSections.llamacpp && (
+          <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+            <label className="block text-sm text-muted-foreground">
+              llama.cpp GPU layers
+              <input type="number" min={0} value={llamaCppGpuLayers}
+                onChange={(e) => setLlamaCppGpuLayers(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              llama.cpp ctx size
+              <input type="number" min={1} value={llamaCppCtxSize}
+                onChange={(e) => setLlamaCppCtxSize(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+              <input type="checkbox" checked={llamaCppFlashAttn} className={checkboxClass}
+                onChange={(e) => setLlamaCppFlashAttn(e.target.checked)} />
+              llama.cpp flash attention
+            </label>
+            <div />
+            <label className="block text-sm text-muted-foreground">
+              BitNet GPU layers
+              <input type="number" min={0} value={bitnetGpuLayers}
+                onChange={(e) => setBitnetGpuLayers(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              BitNet ctx size
+              <input type="number" min={1} value={bitnetCtxSize}
+                onChange={(e) => setBitnetCtxSize(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+              <input type="checkbox" checked={bitnetFlashAttn} className={checkboxClass}
+                onChange={(e) => setBitnetFlashAttn(e.target.checked)} />
+              BitNet flash attention
+            </label>
+          </div>
+        )}
+      </div>
 
-        <div className="space-y-3 rounded-md border border-border/70 p-3">
-          <h3 className="text-sm font-medium">Diffusers / Audio / TensorRT-LLM</h3>
-          <label className="block text-sm text-muted-foreground">
-            Diffusers torch dtype
-            <select
-              value={diffusersTorchDtype}
-              onChange={(event) => setDiffusersTorchDtype(event.target.value)}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            >
-              <option value="auto">auto</option>
-              <option value="float16">float16</option>
-              <option value="bfloat16">bfloat16</option>
-              <option value="float32">float32</option>
-            </select>
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            Diffusers offload mode
-            <select
-              value={diffusersOffloadMode}
-              onChange={(event) => setDiffusersOffloadMode(event.target.value)}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            >
-              <option value="none">none</option>
-              <option value="model">model</option>
-              <option value="sequential">sequential</option>
-            </select>
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={diffusersEnableTorchCompile}
-              onChange={(event) => setDiffusersEnableTorchCompile(event.target.checked)}
-            />
-            Diffusers torch.compile
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={diffusersEnableXformers}
-              onChange={(event) => setDiffusersEnableXformers(event.target.checked)}
-            />
-            Diffusers xFormers
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={diffusersAllowTf32}
-              onChange={(event) => setDiffusersAllowTf32(event.target.checked)}
-            />
-            Diffusers allow TF32
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            OpenAI audio max part size (MB)
-            <input
-              type="number"
-              min={1}
-              value={openaiAudioMaxPartSizeMb}
-              onChange={(event) => setOpenAIAudioMaxPartSizeMb(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            Whisper startup timeout (s)
-            <input
-              type="number"
-              min={1}
-              value={whisperStartupTimeoutSeconds}
-              onChange={(event) => setWhisperStartupTimeoutSeconds(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={tensorrtLlmEnabled}
-              onChange={(event) => setTensorRTLLMEnabled(event.target.checked)}
-            />
-            TensorRT-LLM enabled
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            TensorRT-LLM max batch size
-            <input
-              type="number"
-              min={0}
-              value={tensorrtLlmMaxBatchSize}
-              onChange={(event) => setTensorRTLLMMaxBatchSize(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm text-muted-foreground">
-            TensorRT-LLM context length
-            <input
-              type="number"
-              min={0}
-              value={tensorrtLlmContextLength}
-              onChange={(event) => setTensorRTLLMContextLength(Number(event.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
-            />
-          </label>
-        </div>
+      {/* Diffusers */}
+      <div className="space-y-2">
+        <SectionHeader title="Diffusers" open={openSections.diffusers} onToggle={() => toggleSection("diffusers")} />
+        {openSections.diffusers && (
+          <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+            <label className="block text-sm text-muted-foreground">
+              Torch dtype
+              <select value={diffusersTorchDtype} onChange={(e) => setDiffusersTorchDtype(e.target.value)} className={inputClass}>
+                <option value="auto">auto</option>
+                <option value="float16">float16</option>
+                <option value="bfloat16">bfloat16</option>
+                <option value="float32">float32</option>
+              </select>
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Offload mode
+              <select value={diffusersOffloadMode} onChange={(e) => setDiffusersOffloadMode(e.target.value)} className={inputClass}>
+                <option value="none">none</option>
+                <option value="model">model</option>
+                <option value="sequential">sequential</option>
+              </select>
+            </label>
+            <div className="flex flex-col gap-2">
+              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={diffusersEnableTorchCompile} className={checkboxClass}
+                  onChange={(e) => setDiffusersEnableTorchCompile(e.target.checked)} />
+                torch.compile
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={diffusersEnableXformers} className={checkboxClass}
+                  onChange={(e) => setDiffusersEnableXformers(e.target.checked)} />
+                xFormers
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={diffusersAllowTf32} className={checkboxClass}
+                  onChange={(e) => setDiffusersAllowTf32(e.target.checked)} />
+                Allow TF32
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Audio / Whisper */}
+      <div className="space-y-2">
+        <SectionHeader title="Audio / Whisper" open={openSections.audio} onToggle={() => toggleSection("audio")} />
+        {openSections.audio && (
+          <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+            <label className="block text-sm text-muted-foreground">
+              Audio max part size (MB)
+              <input type="number" min={1} value={openaiAudioMaxPartSizeMb}
+                onChange={(e) => setOpenAIAudioMaxPartSizeMb(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Whisper startup timeout (s)
+              <input type="number" min={1} value={whisperStartupTimeoutSeconds}
+                onChange={(e) => setWhisperStartupTimeoutSeconds(Number(e.target.value))} className={inputClass} />
+            </label>
+          </div>
+        )}
+      </div>
+
+      {/* TensorRT-LLM */}
+      <div className="space-y-2">
+        <SectionHeader title="TensorRT-LLM" open={openSections.tensorrt} onToggle={() => toggleSection("tensorrt")} />
+        {openSections.tensorrt && (
+          <div className="grid gap-3 px-3 py-2 md:grid-cols-2">
+            <label className="inline-flex items-center gap-2 text-sm text-muted-foreground col-span-full">
+              <input type="checkbox" checked={tensorrtLlmEnabled} className={checkboxClass}
+                onChange={(e) => setTensorRTLLMEnabled(e.target.checked)} />
+              TensorRT-LLM enabled
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Max batch size
+              <input type="number" min={0} value={tensorrtLlmMaxBatchSize}
+                onChange={(e) => setTensorRTLLMMaxBatchSize(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="block text-sm text-muted-foreground">
+              Context length
+              <input type="number" min={0} value={tensorrtLlmContextLength}
+                onChange={(e) => setTensorRTLLMContextLength(Number(e.target.value))} className={inputClass} />
+            </label>
+          </div>
+        )}
       </div>
 
       <button

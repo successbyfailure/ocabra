@@ -1,13 +1,12 @@
 import asyncio
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pynvml
 import structlog
 
 from ocabra.config import settings
-from ocabra.redis_client import publish, publish_system_alert, set_key
+from ocabra.redis_client import get_key, publish, set_key
 
 logger = structlog.get_logger(__name__)
 
@@ -40,26 +39,29 @@ class GPUManager:
         self._states: dict[int, GPUState] = {}
         self._locks: dict[int, dict[str, int]] = {}  # gpu_index → {model_id: vram_mb}
         self._poll_task: asyncio.Task | None = None
-        self._poll_history: dict[int, list[dict]] = {}
         self._running: bool = False
-        self._last_temp_alert: dict[int, float] = {}
-        self.max_temperature_c: int = settings.max_temperature_c
+        self._hw_monitor_active: bool = False
+        self._nvml_available: bool = False
 
     async def start(self) -> None:
         try:
             pynvml.nvmlInit()
+            self._nvml_available = True
         except pynvml.NVMLError as e:
-            logger.warning("nvml_unavailable", error=str(e), detail="GPU monitoring disabled")
+            logger.warning("nvml_unavailable", error=str(e), detail="GPU monitoring disabled; relying on hw-monitor")
             self._running = True
             return
         count = pynvml.nvmlDeviceGetCount()
         for i in range(count):
             self._locks[i] = {}
-            self._poll_history[i] = []
             self._states[i] = self._read_gpu(i)
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._running = True
-        logger.info("gpu_manager_started", gpu_count=count)
+        logger.info(
+            "gpu_manager_started",
+            gpu_count=count,
+            detail="pynvml available as fallback; hw-monitor preferred for polling",
+        )
 
     async def stop(self) -> None:
         if self._poll_task:
@@ -68,10 +70,11 @@ class GPUManager:
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
-        try:
-            pynvml.nvmlShutdown()
-        except pynvml.NVMLError:
-            pass
+        if self._nvml_available:
+            try:
+                pynvml.nvmlShutdown()
+            except pynvml.NVMLError:
+                pass
 
     def _read_gpu(self, index: int) -> GPUState:
         handle = pynvml.nvmlDeviceGetHandleByIndex(index)
@@ -206,62 +209,93 @@ class GPUManager:
         while True:
             try:
                 states = []
+                redis_used = False
                 for i in self._states:
-                    state = self._read_gpu(i)
+                    state = await self._read_gpu_from_redis(i)
+                    if state is not None:
+                        redis_used = True
+                    else:
+                        # Fallback: read directly via pynvml
+                        state = self._read_gpu(i)
+                        # Publish to Redis so other consumers still get data
+                        await set_key(f"gpu:state:{i}", asdict(state), ttl=5)
+                    # Preserve locked_vram_mb from local lock state
+                    locked = sum(self._locks.get(i, {}).values())
+                    state = GPUState(
+                        index=state.index,
+                        name=state.name,
+                        total_vram_mb=state.total_vram_mb,
+                        free_vram_mb=state.free_vram_mb,
+                        used_vram_mb=state.used_vram_mb,
+                        utilization_pct=state.utilization_pct,
+                        temperature_c=state.temperature_c,
+                        power_draw_w=state.power_draw_w,
+                        power_limit_w=state.power_limit_w,
+                        locked_vram_mb=locked,
+                        processes=state.processes,
+                    )
                     self._states[i] = state
                     states.append(asdict(state))
-                    self._poll_history[i].append(asdict(state))
-                    await set_key(f"gpu:state:{i}", asdict(state), ttl=5)
-                await publish("gpu:stats", states)
-                await self._check_temperature_alerts()
-                # Aggregate to DB every 30 polls (~60s)
-                if self._poll_history and len(self._poll_history[0]) >= 30:
-                    await self._persist_stats()
+
+                if redis_used != self._hw_monitor_active:
+                    self._hw_monitor_active = redis_used
+                    if redis_used:
+                        logger.info("hw_monitor_detected", detail="Reading GPU state from Redis (hw-monitor)")
+                    else:
+                        logger.info("hw_monitor_lost", detail="Falling back to direct pynvml reads")
+
+                if not redis_used:
+                    # Only publish aggregated stats when we are the source of truth
+                    await publish("gpu:stats", states)
             except Exception as e:
                 logger.error("gpu_poll_error", error=str(e))
             await asyncio.sleep(2)
 
-    async def _persist_stats(self) -> None:
-        from ocabra.database import AsyncSessionLocal
-        from ocabra.db.stats import GpuStat
-
-        now = datetime.now(timezone.utc)
-        async with AsyncSessionLocal() as session:
-            for i, history in self._poll_history.items():
-                if not history:
-                    continue
-                n = len(history)
-                session.add(
-                    GpuStat(
-                        recorded_at=now,
-                        gpu_index=i,
-                        utilization_pct=sum(h["utilization_pct"] for h in history) / n,
-                        vram_used_mb=int(sum(h["used_vram_mb"] for h in history) / n),
-                        power_draw_w=sum(h["power_draw_w"] for h in history) / n,
-                        temperature_c=sum(h["temperature_c"] for h in history) / n,
-                    )
+    async def _read_gpu_from_redis(self, index: int) -> GPUState | None:
+        """Try to read GPU state published by hw-monitor from Redis."""
+        try:
+            data = await get_key(f"gpu:state:{index}")
+        except Exception:
+            return None
+        if data is None:
+            return None
+        try:
+            processes = [
+                GPUProcessInfo(
+                    pid=p.get("pid", 0),
+                    process_name=p.get("process_name"),
+                    process_type=p.get("process_type", "compute"),
+                    used_vram_mb=p.get("used_vram_mb", 0),
                 )
-                self._poll_history[i] = []
-            await session.commit()
+                for p in data.get("processes", [])
+            ]
+            return GPUState(
+                index=data["index"],
+                name=data["name"],
+                total_vram_mb=data["total_vram_mb"],
+                free_vram_mb=data["free_vram_mb"],
+                used_vram_mb=data["used_vram_mb"],
+                utilization_pct=data["utilization_pct"],
+                temperature_c=data["temperature_c"],
+                power_draw_w=data["power_draw_w"],
+                power_limit_w=data["power_limit_w"],
+                locked_vram_mb=data.get("locked_vram_mb", 0),
+                processes=processes,
+            )
+        except (KeyError, TypeError) as exc:
+            logger.warning("redis_gpu_state_parse_error", index=index, error=str(exc))
+            return None
 
     def get_state_nowait(self, index: int) -> GPUState | None:
         """Return the most recently cached GPU state without awaiting the poll loop."""
         return self._states.get(index)
 
-    async def _check_temperature_alerts(self) -> None:
-        now = asyncio.get_event_loop().time()
-        for idx, state in self._states.items():
-            if state.temperature_c < self.max_temperature_c:
-                continue
-            last = self._last_temp_alert.get(idx, 0.0)
-            if now - last < 120:
-                continue
-            self._last_temp_alert[idx] = now
-            await publish_system_alert(
-                "warn",
-                f"GPU {idx} ({state.name}) temperature is {state.temperature_c}°C "
-                f"(threshold: {self.max_temperature_c}°C)",
-            )
+    async def get_server_power(self) -> dict | None:
+        """Read server power data published by hw-monitor from Redis."""
+        try:
+            return await get_key("server:power")
+        except Exception:
+            return None
 
     async def get_all_states(self) -> list[GPUState]:
         return list(self._states.values())

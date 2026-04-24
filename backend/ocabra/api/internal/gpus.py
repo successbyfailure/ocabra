@@ -158,15 +158,35 @@ async def set_gpu_power(
             logger.info("gpu_persistence_mode_set", gpu=index, enabled=body.persistence_mode)
 
         if body.power_limit_w is not None:
-            if body.power_limit_w == 0:
+            target_w = body.power_limit_w
+            if target_w == 0:
                 # Reset to default
                 default = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
-                pynvml.nvmlDeviceSetPowerManagementLimit(handle, default)
-                logger.info("gpu_power_limit_reset", gpu=index, default_w=default // 1000)
-            else:
-                limit_mw = body.power_limit_w * 1000
-                pynvml.nvmlDeviceSetPowerManagementLimit(handle, limit_mw)
-                logger.info("gpu_power_limit_set", gpu=index, watts=body.power_limit_w)
+                target_w = default // 1000
+
+            # Try via hw-monitor (privileged) first, fall back to direct pynvml
+            from ocabra.redis_client import publish as redis_publish
+            import json as _json
+
+            try:
+                await redis_publish(
+                    "gpu:set_power_limit",
+                    _json.dumps({"gpu_index": index, "limit_w": target_w}),
+                )
+                logger.info("gpu_power_limit_requested_via_hw_monitor", gpu=index, watts=target_w)
+                # Give hw-monitor a moment to apply
+                import asyncio
+                await asyncio.sleep(0.5)
+            except Exception:
+                # Fallback: try direct pynvml (will fail if not privileged)
+                try:
+                    pynvml.nvmlDeviceSetPowerManagementLimit(handle, target_w * 1000)
+                    logger.info("gpu_power_limit_set_direct", gpu=index, watts=target_w)
+                except pynvml.NVMLError as nvml_exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cannot set power limit: {nvml_exc}. Ensure hw-monitor is running.",
+                    )
 
         # Return updated state
         current = pynvml.nvmlDeviceGetPowerManagementLimit(handle)

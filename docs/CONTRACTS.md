@@ -427,6 +427,96 @@ Eventos emitidos por el servidor (JSON):
 
 ---
 
+## 5.8 OpenAI Files API
+
+```
+POST   /v1/files                     → FileObject
+  form: file (multipart), purpose: "batch"|"batch_output"|"user_data"
+  Sube un fichero al almacenamiento interno. Para batches, el fichero
+  debe ser JSONL con propósito "batch".
+
+GET    /v1/files                     → {object: "list", data: [FileObject]}
+  query: purpose? (filtro opcional), limit? (1-10000, default 100)
+
+GET    /v1/files/{file_id}           → FileObject
+  file_id acepta formato "file-<uuid>" o UUID directo.
+
+GET    /v1/files/{file_id}/content   → binary (application/octet-stream)
+  Descarga el contenido del fichero.
+
+DELETE /v1/files/{file_id}           → {id, object: "file", deleted: true}
+  No permite borrar ficheros en uso por un batch activo (409).
+```
+
+`FileObject`:
+```json
+{
+  "id": "file-<uuid>",
+  "object": "file",
+  "bytes": 1234,
+  "created_at": 1700000000,
+  "filename": "batch_input.jsonl",
+  "purpose": "batch",
+  "status": "uploaded",
+  "status_details": null
+}
+```
+
+### 5.9 OpenAI Batches API
+
+```
+POST   /v1/batches                   → BatchObject
+  body: {
+    input_file_id: "file-<uuid>",
+    endpoint: "/v1/chat/completions"|"/v1/embeddings"|"/v1/completions",
+    completion_window: "24h",
+    metadata?: dict
+  }
+  Crea un batch job. El fichero de input debe ser JSONL con purpose="batch".
+  Cada línea: {"custom_id": str, "method": "POST", "url": str, "body": dict}
+
+GET    /v1/batches                   → {object: "list", data: [BatchObject]}
+  query: after? (cursor pagination), limit? (1-100, default 20)
+
+GET    /v1/batches/{batch_id}        → BatchObject
+
+POST   /v1/batches/{batch_id}/cancel → BatchObject
+  Transiciona a "cancelling" → "cancelled". No afecta batches terminales.
+```
+
+`BatchObject`:
+```json
+{
+  "id": "batch_<uuid>",
+  "object": "batch",
+  "endpoint": "/v1/chat/completions",
+  "status": "validating|in_progress|finalizing|completed|failed|cancelled|cancelling",
+  "input_file_id": "file-<uuid>",
+  "output_file_id": "file-<uuid>|null",
+  "error_file_id": "file-<uuid>|null",
+  "completion_window": "24h",
+  "request_counts": {"total": N, "completed": N, "failed": N},
+  "created_at": unix_ts,
+  "in_progress_at": unix_ts|null,
+  "completed_at": unix_ts|null,
+  "expires_at": unix_ts|null,
+  "metadata": dict|null
+}
+```
+
+Formato JSONL de salida (output_file_id):
+```json
+{"id": "batch_req_<uuid>", "custom_id": "req1", "response": {"status_code": 200, "request_id": "...", "body": {...}}, "error": null}
+```
+
+Configuración:
+- `OPENAI_FILES_DIR` — directorio de almacenamiento (default `/data/openai_files`)
+- `BATCH_MAX_CONCURRENCY` — peticiones concurrentes por batch (default 4)
+- `BATCH_REQUEST_TIMEOUT_SECONDS` — timeout por petición (default 600)
+- `BATCH_POLL_INTERVAL_SECONDS` — intervalo de polling del procesador (default 5)
+
+---
+
 ## 6. Redis — Keys y canales
 
 ```
@@ -519,6 +609,46 @@ model_load_stats (
 server_config (
   key    TEXT PRIMARY KEY,
   value  JSONB NOT NULL
+)
+
+-- OpenAI Files API
+openai_files (
+  id              UUID PRIMARY KEY,
+  user_id         UUID NOT NULL REFERENCES users(id),
+  filename        TEXT NOT NULL,
+  bytes           BIGINT NOT NULL,
+  purpose         TEXT NOT NULL,           -- 'batch', 'batch_output', 'user_data'
+  storage_path    TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'uploaded',
+  status_details  TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+
+-- OpenAI Batches API
+openai_batches (
+  id                  UUID PRIMARY KEY,
+  user_id             UUID NOT NULL REFERENCES users(id),
+  api_key_id          UUID REFERENCES api_keys(id),
+  endpoint            TEXT NOT NULL,
+  input_file_id       UUID NOT NULL REFERENCES openai_files(id),
+  completion_window   TEXT NOT NULL DEFAULT '24h',
+  status              TEXT NOT NULL DEFAULT 'validating',
+  output_file_id      UUID REFERENCES openai_files(id),
+  error_file_id       UUID REFERENCES openai_files(id),
+  errors              JSONB,
+  request_total       INTEGER NOT NULL DEFAULT 0,
+  request_completed   INTEGER NOT NULL DEFAULT 0,
+  request_failed      INTEGER NOT NULL DEFAULT 0,
+  batch_metadata      JSONB,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  in_progress_at      TIMESTAMPTZ,
+  expires_at          TIMESTAMPTZ,
+  finalizing_at       TIMESTAMPTZ,
+  completed_at        TIMESTAMPTZ,
+  failed_at           TIMESTAMPTZ,
+  cancelling_at       TIMESTAMPTZ,
+  cancelled_at        TIMESTAMPTZ,
+  expired_at          TIMESTAMPTZ
 )
 ```
 

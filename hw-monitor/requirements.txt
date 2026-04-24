@@ -1,0 +1,6 @@
+nvidia-ml-py>=12.0
+redis>=5.0
+psycopg2-binary>=2.9
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.29
+structlog>=24.0

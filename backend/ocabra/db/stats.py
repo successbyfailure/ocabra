@@ -102,3 +102,19 @@ class ServiceGenerationStat(Base):
     __table_args__ = (
         Index("ix_svc_gen_stats_started_at_svc", "started_at", "service_id"),
     )
+
+
+class ServerStat(Base):
+    __tablename__ = "server_stats"
+
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, primary_key=True
+    )
+    cpu_power_w: Mapped[float | None] = mapped_column(Float)
+    cpu_temp_c: Mapped[float | None] = mapped_column(Float)
+    total_gpu_power_w: Mapped[float | None] = mapped_column(Float)
+    total_power_w: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        Index("ix_server_stats_recorded_at", "recorded_at"),
+    )
