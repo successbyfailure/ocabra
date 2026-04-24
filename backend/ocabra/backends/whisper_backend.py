@@ -78,16 +78,26 @@ class WhisperBackend(BackendInterface):
             oci_image="ghcr.io/ocabra/backend-whisper",
             oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
+                # CUDA-enabled wheels come from pip_extra_index_urls below.
                 "torch>=2.5",
                 "torchaudio>=2.5",
                 "faster-whisper>=1.1",
                 "soundfile>=0.12",
                 "transformers>=4.47",
                 "pyannote.audio>=3.3",
+                # Parakeet/Canary support — heavy (~1.2 GB).  Candidate for
+                # moving to an optional extra when the installer learns about
+                # extras (see deuda 9d).
                 "nemo_toolkit[asr]>=2.2",
                 "librosa>=0.10",
                 "matplotlib>=3.10",
                 "numpy",
+            ],
+            pip_extra_index_urls=[
+                # Pull CUDA 12.4 torch wheels; CPU-only wheels from PyPI do
+                # not match the runtime drivers provided by the container
+                # toolkit.
+                "https://download.pytorch.org/whl/cu124",
             ],
             estimated_size_mb=4500,
             display_name="Whisper (faster-whisper)",

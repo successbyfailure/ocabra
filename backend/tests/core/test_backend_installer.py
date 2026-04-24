@@ -180,6 +180,118 @@ async def test_install_from_source_generates_states(
 
 
 @pytest.mark.asyncio
+async def test_install_source_honours_extra_index_and_core_runtime(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deudas 9a + 9b: venv seeds core runtime first and honours extra-index-url."""
+
+    await installer.start()
+
+    # Swap in a spec with both a pip_extra_index_urls and include_core_runtime=True.
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            pip_packages=["torch>=2.5", "cowsay==6.1"],
+            pip_extra_index_urls=["https://download.pytorch.org/whl/cu124"],
+            include_core_runtime=True,
+            estimated_size_mb=10,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type: str, argv: list[str]) -> None:  # noqa: ANN001
+        calls.append(list(argv))
+        self._log(backend_type, f"MOCK $ {' '.join(argv)}")
+        if argv[1:3] == ["-m", "venv"]:
+            venv_dir = Path(argv[-1])
+            (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+            (venv_dir / "bin" / "pip").write_text("#!/bin/sh\nexit 0\n")
+            (venv_dir / "bin" / "pip").chmod(0o755)
+            (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+            (venv_dir / "bin" / "python").chmod(0o755)
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+
+    async for _ in installer.install("mock", method="source"):
+        pass
+
+    pip_invocations = [c for c in calls if c and c[0].endswith("/pip")]
+    # Expect: upgrade pip, core runtime seed, backend deps.
+    assert len(pip_invocations) >= 3, pip_invocations
+
+    upgrade, core, deps = pip_invocations[0], pip_invocations[1], pip_invocations[2]
+    assert upgrade[1:] == ["install", "--upgrade", "pip"]
+
+    # Core runtime comes before backend deps and includes fastapi + pydantic.
+    core_joined = " ".join(core)
+    assert "fastapi" in core_joined and "pydantic" in core_joined, core
+
+    # Backend deps carry the --extra-index-url and the torch requirement.
+    deps_joined = " ".join(deps)
+    assert "--extra-index-url" in deps and "download.pytorch.org" in deps_joined
+    assert "torch>=2.5" in deps
+
+    # Metadata captures both new fields.
+    meta = json.loads((backends_dir / "mock" / METADATA_FILENAME).read_text())
+    assert meta["pip_extra_index_urls"] == ["https://download.pytorch.org/whl/cu124"]
+    assert meta["include_core_runtime"] is True
+
+
+@pytest.mark.asyncio
+async def test_install_source_skips_core_runtime_when_opted_out(
+    installer: BackendInstaller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_core_runtime=False keeps the venv minimal."""
+
+    await installer.start()
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            pip_packages=["cowsay==6.1"],
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type: str, argv: list[str]) -> None:  # noqa: ANN001
+        calls.append(list(argv))
+        self._log(backend_type, f"MOCK $ {' '.join(argv)}")
+        if argv[1:3] == ["-m", "venv"]:
+            venv_dir = Path(argv[-1])
+            (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+            (venv_dir / "bin" / "pip").write_text("#!/bin/sh\nexit 0\n")
+            (venv_dir / "bin" / "pip").chmod(0o755)
+            (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+            (venv_dir / "bin" / "python").chmod(0o755)
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+
+    async for _ in installer.install("mock", method="source"):
+        pass
+
+    pip_joined = [" ".join(c) for c in calls if c and c[0].endswith("/pip")]
+    assert not any("fastapi" in cmd for cmd in pip_joined), pip_joined
+
+
+@pytest.mark.asyncio
 async def test_install_oci_not_implemented(installer: BackendInstaller) -> None:
     await installer.start()
     with pytest.raises(NotImplementedError):

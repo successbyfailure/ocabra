@@ -1,0 +1,18 @@
+# docker-compose override for the slim API image (Bloque 15 Fase 4).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.slim.yml up -d --build api
+#
+# This overrides only the `api` service to use `backend/Dockerfile.slim` which
+# ships without any AI backends pre-installed. Backends are installed at
+# runtime into the `backends_data` volume via the BackendInstaller.
+#
+# The rest of the stack (postgres, redis, caddy, frontend, gateway, hw-monitor)
+# is unchanged.
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.slim
+      args: {}

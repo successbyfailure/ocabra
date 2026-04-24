@@ -330,18 +330,57 @@ class BackendInstaller:
             yield self._snapshot(state)
 
             pip_bin = venv_dir / "bin" / "pip"
-            if spec.pip_packages:
+            extra_index_args: list[str] = []
+            for url in spec.pip_extra_index_urls:
+                extra_index_args.extend(["--extra-index-url", url])
+
+            # Upgrade pip itself before any other install so new resolver
+            # behaviour and --extra-index-url are honoured consistently.
+            await self._run_subprocess(
+                backend_type,
+                [str(pip_bin), "install", "--upgrade", "pip"],
+            )
+
+            # Seed the venv with the core oCabra runtime (FastAPI + Pydantic +
+            # httpx + ...) unless the spec opts out. Workers that run as a
+            # FastAPI subprocess need these in their own venv because the
+            # system interpreter is not on their path.
+            if spec.include_core_runtime:
+                core_runtime = [
+                    "fastapi>=0.115",
+                    "uvicorn[standard]>=0.32",
+                    "httpx>=0.28",
+                    "pydantic>=2.10",
+                ]
                 self._log(
                     backend_type,
-                    f"pip install {' '.join(spec.pip_packages)}",
+                    f"pip install {' '.join(core_runtime)} (core runtime)",
                 )
                 await self._run_subprocess(
                     backend_type,
-                    [str(pip_bin), "install", "--upgrade", "pip"],
+                    [str(pip_bin), "install", *core_runtime],
                 )
+
+            if spec.pip_packages:
+                if extra_index_args:
+                    self._log(
+                        backend_type,
+                        f"pip install {' '.join(extra_index_args)} "
+                        f"{' '.join(spec.pip_packages)}",
+                    )
+                else:
+                    self._log(
+                        backend_type,
+                        f"pip install {' '.join(spec.pip_packages)}",
+                    )
                 await self._run_subprocess(
                     backend_type,
-                    [str(pip_bin), "install", *spec.pip_packages],
+                    [
+                        str(pip_bin),
+                        "install",
+                        *extra_index_args,
+                        *spec.pip_packages,
+                    ],
                 )
 
             # Step 3 — post install script (reserved for Fase 2)
@@ -374,6 +413,8 @@ class BackendInstaller:
                 "extra_bins": {},
                 "size_mb": size_mb,
                 "pip_packages": list(spec.pip_packages),
+                "pip_extra_index_urls": list(spec.pip_extra_index_urls),
+                "include_core_runtime": spec.include_core_runtime,
             }
             await self._write_metadata(backend_type, metadata)
 

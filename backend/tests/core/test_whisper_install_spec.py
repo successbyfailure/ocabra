@@ -52,6 +52,22 @@ def test_install_spec_pip_packages_include_core_audio_deps() -> None:
         assert required in packages, f"missing required dep '{required}' in install_spec"
 
 
+def test_install_spec_requests_cuda_torch_index() -> None:
+    """Torch must come from the CUDA 12.4 wheel index, not the CPU-only default."""
+
+    spec = WhisperBackend().install_spec
+    urls = " ".join(spec.pip_extra_index_urls)
+    assert "download.pytorch.org/whl/cu" in urls, (
+        "expected a pytorch CUDA wheel index so torch installs with GPU support"
+    )
+
+
+def test_install_spec_opts_in_to_core_runtime() -> None:
+    """Worker runs a FastAPI app so the venv needs the oCabra core runtime."""
+
+    assert WhisperBackend().install_spec.include_core_runtime is True
+
+
 # ---------------------------------------------------------------------------
 # _resolve_python_bin
 # ---------------------------------------------------------------------------

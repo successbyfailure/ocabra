@@ -17,6 +17,11 @@ class BackendInstallSpec:
         oci_tags: Mapping of hardware variant → tag (e.g. ``{"cuda12": "latest-cuda12"}``).
         oci_extract_path: Path inside the OCI image that contains the backend tree.
         pip_packages: Packages to install when using the ``source`` install method.
+        pip_extra_index_urls: Extra ``--extra-index-url`` values passed to pip (e.g.
+            ``https://download.pytorch.org/whl/cu124`` to pull CUDA-enabled torch).
+        include_core_runtime: If true, the installer seeds the venv with the core
+            FastAPI/Pydantic/httpx stack that the oCabra worker scripts import.
+            Backends that don't run a FastAPI worker can set this to ``False``.
         post_install_script: Optional script path (relative to repo) to run after install.
         estimated_size_mb: Approximate on-disk footprint reported to the UI.
         display_name: Human-friendly name shown on the UI.
@@ -29,6 +34,8 @@ class BackendInstallSpec:
     oci_tags: dict[str, str] = field(default_factory=dict)
     oci_extract_path: str = "/backend"
     pip_packages: list[str] = field(default_factory=list)
+    pip_extra_index_urls: list[str] = field(default_factory=list)
+    include_core_runtime: bool = True
     post_install_script: str | None = None
     estimated_size_mb: int = 0
     display_name: str = ""
