@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
-import { AlertTriangle, MessageSquarePlus, SlidersHorizontal } from "lucide-react"
+import { AlertTriangle, MessageSquarePlus, SlidersHorizontal, Sparkles } from "lucide-react"
 import { Link } from "react-router-dom"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { useAgentsStore } from "@/stores/agentsStore"
 import { AudioInterface } from "@/components/playground/AudioInterface"
 import { ChatInterface } from "@/components/playground/ChatInterface"
 import { ImageInterface } from "@/components/playground/ImageInterface"
@@ -37,6 +39,15 @@ export function Playground() {
   )
   const [chatKey, setChatKey] = useState(0)
 
+  const agents = useAgentsStore((s) => s.agents)
+  const fetchAgents = useAgentsStore((s) => s.fetchAll)
+
+  const selectedAgent = useMemo(() => {
+    if (!selectedModelId.startsWith("agent/")) return null
+    const slug = selectedModelId.slice("agent/".length)
+    return agents.find((a) => a.slug === slug) ?? null
+  }, [agents, selectedModelId])
+
   useEffect(() => {
     let active = true
     const load = async () => {
@@ -63,6 +74,7 @@ export function Playground() {
     }
 
     void load()
+    void fetchAgents()
     const timer = window.setInterval(() => {
       void load()
     }, 30_000)
@@ -71,14 +83,22 @@ export function Playground() {
       active = false
       window.clearInterval(timer)
     }
-  }, [])
+  }, [fetchAgents])
 
   const selectedModel = useMemo(
     () => models.find((item) => item.modelId === selectedModelId) ?? null,
     [models, selectedModelId],
   )
 
-  const mode = detectMode(selectedModel)
+  // When an agent is selected its base model/profile determines capabilities; for now
+  // agents are chat-only so we force "chat" mode.
+  const mode = selectedAgent ? "chat" : detectMode(selectedModel)
+
+  // When an agent is active, the server forces its system prompt. Pass a placeholder
+  // so the client build doesn't leak the old system prompt to /v1/chat/completions.
+  const effectiveParams = selectedAgent
+    ? { ...params, systemPrompt: "" }
+    : params
 
   return (
     <div className="space-y-4">
@@ -96,7 +116,12 @@ export function Playground() {
         <>
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex-1 min-w-0">
-              <ModelSelector models={models} selectedModelId={selectedModelId} onSelect={setSelectedModelId} />
+              <ModelSelector
+                models={models}
+                selectedModelId={selectedModelId}
+                onSelect={setSelectedModelId}
+                agents={agents}
+              />
             </div>
             <button
               type="button"
@@ -121,7 +146,40 @@ export function Playground() {
             </button>
           </div>
 
-          {selectedModel && selectedModel.status !== "loaded" && (
+          {selectedAgent && (
+            <Tooltip.Provider delayDuration={200}>
+              <Tooltip.Root>
+                <Tooltip.Trigger asChild>
+                  <div
+                    role="status"
+                    className="flex cursor-help items-start gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm text-primary"
+                  >
+                    <Sparkles size={16} className="mt-0.5 shrink-0" />
+                    <span>
+                      Powered by agent:{" "}
+                      <code className="font-mono">agent/{selectedAgent.slug}</code>. El system
+                      prompt y las tools los impone el agente.
+                    </span>
+                  </div>
+                </Tooltip.Trigger>
+                <Tooltip.Portal>
+                  <Tooltip.Content
+                    side="bottom"
+                    className="z-50 max-w-md whitespace-pre-wrap rounded-md border border-border bg-popover p-3 text-xs shadow-md"
+                  >
+                    <p className="mb-1 font-semibold">System prompt</p>
+                    <p className="font-mono text-[11px] text-muted-foreground">
+                      {selectedAgent.systemPrompt.slice(0, 600)}
+                      {selectedAgent.systemPrompt.length > 600 ? "..." : ""}
+                    </p>
+                    <Tooltip.Arrow className="fill-border" />
+                  </Tooltip.Content>
+                </Tooltip.Portal>
+              </Tooltip.Root>
+            </Tooltip.Provider>
+          )}
+
+          {!selectedAgent && selectedModel && selectedModel.status !== "loaded" && (
             <div role="alert" className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
               <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" aria-hidden="true" />
               <div>
@@ -142,7 +200,7 @@ export function Playground() {
                   key={chatKey}
                   modelId={selectedModelId}
                   backendType={selectedModel?.backendType ?? null}
-                  params={params}
+                  params={effectiveParams}
                 />
               )}
               {mode === "pooling" && (
@@ -153,17 +211,23 @@ export function Playground() {
                   classificationCapable={Boolean(selectedModel?.capabilities.classification)}
                 />
               )}
-              {mode === "image" && <ImageInterface modelId={selectedModelId} params={params} />}
+              {mode === "image" && <ImageInterface modelId={selectedModelId} params={effectiveParams} />}
               {mode === "audio" && (
                 <AudioInterface
                   modelId={selectedModelId}
-                  params={params}
+                  params={effectiveParams}
                   canTranscribe={Boolean(selectedModel?.capabilities.audioTranscription)}
                   canTTS={Boolean(selectedModel?.capabilities.tts)}
                 />
               )}
             </section>
-            {showParams && <ParamsPanel params={params} onChange={setParams} />}
+            {showParams && (
+              <ParamsPanel
+                params={params}
+                onChange={setParams}
+                disableSystemPrompt={Boolean(selectedAgent)}
+              />
+            )}
           </div>
         </>
       )}
