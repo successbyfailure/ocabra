@@ -95,7 +95,9 @@ class TTSBackend(BackendInterface):
             pip_packages=[
                 "torch>=2.5",
                 "torchaudio>=2.5",
-                "transformers>=5.0",
+                # qwen-tts pins transformers exactly (e.g. 4.57.3); declaring
+                # a >=5.0 floor here breaks resolution.  We let qwen-tts and
+                # kokoro pull in the transformers version they need.
                 "qwen-tts>=0.1.1",
                 "kokoro>=0.9",
                 "soundfile>=0.12",

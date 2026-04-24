@@ -39,7 +39,7 @@ def test_install_spec_pip_packages_cover_engines() -> None:
 
     packages = " ".join(TTSBackend().install_spec.pip_packages).lower()
 
-    for required in ("torch", "torchaudio", "transformers", "qwen-tts", "kokoro", "soundfile"):
+    for required in ("torch", "torchaudio", "qwen-tts", "kokoro", "soundfile"):
         assert required in packages, f"missing required dep '{required}' in install_spec"
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import sys
@@ -10,7 +11,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -30,9 +37,51 @@ class DiffusersBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.IMAGE_GENERATION}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Declarative install spec for the diffusers backend (Bloque 15 Fase 2)."""
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-diffusers",
+            oci_tags={"cuda12": "latest-cuda12"},
+            pip_packages=[
+                "torch>=2.5",
+                "diffusers>=0.31",
+                "accelerate>=1.2",
+                "transformers>=4.47",
+                "Pillow>=11.0",
+                "safetensors>=0.4",
+                "numpy",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            estimated_size_mb=6000,
+            display_name="Diffusers (Stable Diffusion / SDXL / FLUX)",
+            description=(
+                "Image generation backend for Stable Diffusion, SDXL and "
+                "FLUX models via Hugging Face diffusers"
+            ),
+            tags=["Image", "GPU", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._workers: dict[str, WorkerInfo] = {}
+
+    def _resolve_python_bin(self) -> str:
+        """Return the python interpreter that should launch the diffusers worker."""
+
+        try:
+            meta_path = Path(settings.backends_dir) / "diffusers" / "metadata.json"
+            if not meta_path.exists():
+                return sys.executable
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return sys.executable
+        bin_path = meta.get("python_bin") if isinstance(meta, dict) else None
+        return str(bin_path) if bin_path else sys.executable
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         if not gpu_indices:
@@ -57,7 +106,7 @@ class DiffusersBackend(BackendInterface):
         env["DIFFUSERS_ALLOW_TF32"] = str(settings.diffusers_allow_tf32).lower()
 
         cmd = [
-            sys.executable,
+            self._resolve_python_bin(),
             str(worker_script),
             "--model-id",
             model_id,

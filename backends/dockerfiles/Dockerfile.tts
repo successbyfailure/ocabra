@@ -42,9 +42,10 @@ RUN /backend/venv/bin/pip install --extra-index-url https://download.pytorch.org
         "torch>=2.5" \
         "torchaudio>=2.5"
 
-# Qwen3-TTS pulls transformers>=5.0; install a known-good combo.
+# qwen-tts pins transformers exactly (e.g. 4.57.3); listing transformers
+# >=5.0 breaks resolution.  Let qwen-tts and kokoro pull in the exact
+# transformers version they require.
 RUN /backend/venv/bin/pip install \
-        "transformers>=5.0" \
         "qwen-tts>=0.1.1" \
         "kokoro>=0.9" \
         "soundfile>=0.12" \
