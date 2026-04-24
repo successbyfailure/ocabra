@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: TTS (Qwen3-TTS + Kokoro + Bark)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-tts:latest-cuda12
+# Estimated size    : ~5 GB
+# Variants          : cuda12 (default), cpu
+# Key deps          : qwen-tts>=0.1.1, kokoro>=0.9, transformers>=5.0, torch,
+#                     soundfile, numpy, fastapi, uvicorn
+# Runtime entry     : /backend/venv/bin/python /backend/workers/tts_worker.py
+# Notes             : tts_worker.py also uses ffmpeg via subprocess; we include
+#                     the ffmpeg binary under /backend/bin so the venv can call
+#                     it as an absolute path independent of the host image.
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+FROM ${BASE_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+        ffmpeg \
+        libsndfile1 \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+RUN /backend/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        "torch>=2.5" \
+        "torchaudio>=2.5"
+
+# Qwen3-TTS pulls transformers>=5.0; install a known-good combo.
+RUN /backend/venv/bin/pip install \
+        "transformers>=5.0" \
+        "qwen-tts>=0.1.1" \
+        "kokoro>=0.9" \
+        "soundfile>=0.12" \
+        "numpy" \
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.32" \
+        "pydantic>=2.10"
+
+RUN mkdir -p /backend/workers /backend/bin
+
+# Stage ffmpeg so the runtime ocabra image is not required to ship it.
+RUN cp /usr/bin/ffmpeg /backend/bin/ffmpeg || true
+
+COPY backend/workers/tts_worker.py /backend/workers/tts_worker.py
+
+RUN echo "{\"backend_type\": \"tts\", \"python_bin\": \"/backend/venv/bin/python\", \"worker\": \"/backend/workers/tts_worker.py\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-tts" \
+      org.opencontainers.image.description="Qwen3-TTS / Kokoro / Bark TTS backend for oCabra" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: Diffusers (image generation)
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-diffusers:latest-cuda12
+# Estimated size    : ~6 GB (torch + diffusers + transformers + accelerate)
+# Variants          : cuda12 (default), cpu
+# Key deps          : diffusers>=0.31, accelerate>=1.2, transformers, Pillow>=11.0,
+#                     torch>=2.5, safetensors, fastapi, uvicorn, httpx
+# Runtime entry     : /backend/venv/bin/python /backend/workers/diffusers_worker.py
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+FROM ${BASE_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+        git \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+RUN /backend/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        "torch>=2.5"
+
+RUN /backend/venv/bin/pip install \
+        "diffusers>=0.31" \
+        "accelerate>=1.2" \
+        "transformers>=4.47" \
+        "Pillow>=11.0" \
+        "safetensors>=0.4" \
+        "numpy" \
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.32" \
+        "httpx>=0.28" \
+        "pydantic>=2.10"
+
+RUN mkdir -p /backend/workers /backend/bin
+
+COPY backend/workers/diffusers_worker.py /backend/workers/diffusers_worker.py
+
+RUN echo "{\"backend_type\": \"diffusers\", \"python_bin\": \"/backend/venv/bin/python\", \"worker\": \"/backend/workers/diffusers_worker.py\"}" \
+        > /backend/metadata.template.json
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-diffusers" \
+      org.opencontainers.image.description="Diffusers image-generation backend for oCabra" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

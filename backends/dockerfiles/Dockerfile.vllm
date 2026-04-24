@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# oCabra backend: vLLM
+# -----------------------------------------------------------------------------
+# Resulting image   : ghcr.io/ocabra/backend-vllm:latest-cuda12
+# Estimated size    : ~9.5 GB (torch + vllm wheels)
+# Variants          : cuda12 (default), cuda11 (BASE_IMAGE override), cpu (experimental)
+# Key deps          : vllm==0.17.1, torch>=2.5 (pulled transitively)
+# Runtime entry     : /backend/venv/bin/python -m vllm.entrypoints.openai.api_server
+# Notes             : vllm_backend.py launches "python -m vllm.entrypoints..." in a
+#                     subprocess. We only need the venv — no custom worker script.
+# -----------------------------------------------------------------------------
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+ARG BACKEND_VERSION=0.17.1
+
+# -----------------------------------------------------------------------------
+# Stage 1 — builder
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS builder
+
+ARG BACKEND_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        gnupg \
+        curl \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /backend/venv \
+    && /backend/venv/bin/pip install --upgrade pip setuptools wheel
+
+RUN /backend/venv/bin/pip install \
+        "vllm==${BACKEND_VERSION}" \
+        "torch>=2.5"
+
+# vllm_backend.py invokes the vllm CLI in a subprocess; no custom worker to copy.
+RUN mkdir -p /backend/workers /backend/bin
+
+RUN echo "{\"backend_type\": \"vllm\", \"version\": \"${BACKEND_VERSION}\", \"python_bin\": \"/backend/venv/bin/python\"}" \
+        > /backend/metadata.template.json
+
+# -----------------------------------------------------------------------------
+# Stage 2 — final (scratch, BackendInstaller extracts /backend via `docker cp`)
+# -----------------------------------------------------------------------------
+FROM scratch
+
+ARG BACKEND_VERSION
+
+LABEL org.opencontainers.image.source="https://github.com/ocabra/ocabra" \
+      org.opencontainers.image.title="ocabra-backend-vllm" \
+      org.opencontainers.image.description="vLLM inference backend for oCabra" \
+      org.opencontainers.image.version="${BACKEND_VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /backend /backend

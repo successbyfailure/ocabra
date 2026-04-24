@@ -1,0 +1,52 @@
+# Build context for the backend OCI images is the repo root. These images
+# only need `backend/workers/`, `backend/scripts/`, and nothing else from the
+# project — aggressively exclude the rest so build contexts stay small.
+
+# Frontend is never part of any backend image.
+frontend/
+
+# Local data and caches.
+data/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/node_modules/
+
+# Model weights never belong in a build context.
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.onnx
+
+# Secrets and local env.
+.env
+.env.*
+!.env.example
+
+# IDE / VCS.
+.git/
+.github/
+.idea/
+.vscode/
+
+# Docs and misc assets the backends do not need.
+docs/
+benchmark/
+caddy/
+gateway/
+hw-monitor/
+services/
+Hunyuan3D-2.1/
+
+# Top-level host-only tooling (ocabra API app image handles these separately).
+backend/Dockerfile
+backend/docker-entrypoint.sh
+backend/alembic/
+backend/tests/
+backend/ocabra/
+# ^ NOTE: backend/ocabra/workers/ IS needed by sglang/llama_cpp/tensorrt_llm
+#   but those workers run in the main ocabra venv, NOT inside the backend
+#   image — they ship with the main oCabra Docker image. So we exclude the
+#   whole subtree here.
