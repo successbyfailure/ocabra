@@ -18,6 +18,17 @@
 
 FROM docker:28-cli AS docker-cli
 
+# The compose plugin is shipped separately from the docker CLI in the
+# upstream docker/compose project. service_manager runs `docker compose
+# up -d <service>` from inside the api container to start optional
+# external services (ComfyUI, ACE-Step, Hunyuan3D, A1111), so we need
+# the plugin on the same docker CLI install. Pinned for reproducibility.
+FROM curlimages/curl:8.10.0 AS compose-plugin
+ARG DOCKER_COMPOSE_VERSION=v2.31.0
+RUN curl -fsSL \
+        "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+        -o /tmp/docker-compose
+
 FROM python:3.11-slim-bookworm AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -58,6 +69,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
+# Install the compose plugin under the system-wide cli-plugins dir so any
+# user inside the container picks it up via `docker compose`.
+COPY --from=compose-plugin /tmp/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+RUN chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
 # Install only the core oCabra runtime (no backends, no venvs). Dev extras
 # (pytest/ruff) go in the dev stage below.

@@ -68,6 +68,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
+      # service_manager runs `docker compose up -d <name>` from inside this
+      # container; the compose file references ./services/* as build contexts
+      # so they need to resolve at the same relative path. Read-only is fine
+      # because compose only reads them.
+      - ./services:/opt/ocabra/services:ro
+      # Hunyuan3D + ACE-Step are external repos used as compose build
+      # contexts (paths declared in docker-compose.yml: ./Hunyuan3D-2.1 and
+      # /docker/ACE-Step-1.5). The api needs to see them at the same path
+      # so `docker compose up -d <service>` finds the build context.
+      - ./Hunyuan3D-2.1:/opt/ocabra/Hunyuan3D-2.1:ro
+      - /docker/ACE-Step-1.5:/docker/ACE-Step-1.5:ro
       # ACE-Step weights checkpoint dir (~11 GB) is mounted into the modular
       # install path so the cloned src/ tree finds them where the acestep
       # server expects (<project_root>/checkpoints/). Avoids re-downloading
