@@ -183,6 +183,21 @@ class ServiceManager:
                 runtime_loaded_when_alive=True,
                 idle_action="stop",
             ),
+            "unsloth": ServiceState(
+                service_id="unsloth",
+                service_type="unsloth_studio",
+                display_name="Unsloth Studio",
+                base_url=settings.unsloth_base_url.rstrip("/"),
+                ui_url=settings.unsloth_ui_url,
+                health_path="/",
+                preferred_gpu=settings.unsloth_preferred_gpu,
+                idle_unload_after_seconds=settings.unsloth_idle_unload_seconds,
+                generation_grace_period_s=settings.unsloth_generation_grace_period_s,
+                docker_container_name=settings.unsloth_docker_container,
+                compose_service_name="unsloth-studio",
+                runtime_loaded_when_alive=True,
+                idle_action="stop",
+            ),
         }
         self._lock = asyncio.Lock()
 

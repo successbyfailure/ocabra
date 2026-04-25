@@ -490,6 +490,7 @@ const SERVICE_DESC = {
   comfyui:  'Pipeline de generación de imágenes y vídeo basado en nodos. Compatible con SD, FLUX y workflows personalizados.',
   a1111:    'Automatic1111 Stable Diffusion WebUI — generación de imágenes con control detallado.',
   acestep:  'Generación de música desde texto o audio de referencia. Produce pistas completas.',
+  unsloth:  'Unsloth Studio — fine-tuning sin código (LoRA/QLoRA), chat con modelos locales y export a GGUF/safetensors.',
 };
 
 const STATUS_BADGE = {

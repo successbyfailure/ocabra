@@ -262,6 +262,49 @@ Equipo de agentes paralelos entregó Fases 1, 3 (draft) y 5 en el mismo día:
 
 ---
 
+## 🚧 Bloque 16 — Unsloth Studio (training/fine-tuning como servicio)
+
+Capacidad nueva: fine-tuning de modelos abiertos sin código, integrado como un
+servicio más con su propia UI (mismo patrón que ACE-Step / ComfyUI / A1111).
+Cubre LoRA/QLoRA, FP8/FFT, datasets desde PDF/CSV/JSON/DOCX/TXT, chat local con
+GGUF/safetensors, model arena y export a GGUF + 16-bit safetensors.
+
+### Decisiones de arquitectura
+
+- **Encaje como `ServiceState`, no como nuevo backend de inferencia.** Unsloth
+  es principalmente librería de training; vLLM/SGLang ya cubren inferencia
+  mejor. La imagen oficial `unsloth/unsloth` trae `unsloth studio` (UI Jupyter)
+  en `:8888`, encaja con `ui_url` + iframe vía gateway.
+- **GPU preferida 1** (la grande, RTX 3090 24G) — training es VRAM-hungry.
+- **Idle unload deshabilitado por defecto** (`UNSLOTH_IDLE_UNLOAD_SECONDS=0`):
+  un job de fine-tuning puede durar horas, evicción automática rompería la
+  ejecución. `generation_grace_period_s=-1` complementa esto.
+- **Salida = entrada del registry**: los GGUF exportados a
+  `/docker/ai-models/ocabra/unsloth/exports/` quedan disponibles para que el
+  scanner local + llama.cpp/vLLM los sirvan sin pasos manuales.
+- **Licencia**: core Apache-2.0, UI AGPL-3.0 — irrelevante en self-host del
+  usuario; revisar si en algún momento se distribuye la imagen como producto.
+
+### Implementado (2026-04-25)
+
+| Item | Archivo | Estado |
+|------|---------|--------|
+| Servicio Compose `unsloth-studio` | `docker-compose.yml` | ✅ Imagen `unsloth/unsloth`, GPU 1, volumen `work/` + `exports/`, healthcheck, profile `services` |
+| Settings `unsloth_*` | `backend/ocabra/config.py` | ✅ `unsloth_base_url`, `unsloth_ui_url`, `unsloth_preferred_gpu`, `unsloth_idle_unload_seconds`, `unsloth_docker_container`, `unsloth_generation_grace_period_s` |
+| Registro `ServiceState` | `backend/ocabra/core/service_manager.py` | ✅ `service_id="unsloth"`, `runtime_loaded_when_alive=True`, gestión de ciclo de vida idéntica al resto |
+| Gateway routing | `gateway/config.py`, `gateway/pages.py` | ✅ Entrada en `_SERVICE_DEFS` + descripción en el portal |
+| Variables de entorno | `.env.example` | ✅ Bloque `UNSLOTH_*` documentado |
+
+### Pendiente
+
+- **Validación e2e**: levantar `docker compose --profile services up -d unsloth-studio`, hacer un fine-tune corto LoRA sobre un modelo pequeño (Llama 3.2 1B / Qwen 0.5B), exportar GGUF y comprobar que el scanner local lo recoge.
+- **Hot-import del adapter** desde Studio a vLLM sin reiniciar workers (depende de soporte vLLM para LoRA dinámicos — ya existe en versiones recientes).
+- **Exposición opcional del puerto 8000** de Studio (endpoint OpenAI-compat interno) como backend de inferencia adicional para servir adapters sin re-cargar.
+- **Watcher sobre `unsloth/exports/`** que auto-registre los GGUF/safetensors resultantes en el inventario de modelos.
+- **Job tracking en oCabra**: panel mínimo en frontend que muestre training jobs activos leyendo de Studio (vía Jupyter API) o sólo enlaces directos a la UI — decidir tras validación e2e.
+
+---
+
 ## Orden de ejecución
 
 ```
@@ -279,6 +322,7 @@ Equipo de agentes paralelos entregó Fases 1, 3 (draft) y 5 en el mismo día:
 [✅ Hecho]  Bloque 13 — Observabilidad de potencia + stats ampliadas
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
 [🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
+[🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```

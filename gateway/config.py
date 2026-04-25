@@ -37,6 +37,7 @@ _SERVICE_DEFS: list[tuple[str, str, str, str]] = [
     ("comfyui", "COMFYUI_UI_URL", "COMFYUI_BASE_URL", "ComfyUI"),
     ("a1111",   "A1111_UI_URL",   "A1111_BASE_URL",   "Automatic1111"),
     ("acestep", "ACESTEP_UI_URL", "ACESTEP_BASE_URL",  "ACE-Step"),
+    ("unsloth", "UNSLOTH_UI_URL", "UNSLOTH_BASE_URL",  "Unsloth Studio"),
 ]
 
 # Map: hostname → {service_id, upstream, display_name, ui_url}

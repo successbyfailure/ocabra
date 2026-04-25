@@ -46,6 +46,8 @@ services:
       ACESTEP_BASE_URL: ${ACESTEP_BASE_URL:-http://acestep:7860}
       ACESTEP_UI_URL: ${ACESTEP_UI_URL:-}
       ACESTEP_PREFERRED_GPU: ${ACESTEP_PREFERRED_GPU:-1}
+      UNSLOTH_UI_URL: ${UNSLOTH_UI_URL:-}
+      UNSLOTH_PREFERRED_GPU: ${UNSLOTH_PREFERRED_GPU:-1}
       OCABRA_ADMIN_USER: ${OCABRA_ADMIN_USER:-ocabra}
       OCABRA_ADMIN_PASS: ${OCABRA_ADMIN_PASS:-ocabra}
       JWT_SECRET: ${JWT_SECRET:-}
@@ -281,6 +283,11 @@ services:
       ACESTEP_LM_MODEL_PATH: ${ACESTEP_LM_MODEL_PATH:-acestep-5Hz-lm-0.6B}
       TOKENIZERS_PARALLELISM: "false"
       HF_HOME: /root/.cache/huggingface
+      # Gradio rewrite: sin esto la UI emite URLs absolutas con el host interno
+      # (`https://acestep:7860/...`) en vez de la URL pública. Gradio respeta
+      # GRADIO_ROOT_PATH y reescribe los enlaces del bundle frontend en cuanto
+      # arranca. ACE-Step no expone --root-path como flag, así que vía env.
+      GRADIO_ROOT_PATH: ${ACESTEP_UI_URL:-}
     env_file:
       - path: .env
         required: false
@@ -303,6 +310,40 @@ services:
       timeout: 10s
       start_period: 300s
       retries: 3
+    restart: unless-stopped
+
+  unsloth-studio:
+    profiles: ["services"]
+    image: ${UNSLOTH_IMAGE:-unsloth/unsloth:latest}
+    container_name: ocabra-unsloth-studio-1
+    runtime: nvidia
+    ipc: host
+    shm_size: "4gb"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${UNSLOTH_NVIDIA_VISIBLE_DEVICES:-1}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      JUPYTER_PASSWORD: ${UNSLOTH_JUPYTER_PASSWORD:-ocabra}
+      # HF cache vive dentro de /workspace/work (chowned a `unsloth` por el
+      # entrypoint). Usa cache propio en vez del compartido — el HF cache de
+      # ocabra es root-owned y Studio corre como user no-root.
+      HF_HOME: /workspace/work/hf_cache
+      HUGGINGFACE_HUB_CACHE: /workspace/work/hf_cache/hub
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - /docker/ai-models/ocabra/unsloth/work:/workspace/work
+      - /docker/ai-models/ocabra/unsloth/exports:/workspace/exports
+    ports:
+      # Unsloth Studio UI (entrypoint principal: training + chat + export)
+      - "${UNSLOTH_STUDIO_PORT:-8889}:8000"
+      # Jupyter Lab que viene en la imagen (notebooks, control avanzado).
+      # Descomentar si quieres acceso directo:
+      # - "${UNSLOTH_JUPYTER_PORT:-8891}:8888"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/health -o /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
     restart: unless-stopped
 
   gateway:

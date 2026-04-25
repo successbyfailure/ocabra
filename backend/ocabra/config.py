@@ -242,6 +242,20 @@ class Settings(BaseSettings):
     # with ACESTEP_MODE=api). Example: http://acestep:8001
     acestep_external_api_url: str = ""
 
+    # Unsloth Studio — training/fine-tuning UI + chat + GGUF export
+    # No-code WebUI servida por la imagen oficial `unsloth/unsloth`. Se trata
+    # como un servicio más (mismo patrón que ACE-Step / ComfyUI): gestiona su
+    # propio ciclo de vida y expone su UI vía iframe a través del gateway.
+    unsloth_base_url: str = "http://unsloth-studio:8000"
+    unsloth_ui_url: str = ""
+    unsloth_preferred_gpu: int = 1
+    # Training puede durar horas; 0 = nunca evictar por inactividad.
+    unsloth_idle_unload_seconds: int = 0
+    unsloth_docker_container: str = "ocabra-unsloth-studio-1"
+    # -1 = esperar indefinidamente a que el training/generación activo termine
+    # (capado a 30 s sólo para evicciones por presión de VRAM).
+    unsloth_generation_grace_period_s: int = -1
+
     # Docker Compose project directory (for `docker compose up -d <service>`)
     compose_project_dir: str = "/opt/ocabra"
 
