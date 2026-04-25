@@ -35,12 +35,8 @@ class Agent(Base):
 
     __tablename__ = "agents"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    slug: Mapped[str] = mapped_column(
-        String(128), nullable=False, unique=True, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -57,16 +53,10 @@ class Agent(Base):
 
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
-    tool_choice_default: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="auto"
-    )
+    tool_choice_default: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     max_tool_hops: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
-    tool_timeout_seconds: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=60
-    )
-    require_approval: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="never"
-    )
+    tool_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    require_approval: Mapped[str] = mapped_column(String(16), nullable=False, default="never")
 
     request_defaults: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
@@ -131,6 +121,4 @@ class AgentMCPServer(Base):
     allowed_tools: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     agent: Mapped[Agent] = relationship("Agent", back_populates="mcp_links")
-    mcp_server: Mapped[MCPServer] = relationship(
-        "MCPServer", back_populates="agent_links"
-    )
+    mcp_server: Mapped[MCPServer] = relationship("MCPServer", back_populates="agent_links")

@@ -88,9 +88,7 @@ def _is_agent_accessible(agent: Agent, user: UserContext) -> bool:
 async def _load_agent_or_404(session, slug: str) -> Agent:
     row = (
         await session.execute(
-            sa.select(Agent)
-            .where(Agent.slug == slug)
-            .options(selectinload(Agent.mcp_links))
+            sa.select(Agent).where(Agent.slug == slug).options(selectinload(Agent.mcp_links))
         )
     ).scalar_one_or_none()
     if row is None:
@@ -157,9 +155,7 @@ async def list_agents(
         rows = (
             (
                 await session.execute(
-                    sa.select(Agent)
-                    .options(selectinload(Agent.mcp_links))
-                    .order_by(Agent.slug)
+                    sa.select(Agent).options(selectinload(Agent.mcp_links)).order_by(Agent.slug)
                 )
             )
             .scalars()
@@ -278,7 +274,9 @@ async def update_agent(
         # base_model_id / profile_id: must still satisfy the XOR constraint.
         new_base = patch.get("base_model_id", row.base_model_id)
         new_profile = patch.get("profile_id", row.profile_id)
-        has_base = bool((new_base or "").strip()) if new_base is not None else bool(row.base_model_id)
+        has_base = (
+            bool((new_base or "").strip()) if new_base is not None else bool(row.base_model_id)
+        )
         has_profile = (
             bool((new_profile or "").strip()) if new_profile is not None else bool(row.profile_id)
         )
@@ -352,15 +350,12 @@ async def test_agent(
     async with AsyncSessionLocal() as session:
         agent = await _load_agent_or_404(session, slug)
         link_rows = (
-            (
-                await session.execute(
-                    sa.select(AgentMCPServer, MCPServer)
-                    .join(MCPServer, MCPServer.id == AgentMCPServer.mcp_server_id)
-                    .where(AgentMCPServer.agent_id == agent.id)
-                )
+            await session.execute(
+                sa.select(AgentMCPServer, MCPServer)
+                .join(MCPServer, MCPServer.id == AgentMCPServer.mcp_server_id)
+                .where(AgentMCPServer.agent_id == agent.id)
             )
-            .all()
-        )
+        ).all()
 
     # Base model existence is best-effort: we look it up against the model manager
     # if available.  For profile-based agents we check the profile registry.

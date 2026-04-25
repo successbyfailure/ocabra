@@ -27,12 +27,8 @@ class MCPServer(Base):
 
     __tablename__ = "mcp_servers"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    alias: Mapped[str] = mapped_column(
-        String(128), nullable=False, unique=True, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    alias: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     transport: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
@@ -65,9 +61,7 @@ class MCPServer(Base):
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    health_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="unknown"
-    )
+    health_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
 
     # Audit
     created_by: Mapped[uuid.UUID | None] = mapped_column(

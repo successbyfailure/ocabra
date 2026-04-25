@@ -21,7 +21,6 @@ from tests.agents.conftest import (
     FakeSessionFactory,
     make_user_context,
     override_user,
-    row_tuples,
     scalar_result,
     scalars_all,
 )
@@ -115,9 +114,7 @@ def test_create_http_ok_for_model_manager():
     # Avoid actually calling registry.register on a fake URL.
     with (
         patch("ocabra.api.internal.mcp_servers.AsyncSessionLocal", new=factory),
-        patch.object(
-            app.state.mcp_registry, "register", new=AsyncMock(return_value=None)
-        ),
+        patch.object(app.state.mcp_registry, "register", new=AsyncMock(return_value=None)),
     ):
         client = TestClient(app)
         resp = client.post(
@@ -177,9 +174,7 @@ def test_create_stdio_ok_for_admin():
 
     with (
         patch("ocabra.api.internal.mcp_servers.AsyncSessionLocal", new=factory),
-        patch.object(
-            app.state.mcp_registry, "register", new=AsyncMock(return_value=None)
-        ),
+        patch.object(app.state.mcp_registry, "register", new=AsyncMock(return_value=None)),
     ):
         client = TestClient(app)
         resp = client.post(
@@ -232,7 +227,7 @@ def test_delete_blocks_when_in_use_without_force():
         count_result.scalar_one.return_value = 3  # 3 agents reference it
         session.execute.side_effect = [
             scalar_result(row),  # load server
-            count_result,         # in-use check
+            count_result,  # in-use check
         ]
 
     factory.configure(wire)
@@ -252,15 +247,13 @@ def test_delete_force_ok():
         count_result.scalar_one.return_value = 2
         session.execute.side_effect = [
             scalar_result(row),  # load server
-            count_result,         # in-use check
+            count_result,  # in-use check
         ]
 
     factory.configure(wire)
     with (
         patch("ocabra.api.internal.mcp_servers.AsyncSessionLocal", new=factory),
-        patch.object(
-            app.state.mcp_registry, "unregister", new=AsyncMock(return_value=None)
-        ),
+        patch.object(app.state.mcp_registry, "unregister", new=AsyncMock(return_value=None)),
     ):
         client = TestClient(app)
         resp = client.delete(f"/ocabra/mcp-servers/{row.id}?force=true")
@@ -291,7 +284,7 @@ def test_refresh_persists_cache():
     def wire(session):
         session.execute.side_effect = [
             scalar_result(row),  # load server
-            MagicMock(),          # update() executed by registry.refresh(...)
+            MagicMock(),  # update() executed by registry.refresh(...)
         ]
 
     factory.configure(wire)

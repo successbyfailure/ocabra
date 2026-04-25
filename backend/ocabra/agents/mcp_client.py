@@ -74,9 +74,7 @@ class _HeaderMerger:
     """
 
     def __init__(self, static_headers: Mapping[str, str] | None) -> None:
-        self._static: dict[str, str] = {
-            k.lower(): v for k, v in (static_headers or {}).items()
-        }
+        self._static: dict[str, str] = {k.lower(): v for k, v in (static_headers or {}).items()}
 
     @property
     def static(self) -> dict[str, str]:
@@ -286,9 +284,7 @@ class HttpMCPClient(_BaseClient):
                         timeout=self._timeout_s,
                     )
                 )
-                session = await stack.enter_async_context(
-                    session_mod.ClientSession(read, write)
-                )
+                session = await stack.enter_async_context(session_mod.ClientSession(read, write))
                 await session.initialize()
             except Exception:
                 await stack.aclose()
@@ -328,9 +324,7 @@ class SseMCPClient(_BaseClient):
                         timeout=self._timeout_s,
                     )
                 )
-                session = await stack.enter_async_context(
-                    session_mod.ClientSession(read, write)
-                )
+                session = await stack.enter_async_context(session_mod.ClientSession(read, write))
                 await session.initialize()
             except Exception:
                 await stack.aclose()
@@ -390,9 +384,7 @@ class StdioMCPClient(_BaseClient):
             stack = AsyncExitStack()
             try:
                 read, write = await stack.enter_async_context(stdio_client(params))
-                session = await stack.enter_async_context(
-                    session_mod.ClientSession(read, write)
-                )
+                session = await stack.enter_async_context(session_mod.ClientSession(read, write))
                 await session.initialize()
             except Exception:
                 await stack.aclose()

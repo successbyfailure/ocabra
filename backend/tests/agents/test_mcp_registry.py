@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -80,8 +79,12 @@ def test_encrypt_json_none(registry: MCPRegistry) -> None:
 
 def test_decrypt_rejects_tampered(registry: MCPRegistry) -> None:
     ct = registry.encrypt_text("hello")
+    # Flip the last 4 chars (HMAC region) to guarantee tampering, since
+    # appending bytes can be silently absorbed by base64 decoding.
+    flipped = "X" * 4 if not ct.endswith("X" * 4) else "Y" * 4
+    tampered = ct[:-4] + flipped
     with pytest.raises(ValueError):
-        registry.decrypt_text(ct + "garbage")
+        registry.decrypt_text(tampered)
 
 
 # ── Cache / TTL ─────────────────────────────────────────────

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -196,9 +196,7 @@ def test_list_filters_by_group_for_user():
     factory = FakeSessionFactory()
 
     def wire(session):
-        session.execute.side_effect = [
-            scalars_all([public_agent, my_agent, other_agent])
-        ]
+        session.execute.side_effect = [scalars_all([public_agent, my_agent, other_agent])]
 
     factory.configure(wire)
     with patch("ocabra.api.internal.agents.AsyncSessionLocal", new=factory):
@@ -221,9 +219,7 @@ def test_list_shows_all_to_admin():
     factory = FakeSessionFactory()
 
     def wire(session):
-        session.execute.side_effect = [
-            scalars_all([public_agent, my_agent, other_agent])
-        ]
+        session.execute.side_effect = [scalars_all([public_agent, my_agent, other_agent])]
 
     factory.configure(wire)
     with patch("ocabra.api.internal.agents.AsyncSessionLocal", new=factory):

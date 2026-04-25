@@ -21,15 +21,12 @@ from ocabra.agents.mcp_client import (
     _HeaderMerger,
 )
 
-
 # ── Header merger ───────────────────────────────────────────
 
 
 def test_header_merger_keeps_static_headers():
     merger = _HeaderMerger({"Authorization": "Bearer static", "x-static": "1"})
-    merged = merger.merge(
-        {"authorization": "Bearer INJECTED", "x-extra": "2"}
-    )
+    merged = merger.merge({"authorization": "Bearer INJECTED", "x-extra": "2"})
     # Static header wins
     assert merged["authorization"] == "Bearer static"
     assert merged["x-static"] == "1"
@@ -65,9 +62,7 @@ def test_flatten_uses_model_dump_when_available():
 
 
 def test_flatten_passes_through_dicts():
-    blocks = _flatten_content_blocks(
-        [{"type": "text", "text": "a"}, _FakeTextContent("b")]
-    )
+    blocks = _flatten_content_blocks([{"type": "text", "text": "a"}, _FakeTextContent("b")])
     assert blocks == [
         {"type": "text", "text": "a"},
         {"type": "text", "text": "b"},
@@ -149,9 +144,7 @@ async def test_base_client_list_tools_maps_into_dataclasses():
 async def test_base_client_call_tool_returns_flattened_result():
     client = _ProbeClient()
     client._session = _FakeSession()
-    result = await client.call_tool(
-        "get_issue", {"id": 1}, timeout_seconds=5.0
-    )
+    result = await client.call_tool("get_issue", {"id": 1}, timeout_seconds=5.0)
     assert isinstance(result, MCPToolResult)
     assert result.is_error is False
     assert result.content == [{"type": "text", "text": "ok"}]
@@ -167,9 +160,7 @@ async def test_base_client_call_tool_times_out():
     sess.call_tool = AsyncMock(side_effect=_slow)
     client._session = sess
 
-    result = await client.call_tool(
-        "slow", {}, timeout_seconds=0.01
-    )
+    result = await client.call_tool("slow", {}, timeout_seconds=0.01)
     assert result.is_error is True
     assert "timeout" in result.content[0]["text"]
 

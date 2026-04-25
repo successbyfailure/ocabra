@@ -70,9 +70,7 @@ def _serialize(row: MCPServer) -> MCPServerOut:
         oauth_config=row.oauth_config,
         allowed_tools=list(row.allowed_tools) if row.allowed_tools else None,
         group_id=row.group_id,
-        tools_cache=(
-            [MCPToolOut(**t) for t in row.tools_cache] if row.tools_cache else None
-        ),
+        tools_cache=([MCPToolOut(**t) for t in row.tools_cache] if row.tools_cache else None),
         tools_cache_updated_at=row.tools_cache_updated_at,
         last_error=row.last_error,
         health_status=row.health_status,
@@ -123,9 +121,7 @@ async def list_mcp_servers(
     """List all MCP servers (redacted)."""
     async with AsyncSessionLocal() as session:
         rows = (
-            (await session.execute(sa.select(MCPServer).order_by(MCPServer.alias)))
-            .scalars()
-            .all()
+            (await session.execute(sa.select(MCPServer).order_by(MCPServer.alias))).scalars().all()
         )
     return [_serialize(r) for r in rows]
 
@@ -152,9 +148,7 @@ async def create_mcp_server(
 
     async with AsyncSessionLocal() as session:
         existing = (
-            await session.execute(
-                sa.select(MCPServer.id).where(MCPServer.alias == body.alias)
-            )
+            await session.execute(sa.select(MCPServer.id).where(MCPServer.alias == body.alias))
         ).scalar_one_or_none()
         if existing is not None:
             raise HTTPException(
@@ -181,6 +175,7 @@ async def create_mcp_server(
             oauth_config=body.oauth_config,
             allowed_tools=list(body.allowed_tools) if body.allowed_tools else None,
             group_id=body.group_id,
+            health_status="unknown",
             created_by=UUID(user.user_id) if user.user_id else None,
         )
         session.add(row)
@@ -252,24 +247,18 @@ async def update_mcp_server(
         if "args" in patch:
             row.args = list(patch["args"]) if patch["args"] else None
         if "env" in patch:
-            row.env_encrypted = (
-                registry.encrypt_json(patch["env"]) if patch["env"] else None
-            )
+            row.env_encrypted = registry.encrypt_json(patch["env"]) if patch["env"] else None
         if "auth_type" in patch:
             row.auth_type = patch["auth_type"]
             if patch["auth_type"] == "none":
                 row.auth_value_encrypted = None
         if "auth_value" in patch:
             payload = patch["auth_value"]
-            row.auth_value_encrypted = (
-                registry.encrypt_json(payload) if payload else None
-            )
+            row.auth_value_encrypted = registry.encrypt_json(payload) if payload else None
         if "oauth_config" in patch:
             row.oauth_config = patch["oauth_config"]
         if "allowed_tools" in patch:
-            row.allowed_tools = (
-                list(patch["allowed_tools"]) if patch["allowed_tools"] else None
-            )
+            row.allowed_tools = list(patch["allowed_tools"]) if patch["allowed_tools"] else None
         if "group_id" in patch:
             row.group_id = patch["group_id"]
 

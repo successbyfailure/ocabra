@@ -306,9 +306,7 @@ class MCPRegistry:
         """Drop any cached ``tools/list`` for *alias*."""
         self._cache.pop(alias, None)
 
-    async def refresh(
-        self, alias: str, *, session: AsyncSession | None = None
-    ) -> list[MCPTool]:
+    async def refresh(self, alias: str, *, session: AsyncSession | None = None) -> list[MCPTool]:
         """Force a re-fetch and update the DB cache columns when possible."""
         tools = await self.get_tools(alias, force_refresh=True)
         if session is not None:
@@ -414,9 +412,7 @@ class MCPRegistry:
             return SseMCPClient(row.url, headers=static_headers)
         if transport == "stdio":
             if not row.command:
-                raise ValueError(
-                    f"MCP server '{row.alias}' has transport=stdio but no command"
-                )
+                raise ValueError(f"MCP server '{row.alias}' has transport=stdio but no command")
             env = self.decrypt_json(row.env_encrypted)
             return StdioMCPClient(
                 command=row.command,
