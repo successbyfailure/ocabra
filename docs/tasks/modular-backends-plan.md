@@ -696,6 +696,36 @@ Bloquea la migración de `acestep`, `bitnet`, `llama_cpp` y `tensorrt_llm` (los 
 **Deuda 9h — `_derive_version()` cosmético.**
 Para `tts` el state reporta `installed_version="torch>=2.5"` porque la heurística toma el primer paquete pinneado y `torch>=2.5` es el primero. No bloqueante, pero visualmente raro. Mejorar: preferir un paquete cuyo nombre coincida con el `backend_type` o el primer paquete que NO esté en la lista del core_runtime.
 
+### Hito Validación e2e — Federation/profile_id fix + ACE-Step weight reuse (2026-04-25)
+
+**Avances**:
+- **Bug fix federation hook + profile_id**: `resolve_federated()` ahora acepta
+  `profile_registry` opcional y normaliza `profile_id` → `base_model_id`
+  antes de buscar en `model_manager`. Cableado en los 5 endpoints OpenAI
+  (`chat`, `images`, `audio`, `embeddings`, `completions`). Ahora
+  `model="qwen2.5-0.5b-gguf"` o `model="sdxl-base"` resuelven sin 404
+  donde antes hacía falta usar el canonical model_id largo. Validado e2e:
+  - chat con `qwen2.5-0.5b-gguf` → "pong" ✅
+  - images con `sdxl-base` → PNG 1024×1024 ✅
+- **Bind-mount ACE-Step weights**: nuevo bind en `docker-compose.yml`
+  `/docker/ACE-Step-1.5/checkpoints:/data/backends/acestep/src/checkpoints`
+  (no `:ro` — ACE-Step server escribe configs sync al primer init). Los
+  ~11 GB de pesos pre-existentes (acestep-v15-turbo, vae,
+  acestep-5Hz-lm-{0.6B,1.7B,4B}, Qwen3-Embedding-0.6B) se reutilizan sin
+  re-descarga.
+- **Fix acestep `forward_request`**: el endpoint `/v1/audio/generate` pasaba
+  `worker_key` (canonical `acestep/turbo`) al backend pero el backend
+  almacena `_workers` por `backend_model_id` (`turbo`). Cambiado a
+  `state.backend_model_id`. Mismo patrón que ya usaban whisper/health_check.
+
+**Deudas abiertas**:
+- **acestep generación e2e**: load funciona, pesos se reutilizan, pero
+  `torchcodec==0.11.1` (instalado por `uv sync`) requiere `libavutil.so.56`
+  (FFmpeg 4.x) y la imagen slim trae FFmpeg 5.x con `libavutil.so.57`.
+  Bloqueado hasta downgrade ffmpeg en slim, pin de torchcodec
+  compatible o build de torchcodec local. No-bloqueante para el resto
+  de backends.
+
 ### Hito Validación e2e — Diffusers SDXL single-file (2026-04-25)
 
 Cierre de la única casilla `⏭️` del cuadro e2e: diffusers ahora carga el
@@ -718,18 +748,14 @@ sobre la RTX 3090.
   single-file SDXL/SD1.5, ext checks, env override) con stubs in-place de
   `uvicorn`/`fastapi`/`pydantic` para evitar la dep en sandbox.
 
-**Bug colateral encontrado**:
+**Bug colateral encontrado** (resuelto en hito posterior 2026-04-25):
 - En `api/openai/images.py` (y `chat.py`/`audio.py`/...), el bloque
-  `--- Federation hook ---` corre **antes** del `resolve_profile()`. Cuando
+  `--- Federation hook ---` corre antes del `resolve_profile()`. Cuando
   el cliente envía `model="sdxl-base"` (un `profile_id`, no canonical),
   `resolve_federated()` busca en `model_manager.get_state(model_id)` y
-  como no es canonical → 404 antes de que el resolver de profile tenga
-  oportunidad. Workaround actual: usar el canonical `model_id` directo
-  (`diffusers/image/checkpoints/sd_xl_base_1.0.safetensors`). **Fix
-  pendiente**: invertir el orden — primero resolver `profile_id` →
-  `base_model_id`, luego pasar el canonical al federation hook. Aplica a
-  todos los endpoints OpenAI; no se tocó en esta sesión para no
-  desacoplar la sesión de validación e2e.
+  como no es canonical → 404. **Fix aplicado**: `resolve_federated`
+  acepta `profile_registry` opcional y normaliza `profile_id` →
+  `base_model_id`. Cableado en los 5 endpoints OpenAI.
 
 ### Hito Validación e2e — Slim image runtime (2026-04-25)
 

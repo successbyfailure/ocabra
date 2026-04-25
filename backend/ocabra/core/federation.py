@@ -600,6 +600,7 @@ async def resolve_federated(
     model_id: str,
     model_manager: ModelManager,
     federation_manager: FederationManager | None,
+    profile_registry: Any = None,
 ) -> tuple[str, PeerState | None]:
     """Decide whether to handle a request locally or proxy to a remote peer.
 
@@ -608,11 +609,34 @@ async def resolve_federated(
         2. Model exists locally (can be loaded) -> ``("local", None)``
         3. Model available on a remote peer -> ``("remote", best_peer)``
         4. Not found anywhere -> raise ``HTTPException(404)``
+
+    Args:
+        model_id: The ``model`` field as the client sent it.  Can be either a
+            canonical model id (``ollama/qwen3:8b``,
+            ``diffusers/image/checkpoints/sd_xl_base_1.0.safetensors``) or a
+            short profile id (``sdxl-base``, ``acestep/turbo``).
+        profile_registry: Optional :class:`ProfileRegistry`.  When provided,
+            *model_id* is first resolved through the registry; if it matches a
+            profile, the profile's ``base_model_id`` is used for the local /
+            remote checks.  Without this, callers passing a profile id would
+            hit step 4 and 404 even when the underlying base model exists.
     """
     from fastapi import HTTPException
 
     from ocabra.core.model_manager import ModelStatus
     from ocabra.core.model_ref import _split_canonical_model_ref, build_model_ref
+
+    # 0. Normalise profile id → canonical base model id when a registry is
+    # provided. Endpoints that accept profile ids (chat, images, audio,
+    # embeddings, completions, rerank) pass the registry so a profile id
+    # short-circuits to its base_model_id before federation lookup.
+    if profile_registry is not None:
+        try:
+            profile = await profile_registry.get(model_id)
+        except Exception:  # noqa: BLE001
+            profile = None
+        if profile is not None:
+            model_id = profile.base_model_id
 
     # 1. Check if loaded locally
     # If model_id is not canonical (e.g. "qwen3:8b" from Ollama), also try

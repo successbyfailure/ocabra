@@ -68,6 +68,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
+      # ACE-Step weights checkpoint dir (~11 GB) is mounted into the modular
+      # install path so the cloned src/ tree finds them where the acestep
+      # server expects (<project_root>/checkpoints/). Avoids re-downloading
+      # at first generation. NOT read-only — ACE-Step writes minor config
+      # syncs (configuration_*.py) into the checkpoint subdirs on first
+      # init. Bloque 15 — 2026-04-25.
+      - /docker/ACE-Step-1.5/checkpoints:/data/backends/acestep/src/checkpoints
     depends_on:
       postgres:
         condition: service_healthy

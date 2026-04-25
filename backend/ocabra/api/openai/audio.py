@@ -285,7 +285,9 @@ async def speech(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
-            target, peer = await resolve_federated(model_id, model_manager, federation_manager)
+            target, peer = await resolve_federated(
+                model_id, model_manager, federation_manager, profile_registry
+            )
             if target == "remote":
                 request.state.federation_remote_node_id = peer.peer_id
                 # TTS is streaming audio — proxy as stream
@@ -441,7 +443,12 @@ async def generate_music(
         )
 
     try:
-        result = await backend.forward_request(worker_key, "/generate", merged_body)
+        # ACE-Step backend stores _workers keyed by backend_model_id (the
+        # short suffix like "turbo"), not the canonical worker_key
+        # ("acestep/turbo"). Use backend_model_id to find the loaded worker.
+        result = await backend.forward_request(
+            state.backend_model_id, "/generate", merged_body
+        )
     except TimeoutError as exc:
         raise _openai_error(
             str(exc), "server_error", code="generation_timeout", status_code=504
