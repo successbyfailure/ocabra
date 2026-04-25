@@ -595,6 +595,31 @@ Si no se actualiza esta sección, el trabajo no se considera cerrado aunque el c
 
 *(Añadir entradas a medida que las fases progresen, como en `modular-backends-plan.md`.)*
 
+### 2026-04-25 — Validación de los entregables de Streams A y C
+
+**Backend (Stream A, ya en `main`)**:
+- `pytest tests/agents/` (vía contenedor `ocabra-api-1`): **46/49 tests pasan, 3 fallan**:
+  - `test_create_http_ok_for_model_manager` y `test_create_stdio_ok_for_admin`: `MCPServerOut.health_status` rechaza `None` con `literal_error`. La columna tiene `server_default="unknown"` pero el `.scalar_one()` post-INSERT devuelve `None` en el modelo Pydantic. Fix: o bien `health_status: Literal[...] | None = "unknown"` en schema, o `default="unknown"` en `MCPServer.health_status` ORM (no sólo `server_default`), o `INSERT ... RETURNING` que rellene el valor.
+  - `test_decrypt_rejects_tampered`: token Fernet manipulado no levanta `ValueError` (silenciado por try/except en `_decrypt_optional` o similar). Revisar: si la API se documenta como "raise on tamper", quitar el except; si se documenta como "return None on tamper", actualizar el test.
+- `ruff check`: 33 errores (28× `B008` *function-call-in-default-argument* — patrón `Depends()`, mismo problema que `api/internal/models.py` preexistente con 24× B008 — **no es regresión de Stream A**; 4× `F401`; 1× `I001`).
+- `ruff format --check`: 10 ficheros requieren reformat.
+
+**Frontend (Stream C, worktree `agent-a4edf4f5`)**:
+- `npm run lint`: ✅ pasa
+- `npm run build` (`tsc -b && vite build`): ✅ pasa, 2729 módulos transformados
+- `npx vitest run`: 21/25 tests pasan. Los **2 tests nuevos** (`Agents.test.tsx`, `MCPServers.test.tsx`) **pasan**. Los 4 fallos son preexistentes en `main` (`Dashboard`, `ExploreFlow`, `GpuCard`, `Settings`) — **no introducidos por Stream C**.
+- Symlink `node_modules` → `../../../../frontend/node_modules` necesario para validar (worktree no instaló deps).
+
+**Deudas que cerrar antes de Stream B**:
+- [ ] Fix `health_status=None` en `MCPServerOut` o en el insert (bug bloqueante para crear cualquier MCP server por API)
+- [ ] Fix Fernet tampering test (decisión: ¿levanta o devuelve None?)
+- [ ] (Opcional) `ruff format` sobre los 10 ficheros nuevos
+- [ ] (Opcional) Limpiar 4× F401 + 1× I001 en tests/agents/
+- [ ] (Opcional) Refactor B008 a `Annotated[X, Depends(...)]` — afecta también a routers preexistentes; tarea separada si se acomete
+- [ ] Mergear Stream C (`worktree-agent-a4edf4f5` → `main`); ya validado, no necesita cambios
+
+---
+
 ### 2026-04-24 — Stream A (DB + Registry, Fase 1) entregado
 
 **Rama**: worktree `agent-a545a2ab` (4 commits sobre `86b70b7`, worktree en `/docker/ocabra/.claude/worktrees/agent-a545a2ab`).
