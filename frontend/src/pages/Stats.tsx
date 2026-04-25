@@ -13,6 +13,7 @@ import { CostSavingsCard } from "@/components/stats/CostSavingsCard"
 import { UserDetailPanel } from "@/components/stats/UserDetailPanel"
 import { ApiKeyPanel } from "@/components/stats/ApiKeyPanel"
 import { FederationPanel } from "@/components/stats/FederationPanel"
+import { AgentsPanel } from "@/components/stats/AgentsPanel"
 import type {
   ByApiKeyStats,
   ByGroupStats,
@@ -562,6 +563,11 @@ export function Stats() {
               </Tabs.Trigger>
             )}
             {isManagerOrAdmin && (
+              <Tabs.Trigger value="agents" className={tabTriggerClass("agents")}>
+                Agents
+              </Tabs.Trigger>
+            )}
+            {isManagerOrAdmin && (
               <Tabs.Trigger value="log" className={tabTriggerClass("log")}>
                 Log
               </Tabs.Trigger>
@@ -625,6 +631,12 @@ export function Stats() {
             {isManagerOrAdmin && hasFederation && (
               <Tabs.Content value="federation">
                 <FederationPanel data={federationStats} />
+              </Tabs.Content>
+            )}
+
+            {isManagerOrAdmin && (
+              <Tabs.Content value="agents">
+                <AgentsPanel from={params.from} to={params.to} />
               </Tabs.Content>
             )}
 

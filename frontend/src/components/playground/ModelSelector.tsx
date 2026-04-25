@@ -1,13 +1,15 @@
 import { CapabilityBadge } from "@/components/common/CapabilityBadge"
 import type { ModelState } from "@/types"
+import type { Agent } from "@/types/agents"
 
 interface ModelSelectorProps {
   models: ModelState[]
   selectedModelId: string
   onSelect: (modelId: string) => void
+  agents?: Agent[]
 }
 
-export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelectorProps) {
+export function ModelSelector({ models, selectedModelId, onSelect, agents = [] }: ModelSelectorProps) {
   const selected = models.find((model) => model.modelId === selectedModelId) ?? null
   const loaded = models.filter((model) => model.status === "loaded")
 
@@ -22,11 +24,22 @@ export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelect
           aria-label="Seleccionar modelo"
           className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
         >
-          {models.map((model) => (
-            <option key={model.modelId} value={model.modelId}>
-              {model.displayName} {model.status === "loaded" ? "• loaded" : ""}
-            </option>
-          ))}
+          <optgroup label="Modelos">
+            {models.map((model) => (
+              <option key={model.modelId} value={model.modelId}>
+                {model.displayName} {model.status === "loaded" ? "• loaded" : ""}
+              </option>
+            ))}
+          </optgroup>
+          {agents.length > 0 && (
+            <optgroup label="✨ Agents">
+              {agents.map((agent) => (
+                <option key={agent.slug} value={`agent/${agent.slug}`}>
+                  ✨ {agent.displayName}
+                </option>
+              ))}
+            </optgroup>
+          )}
         </select>
       </label>
 

@@ -692,6 +692,7 @@ Si no se actualiza esta sección, el trabajo no se considera cerrado aunque el c
 
 ### Deudas abiertas
 
+- [ ] **Stats endpoints para agents**: `GET /ocabra/stats/by-agent` (top agents + top tools con p50/p95/error rate) y `GET /ocabra/stats/tool-calls?agent_id=...` (últimos tool calls para drill-down). **Frontend (Stream C) ya los consume contra mock fallback**; Stream A/B debe exponerlos para que la tab "Agents" de Stats y la card "Active agents (last hour)" del Dashboard dejen de mostrar datos de ejemplo.
 - [ ] OAuth2 discovery en MCP servers (LiteLLM lo soporta; v1 sólo api_key/bearer/basic).
 - [ ] `/v1/responses` compat (v1 sólo `/v1/chat/completions` y Ollama `/api/chat`).
 - [ ] Sub-agentes (un tool de tipo `invoke_agent` que llame a otro `AgentExecutor`).

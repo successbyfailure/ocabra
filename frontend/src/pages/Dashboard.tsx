@@ -11,8 +11,11 @@ import {
   Layers,
   MemoryStick,
   Network,
+  Sparkles,
   Zap,
 } from "lucide-react"
+import { agentStatsApi } from "@/api/agents"
+import type { AgentStatRow } from "@/types/agents"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { GpuCard } from "@/components/gpu/GpuCard"
@@ -352,6 +355,93 @@ function FederationSummary() {
   )
 }
 
+/* ─── Active Agents (last hour) ─── */
+// TODO: remove mock once backend exposes /ocabra/stats/by-agent.
+const MOCK_ACTIVE_AGENTS: AgentStatRow[] = [
+  {
+    agentId: "mock-agent-1",
+    slug: "research-bot",
+    displayName: "Research bot",
+    requestCount: 12,
+    toolCallCount: 27,
+    errorCount: 0,
+    p50DurationMs: 1800,
+    p95DurationMs: 5200,
+    totalTokens: 24100,
+  },
+]
+
+function ActiveAgentsSection() {
+  const [loading, setLoading] = useState(true)
+  const [rows, setRows] = useState<AgentStatRow[]>([])
+  const [usingMock, setUsingMock] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      const now = new Date()
+      const from = new Date(now.getTime() - 60 * 60 * 1000)
+      try {
+        const data = await agentStatsApi.byAgent({ from: from.toISOString(), to: now.toISOString() })
+        if (!active) return
+        setRows(data.byAgent)
+        setUsingMock(false)
+      } catch {
+        if (!active) return
+        setRows(MOCK_ACTIVE_AGENTS)
+        setUsingMock(true)
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+    void load()
+    const timer = window.setInterval(() => void load(), 60_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  return (
+    <Section title="Active agents (last hour)" defaultOpen={rows.length > 0}>
+      {loading ? (
+        <div className="h-20 animate-pulse rounded-lg bg-muted" />
+      ) : rows.length === 0 ? (
+        <EmptyState
+          icon={<Sparkles size={16} />}
+          title="Sin agents activos"
+          description="Los agents aparecerán aquí cuando reciban requests."
+        />
+      ) : (
+        <div className="space-y-2">
+          {usingMock && (
+            <p className="text-xs text-muted-foreground">
+              (mock) Endpoint <code>/ocabra/stats/by-agent</code> todavía no expuesto por el backend.
+            </p>
+          )}
+          {rows.map((row) => (
+            <div
+              key={row.agentId}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm"
+            >
+              <div className="flex items-center gap-2">
+                <Sparkles size={14} className="text-primary" />
+                <span className="font-medium">{row.displayName}</span>
+                <code className="font-mono text-xs text-muted-foreground">agent/{row.slug}</code>
+              </div>
+              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                <span>{row.requestCount} requests</span>
+                <span>{row.toolCallCount} tool calls</span>
+                <span>{row.totalTokens.toLocaleString()} tokens</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  )
+}
+
 /* ─── Recent Requests ─── */
 function RecentRequestsSection() {
   const [data, setData] = useState<RecentRequestsData>({ requests: [] })
@@ -621,6 +711,8 @@ export function Dashboard() {
           )}
         </div>
       </Section>
+
+      {isModelManager && <ActiveAgentsSection />}
 
       {isModelManager && <RecentRequestsSection />}
 

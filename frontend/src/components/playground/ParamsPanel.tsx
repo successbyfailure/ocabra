@@ -12,6 +12,7 @@ export interface PlaygroundParams {
 interface ParamsPanelProps {
   params: PlaygroundParams
   onChange: (next: PlaygroundParams) => void
+  disableSystemPrompt?: boolean
 }
 
 function ParamTooltip({ text }: { text: string }) {
@@ -35,7 +36,7 @@ function ParamTooltip({ text }: { text: string }) {
   )
 }
 
-export function ParamsPanel({ params, onChange }: ParamsPanelProps) {
+export function ParamsPanel({ params, onChange, disableSystemPrompt = false }: ParamsPanelProps) {
   return (
     <Tooltip.Provider delayDuration={200}>
       <aside className="space-y-4 rounded-lg border border-border bg-card p-4">
@@ -101,12 +102,19 @@ export function ParamsPanel({ params, onChange }: ParamsPanelProps) {
         <div className="space-y-1">
           <div className="flex items-center text-sm text-muted-foreground">
             <span>system_prompt</span>
-            <ParamTooltip text="Instrucciones iniciales para el modelo" />
+            <ParamTooltip
+              text={
+                disableSystemPrompt
+                  ? "El agente seleccionado fuerza su propio system prompt. Este campo está deshabilitado."
+                  : "Instrucciones iniciales para el modelo"
+              }
+            />
           </div>
           <textarea
-            value={params.systemPrompt}
+            value={disableSystemPrompt ? "(impuesto por el agente)" : params.systemPrompt}
             onChange={(event) => onChange({ ...params, systemPrompt: event.target.value })}
-            className="min-h-24 w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+            disabled={disableSystemPrompt}
+            className="min-h-24 w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-60"
           />
         </div>
 
