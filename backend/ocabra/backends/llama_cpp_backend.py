@@ -11,8 +11,15 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
+from ocabra.core.backend_installer import read_backend_metadata
 
 logger = structlog.get_logger(__name__)
 
@@ -27,9 +34,61 @@ class LlamaCppBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Modular install spec for llama.cpp (Bloque 15 Fase 2).
+
+        Native build: clones ggml-org/llama.cpp and runs cmake (CUDA-enabled
+        when the host has the toolkit, CPU otherwise). The produced
+        ``llama-server`` binary lives under ``<backend_dir>/bin/`` and is
+        resolved at load time via ``_resolve_server_bin()``.
+        """
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-llama-cpp",
+            oci_tags={"cuda12": "latest-cuda12", "cpu": "latest-cpu"},
+            apt_packages=[
+                "build-essential",
+                "cmake",
+                "git",
+                "ninja-build",
+                "ca-certificates",
+            ],
+            git_repo="https://github.com/ggml-org/llama.cpp",
+            git_ref="master",
+            post_install_script="backend/scripts/install_llama_cpp.sh",
+            extra_bins={"server": "bin/llama-server"},
+            include_core_runtime=False,
+            estimated_size_mb=300,
+            display_name="llama.cpp",
+            description=(
+                "Native llama.cpp server with CUDA acceleration. Supports GGUF "
+                "models for text generation and embeddings."
+            ),
+            tags=["LLM", "GGUF", "CUDA"],
+        )
+
     def __init__(self) -> None:
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
+
+    def _resolve_server_bin(self) -> str:
+        """Pick the ``llama-server`` binary path.
+
+        Priority:
+        1. ``<backends_dir>/llama_cpp/metadata.json`` -> ``extra_bins.server``
+           (modular install via :class:`BackendInstaller`).
+        2. ``settings.llama_cpp_server_bin`` (legacy fat-image path).
+        """
+        meta = read_backend_metadata(settings.backends_dir, "llama_cpp")
+        if meta is not None:
+            extra = meta.get("extra_bins") if isinstance(meta, dict) else None
+            if isinstance(extra, dict):
+                bin_path = extra.get("server")
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+        return settings.llama_cpp_server_bin
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
@@ -48,7 +107,7 @@ class LlamaCppBackend(BackendInterface):
             sys.executable,
             str(_WORKER_PATH),
             "--server-bin",
-            settings.llama_cpp_server_bin,
+            self._resolve_server_bin(),
             "--model-id",
             model_id,
             "--model-path",

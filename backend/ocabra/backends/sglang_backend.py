@@ -20,6 +20,10 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core.backend_installer import (
+    venv_cuda_home,
+    venv_nvidia_ld_library_path,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -57,8 +61,22 @@ class SGLangBackend(BackendInterface):
         return BackendInstallSpec(
             oci_image="ghcr.io/ocabra/backend-sglang",
             oci_tags={"cuda12": "latest-cuda12"},
+            apt_packages=[
+                # SGLang's tvm_ffi JIT-compiles inline C++/CUDA at runtime.
+                # gcc/g++ are mandatory; ninja-build speeds up the JIT.
+                "gcc",
+                "g++",
+                "ninja-build",
+            ],
             pip_packages=[
                 "sglang==0.5.9",
+                # CUDA toolkit wheels — provide nvcc + headers + libs that
+                # tvm_ffi looks for under CUDA_HOME (Deuda D12, validated
+                # 2026-04-25). venv_cuda_home() in core.backend_installer
+                # builds a fake CUDA_HOME that points at these wheels.
+                "nvidia-cuda-nvcc-cu12",
+                "nvidia-cuda-runtime-cu12",
+                "nvidia-cuda-cccl-cu12",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
@@ -180,6 +198,19 @@ class SGLangBackend(BackendInterface):
         }
         if settings.hf_token:
             env["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
+
+        # SGLang JIT-compiles CUDA kernels on first run; tvm_ffi requires
+        # CUDA_HOME and the loader needs the bundled CUDA runtime libs on
+        # LD_LIBRARY_PATH. Both are derived from the venv wheels (Deuda D12).
+        cuda_home = venv_cuda_home(settings.backends_dir, "sglang")
+        if cuda_home:
+            env["CUDA_HOME"] = cuda_home
+            env["CUDA_PATH"] = cuda_home
+            env["PATH"] = f"{cuda_home}/bin:" + env.get("PATH", "")
+        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "sglang")
+        if nvidia_ld:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         logger.info("sglang_starting", model_id=model_id, port=port, tp=tensor_parallel)
         process = await asyncio.create_subprocess_exec(

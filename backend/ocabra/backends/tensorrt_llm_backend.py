@@ -26,10 +26,29 @@ _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "tensorrt_llm_w
 
 
 class TensorRTLLMBackend(BackendInterface):
+    """TensorRT-LLM backend.
+
+    NOTE on modular install (Bloque 15 Fase 2): this backend deliberately
+    does NOT expose an :pyattr:`install_spec`. The TensorRT-LLM distribution
+    path is NVIDIA's NGC container (``nvcr.io/nvidia/tritonserver``) which
+    is too large and too vendor-specific to install via the source/pip path
+    used by the other backends. Source-from-PyPI paths exist
+    (``pypi.nvidia.com``) but pin to specific CUDA/driver versions and
+    drag in tensorrt + cuda-cudnn wheels that are not portable across hosts.
+
+    Tracked under Fase 3 OCI: when the OCI install path lands in
+    BackendInstaller, this backend can declare an OCI image that simply
+    repackages the relevant pieces of the NGC container. Until then the
+    backend stays "built-in" — it relies on the docker-compose stack having
+    docker-in-docker access to spawn the NGC container as a sibling service.
+    """
 
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION}
+
+    # install_spec deliberately omitted — see class docstring.
+
     def __init__(self) -> None:
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
         self.disabled_reason = self._detect_disabled_reason()

@@ -16,6 +16,7 @@ from ocabra.core.backend_installer import (
     BackendAlreadyInstallingError,
     BackendInstaller,
     BackendInstallStatus,
+    BackendModuleState,
 )
 from ocabra.core.worker_pool import WorkerPool
 
@@ -64,7 +65,7 @@ def backends_dir(tmp_path: Path) -> Path:
 def installer(
     worker_pool: WorkerPool, backends_dir: Path
 ) -> BackendInstaller:
-    return BackendInstaller(
+    inst = BackendInstaller(
         backends_dir=backends_dir,
         worker_pool=worker_pool,
         backend_registry={
@@ -72,6 +73,11 @@ def installer(
             "ollama": _AlwaysAvailableMockBackend(),
         },
     )
+    # Tests in this module mock ``_run_subprocess``; the pip-progress path
+    # bypasses that mock by spawning subprocesses directly to read stdout.
+    # Disabling it here keeps every existing test passing with a single mock.
+    inst._pip_progress_enabled = False
+    return inst
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +119,7 @@ async def test_start_slim_image_marks_unknown_backends_as_not_installed(
         },
         assume_fat_image=False,
     )
+    slim_installer._pip_progress_enabled = False
     await slim_installer.start()
 
     states = {s.backend_type: s for s in slim_installer.list_states()}
@@ -429,6 +436,472 @@ async def test_concurrent_install_rejected(
 
     release.set()
     await task
+
+
+# ---------------------------------------------------------------------------
+# Fase 2 — apt / git / post_install_script / extra_bins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_install_skips_venv_when_no_python_deps(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native backends (llama_cpp/bitnet) need no venv; the installer should skip it."""
+
+    await installer.start()
+
+    # Pure-native spec: no pip, no core runtime, no post-install. Just produce a binary.
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            include_core_runtime=False,
+            extra_bins={"server": "bin/mock-server"},
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+        self._log(backend_type, f"MOCK $ {' '.join(argv)}")
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+
+    # Drop the expected binary so extra_bins validation passes.
+    bin_dir = backends_dir / "mock" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "mock-server").write_text("#!/bin/sh\nexit 0\n")
+
+    states = await _collect_states(installer.install("mock", method="source"))
+    assert states[-1].install_status == BackendInstallStatus.INSTALLED
+
+    venv_calls = [c for c in calls if len(c) >= 3 and c[1:3] == ["-m", "venv"]]
+    assert venv_calls == [], f"unexpected venv creation: {venv_calls}"
+
+    meta = json.loads((backends_dir / "mock" / METADATA_FILENAME).read_text())
+    assert meta["python_bin"] is None
+    assert meta["extra_bins"] == {"server": str(bin_dir / "mock-server")}
+
+
+@pytest.mark.asyncio
+async def test_install_runs_apt_when_available(
+    installer: BackendInstaller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apt_packages → apt-get update + apt-get install with --no-install-recommends."""
+
+    await installer.start()
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            apt_packages=["build-essential", "cmake"],
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+        self._log(backend_type, f"MOCK $ {' '.join(argv)}")
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+    # Pretend apt-get is on PATH at /usr/bin/apt-get.
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer.shutil.which",
+        lambda name: "/usr/bin/apt-get" if name == "apt-get" else None,
+    )
+
+    async for _ in installer.install("mock", method="source"):
+        pass
+
+    apt_calls = [c for c in calls if c and c[0].endswith("apt-get")]
+    assert any(c[1:] == ["update"] for c in apt_calls), apt_calls
+    install_call = next(
+        c for c in apt_calls if "install" in c
+    )
+    assert "--no-install-recommends" in install_call
+    assert "build-essential" in install_call and "cmake" in install_call
+
+
+@pytest.mark.asyncio
+async def test_install_skips_apt_when_unavailable(
+    installer: BackendInstaller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No apt-get on PATH → log warning, do not raise."""
+
+    await installer.start()
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            apt_packages=["build-essential"],
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer.shutil.which", lambda name: None
+    )
+
+    states = await _collect_states(installer.install("mock", method="source"))
+    assert states[-1].install_status == BackendInstallStatus.INSTALLED
+    assert not any(c and c[0].endswith("apt-get") for c in calls)
+    log = installer.get_logs("mock")
+    assert any("apt-get not found" in line for line in log)
+
+
+@pytest.mark.asyncio
+async def test_install_clones_git_repo_into_src_dir(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """git_repo → ``git clone --depth 1 --branch <ref>`` into ``<backend>/src/``."""
+
+    await installer.start()
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            git_repo="https://example.com/foo/bar",
+            git_ref="v1.2.3",
+            git_recursive=True,
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+
+    async for _ in installer.install("mock", method="source"):
+        pass
+
+    git_call = next(c for c in calls if c and c[0] == "git")
+    assert "clone" in git_call and "--depth" in git_call and "--recursive" in git_call
+    assert "--branch" in git_call and "v1.2.3" in git_call
+    assert git_call[-2] == "https://example.com/foo/bar"
+    assert git_call[-1] == str(backends_dir / "mock" / "src")
+
+    meta = json.loads((backends_dir / "mock" / METADATA_FILENAME).read_text())
+    assert meta["git_repo"] == "https://example.com/foo/bar"
+    assert meta["git_ref"] == "v1.2.3"
+    assert meta["src_dir"] == str(backends_dir / "mock" / "src")
+
+
+@pytest.mark.asyncio
+async def test_install_runs_post_install_script_with_env(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """post_install_script runs in cwd=BACKEND_DIR with BACKEND_DIR/SRC_DIR/BIN_DIR env."""
+
+    await installer.start()
+
+    # Create a real script on disk so the absolute-path branch is exercised.
+    script_path = tmp_path / "do_thing.sh"
+    script_path.write_text("#!/bin/sh\necho hi\n")
+    script_path.chmod(0o755)
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            git_repo="https://example.com/foo/bar",
+            post_install_script=str(script_path),
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    seen_env: dict[str, str] = {}
+    seen_cwd: list[str | None] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        if argv and argv[0] == "bash":
+            seen_env.update(env or {})
+            seen_cwd.append(str(cwd) if cwd else None)
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+
+    async for _ in installer.install("mock", method="source"):
+        pass
+
+    assert seen_cwd == [str(backends_dir / "mock")]
+    assert seen_env["BACKEND_DIR"] == str(backends_dir / "mock")
+    assert seen_env["SRC_DIR"] == str(backends_dir / "mock" / "src")
+    assert seen_env["BIN_DIR"] == str(backends_dir / "mock" / "bin")
+    # No venv was created (no pip_packages, no core runtime), so VENV_DIR/PYTHON_BIN are empty.
+    assert seen_env["VENV_DIR"] == ""
+    assert seen_env["PYTHON_BIN"] == ""
+
+
+@pytest.mark.asyncio
+async def test_install_post_install_script_resolves_repo_relative_paths(
+    installer: BackendInstaller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relative post_install_script paths resolve against the repo root."""
+
+    await installer.start()
+
+    # backend/scripts/install_llama_cpp.sh ships in the repo and must resolve.
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            post_install_script="backend/scripts/install_llama_cpp.sh",
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    seen_argv: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        if argv and argv[0] == "bash":
+            seen_argv.append(list(argv))
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+
+    async for _ in installer.install("mock", method="source"):
+        pass
+
+    assert len(seen_argv) == 1
+    resolved = seen_argv[0][1]
+    assert resolved.endswith("backend/scripts/install_llama_cpp.sh")
+    assert Path(resolved).is_file()  # noqa: ASYNC240 — assertion, not IO
+
+
+@pytest.mark.asyncio
+async def test_install_extra_bins_missing_file_fails(
+    installer: BackendInstaller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declared extra_bins that the post-install script did not produce → ERROR."""
+
+    await installer.start()
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            extra_bins={"server": "bin/should-have-been-built"},
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    async def _noop(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _noop)
+
+    states = await _collect_states(installer.install("mock", method="source"))
+    assert states[-1].install_status == BackendInstallStatus.ERROR
+    assert "extra_bins" in (states[-1].error or "")
+
+
+@pytest.mark.asyncio
+async def test_install_extra_bins_traversal_rejected(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """extra_bins paths that escape the backend directory are rejected."""
+
+    await installer.start()
+
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-mock",
+            extra_bins={"server": "../../../etc/passwd"},
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+    async def _noop(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _noop)
+
+    states = await _collect_states(installer.install("mock", method="source"))
+    assert states[-1].install_status == BackendInstallStatus.ERROR
+    assert "escapes" in (states[-1].error or "")
+
+
+def test_derive_version_prefers_backend_named_pin() -> None:
+    """Deuda 9h fix: tts spec used to report 'torch>=2.5'; should pick qwen-tts pin."""
+    from ocabra.core.backend_installer import _derive_version
+
+    pkgs = [
+        "torch>=2.5",
+        "torchaudio>=2.5",
+        "qwen-tts==0.1.1",
+        "kokoro-tts==1.2.0",
+    ]
+    # When backend_type is known, prefer the matching package by name.
+    assert _derive_version(pkgs, "tts") not in {"torch>=2.5", "torchaudio>=2.5"}
+    # And falls back to first non-core pinned package without backend_type.
+    assert _derive_version(pkgs) == "0.1.1"
+
+
+def test_derive_version_native_backend_returns_source() -> None:
+    """Native backends (llama_cpp, bitnet) have no pip packages."""
+    from ocabra.core.backend_installer import _derive_version
+
+    assert _derive_version([], "llama_cpp") == "source"
+
+
+def test_derive_version_handles_extras_and_specifiers() -> None:
+    from ocabra.core.backend_installer import _req_name
+
+    assert _req_name("nemo_toolkit[asr]>=2.2") == "nemo_toolkit"
+    assert _req_name("Chatterbox-TTS==0.1.7") == "chatterbox-tts"
+    assert _req_name("torch>=2.5") == "torch"
+
+
+@pytest.mark.asyncio
+async def test_pip_install_parses_progress_lines(
+    installer: BackendInstaller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deuda #8: pip stdout is parsed for Collecting/Downloading/Installing lines."""
+
+    # Re-enable the pip-progress path for this test (the fixture disables it).
+    installer._pip_progress_enabled = True
+
+    # Replace asyncio.create_subprocess_exec to inject a fake stdout stream.
+    sample_lines = [
+        b"Collecting torch>=2.5\n",
+        b"  Downloading torch-2.5.0-cp311-cp311-manylinux2014_x86_64.whl (797.5 MB)\n",
+        b"Collecting numpy\n",
+        b"Installing collected packages: numpy, torch\n",
+        b"Successfully installed numpy-2.0.0 torch-2.5.0\n",
+    ]
+
+    class _FakeStream:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return self._lines.pop(0)
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _FakeStream(sample_lines)
+
+        async def wait(self):
+            return 0
+
+    async def _fake_create(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer.asyncio.create_subprocess_exec", _fake_create
+    )
+
+    state = BackendModuleState(
+        backend_type="mock",
+        display_name="Mock",
+        description="",
+        tags=[],
+        install_status=BackendInstallStatus.INSTALLING,
+        install_progress=0.3,
+    )
+    snapshots = []
+    async for snap in installer._run_pip_install(
+        "mock",
+        ["pip", "install", "torch>=2.5", "numpy"],
+        state,
+        progress_start=0.30,
+        progress_end=0.70,
+    ):
+        snapshots.append(snap.install_detail)
+
+    # We expect at least one snapshot per recognised line type.
+    joined = " | ".join(s for s in snapshots if s)
+    assert "Collecting torch" in joined
+    assert "Downloading torch-" in joined
+    assert "Linking:" in joined
+    assert any(s == "Pip install complete" for s in snapshots)
+
+
+def test_read_backend_metadata_helper(tmp_path: Path) -> None:
+    """The public helper backends use to discover paths from metadata.json."""
+    from ocabra.core.backend_installer import read_backend_metadata
+
+    assert read_backend_metadata(tmp_path, "absent") is None
+
+    backend_dir = tmp_path / "thing"
+    backend_dir.mkdir()
+    (backend_dir / METADATA_FILENAME).write_text(
+        json.dumps({"extra_bins": {"server": "/abs/path/to/server"}})
+    )
+    meta = read_backend_metadata(tmp_path, "thing")
+    assert meta is not None
+    assert meta["extra_bins"]["server"] == "/abs/path/to/server"
 
 
 # ---------------------------------------------------------------------------

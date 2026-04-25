@@ -31,13 +31,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # chatterbox, voxtral). Keeping them in the base image avoids re-installing
 # apt packages from inside BackendInstaller venvs.
 #
+# Build toolchain (gcc, g++, cmake, ninja-build, git, build-essential) ships
+# in the base image because most modern Python LLM stacks JIT-compile
+# CUDA/C++ kernels at runtime (Triton in vllm/voxtral, tvm_ffi in sglang)
+# and the native backends (llama_cpp, bitnet, acestep) cmake-build their
+# binaries during ``BackendInstaller.install()``. Adds ~250 MB to the slim
+# image — still ~50× smaller than the fat. Specs may still declare these
+# in ``apt_packages`` for OCI-image clarity; the runtime ``apt-get install``
+# becomes a fast no-op when the deps are already present.
+#
 # curl is kept for the /health probe used by docker compose healthcheck.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
+        cmake \
         curl \
         ffmpeg \
+        g++ \
+        gcc \
+        git \
         libsndfile1 \
         libsox3 \
+        ninja-build \
         sox \
     && rm -rf /var/lib/apt/lists/*
 

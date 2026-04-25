@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,8 +28,15 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
+from ocabra.core.backend_installer import read_backend_metadata
 
 logger = structlog.get_logger(__name__)
 
@@ -78,12 +84,55 @@ class AceStepBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.IMAGE_GENERATION}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Modular install spec for ACE-Step (Bloque 15 Fase 2).
+
+        Clones ace-step/ACE-Step-1.5, seeds torch+torchaudio with the cu124
+        index, then runs ``uv sync`` against the cloned project to install the
+        rest. The resulting venv lives at ``<backend_dir>/venv/`` and the
+        cloned project at ``<backend_dir>/src/`` — both resolved at load time
+        via the modular metadata (with fallback to the legacy
+        ``settings.acestep_project_dir`` layout).
+        """
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-acestep",
+            oci_tags={"cuda12": "latest-cuda12"},
+            apt_packages=[
+                "ca-certificates",
+                "curl",
+                "git",
+                "ffmpeg",
+                "libsndfile1",
+            ],
+            pip_packages=[
+                "torch>=2.5",
+                "torchaudio>=2.5",
+            ],
+            pip_extra_index_urls=[
+                "https://download.pytorch.org/whl/cu124",
+            ],
+            git_repo="https://github.com/ace-step/ACE-Step-1.5",
+            git_ref="main",
+            post_install_script="backend/scripts/install_acestep.sh",
+            estimated_size_mb=8000,
+            display_name="ACE-Step 1.5",
+            description=(
+                "ACE-Step 1.5 music generation (DiT + LM). Cloned from upstream "
+                "and synced with `uv`."
+            ),
+            tags=["Music", "GPU", "CUDA"],
+        )
+
     """Manages ACE-Step API server instances.
 
     Two operating modes:
     - **Subprocess mode** (default): spawns `python -m acestep.api_server` as a child
-      process from the ACE-Step project venv. Requires settings.acestep_project_dir
-      to contain a valid `uv sync`-created `.venv`.
+      process from the ACE-Step project venv. Requires either a modular install
+      under ``<backends_dir>/acestep/`` (post Bloque 15 Fase 2) or a legacy
+      checkout at ``settings.acestep_project_dir`` with its own ``.venv``.
     - **External mode**: when settings.acestep_external_api_url is set, the backend
       connects to an already-running ACE-Step REST API (e.g. a Docker service running
       with ACESTEP_MODE=api). No subprocess is spawned; the external URL is used
@@ -96,6 +145,32 @@ class AceStepBackend(BackendInterface):
     @property
     def _external_url(self) -> str:
         return (settings.acestep_external_api_url or "").rstrip("/")
+
+    def _resolve_project_paths(self) -> tuple[Path, str]:
+        """Return ``(project_dir, python_bin)`` for launching ACE-Step.
+
+        Priority:
+        1. Modular install metadata at ``<backends_dir>/acestep/metadata.json``
+           — uses ``src_dir`` and ``python_bin`` written by BackendInstaller.
+        2. Legacy fat-image layout at ``settings.acestep_project_dir`` with
+           a ``.venv/bin/python`` created by ``uv sync``.
+        """
+        meta = read_backend_metadata(settings.backends_dir, "acestep")
+        if isinstance(meta, dict):
+            src_dir = meta.get("src_dir")
+            python_bin = meta.get("python_bin")
+            if (
+                isinstance(src_dir, str)
+                and src_dir
+                and isinstance(python_bin, str)
+                and python_bin
+                and Path(python_bin).is_file()
+                and Path(src_dir).is_dir()
+            ):
+                return Path(src_dir), python_bin
+
+        legacy_dir = Path(settings.acestep_project_dir)
+        return legacy_dir, _resolve_python(legacy_dir)
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -139,8 +214,7 @@ class AceStepBackend(BackendInterface):
         if existing and isinstance(existing, _AceStepWorker) and existing.process.returncode is None:
             return existing.info
 
-        project_dir = Path(settings.acestep_project_dir)
-        python_bin = _resolve_python(project_dir)
+        project_dir, python_bin = self._resolve_project_paths()
 
         port = int(kwargs.get("port") or 0)
         if port == 0:

@@ -18,6 +18,7 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
 
@@ -168,6 +169,14 @@ class WhisperBackend(BackendInterface):
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
         if diarization_enabled and settings.hf_token and not env.get("HF_TOKEN"):
             env["HF_TOKEN"] = settings.hf_token
+
+        # Slim image has no CUDA toolkit. Torch wheels under
+        # site-packages/nvidia/*/lib provide libcublas/libcudnn/libcudart;
+        # ctranslate2 (faster-whisper backend) only finds them via LD path.
+        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "whisper")
+        if nvidia_ld:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         python_bin = self._resolve_python_bin()
         args = [

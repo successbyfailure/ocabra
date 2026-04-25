@@ -21,6 +21,7 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
 
@@ -56,9 +57,19 @@ class VoxtralBackend(BackendInterface):
         return BackendInstallSpec(
             oci_image="ghcr.io/ocabra/backend-voxtral",
             oci_tags={"cuda12": "latest-cuda12"},
+            apt_packages=[
+                # Same as vllm: Triton JIT requires a C compiler.
+                "gcc",
+                "g++",
+            ],
             pip_packages=[
-                "vllm>=0.18.0",
-                "vllm-omni>=0.18.0",
+                # vllm-omni 0.18 imports vllm.inputs.data which was removed in
+                # vllm 0.19+. Floor was open-ended (>=0.18.0), so the resolver
+                # pulled the latest vllm and the worker crashed on import.
+                # Pin both to the 0.18 line to keep them in sync (Deuda D13,
+                # validated 2026-04-25).
+                "vllm==0.18.0",
+                "vllm-omni==0.18.0",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
@@ -129,6 +140,12 @@ class VoxtralBackend(BackendInterface):
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
         if settings.hf_token:
             env.setdefault("HF_TOKEN", settings.hf_token)
+
+        # Slim image needs the venv's CUDA libs on LD path (Deuda D14).
+        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "voxtral")
+        if nvidia_ld:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: SIM115

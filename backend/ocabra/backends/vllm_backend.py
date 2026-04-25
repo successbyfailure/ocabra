@@ -29,6 +29,7 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
 
@@ -99,6 +100,15 @@ class VLLMBackend(BackendInterface):
         return BackendInstallSpec(
             oci_image="ghcr.io/ocabra/backend-vllm",
             oci_tags={"cuda12": "latest-cuda12"},
+            apt_packages=[
+                # Triton JIT compiles kernels at runtime and needs a C/C++
+                # compiler. The slim base image does not ship gcc/g++; without
+                # these, the engine fails with
+                # "RuntimeError: Failed to find C compiler" the first time
+                # vllm runs (Deuda D11, validated 2026-04-25).
+                "gcc",
+                "g++",
+            ],
             pip_packages=[
                 "vllm==0.17.1",
                 "torch>=2.5",
@@ -432,6 +442,13 @@ class VLLMBackend(BackendInterface):
         }
         if settings.hf_token:
             env["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
+
+        # Slim image has no CUDA toolkit; the loader needs the bundled CUDA
+        # libs (libcublas/libcudart/...) on LD_LIBRARY_PATH (Deuda D14).
+        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "vllm")
+        if nvidia_ld:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         return cmd, env, cuda_devices
 

@@ -19,6 +19,7 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
 
@@ -104,6 +105,12 @@ class DiffusersBackend(BackendInterface):
         env["DIFFUSERS_ENABLE_XFORMERS"] = str(settings.diffusers_enable_xformers).lower()
         env["DIFFUSERS_OFFLOAD_MODE"] = settings.diffusers_offload_mode
         env["DIFFUSERS_ALLOW_TF32"] = str(settings.diffusers_allow_tf32).lower()
+
+        # Slim image needs the venv's CUDA libs on LD path (Deuda D14).
+        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "diffusers")
+        if nvidia_ld:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         cmd = [
             self._resolve_python_bin(),

@@ -22,7 +22,31 @@ class BackendInstallSpec:
         include_core_runtime: If true, the installer seeds the venv with the core
             FastAPI/Pydantic/httpx stack that the oCabra worker scripts import.
             Backends that don't run a FastAPI worker can set this to ``False``.
-        post_install_script: Optional script path (relative to repo) to run after install.
+        apt_packages: Debian/Ubuntu packages to ``apt-get install`` before the
+            pip / git steps. Required for native backends (build-essential, cmake,
+            git, etc.). The installer is best-effort: if ``apt-get`` is not
+            available it logs a warning and continues — the user is then on the
+            hook for providing the deps in the base image. Packages persist
+            inside the running container only; they are re-installed on every
+            ``install()`` (idempotent).
+        git_repo: HTTPS URL of an upstream repo to clone into
+            ``<backends_dir>/<name>/src/`` before running the post-install
+            script. Used by ACE-Step (uv sync against project) and by native
+            builds (llama.cpp, BitNet).
+        git_ref: Git ref (branch, tag or commit) to check out.
+        git_recursive: If true, clone with ``--recursive`` (submodules). BitNet
+            requires this.
+        post_install_script: Path to a shell script executed after pip install.
+            May be absolute or relative to the repo root. Run with bash, cwd =
+            ``<backends_dir>/<name>/``, env extended with ``BACKEND_DIR``,
+            ``VENV_DIR`` (may be empty), ``PYTHON_BIN`` (may be empty),
+            ``SRC_DIR`` (may be empty), ``BIN_DIR``. Used by native backends
+            for cmake builds and by ACE-Step for ``uv sync``.
+        extra_bins: Mapping of logical name → relative path under
+            ``<backends_dir>/<name>/`` produced by the install. After the
+            post-install script runs, the installer asserts each file exists,
+            chmod +x's it, and persists the absolute paths in ``metadata.json``
+            so the backend can resolve them at load time.
         estimated_size_mb: Approximate on-disk footprint reported to the UI.
         display_name: Human-friendly name shown on the UI.
         description: Short description of the backend.
@@ -36,7 +60,12 @@ class BackendInstallSpec:
     pip_packages: list[str] = field(default_factory=list)
     pip_extra_index_urls: list[str] = field(default_factory=list)
     include_core_runtime: bool = True
+    apt_packages: list[str] = field(default_factory=list)
+    git_repo: str | None = None
+    git_ref: str = "main"
+    git_recursive: bool = False
     post_install_script: str | None = None
+    extra_bins: dict[str, str] = field(default_factory=dict)
     estimated_size_mb: int = 0
     display_name: str = ""
     description: str = ""

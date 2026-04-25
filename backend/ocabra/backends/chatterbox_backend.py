@@ -22,6 +22,7 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
 
@@ -173,6 +174,12 @@ class ChatterboxBackend(BackendInterface):
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
         if settings.hf_token:
             env.setdefault("HF_TOKEN", settings.hf_token)
+
+        # Slim image needs the venv's CUDA libs on LD path (Deuda D14).
+        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "chatterbox")
+        if nvidia_ld:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: SIM115

@@ -10,8 +10,15 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
+from ocabra.core.backend_installer import read_backend_metadata
 
 logger = structlog.get_logger(__name__)
 
@@ -25,9 +32,59 @@ class BitnetBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION}
+
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Modular install spec for BitNet (Bloque 15 Fase 2).
+
+        Native build of microsoft/BitNet (1.58-bit inference). Defaults to a
+        CPU build because BitNet's pretuned LUT kernels are CPU-first; CUDA
+        can be enabled via the ``BITNET_ENABLE_CUDA=true`` env override on the
+        post-install script. Requires a recursive clone (submodules).
+        """
+
+        return BackendInstallSpec(
+            oci_image="ghcr.io/ocabra/backend-bitnet",
+            oci_tags={"cpu": "latest-cpu", "cuda12": "latest-cuda12"},
+            apt_packages=[
+                "build-essential",
+                "cmake",
+                "git",
+                "ca-certificates",
+                "python3",
+            ],
+            git_repo="https://github.com/microsoft/BitNet.git",
+            git_ref="main",
+            git_recursive=True,
+            post_install_script="backend/scripts/install_bitnet.sh",
+            extra_bins={"server": "bin/bitnet-server"},
+            include_core_runtime=False,
+            estimated_size_mb=250,
+            display_name="BitNet (1.58-bit)",
+            description=(
+                "Microsoft BitNet b1.58 — 1.58-bit quantised LLM inference "
+                "with pretuned LUT kernels (CPU-first, optional CUDA)."
+            ),
+            tags=["LLM", "GGUF", "CPU"],
+        )
+
     def __init__(self) -> None:
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
+
+    def _resolve_server_bin(self) -> str:
+        """Pick the ``bitnet-server`` binary path.
+
+        Priority: modular install metadata → ``settings.bitnet_server_bin``.
+        """
+        meta = read_backend_metadata(settings.backends_dir, "bitnet")
+        if meta is not None:
+            extra = meta.get("extra_bins") if isinstance(meta, dict) else None
+            if isinstance(extra, dict):
+                bin_path = extra.get("server")
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+        return settings.bitnet_server_bin
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
@@ -40,7 +97,7 @@ class BitnetBackend(BackendInterface):
         self._model_configs[model_id] = options
 
         cmd = [
-            settings.bitnet_server_bin,
+            self._resolve_server_bin(),
             "--model",
             str(model_file),
             "--host",
@@ -77,7 +134,14 @@ class BitnetBackend(BackendInterface):
             "CUDA_VISIBLE_DEVICES": visible,
         }
         current_ld_path = env.get("LD_LIBRARY_PATH", "")
-        preferred_paths = ["/usr/local/lib/bitnet", "/usr/local/lib/llama_cpp"]
+        # Modular install drops bitnet-server + libggml/libllama in the same
+        # bin/ dir, so include that path first; legacy fat-image paths follow.
+        modular_bin_dir = str(Path(self._resolve_server_bin()).parent)
+        preferred_paths = [
+            modular_bin_dir,
+            "/usr/local/lib/bitnet",
+            "/usr/local/lib/llama_cpp",
+        ]
         ld_parts = preferred_paths + ([current_ld_path] if current_ld_path else [])
         env["LD_LIBRARY_PATH"] = ":".join(part for part in ld_parts if part)
 
