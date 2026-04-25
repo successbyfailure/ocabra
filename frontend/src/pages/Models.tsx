@@ -10,6 +10,7 @@ import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { ProfileModal } from "@/components/models/ProfileModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import { getModelContextSummary } from "@/lib/modelContext"
+import { useBackendsStore } from "@/stores/backendsStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { Search } from "lucide-react"
@@ -60,6 +61,8 @@ export function Models() {
   const setModels = useModelStore((state) => state.setModels)
   const loadModel = useModelStore((state) => state.loadModel)
   const unloadModel = useModelStore((state) => state.unloadModel)
+  // Pre-fetch backends so the BackendBadge in ModelCard has data on first paint.
+  const fetchBackends = useBackendsStore((state) => state.fetchAll)
 
   const modelList = useMemo(() => Object.values(models), [models])
 
@@ -91,7 +94,7 @@ export function Models() {
 
     const bootstrap = async () => {
       try {
-        await refresh()
+        await Promise.all([refresh(), fetchBackends()])
         if (active) setError(null)
       } catch (err) {
         if (active) {
@@ -113,7 +116,7 @@ export function Models() {
       active = false
       window.clearInterval(timer)
     }
-  }, [setGpus, setModels])
+  }, [setGpus, setModels, fetchBackends])
 
   const filtered = useMemo(() => {
     const visible = modelList

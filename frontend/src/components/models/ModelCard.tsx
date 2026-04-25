@@ -16,6 +16,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react"
+import { BackendBadge } from "@/components/models/BackendBadge"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import { CATEGORY_COLORS } from "@/components/models/ProfileModal"
@@ -158,7 +159,9 @@ export function ModelCard({
           </div>
         </td>
         <td className="px-3 py-3 text-muted-foreground">{modelType(model)}</td>
-        <td className="px-3 py-3 text-muted-foreground hidden lg:table-cell">{model.backendType}</td>
+        <td className="px-3 py-3 hidden lg:table-cell">
+          <BackendBadge backendType={model.backendType} />
+        </td>
         <td className="px-3 py-3">
           <LoadPolicyBadge policy={model.loadPolicy} />
         </td>
