@@ -479,21 +479,23 @@ Al hacer click en "Instalar":
 - [x] SSE de progreso de instalación
 - [x] Tests: 13 en verde (`backend/tests/core/test_backend_installer.py`)
 
-### Fase 2 — Migrar backends a install_spec
+### Fase 2 — Migrar backends a install_spec (7/11 hechos, 4 pendientes)
 
-Migrar uno a uno, empezando por los más simples:
+Estado tras la sesión 2026-04-25:
 
-- [ ] `tts` — solo pip packages (transformers, kokoro)
-- [ ] `whisper` — solo pip packages (faster-whisper, soundfile)
-- [ ] `diffusers` — pip packages (diffusers, accelerate, Pillow)
-- [ ] `vllm` — pip packages (vllm, torch)
-- [ ] `sglang` — ya tiene venv aislado, migrar a nuevo patrón
-- [ ] `chatterbox` — ya tiene venv aislado, migrar
-- [ ] `voxtral` — ya tiene venv aislado, migrar
-- [ ] `llama_cpp` — binario nativo, necesita build script
-- [ ] `bitnet` — binario nativo, necesita build script
-- [ ] `acestep` — pip packages
-- [ ] `tensorrt_llm` — caso especial (Docker-based), adaptar
+- [x] `whisper` — pip + cu124 (faster-whisper + pyannote + nemo). Install validado, **6.3 GB**. `load()` validado en GPU 1, 35 s.
+- [x] `tts` — pip + cu124 (qwen-tts + kokoro + bark). Install validado, **5.7 GB**. `load(kokoro)` validado en GPU 1, 14 s.
+- [x] `diffusers` — pip + cu124 (diffusers + accelerate + transformers). Install validado, **4.9 GB**.
+- [x] `chatterbox` — pip + cu124 (chatterbox-tts). Install validado, **6.0 GB**. Resolver de python_bin con prioridad metadata > legacy `settings.chatterbox_python_bin` > sys.executable.
+- [x] `sglang` — pip + cu124 (`sglang==0.5.9`). Install validado, **10.3 GB**. Resolver de python_bin para el server interno.
+- [x] `voxtral` — pip + cu124 (vllm + vllm-omni). Install validado, **11.1 GB**.
+- [x] `vllm` — pip + cu124 (`vllm==0.17.1` + torch). Install validado, **9.7 GB**. Launcher cambiado de `python` literal a `_resolve_python_bin()`.
+- [ ] `llama_cpp` — binario nativo (cmake -DGGML_CUDA=ON). Necesita Fase 3 OCI o `post_install_script` que el installer aún no ejecuta + extensión del contrato con `extra_bins` en metadata + `apt_packages`.
+- [ ] `bitnet` — mismo caso que llama_cpp (binario nativo). Comparte build infrastructure.
+- [ ] `acestep` — clona repo upstream + `uv sync`. Necesita `BackendInstallSpec.git_repo` + `post_install_script`.
+- [ ] `tensorrt_llm` — imagen NGC propietaria de NVIDIA. Solo viable con `method=oci` repackeando NGC; bloqueado por Deuda #3 hasta decidir packaging.
+
+Total disco source-installed en una instalación slim que active los 7: **~52.9 GB** vs **~51 GB** que la imagen fat traía siempre cargados — pero en slim son pay-as-you-use.
 
 Backends sin migración (siempre disponibles):
 - `ollama` — servicio externo, no necesita instalación
@@ -663,6 +665,36 @@ Validado también a través de Caddy (`http://localhost:8484/ocabra/backends` co
 Si el cliente cierra la conexión SSE a `POST /install` mientras pip está descargando, el proceso pip sigue vivo en el contenedor (el subprocess sobrevive la cancelación del handler). Esto tiene dos caras: buena (el usuario puede cerrar la pestaña y el install termina) y mala (el `BackendModuleState.install_status` se queda en `"installing"` para siempre si el generator no llega a yieldear el estado final). Fix pendiente: detectar el pip terminado fuera del handler (task background o tick periódico) y actualizar estado a `installed`/`error`. Añadir a la lista de deudas como **9f**.
 
 **Resuelto (2026-04-25)**: `install()` lanza la instalación como `asyncio.Task` detached y une al consumer SSE vía `asyncio.Queue`. Si el consumer es cancelado, el task sigue vivo y aterriza el estado final (`installed`/`error`) en `self._states`. Test `test_install_survives_consumer_cancellation` cubre el flujo. Commit `27dc571`.
+
+### Decisiones y deudas nuevas (sesión 2026-04-25 — 7 backends migrados)
+
+**Decisión #7 — Floor de `transformers` retirado del spec de tts.**
+`qwen-tts==0.1.1` pinea `transformers==4.57.3` exacto. Listar `transformers>=5.0` en `pip_packages` rompía la resolución (`ResolutionImpossible`). Política: cuando una lib pinea transitivamente a una versión exacta, no añadirla como floor explícito; deja que la resolver decida. Aplicado también al `Dockerfile.tts`. Mismo cuidado con vllm-omni / sglang en futuras revisiones.
+
+**Decisión #8 — Resolver de `python_bin` con prioridad triple para backends con venv legacy.**
+Para `chatterbox`/`sglang`/`voxtral` (que ya tenían `settings.<name>_python_bin` apuntando a `/opt/<name>-venv` en la imagen fat), el `_resolve_python_bin()` consulta en orden:
+1. `<backends_dir>/<name>/metadata.json` → `python_bin` (modular install)
+2. `settings.<name>_python_bin` (fat legacy)
+3. `sys.executable` (fallback)
+
+Esto permite que el mismo `*_backend.py` funcione tanto en slim (modular) como en fat (legacy) sin condicionales por entorno.
+
+**Decisión #9 — `vllm` cambia su launcher de `python` literal a `_resolve_python_bin()`.**
+Antes hacía `cmd = ["python", "-m", "vllm.entrypoints..."]` — un `python` que solo existe en fat porque vllm está globalmente instalado. En slim el `python` del contenedor no tiene vllm, así que tira del venv en `/data/backends/vllm/venv/bin/python`. Mismo patrón aplicará a futuros backends LLM.
+
+**Decisión #10 — Smoke test usa `ollama` para el caso "uninstall built-in".**
+El test original probaba `POST /backends/whisper/uninstall` esperando 409 (built-in protegido). Tras migrar whisper, esa llamada DESINSTALA whisper (200) — eliminando el venv real (esto pasó accidentalmente en una corrida del smoke). Ahora el test usa `ollama` que es always-available y siempre rechaza uninstall. Lección: los smoke tests con side-effects deben apuntar a recursos verdaderamente inmutables.
+
+**Deuda 9g — `BackendInstallSpec` necesita 4 campos para los nativos**:
+- `apt_packages: list[str]` — para `ffmpeg`, `libsndfile1` y similares (hoy solo en imagen base).
+- `extra_bins: dict[str, str]` — declara los binarios producidos (`{"llama_server": "bin/llama-server"}`); el installer los persiste en `metadata.json` y los backends los consumen.
+- `git_repo: str | None` + `git_ref: str | None` — para `acestep` que parte de un repo upstream.
+- `post_install_script: str | None` (ya existe en el dataclass pero el installer no lo ejecuta) — necesario para los builds nativos y el `uv sync` de acestep.
+
+Bloquea la migración de `acestep`, `bitnet`, `llama_cpp` y `tensorrt_llm` (los 4 pendientes de Fase 2).
+
+**Deuda 9h — `_derive_version()` cosmético.**
+Para `tts` el state reporta `installed_version="torch>=2.5"` porque la heurística toma el primer paquete pinneado y `torch>=2.5` es el primero. No bloqueante, pero visualmente raro. Mejorar: preferir un paquete cuyo nombre coincida con el `backend_type` o el primer paquete que NO esté en la lista del core_runtime.
 
 ### Hito final Fase 4 — load() validado end-to-end en slim (2026-04-25)
 
