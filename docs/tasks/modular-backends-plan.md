@@ -1,8 +1,8 @@
 # oCabra — Plan de Backends Modulares
 
-Última actualización: 2026-04-24
+Última actualización: 2026-04-25
 
-**Estado**: Fase 1 ✅ · Fase 3 (draft de Dockerfiles) ✅ · Fase 5 ✅ · Fases 2, 3-CI, 4 pendientes.
+**Estado**: Fase 1 ✅ · Fase 2 ✅ (10/11; tensorrt_llm diferido) · Fase 3 (draft de Dockerfiles) ✅ · Fase 4 ✅ · Fase 5 ✅ · Deudas Ronda 2 ✅ · Validación e2e en slim ✅ (8/12 funcionando; D11/D13/D14 cerradas, D12 sglang parcial: requiere nvcc real). Pendiente: Fase 3 CI + `method="oci"`, ruff sweep #6, sglang nvcc.
 Ver sección "Registro de decisiones y deudas" al final.
 
 ---
@@ -479,9 +479,9 @@ Al hacer click en "Instalar":
 - [x] SSE de progreso de instalación
 - [x] Tests: 13 en verde (`backend/tests/core/test_backend_installer.py`)
 
-### Fase 2 — Migrar backends a install_spec (7/11 hechos, 4 pendientes)
+### Fase 2 — Migrar backends a install_spec (10/11 hechos; tensorrt_llm diferido a Fase 3)
 
-Estado tras la sesión 2026-04-25:
+Estado tras la sesión 2026-04-25 (Ronda 1 de cierre):
 
 - [x] `whisper` — pip + cu124 (faster-whisper + pyannote + nemo). Install validado, **6.3 GB**. `load()` validado en GPU 1, 35 s.
 - [x] `tts` — pip + cu124 (qwen-tts + kokoro + bark). Install validado, **5.7 GB**. `load(kokoro)` validado en GPU 1, 14 s.
@@ -490,12 +490,12 @@ Estado tras la sesión 2026-04-25:
 - [x] `sglang` — pip + cu124 (`sglang==0.5.9`). Install validado, **10.3 GB**. Resolver de python_bin para el server interno.
 - [x] `voxtral` — pip + cu124 (vllm + vllm-omni). Install validado, **11.1 GB**.
 - [x] `vllm` — pip + cu124 (`vllm==0.17.1` + torch). Install validado, **9.7 GB**. Launcher cambiado de `python` literal a `_resolve_python_bin()`.
-- [ ] `llama_cpp` — binario nativo (cmake -DGGML_CUDA=ON). Necesita Fase 3 OCI o `post_install_script` que el installer aún no ejecuta + extensión del contrato con `extra_bins` en metadata + `apt_packages`.
-- [ ] `bitnet` — mismo caso que llama_cpp (binario nativo). Comparte build infrastructure.
-- [ ] `acestep` — clona repo upstream + `uv sync`. Necesita `BackendInstallSpec.git_repo` + `post_install_script`.
-- [ ] `tensorrt_llm` — imagen NGC propietaria de NVIDIA. Solo viable con `method=oci` repackeando NGC; bloqueado por Deuda #3 hasta decidir packaging.
+- [x] `llama_cpp` — apt(build-essential cmake git ninja-build) + git(ggml-org/llama.cpp@master) + post_install_script `backend/scripts/install_llama_cpp.sh` (cmake CUDA build) + `extra_bins={"server": "bin/llama-server"}`. Sin venv (include_core_runtime=False). Resolver de server_bin con prioridad metadata > `settings.llama_cpp_server_bin`. **Ronda 1 — install end-to-end pendiente de validar en runtime con slim image (build CUDA tarda ~10 min).**
+- [x] `bitnet` — apt(build-essential cmake git python3) + git(microsoft/BitNet@main `--recursive`) + post_install_script `backend/scripts/install_bitnet.sh` (kernel-header copy + cmake CPU/CUDA build) + `extra_bins={"server": "bin/bitnet-server"}`. Sin venv. **Ronda 1 — install end-to-end pendiente de validar.**
+- [x] `acestep` — apt(git ffmpeg libsndfile1 curl) + pip(torch+torchaudio cu124) + git(ace-step/ACE-Step-1.5@main) + post_install_script `backend/scripts/install_acestep.sh` (instala uv si falta + `uv sync` contra el venv del install). `_resolve_project_paths()` lee metadata > `settings.acestep_project_dir`. **Ronda 1 — install end-to-end pendiente de validar.**
+- [ ] `tensorrt_llm` — DIFERIDO a Fase 3 OCI. Sin `install_spec`: la distribución oficial es la imagen NGC de NVIDIA y los wheels de `pypi.nvidia.com` están demasiado acoplados a versiones específicas de CUDA/driver para el flujo source. Documentado en el docstring del backend.
 
-Total disco source-installed en una instalación slim que active los 7: **~52.9 GB** vs **~51 GB** que la imagen fat traía siempre cargados — pero en slim son pay-as-you-use.
+Total disco source-installed en una instalación slim que active los 10: **~52.9 GB** Python-heavy + ~0.6 GB binarios nativos. En slim son pay-as-you-use.
 
 Backends sin migración (siempre disponibles):
 - `ollama` — servicio externo, no necesita instalación
@@ -695,6 +695,114 @@ Bloquea la migración de `acestep`, `bitnet`, `llama_cpp` y `tensorrt_llm` (los 
 
 **Deuda 9h — `_derive_version()` cosmético.**
 Para `tts` el state reporta `installed_version="torch>=2.5"` porque la heurística toma el primer paquete pinneado y `torch>=2.5` es el primero. No bloqueante, pero visualmente raro. Mejorar: preferir un paquete cuyo nombre coincida con el `backend_type` o el primer paquete que NO esté en la lista del core_runtime.
+
+### Hito Validación e2e — Slim image runtime (2026-04-25)
+
+Sesión completa de validación e2e de los 12 backends sobre slim. Estado tras
+los fixes aplicados durante la validación:
+
+| Backend | Install | Load | Request | Notas |
+|---------|---------|------|---------|-------|
+| ollama | built-in | n/a | ✅ chat | OK |
+| whisper | ✅ source | ✅ GPU 1 (500 MB) | ✅ STT | Necesitó fix LD_LIBRARY_PATH (D14) |
+| tts | ✅ source | ✅ GPU 1 (1 GB) | ✅ Kokoro WAV 24 kHz | Cableado D14 |
+| chatterbox | ✅ source | ✅ GPU 1 (4 GB) | ✅ TTS WAV | Cableado D14 |
+| diffusers | ✅ source | ⏭️ skip | ⏭️ skip | No hay modelo en formato diffusers en `/data/models` |
+| vllm | ✅ source | ✅ GPU 1 (2 GB) | ✅ chat "pong" | D11 fix: apt gcc/g++ + D14 |
+| voxtral | ✅ source | ✅ GPU 1 (4 GB) | ✅ TTS WAV 24 kHz | D13 fix: pin `vllm==0.18.0 vllm-omni==0.18.0` + D14 |
+| llama_cpp | ✅ source (cmake CUDA, ~2 min) | ✅ GPU 1 | ✅ chat "pong" | Ronda 1 validada runtime |
+| bitnet | ✅ source (cmake CPU, ~1 min) | ✅ CPU | ✅ chat "Pong" | Ronda 1 validada runtime |
+| acestep | ✅ source (torch + uv sync, ~3 min) | ⏸️ pesos | ⏸️ pendiente | Install OK; generación requiere descargar `acestep-v15-turbo` (~7 GB) en primera carga |
+| sglang | ✅ source | ❌ JIT | n/a | **D12 parcial**: helper `venv_cuda_home()` aplicado, `LD_LIBRARY_PATH` + `CUDA_HOME` cableados, pero `sgl-kernel` JIT requiere ``nvcc`` real (no incluido en wheels pip — necesita ``apt cuda-nvcc-12-4`` desde el repo NVIDIA, ~2 GB) |
+| tensorrt_llm | ⚠️ built-in | ❌ n/a | n/a | Diferido a Fase 3 OCI (sin trtllm-serve en slim) |
+
+**8/12 funcionando e2e**, **1 install OK pero sin modelo descargado** (diffusers), **1 install OK pero pesos pendientes** (acestep), **1 bloqueado por nvcc real** (sglang), **1 diferido** (tensorrt_llm).
+
+#### Cambios de código aplicados durante la validación
+
+1. **`venv_nvidia_ld_library_path(backends_dir, backend_type)`** — helper público
+   en `core/backend_installer.py` que devuelve un `LD_LIBRARY_PATH` con todas
+   las dirs `nvidia/*/lib/` del venv del backend. Cableado en
+   `whisper`, `tts`, `diffusers`, `chatterbox`, `vllm`, `voxtral`, `sglang`
+   antes de lanzar el subprocess (Deuda **D14**).
+2. **`venv_cuda_home(backends_dir, backend_type)`** — construye un fake
+   `CUDA_HOME` en `<backend>/cuda_home/` con symlinks (`lib64/` → wheel
+   `cuda_runtime/lib`, `include/` → wheel `cuda_runtime/include`,
+   opcionalmente `bin/` si hay `nvcc` REAL). Usado por `sglang` (Deuda **D12**).
+3. **`_resolve_script_path()`** — añadidas más bases de búsqueda para que el
+   `post_install_script` resuelva tanto en repo (`backend/scripts/...`) como
+   en el contenedor (`/app/scripts/...`).
+4. **`_derive_version()`** — heurística mejorada (Ronda 2, ya documentada).
+5. **vllm spec**: `apt_packages=["gcc", "g++"]` para Triton JIT (Deuda **D11**).
+6. **voxtral spec**: pin exacto `vllm==0.18.0 vllm-omni==0.18.0` (Deuda **D13**).
+7. **sglang spec**: `apt_packages=["gcc","g++","ninja-build"]` + wheels
+   `nvidia-cuda-{nvcc,runtime,cccl}-cu12` (Deuda **D12** parcial).
+8. **`Dockerfile.slim`**: añadidos `build-essential`, `gcc`, `g++`, `cmake`,
+   `git`, `ninja-build` (~250 MB, sigue siendo ~50× más pequeño que el fat).
+   Permite que las JIT compilations y los cmake builds nativos no requieran
+   apt-install runtime.
+
+#### Deudas abiertas tras la validación
+
+- **D12 sglang** — bloqueado por `nvcc` real. Solución conocida: añadir el
+  repo NVIDIA al `Dockerfile.slim` y `apt install cuda-nvcc-12-4
+  cuda-cudart-dev-12-4` (~2 GB, más cerca del slim "ligero" que del fat).
+  No se aplicó en esta ronda porque añade dependencia del repo NVIDIA y
+  reabre la decisión de Fase 3 OCI (donde el problema desaparece — la imagen
+  OCI de sglang ya trae nvcc).
+- **diffusers** — bloqueado por ausencia de modelo en formato diffusers en
+  `/data/models`. Probar con descarga puntual de `stabilityai/sd-turbo`
+  (~1.5 GB) o un SDXL del Hub.
+- **acestep** — generación e2e pendiente; primera carga descargará el
+  `acestep-v15-turbo` (~7 GB). No bloqueante.
+- **`tensorrt_llm`** — diferido a Fase 3 OCI (sin solución en slim/source).
+
+### Hito Ronda 2 — Deudas técnicas menores (2026-04-25)
+
+**Avances**:
+- **Deuda 9h** (`_derive_version` cosmético): nueva heurística que (1) prefiere un paquete cuyo nombre coincide con `backend_type`, (2) si no, el primer pin `==` que NO esté en una lista de paquetes core/comunes (`torch`, `numpy`, `transformers`, `fastapi`, etc.), (3) cae a la lista cruda. El spec de `tts` ya no reportará `installed_version="torch>=2.5"` sino el pin de qwen-tts/kokoro. Helpers `_req_name()` y constante `_CORE_RUNTIME_NAMES` añadidos. 3 tests nuevos.
+- **Deuda #1** (`WorkerPool.registered_backends()` público): ya existía, `main.py:330` ya lo consume. Marcada como cerrada.
+- **Deuda #4** (mock fallback frontend off-by-default): `backendsStore.ts` ya solo activa el mock con `VITE_MOCK_BACKENDS=1`; ningún fallback automático ante 404. El catch del fetch deja `usingMock: false` y un `error` real visible. Comentario aclarado.
+- **Deuda #5** (badges de backend en Models): nuevo `BackendBadge.tsx` con pill por estado (built-in / installed / installing / not_installed / error) y tooltip con versión. Cableado en `ModelCard.tsx` reemplazando el texto plano de `model.backendType`. `Models.tsx` ahora pre-fetcha `backendsStore` en bootstrap para que los badges tengan datos en el primer paint.
+- **Deuda #8** (granularidad SSE de pip): nuevo método async generator `_run_pip_install()` que ejecuta pip y parsea stdout para detectar líneas `Collecting <pkg>`, `Downloading <wheel>`, `Installing collected packages: …`, `Successfully installed`. Cada evento muta `state.install_detail` y emite snapshot al SSE. El progreso interpola con curva de retorno decreciente (`1 - 0.7^n`) entre `progress_start` y `progress_end` para no saturar al 100% antes de tiempo. Flag de instancia `_pip_progress_enabled` permite desactivarlo en tests que mockean `_run_subprocess`. 1 test nuevo.
+
+**Tests**: 39/42 verde en local (los mismos 3 fallos preexistentes por `fastapi` ausente en el sandbox).
+
+**Deudas que NO se tocan en Ronda 2** (decisión consciente):
+- **Deuda #6** (ruff sweep en `api/internal/`, 247 errores B008/ASYNC230/240/F401/I001): merece un PR aparte. Mezclarlo con Ronda 2 enturbiaría el diff.
+- **Deuda #7** (volumen `backends_data` documentado en `docs/INSTALL.md`): pendiente para promoción a GA, no bloquea nada hoy.
+- **Validación runtime** de los 3 backends nativos sobre slim (Ronda 1): sigue pendiente porque cada cmake build tarda minutos y necesita la imagen slim arrancada con BD/Redis. Trabajo manual.
+
+### Hito Ronda 1 — Cierre de Fase 2 con los 3 backends nativos (2026-04-25)
+
+**Avances**:
+- `BackendInstallSpec` extendido (cubre la **Deuda 9g** completa): `apt_packages`, `git_repo`, `git_ref`, `git_recursive`, `extra_bins`. El campo `post_install_script` que ya existía pero no se ejecutaba ahora se ejecuta de verdad.
+- `BackendInstaller._install_from_source` reescrito para la nueva pipeline:
+  apt → git clone → (opcional) venv → pip → post_install_script (con env `BACKEND_DIR`/`VENV_DIR`/`PYTHON_BIN`/`SRC_DIR`/`BIN_DIR`) → validación de `extra_bins` → metadata → register.
+- `read_backend_metadata(backends_dir, backend_type)` exportado como helper público para que cada backend resuelva sus paths sin reimplementar el patrón.
+- Backends nativos migrados:
+  - `llama_cpp` — `_resolve_server_bin()` con prioridad metadata → settings legacy.
+  - `bitnet` — mismo patrón. `LD_LIBRARY_PATH` ahora incluye también el bin dir modular.
+  - `acestep` — `_resolve_project_paths()` devuelve `(src_dir, python_bin)` desde metadata o cae al `acestep_project_dir` legacy.
+- Scripts post-install nuevos en `backend/scripts/`:
+  - `install_llama_cpp.sh` — cmake CUDA build (auto-detecta toolkit, fallback CPU si no hay nvcc).
+  - `install_bitnet.sh` — copia kernel headers pretuned + cmake. Reemplaza al `build_bitnet.sh` original (que clonaba solo); `BackendInstaller` ahora hace el clone.
+  - `install_acestep.sh` — instala `uv` si falta + `uv sync` contra `${VENV_DIR}` con `UV_PROJECT_ENVIRONMENT`.
+- `tensorrt_llm` deja explícito en su docstring por qué NO declara `install_spec` (NGC vendor-lock, esperar a `method=oci` de Fase 3).
+- Tests:
+  - `tests/core/test_backend_installer.py` +9 casos (apt avail/no-avail, git clone shape, post-install env vars, repo-relative path resolve, extra_bins missing/traversal, no-venv path, helper público).
+  - `tests/core/test_native_install_specs.py` nuevo (13 casos): shape de cada spec + scripts presentes y ejecutables + resolver priority.
+  - 100/103 verde en local; los 3 rojos preexistían (requieren `fastapi` que no está en el Python local del sandbox).
+
+**Deudas técnicas**:
+- **Validación end-to-end runtime no ejecutada en slim** para los 3 nuevos. Cada cmake build tarda 5–15 min (llama_cpp/bitnet) y `uv sync` de acestep descarga modelos pesados. Bloqueante para cerrar Fase 2 al 100%: `POST /ocabra/backends/llama_cpp/install method=source` desde el contenedor slim, mismo para bitnet y acestep, y verificar que `load()` levanta el worker.
+- `apt_packages` mete `build-essential + cmake + git + ninja` en el contenedor slim en runtime (~500 MB en `/var`). Es idempotente y los paquetes desaparecen si se recrea el contenedor — está bien para v1, pero reduce la "slim-ness" temporalmente. Cuando `method=oci` esté operativo (Fase 3), llama_cpp/bitnet preferirán OCI y este coste desaparece.
+- `_derive_version` sigue cosmético (Deuda 9h pendiente, prevista en Ronda 2).
+- `WorkerPool._backends` accedido aún como privado desde `main.py` (Deuda #1, Ronda 2).
+
+**Cuestiones pendientes**:
+- ¿Variantes CUDA archs por defecto? `install_llama_cpp.sh` define `61;70;75;80;86;89` (RTX 3060 → RTX 4090, L4/L40S). Si el target es Hopper/Blackwell habrá que extender o exponer el override por env.
+- `install_bitnet.sh` por defecto `BITNET_ENABLE_CUDA=false` (los kernels pretuned son CPU-first). Documentar en la UI cómo cambiar.
 
 ### Hito final Fase 4 — load() validado end-to-end en slim (2026-04-25)
 

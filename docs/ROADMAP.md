@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-04-24
+Última actualización: 2026-04-25
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -223,7 +223,7 @@ Implementado:
 
 ---
 
-## 🚧 Bloque 15 — Backends Modulares (EN CURSO; Fase 1, 4, 5 + 7 backends en Fase 2 entregados)
+## 🚧 Bloque 15 — Backends Modulares (Fase 2 cerrada al 10/11; pendiente Fase 3 OCI)
 
 Plan en `docs/tasks/modular-backends-plan.md`.
 
@@ -245,14 +245,18 @@ Equipo de agentes paralelos entregó Fases 1, 3 (draft) y 5 en el mismo día:
 - ✅ **Fase 1 — Infra backend**: `BackendInstallSpec`, `BackendInstaller`, router `/ocabra/backends`, SSE de instalación, tests.
 - ✅ **Fase 4 — Imagen slim**: `Dockerfile.slim` (~987 MB) + `docker-compose.yml` por defecto a slim, `docker-compose.fat.yml` como override de rollback, `BACKENDS_FAT_IMAGE` flag.
 - ✅ **Fase 5 — Frontend**: página `/backends` + cards + SSE + WebSocket events.
-- ✅ **Fase 2 — 7 de 11 backends migrados a `install_spec`** y validados con install end-to-end sobre slim:
-  - `whisper` (~6.3 GB), `tts` (~5.7 GB), `diffusers` (~4.9 GB), `chatterbox` (~6.0 GB), `sglang` (~10.3 GB), `voxtral` (~11.1 GB), `vllm` (~9.7 GB) → 52.9 GB en `/data/backends`.
-  - `whisper` y `tts/kokoro` además validados con `load()` real sobre GPU 1.
+- ✅ **Fase 2 — 10 de 11 backends migrados a `install_spec`** (tensorrt_llm diferido a Fase 3 OCI):
+  - Python-heavy (validados install end-to-end + algunos `load()`): `whisper`, `tts`, `diffusers`, `chatterbox`, `sglang`, `voxtral`, `vllm`.
+  - Nativos (Ronda 1 cierre 2026-04-25, install runtime pendiente de validar): `llama_cpp` (cmake CUDA), `bitnet` (cmake CPU/CUDA), `acestep` (git + uv sync).
+  - `BackendInstallSpec` ya soporta `apt_packages`, `git_repo`/`git_ref`/`git_recursive`, `post_install_script`, `extra_bins` (Deuda 9g cerrada).
 
 ### Pendiente del bloque 15
 
-- **Fase 2 — Migrar los 4 backends restantes**: `acestep`, `bitnet`, `llama_cpp`, `tensorrt_llm`. Necesitan extensiones del contrato (`apt_packages`, `extra_bins`, `git_repo`, `post_install_script`) y/o **Fase 3 OCI** porque compilan binarios nativos o vienen de NGC.
-- **Fase 3 — CI pipeline + implementar `method="oci"`**: el endpoint devuelve `501` hasta que las imágenes OCI estén publicadas en `ghcr.io/ocabra/backend-*`. Resolver incógnitas de Agente B: TensorRT-LLM (NGC vs wheel), ACE-Step pin, variantes CPU con torch CPU index, runners CI (disk cleanup o self-hosted).
+- **Validación runtime de los 3 nativos sobre slim** ✅ (2026-04-25): llama_cpp + bitnet validados load + chat OK; acestep instalado, generación pendiente de descarga de pesos. Durante la sesión también se cerraron D11 (vllm gcc), D13 (voxtral pin) y D14 (LD_LIBRARY_PATH genérico). D12 sglang queda parcial: el helper `venv_cuda_home` funciona pero `sgl-kernel` JIT requiere `nvcc` real (apt `cuda-nvcc-12-4` desde repo NVIDIA, ~2 GB).
+- **diffusers e2e**: requiere descargar un modelo en formato diffusers (`stabilityai/sd-turbo` ~1.5 GB). No hay nada listo en `/data/models`.
+- **Fase 3 — CI pipeline + implementar `method="oci"`**: el endpoint devuelve `501` hasta que las imágenes OCI estén publicadas en `ghcr.io/ocabra/backend-*`. Resolver incógnitas: TensorRT-LLM (NGC vs wheel — bloquea su `install_spec`), ACE-Step pin, variantes CPU con torch CPU index, runners CI (disk cleanup o self-hosted).
+- **Deudas Ronda 2 ✅** (cerradas 2026-04-25): `_derive_version` ya prefiere el paquete del backend (9h); `WorkerPool.registered_backends()` ya era público (#1); mock fallback frontend solo con flag explícita (#4); nuevo `BackendBadge` en Models con estado/tooltip (#5); `_run_pip_install` parsea stdout y emite SSE por wheel (#8).
+- **Deuda #6 ruff sweep** (247 errores en `api/internal/`): pendiente, candidato a PR aparte para no enturbiar diffs.
 
 ---
 
@@ -272,7 +276,7 @@ Equipo de agentes paralelos entregó Fases 1, 3 (draft) y 5 en el mismo día:
 [✅ Hecho]  Bloque 12 — Federación P2P
 [✅ Hecho]  Bloque 13 — Observabilidad de potencia + stats ampliadas
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
-[🚧 En curso] Bloque 15 — Backends Modulares (Fases 1+3-draft+5 mergeadas; pendientes 2, 3-CI, 4)
+[🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
