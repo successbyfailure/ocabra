@@ -63,6 +63,37 @@ class WorkerState:
 
 
 def detect_pipeline_class(model_path: Path) -> str:
+    """Detect the diffusers pipeline class for *model_path*.
+
+    Two layouts are supported:
+
+    1. **HuggingFace diffusers tree** (a directory with ``model_index.json``).
+       The ``_class_name`` / ``pipeline_class`` field selects the pipeline.
+    2. **Single-file checkpoint** (a ``.safetensors`` / ``.ckpt`` file
+       produced by Stable Diffusion WebUI / ComfyUI workflows). The pipeline
+       class is inferred from the file name — SDXL when the stem contains
+       ``xl`` / ``sdxl`` / ``stable-diffusion-xl``, otherwise SD1.5. Use the
+       ``DIFFUSERS_PIPELINE_OVERRIDE`` env var to force a class when the
+       heuristic guesses wrong.
+    """
+    if model_path.is_file():
+        suffix = model_path.suffix.lower()
+        if suffix not in {".safetensors", ".ckpt"}:
+            raise ValueError(
+                f"Unsupported single-file checkpoint extension '{suffix}' for {model_path}"
+            )
+        override = os.getenv("DIFFUSERS_PIPELINE_OVERRIDE", "").strip()
+        if override:
+            if override not in SUPPORTED_PIPELINES:
+                raise ValueError(
+                    f"DIFFUSERS_PIPELINE_OVERRIDE='{override}' is not in {SUPPORTED_PIPELINES}"
+                )
+            return override
+        stem = model_path.stem.lower()
+        if any(token in stem for token in ("sdxl", "stable-diffusion-xl", "sd_xl", "xl-base")):
+            return "StableDiffusionXLPipeline"
+        return "StableDiffusionPipeline"
+
     model_index_path = model_path / "model_index.json"
     if not model_index_path.exists():
         raise FileNotFoundError(f"model_index.json not found in {model_path}")
@@ -182,7 +213,17 @@ def load_pipeline(state: WorkerState) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    pipeline = pipeline_class.from_pretrained(str(state.model_path), torch_dtype=dtype)
+    if state.model_path.is_file():
+        # Single-file checkpoint (SDXL / SD1.5 .safetensors from a1111/ComfyUI).
+        # ``from_single_file`` re-builds the unet/vae/text_encoder from the
+        # bundled weights without expecting a HuggingFace tree on disk.
+        pipeline = pipeline_class.from_single_file(
+            str(state.model_path), torch_dtype=dtype
+        )
+    else:
+        pipeline = pipeline_class.from_pretrained(
+            str(state.model_path), torch_dtype=dtype
+        )
     offload_mode = str(os.getenv("DIFFUSERS_OFFLOAD_MODE", "none")).strip().lower()
     if torch.cuda.is_available() and offload_mode == "none":
         pipeline = pipeline.to("cuda")

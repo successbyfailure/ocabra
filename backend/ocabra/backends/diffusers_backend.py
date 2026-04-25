@@ -48,9 +48,16 @@ class DiffusersBackend(BackendInterface):
             oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
                 "torch>=2.5",
-                "diffusers>=0.31",
+                "torchvision>=0.20",
+                # diffusers 0.31..0.37 expected the transformers 4.x CLIP API
+                # (``CLIPTextModel.text_model``). transformers 5.x renamed
+                # the inner module and ``from_single_file`` for SDXL crashes
+                # with AttributeError. Pin transformers to the 4.x line and
+                # bump the diffusers floor to 0.32 so the rest of the stack
+                # picks up the SDXL single-file fixes.
+                "diffusers>=0.32,<0.40",
                 "accelerate>=1.2",
-                "transformers>=4.47",
+                "transformers>=4.47,<5.0",
                 "Pillow>=11.0",
                 "safetensors>=0.4",
                 "numpy",

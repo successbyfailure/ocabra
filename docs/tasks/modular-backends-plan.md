@@ -2,7 +2,7 @@
 
 Última actualización: 2026-04-25
 
-**Estado**: Fase 1 ✅ · Fase 2 ✅ (10/11; tensorrt_llm diferido) · Fase 3 (draft de Dockerfiles) ✅ · Fase 4 ✅ · Fase 5 ✅ · Deudas Ronda 2 ✅ · Validación e2e en slim ✅ (8/12 funcionando; D11/D13/D14 cerradas, D12 sglang parcial: requiere nvcc real). Pendiente: Fase 3 CI + `method="oci"`, ruff sweep #6, sglang nvcc.
+**Estado**: Fase 1 ✅ · Fase 2 ✅ (10/11; tensorrt_llm diferido) · Fase 3 (draft de Dockerfiles) ✅ · Fase 4 ✅ · Fase 5 ✅ · Deudas Ronda 2 ✅ · Validación e2e en slim ✅ (9/12 funcionando; D11/D13/D14 cerradas, diffusers single-file añadido, D12 sglang parcial: requiere nvcc real). Pendiente: Fase 3 CI + `method="oci"`, ruff sweep #6, sglang nvcc, fix orden federation/profile en endpoints OpenAI.
 Ver sección "Registro de decisiones y deudas" al final.
 
 ---
@@ -696,6 +696,41 @@ Bloquea la migración de `acestep`, `bitnet`, `llama_cpp` y `tensorrt_llm` (los 
 **Deuda 9h — `_derive_version()` cosmético.**
 Para `tts` el state reporta `installed_version="torch>=2.5"` porque la heurística toma el primer paquete pinneado y `torch>=2.5` es el primero. No bloqueante, pero visualmente raro. Mejorar: preferir un paquete cuyo nombre coincida con el `backend_type` o el primer paquete que NO esté en la lista del core_runtime.
 
+### Hito Validación e2e — Diffusers SDXL single-file (2026-04-25)
+
+Cierre de la única casilla `⏭️` del cuadro e2e: diffusers ahora carga el
+checkpoint `sd_xl_base_1.0.safetensors` ya presente en
+`/data/models/image/checkpoints/` y genera imágenes 1024×1024 en ~117 s
+sobre la RTX 3090.
+
+**Cambios**:
+- **`diffusers_worker.py`** — `detect_pipeline_class()` ahora maneja dos
+  layouts: HuggingFace tree (existente) y single-file `.safetensors`/`.ckpt`.
+  En el single-file infiere SDXL vs SD1.5 por tokens del nombre
+  (`sd_xl`, `sdxl`, `xl-base`, `stable-diffusion-xl`); `DIFFUSERS_PIPELINE_OVERRIDE`
+  fuerza la clase si la heurística falla. `load_pipeline()` añade rama
+  `pipeline_class.from_single_file(path)` cuando el path es fichero.
+- **`diffusers_backend.py` install_spec** — pin `transformers>=4.47,<5.0`
+  + `diffusers>=0.32,<0.40` + `torchvision>=0.20`. Sin pin, transformers 5.x
+  rompe `CLIPTextModel.text_model` y `from_single_file` para SDXL falla
+  con `AttributeError`.
+- **`tests/workers/test_diffusers_worker.py`** — 8 tests nuevos (HF tree,
+  single-file SDXL/SD1.5, ext checks, env override) con stubs in-place de
+  `uvicorn`/`fastapi`/`pydantic` para evitar la dep en sandbox.
+
+**Bug colateral encontrado**:
+- En `api/openai/images.py` (y `chat.py`/`audio.py`/...), el bloque
+  `--- Federation hook ---` corre **antes** del `resolve_profile()`. Cuando
+  el cliente envía `model="sdxl-base"` (un `profile_id`, no canonical),
+  `resolve_federated()` busca en `model_manager.get_state(model_id)` y
+  como no es canonical → 404 antes de que el resolver de profile tenga
+  oportunidad. Workaround actual: usar el canonical `model_id` directo
+  (`diffusers/image/checkpoints/sd_xl_base_1.0.safetensors`). **Fix
+  pendiente**: invertir el orden — primero resolver `profile_id` →
+  `base_model_id`, luego pasar el canonical al federation hook. Aplica a
+  todos los endpoints OpenAI; no se tocó en esta sesión para no
+  desacoplar la sesión de validación e2e.
+
 ### Hito Validación e2e — Slim image runtime (2026-04-25)
 
 Sesión completa de validación e2e de los 12 backends sobre slim. Estado tras
@@ -707,7 +742,7 @@ los fixes aplicados durante la validación:
 | whisper | ✅ source | ✅ GPU 1 (500 MB) | ✅ STT | Necesitó fix LD_LIBRARY_PATH (D14) |
 | tts | ✅ source | ✅ GPU 1 (1 GB) | ✅ Kokoro WAV 24 kHz | Cableado D14 |
 | chatterbox | ✅ source | ✅ GPU 1 (4 GB) | ✅ TTS WAV | Cableado D14 |
-| diffusers | ✅ source | ⏭️ skip | ⏭️ skip | No hay modelo en formato diffusers en `/data/models` |
+| diffusers | ✅ source | ✅ GPU 1 SDXL single-file | ✅ PNG 1024×1024 (~117 s) | Worker extendido con `from_single_file`; spec con pin `transformers<5` |
 | vllm | ✅ source | ✅ GPU 1 (2 GB) | ✅ chat "pong" | D11 fix: apt gcc/g++ + D14 |
 | voxtral | ✅ source | ✅ GPU 1 (4 GB) | ✅ TTS WAV 24 kHz | D13 fix: pin `vllm==0.18.0 vllm-omni==0.18.0` + D14 |
 | llama_cpp | ✅ source (cmake CUDA, ~2 min) | ✅ GPU 1 | ✅ chat "pong" | Ronda 1 validada runtime |
@@ -716,7 +751,7 @@ los fixes aplicados durante la validación:
 | sglang | ✅ source | ❌ JIT | n/a | **D12 parcial**: helper `venv_cuda_home()` aplicado, `LD_LIBRARY_PATH` + `CUDA_HOME` cableados, pero `sgl-kernel` JIT requiere ``nvcc`` real (no incluido en wheels pip — necesita ``apt cuda-nvcc-12-4`` desde el repo NVIDIA, ~2 GB) |
 | tensorrt_llm | ⚠️ built-in | ❌ n/a | n/a | Diferido a Fase 3 OCI (sin trtllm-serve en slim) |
 
-**8/12 funcionando e2e**, **1 install OK pero sin modelo descargado** (diffusers), **1 install OK pero pesos pendientes** (acestep), **1 bloqueado por nvcc real** (sglang), **1 diferido** (tensorrt_llm).
+**9/12 funcionando e2e**, **1 install OK pero pesos pendientes** (acestep), **1 bloqueado por nvcc real** (sglang), **1 diferido** (tensorrt_llm).
 
 #### Cambios de código aplicados durante la validación
 
