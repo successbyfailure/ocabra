@@ -90,9 +90,13 @@ async def _check_user_auth(request: Request) -> dict | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
+            # Send ONLY the user's credentials. Do NOT add X-Gateway-Token here:
+            # ocabra's auth dependency prefers the service token over user
+            # credentials, which would resolve the call as the impersonated
+            # gateway user (user_id=None) and break /auth/me with 404.
             r = await client.get(
                 f"{OCABRA_API_URL}/ocabra/auth/me",
-                headers={**headers, **_service_headers()},
+                headers=headers,
             )
             if r.status_code == 200:
                 return r.json()
@@ -207,9 +211,11 @@ async def ws_catch_all(websocket: WebSocket, path: str) -> None:
     if cookie:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
+                # User-context check: only the user's cookie, no X-Gateway-Token
+                # (the service token outranks user creds in ocabra's auth dep).
                 r = await client.get(
                     f"{OCABRA_API_URL}/ocabra/auth/me",
-                    headers={"Cookie": f"ocabra_session={cookie}", **_service_headers()},
+                    headers={"Cookie": f"ocabra_session={cookie}"},
                 )
                 if r.status_code != 200:
                     await websocket.close(code=4401, reason="Unauthorized")
