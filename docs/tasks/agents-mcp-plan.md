@@ -595,6 +595,68 @@ Si no se actualiza esta sección, el trabajo no se considera cerrado aunque el c
 
 *(Añadir entradas a medida que las fases progresen, como en `modular-backends-plan.md`.)*
 
+### 2026-04-24 — Stream A (DB + Registry, Fase 1) entregado
+
+**Rama**: worktree `agent-a545a2ab` (4 commits sobre `86b70b7`, worktree en `/docker/ocabra/.claude/worktrees/agent-a545a2ab`).
+
+**Avances**:
+- Migración `0017_agents_mcp.py` con 4 tablas (`mcp_servers`, `agents`, `agent_mcp_servers`, `tool_call_stats`) + campos `agent_id` y `parent_request_id` en `request_stats` + CHECK constraint `ck_agents_exactly_one_base`.
+- ORM: `db/mcp.py`, `db/agents.py`, extensión de `db/stats.py`.
+- Schemas Pydantic v2: `schemas/mcp.py`, `schemas/agents.py`.
+- Cliente MCP (`agents/mcp_client.py`) con interface + 3 impls (http/sse/stdio) importando el SDK `mcp` de forma perezosa.
+- Registry MCP (`agents/mcp_registry.py`) con pool de clients, cache TTL, invalidación, health checks, carga desde BD al arranque.
+- Routers CRUD: `api/internal/mcp_servers.py` y `api/internal/agents.py` con ACL por rol (stdio exige `system_admin` en create/update/**delete**).
+- Inventario: agentes aparecen en `/v1/models` y `/ocabra/models` como `agent/<slug>`.
+- Lifespan de `MCPRegistry` wireado en `main.py`.
+- Deps añadidas: `mcp>=0.9.0`, `jsonschema>=4.21.0`.
+- Settings: 5 nuevas `mcp_*` en `config.py`.
+- 44 test cases en `tests/agents/` (CRUD, client mock, registry, inventory, conftest con `FakeSessionFactory`).
+- Cifrado Fernet para `auth_value` y `env` (reutiliza helper de federation).
+
+**Deudas técnicas**:
+- **Validación no ejecutada**: `ruff`, `pytest` y `alembic upgrade head` bloqueados por el sandbox del harness. **Bloqueante para merge**: ejecutar desde el worktree `cd backend && ruff check . && ruff format --check . && pytest tests/agents/` y `alembic upgrade head` contra BD de test.
+- Header merge (`_HeaderMerger`) ya implementado en el cliente — adelanta parte de Fase 2 (Stream B). No refactorizar, sólo consumir.
+- `env_encrypted` no estaba en el plan original (sí en la checklist implícita); plan actualizado implícitamente, pero conviene reflejarlo en la sección "Modelo de datos" si se rehace el doc.
+
+**Cuestiones pendientes / decisiones no consultadas**:
+- `env` cifrado con Fernet (no explícito en el plan; confirmar criterio — probablemente OK, alinea con la checklist de seguridad).
+- `group_id = NULL` en `agents` ⇒ agente público (visible para todos los usuarios). Mismo patrón que modelos sin restricción. **Confirmar con usuario** si se prefiere que NULL signifique "sólo admins".
+- DELETE de `mcp_servers` con `transport=stdio` requiere `system_admin` (plan sólo lo pedía en create/update). Aplicado por simetría de privilegios.
+- CHECK constraint SQL duplica la validación Pydantic de "exactamente uno de base_model_id o profile_id" — consciente, defensa en profundidad.
+- SDK `mcp` importado perezosamente: tests y dev local funcionan sin él instalado. En prod la dep existe en `pyproject.toml`.
+
+---
+
+### 2026-04-24 — Stream C (Frontend, Fases 4+5) entregado
+
+**Rama**: `worktree-agent-a4edf4f5` (6 commits sobre `main`, worktree en `/docker/ocabra/.claude/worktrees/agent-a4edf4f5`).
+
+**Avances**:
+- Páginas `/agents` y `/mcp-servers` (rol `model_manager`+) con CRUD completo, selector de MCP servers con allowlist de tools por agente, botones Test/Refresh.
+- Cliente tipado `api/agents.ts` y `api/mcp.ts` + stores Zustand con mock fallback al detectar 404/501.
+- Playground integra agentes en el dropdown (sección "✨ Agents") y bloquea el campo system_prompt cuando se elige uno.
+- Stats: tab "Agents" con top agents, top tools, drill-down a tool_calls recientes (mock).
+- Dashboard: card "Active agents (last hour)" para `model_manager`+.
+- WebSocket hook extendido con `agent_updated` y `mcp_server_health_changed`.
+- Transport `stdio` visible pero deshabilitado para `model_manager` sin admin.
+- Smoke tests: `__tests__/Agents.test.tsx` y `MCPServers.test.tsx` (render + banner de mock).
+- Sidebar con entradas nuevas y rutas `/agents`, `/mcp-servers` protegidas por rol en `App.tsx`.
+
+**Deudas técnicas**:
+- **`npm run lint` y `npm run build` no ejecutados**: el worktree no tenía `node_modules` y el sandbox bloqueó `npm ci` + crear symlink. Auditoría manual realizada pero no sustituye a `tsc -b`. **Bloquea merge hasta validar**: ejecutar desde el worktree `cd frontend && npm install && npm run lint && npm run build && npm test`.
+- Mocks pendientes de Stream A (marcados con `// TODO: remove mock once Stream A merges`):
+  - CRUD `/ocabra/agents` y `/ocabra/mcp-servers`
+  - Eventos WS `agent_updated` y `mcp_server_health_changed`
+- Mocks pendientes de Stream A/B (ver "Deudas abiertas"):
+  - `/ocabra/stats/by-agent` y `/ocabra/stats/tool-calls`
+- Edge-case UX aceptado para v1: editar un agente cuyo `profile_id` no tiene `base_model_id` asociado deja el picker de profile vacío hasta que el usuario seleccione un modelo base primero.
+- Limitación UX: `allowed_tools = null` (hereda) vs `[]` (ninguno explícito) no son distinguibles en el modal — desmarcar todo vuelve a `null`. Documentar en la Fase 4 del README de agentes si se añade.
+
+**Cuestiones pendientes**:
+- Validación humana de la UI en dev server (`npm run dev`) antes de mergear. La auditoría estática cubre tipos e imports pero no regresiones visuales ni WebSocket-in-UI.
+- Decidir si `agentsApi`/`mcpApi` se quedan como módulos paralelos al gran objeto `api` en `client.ts` (decisión tomada para no inflarlo más) o se consolidan en `api.agents`/`api.mcp` en Fase 5+.
+- Los endpoints de stats (`/ocabra/stats/by-agent`, `/ocabra/stats/tool-calls`) no están especificados en detalle — Stream A/B debe diseñar su forma antes de que C pueda quitar el mock. Sugerencia: `{ agents: [{agent_id, slug, requests, tokens_total, avg_hops}], tool_calls: [...] }` reusando el agregador de `cost_calculator`.
+
 ### Decisiones confirmadas
 
 - **2026-04-24**: usar `mcp` SDK oficial en lugar de `litellm.experimental_mcp_client`. Razón: evitar traer toda la dep de litellm; traducción OpenAI↔MCP son ~30 líneas propias.
