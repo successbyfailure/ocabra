@@ -389,6 +389,22 @@ export interface ServerConfig {
   realtimeDefaultTtsModel: string
   federationEnabled: boolean
   federationNodeName: string
+  hunyuanIdleUnloadSeconds: number
+  hunyuanGenerationGracePeriodS: number
+  hunyuanPreferredGpu: number
+  comfyuiIdleUnloadSeconds: number
+  comfyuiGenerationGracePeriodS: number
+  comfyuiPreferredGpu: number
+  a1111IdleUnloadSeconds: number
+  a1111GenerationGracePeriodS: number
+  a1111PreferredGpu: number
+  acestepIdleUnloadSeconds: number
+  acestepGenerationGracePeriodS: number
+  acestepPreferredGpu: number
+  unslothIdleUnloadSeconds: number
+  unslothGenerationGracePeriodS: number
+  unslothPreferredGpu: number
+  generationGpuUtilThresholdPct: number
 }
 
 export interface StatsParams {

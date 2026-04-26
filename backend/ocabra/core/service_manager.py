@@ -806,6 +806,32 @@ class ServiceManager:
         await self._publish_state(state, "enabled_changed")
         return state
 
+    # ── Runtime config propagation (idle/grace/preferred GPU) ─────────────
+
+    async def update_runtime_config(
+        self,
+        service_id: str,
+        *,
+        idle_unload_after_seconds: int | None = None,
+        generation_grace_period_s: int | None = None,
+        preferred_gpu: int | None = None,
+    ) -> ServiceState:
+        """Apply hot config changes (timeouts / preferred GPU) to a live ServiceState.
+
+        Called from the config PATCH handler so users don't have to recreate the
+        api container for these to take effect. Persistence of the underlying
+        settings happens at the patch_config caller (server_config table).
+        """
+        state = self._require(service_id)
+        if idle_unload_after_seconds is not None:
+            state.idle_unload_after_seconds = int(idle_unload_after_seconds)
+        if generation_grace_period_s is not None:
+            state.generation_grace_period_s = int(generation_grace_period_s)
+        if preferred_gpu is not None:
+            state.preferred_gpu = int(preferred_gpu)
+        await self._publish_state(state, "config_updated")
+        return state
+
     # ── Generation event persistence ──────────────────────────────────────
 
     async def _persist_generation_event(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +16,8 @@ from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.model_config import global_schedule_rows_to_payload, get_global_schedule_rows, replace_global_schedules
 from ocabra.db.server_config import save_override
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["config"])
 
@@ -93,6 +96,28 @@ class ServerConfigPatch(BaseModel):
         description="Human-readable name for this node in the federation",
     )
 
+    # ── Generation services (Hunyuan, ComfyUI, A1111, ACE-Step, Unsloth) ───
+    # Hot config: idle unload, generation grace, preferred GPU.
+    hunyuan_idle_unload_seconds: int | None = Field(default=None, alias="hunyuanIdleUnloadSeconds")
+    hunyuan_generation_grace_period_s: int | None = Field(default=None, alias="hunyuanGenerationGracePeriodS")
+    hunyuan_preferred_gpu: int | None = Field(default=None, alias="hunyuanPreferredGpu")
+    comfyui_idle_unload_seconds: int | None = Field(default=None, alias="comfyuiIdleUnloadSeconds")
+    comfyui_generation_grace_period_s: int | None = Field(default=None, alias="comfyuiGenerationGracePeriodS")
+    comfyui_preferred_gpu: int | None = Field(default=None, alias="comfyuiPreferredGpu")
+    a1111_idle_unload_seconds: int | None = Field(default=None, alias="a1111IdleUnloadSeconds")
+    a1111_generation_grace_period_s: int | None = Field(default=None, alias="a1111GenerationGracePeriodS")
+    a1111_preferred_gpu: int | None = Field(default=None, alias="a1111PreferredGpu")
+    acestep_idle_unload_seconds: int | None = Field(default=None, alias="acestepIdleUnloadSeconds")
+    acestep_generation_grace_period_s: int | None = Field(default=None, alias="acestepGenerationGracePeriodS")
+    acestep_preferred_gpu: int | None = Field(default=None, alias="acestepPreferredGpu")
+    unsloth_idle_unload_seconds: int | None = Field(default=None, alias="unslothIdleUnloadSeconds")
+    unsloth_generation_grace_period_s: int | None = Field(default=None, alias="unslothGenerationGracePeriodS")
+    unsloth_preferred_gpu: int | None = Field(default=None, alias="unslothPreferredGpu")
+    generation_gpu_util_threshold_pct: int | None = Field(
+        default=None, alias="generationGpuUtilThresholdPct",
+        description="GPU utilisation %% above which services without a dedicated generation-status endpoint are considered busy (Hunyuan, ACE-Step, Unsloth).",
+    )
+
 
 def _masked_admin_key(value: str) -> str:
     return "***" if value else ""
@@ -149,6 +174,22 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
         "federationEnabled": settings.federation_enabled,
         "federationNodeName": settings.federation_node_name,
+        "hunyuanIdleUnloadSeconds": settings.hunyuan_idle_unload_seconds,
+        "hunyuanGenerationGracePeriodS": settings.hunyuan_generation_grace_period_s,
+        "hunyuanPreferredGpu": settings.hunyuan_preferred_gpu,
+        "comfyuiIdleUnloadSeconds": settings.comfyui_idle_unload_seconds,
+        "comfyuiGenerationGracePeriodS": settings.comfyui_generation_grace_period_s,
+        "comfyuiPreferredGpu": settings.comfyui_preferred_gpu,
+        "a1111IdleUnloadSeconds": settings.a1111_idle_unload_seconds,
+        "a1111GenerationGracePeriodS": settings.a1111_generation_grace_period_s,
+        "a1111PreferredGpu": settings.a1111_preferred_gpu,
+        "acestepIdleUnloadSeconds": settings.acestep_idle_unload_seconds,
+        "acestepGenerationGracePeriodS": settings.acestep_generation_grace_period_s,
+        "acestepPreferredGpu": settings.acestep_preferred_gpu,
+        "unslothIdleUnloadSeconds": settings.unsloth_idle_unload_seconds,
+        "unslothGenerationGracePeriodS": settings.unsloth_generation_grace_period_s,
+        "unslothPreferredGpu": settings.unsloth_preferred_gpu,
+        "generationGpuUtilThresholdPct": settings.generation_gpu_util_threshold_pct,
     }
 
 
@@ -395,6 +436,43 @@ async def patch_config(
         await _persist("max_temperature_c", settings.max_temperature_c)
         if hasattr(request.app.state, "gpu_manager"):
             request.app.state.gpu_manager.max_temperature_c = settings.max_temperature_c
+
+    # ── Generation services: persist setting + propagate to live ServiceState ──
+    # service_id (in ServiceManager) → settings prefix
+    _SERVICE_PREFIXES = (
+        ("hunyuan", "hunyuan"),
+        ("comfyui", "comfyui"),
+        ("a1111",   "a1111"),
+        ("acestep", "acestep"),
+        ("unsloth", "unsloth"),
+    )
+    sm = getattr(request.app.state, "service_manager", None)
+    for service_id, prefix in _SERVICE_PREFIXES:
+        live: dict[str, int] = {}
+        for short, suffix, kw in (
+            ("idle",  "idle_unload_seconds",        "idle_unload_after_seconds"),
+            ("grace", "generation_grace_period_s",  "generation_grace_period_s"),
+            ("gpu",   "preferred_gpu",              "preferred_gpu"),
+        ):
+            key = f"{prefix}_{suffix}"
+            if key in payload:
+                value = int(payload[key])
+                setattr(settings, key, value)
+                await _persist(key, value)
+                live[kw] = value
+        if live and sm is not None:
+            try:
+                await sm.update_runtime_config(service_id, **live)
+            except KeyError:
+                # Service not registered (shouldn't happen) — settings still persisted.
+                logger.warning("service_runtime_config_missing", service_id=service_id)
+
+    if "generation_gpu_util_threshold_pct" in payload:
+        settings.generation_gpu_util_threshold_pct = int(payload["generation_gpu_util_threshold_pct"])
+        await _persist(
+            "generation_gpu_util_threshold_pct",
+            settings.generation_gpu_util_threshold_pct,
+        )
 
     response = _build_config_response(request)
     response["globalSchedules"] = await _load_global_schedules()

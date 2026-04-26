@@ -713,6 +713,22 @@ function toServerConfig(raw: unknown): ServerConfig {
     realtimeDefaultTtsModel: String(data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? ""),
     federationEnabled: Boolean(data.federationEnabled ?? data.federation_enabled ?? false),
     federationNodeName: String(data.federationNodeName ?? data.federation_node_name ?? ""),
+    hunyuanIdleUnloadSeconds: Number(data.hunyuanIdleUnloadSeconds ?? data.hunyuan_idle_unload_seconds ?? 300),
+    hunyuanGenerationGracePeriodS: Number(data.hunyuanGenerationGracePeriodS ?? data.hunyuan_generation_grace_period_s ?? 120),
+    hunyuanPreferredGpu: Number(data.hunyuanPreferredGpu ?? data.hunyuan_preferred_gpu ?? 1),
+    comfyuiIdleUnloadSeconds: Number(data.comfyuiIdleUnloadSeconds ?? data.comfyui_idle_unload_seconds ?? 600),
+    comfyuiGenerationGracePeriodS: Number(data.comfyuiGenerationGracePeriodS ?? data.comfyui_generation_grace_period_s ?? 120),
+    comfyuiPreferredGpu: Number(data.comfyuiPreferredGpu ?? data.comfyui_preferred_gpu ?? 1),
+    a1111IdleUnloadSeconds: Number(data.a1111IdleUnloadSeconds ?? data.a1111_idle_unload_seconds ?? 600),
+    a1111GenerationGracePeriodS: Number(data.a1111GenerationGracePeriodS ?? data.a1111_generation_grace_period_s ?? 120),
+    a1111PreferredGpu: Number(data.a1111PreferredGpu ?? data.a1111_preferred_gpu ?? 1),
+    acestepIdleUnloadSeconds: Number(data.acestepIdleUnloadSeconds ?? data.acestep_idle_unload_seconds ?? 1800),
+    acestepGenerationGracePeriodS: Number(data.acestepGenerationGracePeriodS ?? data.acestep_generation_grace_period_s ?? 180),
+    acestepPreferredGpu: Number(data.acestepPreferredGpu ?? data.acestep_preferred_gpu ?? 1),
+    unslothIdleUnloadSeconds: Number(data.unslothIdleUnloadSeconds ?? data.unsloth_idle_unload_seconds ?? 0),
+    unslothGenerationGracePeriodS: Number(data.unslothGenerationGracePeriodS ?? data.unsloth_generation_grace_period_s ?? -1),
+    unslothPreferredGpu: Number(data.unslothPreferredGpu ?? data.unsloth_preferred_gpu ?? 1),
+    generationGpuUtilThresholdPct: Number(data.generationGpuUtilThresholdPct ?? data.generation_gpu_util_threshold_pct ?? 50),
   }
 }
 

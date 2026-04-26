@@ -7,6 +7,7 @@ import {
   HardDrive,
   Link,
   Network,
+  Sparkles,
 } from "lucide-react"
 import { toast } from "sonner"
 import { SkeletonList } from "@/components/common/Skeleton"
@@ -14,6 +15,7 @@ import { api } from "@/api/client"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
 import { FederationSettings } from "@/components/settings/FederationSettings"
+import { GenerationServicesSettings } from "@/components/settings/GenerationServicesSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
@@ -68,6 +70,22 @@ const EMPTY_CONFIG: ServerConfig = {
   realtimeDefaultTtsModel: "",
   federationEnabled: false,
   federationNodeName: "",
+  hunyuanIdleUnloadSeconds: 300,
+  hunyuanGenerationGracePeriodS: 120,
+  hunyuanPreferredGpu: 1,
+  comfyuiIdleUnloadSeconds: 600,
+  comfyuiGenerationGracePeriodS: 120,
+  comfyuiPreferredGpu: 1,
+  a1111IdleUnloadSeconds: 600,
+  a1111GenerationGracePeriodS: 120,
+  a1111PreferredGpu: 1,
+  acestepIdleUnloadSeconds: 1800,
+  acestepGenerationGracePeriodS: 180,
+  acestepPreferredGpu: 1,
+  unslothIdleUnloadSeconds: 0,
+  unslothGenerationGracePeriodS: -1,
+  unslothPreferredGpu: 1,
+  generationGpuUtilThresholdPct: 50,
 }
 
 const TAB_TRIGGER =
@@ -153,6 +171,10 @@ export function Settings() {
               <Link size={14} />
               LiteLLM
             </Tabs.Trigger>
+            <Tabs.Trigger value="generation" className={TAB_TRIGGER}>
+              <Sparkles size={14} />
+              Generación
+            </Tabs.Trigger>
             <Tabs.Trigger value="federation" className={TAB_TRIGGER}>
               <Network size={14} />
               Federation
@@ -188,6 +210,12 @@ export function Settings() {
           <Tabs.Content value="litellm">
             <div className="grid gap-4">
               <LiteLLMSettings config={config} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="generation">
+            <div className="grid gap-4">
+              <GenerationServicesSettings config={config} gpus={gpus} onSave={savePatch} />
             </div>
           </Tabs.Content>
 
