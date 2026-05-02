@@ -68,8 +68,9 @@ async def chat(
     profile_registry = get_profile_registry(request)
 
     # --- Federation hook ---
+    # Agent invocations (model="agent/<slug>") are local; skip federation.
     federation_manager = get_federation_manager(request)
-    if federation_manager is not None:
+    if federation_manager is not None and not is_agent_model(ollama_model):
         from ocabra.config import settings as _settings
 
         if _settings.federation_enabled:

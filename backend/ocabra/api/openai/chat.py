@@ -70,7 +70,10 @@ async def chat_completions(
 
     # --- Federation: check if request should be proxied to a remote peer ---
     federation_manager = get_federation_manager(request)
-    if federation_manager is not None:
+    # Agent invocations (model="agent/<slug>") are local resources and must not
+    # go through federation: resolve_federated would 404 because the agent
+    # slug is not a profile or model_id.
+    if federation_manager is not None and not is_agent_model(model_id):
         from ocabra.config import settings as _settings
 
         if _settings.federation_enabled:
@@ -107,6 +110,18 @@ async def chat_completions(
             user=user,
             body=body,
             stream=stream,
+        )
+
+    # Diagnostic: tells us when a request lands on the legacy path with a
+    # model_id that doesn't have the agent/ prefix. Helps catch stale frontend
+    # bundles that send the bare slug or the base model id.
+    if isinstance(model_id, str) and (
+        model_id.startswith("task-") or "agent" in model_id.lower()
+    ):
+        logger.warning(
+            "agent_dispatch_skipped_no_prefix",
+            model_id=model_id,
+            user_id=user.user_id,
         )
 
     profile, state = await resolve_profile(
