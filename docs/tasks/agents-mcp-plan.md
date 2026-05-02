@@ -595,6 +595,61 @@ Si no se actualiza esta sección, el trabajo no se considera cerrado aunque el c
 
 *(Añadir entradas a medida que las fases progresen, como en `modular-backends-plan.md`.)*
 
+### 2026-05-03 — Stream B (Executor + Stats endpoints, Fases 2 + 3) entregado
+
+**Rama**: worktree `agent-add2c4c6b516679b7` sobre `main`.
+
+**Avances**:
+- `backend/ocabra/agents/translation.py` — helpers puros OpenAI↔MCP (`mcp_tool_to_openai`, `parse_openai_tool_call`, `mcp_result_to_openai_message`, `redact_args`, `summarise_result`, `truncate_summary`, `sanitize_openai_function_name`). Cumple regex OpenAI `^[a-zA-Z0-9_-]{1,64}$` y maneja blocks vision con `vision_capable` on/off (omit ↔ `image_url`).
+- `backend/ocabra/agents/resolver.py` — `resolve_agent(model_id, db, user)` carga `AgentSpec` con bindings MCP (server_alias, allowed_tools del agente y del server) en una sola query con `selectinload`. Filtrado por grupo (NULL = público).
+- `backend/ocabra/agents/executor.py` — `AgentExecutor.run()` y `run_stream()`:
+  - Tool-loop con `asyncio.gather` + semáforo `mcp_max_concurrent_tool_calls`.
+  - Validación JSON-Schema de args via `jsonschema` antes del MCP; fallo → tool message `schema_error`, no excepción.
+  - Timeout (`tool_timeout_seconds`), `mcp_error`, `unknown_tool` → tool message + status correspondiente.
+  - `max_tool_hops` enforced; superar → `finish_reason="tool_hop_limit"`.
+  - Concatenación de tools del caller con namespace `caller_*`; colisión con `{alias}_*` → 400.
+  - Intersección triple de allowlists (server, agent, header `x-ocabra-allowed-tools`).
+  - Inyección de `system_prompt`: prepend al system existente con `\n\n`.
+  - `require_approval`: `never` ejecuta el bucle; `always` devuelve `finish_reason="tool_calls"` y reanuda cuando el cliente reenvía con `role=tool`.
+  - Override por header `x-ocabra-require-approval` con regla de no-rebajar (agente `always` no admite `never`).
+  - Streaming SSE OpenAI-compat con eventos custom `event: ocabra.tool_result` entre hops.
+- `backend/ocabra/agents/chat_glue.py` — `ProfileWorkerInvoker` (wrapper sobre `WorkerPool.forward_request` que reusa `resolve_profile`), `extract_per_request_headers`, `parse_allowed_tools_header`.
+- Patches en chat endpoints:
+  - `backend/ocabra/api/openai/chat.py`: rama `_dispatch_agent` para `model="agent/<slug>"` (streaming + non-streaming).
+  - `backend/ocabra/api/ollama/chat.py`: adapter `_ollama_messages_to_openai` ↔ `_openai_response_to_ollama`, `_dispatch_agent_ollama`.
+- Stats endpoints (cierra deuda mock del frontend):
+  - `backend/ocabra/api/internal/stats_agents.py` con `GET /ocabra/stats/by-agent` (acepta `range=24h|7d|30d` o `from`/`to`) y `GET /ocabra/stats/tool-calls?agent_id=&limit=&since=`.
+  - Forma exacta: `{by_agent: [...], by_tool: [...]}` y `{tool_calls: [...]}` — coincide con `frontend/src/api/agents.ts`.
+  - Filtrado por grupo (igual patrón que `/ocabra/stats/recent`).
+  - `total_tokens` agrega root + hops via `parent_request_id`.
+- Stats middleware (`backend/ocabra/stats/collector.py`): lee `current_agent_id` contextvar para stampear el root `request_stats` con `agent_id`. Los hops hijos los inserta el executor directamente con `parent_request_id` apuntando al root.
+- Wiring en `backend/ocabra/main.py`: registrado `stats_agents_router` bajo `/ocabra`.
+- Tests: `tests/agents/test_translation.py` (16 cases), `test_executor.py` (12 cases incl. parallel, timeout, schema_error, hop_limit, approval handshake, header override, caller collision), `test_resolver.py` (6 cases), `test_stats_agents.py` (4 cases).
+
+**Validación ejecutada** (vía `docker exec ocabra-api-1`):
+- `python -m pytest tests/agents/ -q` → **89 passed** (49 preexistentes Stream A + 40 nuevos Stream B).
+- `ruff check backend/ocabra/agents/ backend/ocabra/api/internal/stats_agents.py` → 7 errores `B008` (mismo patrón `Depends()` ya presente en `api/internal/stats.py` y `models.py`; **no es regresión**, refactor a `Annotated[X, Depends(...)]` queda como tarea separada).
+- `ruff format` aplicado a 9 ficheros nuevos.
+- Imports validados (`python -c "import ocabra.main"`).
+
+**Deudas técnicas**:
+- `_persist_hop_request_stat` y `_persist_tool_call_stats` no se exponen al observer/metrics router — se consumen sólo desde `/ocabra/stats/*`. Si Langfuse/Prometheus quieren spans por hop, hay que extender `langfuse_tracer.py` con `trace_agent_hop()` (Stream D / Fase 3 obs).
+- El `current_root_request_id` contextvar **no se setea** desde el dispatcher: el middleware crea el root `request_stats` row *después* de que termine el handler, así que durante el bucle no conocemos su `id`. Por ahora los hops llevan `parent_request_id=NULL` cuando este contextvar no está disponible; la suma de tokens en `by-agent` agrupa todo por `agent_id` así que el cálculo de coste sigue siendo correcto, pero la trazabilidad fila-a-fila root↔hop está incompleta. Solución v2: que el dispatcher cree el root manualmente antes del executor y propague el id.
+- `run_stream` **fuerza `stream=False`** en cada llamada al worker para reensamblar tool_calls de forma fiable; el cliente recibe SSE con un solo chunk por hop más eventos `ocabra.tool_result`. Cuando vLLM/Ollama estabilicen el streaming de tool_calls esto puede pasar a true streaming token-a-token.
+- `vision_capable` se infiere de `state.capabilities.vision`; depende de que cada backend rellene ese flag — confirmado para vLLM, no auditado para Ollama/llama-server.
+- `tool_choice` per-request acepta cualquier valor; no hay validación contra `auto|required|none|{type:function,...}`. La validación queda en el LLM upstream.
+- `_dispatch_agent_ollama` implementa streaming como un solo NDJSON `done:true` (no hay streaming hop-a-hop). Justificación: el cliente Ollama típico (curl/sdk) procesa NDJSON y no entiende los eventos custom `ocabra.tool_result`. Streaming "real" Ollama queda como deuda menor.
+- B008 ruff warnings (7) — patrón `user: UserContext = Depends(require_role(...))` heredado del resto de routers; refactor a `Annotated[X, Depends(...)]` afecta a múltiples ficheros y se acomete separado.
+
+**Cuestiones pendientes / decisiones tomadas sin consultar**:
+- **Forma del payload de los endpoints de stats**: usé exactamente lo que `frontend/src/api/agents.ts` espera (`by_agent`/`by_tool`/`tool_calls`, snake_case por consistencia con resto de API) en lugar del formato `{agents: [...], top_tools: [...]}` propuesto en el briefing. Justificación: el briefing mismo dice "Si la forma propuesta arriba choca con el código del frontend, **adapta el backend a lo que el frontend ya consume**".
+- **Granularidad de `request_count` en `by-agent`**: cuento sólo rows root (`parent_request_id=NULL`); los hops cuentan en `tool_call_count`. Tokens sí se suman across root + hops.
+- **`ProfileWorkerInvoker` reusa `resolve_profile` con `agent.base_model_id`** asumiendo que muchos deployments lo tienen como canonical id resoluble por el legacy fallback de `resolve_profile`. Si `base_model_id` apunta a un model_id que **no** tiene profile asociada, falla con 404 — el agente debería usar `profile_id` en ese caso.
+- **`tool_call_id` para tools del caller (`caller_*`)**: se enrutan al LLM como tools normales pero el executor sólo ejecuta tools con prefix `{alias}_*`. Si el LLM emite un tool_call con prefix `caller_*`, llegará al cliente como tool_call no resuelto en la respuesta final (igual que llamar a un tool externo en chat normal). No hay test específico para esto; documentado como deuda menor.
+- **Truncado del result a `mcp_result_max_bytes`**: aplicado al `result_summary` persistido y al `content` string del tool message. Para vision content (lista de blocks) no se trunca (suposición: la imagen es atómica). Confirmar con usuario si conviene capar también ahí.
+
+---
+
 ### 2026-04-25 — Validación de los entregables de Streams A y C
 
 **Backend (Stream A, ya en `main`)**:
