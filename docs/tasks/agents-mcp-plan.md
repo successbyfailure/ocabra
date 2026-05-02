@@ -682,6 +682,22 @@ Si no se actualiza esta sección, el trabajo no se considera cerrado aunque el c
 - Decidir si `agentsApi`/`mcpApi` se quedan como módulos paralelos al gran objeto `api` en `client.ts` (decisión tomada para no inflarlo más) o se consolidan en `api.agents`/`api.mcp` en Fase 5+.
 - Los endpoints de stats (`/ocabra/stats/by-agent`, `/ocabra/stats/tool-calls`) no están especificados en detalle — Stream A/B debe diseñar su forma antes de que C pueda quitar el mock. Sugerencia: `{ agents: [{agent_id, slug, requests, tokens_total, avg_hops}], tool_calls: [...] }` reusando el agregador de `cost_calculator`.
 
+### 2026-04-26 — Fix create MCP server + test-config endpoint
+
+**Avances**:
+- Frontend: `serializeCreate` envuelve el `authValue` (string) en `{ value }` antes de mandar al backend. En edición, si el input está vacío, el campo se omite (no se sobreescribe el secreto guardado).
+- Frontend: validación cliente para `url` (transport http/sse) y `command` (stdio) antes del submit; mensajes de error claros.
+- Frontend: botón "Probar conexión" en el modal — invoca el nuevo endpoint sin guardar.
+- Backend: `POST /ocabra/mcp-servers/test-config` que recibe un `MCPServerCreate` y devuelve `MCPServerTestResult` (`healthy`, `tools_count`, `error`) sin persistir nada. Sigue las mismas reglas de ACL (model_manager + admin para stdio).
+- Refactor de `MCPRegistry._build_client(row)` a `build_client_from_fields(...)` (público) — el método antiguo delega al nuevo. Permite reutilizar la construcción del cliente sin DB row.
+
+**Deudas técnicas / cuestiones**:
+- 49/49 tests en `tests/agents/` siguen verdes tras el refactor.
+- El test del endpoint `/test-config` en sí mismo aún no está escrito (cobertura indirecta vía smoke manual). Añadir en seguimiento.
+- Para que el cambio de backend surta efecto en el contenedor desplegado hay que rebuild de la imagen oCabra (no hay bind mount del backend). El frontend se sirve desde nginx con bundle pre-built; nuevo build necesario.
+
+---
+
 ### Decisiones confirmadas
 
 - **2026-04-24**: usar `mcp` SDK oficial en lugar de `litellm.experimental_mcp_client`. Razón: evitar traer toda la dep de litellm; traducción OpenAI↔MCP son ~30 líneas propias.
