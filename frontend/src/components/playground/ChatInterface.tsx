@@ -109,7 +109,17 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
       })
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
-        throw new Error(String(err?.error?.message ?? err?.detail ?? `HTTP ${response.status}`))
+        // FastAPI nests structured errors as {detail: {error: {message}}};
+        // OpenAI-style endpoints flatten to {error: {message}}; some routes
+        // return {detail: "..."}. Try each path before falling back to the
+        // status — never call String() on a raw object (=> "[object Object]").
+        const detail = err?.detail
+        const message =
+          err?.error?.message ??
+          (typeof detail === "string" ? detail : detail?.error?.message) ??
+          err?.message ??
+          `HTTP ${response.status}`
+        throw new Error(typeof message === "string" ? message : JSON.stringify(message))
       }
       const content = useOllama
         ? await readOllamaChatStream(response, (chunk) => {

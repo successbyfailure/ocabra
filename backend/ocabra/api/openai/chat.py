@@ -173,6 +173,16 @@ async def _dispatch_agent(
     async with AsyncSessionLocal() as session:
         agent = await resolve_agent(model_id, session, user=user)
     if agent is None:
+        # Log enough context to debug 404s from the Playground without
+        # leaking secrets. Distinguishes "agent does not exist" from "user
+        # has no access" — both map to 404 client-side to avoid info leak.
+        logger.warning(
+            "agent_resolve_failed",
+            model_id=model_id,
+            user_id=user.user_id,
+            user_role=user.role,
+            user_group_count=len(user.group_ids or []),
+        )
         raise HTTPException(
             status_code=404,
             detail={
