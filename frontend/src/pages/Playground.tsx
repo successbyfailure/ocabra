@@ -63,6 +63,9 @@ export function Playground() {
         const loadedFirst = sorted.find((item) => item.status === "loaded")
         setModels(sorted)
         setSelectedModelId((prev) => {
+          // Preserve agent selections — they're not part of the models list
+          // but they're a valid choice in the dropdown.
+          if (prev?.startsWith("agent/")) return prev
           if (prev && sorted.some((item) => item.modelId === prev)) return prev
           return loadedFirst?.modelId || sorted[0]?.modelId || ""
         })
