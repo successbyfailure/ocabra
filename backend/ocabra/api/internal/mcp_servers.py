@@ -418,3 +418,54 @@ async def test_mcp_server(
     except Exception as exc:  # noqa: BLE001
         return MCPServerTestResult(healthy=False, tools_count=0, error=str(exc))
     return MCPServerTestResult(healthy=True, tools_count=len(tools), error=None)
+
+
+@router.post(
+    "/mcp-servers/test-config",
+    summary="Test a candidate MCP server config without persisting it",
+    description=(
+        "Validate connectivity to an MCP server using a configuration payload "
+        "that is **not** stored in the database. Used by the create/edit form "
+        "to let users verify connectivity before saving."
+    ),
+    response_model=MCPServerTestResult,
+    responses={
+        400: {"description": "Invalid body (transport/auth mismatch, ...)"},
+        403: {"description": "stdio transport requires system_admin"},
+    },
+)
+async def test_mcp_config(
+    body: MCPServerCreate,
+    request: Request,
+    user: UserContext = Depends(require_role("model_manager")),
+) -> MCPServerTestResult:
+    """One-shot connectivity test for an unsaved MCP server config."""
+    _require_admin_for_stdio(user, body.transport)
+    registry = _get_registry(request)
+
+    auth_payload = (
+        body.auth_value.model_dump(exclude_none=True) if body.auth_value is not None else None
+    )
+    try:
+        client = registry.build_client_from_fields(
+            alias=body.alias,
+            transport=body.transport,
+            url=body.url,
+            command=body.command,
+            args=list(body.args) if body.args else None,
+            env=dict(body.env) if body.env else None,
+            auth_type=body.auth_type,
+            auth_payload=auth_payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        await client.connect()
+        try:
+            tools = await client.list_tools()
+        finally:
+            await client.close()
+    except Exception as exc:  # noqa: BLE001
+        return MCPServerTestResult(healthy=False, tools_count=0, error=str(exc))
+    return MCPServerTestResult(healthy=True, tools_count=len(tools), error=None)

@@ -86,7 +86,17 @@ function serializeCreate(data: MCPServerCreate | MCPServerUpdate): Record<string
   if (data.args !== undefined) out.args = data.args
   if (data.env !== undefined) out.env = data.env
   if (data.authType !== undefined) out.auth_type = data.authType
-  if (data.authValue !== undefined) out.auth_value = data.authValue
+  // The backend expects auth_value as { value, header_name? } or null;
+  // the form sends a plain string for ergonomics, so wrap it here.
+  if (data.authValue !== undefined) {
+    if (data.authValue === null || data.authValue === "") {
+      out.auth_value = null
+    } else if (typeof data.authValue === "string") {
+      out.auth_value = { value: data.authValue }
+    } else {
+      out.auth_value = data.authValue
+    }
+  }
   if (data.allowedTools !== undefined) out.allowed_tools = data.allowedTools
   if (data.groupId !== undefined) out.group_id = data.groupId
   return out
@@ -132,6 +142,11 @@ export const mcpApi = {
   test: async (id: string): Promise<MCPServerTestResult> =>
     toTestResult(
       await request<unknown>("POST", `/ocabra/mcp-servers/${encodeURIComponent(id)}/test`),
+    ),
+
+  testConfig: async (data: MCPServerCreate): Promise<MCPServerTestResult> =>
+    toTestResult(
+      await request<unknown>("POST", "/ocabra/mcp-servers/test-config", serializeCreate(data)),
     ),
 
   tools: async (id: string): Promise<MCPToolSpec[]> =>

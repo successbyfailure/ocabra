@@ -105,17 +105,25 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
 
   const cachedTools = initial?.toolsCache ?? null
   const useChecklist = (cachedTools?.length ?? 0) > 0
+  const [testing, setTesting] = useState(false)
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault()
+  function buildPayload(): MCPServerCreate | { error: string } {
     if (!alias.trim() || !displayName.trim()) {
-      setErr("Alias y nombre son obligatorios.")
-      return
+      return { error: "Alias y nombre son obligatorios." }
     }
     if (transport === "stdio" && !isAdmin && !initial) {
-      setErr("Sólo system_admin puede crear servidores stdio.")
-      return
+      return { error: "Sólo system_admin puede crear servidores stdio." }
     }
+    if ((transport === "http" || transport === "sse") && !url.trim()) {
+      return { error: `transport=${transport} requiere URL.` }
+    }
+    if (transport === "stdio" && !command.trim()) {
+      return { error: "transport=stdio requiere command." }
+    }
+    if (authType !== "none" && !initial && !authValue.trim()) {
+      return { error: `auth_type='${authType}' requiere un auth value.` }
+    }
+
     let allowedTools: string[] | null = null
     if (useChecklist) {
       allowedTools = [...allowedToolsSet]
@@ -146,6 +154,8 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
       }
     }
 
+    // On edit, an empty auth value means "no change" — omit the key entirely
+    // so we don't clobber the stored secret.
     const payload: MCPServerCreate = {
       alias: alias.trim(),
       displayName: displayName.trim(),
@@ -156,19 +166,61 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
       args: argsList,
       env: envObj,
       authType,
-      authValue: authValue || null,
       allowedTools,
       groupId: groupId || null,
     }
+    if (authType === "none") {
+      payload.authValue = null
+    } else if (authValue.trim()) {
+      payload.authValue = authValue
+    }
+    // else: edit mode with empty input → leave authValue undefined (omitted)
+    return payload
+  }
 
+  async function handleTestConnection() {
+    const built = buildPayload()
+    if ("error" in built) {
+      setErr(built.error)
+      return
+    }
+    if (built.authType !== "none" && !built.authValue && !initial) {
+      setErr("Para probar la conexión rellena el auth value (o usa auth_type=none).")
+      return
+    }
+    setTesting(true)
+    setErr(null)
+    try {
+      const res = await mcpApi.testConfig(built)
+      if (res.healthy) {
+        toast.success(`Conexión OK · ${res.toolsCount} tools detectadas`)
+      } else {
+        toast.error(`Conexión fallida: ${res.error ?? "desconocido"}`)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Test fallido"
+      setErr(msg)
+      toast.error(msg)
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    const built = buildPayload()
+    if ("error" in built) {
+      setErr(built.error)
+      return
+    }
     setBusy(true)
     setErr(null)
     try {
       if (initial) {
-        await update(initial.id, payload)
+        await update(initial.id, built)
         toast.success(`Servidor "${displayName}" actualizado`)
       } else {
-        await create(payload)
+        await create(built)
         toast.success(`Servidor "${displayName}" creado`)
       }
       onClose()
@@ -424,21 +476,33 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
               </div>
             )}
 
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={onClose}
-                className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
+                onClick={() => void handleTestConnection()}
+                disabled={busy || testing}
+                className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm text-primary hover:bg-primary/20 disabled:opacity-50"
+                title="Intenta conectar y listar tools sin guardar"
               >
-                Cancelar
+                <Zap size={14} />
+                {testing ? "Probando..." : "Probar conexión"}
               </button>
-              <button
-                type="submit"
-                disabled={busy}
-                className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-              >
-                {busy ? "Guardando..." : initial ? "Guardar" : "Crear"}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy || testing}
+                  className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {busy ? "Guardando..." : initial ? "Guardar" : "Crear"}
+                </button>
+              </div>
             </div>
           </form>
         </Dialog.Content>

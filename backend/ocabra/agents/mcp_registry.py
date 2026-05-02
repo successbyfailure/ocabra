@@ -385,40 +385,69 @@ class MCPRegistry:
     # ── Client factory ──────────────────────────────────────
 
     def _build_client(self, row: MCPServer) -> MCPClientInterface:
+        auth_payload = (
+            self.decrypt_json(row.auth_value_encrypted) if row.auth_value_encrypted else None
+        )
+        env = self.decrypt_json(row.env_encrypted) if row.env_encrypted else None
+        return self.build_client_from_fields(
+            alias=row.alias,
+            transport=row.transport,
+            url=row.url,
+            command=row.command,
+            args=list(row.args or []) if row.args else None,
+            env=env,
+            auth_type=row.auth_type,
+            auth_payload=auth_payload,
+        )
+
+    def build_client_from_fields(
+        self,
+        *,
+        alias: str,
+        transport: str,
+        url: str | None,
+        command: str | None,
+        args: list[str] | None,
+        env: dict[str, str] | None,
+        auth_type: str,
+        auth_payload: Mapping[str, Any] | None,
+    ) -> MCPClientInterface:
+        """Build a client from raw fields (no DB row required).
+
+        Used by :meth:`_build_client` and by the ``test-config`` endpoint to
+        validate a candidate configuration before persisting it.
+        """
         static_headers: dict[str, str] = {}
-        if row.auth_type in ("api_key", "bearer", "basic") and row.auth_value_encrypted:
-            auth_payload = self.decrypt_json(row.auth_value_encrypted) or {}
+        if auth_type in ("api_key", "bearer", "basic") and auth_payload:
             header_name = auth_payload.get("header_name") or "Authorization"
             raw_value = auth_payload.get("value") or ""
-            if row.auth_type == "bearer":
+            if auth_type == "bearer":
                 static_headers[header_name] = (
                     raw_value if raw_value.lower().startswith("bearer ") else f"Bearer {raw_value}"
                 )
-            elif row.auth_type == "basic":
+            elif auth_type == "basic":
                 static_headers[header_name] = (
                     raw_value if raw_value.lower().startswith("basic ") else f"Basic {raw_value}"
                 )
             else:  # api_key
                 static_headers[header_name] = raw_value
 
-        transport = row.transport
         if transport == "http":
-            if not row.url:
-                raise ValueError(f"MCP server '{row.alias}' has transport=http but no url")
-            return HttpMCPClient(row.url, headers=static_headers)
+            if not url:
+                raise ValueError(f"MCP server '{alias}' has transport=http but no url")
+            return HttpMCPClient(url, headers=static_headers)
         if transport == "sse":
-            if not row.url:
-                raise ValueError(f"MCP server '{row.alias}' has transport=sse but no url")
-            return SseMCPClient(row.url, headers=static_headers)
+            if not url:
+                raise ValueError(f"MCP server '{alias}' has transport=sse but no url")
+            return SseMCPClient(url, headers=static_headers)
         if transport == "stdio":
-            if not row.command:
-                raise ValueError(f"MCP server '{row.alias}' has transport=stdio but no command")
-            env = self.decrypt_json(row.env_encrypted)
+            if not command:
+                raise ValueError(f"MCP server '{alias}' has transport=stdio but no command")
             return StdioMCPClient(
-                command=row.command,
-                args=list(row.args or []),
+                command=command,
+                args=list(args or []),
                 env=env or {},
-                cwd=f"/data/mcp/{row.alias}",
+                cwd=f"/data/mcp/{alias}",
             )
         raise ValueError(f"Unsupported transport '{transport}'")
 
