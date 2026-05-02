@@ -23,8 +23,8 @@ from __future__ import annotations
 import asyncio
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -174,30 +174,58 @@ def _flatten_content_blocks(content: Any) -> list[dict[str, Any]]:
 
 
 class _BaseClient(MCPClientInterface):
-    """Shared plumbing for HTTP/SSE clients (server-driven async context)."""
+    """Shared plumbing for HTTP/SSE/stdio clients.
+
+    Each public method (``list_tools``/``call_tool``/``health_check``) opens
+    a fresh ``ClientSession`` via :meth:`_open_streams` and tears it down on
+    exit, all inside the *same* task scope.  This avoids the
+    ``AsyncExitStack`` cancel-scope mismatch that the MCP SDK raises when the
+    stack is opened in one task and closed in another (which is exactly what
+    happens if ``connect``/``close`` are split across handler boundaries).
+
+    Tests can pre-inject ``self._session`` to skip transport setup entirely.
+    """
 
     def __init__(self) -> None:
-        self._exit_stack: AsyncExitStack | None = None
+        # Test-only injection point. Real clients leave this as None and open
+        # a fresh session per operation inside _session_scope().
         self._session: Any | None = None
-        self._lock = asyncio.Lock()
+
+    async def connect(self) -> None:
+        """No-op for real clients (sessions are per-operation)."""
+        return
 
     async def close(self) -> None:
-        async with self._lock:
-            if self._exit_stack is None:
-                return
-            stack = self._exit_stack
-            self._exit_stack = None
-            self._session = None
-            try:
-                await stack.aclose()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("mcp_client_close_failed", error=str(exc))
+        """No-op for real clients (per-operation sessions clean up themselves)."""
+        return
+
+    @asynccontextmanager
+    async def _open_streams(self) -> AsyncIterator[tuple[Any, ...]]:
+        """Subclass hook: yield the ``(read, write[, ...])`` streams tuple.
+
+        Implemented as an async context manager so the underlying transport's
+        AsyncExitStack lives inside the caller's task scope.
+        """
+        raise NotImplementedError
+        yield  # pragma: no cover - unreachable, satisfies the generator protocol
+
+    @asynccontextmanager
+    async def _session_scope(self) -> AsyncIterator[Any]:
+        """Yield a live initialised ``ClientSession`` for one operation."""
+        if self._session is not None:
+            # Tests inject a pre-built session — skip transport setup entirely.
+            yield self._session
+            return
+        session_mod = _load_mcp()
+        async with self._open_streams() as streams:
+            read, write = streams[0], streams[1]
+            async with session_mod.ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
 
     async def list_tools(self) -> list[MCPTool]:
-        await self.connect()
-        session = self._session
-        assert session is not None  # noqa: S101 — for type-narrow only
-        response = await session.list_tools()
+        async with self._session_scope() as session:
+            response = await session.list_tools()
         result: list[MCPTool] = []
         for tool in getattr(response, "tools", []):
             result.append(
@@ -223,15 +251,13 @@ class _BaseClient(MCPClientInterface):
         # transports in the MCP SDK do not yet accept per-call header overrides
         # without reopening the session.  Stream B will implement re-connect
         # with merged headers when the agent passes non-empty extra_headers.
-        # Here we simply connect with the static headers.
-        await self.connect()
-        session = self._session
-        assert session is not None  # noqa: S101 — for type-narrow only
+        # Here we simply use the static headers baked into the client.
         try:
-            raw = await asyncio.wait_for(
-                session.call_tool(name=name, arguments=arguments),
-                timeout=timeout_seconds,
-            )
+            async with self._session_scope() as session:
+                raw = await asyncio.wait_for(
+                    session.call_tool(name=name, arguments=arguments),
+                    timeout=timeout_seconds,
+                )
         except TimeoutError:
             return MCPToolResult(
                 content=[{"type": "text", "text": "tool_timeout"}],
@@ -268,29 +294,17 @@ class HttpMCPClient(_BaseClient):
         self._merger = _HeaderMerger(headers)
         self._timeout_s = timeout_seconds
 
-    async def connect(self) -> None:
-        async with self._lock:
-            if self._session is not None:
-                return
-            session_mod = _load_mcp()
-            from mcp.client.streamable_http import streamablehttp_client
+    @asynccontextmanager
+    async def _open_streams(self) -> AsyncIterator[tuple[Any, ...]]:
+        _load_mcp()
+        from mcp.client.streamable_http import streamablehttp_client
 
-            stack = AsyncExitStack()
-            try:
-                read, write, *_ = await stack.enter_async_context(
-                    streamablehttp_client(
-                        self._url,
-                        headers=self._merger.static,
-                        timeout=self._timeout_s,
-                    )
-                )
-                session = await stack.enter_async_context(session_mod.ClientSession(read, write))
-                await session.initialize()
-            except Exception:
-                await stack.aclose()
-                raise
-            self._exit_stack = stack
-            self._session = session
+        async with streamablehttp_client(
+            self._url,
+            headers=self._merger.static,
+            timeout=self._timeout_s,
+        ) as streams:
+            yield streams
 
 
 class SseMCPClient(_BaseClient):
@@ -308,29 +322,17 @@ class SseMCPClient(_BaseClient):
         self._merger = _HeaderMerger(headers)
         self._timeout_s = timeout_seconds
 
-    async def connect(self) -> None:
-        async with self._lock:
-            if self._session is not None:
-                return
-            session_mod = _load_mcp()
-            from mcp.client.sse import sse_client
+    @asynccontextmanager
+    async def _open_streams(self) -> AsyncIterator[tuple[Any, ...]]:
+        _load_mcp()
+        from mcp.client.sse import sse_client
 
-            stack = AsyncExitStack()
-            try:
-                read, write = await stack.enter_async_context(
-                    sse_client(
-                        url=self._url,
-                        headers=self._merger.static,
-                        timeout=self._timeout_s,
-                    )
-                )
-                session = await stack.enter_async_context(session_mod.ClientSession(read, write))
-                await session.initialize()
-            except Exception:
-                await stack.aclose()
-                raise
-            self._exit_stack = stack
-            self._session = session
+        async with sse_client(
+            url=self._url,
+            headers=self._merger.static,
+            timeout=self._timeout_s,
+        ) as streams:
+            yield streams
 
 
 class StdioMCPClient(_BaseClient):
@@ -359,35 +361,25 @@ class StdioMCPClient(_BaseClient):
         self._env = dict(env or {})
         self._cwd = cwd
 
-    async def connect(self) -> None:
-        async with self._lock:
-            if self._session is not None:
-                return
-            session_mod = _load_mcp()
-            from mcp import StdioServerParameters
-            from mcp.client.stdio import stdio_client
+    @asynccontextmanager
+    async def _open_streams(self) -> AsyncIterator[tuple[Any, ...]]:
+        _load_mcp()
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
 
-            sanitised_env: dict[str, str] = {}
-            # Minimal PATH fallback so the command resolves.  Explicit PATH in
-            # the caller ``env`` wins.  No other variables leak from parent.
-            sanitised_env["PATH"] = self._env.get(
-                "PATH", os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            )
-            sanitised_env.update(self._env)
+        sanitised_env: dict[str, str] = {}
+        # Minimal PATH fallback so the command resolves.  Explicit PATH in
+        # the caller ``env`` wins.  No other variables leak from parent.
+        sanitised_env["PATH"] = self._env.get(
+            "PATH", os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        )
+        sanitised_env.update(self._env)
 
-            params = StdioServerParameters(
-                command=self._command,
-                args=self._args,
-                env=sanitised_env,
-                cwd=self._cwd,
-            )
-            stack = AsyncExitStack()
-            try:
-                read, write = await stack.enter_async_context(stdio_client(params))
-                session = await stack.enter_async_context(session_mod.ClientSession(read, write))
-                await session.initialize()
-            except Exception:
-                await stack.aclose()
-                raise
-            self._exit_stack = stack
-            self._session = session
+        params = StdioServerParameters(
+            command=self._command,
+            args=self._args,
+            env=sanitised_env,
+            cwd=self._cwd,
+        )
+        async with stdio_client(params) as streams:
+            yield streams
