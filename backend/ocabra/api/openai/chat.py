@@ -33,6 +33,15 @@ from ._deps import (
     resolve_profile,
     to_backend_body,
 )
+from ocabra.agents.chat_glue import (
+    build_invoker_for_agent,
+    extract_per_request_headers,
+    parse_allowed_tools_header,
+)
+from ocabra.agents.executor import AgentExecutor
+from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
+from ocabra.agents.resolver import is_agent_model, resolve_agent
+from ocabra.database import AsyncSessionLocal
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -79,7 +88,10 @@ async def chat_completions(
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                     )
                 resp = await federation_manager.proxy_request(
-                    peer, "POST", request.url.path, body,
+                    peer,
+                    "POST",
+                    request.url.path,
+                    body,
                 )
                 return Response(
                     content=resp.content,
@@ -87,6 +99,15 @@ async def chat_completions(
                     media_type=resp.headers.get("content-type"),
                 )
     # --- End federation hook ---
+
+    # --- Agent dispatch: model="agent/<slug>" ---
+    if is_agent_model(model_id):
+        return await _dispatch_agent(
+            request=request,
+            user=user,
+            body=body,
+            stream=stream,
+        )
 
     profile, state = await resolve_profile(
         model_id,
@@ -132,3 +153,101 @@ async def _stream_chat(worker_pool, model_id: str, body: dict):
         )
         yield f"data: {error_payload}\n\n".encode()
         yield b"data: [DONE]\n\n"
+
+
+async def _dispatch_agent(
+    *,
+    request: Request,
+    user: UserContext,
+    body: dict,
+    stream: bool,
+):
+    """Resolve and execute an agent invocation (``model="agent/<slug>"``).
+
+    Plan: docs/tasks/agents-mcp-plan.md — Fase 2/3.
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+
+    model_id = body.get("model", "")
+    async with AsyncSessionLocal() as session:
+        agent = await resolve_agent(model_id, session, user=user)
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "message": f"The model '{model_id}' does not exist.",
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found",
+                }
+            },
+        )
+
+    registry = getattr(request.app.state, "mcp_registry", None) or get_mcp_registry()
+    if registry is None:
+        raise HTTPException(status_code=503, detail="MCP registry not available")
+
+    model_manager = get_model_manager(request)
+    profile_registry = get_profile_registry(request)
+    invoker = await build_invoker_for_agent(
+        agent,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        user=user,
+        worker_pool=request.app.state.worker_pool,
+    )
+
+    executor = AgentExecutor(registry)
+    messages = body.get("messages") or []
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="messages must be an array")
+
+    # Stamp the root request_stat with the agent id (consumed by the stats
+    # middleware via contextvars).  Setting here means the middleware's
+    # ``asyncio.create_task(_record_stat...)`` captures the live value.
+    from ocabra.agents.executor import current_agent_id  # local import to avoid cycle
+
+    current_agent_id.set(agent.id)
+
+    request_options = {
+        k: v for k, v in body.items() if k not in ("model", "messages", "stream", "tools")
+    }
+    caller_tools = body.get("tools") if isinstance(body.get("tools"), list) else None
+    per_request_headers = extract_per_request_headers(request)
+    per_request_allowed = parse_allowed_tools_header(request.headers.get("x-ocabra-allowed-tools"))
+    require_approval_override = request.headers.get("x-ocabra-require-approval")
+
+    if stream:
+        from fastapi.responses import StreamingResponse as _SR
+
+        agen = executor.run_stream(
+            agent,
+            messages,
+            request_options,
+            user,
+            invoker,
+            per_request_headers=per_request_headers,
+            per_request_allowed_tools=per_request_allowed,
+            caller_tools=caller_tools,
+            require_approval_override=require_approval_override,
+        )
+        return _SR(
+            agen,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    result = await executor.run(
+        agent,
+        messages,
+        request_options,
+        user,
+        invoker,
+        per_request_headers=per_request_headers,
+        per_request_allowed_tools=per_request_allowed,
+        caller_tools=caller_tools,
+        require_approval_override=require_approval_override,
+    )
+    return JSONResponse(content=result.openai_response)

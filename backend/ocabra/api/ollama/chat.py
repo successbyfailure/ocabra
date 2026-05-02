@@ -32,6 +32,15 @@ from ._shared import (
     iter_sse_payloads,
     now_iso_z,
 )
+from ocabra.agents.chat_glue import (
+    build_invoker_for_agent,
+    extract_per_request_headers,
+    parse_allowed_tools_header,
+)
+from ocabra.agents.executor import AgentExecutor
+from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
+from ocabra.agents.resolver import is_agent_model, resolve_agent
+from ocabra.database import AsyncSessionLocal
 
 router = APIRouter()
 
@@ -76,7 +85,10 @@ async def chat(
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                     )
                 resp = await federation_manager.proxy_request(
-                    peer, "POST", request.url.path, body,
+                    peer,
+                    "POST",
+                    request.url.path,
+                    body,
                 )
                 return Response(
                     content=resp.content,
@@ -84,6 +96,16 @@ async def chat(
                     media_type=resp.headers.get("content-type"),
                 )
     # --- End federation hook ---
+
+    # --- Agent dispatch: model="agent/<slug>" via Ollama-compat ---
+    if is_agent_model(ollama_model):
+        return await _dispatch_agent_ollama(
+            request=request,
+            user=user,
+            body=body,
+            ollama_model=ollama_model,
+            stream=stream,
+        )
 
     # Try profile resolution first
     try:
@@ -241,3 +263,174 @@ def _extract_chat_message(payload: dict) -> str:
         return ""
     message = choices[0].get("message") or {}
     return str(message.get("content") or "")
+
+
+# ── Agent dispatch (Ollama adapter) ──────────────────────────────
+
+
+def _ollama_messages_to_openai(messages: list[dict]) -> list[dict]:
+    """Translate Ollama-style messages to OpenAI-style messages.
+
+    Ollama supports: ``role``, ``content`` (string), ``images`` (list of b64),
+    ``tool_calls``.  OpenAI expects ``content`` as string or content-parts list,
+    ``role=tool`` with ``tool_call_id``.
+    """
+    out: list[dict] = []
+    for raw in messages or []:
+        if not isinstance(raw, dict):
+            continue
+        role = raw.get("role")
+        content = raw.get("content", "")
+        images = raw.get("images") or []
+        msg: dict = {"role": role}
+        if images:
+            parts: list[dict] = []
+            if isinstance(content, str) and content:
+                parts.append({"type": "text", "text": content})
+            for img in images:
+                if isinstance(img, str) and img:
+                    parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img}"},
+                        }
+                    )
+            msg["content"] = parts
+        else:
+            msg["content"] = content
+        if raw.get("tool_calls"):
+            msg["tool_calls"] = raw["tool_calls"]
+        if raw.get("tool_call_id"):
+            msg["tool_call_id"] = raw["tool_call_id"]
+        out.append(msg)
+    return out
+
+
+def _openai_response_to_ollama(payload: dict, ollama_model: str) -> dict:
+    """Translate the executor's OpenAI response into Ollama's ``/api/chat`` shape."""
+    msg_dict = (payload.get("choices") or [{}])[0].get("message") or {}
+    out_msg: dict = {"role": "assistant", "content": msg_dict.get("content") or ""}
+    if msg_dict.get("tool_calls"):
+        out_msg["tool_calls"] = msg_dict["tool_calls"]
+    usage = payload.get("usage") or {}
+    return {
+        "model": ollama_model,
+        "created_at": now_iso_z(),
+        "message": out_msg,
+        "done": True,
+        "total_duration": 0,
+        "load_duration": 0,
+        "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
+        "eval_count": int(usage.get("completion_tokens") or 0),
+        "eval_duration": 0,
+    }
+
+
+async def _dispatch_agent_ollama(
+    *,
+    request: Request,
+    user: UserContext,
+    body: dict,
+    ollama_model: str,
+    stream: bool,
+):
+    """Run the AgentExecutor and return a response in Ollama format.
+
+    Ollama clients send Ollama-shaped request bodies; we translate them to
+    OpenAI format, run the executor, and translate the final assistant
+    response back.  Streaming is exposed as NDJSON, mirroring the rest of
+    ``/api/chat``.
+    """
+    async with AsyncSessionLocal() as session:
+        agent = await resolve_agent(ollama_model, session, user=user)
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{ollama_model}' not found",
+        )
+
+    registry = getattr(request.app.state, "mcp_registry", None) or get_mcp_registry()
+    if registry is None:
+        raise HTTPException(status_code=503, detail="MCP registry not available")
+
+    model_manager = get_model_manager(request)
+    profile_registry = get_profile_registry(request)
+    invoker = await build_invoker_for_agent(
+        agent,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        user=user,
+        worker_pool=request.app.state.worker_pool,
+    )
+
+    executor = AgentExecutor(registry)
+    raw_messages = body.get("messages") or []
+    messages = _ollama_messages_to_openai(raw_messages)
+
+    # See the OpenAI dispatcher for the rationale behind the contextvar set.
+    from ocabra.agents.executor import current_agent_id  # local import to avoid cycle
+
+    current_agent_id.set(agent.id)
+
+    request_options: dict = {}
+    options = body.get("options") or {}
+    if isinstance(options, dict):
+        # Map the relevant Ollama options to OpenAI sampling args.
+        for src, dst in (
+            ("temperature", "temperature"),
+            ("top_p", "top_p"),
+            ("top_k", "top_k"),
+            ("seed", "seed"),
+            ("num_predict", "max_tokens"),
+            ("stop", "stop"),
+        ):
+            if src in options:
+                request_options[dst] = options[src]
+    if "tools" in body and isinstance(body["tools"], list):
+        caller_tools = body["tools"]
+    else:
+        caller_tools = None
+
+    per_request_headers = extract_per_request_headers(request)
+    per_request_allowed = parse_allowed_tools_header(request.headers.get("x-ocabra-allowed-tools"))
+    require_approval_override = request.headers.get("x-ocabra-require-approval")
+
+    if stream:
+
+        async def _gen():
+            # Build the final response synchronously then emit a single done line.
+            # The OpenAI streaming variant offers token-by-token deltas; for
+            # Ollama we keep parity with the legacy implementation that drains
+            # to a single chunk on tool-loops.
+            result = await executor.run(
+                agent,
+                messages,
+                request_options,
+                user,
+                invoker,
+                per_request_headers=per_request_headers,
+                per_request_allowed_tools=per_request_allowed,
+                caller_tools=caller_tools,
+                require_approval_override=require_approval_override,
+            )
+            translated = _openai_response_to_ollama(result.openai_response, ollama_model)
+            yield (json.dumps(translated) + "\n").encode("utf-8")
+
+        return StreamingResponse(
+            _gen(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    result = await executor.run(
+        agent,
+        messages,
+        request_options,
+        user,
+        invoker,
+        per_request_headers=per_request_headers,
+        per_request_allowed_tools=per_request_allowed,
+        caller_tools=caller_tools,
+        require_approval_override=require_approval_override,
+    )
+    return _openai_response_to_ollama(result.openai_response, ollama_model)

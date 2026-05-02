@@ -4,6 +4,7 @@ Stats middleware — records inference request metrics.
 Tracks OpenAI-compatible `/v1/*` and Ollama-compatible inference routes under
 `/api/*` so the stats page reflects real usage regardless of client protocol.
 """
+
 from __future__ import annotations
 
 import json
@@ -133,13 +134,20 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 mm.end_request(inflight_model_id, inflight_request_id)
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
-                asyncio.create_task(_record_stat(
-                    request=request, model_id=model_id, started_at=started_at,
-                    duration_ms=(time.monotonic() - start) * 1000,
-                    error_message=str(exc), status_code=500,
-                    endpoint_path=path, request_kind=request_kind,
-                    input_tokens=None, output_tokens=None,
-                ))
+                asyncio.create_task(
+                    _record_stat(
+                        request=request,
+                        model_id=model_id,
+                        started_at=started_at,
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        error_message=str(exc),
+                        status_code=500,
+                        endpoint_path=path,
+                        request_kind=request_kind,
+                        input_tokens=None,
+                        output_tokens=None,
+                    )
+                )
             raise
 
         # Detect streaming by content-type (SSE or NDJSON).
@@ -179,14 +187,21 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         all_body = b"".join(chunks)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
                         in_tok, out_tok = _extract_usage_tokens(last_payload, request_kind)
-                        asyncio.create_task(_record_stat(
-                            request=request, model_id=model_id, started_at=started_at,
-                            duration_ms=duration_ms,
-                            error_message=error_msg or (f"HTTP {status_code}" if status_code >= 400 else None),
-                            status_code=status_code,
-                            endpoint_path=path, request_kind=request_kind,
-                            input_tokens=in_tok, output_tokens=out_tok,
-                        ))
+                        asyncio.create_task(
+                            _record_stat(
+                                request=request,
+                                model_id=model_id,
+                                started_at=started_at,
+                                duration_ms=duration_ms,
+                                error_message=error_msg
+                                or (f"HTTP {status_code}" if status_code >= 400 else None),
+                                status_code=status_code,
+                                endpoint_path=path,
+                                request_kind=request_kind,
+                                input_tokens=in_tok,
+                                output_tokens=out_tok,
+                            )
+                        )
 
             response.body_iterator = tee_and_record()
             return response
@@ -203,12 +218,20 @@ class StatsMiddleware(BaseHTTPMiddleware):
         model_id = _extract_model_id(request=request, body=request_payload)
         if model_id:
             in_tok, out_tok = _extract_usage_tokens(response_payload, request_kind=request_kind)
-            asyncio.create_task(_record_stat(
-                request=request, model_id=model_id, started_at=started_at,
-                duration_ms=duration_ms, error_message=error_message,
-                status_code=response.status_code, endpoint_path=path,
-                request_kind=request_kind, input_tokens=in_tok, output_tokens=out_tok,
-            ))
+            asyncio.create_task(
+                _record_stat(
+                    request=request,
+                    model_id=model_id,
+                    started_at=started_at,
+                    duration_ms=duration_ms,
+                    error_message=error_message,
+                    status_code=response.status_code,
+                    endpoint_path=path,
+                    request_kind=request_kind,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                )
+            )
 
         return response
 
@@ -347,7 +370,11 @@ async def _record_stat(
                 elif backend_type == "ollama":
                     # Ollama manages its own GPU assignment; use preferred_gpu or the
                     # system default so energy estimates are at least approximated.
-                    gpu_index = state.preferred_gpu if state.preferred_gpu is not None else settings.default_gpu_index
+                    gpu_index = (
+                        state.preferred_gpu
+                        if state.preferred_gpu is not None
+                        else settings.default_gpu_index
+                    )
         except Exception:
             pass
 
@@ -365,14 +392,23 @@ async def _record_stat(
         from ocabra.database import AsyncSessionLocal
         from ocabra.db.stats import RequestStat
 
-        record_request(model_id=model_id, duration_s=max(duration_ms, 0.0) / 1000.0, status="error" if error_message else "ok")
-        record_tokens(model_id=model_id, input_tokens=int(input_tokens or 0), output_tokens=int(output_tokens or 0))
+        record_request(
+            model_id=model_id,
+            duration_s=max(duration_ms, 0.0) / 1000.0,
+            status="error" if error_message else "ok",
+        )
+        record_tokens(
+            model_id=model_id,
+            input_tokens=int(input_tokens or 0),
+            output_tokens=int(output_tokens or 0),
+        )
 
         # Extract user_id set by auth dependency (stored on request.state by get_current_user).
         auth_user = getattr(request.state, "auth_user", None)
         user_id = auth_user.user_id if auth_user and not auth_user.is_anonymous else None
 
         import uuid as _uuid
+
         parsed_user_id: _uuid.UUID | None = None
         if user_id:
             try:
@@ -394,6 +430,17 @@ async def _record_stat(
         if remote_node_id is None:
             remote_node_id = getattr(request.state, "federation_remote_node_id", None)
 
+        # Pull agent context from the executor's contextvars (only set during
+        # an agent invocation).  This stamps the *root* request_stat row with
+        # the agent_id so the stats endpoints can filter by agent.
+        agent_id_ctx: _uuid.UUID | None = None
+        try:
+            from ocabra.agents.executor import current_agent_id
+
+            agent_id_ctx = current_agent_id.get()
+        except Exception:
+            agent_id_ctx = None
+
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
                 model_id=model_id,
@@ -412,6 +459,7 @@ async def _record_stat(
                 group_id=parsed_group_id,
                 api_key_name=api_key_name,
                 remote_node_id=remote_node_id,
+                agent_id=agent_id_ctx,
             )
             session.add(stat)
             await session.commit()
