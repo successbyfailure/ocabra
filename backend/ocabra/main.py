@@ -801,4 +801,8 @@ from ocabra.api.internal.mcp_servers import router as mcp_servers_router  # noqa
 
 app.include_router(agents_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(mcp_servers_router, prefix="/ocabra", include_in_schema=False)
+
+from ocabra.api.internal.stats_agents import router as stats_agents_router  # noqa: E402
+
+app.include_router(stats_agents_router, prefix="/ocabra", include_in_schema=False)
 # ─────────────────────────────────────────────────────────────
