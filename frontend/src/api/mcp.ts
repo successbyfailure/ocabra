@@ -121,14 +121,20 @@ export const mcpApi = {
   create: async (data: MCPServerCreate): Promise<MCPServer> =>
     toMCPServer(await request<unknown>("POST", "/ocabra/mcp-servers", serializeCreate(data))),
 
-  update: async (id: string, data: MCPServerUpdate): Promise<MCPServer> =>
-    toMCPServer(
+  update: async (id: string, data: MCPServerUpdate): Promise<MCPServer> => {
+    // alias is immutable in MCPServerUpdate (the backend's Pydantic schema
+    // is extra="forbid" and the field doesn't exist on update). Strip it
+    // before sending so reusing the create payload doesn't 422.
+    const { alias: _alias, ...patch } = data as MCPServerUpdate & { alias?: string }
+    void _alias
+    return toMCPServer(
       await request<unknown>(
         "PATCH",
         `/ocabra/mcp-servers/${encodeURIComponent(id)}`,
-        serializeCreate(data),
+        serializeCreate(patch),
       ),
-    ),
+    )
+  },
 
   delete: async (id: string): Promise<void> => {
     await request<void>("DELETE", `/ocabra/mcp-servers/${encodeURIComponent(id)}`)
