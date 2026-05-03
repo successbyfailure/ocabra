@@ -331,6 +331,13 @@ class ServiceManager:
                 if state.last_activity_at is None:
                     state.last_activity_at = now
 
+            # Some interactive services can come up already loaded after a
+            # restart or external warmup path. If we observe the runtime as
+            # loaded but have never recorded activity, seed the idle timer now
+            # so automatic unload can eventually trigger.
+            if state.runtime_loaded and state.last_activity_at is None:
+                state.last_activity_at = now
+
             state.status = "active" if state.runtime_loaded else "idle"
 
             # Refresh generation metrics (best-effort, never blocks health check)
@@ -364,8 +371,8 @@ class ServiceManager:
         if not state.runtime_check_path:
             return
 
+        now = datetime.now(timezone.utc)
         if state.last_unload_at is not None:
-            now = datetime.now(timezone.utc)
             if (now - state.last_unload_at).total_seconds() < 15:
                 state.runtime_loaded = False
                 state.active_model_ref = None
@@ -386,6 +393,8 @@ class ServiceManager:
             if model_ref:
                 state.runtime_loaded = True
                 state.active_model_ref = str(model_ref)
+                if state.last_activity_at is None:
+                    state.last_activity_at = now
             else:
                 state.runtime_loaded = False
                 state.active_model_ref = None
@@ -393,7 +402,9 @@ class ServiceManager:
             val = payload.get(state.runtime_check_key)
             if isinstance(val, bool):
                 state.runtime_loaded = val
-                if not val:
+                if val and state.last_activity_at is None:
+                    state.last_activity_at = now
+                elif not val:
                     state.active_model_ref = None
 
     async def _refresh_generation_metrics(self, state: ServiceState) -> None:
@@ -644,18 +655,25 @@ class ServiceManager:
                 continue
             if not state.service_alive or not state.runtime_loaded:
                 continue
-            if state.last_activity_at is None:
-                continue
-            idle_for = now - state.last_activity_at
+            missing_activity_marker = state.last_activity_at is None
+            if missing_activity_marker:
+                idle_for = timedelta.max
+            else:
+                idle_for = now - state.last_activity_at
             if idle_for < timedelta(seconds=state.idle_unload_after_seconds):
                 continue
             try:
-                idle_seconds = int(idle_for.total_seconds())
+                idle_seconds = (
+                    int(idle_for.total_seconds())
+                    if not missing_activity_marker
+                    else state.idle_unload_after_seconds
+                )
                 logger.info(
                     "service_idle_eviction_triggered",
                     service_id=state.service_id,
                     idle_seconds=idle_seconds,
                     is_generating=state.is_generating,
+                    missing_activity_marker=missing_activity_marker,
                 )
 
                 # Refresh generation status before deciding
