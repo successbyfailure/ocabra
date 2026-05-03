@@ -74,6 +74,9 @@ function toAgent(raw: unknown): Agent {
     requestDefaults: isRecord(d.request_defaults ?? d.requestDefaults)
       ? ((d.request_defaults ?? d.requestDefaults) as Record<string, unknown>)
       : null,
+    subagentSlugs: Array.isArray(d.subagent_slugs ?? d.subagentSlugs)
+      ? ((d.subagent_slugs ?? d.subagentSlugs) as unknown[]).map(String)
+      : [],
     groupId: (d.group_id ?? d.groupId ?? null) as string | null,
     groupName: (d.group_name ?? d.groupName ?? null) as string | null,
     mcpServers: Array.isArray(rawMcp) ? (rawMcp as unknown[]).map(toBinding) : [],
@@ -95,6 +98,7 @@ function serializeAgent(data: AgentCreate | AgentUpdate): Record<string, unknown
   if (data.toolTimeoutSeconds !== undefined) out.tool_timeout_seconds = data.toolTimeoutSeconds
   if (data.requireApproval !== undefined) out.require_approval = data.requireApproval
   if (data.requestDefaults !== undefined) out.request_defaults = data.requestDefaults
+  if (data.subagentSlugs !== undefined) out.subagent_slugs = data.subagentSlugs
   if (data.groupId !== undefined) out.group_id = data.groupId
   if (data.mcpServers !== undefined) {
     out.mcp_servers = data.mcpServers.map((binding) => ({
@@ -137,14 +141,20 @@ export const agentsApi = {
   create: async (data: AgentCreate): Promise<Agent> =>
     toAgent(await request<unknown>("POST", "/ocabra/agents", serializeAgent(data))),
 
-  update: async (slug: string, data: AgentUpdate): Promise<Agent> =>
-    toAgent(
+  update: async (slug: string, data: AgentUpdate): Promise<Agent> => {
+    // slug is immutable in AgentUpdate (Pydantic schema is extra="forbid"
+    // and the field doesn't exist on update). Strip it so reusing the
+    // create payload doesn't 422 with "extra_forbidden / body.slug".
+    const { slug: _slug, ...patch } = data as AgentUpdate & { slug?: string }
+    void _slug
+    return toAgent(
       await request<unknown>(
         "PATCH",
         `/ocabra/agents/${encodeURIComponent(slug)}`,
-        serializeAgent(data),
+        serializeAgent(patch),
       ),
-    ),
+    )
+  },
 
   delete: async (slug: string): Promise<void> => {
     await request<void>("DELETE", `/ocabra/agents/${encodeURIComponent(slug)}`)
