@@ -56,6 +56,18 @@ def _set_session_cookie(response: Response, token: str, remember: bool) -> None:
         secure=settings.use_https,
         max_age=max_age,
         path="/",
+        domain=settings.auth_cookie_domain or None,
+    )
+
+
+def _delete_session_cookie(response: Response) -> None:
+    """Delete the ``ocabra_session`` cookie using the configured domain when set."""
+    from ocabra.config import settings
+
+    response.delete_cookie(
+        "ocabra_session",
+        path="/",
+        domain=settings.auth_cookie_domain or None,
     )
 
 
@@ -157,7 +169,7 @@ async def logout(
         except AuthError:
             pass  # Expired/invalid token — nothing to revoke.
 
-    response.delete_cookie("ocabra_session", path="/")
+    _delete_session_cookie(response)
     return {"ok": True}
 
 

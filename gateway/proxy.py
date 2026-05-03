@@ -14,7 +14,7 @@ from fastapi import Request, WebSocket
 from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import Headers
 
-from config import OCABRA_API_URL, TOUCH_INTERVAL_S
+from config import GATEWAY_SERVICE_TOKEN, OCABRA_API_URL, TOUCH_INTERVAL_S
 
 logger = logging.getLogger("gateway.proxy")
 
@@ -49,7 +49,15 @@ async def touch_service(service_id: str) -> None:
     _last_touch[service_id] = now
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            await client.post(f"{OCABRA_API_URL}/ocabra/services/{service_id}/touch")
+            headers = (
+                {"X-Gateway-Token": GATEWAY_SERVICE_TOKEN}
+                if GATEWAY_SERVICE_TOKEN
+                else {}
+            )
+            await client.post(
+                f"{OCABRA_API_URL}/ocabra/services/{service_id}/touch",
+                headers=headers,
+            )
     except Exception:
         pass  # touch is best-effort, never block the proxy
 

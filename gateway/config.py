@@ -19,6 +19,10 @@ OCABRA_API_URL: str = os.getenv("OCABRA_API_URL", "http://api:8000").rstrip("/")
 # Shared secret for gateway → ocabra internal calls (empty = disabled)
 GATEWAY_SERVICE_TOKEN: str = os.getenv("GATEWAY_SERVICE_TOKEN", "")
 
+# Optional cookie domain for sharing auth across gateway subdomains.
+# Empty = derive a parent domain from the request host when possible.
+AUTH_COOKIE_DOMAIN: str = os.getenv("AUTH_COOKIE_DOMAIN", "").strip()
+
 # Port this gateway process listens on (container-internal; host port set via docker-compose)
 GATEWAY_PORT: int = int(os.getenv("GATEWAY_PORT", "9000"))
 

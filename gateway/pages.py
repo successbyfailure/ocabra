@@ -290,8 +290,6 @@ async function doLogin() {{
     }});
     const data = await r.json();
     if (!r.ok) {{ err.textContent = data.detail || 'Error de autenticacion'; btn.disabled = false; return; }}
-    // Set session cookie so the gateway can verify on next page load
-    document.cookie = 'ocabra_session=' + data.access_token + '; path=/; SameSite=Lax; max-age=86400';
     location.reload();
   }} catch (e) {{
     err.textContent = 'Error de conexion';
@@ -481,8 +479,6 @@ header {
 </div>
 
 <script>
-const TOKEN_KEY = 'ocabra_gw_token';
-const USER_KEY  = 'ocabra_gw_user';
 const GPU_LABEL = { 0: 'RTX 3060 12G', 1: 'RTX 3090 24G' };
 
 const SERVICE_DESC = {
@@ -502,22 +498,7 @@ const STATUS_BADGE = {
   unknown:     { cls: 'badge-idle',     dot: 'dot-idle',     label: 'Desconocido' },
 };
 
-// ── Auth helpers ─────────────────────────────────────────────────────────────
-
-function getToken() { return localStorage.getItem(TOKEN_KEY); }
-function getUser()  {
-  try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null'); } catch { return null; }
-}
-
-function isTokenValid(token) {
-  if (!token) return false;
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return false;
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    return payload.exp && payload.exp * 1000 > Date.now() + 60_000; // 1 min buffer
-  } catch { return false; }
-}
+let refreshTimer = null;
 
 function showLogin() {
   document.getElementById('login-overlay').classList.add('active');
@@ -546,9 +527,8 @@ async function doLogin() {
     });
     const data = await r.json();
     if (!r.ok) { errEl.textContent = data.detail || 'Credenciales incorrectas.'; return; }
-    localStorage.setItem(TOKEN_KEY, data.access_token);
-    localStorage.setItem(USER_KEY, JSON.stringify(data.user));
     showMain(data.user);
+    ensureRefreshLoop();
     refresh();
   } catch (e) {
     errEl.textContent = 'Error de red: ' + e.message;
@@ -557,10 +537,20 @@ async function doLogin() {
   }
 }
 
-function doLogout() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+async function doLogout() {
+  try {
+    await fetch('/_gw/auth/logout', { method: 'POST' });
+  } catch (_e) {}
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
   showLogin();
+}
+
+function ensureRefreshLoop() {
+  if (refreshTimer) return;
+  refreshTimer = setInterval(refresh, 10000);
 }
 
 // Enter key on password field
@@ -669,15 +659,18 @@ async function refresh() {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-const token = getToken();
-const user  = getUser();
-if (isTokenValid(token)) {
-  showMain(user);
-  refresh();
-  setInterval(refresh, 10000);
-} else {
-  showLogin();
-}
+(async function bootstrap() {
+  try {
+    const r = await fetch('/_gw/auth/me');
+    if (!r.ok) throw new Error('unauthorized');
+    const user = await r.json();
+    showMain(user);
+    ensureRefreshLoop();
+    refresh();
+  } catch (_e) {
+    showLogin();
+  }
+})();
 </script>
 </body>
 </html>"""

@@ -15,6 +15,7 @@ Internal API endpoints (prefix /_gw/) are served for all hosts:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 
 import httpx
@@ -22,6 +23,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from config import (
+    AUTH_COOKIE_DOMAIN,
     DIRECTORY_HOST,
     GATEWAY_PORT,
     GATEWAY_SERVICE_TOKEN,
@@ -46,6 +48,47 @@ def _service_headers() -> dict:
     if GATEWAY_SERVICE_TOKEN:
         return {"X-Gateway-Token": GATEWAY_SERVICE_TOKEN}
     return {}
+
+
+def _derive_cookie_domain(hostname: str | None) -> str | None:
+    """Return a shared parent domain for subdomain-wide auth cookies."""
+    if AUTH_COOKIE_DOMAIN:
+        return AUTH_COOKIE_DOMAIN
+    if not hostname:
+        return None
+    host = hostname.strip().lower().rstrip(".")
+    if not host or host == "localhost":
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    parts = host.split(".")
+    if len(parts) < 3:
+        return None
+    return "." + ".".join(parts[-2:])
+
+
+def _set_gateway_session_cookie(request: Request, response: JSONResponse, token: str) -> None:
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    response.set_cookie(
+        key="ocabra_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=proto == "https",
+        path="/",
+        domain=_derive_cookie_domain(request.url.hostname),
+    )
+
+
+def _clear_gateway_session_cookie(request: Request, response: JSONResponse) -> None:
+    response.delete_cookie(
+        "ocabra_session",
+        path="/",
+        domain=_derive_cookie_domain(request.url.hostname),
+    )
 
 
 async def _ocabra(method: str, path: str, **kwargs) -> httpx.Response:
@@ -105,17 +148,17 @@ async def _check_user_auth(request: Request) -> dict | None:
     return None
 
 
+async def _require_gateway_user(request: Request) -> dict | None:
+    return await _check_user_auth(request)
+
+
 # ---------------------------------------------------------------------------
 # Internal gateway API  (/_gw/*)
 # ---------------------------------------------------------------------------
 
 @app.post("/_gw/auth/login")
 async def gw_auth_login(request: Request) -> JSONResponse:
-    """Proxy login to the ocabra API and return the JWT in the JSON body.
-
-    The gateway directory page uses this to authenticate users via localStorage
-    instead of relying on the HTTP-only cookie (which is scoped to the API domain).
-    """
+    """Proxy login to the ocabra API and set the shared gateway session cookie."""
     try:
         body = await request.json()
     except Exception:
@@ -125,19 +168,57 @@ async def gw_auth_login(request: Request) -> JSONResponse:
             r = await client.post(f"{OCABRA_API_URL}/ocabra/auth/login", json=body)
         if r.status_code == 200:
             data = r.json()
-            return JSONResponse({"access_token": data.get("access_token", ""), "user": data.get("user", {})})
+            response = JSONResponse(
+                {
+                    "access_token": data.get("access_token", ""),
+                    "user": data.get("user", {}),
+                }
+            )
+            token = data.get("access_token", "")
+            if token:
+                _set_gateway_session_cookie(request, response, token)
+            return response
         return JSONResponse(r.json(), status_code=r.status_code)
     except Exception as exc:
         return JSONResponse({"detail": str(exc)}, status_code=502)
 
 
+@app.get("/_gw/auth/me")
+async def gw_auth_me(request: Request) -> JSONResponse:
+    user = await _require_gateway_user(request)
+    if user is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return JSONResponse(user)
+
+
+@app.post("/_gw/auth/logout")
+async def gw_auth_logout(request: Request) -> JSONResponse:
+    headers: dict[str, str] = {}
+    auth = request.headers.get("authorization", "")
+    if auth:
+        headers["Authorization"] = auth
+    cookie = request.cookies.get("ocabra_session", "")
+    if cookie:
+        headers["Cookie"] = f"ocabra_session={cookie}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{OCABRA_API_URL}/ocabra/auth/logout", headers=headers)
+    except Exception:
+        pass
+    response = JSONResponse({"ok": True})
+    _clear_gateway_session_cookie(request, response)
+    return response
+
+
 @app.get("/_gw/status/{service_id}")
-async def gw_status(service_id: str) -> JSONResponse:
+async def gw_status(service_id: str, request: Request) -> JSONResponse:
     """Return live state of a service. Used by the loading page to poll.
 
     Calls POST /refresh so the response reflects the real health of the container
     immediately — no need to wait for the 30-second background health loop.
     """
+    if await _require_gateway_user(request) is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
         r = await _ocabra("POST", f"/ocabra/services/{service_id}/refresh")
         if r.status_code == 200:
@@ -154,8 +235,10 @@ async def gw_status(service_id: str) -> JSONResponse:
 
 
 @app.get("/_gw/services")
-async def gw_list_services() -> JSONResponse:
+async def gw_list_services(request: Request) -> JSONResponse:
     """Return state of all generation services. Used by the directory page."""
+    if await _require_gateway_user(request) is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
         r = await _ocabra("GET", "/ocabra/services")
         if r.status_code == 200:
@@ -166,7 +249,9 @@ async def gw_list_services() -> JSONResponse:
 
 
 @app.post("/_gw/services/{service_id}/start")
-async def gw_start(service_id: str) -> JSONResponse:
+async def gw_start(service_id: str, request: Request) -> JSONResponse:
+    if await _require_gateway_user(request) is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
         r = await _ocabra("POST", f"/ocabra/services/{service_id}/start")
         return JSONResponse(r.json(), status_code=r.status_code)
@@ -175,7 +260,9 @@ async def gw_start(service_id: str) -> JSONResponse:
 
 
 @app.post("/_gw/services/{service_id}/unload")
-async def gw_unload(service_id: str) -> JSONResponse:
+async def gw_unload(service_id: str, request: Request) -> JSONResponse:
+    if await _require_gateway_user(request) is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
         r = await _ocabra("POST", f"/ocabra/services/{service_id}/unload")
         return JSONResponse(r.json(), status_code=r.status_code)
@@ -185,6 +272,8 @@ async def gw_unload(service_id: str) -> JSONResponse:
 
 @app.patch("/_gw/services/{service_id}/enable")
 async def gw_enable(service_id: str, request: Request) -> JSONResponse:
+    if await _require_gateway_user(request) is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     body = await request.json()
     try:
         r = await _ocabra("PATCH", f"/ocabra/services/{service_id}", json={"enabled": body.get("enabled", True)})

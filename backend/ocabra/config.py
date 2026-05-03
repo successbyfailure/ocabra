@@ -289,6 +289,7 @@ class Settings(BaseSettings):
     jwt_remember_days: int = 30
     ocabra_admin_user: str = "ocabra"
     ocabra_admin_pass: str = "ocabra"
+    auth_cookie_domain: str = ""
     use_https: bool = False
 
     # API access control
