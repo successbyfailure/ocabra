@@ -28,7 +28,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Awaitable, Callable, Literal
 
 import structlog
 from fastapi import HTTPException
@@ -63,6 +63,8 @@ current_root_request_id: contextvars.ContextVar[uuid.UUID | None] = contextvars.
 
 REQUIRE_APPROVAL_NEVER = "never"
 REQUIRE_APPROVAL_ALWAYS = "always"
+SUBAGENT_TOOL_PREFIX = "delegate_"
+SUBAGENT_MAX_DEPTH = 8
 
 
 # ── Result payloads ────────────────────────────────────────────
@@ -81,6 +83,11 @@ class ToolCallRecord:
     hop_index: int
     result_summary: str | None
     server_id: uuid.UUID | None = None
+    # When ``alias == "agent"`` this carries the records of every tool the
+    # subagent executed inside its own loop, so the parent can surface the
+    # nested trace to the UI without leaking it into ``tool_call_stats`` (those
+    # rows are already persisted by the child executor with parent_request_id).
+    child_tool_calls: list["ToolCallRecord"] = field(default_factory=list)
 
 
 @dataclass
@@ -90,6 +97,18 @@ class AgentExecutorResult:
     openai_response: dict[str, Any]
     hops_used: int
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+
+
+@dataclass
+class ToolTarget:
+    """Resolved execution target for one exposed tool."""
+
+    kind: Literal["mcp", "subagent"]
+    public_name: str
+    alias: str
+    tool_name: str
+    mcp_tool: MCPTool | None = None
+    subagent_slug: str | None = None
 
 
 # ── Worker contract ────────────────────────────────────────────
@@ -149,6 +168,13 @@ def _validate_args(
     try:
         import jsonschema
     except ImportError:  # pragma: no cover - dep is in pyproject
+        if schema.get("type") == "object" and not isinstance(args, dict):
+            return "schema_error: expected object arguments"
+        required = schema.get("required") or []
+        if isinstance(required, list):
+            for key in required:
+                if key not in args:
+                    return f"schema_error: '{key}' is a required property"
         return None
     try:
         jsonschema.validate(instance=args, schema=schema)
@@ -222,6 +248,62 @@ def _build_caller_tool(tool: dict[str, Any]) -> dict[str, Any]:
     namespaced = sanitize_openai_function_name(f"caller_{name}")
     new_fn = {**fn, "name": namespaced}
     return {**tool, "function": new_fn}
+
+
+def _make_subagent_tool_name(slug: str) -> str:
+    """Return a stable OpenAI-safe function name for a child agent slug."""
+    base = sanitize_openai_function_name(f"{SUBAGENT_TOOL_PREFIX}{slug}")
+    if "." not in slug:
+        return base
+    suffix = uuid.uuid5(uuid.NAMESPACE_URL, f"ocabra-subagent:{slug}").hex[:8]
+    trimmed = base[: max(1, 64 - 9)]
+    return f"{trimmed}_{suffix}"
+
+
+def _subagent_parameters_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "Task or question for the subagent.",
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional supporting context for the subagent.",
+            },
+        },
+        "required": ["task"],
+        "additionalProperties": False,
+    }
+
+
+def _build_subagent_tool(agent: AgentSpec, child_slug: str) -> dict[str, Any]:
+    """Expose a child agent as a synthetic function tool."""
+    child_name = agent.subagent_names.get(child_slug, child_slug)
+    child_desc = agent.subagent_descriptions.get(child_slug)
+    description = f"Delegate work to subagent '{child_name}' (agent/{child_slug})."
+    if child_desc:
+        description = f"{description} {child_desc}"
+    return {
+        "type": "function",
+        "function": {
+            "name": _make_subagent_tool_name(child_slug),
+            "description": description,
+            "parameters": _subagent_parameters_schema(),
+        },
+    }
+
+
+def _subagent_args_to_messages(args: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate a subagent tool payload into a minimal chat history."""
+    task = str(args.get("task") or "").strip()
+    context = str(args.get("context") or "").strip()
+    if context:
+        content = f"{task}\n\nContext:\n{context}"
+    else:
+        content = task
+    return [{"role": "user", "content": content}]
 
 
 def _last_message_role(messages: list[dict[str, Any]]) -> str | None:
@@ -348,11 +430,24 @@ class AgentExecutor:
         self,
         registry: MCPRegistry,
         *,
+        subagent_runner: Callable[
+            [
+                str,
+                dict[str, Any],
+                UserContext,
+                tuple[uuid.UUID, ...],
+                dict[str, str] | None,
+                list[str] | None,
+            ],
+            Awaitable[AgentExecutorResult],
+        ]
+        | None = None,
         max_concurrent_tool_calls: int | None = None,
         result_max_bytes: int | None = None,
         redact_fields: list[str] | tuple[str, ...] = DEFAULT_REDACT_FIELDS,
     ) -> None:
         self._registry = registry
+        self._subagent_runner = subagent_runner
         self._max_concurrency = max(
             1,
             max_concurrent_tool_calls
@@ -370,15 +465,15 @@ class AgentExecutor:
         self,
         agent: AgentSpec,
         per_request_allow: list[str] | None,
-    ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str, MCPTool]]]:
-        """Return ``(openai_tools, name → (alias, raw_tool_name, MCPTool))``.
+    ) -> tuple[list[dict[str, Any]], dict[str, ToolTarget]]:
+        """Return ``(openai_tools, name → ToolTarget)``.
 
         Names in ``openai_tools`` follow the ``{alias}_{tool_name}`` namespace.
         Empty ``MCPTool.input_schema`` is normalised to a permissive object
         schema downstream.
         """
         openai_tools: list[dict[str, Any]] = []
-        lookup: dict[str, tuple[str, str, MCPTool]] = {}
+        lookup: dict[str, ToolTarget] = {}
         for binding in agent.bindings:
             try:
                 tools = await self._registry.get_tools(binding.server_alias)
@@ -400,7 +495,24 @@ class AgentExecutor:
                 schema = mcp_tool_to_openai(binding.server_alias, tool)
                 name = schema["function"]["name"]
                 openai_tools.append(schema)
-                lookup[name] = (binding.server_alias, tool.name, tool)
+                lookup[name] = ToolTarget(
+                    kind="mcp",
+                    public_name=name,
+                    alias=binding.server_alias,
+                    tool_name=tool.name,
+                    mcp_tool=tool,
+                )
+        for child_slug in agent.subagent_slugs:
+            schema = _build_subagent_tool(agent, child_slug)
+            name = schema["function"]["name"]
+            openai_tools.append(schema)
+            lookup[name] = ToolTarget(
+                kind="subagent",
+                public_name=name,
+                alias="agent",
+                tool_name=child_slug,
+                subagent_slug=child_slug,
+            )
         return openai_tools, lookup
 
     @staticmethod
@@ -444,12 +556,15 @@ class AgentExecutor:
         self,
         *,
         tool_call: dict[str, Any],
-        lookup: dict[str, tuple[str, str, MCPTool]],
+        lookup: dict[str, ToolTarget],
         timeout_seconds: float,
         per_request_headers: dict[str, str] | None,
         hop_index: int,
         vision_capable: bool,
         sem: asyncio.Semaphore,
+        user_ctx: UserContext,
+        agent_chain: tuple[uuid.UUID, ...],
+        per_request_allowed_tools: list[str] | None,
     ) -> tuple[dict[str, Any], ToolCallRecord]:
         """Execute one tool_call and return ``(message, record)``.
 
@@ -461,66 +576,192 @@ class AgentExecutor:
         async with sem:
             t_start = time.monotonic()
             try:
-                alias_lookup_key = (tool_call.get("function") or {}).get("name") or ""
-                lookup_entry = lookup.get(alias_lookup_key)
-                if lookup_entry is None:
+                public_name = (tool_call.get("function") or {}).get("name") or ""
+                target = lookup.get(public_name)
+                if target is None:
                     duration_ms = int((time.monotonic() - t_start) * 1000)
                     err = MCPToolResult(
-                        content=[{"type": "text", "text": f"Unknown tool '{alias_lookup_key}'"}],
+                        content=[{"type": "text", "text": f"Unknown tool '{public_name}'"}],
                         is_error=True,
                     )
                     msg = mcp_result_to_openai_message(
                         tool_call_id, err, vision_capable=vision_capable
                     )
                     rec = ToolCallRecord(
-                        alias=alias_lookup_key.split("_", 1)[0] if "_" in alias_lookup_key else "",
-                        tool_name=alias_lookup_key,
+                        alias="",
+                        tool_name=public_name,
                         args_redacted={},
                         duration_ms=duration_ms,
                         status="schema_error",
-                        error=f"unknown_tool:{alias_lookup_key}",
+                        error=f"unknown_tool:{public_name}",
                         hop_index=hop_index,
                         result_summary="unknown_tool",
                     )
                     return msg, rec
 
-                alias, mcp_tool_name, mcp_tool = lookup_entry
-                try:
-                    parsed_alias, parsed_name, args = parse_openai_tool_call(tool_call)
-                except ValueError as exc:
+                if target.kind == "mcp":
+                    alias, mcp_tool_name, mcp_tool = target.alias, target.tool_name, target.mcp_tool
+                    try:
+                        parsed_alias, parsed_name, args = parse_openai_tool_call(tool_call)
+                    except ValueError as exc:
+                        duration_ms = int((time.monotonic() - t_start) * 1000)
+                        err = MCPToolResult(
+                            content=[{"type": "text", "text": f"invalid_tool_call: {exc}"}],
+                            is_error=True,
+                        )
+                        msg = mcp_result_to_openai_message(
+                            tool_call_id, err, vision_capable=vision_capable
+                        )
+                        rec = ToolCallRecord(
+                            alias=alias,
+                            tool_name=mcp_tool_name,
+                            args_redacted={},
+                            duration_ms=duration_ms,
+                            status="schema_error",
+                            error=str(exc),
+                            hop_index=hop_index,
+                            result_summary="invalid_tool_call",
+                        )
+                        return msg, rec
+
+                    redacted = redact_args(args, list(self._redact_fields))
+                    schema_err = _validate_args(mcp_tool.input_schema if mcp_tool else None, args)
+                    if schema_err is not None:
+                        duration_ms = int((time.monotonic() - t_start) * 1000)
+                        err = MCPToolResult(
+                            content=[{"type": "text", "text": schema_err}], is_error=True
+                        )
+                        msg = mcp_result_to_openai_message(
+                            tool_call_id, err, vision_capable=vision_capable
+                        )
+                        rec = ToolCallRecord(
+                            alias=alias,
+                            tool_name=mcp_tool_name,
+                            args_redacted=redacted,
+                            duration_ms=duration_ms,
+                            status="schema_error",
+                            error=schema_err,
+                            hop_index=hop_index,
+                            result_summary=schema_err,
+                        )
+                        return msg, rec
+
+                    forwarded_headers: dict[str, str] | None = None
+                    if per_request_headers:
+                        prefix = f"x-mcp-{alias}-"
+                        forwarded_headers = {
+                            k[len(prefix) :]: v
+                            for k, v in per_request_headers.items()
+                            if k.lower().startswith(prefix)
+                        }
+                        if not forwarded_headers:
+                            forwarded_headers = None
+
+                    try:
+                        result = await self._registry.call_tool(
+                            alias,
+                            mcp_tool_name,
+                            args,
+                            timeout_seconds=timeout_seconds,
+                            extra_headers=forwarded_headers,
+                        )
+                    except KeyError:
+                        duration_ms = int((time.monotonic() - t_start) * 1000)
+                        err = MCPToolResult(
+                            content=[{"type": "text", "text": f"alias '{alias}' not registered"}],
+                            is_error=True,
+                        )
+                        msg = mcp_result_to_openai_message(
+                            tool_call_id, err, vision_capable=vision_capable
+                        )
+                        rec = ToolCallRecord(
+                            alias=alias,
+                            tool_name=mcp_tool_name,
+                            args_redacted=redacted,
+                            duration_ms=duration_ms,
+                            status="mcp_error",
+                            error="alias_not_registered",
+                            hop_index=hop_index,
+                            result_summary=None,
+                        )
+                        return msg, rec
+                    except TimeoutError:
+                        duration_ms = int((time.monotonic() - t_start) * 1000)
+                        err = MCPToolResult(
+                            content=[{"type": "text", "text": "tool_timeout"}], is_error=True
+                        )
+                        msg = mcp_result_to_openai_message(
+                            tool_call_id, err, vision_capable=vision_capable
+                        )
+                        rec = ToolCallRecord(
+                            alias=alias,
+                            tool_name=mcp_tool_name,
+                            args_redacted=redacted,
+                            duration_ms=duration_ms,
+                            status="timeout",
+                            error="tool_timeout",
+                            hop_index=hop_index,
+                            result_summary="tool_timeout",
+                        )
+                        return msg, rec
+                    except Exception as exc:  # noqa: BLE001
+                        duration_ms = int((time.monotonic() - t_start) * 1000)
+                        err = MCPToolResult(
+                            content=[{"type": "text", "text": f"mcp_error: {exc}"}],
+                            is_error=True,
+                        )
+                        msg = mcp_result_to_openai_message(
+                            tool_call_id, err, vision_capable=vision_capable
+                        )
+                        rec = ToolCallRecord(
+                            alias=alias,
+                            tool_name=mcp_tool_name,
+                            args_redacted=redacted,
+                            duration_ms=duration_ms,
+                            status="mcp_error",
+                            error=str(exc),
+                            hop_index=hop_index,
+                            result_summary=str(exc)[:512],
+                        )
+                        return msg, rec
+
                     duration_ms = int((time.monotonic() - t_start) * 1000)
-                    err = MCPToolResult(
-                        content=[{"type": "text", "text": f"invalid_tool_call: {exc}"}],
-                        is_error=True,
-                    )
+                    summary = summarise_result(result, max_bytes=self._result_max_bytes)
                     msg = mcp_result_to_openai_message(
-                        tool_call_id, err, vision_capable=vision_capable
+                        tool_call_id, result, vision_capable=vision_capable
                     )
+                    if isinstance(msg.get("content"), str):
+                        msg["content"] = summary if len(summary) <= self._result_max_bytes else summary
                     rec = ToolCallRecord(
                         alias=alias,
                         tool_name=mcp_tool_name,
-                        args_redacted={},
+                        args_redacted=redacted,
                         duration_ms=duration_ms,
-                        status="schema_error",
-                        error=str(exc),
+                        status="mcp_error" if result.is_error else "ok",
+                        error=summary if result.is_error else None,
                         hop_index=hop_index,
-                        result_summary="invalid_tool_call",
+                        result_summary=summary,
                     )
+                    rec.alias = parsed_alias
+                    rec.tool_name = parsed_name
                     return msg, rec
 
+                args_raw = (tool_call.get("function") or {}).get("arguments")
+                if isinstance(args_raw, str):
+                    args = json.loads(args_raw) if args_raw.strip() else {}
+                elif isinstance(args_raw, dict):
+                    args = dict(args_raw)
+                else:
+                    args = {}
                 redacted = redact_args(args, list(self._redact_fields))
-                schema_err = _validate_args(mcp_tool.input_schema, args)
+                schema_err = _validate_args(_subagent_parameters_schema(), args)
                 if schema_err is not None:
                     duration_ms = int((time.monotonic() - t_start) * 1000)
-                    err = MCPToolResult(
-                        content=[{"type": "text", "text": schema_err}], is_error=True
-                    )
-                    msg = mcp_result_to_openai_message(
-                        tool_call_id, err, vision_capable=vision_capable
-                    )
+                    err = MCPToolResult(content=[{"type": "text", "text": schema_err}], is_error=True)
+                    msg = mcp_result_to_openai_message(tool_call_id, err, vision_capable=vision_capable)
                     rec = ToolCallRecord(
-                        alias=alias,
-                        tool_name=mcp_tool_name,
+                        alias="agent",
+                        tool_name=target.subagent_slug or "",
                         args_redacted=redacted,
                         duration_ms=duration_ms,
                         status="schema_error",
@@ -529,109 +770,42 @@ class AgentExecutor:
                         result_summary=schema_err,
                     )
                     return msg, rec
-
-                # Per-server header subset: ``x-mcp-{alias}-*`` → forward as
-                # ``{header}`` to the MCP client, which merges them under the
-                # static auth (static wins, see _HeaderMerger).
-                forwarded_headers: dict[str, str] | None = None
-                if per_request_headers:
-                    prefix = f"x-mcp-{alias}-"
-                    forwarded_headers = {
-                        k[len(prefix) :]: v
-                        for k, v in per_request_headers.items()
-                        if k.lower().startswith(prefix)
-                    }
-                    if not forwarded_headers:
-                        forwarded_headers = None
-
-                try:
-                    result = await self._registry.call_tool(
-                        alias,
-                        mcp_tool_name,
-                        args,
-                        timeout_seconds=timeout_seconds,
-                        extra_headers=forwarded_headers,
-                    )
-                except KeyError:
-                    duration_ms = int((time.monotonic() - t_start) * 1000)
-                    err = MCPToolResult(
-                        content=[{"type": "text", "text": f"alias '{alias}' not registered"}],
-                        is_error=True,
-                    )
-                    msg = mcp_result_to_openai_message(
-                        tool_call_id, err, vision_capable=vision_capable
-                    )
-                    rec = ToolCallRecord(
-                        alias=alias,
-                        tool_name=mcp_tool_name,
-                        args_redacted=redacted,
-                        duration_ms=duration_ms,
-                        status="mcp_error",
-                        error="alias_not_registered",
-                        hop_index=hop_index,
-                        result_summary=None,
-                    )
-                    return msg, rec
-                except TimeoutError:
-                    duration_ms = int((time.monotonic() - t_start) * 1000)
-                    err = MCPToolResult(
-                        content=[{"type": "text", "text": "tool_timeout"}], is_error=True
-                    )
-                    msg = mcp_result_to_openai_message(
-                        tool_call_id, err, vision_capable=vision_capable
-                    )
-                    rec = ToolCallRecord(
-                        alias=alias,
-                        tool_name=mcp_tool_name,
-                        args_redacted=redacted,
-                        duration_ms=duration_ms,
-                        status="timeout",
-                        error="tool_timeout",
-                        hop_index=hop_index,
-                        result_summary="tool_timeout",
-                    )
-                    return msg, rec
-                except Exception as exc:  # noqa: BLE001
-                    duration_ms = int((time.monotonic() - t_start) * 1000)
-                    err = MCPToolResult(
-                        content=[{"type": "text", "text": f"mcp_error: {exc}"}], is_error=True
-                    )
-                    msg = mcp_result_to_openai_message(
-                        tool_call_id, err, vision_capable=vision_capable
-                    )
-                    rec = ToolCallRecord(
-                        alias=alias,
-                        tool_name=mcp_tool_name,
-                        args_redacted=redacted,
-                        duration_ms=duration_ms,
-                        status="mcp_error",
-                        error=str(exc),
-                        hop_index=hop_index,
-                        result_summary=str(exc)[:512],
-                    )
-                    return msg, rec
-
-                duration_ms = int((time.monotonic() - t_start) * 1000)
-                summary = summarise_result(result, max_bytes=self._result_max_bytes)
-                msg = mcp_result_to_openai_message(
-                    tool_call_id, result, vision_capable=vision_capable
+                if self._subagent_runner is None or not target.subagent_slug:
+                    raise RuntimeError("subagent runner not configured")
+                if len(agent_chain) >= SUBAGENT_MAX_DEPTH:
+                    raise RuntimeError("subagent_depth_limit")
+                result = await self._subagent_runner(
+                    target.subagent_slug,
+                    args,
+                    user_ctx,
+                    agent_chain,
+                    per_request_headers,
+                    per_request_allowed_tools,
                 )
-                # Truncate the message content to mcp_result_max_bytes when string-form.
-                if isinstance(msg.get("content"), str):
-                    msg["content"] = summary if len(summary) <= self._result_max_bytes else summary
+                child_message = _extract_message(result.openai_response) or {}
+                child_content = child_message.get("content") or ""
+                if isinstance(child_content, list):
+                    child_content = json.dumps(child_content, ensure_ascii=False)
+                child_result = MCPToolResult(
+                    content=[{"type": "text", "text": str(child_content)}],
+                    is_error=False,
+                )
+                duration_ms = int((time.monotonic() - t_start) * 1000)
+                summary = str(child_content)[: self._result_max_bytes]
+                msg = mcp_result_to_openai_message(
+                    tool_call_id, child_result, vision_capable=vision_capable
+                )
                 rec = ToolCallRecord(
-                    alias=alias,
-                    tool_name=mcp_tool_name,
+                    alias="agent",
+                    tool_name=target.subagent_slug,
                     args_redacted=redacted,
                     duration_ms=duration_ms,
-                    status="mcp_error" if result.is_error else "ok",
-                    error=summary if result.is_error else None,
+                    status="ok",
+                    error=None,
                     hop_index=hop_index,
                     result_summary=summary,
+                    child_tool_calls=list(result.tool_calls),
                 )
-                # Persist the parsed alias/name (defensive against parse drift).
-                rec.alias = parsed_alias
-                rec.tool_name = parsed_name
                 return msg, rec
             except Exception as exc:  # noqa: BLE001
                 logger.exception("agent_executor_unexpected_tool_error", error=str(exc))
@@ -665,9 +839,10 @@ class AgentExecutor:
         per_request_allowed_tools: list[str] | None = None,
         caller_tools: list[dict[str, Any]] | None = None,
         require_approval_override: str | None = None,
+        _agent_chain: tuple[uuid.UUID, ...] | None = None,
     ) -> AgentExecutorResult:
         """Execute the tool-loop until either no tool_calls remain or hop cap."""
-        del user_ctx  # currently unused; kept for future ACL hooks.
+        agent_chain = (*(_agent_chain or ()), agent.id)
 
         agent_tools, lookup = await self._load_tools(agent, per_request_allowed_tools)
         all_tools = self._merge_caller_tools(agent_tools, caller_tools)
@@ -786,6 +961,9 @@ class AgentExecutor:
                     hop_index=hop,
                     vision_capable=worker.vision_capable,
                     sem=sem,
+                    user_ctx=user_ctx,
+                    agent_chain=agent_chain,
+                    per_request_allowed_tools=per_request_allowed_tools,
                 )
                 for tc in tool_calls
             ]
@@ -819,6 +997,7 @@ class AgentExecutor:
         per_request_allowed_tools: list[str] | None = None,
         caller_tools: list[dict[str, Any]] | None = None,
         require_approval_override: str | None = None,
+        _agent_chain: tuple[uuid.UUID, ...] | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream the tool-loop as OpenAI SSE chunks plus ``ocabra.tool_result``.
 
@@ -837,7 +1016,7 @@ class AgentExecutor:
         ignore those frames; the standard ``data:`` chunks remain valid
         OpenAI-compat output.
         """
-        del user_ctx
+        agent_chain = (*(_agent_chain or ()), agent.id)
         agent_tools, lookup = await self._load_tools(agent, per_request_allowed_tools)
         all_tools = self._merge_caller_tools(agent_tools, caller_tools)
         require_approval = _resolve_require_approval(
@@ -994,6 +1173,9 @@ class AgentExecutor:
                     hop_index=hop,
                     vision_capable=worker.vision_capable,
                     sem=sem,
+                    user_ctx=user_ctx,
+                    agent_chain=agent_chain,
+                    per_request_allowed_tools=per_request_allowed_tools,
                 )
                 for tc in tool_calls
             ]
@@ -1011,6 +1193,19 @@ class AgentExecutor:
                         "status": record.status,
                         "duration_ms": record.duration_ms,
                         "error": record.error,
+                        "result_summary": record.result_summary,
+                        "child_tool_calls": [
+                            {
+                                "alias": c.alias,
+                                "tool_name": c.tool_name,
+                                "status": c.status,
+                                "duration_ms": c.duration_ms,
+                                "error": c.error,
+                                "result_summary": c.result_summary,
+                                "hop_index": c.hop_index,
+                            }
+                            for c in record.child_tool_calls
+                        ],
                     },
                 )
             await _persist_tool_call_stats(
