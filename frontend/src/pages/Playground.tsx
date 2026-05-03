@@ -32,7 +32,12 @@ const DEFAULT_PARAMS: PlaygroundParams = {
 export function Playground() {
   const [loading, setLoading] = useState(true)
   const [models, setModels] = useState<ModelState[]>([])
-  const [selectedModelId, setSelectedModelId] = useState("")
+  // Honour ?model=... in the URL so other pages can deep-link into a
+  // preselected model or agent (e.g. the Agents page "Use in Playground" button).
+  const [selectedModelId, setSelectedModelId] = useState(() => {
+    if (typeof window === "undefined") return ""
+    return new URLSearchParams(window.location.search).get("model") ?? ""
+  })
   const [params, setParams] = useState<PlaygroundParams>(DEFAULT_PARAMS)
   const [showParams, setShowParams] = useState(() =>
     typeof window !== "undefined" && window.innerWidth >= 1280,

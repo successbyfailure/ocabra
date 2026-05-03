@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { AlertCircle, Pencil, Plus, RefreshCw, Sparkles, Trash2, X, Zap } from "lucide-react"
+import {
+  AlertCircle,
+  MessageSquare,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  X,
+  Zap,
+} from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { agentsApi } from "@/api/agents"
@@ -28,9 +39,10 @@ interface AgentFormProps {
   models: ModelState[]
   servers: MCPServer[]
   groups: Group[]
+  agents: Agent[]
 }
 
-function AgentFormModal({ open, onClose, initial, models, servers, groups }: AgentFormProps) {
+function AgentFormModal({ open, onClose, initial, models, servers, groups, agents }: AgentFormProps) {
   const create = useAgentsStore((s) => s.create)
   const update = useAgentsStore((s) => s.update)
 
@@ -45,6 +57,7 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups }: Age
   const [requireApproval, setRequireApproval] = useState<AgentRequireApproval>("never")
   const [maxToolHops, setMaxToolHops] = useState(8)
   const [toolTimeout, setToolTimeout] = useState(60)
+  const [subagentSlugs, setSubagentSlugs] = useState<string[]>([])
   const [groupId, setGroupId] = useState<string>("")
   const [bindings, setBindings] = useState<AgentMCPBinding[]>([])
   const [busy, setBusy] = useState(false)
@@ -63,6 +76,7 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups }: Age
       setRequireApproval(initial.requireApproval)
       setMaxToolHops(initial.maxToolHops)
       setToolTimeout(initial.toolTimeoutSeconds)
+      setSubagentSlugs(initial.subagentSlugs ?? [])
       setGroupId(initial.groupId ?? "")
       setBindings(initial.mcpServers)
     } else {
@@ -76,11 +90,17 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups }: Age
       setRequireApproval("never")
       setMaxToolHops(8)
       setToolTimeout(60)
+      setSubagentSlugs([])
       setGroupId("")
       setBindings([])
     }
     setErr(null)
   }, [open, initial])
+
+  const availableSubagents = useMemo(
+    () => agents.filter((agent) => agent.slug !== initial?.slug),
+    [agents, initial?.slug],
+  )
 
   // Load profiles when base model changes.
   useEffect(() => {
@@ -131,6 +151,14 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups }: Age
     setBindings(bindings.map((b) => (b.mcpServerId === serverId ? nextBinding : b)))
   }
 
+  function toggleSubagent(childSlug: string) {
+    setSubagentSlugs((current) =>
+      current.includes(childSlug)
+        ? current.filter((slugValue) => slugValue !== childSlug)
+        : [...current, childSlug],
+    )
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     if (!slug.trim() || !displayName.trim()) {
@@ -166,6 +194,7 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups }: Age
       toolTimeoutSeconds: toolTimeout,
       requireApproval,
       requestDefaults: null,
+      subagentSlugs,
       groupId: groupId || null,
       mcpServers: bindings,
     }
@@ -232,6 +261,45 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups }: Age
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 />
               </div>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">Subagentes</label>
+              {availableSubagents.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                  No hay otros agentes disponibles para delegación.
+                </p>
+              ) : (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {availableSubagents.map((agentOption) => {
+                    const checked = subagentSlugs.includes(agentOption.slug)
+                    return (
+                      <label
+                        key={agentOption.slug}
+                        className="flex items-start gap-2 rounded-md border border-border bg-background/60 p-3 text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSubagent(agentOption.slug)}
+                          className="mt-0.5"
+                        />
+                        <span className="min-w-0">
+                          <span className="block font-medium">{agentOption.displayName}</span>
+                          <span className="block font-mono text-xs text-muted-foreground">
+                            agent/{agentOption.slug}
+                          </span>
+                          {agentOption.description && (
+                            <span className="block text-xs text-muted-foreground">
+                              {agentOption.description}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
             <div>
@@ -698,10 +766,29 @@ export function Agents() {
                 <span className="rounded-md bg-muted px-2 py-0.5">
                   tool_choice: {agent.toolChoiceDefault}
                 </span>
+                {agent.subagentSlugs.length > 0 && (
+                  <span className="rounded-md bg-muted px-2 py-0.5">
+                    subagents: {agent.subagentSlugs.length}
+                  </span>
+                )}
                 {agent.groupName && (
                   <span className="rounded-md bg-muted px-2 py-0.5">{agent.groupName}</span>
                 )}
               </div>
+
+              {agent.subagentSlugs.length > 0 && (
+                <div className="flex flex-wrap gap-1 text-xs">
+                  <span className="text-muted-foreground">Delega en:</span>
+                  {agent.subagentSlugs.map((childSlug) => (
+                    <span
+                      key={childSlug}
+                      className="rounded-md border border-border bg-background/60 px-2 py-0.5 font-mono"
+                    >
+                      agent/{childSlug}
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {agent.mcpServers.length > 0 && (
                 <div className="flex flex-wrap gap-1 text-xs">
@@ -718,7 +805,15 @@ export function Agents() {
                 </div>
               )}
 
-              <div className="flex gap-2 border-t border-border pt-3">
+              <div className="flex flex-wrap gap-2 border-t border-border pt-3">
+                <Link
+                  to={`/playground?model=agent/${encodeURIComponent(agent.slug)}`}
+                  className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1 text-sm text-primary-foreground hover:bg-primary/90"
+                  title="Abrir este agente en el Playground"
+                >
+                  <MessageSquare size={12} />
+                  Probar en Playground
+                </Link>
                 <button
                   type="button"
                   onClick={() => void handleTest(agent)}
@@ -741,6 +836,7 @@ export function Agents() {
         models={models}
         servers={servers}
         groups={groups}
+        agents={agents}
       />
     </div>
   )
