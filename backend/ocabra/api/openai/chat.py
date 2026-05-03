@@ -35,6 +35,7 @@ from ._deps import (
 )
 from ocabra.agents.chat_glue import (
     build_invoker_for_agent,
+    build_subagent_runner,
     extract_per_request_headers,
     parse_allowed_tools_header,
 )
@@ -225,6 +226,13 @@ async def _dispatch_agent(
     )
 
     executor = AgentExecutor(registry)
+    executor._subagent_runner = build_subagent_runner(  # noqa: SLF001
+        executor,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        user=user,
+        worker_pool=request.app.state.worker_pool,
+    )
     messages = body.get("messages") or []
     if not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="messages must be an array")

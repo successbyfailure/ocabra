@@ -75,6 +75,7 @@ describe("Agents page", () => {
         toolTimeoutSeconds: 60,
         requireApproval: "never",
         requestDefaults: null,
+        subagentSlugs: [],
         groupId: null,
         groupName: null,
         mcpServers: [],

@@ -66,6 +66,7 @@ def _serialize(row: Agent) -> AgentOut:
         tool_timeout_seconds=row.tool_timeout_seconds,
         require_approval=row.require_approval,
         request_defaults=row.request_defaults,
+        subagent_slugs=list(row.subagent_slugs or []),
         group_id=row.group_id,
         mcp_servers=links,
         created_by=row.created_by,
@@ -135,6 +136,39 @@ async def _validate_mcp_links(
     return resolved
 
 
+async def _validate_subagent_slugs(
+    session,
+    subagent_slugs: list[str] | None,
+    *,
+    current_slug: str | None = None,
+) -> list[str]:
+    """Resolve child-agent references by slug and reject self-references."""
+    if not subagent_slugs:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in subagent_slugs:
+        slug = (raw or "").strip()
+        if not slug or slug in seen:
+            continue
+        if current_slug is not None and slug == current_slug:
+            raise HTTPException(status_code=400, detail="An agent cannot include itself as subagent")
+        seen.add(slug)
+        cleaned.append(slug)
+
+    found = {
+        slug
+        for (slug,) in (
+            await session.execute(sa.select(Agent.slug).where(Agent.slug.in_(cleaned)))
+        ).all()
+    }
+    missing = sorted(set(cleaned) - found)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Unknown subagent slugs: {missing}")
+    return cleaned
+
+
 # ── CRUD ─────────────────────────────────────────────────────
 
 
@@ -188,6 +222,9 @@ async def create_agent(
                 detail=f"Slug '{body.slug}' is already taken",
             )
         resolved_links = await _validate_mcp_links(session, body.mcp_servers)
+        subagent_slugs = await _validate_subagent_slugs(
+            session, body.subagent_slugs, current_slug=body.slug
+        )
 
         row = Agent(
             slug=body.slug,
@@ -201,6 +238,7 @@ async def create_agent(
             tool_timeout_seconds=body.tool_timeout_seconds,
             require_approval=body.require_approval,
             request_defaults=body.request_defaults,
+            subagent_slugs=subagent_slugs,
             group_id=body.group_id,
             created_by=_uuid.UUID(user.user_id) if user.user_id else None,
         )
@@ -266,10 +304,19 @@ async def update_agent(
             "tool_timeout_seconds",
             "require_approval",
             "request_defaults",
-            "group_id",
         ):
             if field_name in patch:
                 setattr(row, field_name, patch[field_name])
+
+        if "subagent_slugs" in patch:
+            row.subagent_slugs = await _validate_subagent_slugs(
+                session,
+                patch.get("subagent_slugs"),
+                current_slug=row.slug,
+            )
+
+        if "group_id" in patch:
+            row.group_id = patch["group_id"]
 
         # base_model_id / profile_id: must still satisfy the XOR constraint.
         new_base = patch.get("base_model_id", row.base_model_id)

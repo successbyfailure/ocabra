@@ -51,6 +51,7 @@ class _AgentBase(BaseModel):
     tool_timeout_seconds: int = Field(default=60, ge=1, le=3600)
     require_approval: RequireApproval = "never"
     request_defaults: dict[str, Any] | None = None
+    subagent_slugs: list[str] = Field(default_factory=list)
     group_id: UUID | None = None
     mcp_servers: list[AgentMCPServerLink] = Field(default_factory=list)
 
@@ -82,6 +83,7 @@ class AgentUpdate(BaseModel):
     tool_timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
     require_approval: RequireApproval | None = None
     request_defaults: dict[str, Any] | None = None
+    subagent_slugs: list[str] | None = None
     group_id: UUID | None = None
     mcp_servers: list[AgentMCPServerLink] | None = None
 
@@ -101,6 +103,7 @@ class AgentOut(BaseModel):
     tool_timeout_seconds: int
     require_approval: RequireApproval
     request_defaults: dict[str, Any] | None = None
+    subagent_slugs: list[str] = Field(default_factory=list)
     group_id: UUID | None = None
     mcp_servers: list[AgentMCPServerLinkOut] = Field(default_factory=list)
     created_by: UUID | None = None

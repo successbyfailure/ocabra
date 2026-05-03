@@ -80,6 +80,7 @@ export interface Agent {
   toolTimeoutSeconds: number
   requireApproval: AgentRequireApproval
   requestDefaults: Record<string, unknown> | null
+  subagentSlugs: string[]
   groupId: string | null
   groupName: string | null
   mcpServers: AgentMCPBinding[]
@@ -99,6 +100,7 @@ export interface AgentCreate {
   toolTimeoutSeconds: number
   requireApproval: AgentRequireApproval
   requestDefaults?: Record<string, unknown> | null
+  subagentSlugs?: string[]
   groupId?: string | null
   mcpServers: AgentMCPBinding[]
 }

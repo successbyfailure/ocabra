@@ -16,14 +16,20 @@ Plan: docs/tasks/agents-mcp-plan.md — Fase 2.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
 from fastapi import HTTPException, Request
 
-from ocabra.agents.executor import WorkerInvoker
-from ocabra.agents.resolver import AgentSpec
+from ocabra.agents.executor import (
+    AgentExecutor,
+    AgentExecutorResult,
+    REQUIRE_APPROVAL_NEVER,
+    WorkerInvoker,
+)
+from ocabra.agents.resolver import AgentSpec, resolve_agent
 from ocabra.api.openai._deps import (
     _openai_error,
     compute_worker_key,
@@ -35,6 +41,7 @@ if TYPE_CHECKING:
     from ocabra.api._deps_auth import UserContext
     from ocabra.core.model_manager import ModelManager
     from ocabra.core.profile_registry import ProfileRegistry
+    from uuid import UUID
 
 logger = structlog.get_logger(__name__)
 
@@ -155,3 +162,57 @@ def parse_allowed_tools_header(value: str | None) -> list[str] | None:
     items = [t.strip() for t in value.split(",")]
     cleaned = [t for t in items if t]
     return cleaned if cleaned else None
+
+
+def build_subagent_runner(
+    executor: AgentExecutor,
+    *,
+    model_manager: ModelManager,
+    profile_registry: ProfileRegistry,
+    user: UserContext,
+    worker_pool,
+):
+    """Return a closure that resolves and runs child agents on demand."""
+
+    async def _run_subagent(
+        child_slug: str,
+        args: dict[str, Any],
+        user_ctx: UserContext,
+        agent_chain: tuple[UUID, ...],
+        per_request_headers: dict[str, str] | None,
+        per_request_allowed_tools: list[str] | None,
+    ) -> AgentExecutorResult:
+        del user_ctx  # the outer request user is the authority for resolution
+        from ocabra.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            child = await resolve_agent(f"agent/{child_slug}", session, user=user)
+        if child is None:
+            raise ValueError(f"subagent_not_found:{child_slug}")
+        if child.id in agent_chain:
+            raise ValueError(f"subagent_cycle:{child_slug}")
+        child = replace(child, require_approval="never")
+        invoker = await build_invoker_for_agent(
+            child,
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            user=user,
+            worker_pool=worker_pool,
+        )
+        messages = [{"role": "user", "content": str(args.get("task") or "").strip()}]
+        context = str(args.get("context") or "").strip()
+        if context:
+            messages[0]["content"] = f"{messages[0]['content']}\n\nContext:\n{context}"
+        return await executor.run(
+            child,
+            messages,
+            {},
+            user,
+            invoker,
+            per_request_headers=per_request_headers,
+            per_request_allowed_tools=per_request_allowed_tools,
+            require_approval_override=REQUIRE_APPROVAL_NEVER,
+            _agent_chain=agent_chain,
+        )
+
+    return _run_subagent

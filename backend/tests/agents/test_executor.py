@@ -16,6 +16,7 @@ import pytest
 
 from ocabra.agents.executor import (
     AgentExecutor,
+    AgentExecutorResult,
     WorkerInvoker,
 )
 from ocabra.agents.mcp_client import MCPTool, MCPToolResult
@@ -92,6 +93,7 @@ def _agent(
     system_prompt: str = "You are helpful.",
     base_model_id: str = "vllm/test-model",
     tool_choice: str = "auto",
+    subagent_slugs: list[str] | None = None,
 ) -> AgentSpec:
     return AgentSpec(
         id=uuid.uuid4(),
@@ -106,6 +108,9 @@ def _agent(
         tool_timeout_seconds=30,
         require_approval=require_approval,
         request_defaults=None,
+        subagent_slugs=subagent_slugs or [],
+        subagent_names={slug: slug for slug in (subagent_slugs or [])},
+        subagent_descriptions={slug: None for slug in (subagent_slugs or [])},
         group_id=None,
         bindings=bindings or [],
     )
@@ -433,6 +438,39 @@ async def test_caller_tool_collision_raises_400():
             caller_tools=caller_tools,
         )
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_invokes_runner():
+    agent = _agent(subagent_slugs=["child-bot"])
+    public_name = "delegate_child-bot"
+    worker = FakeWorker(
+        [
+            _assistant_response(
+                tool_calls=[
+                    {
+                        "id": "sub1",
+                        "type": "function",
+                        "function": {
+                            "name": public_name,
+                            "arguments": '{"task":"sumariza","context":"hola"}',
+                        },
+                    }
+                ],
+                finish="tool_calls",
+            ),
+            _assistant_response(content="done"),
+        ]
+    )
+    registry = FakeRegistry()
+    runner = AsyncMock(return_value=AgentExecutorResult(openai_response=_assistant_response(content="child result"), hops_used=0))
+    executor = AgentExecutor(registry, subagent_runner=runner)
+
+    result = await executor.run(agent, [{"role": "user", "content": "delegar"}], {}, _user(), worker)
+
+    assert result.tool_calls[0].alias == "agent"
+    assert result.tool_calls[0].tool_name == "child-bot"
+    runner.assert_awaited_once()
 
 
 @pytest.mark.asyncio

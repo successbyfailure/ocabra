@@ -53,6 +53,7 @@ def _agent_row(group_id=None, mcp_links=None) -> Agent:
         max_tool_hops=3,
         tool_timeout_seconds=10,
         require_approval="never",
+        subagent_slugs=[],
         group_id=group_id,
     )
     a.id = uuid.uuid4()
@@ -117,6 +118,26 @@ async def test_returns_spec_for_existing_slug():
     assert binding.server_alias == "fs"
     assert binding.allowed_tools == ["read", "write"]
     assert binding.server_allowed_tools == ["read"]
+
+
+@pytest.mark.asyncio
+async def test_resolves_visible_subagents():
+    agent = _agent_row()
+    agent.subagent_slugs = ["child-a", "child-b"]
+    session = _AsyncSession(
+        [
+            _scalar(agent),
+            MagicMock(),
+        ]
+    )
+    session._side_effects[1].all.return_value = [
+        ("child-a", "Child A", "alpha", None),
+        ("child-b", "Child B", "beta", None),
+    ]
+    spec = await resolve_agent("agent/bot", session, user=make_user_context(role="user"))
+    assert spec is not None
+    assert spec.subagent_slugs == ["child-a", "child-b"]
+    assert spec.subagent_names["child-a"] == "Child A"
 
 
 @pytest.mark.asyncio

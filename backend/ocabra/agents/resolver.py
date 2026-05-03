@@ -58,6 +58,9 @@ class AgentSpec:
     require_approval: str
     request_defaults: dict[str, Any] | None
     group_id: UUID | None
+    subagent_slugs: list[str] = field(default_factory=list)
+    subagent_names: dict[str, str] = field(default_factory=dict)
+    subagent_descriptions: dict[str, str | None] = field(default_factory=dict)
     bindings: list[AgentMCPBindingSpec] = field(default_factory=list)
 
 
@@ -140,7 +143,7 @@ async def resolve_agent(
             )
         )
 
-    return AgentSpec(
+    spec = AgentSpec(
         id=row.id,
         slug=row.slug,
         display_name=row.display_name,
@@ -157,8 +160,32 @@ async def resolve_agent(
         bindings=bindings,
     )
 
+    if row.subagent_slugs:
+        wanted_slugs = [child_slug for child_slug in row.subagent_slugs if child_slug != row.slug]
+        if wanted_slugs:
+            child_rows = (
+                (
+                    await db_session.execute(
+                        sa.select(Agent.slug, Agent.display_name, Agent.description, Agent.group_id)
+                        .where(Agent.slug.in_(wanted_slugs))
+                    )
+                )
+                .all()
+            )
+            visible: dict[str, tuple[str, str | None]] = {}
+            for child_slug, display_name, description, group_id in child_rows:
+                if user is not None and not _is_accessible(group_id, user):
+                    continue
+                visible[str(child_slug)] = (str(display_name), description)
+            spec.subagent_slugs = [child_slug for child_slug in wanted_slugs if child_slug in visible]
+            spec.subagent_names = {
+                child_slug: visible[child_slug][0] for child_slug in spec.subagent_slugs
+            }
+            spec.subagent_descriptions = {
+                child_slug: visible[child_slug][1] for child_slug in spec.subagent_slugs
+            }
 
-# Re-exported for convenience: tests and other modules can import the helper
+    return spec
 # without pulling in :class:`AgentMCPServer`.
 __all__ = [
     "AGENT_PREFIX",

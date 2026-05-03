@@ -18,6 +18,7 @@ const MOCK_AGENTS: Agent[] = [
     toolTimeoutSeconds: 60,
     requireApproval: "never",
     requestDefaults: { temperature: 0.3 },
+    subagentSlugs: [],
     groupId: null,
     groupName: null,
     mcpServers: [{ mcpServerId: "mock-mcp-1", allowedTools: ["list_dir", "read_file"] }],
@@ -101,6 +102,7 @@ export const useAgentsStore = create<AgentsStore>((set, get) => ({
         toolTimeoutSeconds: data.toolTimeoutSeconds,
         requireApproval: data.requireApproval,
         requestDefaults: data.requestDefaults ?? null,
+        subagentSlugs: data.subagentSlugs ?? [],
         groupId: data.groupId ?? null,
         groupName: null,
         mcpServers: data.mcpServers,
@@ -136,6 +138,7 @@ export const useAgentsStore = create<AgentsStore>((set, get) => ({
         ...(data.requestDefaults !== undefined && {
           requestDefaults: data.requestDefaults ?? null,
         }),
+        ...(data.subagentSlugs !== undefined && { subagentSlugs: data.subagentSlugs }),
         ...(data.groupId !== undefined && { groupId: data.groupId ?? null }),
         ...(data.mcpServers !== undefined && { mcpServers: data.mcpServers }),
         updatedAt: new Date().toISOString(),

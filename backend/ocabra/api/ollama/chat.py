@@ -34,6 +34,7 @@ from ._shared import (
 )
 from ocabra.agents.chat_glue import (
     build_invoker_for_agent,
+    build_subagent_runner,
     extract_per_request_headers,
     parse_allowed_tools_header,
 )
@@ -365,6 +366,13 @@ async def _dispatch_agent_ollama(
     )
 
     executor = AgentExecutor(registry)
+    executor._subagent_runner = build_subagent_runner(  # noqa: SLF001
+        executor,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        user=user,
+        worker_pool=request.app.state.worker_pool,
+    )
     raw_messages = body.get("messages") or []
     messages = _ollama_messages_to_openai(raw_messages)
 

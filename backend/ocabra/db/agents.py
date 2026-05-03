@@ -59,6 +59,7 @@ class Agent(Base):
     require_approval: Mapped[str] = mapped_column(String(16), nullable=False, default="never")
 
     request_defaults: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    subagent_slugs: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

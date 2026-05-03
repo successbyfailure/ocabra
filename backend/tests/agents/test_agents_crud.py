@@ -15,6 +15,7 @@ from tests.agents.conftest import (
     FakeSessionFactory,
     make_user_context,
     override_user,
+    row_tuples,
     scalar_result,
     scalars_all,
 )
@@ -43,6 +44,7 @@ def _make_agent(**overrides) -> Agent:
         tool_timeout_seconds=overrides.get("tool_timeout_seconds", 60),
         require_approval=overrides.get("require_approval", "never"),
         request_defaults=overrides.get("request_defaults", None),
+        subagent_slugs=overrides.get("subagent_slugs", []),
         group_id=overrides.get("group_id", None),
         created_by=overrides.get("created_by", None),
     )
@@ -123,6 +125,43 @@ def test_create_ok_for_model_manager():
     body = resp.json()
     assert body["slug"] == "bot"
     assert body["display_name"] == "Bot"
+    assert body["subagent_slugs"] == []
+
+
+def test_create_accepts_subagent_slugs():
+    app = _make_app(make_user_context(role="model_manager"))
+    factory = FakeSessionFactory()
+    created = _make_agent(subagent_slugs=["child"])
+
+    def wire(session):
+        call_idx = {"n": 0}
+
+        def _on_execute(*_args, **_kwargs):
+            idx = call_idx["n"]
+            call_idx["n"] += 1
+            if idx == 0:
+                return scalar_result(None)
+            if idx == 1:
+                return row_tuples([("child",)])
+            return scalar_result(created)
+
+        session.execute.side_effect = _on_execute
+
+    factory.configure(wire)
+    with patch("ocabra.api.internal.agents.AsyncSessionLocal", new=factory):
+        client = TestClient(app)
+        resp = client.post(
+            "/ocabra/agents",
+            json={
+                "slug": "bot",
+                "display_name": "Bot",
+                "base_model_id": "vllm/some-model",
+                "system_prompt": "hi",
+                "subagent_slugs": ["child"],
+            },
+        )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["subagent_slugs"] == ["child"]
 
 
 def test_create_requires_exactly_one_base():
