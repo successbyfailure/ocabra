@@ -66,6 +66,11 @@ REQUIRE_APPROVAL_ALWAYS = "always"
 SUBAGENT_TOOL_PREFIX = "delegate_"
 SUBAGENT_MAX_DEPTH = 8
 
+# Interval between SSE keepalive comments emitted while a tool gather (which
+# may include a long-running subagent) is in flight. Must be smaller than the
+# typical proxy / browser idle timeout (~30 s for many CDN defaults).
+_KEEPALIVE_INTERVAL_S = 10.0
+
 
 # ── Result payloads ────────────────────────────────────────────
 
@@ -1163,6 +1168,19 @@ class AgentExecutor:
                 yield b"data: [DONE]\n\n"
                 return
 
+            # Tell the client which tools are about to run so the UI can show
+            # "in progress" cards before the (possibly long) execution finishes.
+            for tc in tool_calls:
+                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                yield _sse_event(
+                    "ocabra.tool_started",
+                    {
+                        "hop": hop,
+                        "tool_call_id": tc.get("id") if isinstance(tc, dict) else None,
+                        "name": fn.get("name") if isinstance(fn, dict) else None,
+                    },
+                )
+
             sem = asyncio.Semaphore(self._max_concurrency)
             tasks = [
                 self._invoke_tool(
@@ -1179,7 +1197,28 @@ class AgentExecutor:
                 )
                 for tc in tool_calls
             ]
-            results = await asyncio.gather(*tasks, return_exceptions=False)
+            # Subagent calls and slow MCP tools can keep gather() blocked for
+            # tens of seconds while the SSE stream emits nothing, which makes
+            # proxies and browsers drop the connection ("network error" in the
+            # playground). Emit an SSE comment as a keepalive every
+            # _KEEPALIVE_INTERVAL_S seconds while the gather is still running.
+            # Lines starting with `:` are SSE comments — the OpenAI parser
+            # ignores them, but they reset the proxy/browser inactivity timer.
+            # ``asyncio.gather`` already returns a ``_GatheringFuture``;
+            # wrap it through ``ensure_future`` (which accepts both coroutines
+            # and futures) so we can drive it from ``wait_for`` below.
+            gather_task = asyncio.ensure_future(
+                asyncio.gather(*tasks, return_exceptions=False)
+            )
+            while not gather_task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(gather_task),
+                        timeout=_KEEPALIVE_INTERVAL_S,
+                    )
+                except TimeoutError:
+                    yield b": keepalive\n\n"
+            results = gather_task.result()
             for tool_msg, record in results:
                 loop_messages.append(tool_msg)
                 tc_id = tool_msg.get("tool_call_id") or ""
