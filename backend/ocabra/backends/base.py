@@ -93,11 +93,18 @@ class BackendCapabilities:
     rerank: bool = False
     classification: bool = False
     score: bool = False
-    reasoning: bool = False
+    reasoning: bool = False  # Model emits ``reasoning_content`` / chain-of-thought
     image_generation: bool = False
-    audio_transcription: bool = False
+    audio_transcription: bool = False  # Dedicated STT (e.g. Whisper) on /v1/audio/transcriptions
     tts: bool = False
     music_generation: bool = False
+    # Multimodal input in /v1/chat/completions:
+    # ``audio_input``  → accepts ``{type:"input_audio", input_audio:{data, format}}`` content parts.
+    # ``video_input``  → accepts ``{type:"video_url",  video_url:{url}}`` content parts.
+    # These are about *consuming* media inside chat, distinct from
+    # ``audio_transcription`` (a dedicated STT endpoint) or ``vision`` (image input).
+    audio_input: bool = False
+    video_input: bool = False
     streaming: bool = False
     context_length: int = 0
 

@@ -59,6 +59,8 @@ export interface ModelCapabilities {
   audioTranscription: boolean
   musicGeneration: boolean
   tts: boolean
+  audioInput: boolean
+  videoInput: boolean
   streaming: boolean
   contextLength: number
 }

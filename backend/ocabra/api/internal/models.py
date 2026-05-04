@@ -675,7 +675,11 @@ async def _resolve_capabilities_payload(
                 "reasoning",
                 "streaming",
                 "audio_transcription",
+                "audio_input",
+                "video_input",
                 "tts",
+                "music_generation",
+                "image_generation",
             )
         )
         or int(current_payload.get("context_length") or 0) > 0

@@ -52,9 +52,14 @@ class OllamaBackend(BackendInterface):
             return cached
 
         model = model_id.lower()
+        # Heuristic fallbacks (used only when /api/show doesn't expose
+        # ``capabilities``). Ollama 0.5+ overrides every flag below.
         embeds = "embed" in model or "nomic-embed" in model or "mxbai-embed" in model
         vision = "llava" in model or "vision" in model or "vl" in model
         tools = False
+        reasoning = False
+        audio_input = False
+        video_input = False
         context_length = 8192
 
         # Query Ollama /api/show for accurate capabilities
@@ -69,24 +74,27 @@ class OllamaBackend(BackendInterface):
                     # Ollama 0.5+ exposes a top-level ``capabilities`` array
                     # (e.g. ["completion", "vision", "audio", "tools",
                     # "thinking"]). When present it's the source of truth and
-                    # avoids the family-name heuristics below failing on new
-                    # families like ``nemotron_h_omni``.
+                    # supersedes every heuristic below.
                     advertised = data.get("capabilities") or []
                     if isinstance(advertised, list) and advertised:
                         adv_set = {str(c).lower() for c in advertised}
-                        tools = "tools" in adv_set
-                        if "vision" in adv_set:
-                            vision = True
+                        # Ollama vocabulary -> oCabra flags. Aliases ("embed"
+                        # vs "embedding", "thinking" vs "reasoning") are
+                        # accepted defensively.
+                        if "completion" in adv_set:
+                            embeds = embeds and "embedding" in adv_set
                         if "embedding" in adv_set or "embed" in adv_set:
                             embeds = True
+                        vision = "vision" in adv_set or vision
+                        tools = "tools" in adv_set
+                        reasoning = "thinking" in adv_set or "reasoning" in adv_set
+                        audio_input = "audio" in adv_set
+                        video_input = "video" in adv_set
                     else:
                         template = data.get("template", "")
-                        # Tool support: check template markers OR known model families
                         tools = "{{.Tools}}" in template or ".ToolCalls" in template
                         family = data.get("details", {}).get("family", "")
                         if not tools:
-                            # Modern model families support tools natively in
-                            # Ollama even without template markers.
                             _tool_families = {
                                 "gemma4", "gemma3", "gemma2",
                                 "qwen3", "qwen2.5", "qwen2",
@@ -117,6 +125,9 @@ class OllamaBackend(BackendInterface):
             embeddings=embeds,
             vision=vision,
             tools=tools,
+            reasoning=reasoning,
+            audio_input=audio_input,
+            video_input=video_input,
             streaming=True,
             context_length=context_length,
         )

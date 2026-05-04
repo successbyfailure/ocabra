@@ -17,6 +17,9 @@ const LABELS: Partial<Record<keyof ModelCapabilities, string>> = {
   imageGeneration: "Image",
   audioTranscription: "Audio",
   tts: "TTS",
+  audioInput: "Audio in",
+  videoInput: "Video in",
+  musicGeneration: "Music",
 }
 
 export function CapabilityBadge({ capability }: CapabilityBadgeProps) {

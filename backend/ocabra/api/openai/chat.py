@@ -134,6 +134,18 @@ async def chat_completions(
     check_capability(state, "chat", "chat completions")
     if body.get("tools"):
         check_capability(state, "tools", "tool calling")
+    # Detect multimodal content parts inside messages and validate the model
+    # advertises the matching capability. The body itself is forwarded to the
+    # backend untouched: when the upstream (e.g. Ollama) starts accepting
+    # ``input_audio`` / ``video_url``, oCabra will pass it through with no
+    # further changes.
+    _content_kinds = _detect_message_content_kinds(body.get("messages") or [])
+    if "image_url" in _content_kinds:
+        check_capability(state, "vision", "image input")
+    if "input_audio" in _content_kinds:
+        check_capability(state, "audio_input", "audio input")
+    if "video_url" in _content_kinds:
+        check_capability(state, "video_input", "video input")
 
     merged_body = merge_profile_defaults(profile, body)
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
@@ -284,3 +296,26 @@ async def _dispatch_agent(
         require_approval_override=require_approval_override,
     )
     return JSONResponse(content=result.openai_response)
+
+
+def _detect_message_content_kinds(messages: list) -> set[str]:
+    """Return the set of multimodal content-part types used by the messages.
+
+    Walks the OpenAI ``content`` arrays looking for ``{type: ...}`` parts.
+    Recognised kinds: ``"image_url"``, ``"input_audio"``, ``"video_url"``.
+    Plain string content is ignored.
+    """
+    kinds: set[str] = set()
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind in ("image_url", "input_audio", "video_url"):
+                kinds.add(kind)
+    return kinds
