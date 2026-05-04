@@ -166,12 +166,15 @@ async def set_gpu_power(
 
             # Try via hw-monitor (privileged) first, fall back to direct pynvml
             from ocabra.redis_client import publish as redis_publish
-            import json as _json
 
             try:
+                # ``redis_publish`` already json.dumps the payload; passing a
+                # pre-serialised string here would double-encode it and the
+                # hw-monitor's ``json.loads`` would get a string instead of a
+                # dict ("string indices must be integers" in its error log).
                 await redis_publish(
                     "gpu:set_power_limit",
-                    _json.dumps({"gpu_index": index, "limit_w": target_w}),
+                    {"gpu_index": index, "limit_w": target_w},
                 )
                 logger.info("gpu_power_limit_requested_via_hw_monitor", gpu=index, watts=target_w)
                 # Give hw-monitor a moment to apply
