@@ -77,14 +77,20 @@ def _delete_session_cookie(response: Response) -> None:
 @router.post(
     "/auth/login",
     summary="Login",
-    description="Authenticate with username/password and receive a session cookie plus access token.",
+    description=(
+        "Authenticate with **username or email** + password and receive a "
+        "session cookie plus access token. The ``username`` field accepts "
+        "either the account's username or its email address; emails are "
+        "matched case-insensitively."
+    ),
     responses={401: {"description": "Invalid credentials or inactive account"}},
 )
 async def login(body: LoginRequest, response: Response) -> dict:
-    """Authenticate a user and issue a session cookie.
+    """Authenticate a user (by username or email) and issue a session cookie.
 
     Args:
-        body: ``{ username, password, remember }``
+        body: ``{ username, password, remember }`` — ``username`` accepts the
+            account's username or its email address.
 
     Returns:
         ``{ user: { id, username, email, role, created_at } }``
@@ -95,11 +101,18 @@ async def login(body: LoginRequest, response: Response) -> dict:
     from ocabra.core.auth_manager import create_access_token, verify_password
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
+    from sqlalchemy import func, or_, select
+
+    identifier = (body.username or "").strip()
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(User).where(User.username == body.username)
+            select(User).where(
+                or_(
+                    User.username == identifier,
+                    func.lower(User.email) == identifier.lower(),
+                )
+            )
         )
         user: User | None = result.scalar_one_or_none()
 
