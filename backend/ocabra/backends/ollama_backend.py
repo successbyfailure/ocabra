@@ -66,30 +66,42 @@ class OllamaBackend(BackendInterface):
                 )
                 if r.status_code == 200:
                     data = r.json()
-                    template = data.get("template", "")
-                    # Tool support: check template markers OR known model families
-                    tools = "{{.Tools}}" in template or ".ToolCalls" in template
-                    if not tools:
+                    # Ollama 0.5+ exposes a top-level ``capabilities`` array
+                    # (e.g. ["completion", "vision", "audio", "tools",
+                    # "thinking"]). When present it's the source of truth and
+                    # avoids the family-name heuristics below failing on new
+                    # families like ``nemotron_h_omni``.
+                    advertised = data.get("capabilities") or []
+                    if isinstance(advertised, list) and advertised:
+                        adv_set = {str(c).lower() for c in advertised}
+                        tools = "tools" in adv_set
+                        if "vision" in adv_set:
+                            vision = True
+                        if "embedding" in adv_set or "embed" in adv_set:
+                            embeds = True
+                    else:
+                        template = data.get("template", "")
+                        # Tool support: check template markers OR known model families
+                        tools = "{{.Tools}}" in template or ".ToolCalls" in template
                         family = data.get("details", {}).get("family", "")
-                        # Modern model families support tools natively in Ollama
-                        # even without template markers
-                        _tool_families = {
-                            "gemma4", "gemma3", "gemma2",
-                            "qwen3", "qwen2.5", "qwen2",
-                            "llama4", "llama3.3", "llama3.2", "llama3.1", "llama3",
-                            "mistral", "mixtral", "ministral",
-                            "phi4", "phi3.5", "phi3",
-                            "command-r",
-                            "deepseek", "deepseek2",
-                            "nemotron",
-                            "devstral",
-                            "glm-4",
-                        }
-                        tools = family.lower() in _tool_families
-                    # Detect vision from template or family
-                    family = data.get("details", {}).get("family", "")
-                    if "vl" in family or "vision" in family or "llava" in family:
-                        vision = True
+                        if not tools:
+                            # Modern model families support tools natively in
+                            # Ollama even without template markers.
+                            _tool_families = {
+                                "gemma4", "gemma3", "gemma2",
+                                "qwen3", "qwen2.5", "qwen2",
+                                "llama4", "llama3.3", "llama3.2", "llama3.1", "llama3",
+                                "mistral", "mixtral", "ministral",
+                                "phi4", "phi3.5", "phi3",
+                                "command-r",
+                                "deepseek", "deepseek2",
+                                "nemotron",
+                                "devstral",
+                                "glm-4",
+                            }
+                            tools = family.lower() in _tool_families
+                        if "vl" in family or "vision" in family or "llava" in family:
+                            vision = True
                     # Extract context length from model_info or parameters
                     model_info = data.get("model_info", {})
                     for key, val in model_info.items():
