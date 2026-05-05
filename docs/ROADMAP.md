@@ -305,6 +305,52 @@ GGUF/safetensors, model arena y export a GGUF + 16-bit safetensors.
 
 ---
 
+## 🚧 Bloque 17 — llama.cpp loader parity con LM Studio
+
+Plan completo en `docs/tasks/llama-cpp-parity-plan.md`.
+
+Cobertura actual del backend llama.cpp: ~27% de los controles que LM Studio expone
+(4 de 15+ flags). Este bloque cierra la brecha en 4 sprints. Esquema de datos
+compartido `LlamaCppLoadConfig` en `backend/ocabra/schemas/backend_load.py`
+(crear en Sprint 17.1, ampliar aditivamente en sprints siguientes).
+
+### Sprint 17.1 — Tier 1: flags triviales en UI per-model
+
+| Item | Detalle |
+|------|---------|
+| Mover per-model: `threads`, `batch_size`, `ubatch_size`, `mlock` | ya en backend, falta exposición UI |
+| Nuevos: `mmap` (opt-out), `seed`, `no_kv_offload`, `rope_freq_base`, `rope_freq_scale` | extender `_build_options()` + args worker + UI |
+| Crear `LlamaCppLoadConfig` Pydantic | base para Sprints 17.2-17.4 |
+
+### Sprint 17.2 — KV-quant + estimación VRAM en vivo
+
+| Item | Detalle |
+|------|---------|
+| `cache_type_k`, `cache_type_v` | enum `f16/q8_0/q5_1/q5_0/q4_1/q4_0` con gating `flash_attn` |
+| Estimador determinístico VRAM | parsear header GGUF (n_layers, kv_heads, head_dim) + KV-quant + n_ctx |
+| UI live update | recálculo on-change reusando `POST /memory-estimate` |
+
+### Sprint 17.3 — Multi-GPU + MoE CPU offload
+
+| Item | Detalle |
+|------|---------|
+| `main_gpu`, `tensor_split: list[float]`, `split_mode` | flags `--main-gpu`/`--tensor-split`/`--split-mode` |
+| `n_cpu_moe`, `override_tensor` | `--n-cpu-moe N` + `--override-tensor "exps=CPU"` |
+| `disabled_gpus`, `split_strategy` | composición sobre `CUDA_VISIBLE_DEVICES` actual |
+| UI multi-GPU | selector con drag-and-drop de ratios y enable/disable per-GPU |
+
+### Sprint 17.4 — Speculative decoding + runtime alterno + concurrent slots
+
+| Item | Detalle |
+|------|---------|
+| `speculative.{draft_model_id, draft_n, draft_min, draft_p_min}` | flags `--model-draft`/`--draft-*` |
+| Validación tokenizer compatible | indexar `vocab_size` + `bos/eos` en `local_scanner.py` |
+| `runtime: cuda\|rocm\|vulkan\|cpu` | múltiples binarios `llama-server` por arch |
+| `parallel_slots`, `cont_batching` | flags `--parallel N` + `--cont-batching` |
+| `keep_alive_seconds` per-model | override sobre idle_eviction global |
+
+---
+
 ## Orden de ejecución
 
 ```
@@ -323,6 +369,7 @@ GGUF/safetensors, model arena y export a GGUF + 16-bit safetensors.
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
 [🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
 [🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
+[🚧 En curso] Bloque 17 — llama.cpp loader parity (4 sprints: Tier 1 flags → KV-quant + VRAM estim → Multi-GPU + MoE → Speculative + runtime alterno)
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
