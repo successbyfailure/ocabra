@@ -27,6 +27,40 @@ _DEFAULT_TOTAL_LAYERS = 32
 _DEFAULT_STARTUP_TIMEOUT_S = 30
 _SHUTDOWN_TIMEOUT_S = 20
 _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_worker.py"
+_VALID_SPLIT_MODES = {"layer", "row", "none"}
+_VALID_SPLIT_STRATEGIES = {"evenly", "favor_main"}
+
+
+def _compose_visible_devices(
+    preferred_gpu: list[int],
+    disabled_gpus: list[int] | None,
+    gpu_manager: Any | None = None,
+) -> list[int]:
+    """Compose the final list of GPU indices visible to the worker.
+
+    Args:
+        preferred_gpu: GPU indices assigned by the scheduler / caller. Order
+            is preserved because llama.cpp interprets index 0 as the first
+            visible device, which interacts with ``--main-gpu``.
+        disabled_gpus: indices the user explicitly asked to keep free. They
+            are removed from the result regardless of source.
+        gpu_manager: optional GPU manager used to validate that disabled
+            indices exist. The manager is read-only here; the function never
+            mutates state and tolerates ``None`` so unit tests can omit it.
+
+    Returns:
+        The filtered list of GPU indices, preserving the input order.
+    """
+
+    blocked = set(disabled_gpus or ())
+    if gpu_manager is not None and blocked:
+        # Best-effort sanity check: silently drop indices the manager does
+        # not know about so we never produce an empty CUDA_VISIBLE_DEVICES
+        # by accident.
+        known = getattr(gpu_manager, "_states", None)
+        if isinstance(known, dict):
+            blocked = {idx for idx in blocked if idx in known}
+    return [idx for idx in preferred_gpu if idx not in blocked]
 
 
 class LlamaCppBackend(BackendInterface):
@@ -68,9 +102,19 @@ class LlamaCppBackend(BackendInterface):
             tags=["LLM", "GGUF", "CUDA"],
         )
 
-    def __init__(self) -> None:
+    def __init__(self, gpu_manager: Any | None = None) -> None:
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
+        self._gpu_manager = gpu_manager
+
+    def set_gpu_manager(self, gpu_manager: Any) -> None:
+        """Inject the :class:`~ocabra.core.gpu_manager.GPUManager`.
+
+        The backend only reads VRAM totals to compute ``tensor_split`` ratios
+        when ``split_strategy='evenly'``. It never mutates the manager.
+        """
+
+        self._gpu_manager = gpu_manager
 
     def _resolve_server_bin(self) -> str:
         """Pick the ``llama-server`` binary path.
@@ -100,6 +144,22 @@ class LlamaCppBackend(BackendInterface):
         model_file = self._resolve_model_file(model_id, extra_config)
         options = self._build_options(extra_config)
         options["model_file"] = str(model_file)
+
+        visible_gpus = _compose_visible_devices(
+            gpu_indices,
+            options.get("disabled_gpus"),
+            self._gpu_manager,
+        )
+        # Auto-compute tensor_split when the user picked "evenly" and did not
+        # supply explicit ratios. We need at least two visible GPUs for it to
+        # make sense.
+        if (
+            options.get("tensor_split") is None
+            and options.get("split_strategy") == "evenly"
+            and len(visible_gpus) > 1
+        ):
+            options["tensor_split"] = await self._compute_evenly_tensor_split(visible_gpus)
+
         self._model_configs[model_id] = options
 
         cmd = [
@@ -152,10 +212,28 @@ class LlamaCppBackend(BackendInterface):
         if options.get("cache_type_v"):
             cmd.extend(["--cache-type-v", str(options["cache_type_v"])])
 
+        # Multi-GPU + MoE flags (Sprint 17.3). All optional; only forwarded
+        # when the user actually configured them.
+        if options.get("main_gpu") is not None:
+            cmd.extend(["--main-gpu", str(int(options["main_gpu"]))])
+        if options.get("tensor_split"):
+            cmd.extend(
+                [
+                    "--tensor-split",
+                    ",".join(self._format_ratio(r) for r in options["tensor_split"]),
+                ]
+            )
+        if options.get("split_mode") is not None:
+            cmd.extend(["--split-mode", str(options["split_mode"])])
+        if options.get("n_cpu_moe") is not None:
+            cmd.extend(["--n-cpu-moe", str(int(options["n_cpu_moe"]))])
+        if options.get("override_tensor"):
+            cmd.extend(["--override-tensor", str(options["override_tensor"])])
+
         env = {
             **os.environ,
             "CUDA_DEVICE_ORDER": settings.cuda_device_order,
-            "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in gpu_indices)
+            "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in visible_gpus)
             if options["gpu_layers"] > 0
             else "",
         }
@@ -188,7 +266,7 @@ class LlamaCppBackend(BackendInterface):
         return WorkerInfo(
             backend_type="llama_cpp",
             model_id=model_id,
-            gpu_indices=gpu_indices,
+            gpu_indices=visible_gpus or gpu_indices,
             port=port,
             pid=process.pid or 0,
             vram_used_mb=vram_used_mb,
@@ -321,6 +399,24 @@ class LlamaCppBackend(BackendInterface):
             # Sprint 17.2 — KV cache quantization (None = use llama-server default)
             "cache_type_k": self._get_option(extra_config, "cache_type_k", None),
             "cache_type_v": self._get_option(extra_config, "cache_type_v", None),
+            # Multi-GPU + MoE (Sprint 17.3). All optional.
+            "main_gpu": self._to_int_or_none(self._get_option(extra_config, "main_gpu", None)),
+            "tensor_split": self._normalize_tensor_split(
+                self._get_option(extra_config, "tensor_split", None)
+            ),
+            "split_mode": self._normalize_split_mode(
+                self._get_option(extra_config, "split_mode", None)
+            ),
+            "disabled_gpus": self._normalize_int_list(
+                self._get_option(extra_config, "disabled_gpus", None)
+            ),
+            "split_strategy": self._normalize_split_strategy(
+                self._get_option(extra_config, "split_strategy", None)
+            ),
+            "n_cpu_moe": self._to_int_or_none(self._get_option(extra_config, "n_cpu_moe", None)),
+            "override_tensor": self._normalize_str(
+                self._get_option(extra_config, "override_tensor", None)
+            ),
         }
         # Sprint 17.2 — quantized V cache requires flash attention.
         cache_v = options["cache_type_v"]
@@ -332,6 +428,8 @@ class LlamaCppBackend(BackendInterface):
         return options
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
+        # Accept both snake_case (canonical schema) and camelCase (frontend
+        # write path) so persisted state from either side resolves correctly.
         camel_key = "".join(
             part.capitalize() if index else part for index, part in enumerate(key.split("_"))
         )
@@ -456,3 +554,109 @@ class LlamaCppBackend(BackendInterface):
         if value is None:
             return None
         return bool(value)
+
+    def _normalize_tensor_split(self, value: Any) -> list[float] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parts = [chunk.strip() for chunk in value.split(",") if chunk.strip()]
+        elif isinstance(value, (list, tuple)):
+            parts = list(value)
+        else:
+            return None
+        ratios: list[float] = []
+        for raw in parts:
+            try:
+                ratios.append(float(raw))
+            except (TypeError, ValueError):
+                return None
+        if not ratios or all(r == 0 for r in ratios) or any(r < 0 for r in ratios):
+            return None
+        return ratios
+
+    def _normalize_int_list(self, value: Any) -> list[int] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parts = [chunk.strip() for chunk in value.split(",") if chunk.strip()]
+        elif isinstance(value, (list, tuple)):
+            parts = list(value)
+        else:
+            return None
+        out: list[int] = []
+        seen: set[int] = set()
+        for raw in parts:
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if idx < 0 or idx in seen:
+                continue
+            out.append(idx)
+            seen.add(idx)
+        return out or None
+
+    def _normalize_split_mode(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        return text if text in _VALID_SPLIT_MODES else None
+
+    def _normalize_split_strategy(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        return text if text in _VALID_SPLIT_STRATEGIES else None
+
+    def _normalize_str(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _format_ratio(value: float) -> str:
+        """Format a tensor-split ratio for the CLI.
+
+        Uses an integer literal when the value is a whole number to keep the
+        flag tidy (``--tensor-split 3,1`` rather than ``3.0,1.0``).
+        """
+
+        if float(value).is_integer():
+            return str(int(value))
+        return f"{float(value):g}"
+
+    async def _compute_evenly_tensor_split(self, gpu_indices: list[int]) -> list[float] | None:
+        """Compute split ratios proportional to each GPU's total VRAM.
+
+        Reads ``total_vram_mb`` from the injected GPU manager. Falls back to
+        ``None`` (i.e. let llama-server decide) when the manager is missing
+        or any GPU reports a non-positive total.
+        """
+
+        manager = self._gpu_manager
+        if manager is None:
+            return None
+        ratios: list[float] = []
+        for idx in gpu_indices:
+            getter = getattr(manager, "get_state", None)
+            state = None
+            if callable(getter):
+                try:
+                    state = await getter(idx)
+                except Exception:
+                    state = None
+            if state is None:
+                state = (
+                    manager.get_state_nowait(idx) if hasattr(manager, "get_state_nowait") else None
+                )
+            total = getattr(state, "total_vram_mb", 0) if state is not None else 0
+            if total <= 0:
+                return None
+            ratios.append(float(total))
+        # Normalize to the smallest GPU = 1 so the resulting CSV is compact
+        # (``3,1`` instead of ``24576,8192``).
+        smallest = min(ratios)
+        if smallest <= 0:
+            return None
+        return [round(r / smallest, 4) for r in ratios]

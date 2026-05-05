@@ -30,6 +30,16 @@ def parse_args() -> argparse.Namespace:
     # Sprint 17.2 — KV cache quantization
     parser.add_argument("--cache-type-k", default=None)
     parser.add_argument("--cache-type-v", default=None)
+    # --- Sprint 17.3 (Multi-GPU + MoE) ---
+    parser.add_argument("--main-gpu", type=int, default=None)
+    parser.add_argument("--tensor-split", default=None)
+    parser.add_argument(
+        "--split-mode",
+        choices=("layer", "row", "none"),
+        default=None,
+    )
+    parser.add_argument("--n-cpu-moe", type=int, default=None)
+    parser.add_argument("--override-tensor", default=None)
     return parser.parse_args()
 
 
@@ -78,6 +88,17 @@ def main() -> None:
         cmd.extend(["--cache-type-k", str(args.cache_type_k)])
     if args.cache_type_v:
         cmd.extend(["--cache-type-v", str(args.cache_type_v)])
+    # --- Sprint 17.3 (Multi-GPU + MoE) ---
+    if args.main_gpu is not None:
+        cmd.extend(["--main-gpu", str(args.main_gpu)])
+    if args.tensor_split:
+        cmd.extend(["--tensor-split", args.tensor_split])
+    if args.split_mode is not None:
+        cmd.extend(["--split-mode", args.split_mode])
+    if args.n_cpu_moe is not None:
+        cmd.extend(["--n-cpu-moe", str(args.n_cpu_moe)])
+    if args.override_tensor:
+        cmd.extend(["--override-tensor", args.override_tensor])
 
     os.execvpe(args.server_bin, cmd, os.environ.copy())
 

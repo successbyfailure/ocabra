@@ -87,6 +87,14 @@ const LLAMA_CPP_ROOT_KEYS = [
   // Sprint 17.2 — KV cache quantization
   "cache_type_k",
   "cache_type_v",
+  // Sprint 17.3 — Multi-GPU + MoE CPU offload
+  "main_gpu",
+  "tensor_split",
+  "split_mode",
+  "disabled_gpus",
+  "split_strategy",
+  "n_cpu_moe",
+  "override_tensor",
 ]
 const LLAMA_KV_CACHE_TYPES = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"] as const
 const BITNET_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn"]
@@ -267,6 +275,18 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   // Sprint 17.2 — KV cache quantization
   const [llamaCacheTypeK, setLlamaCacheTypeK] = useState<string>("")
   const [llamaCacheTypeV, setLlamaCacheTypeV] = useState<string>("")
+  // Sprint 17.3: Multi-GPU + MoE state.
+  const [llamaSplitStrategy, setLlamaSplitStrategy] = useState<
+    "evenly" | "favor_main" | "single" | "custom" | ""
+  >("")
+  const [llamaMainGpu, setLlamaMainGpu] = useState<number | "">("")
+  const [llamaSplitMode, setLlamaSplitMode] = useState<"layer" | "row" | "none" | "">("")
+  const [llamaDisabledGpus, setLlamaDisabledGpus] = useState<Set<number>>(new Set())
+  // tensor_split is keyed by GPU index → ratio string so the input survives
+  // checkboxing GPUs on/off without losing user-typed values.
+  const [llamaTensorSplit, setLlamaTensorSplit] = useState<Record<number, string>>({})
+  const [llamaNCpuMoe, setLlamaNCpuMoe] = useState("")
+  const [llamaOverrideTensor, setLlamaOverrideTensor] = useState("")
 
   const [bitnetGpuLayers, setBitnetGpuLayers] = useState("")
   const [bitnetCtxSize, setBitnetCtxSize] = useState("")
@@ -358,6 +378,33 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     )
     setLlamaCacheTypeK(llamaCpp?.cacheTypeK == null ? "" : String(llamaCpp.cacheTypeK))
     setLlamaCacheTypeV(llamaCpp?.cacheTypeV == null ? "" : String(llamaCpp.cacheTypeV))
+    // Sprint 17.3 — Multi-GPU + MoE state hydration
+    setLlamaMainGpu(llamaCpp?.mainGpu == null ? "" : llamaCpp.mainGpu)
+    setLlamaSplitMode((llamaCpp?.splitMode as "layer" | "row" | "none" | undefined) ?? "")
+    setLlamaDisabledGpus(new Set(llamaCpp?.disabledGpus ?? []))
+    setLlamaNCpuMoe(llamaCpp?.nCpuMoe == null ? "" : String(llamaCpp.nCpuMoe))
+    setLlamaOverrideTensor(llamaCpp?.overrideTensor ?? "")
+    if (Array.isArray(llamaCpp?.tensorSplit) && llamaCpp.tensorSplit.length > 0) {
+      const ratios: Record<number, string> = {}
+      llamaCpp.tensorSplit.forEach((value, idx) => {
+        ratios[idx] = String(value)
+      })
+      setLlamaTensorSplit(ratios)
+      setLlamaSplitStrategy("custom")
+    } else {
+      setLlamaTensorSplit({})
+      const persisted = llamaCpp?.splitStrategy
+      if (persisted === "evenly" || persisted === "favor_main") {
+        setLlamaSplitStrategy(persisted)
+      } else if (
+        (llamaCpp?.splitMode === "none") ||
+        (llamaCpp?.disabledGpus != null && llamaCpp.disabledGpus.length === Math.max(0, gpus.length - 1))
+      ) {
+        setLlamaSplitStrategy("single")
+      } else {
+        setLlamaSplitStrategy("")
+      }
+    }
 
     setBitnetGpuLayers(bitnet?.gpuLayers == null ? "" : String(bitnet.gpuLayers))
     setBitnetCtxSize(bitnet?.ctxSize == null ? "" : String(bitnet.ctxSize))
@@ -371,7 +418,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setWhisperDiarizationModelId(
       whisper?.diarizationModelId == null ? "" : String(whisper.diarizationModelId),
     )
-  }, [bitnet, llamaCpp, model, sglang, tensorrt, vllm, whisper])
+  }, [bitnet, llamaCpp, model, sglang, tensorrt, vllm, whisper, gpus])
 
   // Load groups for system_admin when modal opens
   useEffect(() => {
@@ -524,6 +571,43 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     }
 
     if (model.backendType === "llama_cpp") {
+      // Resolve enabled GPUs (everything not toggled off in the modal).
+      const enabledGpus = gpus.map((g) => g.index).filter((idx) => !llamaDisabledGpus.has(idx))
+      const disabledList = gpus.map((g) => g.index).filter((idx) => llamaDisabledGpus.has(idx))
+
+      // Strategy → backend payload.
+      let mainGpuOut: number | null =
+        llamaMainGpu === "" ? null : Number(llamaMainGpu)
+      // Drop main_gpu if it points at a disabled GPU (defensive — UI also
+      // filters the dropdown but a stale persisted value might still leak).
+      if (mainGpuOut !== null && llamaDisabledGpus.has(mainGpuOut)) {
+        mainGpuOut = null
+      }
+      let strategyOut: "evenly" | "favor_main" | null = null
+      let tensorSplitOut: number[] | null = null
+      let splitModeOut: "layer" | "row" | "none" | null =
+        llamaSplitMode === "" ? null : llamaSplitMode
+
+      if (llamaSplitStrategy === "evenly") {
+        strategyOut = "evenly"
+      } else if (llamaSplitStrategy === "favor_main") {
+        strategyOut = "favor_main"
+      } else if (llamaSplitStrategy === "custom") {
+        const ratios = enabledGpus
+          .map((idx) => Number(llamaTensorSplit[idx] ?? ""))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+        if (ratios.length === enabledGpus.length && ratios.some((value) => value > 0)) {
+          tensorSplitOut = ratios
+        }
+      } else if (llamaSplitStrategy === "single") {
+        // Force single-GPU layout via split_mode=none and a chosen main_gpu.
+        if (splitModeOut == null) splitModeOut = "none"
+      }
+
+      const nCpuMoeOut: number | null = llamaNCpuMoe === "" ? null : Number(llamaNCpuMoe)
+      const overrideTensorOut: string | null =
+        llamaOverrideTensor.trim() === "" ? null : llamaOverrideTensor.trim()
+
       const next = setNestedConfig(
         current,
         "llama_cpp",
@@ -548,6 +632,14 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           // Sprint 17.2 — KV cache quantization
           cache_type_k: llamaCacheTypeK === "" ? null : llamaCacheTypeK,
           cache_type_v: llamaCacheTypeV === "" ? null : llamaCacheTypeV,
+          // Sprint 17.3 — Multi-GPU + MoE CPU offload
+          mainGpu: mainGpuOut,
+          tensorSplit: tensorSplitOut,
+          splitMode: splitModeOut,
+          disabledGpus: disabledList.length > 0 ? disabledList : null,
+          splitStrategy: strategyOut,
+          nCpuMoe: nCpuMoeOut,
+          overrideTensor: overrideTensorOut,
         },
         LLAMA_CPP_ROOT_KEYS,
       )
@@ -1398,6 +1490,202 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       )}
                     </label>
                   </div>
+                </div>
+              </FieldSection>
+            )}
+
+            {model?.backendType === "llama_cpp" && gpus.length > 0 && (
+              <FieldSection
+                title="Multi-GPU"
+                description="Reparto de capas entre GPUs, GPU principal y exclusión selectiva de dispositivos."
+              >
+                <div className="space-y-2">
+                  <span className="block text-sm text-muted-foreground">GPUs habilitadas</span>
+                  <div className="space-y-2">
+                    {gpus.map((gpu) => {
+                      const disabled = llamaDisabledGpus.has(gpu.index)
+                      return (
+                        <label key={gpu.index} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={!disabled}
+                            onChange={(event) => {
+                              setLlamaDisabledGpus((prev) => {
+                                const next = new Set(prev)
+                                if (event.target.checked) {
+                                  next.delete(gpu.index)
+                                } else {
+                                  next.add(gpu.index)
+                                }
+                                return next
+                              })
+                            }}
+                          />
+                          <span className="font-medium">GPU {gpu.index}</span>
+                          <span className="text-muted-foreground">{gpu.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            ({gpu.totalVramMb} MB)
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                  <FieldHint>
+                    Las GPUs deshabilitadas se excluyen de `CUDA_VISIBLE_DEVICES`.
+                  </FieldHint>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <fieldset className="space-y-2">
+                    <legend className="text-sm text-muted-foreground">Estrategia de split</legend>
+                    {(
+                      [
+                        ["evenly", "Even split (auto-balanceado por VRAM)"],
+                        ["custom", "Custom ratios"],
+                        ["single", "Single GPU"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <label key={value} className="flex items-center gap-2 text-sm">
+                        <input
+                          type="radio"
+                          name="llama-split-strategy"
+                          value={value}
+                          checked={llamaSplitStrategy === value}
+                          onChange={() => setLlamaSplitStrategy(value)}
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                    <FieldHint>
+                      `Even split` calcula ratios proporcionales al VRAM total de cada GPU al
+                      cargar el modelo. `Single GPU` fija `split_mode=none`.
+                    </FieldHint>
+                  </fieldset>
+
+                  <div className="space-y-3">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Main GPU</span>
+                      <select
+                        value={llamaMainGpu === "" ? "" : String(llamaMainGpu)}
+                        onChange={(event) =>
+                          setLlamaMainGpu(event.target.value === "" ? "" : Number(event.target.value))
+                        }
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="">auto</option>
+                        {gpus
+                          .filter((gpu) => !llamaDisabledGpus.has(gpu.index))
+                          .map((gpu) => (
+                            <option key={gpu.index} value={gpu.index}>
+                              GPU {gpu.index} - {gpu.name}
+                            </option>
+                          ))}
+                      </select>
+                      <FieldHint>
+                        GPU que aloja los tensores no repartidos. Mapea a `--main-gpu`.
+                      </FieldHint>
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Split mode</span>
+                      <select
+                        value={llamaSplitMode}
+                        onChange={(event) =>
+                          setLlamaSplitMode(event.target.value as "layer" | "row" | "none" | "")
+                        }
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="">layer (default)</option>
+                        <option value="layer">layer</option>
+                        <option value="row">row</option>
+                        <option value="none">none</option>
+                      </select>
+                      <FieldHint>
+                        `layer` reparte por capas (default), `row` reparte dentro de cada capa,
+                        `none` mantiene todo en una GPU.
+                      </FieldHint>
+                    </label>
+                  </div>
+                </div>
+
+                {llamaSplitStrategy === "custom" && (
+                  <div className="space-y-2">
+                    <span className="block text-sm text-muted-foreground">Ratios por GPU</span>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      {gpus
+                        .filter((gpu) => !llamaDisabledGpus.has(gpu.index))
+                        .map((gpu) => (
+                          <label key={gpu.index} className="block text-sm">
+                            <span className="mb-1 block text-muted-foreground">
+                              GPU {gpu.index} ({gpu.name})
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.5"
+                              value={llamaTensorSplit[gpu.index] ?? ""}
+                              onChange={(event) =>
+                                setLlamaTensorSplit((prev) => ({
+                                  ...prev,
+                                  [gpu.index]: event.target.value,
+                                }))
+                              }
+                              placeholder="ratio"
+                              className="w-full rounded-md border border-border bg-background px-3 py-2"
+                            />
+                          </label>
+                        ))}
+                    </div>
+                    <FieldHint>
+                      Ratios sin normalizar. Por ejemplo `3,1` da el 75% a la primera GPU
+                      habilitada y el 25% a la segunda.
+                    </FieldHint>
+                  </div>
+                )}
+              </FieldSection>
+            )}
+
+            {model?.backendType === "llama_cpp" && (
+              <FieldSection
+                title="MoE / CPU offload"
+                description="Mantén capas de expertos en CPU para liberar VRAM en modelos Mixture-of-Experts."
+              >
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-muted-foreground">n_cpu_moe</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="99"
+                      step="1"
+                      value={llamaNCpuMoe}
+                      onChange={(event) => setLlamaNCpuMoe(event.target.value)}
+                      placeholder="0 (sin offload)"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                    />
+                    <FieldHint>
+                      Número de capas MoE que se quedan en CPU. `0` desactiva el offload.
+                    </FieldHint>
+                  </label>
+
+                  <label className="block text-sm">
+                    <span
+                      className="mb-1 block text-muted-foreground"
+                      title="Formato regex=DEVICE, p.ej. 'exps=CPU' o '\\.ffn_(up|down|gate)_exps=CPU'"
+                    >
+                      override_tensor (avanzado)
+                    </span>
+                    <input
+                      value={llamaOverrideTensor}
+                      onChange={(event) => setLlamaOverrideTensor(event.target.value)}
+                      placeholder="exps=CPU"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
+                    />
+                    <FieldHint>
+                      Texto libre forwarded a `--override-tensor`. Formato `regex=DEVICE`. Solo
+                      para usuarios que conocen los nombres de tensores del modelo.
+                    </FieldHint>
+                  </label>
                 </div>
               </FieldSection>
             )}

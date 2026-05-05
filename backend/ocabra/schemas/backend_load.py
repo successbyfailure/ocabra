@@ -15,13 +15,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------
 
 KvCacheType = Literal["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"]
+SplitMode = Literal["layer", "row", "none"]
+SplitStrategy = Literal["evenly", "favor_main"]
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +46,6 @@ class LlamaCppLoadConfig(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     # --- Sprint 17.1 (Tier 1) ---
-    # Pre-existing fields (kept here so the schema is the single source of
-    # truth for the UI and tests):
     gpu_layers: int | None = Field(default=None, ge=0)
     ctx_size: int | None = Field(default=None, ge=1)
     batch_size: int | None = Field(default=None, ge=1)
@@ -54,7 +54,6 @@ class LlamaCppLoadConfig(BaseModel):
     flash_attn: bool | None = None
     mlock: bool | None = None
     embedding: bool | None = None
-    # New in Sprint 17.1.
     # ``mmap`` is the inverted form of ``--no-mmap``: True (or None) means
     # "use mmap", False means "pass --no-mmap to llama-server".
     mmap: bool | None = None
@@ -67,18 +66,95 @@ class LlamaCppLoadConfig(BaseModel):
     cache_type_k: KvCacheType | None = None
     cache_type_v: KvCacheType | None = None  # requires flash_attn=True if != f16
 
+    # --- Sprint 17.3 (Multi-GPU + MoE CPU offload) ---
+    main_gpu: int | None = Field(
+        default=None,
+        description=(
+            "Index of the GPU that hosts non-split tensors and acts as the "
+            "primary device. Maps to llama-server's --main-gpu."
+        ),
+        ge=0,
+    )
+    tensor_split: list[float] | None = Field(
+        default=None,
+        description=(
+            "Per-GPU split ratios passed to llama-server's --tensor-split. "
+            "When omitted and split_strategy='evenly', oCabra autocomputes "
+            "values proportional to each GPU's total VRAM."
+        ),
+    )
+    split_mode: SplitMode | None = Field(
+        default=None,
+        description=(
+            "How to split the model across GPUs: 'layer' splits by layers "
+            "(default), 'row' splits within each layer, 'none' keeps the "
+            "model on a single GPU."
+        ),
+    )
+    disabled_gpus: list[int] | None = Field(
+        default=None,
+        description=(
+            "GPU indices to exclude from CUDA_VISIBLE_DEVICES regardless of "
+            "the scheduler's assignment."
+        ),
+    )
+    split_strategy: SplitStrategy | None = Field(
+        default=None,
+        description=(
+            "Auto-split helper: 'evenly' computes tensor_split proportional "
+            "to total VRAM per GPU; 'favor_main' biases the main_gpu."
+        ),
+    )
+    n_cpu_moe: int | None = Field(
+        default=None,
+        description=(
+            "Number of MoE expert layers kept on CPU instead of GPU. Maps to "
+            "llama-server's --n-cpu-moe. 0 disables CPU offload."
+        ),
+        ge=0,
+    )
+    override_tensor: str | None = Field(
+        default=None,
+        description=(
+            "Free-form regex=DEVICE override forwarded as-is to "
+            "llama-server's --override-tensor. Advanced; see llama.cpp docs."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_cache_type_v_requires_flash_attn(self) -> LlamaCppLoadConfig:
-        """When ``cache_type_v`` is quantized, ``flash_attn`` must be enabled.
-
-        llama.cpp (mirroring LM Studio's gating) only supports a quantized V
-        cache when flash attention is active. We surface a friendly error at
-        load-config validation time rather than letting llama-server crash on
-        startup.
-        """
+        """When ``cache_type_v`` is quantized, ``flash_attn`` must be enabled."""
         if self.cache_type_v is not None and self.cache_type_v != "f16" and not self.flash_attn:
             raise ValueError(
                 "cache_type_v != 'f16' requires flash_attn=True (llama.cpp only "
                 "supports quantized V cache when flash attention is enabled)."
             )
         return self
+
+    @field_validator("tensor_split")
+    @classmethod
+    def _validate_tensor_split(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("tensor_split must contain at least one ratio")
+        if any(ratio < 0 for ratio in value):
+            raise ValueError("tensor_split ratios must be non-negative")
+        if all(ratio == 0 for ratio in value):
+            raise ValueError("tensor_split must contain at least one non-zero ratio")
+        return value
+
+    @field_validator("disabled_gpus")
+    @classmethod
+    def _validate_disabled_gpus(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        if any(idx < 0 for idx in value):
+            raise ValueError("disabled_gpus indices must be non-negative")
+        seen: set[int] = set()
+        unique: list[int] = []
+        for idx in value:
+            if idx not in seen:
+                unique.append(idx)
+                seen.add(idx)
+        return unique

@@ -48,7 +48,33 @@ export function getSGLangConfig(model: ModelState): SGLangConfig | null {
 
 export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
   if (model.backendType !== "llama_cpp") return null
-  return getConfigSection<LlamaCppConfig>(model, "llama_cpp")
+  const raw = getConfigSection<Record<string, unknown>>(model, "llama_cpp")
+  if (raw == null) return null
+  // Accept both camelCase (frontend write path) and snake_case (backend
+  // schemas / persisted state) for the Sprint 17.3 multi-GPU + MoE knobs.
+  const config: LlamaCppConfig = { ...(raw as LlamaCppConfig) }
+  if (config.mainGpu == null && typeof raw.main_gpu === "number") config.mainGpu = raw.main_gpu
+  if (config.tensorSplit == null && Array.isArray(raw.tensor_split)) {
+    config.tensorSplit = (raw.tensor_split as unknown[]).filter(
+      (v): v is number => typeof v === "number" && Number.isFinite(v),
+    )
+  }
+  if (config.splitMode == null && typeof raw.split_mode === "string") {
+    config.splitMode = raw.split_mode as LlamaCppConfig["splitMode"]
+  }
+  if (config.disabledGpus == null && Array.isArray(raw.disabled_gpus)) {
+    config.disabledGpus = (raw.disabled_gpus as unknown[]).filter(
+      (v): v is number => typeof v === "number" && Number.isInteger(v),
+    )
+  }
+  if (config.splitStrategy == null && typeof raw.split_strategy === "string") {
+    config.splitStrategy = raw.split_strategy as LlamaCppConfig["splitStrategy"]
+  }
+  if (config.nCpuMoe == null && typeof raw.n_cpu_moe === "number") config.nCpuMoe = raw.n_cpu_moe
+  if (config.overrideTensor == null && typeof raw.override_tensor === "string") {
+    config.overrideTensor = raw.override_tensor
+  }
+  return config
 }
 
 export function getBitNetConfig(model: ModelState): BitNetConfig | null {

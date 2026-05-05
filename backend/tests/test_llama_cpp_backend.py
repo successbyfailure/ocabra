@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ocabra.backends.llama_cpp_backend import LlamaCppBackend
+from ocabra.backends.llama_cpp_backend import LlamaCppBackend, _compose_visible_devices
 
 
 def _fake_proc(returncode: int | None = None) -> MagicMock:
@@ -283,3 +284,137 @@ def test_load_config_validator_rejects_quantized_v_without_flash_attn() -> None:
     # Quantized V cache works when flash_attn is on.
     cfg = LlamaCppLoadConfig(cache_type_v="q4_0", flash_attn=True)
     assert cfg.cache_type_v == "q4_0"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 17.3 — Multi-GPU + MoE CPU offload
+# ---------------------------------------------------------------------------
+
+
+def _patch_settings(mock_settings: MagicMock, models_dir: str) -> None:
+    """Apply the baseline llama_cpp settings used by load() tests."""
+
+    mock_settings.models_dir = models_dir
+    mock_settings.llama_cpp_server_bin = "/usr/local/bin/llama-server"
+    mock_settings.llama_cpp_gpu_layers = 16
+    mock_settings.llama_cpp_ctx_size = 8192
+    mock_settings.llama_cpp_threads = 8
+    mock_settings.llama_cpp_batch_size = 256
+    mock_settings.llama_cpp_ubatch_size = 64
+    mock_settings.llama_cpp_flash_attn = False
+    mock_settings.llama_cpp_mlock = False
+    mock_settings.llama_cpp_embeddings = False
+    mock_settings.llama_cpp_startup_timeout_s = 30
+    mock_settings.cuda_device_order = "PCI_BUS_ID"
+
+
+def test_compose_visible_devices_excludes_disabled() -> None:
+    assert _compose_visible_devices([0, 1, 2], [1]) == [0, 2]
+    assert _compose_visible_devices([0, 1], None) == [0, 1]
+    assert _compose_visible_devices([0, 1], []) == [0, 1]
+    # Order is preserved (matters for --main-gpu semantics).
+    assert _compose_visible_devices([2, 0, 1], [0]) == [2, 1]
+
+
+def test_compose_visible_devices_with_gpu_manager_validates() -> None:
+    manager = SimpleNamespace(_states={0: object(), 1: object()})
+    # Index 5 is unknown to the manager; it must not be silently filtered out
+    # of preferred_gpu, but it also should not raise.
+    assert _compose_visible_devices([0, 1], [5], gpu_manager=manager) == [0, 1]
+    assert _compose_visible_devices([0, 1], [1], gpu_manager=manager) == [0]
+
+
+@pytest.mark.asyncio
+async def test_load_forwards_multi_gpu_and_moe_flags(tmp_path: Path) -> None:
+    gguf = tmp_path / "moe.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    extra = {
+        "llama_cpp": {
+            "main_gpu": 1,
+            "tensor_split": [3, 1],
+            "split_mode": "row",
+            "n_cpu_moe": 4,
+            "override_tensor": "exps=CPU",
+        }
+    }
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        await backend.load("moe", [0, 1], port=18032, extra_config=extra)
+
+    args = list(create_proc.await_args.args)
+    assert "--main-gpu" in args and args[args.index("--main-gpu") + 1] == "1"
+    assert "--tensor-split" in args and args[args.index("--tensor-split") + 1] == "3,1"
+    assert "--split-mode" in args and args[args.index("--split-mode") + 1] == "row"
+    assert "--n-cpu-moe" in args and args[args.index("--n-cpu-moe") + 1] == "4"
+    assert "--override-tensor" in args
+    assert args[args.index("--override-tensor") + 1] == "exps=CPU"
+
+
+@pytest.mark.asyncio
+async def test_load_disabled_gpus_filters_cuda_visible_devices(tmp_path: Path) -> None:
+    gguf = tmp_path / "demo.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    extra = {"llama_cpp": {"disabled_gpus": [0]}}
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        info = await backend.load("demo", [0, 1], port=18033, extra_config=extra)
+
+    env = create_proc.await_args.kwargs["env"]
+    # GPU 0 was disabled; only GPU 1 should be visible to the worker.
+    assert env["CUDA_VISIBLE_DEVICES"] == "1"
+    assert info.gpu_indices == [1]
+
+
+@pytest.mark.asyncio
+async def test_load_evenly_strategy_autocomputes_tensor_split(tmp_path: Path) -> None:
+    gguf = tmp_path / "demo.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    # Mock GPU manager: GPU 0 = 12 GB, GPU 1 = 24 GB.
+    manager = MagicMock()
+    manager._states = {0: object(), 1: object()}
+    manager.get_state = AsyncMock(
+        side_effect=lambda idx: SimpleNamespace(total_vram_mb={0: 12 * 1024, 1: 24 * 1024}[idx])
+    )
+
+    backend = LlamaCppBackend(gpu_manager=manager)
+    extra = {"llama_cpp": {"split_strategy": "evenly"}}
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        await backend.load("demo-evenly", [0, 1], port=18034, extra_config=extra)
+
+    args = list(create_proc.await_args.args)
+    # Smallest GPU is normalised to 1 → ratios become 1,2.
+    assert "--tensor-split" in args
+    csv = args[args.index("--tensor-split") + 1]
+    assert csv == "1,2"
+    manager.get_state.assert_awaited()
+
+
+def test_compute_evenly_tensor_split_returns_none_without_manager() -> None:
+    backend = LlamaCppBackend()
+    # No event loop required because we exercise the helper directly through
+    # the public surface used by load(): asyncio.run is fine for one call.
+    import asyncio
+
+    result = asyncio.run(backend._compute_evenly_tensor_split([0, 1]))
+    assert result is None

@@ -144,6 +144,8 @@ export interface SGLangConfig {
 }
 
 export type LlamaKvCacheType = "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0"
+export type LlamaCppSplitMode = "layer" | "row" | "none"
+export type LlamaCppSplitStrategy = "evenly" | "favor_main" | "single"
 
 export interface LlamaCppConfig {
   gpuLayers?: number | null
@@ -164,6 +166,14 @@ export interface LlamaCppConfig {
   // Sprint 17.2 — KV cache quantization
   cacheTypeK?: LlamaKvCacheType | null
   cacheTypeV?: LlamaKvCacheType | null
+  // Sprint 17.3: Multi-GPU + MoE CPU offload.
+  mainGpu?: number | null
+  tensorSplit?: number[] | null
+  splitMode?: LlamaCppSplitMode | null
+  disabledGpus?: number[] | null
+  splitStrategy?: LlamaCppSplitStrategy | null
+  nCpuMoe?: number | null
+  overrideTensor?: string | null
 }
 
 export interface BitNetConfig {
