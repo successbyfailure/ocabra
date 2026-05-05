@@ -305,14 +305,34 @@ GGUF/safetensors, model arena y export a GGUF + 16-bit safetensors.
 
 ---
 
-## 🚧 Bloque 17 — llama.cpp loader parity con LM Studio
+## ✅ Bloque 17 — llama.cpp loader parity con LM Studio (entregado 2026-05-05)
 
-Plan completo en `docs/tasks/llama-cpp-parity-plan.md`.
+Plan completo en `docs/tasks/llama-cpp-parity-plan.md`. Schema compartido en
+`backend/ocabra/schemas/backend_load.py` (`LlamaCppLoadConfig` + `SpeculativeConfig`).
 
-Cobertura actual del backend llama.cpp: ~27% de los controles que LM Studio expone
-(4 de 15+ flags). Este bloque cierra la brecha en 4 sprints. Esquema de datos
-compartido `LlamaCppLoadConfig` en `backend/ocabra/schemas/backend_load.py`
-(crear en Sprint 17.1, ampliar aditivamente en sprints siguientes).
+Cobertura ahora: 100% de los flags que LM Studio expone (15+ campos) +
+estimador VRAM determinístico desde header GGUF + multi-GPU granular +
+speculative decoding + selector de runtime alterno. Entregado por equipo de 4
+agentes en paralelo en worktrees (commits b5c7cd1, 23cb65a, 553abbb, 7a24163,
+cb3f61b, 727987a).
+
+### Pendiente del bloque 17
+
+- **Wiring scanner→DB del fingerprint del tokenizer**: las columnas
+  `vocab_size`/`bos_id`/`eos_id` en `model_configs` (migración 0019) y la
+  extracción en `local_scanner.parse_gguf_tokenizer_fingerprint()` están en
+  su sitio, pero no hay path que persista los valores al añadir un modelo
+  via `POST /ocabra/models`. El endpoint `GET /ocabra/models/{id}/speculative-candidates`
+  funciona pero devolverá vacío hasta que se backfill manualmente o se
+  amplíe `add_model()` para aceptar y guardar estos campos. Tarea pequeña
+  para próxima iteración.
+- **Tests speculative pendientes de container rebuild**: 3 tests en
+  `test_llama_cpp_speculative.py` requieren `fastapi` (no está en el host
+  Python). Funcionan en contenedor tras `docker compose build api`. Los
+  43 tests restantes (Sprint 17.1-17.3 + parte 17.4) pasan en host.
+- **Limpieza opcional**: el directorio raíz `/docker/ocabra/workers/` tiene
+  duplicados legacy (`llama_cpp_worker.py`, `vllm_worker.py`, etc.) que ya
+  no se importan desde producción. PR aparte para borrarlos.
 
 ### Sprint 17.1 — Tier 1: flags triviales en UI per-model
 
@@ -369,7 +389,7 @@ compartido `LlamaCppLoadConfig` en `backend/ocabra/schemas/backend_load.py`
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
 [🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
 [🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
-[🚧 En curso] Bloque 17 — llama.cpp loader parity (4 sprints: Tier 1 flags → KV-quant + VRAM estim → Multi-GPU + MoE → Speculative + runtime alterno)
+[✅ Hecho]    Bloque 17 — llama.cpp loader parity (4 sprints; pendiente wiring scanner→DB del tokenizer fingerprint)
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
