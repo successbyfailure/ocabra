@@ -402,7 +402,7 @@ async def test_load_evenly_strategy_autocomputes_tensor_split(tmp_path: Path) ->
         patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
     ):
         _patch_settings(mock_settings, str(tmp_path))
-        await backend.load("demo-evenly", [0, 1], port=18034, extra_config=extra)
+        await backend.load("demo", [0, 1], port=18034, extra_config=extra)
 
     args = list(create_proc.await_args.args)
     # Smallest GPU is normalised to 1 → ratios become 1,2.
