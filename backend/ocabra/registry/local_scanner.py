@@ -1,4 +1,5 @@
 import asyncio
+import json
 import struct
 from pathlib import Path
 
@@ -172,11 +173,20 @@ def parse_gguf_tokenizer_fingerprint(
 
 
 class LocalScanner:
-    async def scan(self, models_dir: Path) -> list[LocalModel]:
-        return await asyncio.to_thread(self._scan_sync, models_dir)
+    async def scan(
+        self, models_dir: Path, ollama_shared_dir: Path | None = None
+    ) -> list[LocalModel]:
+        return await asyncio.to_thread(self._scan_sync, models_dir, ollama_shared_dir)
 
-    def _scan_sync(self, models_dir: Path) -> list[LocalModel]:
+    def _scan_sync(
+        self, models_dir: Path, ollama_shared_dir: Path | None = None
+    ) -> list[LocalModel]:
         models: list[LocalModel] = []
+
+        # Ollama-shared blobs run first so they appear next to the user's
+        # downloads in the explore listing.
+        if ollama_shared_dir is not None:
+            models.extend(self._scan_ollama_shared(ollama_shared_dir))
 
         if not models_dir.exists():
             return models
@@ -290,3 +300,74 @@ class LocalScanner:
         except OSError:
             return False
         return b"bitnet" in head or b"i2_s" in head
+
+    def _scan_ollama_shared(self, root: Path) -> list[LocalModel]:
+        """Surface Ollama-pulled models as additional ``llama_cpp`` candidates.
+
+        Ollama stores each pulled model as an OCI manifest in
+        ``manifests/<registry>/<owner>/<model>/<tag>`` plus content-addressed
+        blobs under ``blobs/sha256-<digest>``. The blob whose layer mediaType
+        is ``application/vnd.ollama.image.model`` is a stock GGUF and can be
+        passed directly to llama-server. This lets the user reuse models
+        already pulled via Ollama without a second download or registration.
+
+        Best-effort: any IO/JSON error is silently dropped per manifest.
+        """
+        if not root.exists():
+            return []
+
+        manifests_root = root / "manifests"
+        blobs_root = root / "blobs"
+        if not manifests_root.exists() or not blobs_root.exists():
+            return []
+
+        out: list[LocalModel] = []
+        for manifest in manifests_root.rglob("*"):
+            if not manifest.is_file():
+                continue
+            try:
+                payload = json.loads(manifest.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            layers = payload.get("layers")
+            if not isinstance(layers, list):
+                continue
+            model_layer = next(
+                (
+                    layer
+                    for layer in layers
+                    if isinstance(layer, dict)
+                    and layer.get("mediaType") == "application/vnd.ollama.image.model"
+                ),
+                None,
+            )
+            if model_layer is None:
+                continue
+            digest = str(model_layer.get("digest", ""))
+            if not digest.startswith("sha256:"):
+                continue
+            blob_filename = "sha256-" + digest.split(":", 1)[1]
+            blob_path = blobs_root / blob_filename
+            if not blob_path.is_file():
+                continue
+            # Manifest path: .../manifests/<registry>/<owner>/<model>/<tag>
+            try:
+                tag = manifest.name
+                model_name = manifest.parent.name
+            except Exception:
+                continue
+            model_ref = f"{model_name}:{tag}"
+            vocab_size, bos_id, eos_id = parse_gguf_tokenizer_fingerprint(blob_path)
+            out.append(
+                LocalModel(
+                    model_ref=model_ref,
+                    path=str(blob_path),
+                    source="ollama-shared",
+                    backend_type="llama_cpp",
+                    size_gb=blob_path.stat().st_size / (1024**3),
+                    vocab_size=vocab_size,
+                    bos_id=bos_id,
+                    eos_id=eos_id,
+                )
+            )
+        return out

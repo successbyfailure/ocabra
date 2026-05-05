@@ -581,7 +581,7 @@ async def test_hf_detail_runtime_probe_overrides_model_impl_and_runner(
 
 
 @pytest.mark.asyncio
-async def test_hf_detail_gguf_only_repo_is_not_treated_as_ollama(
+async def test_hf_detail_gguf_only_repo_routes_to_llama_cpp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_info = SimpleNamespace(
@@ -600,7 +600,10 @@ async def test_hf_detail_gguf_only_repo_is_not_treated_as_ollama(
     registry = HuggingFaceRegistry()
     detail = await registry.get_model_detail("bartowski/Qwen2.5-7B-Instruct-GGUF")
 
-    assert detail.suggested_backend == "vllm"
+    # G1: GGUF-only repos resolve to llama_cpp (formerly defaulted to vllm
+    # which then failed at download time because of the explicit reject).
+    assert detail.suggested_backend == "llama_cpp"
+    assert "llama_cpp" in detail.backend_options
 
 
 @pytest.mark.asyncio
@@ -683,7 +686,7 @@ async def test_hf_detail_detects_diffusers_from_repo_layout(
 
 
 @pytest.mark.asyncio
-async def test_hf_variants_exposes_standard_only(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hf_variants_exposes_standard_and_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_info = SimpleNamespace(
         id="org/mixed-model",
         siblings=[
@@ -699,8 +702,16 @@ async def test_hf_variants_exposes_standard_only(monkeypatch: pytest.MonkeyPatch
     registry = HuggingFaceRegistry()
     variants = await registry.get_variants("org/mixed-model")
 
-    assert any(v.variant_id == "standard" and v.backend_type == "vllm" for v in variants)
-    assert not any(v.artifact == "model-q4_k_m.gguf" for v in variants)
+    # G1: standard (safetensors → vllm) + per-quant GGUF variants (→ llama_cpp)
+    standard = next(v for v in variants if v.variant_id == "standard")
+    assert standard.backend_type == "vllm"
+    assert standard.is_default
+    gguf_variants = [v for v in variants if v.format == "gguf"]
+    assert len(gguf_variants) == 2
+    assert {v.artifact for v in gguf_variants} == {"model-q4_k_m.gguf", "model-q8_0.gguf"}
+    assert all(v.backend_type == "llama_cpp" for v in gguf_variants)
+    # When a standard safetensors variant is present, it remains the default.
+    assert all(not v.is_default for v in gguf_variants)
 
 
 @pytest.mark.asyncio
@@ -817,18 +828,14 @@ async def test_hf_download_rejects_incompatible_tokenizer_repo(
 
 
 @pytest.mark.asyncio
-async def test_hf_download_rejects_gguf_artifacts(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_hf_infer_backend_for_repo_returns_llama_cpp_for_gguf_artifact() -> None:
+    """G1: a .gguf artifact short-circuits to llama_cpp without inspecting metadata."""
     registry = HuggingFaceRegistry()
-
-    with pytest.raises(ValueError, match="GGUF"):
-        await registry.download(
-            repo_id="org/model",
-            target_dir=tmp_path / "model",
-            progress_callback=lambda *_args: None,
-            artifact="model-q4_k_m.gguf",
-        )
+    backend = await registry.infer_backend_for_repo(
+        repo_id="org/model",  # repo_id is irrelevant here
+        artifact="model-q4_k_m.gguf",
+    )
+    assert backend == "llama_cpp"
 
 
 @pytest.mark.asyncio
@@ -1069,8 +1076,9 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert sources == {"huggingface", "gguf", "ollama"}
     assert any(model.model_ref == "hf-model" for model in models)
     assert any(model.model_ref == "tiny" for model in models)
+    # G2: standalone GGUFs default to llama_cpp instead of vllm.
     assert any(
-        model.model_ref == "tiny" and model.backend_type == "vllm" for model in models
+        model.model_ref == "tiny" and model.backend_type == "llama_cpp" for model in models
     )
     assert any(
         model.model_ref == "bitnet-b1.58-i2_s" and model.backend_type == "bitnet"
@@ -1080,6 +1088,49 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert any(
         model.model_ref == "ollama-model" and model.backend_type == "ollama" for model in models
     )
+
+
+@pytest.mark.asyncio
+async def test_local_scanner_exposes_ollama_shared_blobs_as_llama_cpp(tmp_path: Path) -> None:
+    """When ollama_shared_dir is given, pulled GGUFs surface as llama_cpp candidates."""
+    import json as _json
+
+    ollama_root = tmp_path / "ollama"
+    blobs = ollama_root / "blobs"
+    manifests = ollama_root / "manifests" / "registry.ollama.ai" / "library" / "mistral"
+    blobs.mkdir(parents=True)
+    manifests.mkdir(parents=True)
+
+    digest = "abc123" + ("0" * 58)  # 64 hex chars
+    blob_path = blobs / f"sha256-{digest}"
+    blob_path.write_bytes(b"GGUF" + b"\x00" * 1024)
+
+    manifest = manifests / "7b"
+    manifest.write_text(
+        _json.dumps(
+            {
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.ollama.image.model",
+                        "digest": f"sha256:{digest}",
+                    },
+                    {
+                        "mediaType": "application/vnd.ollama.image.template",
+                        "digest": "sha256:other",
+                    },
+                ]
+            }
+        )
+    )
+
+    scanner = LocalScanner()
+    models = await scanner.scan(tmp_path / "models", ollama_root)
+
+    shared = [m for m in models if m.source == "ollama-shared"]
+    assert len(shared) == 1
+    assert shared[0].model_ref == "mistral:7b"
+    assert shared[0].backend_type == "llama_cpp"
+    assert shared[0].path == str(blob_path)
 
 
 @pytest.mark.asyncio

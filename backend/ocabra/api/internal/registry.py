@@ -117,4 +117,9 @@ async def get_ollama_variants(
 async def list_local_models(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[LocalModel]:
-    return await _local_scanner.scan(Path(settings.models_dir))
+    ollama_shared = (
+        Path(settings.ollama_shared_models_dir)
+        if settings.ollama_shared_models_dir
+        else None
+    )
+    return await _local_scanner.scan(Path(settings.models_dir), ollama_shared)

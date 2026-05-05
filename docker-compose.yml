@@ -66,6 +66,11 @@ services:
       - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
       - ./data/openai_files:/data/openai_files
       - backends_data:/data/backends
+      # Read-only mount of Ollama's manifest/blob store so the local scanner
+      # can surface Ollama-pulled GGUFs as llama.cpp candidates without a
+      # second download. Disabled by default (no OLLAMA_SHARED_MODELS_DIR);
+      # set to /data/ollama_models in .env to enable.
+      - /docker/ai-models/ollama/models:/data/ollama_models:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro

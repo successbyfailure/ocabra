@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
     ollama_keep_alive: str = "30m"
     ollama_inventory_sync_interval_seconds: int = 15
+    # When set, the local scanner reads Ollama's manifest/blob store
+    # (typically mounted at /data/ollama_models when ./data/ollama_models
+    # maps to the host's Ollama models dir) and surfaces each pulled model
+    # as an additional ``llama_cpp``-runnable ``LocalModel`` entry pointing
+    # at the underlying GGUF blob. Empty disables the scan.
+    ollama_shared_models_dir: str = ""
 
     # GPU scheduling
     default_gpu_index: int = 1

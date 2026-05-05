@@ -123,7 +123,7 @@ class OllamaModelVariant(BaseModel):
 class LocalModel(BaseModel):
     model_ref: str
     path: str
-    source: Literal["huggingface", "gguf", "ollama"]
+    source: Literal["huggingface", "gguf", "ollama", "ollama-shared"]
     backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "ollama"]
     size_gb: float | None
     # GGUF tokenizer fingerprint (Sprint 17.4) — used to validate speculative
