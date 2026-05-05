@@ -1017,6 +1017,76 @@ class ModelManager:
                     model_id=model_id,
                 )
 
+    async def _extract_llama_cpp_fingerprint(
+        self, model_id: str, extra_config: dict
+    ) -> tuple[int | None, int | None, int | None]:
+        """Extract ``(vocab_size, bos_id, eos_id)`` from the GGUF for a llama.cpp model.
+
+        Best-effort: any error (backend unavailable, file missing, malformed
+        GGUF) returns ``(None, None, None)`` without raising. The values are
+        used to populate the ``model_configs`` row at registration time so the
+        ``GET /ocabra/models/{id}/speculative-candidates`` endpoint can match
+        compatible draft models without requiring the user to load anything.
+        """
+        from ocabra.registry.local_scanner import parse_gguf_tokenizer_fingerprint
+
+        try:
+            backend = await self._worker_pool.get_backend("llama_cpp")
+        except Exception:
+            return (None, None, None)
+        resolver = getattr(backend, "_resolve_model_file", None)
+        if not callable(resolver):
+            return (None, None, None)
+        try:
+            path = await asyncio.to_thread(resolver, model_id, extra_config)
+        except Exception:
+            return (None, None, None)
+        try:
+            return await asyncio.to_thread(parse_gguf_tokenizer_fingerprint, path)
+        except Exception:
+            return (None, None, None)
+
+    async def refresh_tokenizer_fingerprints(self) -> dict[str, int]:
+        """Backfill ``vocab_size``/``bos_id``/``eos_id`` for existing llama.cpp models.
+
+        Iterates over registered ``llama_cpp`` model_configs, parses the GGUF
+        header and writes the fingerprint columns. Returns a summary
+        ``{updated: int, skipped: int, missing: int}``.
+        """
+        updated = 0
+        skipped = 0
+        missing = 0
+        async with database.AsyncSessionLocal() as session:
+            from sqlalchemy import select, update
+
+            rows = (
+                await session.execute(
+                    select(ModelConfig).where(ModelConfig.backend_type == "llama_cpp")
+                )
+            ).scalars().all()
+            for row in rows:
+                vocab, bos, eos = await self._extract_llama_cpp_fingerprint(
+                    row.model_id, row.extra_config or {}
+                )
+                if vocab is None and bos is None and eos is None:
+                    missing += 1
+                    continue
+                if (
+                    row.vocab_size == vocab
+                    and row.bos_id == bos
+                    and row.eos_id == eos
+                ):
+                    skipped += 1
+                    continue
+                await session.execute(
+                    update(ModelConfig)
+                    .where(ModelConfig.model_id == row.model_id)
+                    .values(vocab_size=vocab, bos_id=bos, eos_id=eos)
+                )
+                updated += 1
+            await session.commit()
+        return {"updated": updated, "skipped": skipped, "missing": missing}
+
     @staticmethod
     def _resolve_keep_alive_seconds(state: "ModelState", global_default: int) -> int:
         """Return the effective idle timeout for a model.
@@ -1163,6 +1233,15 @@ class ModelManager:
         if normalized_model_id in self._states:
             return self._states[normalized_model_id]
 
+        # Sprint 17.4 — extract GGUF tokenizer fingerprint at registration time
+        # so /speculative-candidates can match draft↔target models without
+        # waiting for the first load. Best-effort: failures yield (None,None,None).
+        vocab_size = bos_id = eos_id = None
+        if normalized_backend == "llama_cpp":
+            vocab_size, bos_id, eos_id = await self._extract_llama_cpp_fingerprint(
+                normalized_model_id, extra_config or {}
+            )
+
         async with database.AsyncSessionLocal() as session:
             cfg = ModelConfig(
                 model_id=normalized_model_id,
@@ -1172,6 +1251,9 @@ class ModelManager:
                 auto_reload=auto_reload,
                 preferred_gpu=preferred_gpu,
                 extra_config=extra_config,
+                vocab_size=vocab_size,
+                bos_id=bos_id,
+                eos_id=eos_id,
             )
             session.add(cfg)
             await session.commit()

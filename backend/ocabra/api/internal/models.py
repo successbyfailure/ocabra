@@ -422,6 +422,25 @@ async def list_speculative_candidates(
     )
 
 
+@router.post(
+    "/models/refresh-tokenizer-fingerprints",
+    summary="Backfill llama.cpp tokenizer fingerprints",
+    description=(
+        "Re-parse every registered ``llama_cpp`` model GGUF and write "
+        "``vocab_size``, ``bos_id`` and ``eos_id`` to its ``model_configs`` "
+        "row. Newly registered models pick up the fingerprint at registration "
+        "time; this endpoint is for backfilling rows that pre-date Sprint 17.4."
+    ),
+)
+async def refresh_tokenizer_fingerprints(
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Backfill GGUF tokenizer fingerprints for existing llama.cpp models."""
+    mm = request.app.state.model_manager
+    return await mm.refresh_tokenizer_fingerprints()
+
+
 @router.delete(
     "/models/{model_id:path}",
     summary="Delete a model",
