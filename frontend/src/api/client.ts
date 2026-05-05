@@ -50,6 +50,7 @@ import type {
   FederationPeerCreate,
   FederationPeerUpdate,
   FederationTestResult,
+  LlamaCppConfig,
 } from "@/types"
 
 const BASE = ""
@@ -194,12 +195,32 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
 
   const llamaCppRaw = isRecord(data.llama_cpp) ? data.llama_cpp : {}
   const llamaCppSource = isRecord(data.llama_cpp) ? llamaCppRaw : data
-  if (isRecord(data.llama_cpp) || hasAnyKey(llamaCppSource, ["gpu_layers", "ctx_size", "flash_attn", "embedding"])) {
+  if (
+    isRecord(data.llama_cpp) ||
+    hasAnyKey(llamaCppSource, [
+      "gpu_layers",
+      "ctx_size",
+      "flash_attn",
+      "embedding",
+      "cache_type_k",
+      "cache_type_v",
+    ])
+  ) {
+    const cacheK = (llamaCppSource.cache_type_k ?? llamaCppSource.cacheTypeK) as
+      | string
+      | null
+      | undefined
+    const cacheV = (llamaCppSource.cache_type_v ?? llamaCppSource.cacheTypeV) as
+      | string
+      | null
+      | undefined
     next.llama_cpp = {
       gpuLayers: toNumberOrNull(llamaCppSource, "gpu_layers", "gpuLayers"),
       ctxSize: toNumberOrNull(llamaCppSource, "ctx_size", "ctxSize"),
       flashAttn: Boolean(llamaCppSource.flash_attn ?? llamaCppSource.flashAttn),
       embedding: Boolean(llamaCppSource.embedding),
+      cacheTypeK: (cacheK ?? null) as LlamaCppConfig["cacheTypeK"],
+      cacheTypeV: (cacheV ?? null) as LlamaCppConfig["cacheTypeV"],
     }
   }
 

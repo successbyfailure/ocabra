@@ -143,6 +143,8 @@ export interface SGLangConfig {
   disableRadixCache?: boolean
 }
 
+export type LlamaKvCacheType = "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0"
+
 export interface LlamaCppConfig {
   gpuLayers?: number | null
   ctxSize?: number | null
@@ -159,6 +161,9 @@ export interface LlamaCppConfig {
   noKvOffload?: boolean
   ropeFreqBase?: number | null
   ropeFreqScale?: number | null
+  // Sprint 17.2 — KV cache quantization
+  cacheTypeK?: LlamaKvCacheType | null
+  cacheTypeV?: LlamaKvCacheType | null
 }
 
 export interface BitNetConfig {

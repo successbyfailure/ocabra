@@ -27,6 +27,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-kv-offload", action="store_true")
     parser.add_argument("--rope-freq-base", type=float, default=None)
     parser.add_argument("--rope-freq-scale", type=float, default=None)
+    # Sprint 17.2 — KV cache quantization
+    parser.add_argument("--cache-type-k", default=None)
+    parser.add_argument("--cache-type-v", default=None)
     return parser.parse_args()
 
 
@@ -70,6 +73,11 @@ def main() -> None:
         cmd.extend(["--rope-freq-base", str(args.rope_freq_base)])
     if args.rope_freq_scale is not None:
         cmd.extend(["--rope-freq-scale", str(args.rope_freq_scale)])
+    # Sprint 17.2 — KV cache quantization
+    if args.cache_type_k:
+        cmd.extend(["--cache-type-k", str(args.cache_type_k)])
+    if args.cache_type_v:
+        cmd.extend(["--cache-type-v", str(args.cache_type_v)])
 
     os.execvpe(args.server_bin, cmd, os.environ.copy())
 

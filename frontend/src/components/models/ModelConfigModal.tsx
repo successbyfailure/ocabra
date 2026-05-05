@@ -84,7 +84,11 @@ const LLAMA_CPP_ROOT_KEYS = [
   "no_kv_offload",
   "rope_freq_base",
   "rope_freq_scale",
+  // Sprint 17.2 — KV cache quantization
+  "cache_type_k",
+  "cache_type_v",
 ]
+const LLAMA_KV_CACHE_TYPES = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"] as const
 const BITNET_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn"]
 const TENSORRT_LLM_ROOT_KEYS = ["max_batch_size", "context_length", "trust_remote_code"]
 const WHISPER_ROOT_KEYS = ["diarization_enabled", "diarization_model_id"]
@@ -260,6 +264,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [llamaNoKvOffload, setLlamaNoKvOffload] = useState(false)
   const [llamaRopeFreqBase, setLlamaRopeFreqBase] = useState("")
   const [llamaRopeFreqScale, setLlamaRopeFreqScale] = useState("")
+  // Sprint 17.2 — KV cache quantization
+  const [llamaCacheTypeK, setLlamaCacheTypeK] = useState<string>("")
+  const [llamaCacheTypeV, setLlamaCacheTypeV] = useState<string>("")
 
   const [bitnetGpuLayers, setBitnetGpuLayers] = useState("")
   const [bitnetCtxSize, setBitnetCtxSize] = useState("")
@@ -349,6 +356,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setLlamaRopeFreqScale(
       llamaCpp?.ropeFreqScale == null ? "" : String(llamaCpp.ropeFreqScale),
     )
+    setLlamaCacheTypeK(llamaCpp?.cacheTypeK == null ? "" : String(llamaCpp.cacheTypeK))
+    setLlamaCacheTypeV(llamaCpp?.cacheTypeV == null ? "" : String(llamaCpp.cacheTypeV))
 
     setBitnetGpuLayers(bitnet?.gpuLayers == null ? "" : String(bitnet.gpuLayers))
     setBitnetCtxSize(bitnet?.ctxSize == null ? "" : String(bitnet.ctxSize))
@@ -536,6 +545,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           noKvOffload: llamaNoKvOffload,
           ropeFreqBase: llamaRopeFreqBase === "" ? null : Number(llamaRopeFreqBase),
           ropeFreqScale: llamaRopeFreqScale === "" ? null : Number(llamaRopeFreqScale),
+          // Sprint 17.2 — KV cache quantization
+          cache_type_k: llamaCacheTypeK === "" ? null : llamaCacheTypeK,
+          cache_type_v: llamaCacheTypeV === "" ? null : llamaCacheTypeV,
         },
         LLAMA_CPP_ROOT_KEYS,
       )
@@ -626,7 +638,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     if (!open || !model) return
     const timer = window.setTimeout(() => {
       void estimateMemory(false)
-    }, 250)
+    }, 300)
     return () => window.clearTimeout(timer)
   }, [estimateKey, open, model])
 
@@ -1333,6 +1345,60 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </div>
                   </div>
                 </details>
+                {/* Sprint 17.2 — KV cache quantization */}
+                <div className="space-y-3 rounded-md border border-border/50 bg-muted/20 p-3">
+                  <div>
+                    <h4 className="text-xs font-medium text-foreground">KV cache</h4>
+                    <p className="text-xs text-muted-foreground">
+                      Cuantizar la KV cache reduce VRAM por token de contexto.
+                      `q8_0` ahorra ~50% sin pérdida apreciable; `q4_0` baja a un cuarto a costa de algo de calidad.
+                    </p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">cache_type_k</span>
+                      <select
+                        value={llamaCacheTypeK}
+                        onChange={(event) => setLlamaCacheTypeK(event.target.value)}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        title="Tipo de cuantización de la cache K (keys)."
+                      >
+                        <option value="">auto (f16)</option>
+                        {LLAMA_KV_CACHE_TYPES.map((value) => (
+                          <option key={value} value={value}>
+                            {value}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">cache_type_v</span>
+                      <select
+                        value={llamaCacheTypeV}
+                        onChange={(event) => setLlamaCacheTypeV(event.target.value)}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        title="Tipo de cuantización de la cache V (values). Requiere flash attention si != f16."
+                        disabled={!llamaFlashAttn && llamaCacheTypeV !== "" && llamaCacheTypeV !== "f16"}
+                      >
+                        <option value="">auto (f16)</option>
+                        {LLAMA_KV_CACHE_TYPES.map((value) => (
+                          <option
+                            key={value}
+                            value={value}
+                            disabled={!llamaFlashAttn && value !== "f16"}
+                          >
+                            {value}
+                          </option>
+                        ))}
+                      </select>
+                      {!llamaFlashAttn && llamaCacheTypeV !== "" && llamaCacheTypeV !== "f16" && (
+                        <FieldHint>
+                          cache_type_v cuantizado requiere `flash attention` activo. Marca el checkbox de arriba o vuelve a `f16`.
+                        </FieldHint>
+                      )}
+                    </label>
+                  </div>
+                </div>
               </FieldSection>
             )}
 

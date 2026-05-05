@@ -146,6 +146,11 @@ class LlamaCppBackend(BackendInterface):
             cmd.extend(["--rope-freq-base", str(options["rope_freq_base"])])
         if options["rope_freq_scale"] is not None:
             cmd.extend(["--rope-freq-scale", str(options["rope_freq_scale"])])
+        # Sprint 17.2 — KV cache quantization
+        if options.get("cache_type_k"):
+            cmd.extend(["--cache-type-k", str(options["cache_type_k"])])
+        if options.get("cache_type_v"):
+            cmd.extend(["--cache-type-v", str(options["cache_type_v"])])
 
         env = {
             **os.environ,
@@ -313,7 +318,17 @@ class LlamaCppBackend(BackendInterface):
             "rope_freq_scale": self._to_float_or_none(
                 self._get_option(extra_config, "rope_freq_scale", None)
             ),
+            # Sprint 17.2 — KV cache quantization (None = use llama-server default)
+            "cache_type_k": self._get_option(extra_config, "cache_type_k", None),
+            "cache_type_v": self._get_option(extra_config, "cache_type_v", None),
         }
+        # Sprint 17.2 — quantized V cache requires flash attention.
+        cache_v = options["cache_type_v"]
+        if cache_v is not None and cache_v != "f16" and not options["flash_attn"]:
+            raise ValueError(
+                "cache_type_v != 'f16' requires flash_attn=True (llama.cpp only "
+                "supports quantized V cache when flash attention is enabled)."
+            )
         return options
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:

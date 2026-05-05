@@ -105,10 +105,8 @@ async def list_models(
                 "local": True,
                 "nodes": [
                     {"node_name": "local", "node_id": federation_manager.node_id},
-                ] + [
-                    {"node_name": p.name, "node_id": p.peer_id}
-                    for p in peers_for_model
-                ],
+                ]
+                + [{"node_name": p.name, "node_id": p.peer_id} for p in peers_for_model],
             }
 
         payloads.append(item)
@@ -150,10 +148,7 @@ async def list_models(
                     "federation": {
                         "local": False,
                         "read_only": True,
-                        "nodes": [
-                            {"node_name": p.name, "node_id": p.peer_id}
-                            for p in peers
-                        ],
+                        "nodes": [{"node_name": p.name, "node_id": p.peer_id} for p in peers],
                     },
                 }
             )
@@ -591,6 +586,16 @@ async def _build_model_memory_estimate(
                 )
         return estimate
 
+    if state.backend_type == "llama_cpp":
+        # Sprint 17.2 — deterministic GGUF estimator.
+        return _estimate_llama_cpp_memory(
+            estimate=estimate,
+            state=state,
+            extra_config=extra_config,
+            heuristic_mb=heuristic_mb,
+            total_vram_mb=total_vram_mb,
+        )
+
     if state.backend_type == "tensorrt_llm":
         engine_path = _resolve_extra_config_path(
             extra_config, "engine_dir"
@@ -627,6 +632,103 @@ async def _build_model_memory_estimate(
             "notes": [
                 "Estimación heurística basada en el tamaño de los artefactos locales del modelo."
             ],
+        }
+    )
+    return estimate
+
+
+def _estimate_llama_cpp_memory(
+    *,
+    estimate: dict[str, Any],
+    state,
+    extra_config: dict[str, Any],
+    heuristic_mb: int,
+    total_vram_mb: int | None,
+) -> dict[str, Any]:
+    """Sprint 17.2 — deterministic GGUF VRAM estimator for llama.cpp models.
+
+    Falls back to the legacy heuristic when the GGUF file cannot be located or
+    parsed (e.g. only-on-disk via Ollama, or remote model). The legacy probe
+    remains the source for everything else.
+    """
+    from ocabra.core.llama_cpp_estimator import estimate_vram_safe
+    from ocabra.schemas.backend_load import LlamaCppLoadConfig
+
+    nested = extra_config.get("llama_cpp") if isinstance(extra_config, dict) else None
+    payload = nested if isinstance(nested, dict) else {}
+    try:
+        load_config = LlamaCppLoadConfig.model_validate(payload)
+    except Exception as exc:  # noqa: BLE001 — surface as warning, keep estimate
+        estimate.update(
+            {
+                "estimated_weights_mb": heuristic_mb or None,
+                "fits_current_gpu": (
+                    heuristic_mb <= total_vram_mb
+                    if total_vram_mb is not None and heuristic_mb > 0
+                    else None
+                ),
+                "status": "warning",
+                "warning": f"Configuración llama.cpp inválida: {exc}",
+                "notes": ["Estimación heurística (config inválida)."],
+            }
+        )
+        return estimate
+
+    gguf_path = _resolve_extra_config_path(extra_config, "model_path") or _resolve_local_model_path(
+        state.backend_model_id
+    )
+    gguf_file: Path | None = None
+    if gguf_path is not None:
+        if gguf_path.is_file() and gguf_path.suffix == ".gguf":
+            gguf_file = gguf_path
+        elif gguf_path.is_dir():
+            ggufs = sorted(gguf_path.rglob("*.gguf"))
+            if ggufs:
+                gguf_file = max(ggufs, key=lambda p: p.stat().st_size)
+
+    breakdown = estimate_vram_safe(str(gguf_file), load_config) if gguf_file is not None else None
+
+    if breakdown is None:
+        # Couldn't locate / parse — degrade gracefully to the legacy heuristic.
+        estimate.update(
+            {
+                "estimated_weights_mb": heuristic_mb or None,
+                "fits_current_gpu": (
+                    heuristic_mb <= total_vram_mb
+                    if total_vram_mb is not None and heuristic_mb > 0
+                    else None
+                ),
+                "notes": [
+                    "Estimación heurística: GGUF no encontrado o no parseable.",
+                ],
+            }
+        )
+        return estimate
+
+    bytes_per_mb = 1024 * 1024
+    weights_mb = max(1, breakdown["model_bytes"] // bytes_per_mb)
+    kv_mb = max(0, breakdown["kv_bytes"] // bytes_per_mb)
+    compute_mb = max(0, breakdown["compute_buffer_bytes"] // bytes_per_mb)
+    total_mb = max(1, breakdown["total_bytes"] // bytes_per_mb)
+
+    notes = [
+        "Estimación determinística desde el header GGUF (Sprint 17.2).",
+        f"Desglose en MB — pesos: {weights_mb} · KV: {kv_mb} · compute: {compute_mb} · total: {total_mb}.",
+    ]
+    if load_config.cache_type_k or load_config.cache_type_v:
+        notes.append(
+            "KV cache cuantizado: K="
+            f"{load_config.cache_type_k or 'f16'} · V={load_config.cache_type_v or 'f16'}."
+        )
+
+    estimate.update(
+        {
+            "estimated_weights_mb": weights_mb,
+            "estimated_kv_cache_mb": kv_mb,
+            "model_loading_memory_mb": total_mb,
+            "fits_current_gpu": (total_mb <= total_vram_mb if total_vram_mb is not None else None),
+            "source": "heuristic",
+            "notes": notes,
         }
     )
     return estimate
@@ -982,9 +1084,7 @@ async def _list_agent_entries(user: UserContext) -> list[dict]:
         rows = (
             (
                 await session.execute(
-                    sa.select(Agent)
-                    .options(selectinload(Agent.mcp_links))
-                    .order_by(Agent.slug)
+                    sa.select(Agent).options(selectinload(Agent.mcp_links)).order_by(Agent.slug)
                 )
             )
             .scalars()

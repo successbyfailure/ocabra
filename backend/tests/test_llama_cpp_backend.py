@@ -199,3 +199,87 @@ async def test_all_tier1_flags_combined(tmp_path: Path) -> None:
     )
     for flag in ("--no-mmap", "--seed", "--no-kv-offload", "--rope-freq-base", "--rope-freq-scale"):
         assert flag in args, f"missing {flag} in {args}"
+
+
+# --- Sprint 17.2 — KV cache quantization ---
+
+
+@pytest.mark.asyncio
+async def test_load_passes_cache_type_flags(tmp_path: Path) -> None:
+    gguf = tmp_path / "demo.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        mock_settings.models_dir = str(tmp_path)
+        mock_settings.llama_cpp_server_bin = "/usr/local/bin/llama-server"
+        mock_settings.llama_cpp_gpu_layers = 16
+        mock_settings.llama_cpp_ctx_size = 8192
+        mock_settings.llama_cpp_threads = 8
+        mock_settings.llama_cpp_batch_size = 256
+        mock_settings.llama_cpp_ubatch_size = 64
+        mock_settings.llama_cpp_flash_attn = True  # required for cache_type_v != f16
+        mock_settings.llama_cpp_mlock = False
+        mock_settings.llama_cpp_embeddings = False
+        mock_settings.llama_cpp_startup_timeout_s = 30
+        mock_settings.cuda_device_order = "PCI_BUS_ID"
+
+        extra_config = {
+            "llama_cpp": {
+                "cache_type_k": "q8_0",
+                "cache_type_v": "q4_0",
+            }
+        }
+        await backend.load("demo", [0], port=18032, extra_config=extra_config)
+
+    args = list(create_proc.await_args.args)
+    assert "--cache-type-k" in args
+    assert "q8_0" in args
+    assert "--cache-type-v" in args
+    assert "q4_0" in args
+
+
+@pytest.mark.asyncio
+async def test_load_rejects_quantized_v_without_flash_attn(tmp_path: Path) -> None:
+    gguf = tmp_path / "demo.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    backend = LlamaCppBackend()
+    with patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings:
+        mock_settings.models_dir = str(tmp_path)
+        mock_settings.llama_cpp_server_bin = "/usr/local/bin/llama-server"
+        mock_settings.llama_cpp_gpu_layers = 16
+        mock_settings.llama_cpp_ctx_size = 8192
+        mock_settings.llama_cpp_threads = 8
+        mock_settings.llama_cpp_batch_size = 256
+        mock_settings.llama_cpp_ubatch_size = 64
+        mock_settings.llama_cpp_flash_attn = False  # <-- the gating bit
+        mock_settings.llama_cpp_mlock = False
+        mock_settings.llama_cpp_embeddings = False
+        mock_settings.llama_cpp_startup_timeout_s = 30
+        mock_settings.cuda_device_order = "PCI_BUS_ID"
+
+        extra_config = {"llama_cpp": {"cache_type_v": "q4_0"}}
+        with pytest.raises(ValueError, match="flash_attn"):
+            await backend.load("demo", [0], port=18033, extra_config=extra_config)
+
+
+def test_load_config_validator_rejects_quantized_v_without_flash_attn() -> None:
+    """Pydantic-level validation mirrors the backend gating."""
+    from ocabra.schemas.backend_load import LlamaCppLoadConfig
+
+    with pytest.raises(ValueError, match="flash_attn"):
+        LlamaCppLoadConfig(cache_type_v="q4_0")
+
+    # f16 V cache is fine without flash_attn.
+    cfg = LlamaCppLoadConfig(cache_type_v="f16")
+    assert cfg.cache_type_v == "f16"
+
+    # Quantized V cache works when flash_attn is on.
+    cfg = LlamaCppLoadConfig(cache_type_v="q4_0", flash_attn=True)
+    assert cfg.cache_type_v == "q4_0"
