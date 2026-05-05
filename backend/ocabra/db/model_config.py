@@ -20,6 +20,11 @@ class ModelConfig(Base):
     auto_reload: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     preferred_gpu: Mapped[int | None] = mapped_column(Integer)
     extra_config: Mapped[dict | None] = mapped_column(JSONB)
+    # GGUF tokenizer fingerprint (Sprint 17.4) — populated by the local scanner
+    # for llama.cpp/bitnet models. Nullable for non-GGUF backends.
+    vocab_size: Mapped[int | None] = mapped_column(Integer)
+    bos_id: Mapped[int | None] = mapped_column(Integer)
+    eos_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

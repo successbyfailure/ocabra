@@ -288,6 +288,7 @@ def test_load_config_validator_rejects_quantized_v_without_flash_attn() -> None:
 
 # ---------------------------------------------------------------------------
 # Sprint 17.3 — Multi-GPU + MoE CPU offload
+# Sprint 17.4 — Speculative decoding + runtime alterno + concurrent slots
 # ---------------------------------------------------------------------------
 
 
@@ -306,6 +307,7 @@ def _patch_settings(mock_settings: MagicMock, models_dir: str) -> None:
     mock_settings.llama_cpp_embeddings = False
     mock_settings.llama_cpp_startup_timeout_s = 30
     mock_settings.cuda_device_order = "PCI_BUS_ID"
+    mock_settings.backends_dir = str(Path(models_dir) / "backends")
 
 
 def test_compose_visible_devices_excludes_disabled() -> None:
@@ -418,3 +420,80 @@ def test_compute_evenly_tensor_split_returns_none_without_manager() -> None:
 
     result = asyncio.run(backend._compute_evenly_tensor_split([0, 1]))
     assert result is None
+
+
+# --- Sprint 17.4 — Speculative decoding + runtime alterno ---
+
+
+@pytest.mark.asyncio
+async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
+    """Speculative draft + draft_n/min/p_min should reach llama-server cmd."""
+    target = tmp_path / "target.gguf"
+    target.write_bytes(b"GGUF" * 1024)
+    draft = tmp_path / "draft.gguf"
+    draft.write_bytes(b"GGUF" * 256)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    extra_config = {
+        "llama_cpp": {
+            "speculative": {
+                "draft_model_id": str(draft),
+                "draft_n": 8,
+                "draft_min": 2,
+                "draft_p_min": 0.4,
+            },
+            "parallel_slots": 4,
+            "cont_batching": True,
+        }
+    }
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        await backend.load("target", [1], port=18045, extra_config=extra_config)
+
+    args = list(create_proc.await_args.args)
+    assert "--model-draft" in args
+    assert str(draft) in args
+    assert "--draft-max" in args and args[args.index("--draft-max") + 1] == "8"
+    assert "--draft-min" in args and args[args.index("--draft-min") + 1] == "2"
+    assert "--draft-p-min" in args
+    assert "--parallel" in args and args[args.index("--parallel") + 1] == "4"
+    assert "--cont-batching" in args
+
+
+def test_get_binary_path_default_uses_resolve_server_bin(tmp_path: Path) -> None:
+    backend = LlamaCppBackend()
+    with patch.object(backend, "_resolve_server_bin", return_value="/opt/cuda/llama-server"):
+        assert backend._get_binary_path(None) == "/opt/cuda/llama-server"
+        assert backend._get_binary_path("cuda") == "/opt/cuda/llama-server"
+
+
+def test_get_binary_path_alternate_runtime(tmp_path: Path) -> None:
+    backend = LlamaCppBackend()
+    bin_path = tmp_path / "backends" / "llama_cpp_cpu" / "bin" / "llama-server"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("#!/bin/sh\n")
+
+    with patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings:
+        mock_settings.backends_dir = str(tmp_path / "backends")
+        with patch(
+            "ocabra.backends.llama_cpp_backend.read_backend_metadata",
+            return_value=None,
+        ):
+            assert backend._get_binary_path("cpu") == str(bin_path)
+
+
+def test_get_binary_path_missing_runtime_raises(tmp_path: Path) -> None:
+    backend = LlamaCppBackend()
+    with patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings:
+        mock_settings.backends_dir = str(tmp_path / "backends")
+        with patch(
+            "ocabra.backends.llama_cpp_backend.read_backend_metadata",
+            return_value=None,
+        ):
+            with pytest.raises(FileNotFoundError, match="rocm"):
+                backend._get_binary_path("rocm")

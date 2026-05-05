@@ -981,8 +981,7 @@ class ModelManager:
                 continue
 
     async def check_idle_evictions(self) -> None:
-        if settings.idle_timeout_seconds <= 0:
-            return
+        global_timeout = int(settings.idle_timeout_seconds)
         now = datetime.now(timezone.utc)
         for model_id, state in list(self._states.items()):
             if state.status != ModelStatus.LOADED:
@@ -990,6 +989,14 @@ class ModelManager:
             if state.load_policy != LoadPolicy.ON_DEMAND:
                 continue
             if self.is_busy(model_id):
+                continue
+            # Sprint 17.4 — per-model ``keep_alive_seconds`` override on top
+            # of the global ``idle_timeout_seconds``. Stored under
+            # ``extra_config["llama_cpp"]["keep_alive_seconds"]`` (Tier 4
+            # field). ``0`` or negative disables eviction for the model;
+            # ``None`` falls back to the global default.
+            timeout_s = self._resolve_keep_alive_seconds(state, global_timeout)
+            if timeout_s <= 0:
                 continue
             # Idle clock starts at whichever is more recent: the last request
             # served, or the moment the model was (re)loaded. Without the
@@ -1002,13 +1009,32 @@ class ModelManager:
             if anchor is None:
                 continue
             idle_s = (now - anchor).total_seconds()
-            if idle_s > settings.idle_timeout_seconds:
+            if idle_s > timeout_s:
                 logger.info("idle_eviction", model_id=model_id, idle_s=int(idle_s))
                 self._create_background_task(
                     self.unload(model_id, reason="idle"),
                     task_name=f"idle-unload:{model_id}",
                     model_id=model_id,
                 )
+
+    @staticmethod
+    def _resolve_keep_alive_seconds(state: "ModelState", global_default: int) -> int:
+        """Return the effective idle timeout for a model.
+
+        Looks for ``keep_alive_seconds`` under ``extra_config[backend_type]``
+        first and falls back to ``extra_config["keep_alive_seconds"]`` and
+        finally to ``global_default``.
+        """
+        extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+        section = extra.get(state.backend_type)
+        if isinstance(section, dict):
+            value = section.get("keep_alive_seconds")
+            if isinstance(value, int):
+                return value
+        value = extra.get("keep_alive_seconds")
+        if isinstance(value, int):
+            return value
+        return int(global_default)
 
     async def get_state(self, model_id: str) -> "ModelState | None":
         return self._states.get(model_id)

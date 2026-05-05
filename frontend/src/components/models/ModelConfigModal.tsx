@@ -287,6 +287,21 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [llamaTensorSplit, setLlamaTensorSplit] = useState<Record<number, string>>({})
   const [llamaNCpuMoe, setLlamaNCpuMoe] = useState("")
   const [llamaOverrideTensor, setLlamaOverrideTensor] = useState("")
+  // --- Sprint 17.4 ---
+  const [llamaDraftModelId, setLlamaDraftModelId] = useState("")
+  const [llamaDraftN, setLlamaDraftN] = useState("")
+  const [llamaDraftMin, setLlamaDraftMin] = useState("")
+  const [llamaDraftPMin, setLlamaDraftPMin] = useState("")
+  const [llamaRuntime, setLlamaRuntime] = useState<"" | "cuda" | "rocm" | "vulkan" | "cpu">("")
+  const [llamaParallelSlots, setLlamaParallelSlots] = useState("")
+  const [llamaContBatching, setLlamaContBatching] = useState(true)
+  const [llamaKeepAlive, setLlamaKeepAlive] = useState("")
+  const [speculativeCandidates, setSpeculativeCandidates] = useState<
+    { modelId: string; displayName: string }[]
+  >([])
+  const [installedRuntimes, setInstalledRuntimes] = useState<Set<string>>(
+    new Set(["cuda"]),
+  )
 
   const [bitnetGpuLayers, setBitnetGpuLayers] = useState("")
   const [bitnetCtxSize, setBitnetCtxSize] = useState("")
@@ -405,6 +420,29 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         setLlamaSplitStrategy("")
       }
     }
+    // --- Sprint 17.4 ---
+    setLlamaDraftModelId(llamaCpp?.speculative?.draftModelId ?? "")
+    setLlamaDraftN(
+      llamaCpp?.speculative?.draftN == null ? "" : String(llamaCpp.speculative.draftN),
+    )
+    setLlamaDraftMin(
+      llamaCpp?.speculative?.draftMin == null ? "" : String(llamaCpp.speculative.draftMin),
+    )
+    setLlamaDraftPMin(
+      llamaCpp?.speculative?.draftPMin == null
+        ? ""
+        : String(llamaCpp.speculative.draftPMin),
+    )
+    setLlamaRuntime(llamaCpp?.runtime ?? "")
+    setLlamaParallelSlots(
+      llamaCpp?.parallelSlots == null ? "" : String(llamaCpp.parallelSlots),
+    )
+    setLlamaContBatching(
+      llamaCpp?.contBatching == null ? true : Boolean(llamaCpp.contBatching),
+    )
+    setLlamaKeepAlive(
+      llamaCpp?.keepAliveSeconds == null ? "" : String(llamaCpp.keepAliveSeconds),
+    )
 
     setBitnetGpuLayers(bitnet?.gpuLayers == null ? "" : String(bitnet.gpuLayers))
     setBitnetCtxSize(bitnet?.ctxSize == null ? "" : String(bitnet.ctxSize))
@@ -419,6 +457,43 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
       whisper?.diarizationModelId == null ? "" : String(whisper.diarizationModelId),
     )
   }, [bitnet, llamaCpp, model, sglang, tensorrt, vllm, whisper, gpus])
+
+  // Sprint 17.4 — fetch speculative candidates + installed llama.cpp runtimes
+  // when the modal opens for a llama.cpp model.
+  useEffect(() => {
+    if (!open || !model || model.backendType !== "llama_cpp") return
+    let cancelled = false
+    void (async () => {
+      try {
+        const [candidates, backendsList] = await Promise.all([
+          api.models.speculativeCandidates(model.modelId).catch(() => []),
+          api.backends.list().catch(() => []),
+        ])
+        if (cancelled) return
+        setSpeculativeCandidates(
+          candidates.map((c) => ({ modelId: c.modelId, displayName: c.displayName })),
+        )
+        const installed = new Set<string>()
+        for (const b of backendsList as Array<{ backendType: string; installStatus?: string }>) {
+          if (!b?.backendType?.startsWith("llama_cpp")) continue
+          if (b.installStatus !== "installed") continue
+          if (b.backendType === "llama_cpp") {
+            installed.add("cuda")
+            continue
+          }
+          const runtime = b.backendType.split("_").pop()
+          if (runtime) installed.add(runtime)
+        }
+        if (installed.size === 0) installed.add("cuda")
+        setInstalledRuntimes(installed)
+      } catch {
+        // Best-effort — silent failure leaves the defaults in place.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, model])
 
   // Load groups for system_admin when modal opens
   useEffect(() => {
@@ -608,6 +683,16 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
       const overrideTensorOut: string | null =
         llamaOverrideTensor.trim() === "" ? null : llamaOverrideTensor.trim()
 
+      // Sprint 17.4 — speculative decoding payload
+      const speculative =
+        llamaDraftModelId.trim() === ""
+          ? null
+          : {
+              draftModelId: llamaDraftModelId.trim(),
+              draftN: llamaDraftN === "" ? null : Number(llamaDraftN),
+              draftMin: llamaDraftMin === "" ? null : Number(llamaDraftMin),
+              draftPMin: llamaDraftPMin === "" ? null : Number(llamaDraftPMin),
+            }
       const next = setNestedConfig(
         current,
         "llama_cpp",
@@ -640,6 +725,12 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           splitStrategy: strategyOut,
           nCpuMoe: nCpuMoeOut,
           overrideTensor: overrideTensorOut,
+          // Sprint 17.4
+          speculative,
+          runtime: llamaRuntime === "" ? null : llamaRuntime,
+          parallelSlots: llamaParallelSlots === "" ? null : Number(llamaParallelSlots),
+          contBatching: llamaContBatching,
+          keepAliveSeconds: llamaKeepAlive === "" ? null : Number(llamaKeepAlive),
         },
         LLAMA_CPP_ROOT_KEYS,
       )
@@ -1685,6 +1776,166 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       Texto libre forwarded a `--override-tensor`. Formato `regex=DEVICE`. Solo
                       para usuarios que conocen los nombres de tensores del modelo.
                     </FieldHint>
+                  </label>
+                </div>
+              </FieldSection>
+            )}
+
+            {model?.backendType === "llama_cpp" && (
+              <FieldSection
+                title="Speculative decoding"
+                description="Acelera la generación usando un modelo borrador con tokenizer idéntico."
+              >
+                {speculativeCandidates.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No hay candidatos compatibles. Indexa otro GGUF con el mismo tokenizer
+                    (vocab_size + bos/eos) para habilitar speculative decoding.
+                  </p>
+                ) : (
+                  <>
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">Draft model</span>
+                      <select
+                        value={llamaDraftModelId}
+                        onChange={(event) => setLlamaDraftModelId(event.target.value)}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="">— ninguno —</option>
+                        {speculativeCandidates.map((c) => (
+                          <option key={c.modelId} value={c.modelId}>
+                            {c.displayName}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">draft_n</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={llamaDraftN}
+                          onChange={(event) => setLlamaDraftN(event.target.value)}
+                          placeholder="default"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">draft_min</span>
+                        <input
+                          type="number"
+                          min="0"
+                          value={llamaDraftMin}
+                          onChange={(event) => setLlamaDraftMin(event.target.value)}
+                          placeholder="default"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">draft_p_min</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={llamaDraftPMin}
+                          onChange={(event) => setLlamaDraftPMin(event.target.value)}
+                          placeholder="default"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                    </div>
+                  </>
+                )}
+              </FieldSection>
+            )}
+
+            {model?.backendType === "llama_cpp" && (
+              <FieldSection
+                title="Runtime"
+                description="Elige el binario que ejecuta llama-server. Sólo aparecen los runtimes instalados."
+              >
+                <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                  {(["cuda", "rocm", "vulkan", "cpu"] as const).map((rt) => {
+                    const installed = installedRuntimes.has(rt)
+                    return (
+                      <label
+                        key={rt}
+                        className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+                          installed
+                            ? "cursor-pointer border-border"
+                            : "cursor-not-allowed border-dashed border-border/50 text-muted-foreground"
+                        }`}
+                        title={
+                          installed
+                            ? undefined
+                            : "Instala este runtime desde /backends"
+                        }
+                      >
+                        <input
+                          type="radio"
+                          name="llama-runtime"
+                          checked={llamaRuntime === rt}
+                          disabled={!installed}
+                          onChange={() => setLlamaRuntime(rt)}
+                        />
+                        {rt}
+                      </label>
+                    )
+                  })}
+                  <label className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+                    <input
+                      type="radio"
+                      name="llama-runtime"
+                      checked={llamaRuntime === ""}
+                      onChange={() => setLlamaRuntime("")}
+                    />
+                    default
+                  </label>
+                </div>
+              </FieldSection>
+            )}
+
+            {model?.backendType === "llama_cpp" && (
+              <FieldSection
+                title="Concurrencia"
+                description="Slots paralelos y batching continuo para servir múltiples peticiones a la vez."
+              >
+                <div className="grid gap-4 md:grid-cols-3">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-muted-foreground">parallel_slots</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={llamaParallelSlots}
+                      onChange={(event) => setLlamaParallelSlots(event.target.value)}
+                      placeholder="1"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-muted-foreground">
+                      keep_alive_seconds
+                    </span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={llamaKeepAlive}
+                      onChange={(event) => setLlamaKeepAlive(event.target.value)}
+                      placeholder="global"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                    />
+                    <FieldHint>
+                      Override del idle eviction global. `0` desactiva la evicción.
+                    </FieldHint>
+                  </label>
+                  <label className="inline-flex items-center gap-2 self-end pb-2 text-sm text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={llamaContBatching}
+                      onChange={(event) => setLlamaContBatching(event.target.checked)}
+                    />
+                    cont batching
                   </label>
                 </div>
               </FieldSection>

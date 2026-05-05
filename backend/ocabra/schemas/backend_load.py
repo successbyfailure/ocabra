@@ -7,8 +7,13 @@ can serialise with ``model_dump(exclude_none=True)`` and let the runtime fall
 back to the global defaults defined in ``ocabra.config.settings``.
 
 Owner: Bloque 17 of the llama.cpp loader parity plan
-(``docs/tasks/llama-cpp-parity-plan.md``). Each Sprint (17.1-17.4) only ADDS
-fields to :class:`LlamaCppLoadConfig`; never rename or remove existing ones.
+(``docs/tasks/llama-cpp-parity-plan.md``).
+
+The schema is **strictly additive** across the four sprints:
+    * 17.1 — Tier 1 (foundation + trivial flags).
+    * 17.2 — KV-quant fields.
+    * 17.3 — Multi-GPU + MoE offload.
+    * 17.4 — Speculative decoding, alternate runtime, concurrent slots.
 """
 
 from __future__ import annotations
@@ -24,11 +29,38 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 KvCacheType = Literal["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"]
 SplitMode = Literal["layer", "row", "none"]
 SplitStrategy = Literal["evenly", "favor_main"]
+RuntimeType = Literal["cuda", "rocm", "vulkan", "cpu"]
 
 
 # ---------------------------------------------------------------------------
 # llama.cpp
 # ---------------------------------------------------------------------------
+
+
+class SpeculativeConfig(BaseModel):
+    """Speculative decoding parameters (Sprint 17.4).
+
+    The draft model must be a llama.cpp-compatible GGUF with the same
+    tokenizer (``vocab_size``, ``bos_id``, ``eos_id``) as the target model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_model_id: str = Field(
+        description="Canonical model_id of the draft (smaller) model.",
+    )
+    draft_n: int | None = Field(
+        default=None,
+        description="Maximum draft tokens to predict per step (--draft-max).",
+    )
+    draft_min: int | None = Field(
+        default=None,
+        description="Minimum draft tokens before validating (--draft-min).",
+    )
+    draft_p_min: float | None = Field(
+        default=None,
+        description="Minimum acceptance probability for drafts (--draft-p-min).",
+    )
 
 
 class LlamaCppLoadConfig(BaseModel):
@@ -67,59 +99,20 @@ class LlamaCppLoadConfig(BaseModel):
     cache_type_v: KvCacheType | None = None  # requires flash_attn=True if != f16
 
     # --- Sprint 17.3 (Multi-GPU + MoE CPU offload) ---
-    main_gpu: int | None = Field(
-        default=None,
-        description=(
-            "Index of the GPU that hosts non-split tensors and acts as the "
-            "primary device. Maps to llama-server's --main-gpu."
-        ),
-        ge=0,
-    )
-    tensor_split: list[float] | None = Field(
-        default=None,
-        description=(
-            "Per-GPU split ratios passed to llama-server's --tensor-split. "
-            "When omitted and split_strategy='evenly', oCabra autocomputes "
-            "values proportional to each GPU's total VRAM."
-        ),
-    )
-    split_mode: SplitMode | None = Field(
-        default=None,
-        description=(
-            "How to split the model across GPUs: 'layer' splits by layers "
-            "(default), 'row' splits within each layer, 'none' keeps the "
-            "model on a single GPU."
-        ),
-    )
-    disabled_gpus: list[int] | None = Field(
-        default=None,
-        description=(
-            "GPU indices to exclude from CUDA_VISIBLE_DEVICES regardless of "
-            "the scheduler's assignment."
-        ),
-    )
-    split_strategy: SplitStrategy | None = Field(
-        default=None,
-        description=(
-            "Auto-split helper: 'evenly' computes tensor_split proportional "
-            "to total VRAM per GPU; 'favor_main' biases the main_gpu."
-        ),
-    )
-    n_cpu_moe: int | None = Field(
-        default=None,
-        description=(
-            "Number of MoE expert layers kept on CPU instead of GPU. Maps to "
-            "llama-server's --n-cpu-moe. 0 disables CPU offload."
-        ),
-        ge=0,
-    )
-    override_tensor: str | None = Field(
-        default=None,
-        description=(
-            "Free-form regex=DEVICE override forwarded as-is to "
-            "llama-server's --override-tensor. Advanced; see llama.cpp docs."
-        ),
-    )
+    main_gpu: int | None = Field(default=None, ge=0)
+    tensor_split: list[float] | None = None
+    split_mode: SplitMode | None = None
+    disabled_gpus: list[int] | None = None
+    split_strategy: SplitStrategy | None = None
+    n_cpu_moe: int | None = Field(default=None, ge=0)
+    override_tensor: str | None = None
+
+    # --- Sprint 17.4 (Speculative decoding + runtime + concurrent slots) ---
+    speculative: SpeculativeConfig | None = None
+    runtime: RuntimeType | None = None
+    parallel_slots: int | None = Field(default=None, ge=1)
+    cont_batching: bool | None = None
+    keep_alive_seconds: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _validate_cache_type_v_requires_flash_attn(self) -> LlamaCppLoadConfig:

@@ -121,6 +121,12 @@ class LocalModel(BaseModel):
     source: Literal["huggingface", "gguf", "ollama"]
     backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "ollama"]
     size_gb: float | None
+    # GGUF tokenizer fingerprint (Sprint 17.4) — used to validate speculative
+    # decoding draft compatibility. Only populated for ``source="gguf"`` entries
+    # where the header could be parsed.
+    vocab_size: int | None = None
+    bos_id: int | None = None
+    eos_id: int | None = None
 
 
 class DownloadJob(BaseModel):

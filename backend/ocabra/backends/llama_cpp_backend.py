@@ -166,7 +166,7 @@ class LlamaCppBackend(BackendInterface):
             sys.executable,
             str(_WORKER_PATH),
             "--server-bin",
-            self._resolve_server_bin(),
+            self._get_binary_path(options.get("runtime")),
             "--model-id",
             model_id,
             "--model-path",
@@ -229,6 +229,28 @@ class LlamaCppBackend(BackendInterface):
             cmd.extend(["--n-cpu-moe", str(int(options["n_cpu_moe"]))])
         if options.get("override_tensor"):
             cmd.extend(["--override-tensor", str(options["override_tensor"])])
+
+        # --- Sprint 17.4 — speculative decoding + concurrency ---
+        speculative = options.get("speculative")
+        if isinstance(speculative, dict):
+            draft_id = speculative.get("draft_model_id")
+            if draft_id:
+                draft_path = self._resolve_draft_model_path(str(draft_id))
+                cmd.extend(["--model-draft", str(draft_path)])
+                draft_n = speculative.get("draft_n")
+                if draft_n is not None:
+                    cmd.extend(["--draft-max", str(int(draft_n))])
+                draft_min = speculative.get("draft_min")
+                if draft_min is not None:
+                    cmd.extend(["--draft-min", str(int(draft_min))])
+                draft_p_min = speculative.get("draft_p_min")
+                if draft_p_min is not None:
+                    cmd.extend(["--draft-p-min", str(float(draft_p_min))])
+
+        if options.get("parallel_slots") is not None:
+            cmd.extend(["--parallel", str(int(options["parallel_slots"]))])
+        if options.get("cont_batching"):
+            cmd.append("--cont-batching")
 
         env = {
             **os.environ,
@@ -416,6 +438,18 @@ class LlamaCppBackend(BackendInterface):
             "n_cpu_moe": self._to_int_or_none(self._get_option(extra_config, "n_cpu_moe", None)),
             "override_tensor": self._normalize_str(
                 self._get_option(extra_config, "override_tensor", None)
+            ),
+            # --- Sprint 17.4 ---
+            "speculative": self._get_option(extra_config, "speculative", None),
+            "runtime": self._get_option(extra_config, "runtime", None),
+            "parallel_slots": self._to_int_or_none(
+                self._get_option(extra_config, "parallel_slots", None)
+            ),
+            "cont_batching": self._to_bool_or_none(
+                self._get_option(extra_config, "cont_batching", None)
+            ),
+            "keep_alive_seconds": self._to_int_or_none(
+                self._get_option(extra_config, "keep_alive_seconds", None)
             ),
         }
         # Sprint 17.2 — quantized V cache requires flash attention.
@@ -660,3 +694,48 @@ class LlamaCppBackend(BackendInterface):
         if smallest <= 0:
             return None
         return [round(r / smallest, 4) for r in ratios]
+
+    def _get_binary_path(self, runtime: str | None) -> str:
+        """Resolve the ``llama-server`` binary path for a given runtime variant.
+
+        Sprint 17.4 introduces optional ``runtime`` selection
+        (``cuda``/``rocm``/``vulkan``/``cpu``). When ``runtime`` is ``None`` or
+        ``"cuda"`` the existing default lookup is used. For alternate runtimes
+        the installer is expected to have placed a binary under
+        ``<backends_dir>/llama_cpp_<runtime>/bin/llama-server``; if missing we
+        raise a clear error pointing to the ``/backends`` page.
+        """
+        if runtime is None or runtime == "cuda":
+            return self._resolve_server_bin()
+
+        backend_name = f"llama_cpp_{runtime}"
+        meta = read_backend_metadata(settings.backends_dir, backend_name)
+        if meta is not None and isinstance(meta, dict):
+            extra = meta.get("extra_bins")
+            if isinstance(extra, dict):
+                bin_path = extra.get("server")
+                if bin_path and Path(bin_path).is_file():
+                    return str(bin_path)
+
+        # Fallback: convention-based location.
+        candidate = Path(settings.backends_dir) / backend_name / "bin" / "llama-server"
+        if candidate.is_file():
+            return str(candidate)
+
+        raise FileNotFoundError(
+            f"llama.cpp runtime '{runtime}' is not installed. "
+            f"Install it from the /backends page (variant 'llama_cpp:{runtime}')."
+        )
+
+    def _resolve_draft_model_path(self, draft_model_id: str) -> Path:
+        """Resolve a draft model_id into a local GGUF path.
+
+        Strategy:
+            1. If the value is an existing file path, use it.
+            2. Otherwise treat it as a canonical model_id and re-use the
+               regular ``_resolve_model_file`` lookup over ``settings.models_dir``.
+        """
+        direct = Path(draft_model_id)
+        if direct.is_file():
+            return direct
+        return self._resolve_model_file(draft_model_id, {})

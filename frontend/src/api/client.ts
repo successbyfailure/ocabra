@@ -1034,6 +1034,38 @@ export const api = {
         run_probe: Boolean(body.runProbe),
       }).then(toModelMemoryEstimate),
     delete: (modelId: string) => request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
+    // Sprint 17.4 — list llama.cpp models compatible as speculative-decoding drafts.
+    speculativeCandidates: async (
+      modelId: string,
+    ): Promise<
+      {
+        modelId: string
+        displayName: string
+        vocabSize: number | null
+        bosId: number | null
+        eosId: number | null
+      }[]
+    > => {
+      const rows = await request<
+        {
+          model_id: string
+          display_name: string
+          vocab_size: number | null
+          bos_id: number | null
+          eos_id: number | null
+        }[]
+      >(
+        "GET",
+        `/ocabra/models/${encodeURIComponent(modelId)}/speculative-candidates`,
+      )
+      return rows.map((row) => ({
+        modelId: row.model_id,
+        displayName: row.display_name,
+        vocabSize: row.vocab_size,
+        bosId: row.bos_id,
+        eosId: row.eos_id,
+      }))
+    },
   },
 
   profiles: {

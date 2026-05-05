@@ -40,6 +40,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-cpu-moe", type=int, default=None)
     parser.add_argument("--override-tensor", default=None)
+    # --- Sprint 17.4 — speculative decoding + concurrent slots ---
+    parser.add_argument("--model-draft", default=None)
+    parser.add_argument("--draft-max", type=int, default=None)
+    parser.add_argument("--draft-min", type=int, default=None)
+    parser.add_argument("--draft-p-min", type=float, default=None)
+    parser.add_argument("--parallel", type=int, default=None)
+    parser.add_argument("--cont-batching", action="store_true")
     return parser.parse_args()
 
 
@@ -99,6 +106,20 @@ def main() -> None:
         cmd.extend(["--n-cpu-moe", str(args.n_cpu_moe)])
     if args.override_tensor:
         cmd.extend(["--override-tensor", args.override_tensor])
+
+    # --- Sprint 17.4 ---
+    if args.model_draft:
+        cmd.extend(["--model-draft", args.model_draft])
+    if args.draft_max is not None:
+        cmd.extend(["--draft-max", str(args.draft_max)])
+    if args.draft_min is not None:
+        cmd.extend(["--draft-min", str(args.draft_min)])
+    if args.draft_p_min is not None:
+        cmd.extend(["--draft-p-min", str(args.draft_p_min)])
+    if args.parallel is not None:
+        cmd.extend(["--parallel", str(args.parallel)])
+    if args.cont_batching:
+        cmd.append("--cont-batching")
 
     os.execvpe(args.server_bin, cmd, os.environ.copy())
 

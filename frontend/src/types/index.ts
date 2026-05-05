@@ -146,6 +146,14 @@ export interface SGLangConfig {
 export type LlamaKvCacheType = "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0"
 export type LlamaCppSplitMode = "layer" | "row" | "none"
 export type LlamaCppSplitStrategy = "evenly" | "favor_main" | "single"
+export type LlamaCppRuntime = "cuda" | "rocm" | "vulkan" | "cpu"
+
+export interface SpeculativeConfig {
+  draftModelId: string
+  draftN?: number | null
+  draftMin?: number | null
+  draftPMin?: number | null
+}
 
 export interface LlamaCppConfig {
   gpuLayers?: number | null
@@ -174,6 +182,12 @@ export interface LlamaCppConfig {
   splitStrategy?: LlamaCppSplitStrategy | null
   nCpuMoe?: number | null
   overrideTensor?: string | null
+  // --- Sprint 17.4 ---
+  speculative?: SpeculativeConfig | null
+  runtime?: LlamaCppRuntime | null
+  parallelSlots?: number | null
+  contBatching?: boolean | null
+  keepAliveSeconds?: number | null
 }
 
 export interface BitNetConfig {
