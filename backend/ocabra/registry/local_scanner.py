@@ -210,7 +210,10 @@ class LocalScanner:
                 continue
 
             if path.is_file() and path.suffix.lower() == ".gguf":
-                backend_type = "bitnet" if self._is_bitnet_gguf(path) else "vllm"
+                # GGUF is the native llama.cpp format; default to llama_cpp.
+                # Bitnet quantizations (i2_s, "bitnet" in name) need their
+                # specialised backend.
+                backend_type = "bitnet" if self._is_bitnet_gguf(path) else "llama_cpp"
                 vocab_size, bos_id, eos_id = parse_gguf_tokenizer_fingerprint(path)
                 models.append(
                     LocalModel(

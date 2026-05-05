@@ -67,6 +67,11 @@ class HFModelCard(BaseModel):
     tags: list[str]
     gated: bool
     suggested_backend: str
+    # Backends compatible con este repo (incluyendo el ``suggested_backend``
+    # como primer elemento). Permite a la UI ofrecer al usuario una elección
+    # explícita cuando el repo expone múltiples formatos (p.ej. safetensors
+    # + GGUF en el mismo upload). G3 — añadido junto al soporte llama.cpp.
+    backend_options: list[str] = Field(default_factory=list)
     compatibility: str = "unknown"
     compatibility_reason: str | None = None
     vllm_support: HFVLLMSupport | None = None

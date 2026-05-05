@@ -124,10 +124,10 @@ class HuggingFaceRegistry:
         self._runtime_probe = VLLMRuntimeProbeService()
 
     async def infer_backend_for_repo(self, repo_id: str, artifact: str | None = None) -> str:
+        # GGUF artifacts go to llama.cpp directly without inspecting the repo
+        # metadata — the format unambiguously identifies the runtime.
         if artifact and artifact.lower().endswith(".gguf"):
-            raise ValueError(
-                "HF GGUF artifacts are not supported; use the Ollama registry flow instead"
-            )
+            return "llama_cpp"
         info = await asyncio.to_thread(
             lambda: model_info(
                 repo_id=repo_id, files_metadata=False, token=settings.hf_token or None
@@ -173,6 +173,20 @@ class HuggingFaceRegistry:
                 repo_id=model.id,
                 sibling_names=[str(getattr(s, "rfilename", "")) for s in siblings],
             )
+            sibling_names = [str(getattr(s, "rfilename", "")) for s in siblings]
+            primary_backend = self._infer_backend(
+                task=getattr(model, "pipeline_tag", None),
+                siblings=[
+                    {
+                        "rfilename": getattr(s, "rfilename", ""),
+                        "size": getattr(s, "size", None),
+                    }
+                    for s in siblings
+                ],
+                tags=list(getattr(model, "tags", []) or []),
+                library_name=getattr(model, "library_name", None),
+                repo_id=model.id,
+            )
             cards.append(
                 HFModelCard(
                     repo_id=model.id,
@@ -183,19 +197,8 @@ class HuggingFaceRegistry:
                     size_gb=(size_bytes / (1024**3)) if size_bytes > 0 else None,
                     tags=list(getattr(model, "tags", []) or []),
                     gated=bool(getattr(model, "gated", False)),
-                    suggested_backend=self._infer_backend(
-                        task=getattr(model, "pipeline_tag", None),
-                        siblings=[
-                            {
-                                "rfilename": getattr(s, "rfilename", ""),
-                                "size": getattr(s, "size", None),
-                            }
-                            for s in siblings
-                        ],
-                        tags=list(getattr(model, "tags", []) or []),
-                        library_name=getattr(model, "library_name", None),
-                        repo_id=model.id,
-                    ),
+                    suggested_backend=primary_backend,
+                    backend_options=self._backend_options(primary_backend, sibling_names),
                     compatibility=self._compatibility_from_vllm_support(vllm_support),
                     compatibility_reason=self._compatibility_reason_from_support(vllm_support),
                     vllm_support=vllm_support,
@@ -255,6 +258,9 @@ class HuggingFaceRegistry:
             siblings=siblings,
             readme_excerpt=None,
             suggested_backend=suggested_backend,
+            backend_options=self._backend_options(
+                suggested_backend, [str(s.get("rfilename", "")) for s in siblings]
+            ),
             estimated_vram_gb=(safetensors_bytes / (1024**3) * 1.3)
             if safetensors_bytes > 0
             else None,
@@ -324,6 +330,12 @@ class HuggingFaceRegistry:
                 )
             )
 
+        # llama.cpp GGUF variants — one per file. Each quantization is its own
+        # download because the GGUFs are independent and the user is expected
+        # to pick a single quality/VRAM trade-off.
+        gguf_variants = self._gguf_variants(items=items, has_standard=has_standard)
+        variants.extend(gguf_variants)
+
         if not variants:
             variants.append(
                 HFModelVariant(
@@ -351,11 +363,6 @@ class HuggingFaceRegistry:
         progress_callback: Callable[[float, float | None], None],
         artifact: str | None = None,
     ) -> Path:
-        if artifact and artifact.lower().endswith(".gguf"):
-            raise ValueError(
-                "HF GGUF artifacts are not supported; use the Ollama registry flow instead"
-            )
-
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
         info = await asyncio.to_thread(
             lambda: model_info(
@@ -482,7 +489,41 @@ class HuggingFaceRegistry:
             return "chatterbox"
         if self._looks_like_tts_repo(repo_name, normalized_tags, normalized_library, names):
             return "tts"
+        # GGUF-only repos (typical for *-GGUF mirror repos): llama.cpp is the
+        # right runtime. Detected as a hint when there are no transformers
+        # weights at all but at least one .gguf file is present.
+        if (
+            any(name.endswith(".gguf") for name in names)
+            and not any(name.endswith((".safetensors", ".bin")) for name in names)
+        ):
+            return "llama_cpp"
         return "vllm"
+
+    def _backend_options(
+        self,
+        primary: str,
+        names: list[str],
+    ) -> list[str]:
+        """Return the list of compatible backends for a repo.
+
+        Used by the search/explore UI when a repo ships multiple formats so
+        the user can pick (e.g. transformers safetensors + GGUF quants in
+        the same upload). The primary hint is always first.
+        """
+        options = [primary]
+        lowered = [name.lower() for name in names]
+        # If the primary is not llama.cpp but there are .gguf files alongside,
+        # surface llama.cpp as an alternative.
+        if primary != "llama_cpp" and any(name.endswith(".gguf") for name in lowered):
+            options.append("llama_cpp")
+        # If the primary is llama.cpp but transformers weights are also
+        # present (rare but possible — base model + GGUF mirror in one repo),
+        # offer vllm as an alternative.
+        if primary == "llama_cpp" and any(
+            name.endswith((".safetensors", ".bin")) for name in lowered
+        ):
+            options.append("vllm")
+        return options
 
     def _has_supported_hf_payload(
         self,
@@ -501,6 +542,8 @@ class HuggingFaceRegistry:
             return any(name.endswith((".safetensors", ".bin")) for name in lowered)
         if backend_hint == "whisper":
             return any(name.endswith((".safetensors", ".bin", ".pt", ".nemo")) for name in lowered)
+        if backend_hint == "llama_cpp":
+            return any(name.endswith(".gguf") for name in lowered)
         return any(name.endswith((".safetensors", ".bin")) for name in lowered)
 
     def _looks_like_diffusers_repo(
@@ -560,7 +603,7 @@ class HuggingFaceRegistry:
     ) -> list[str] | None:
         names = [name.lower() for name in siblings]
         if artifact:
-            return [
+            patterns = [
                 artifact,
                 "*.json",
                 "*.model",
@@ -571,6 +614,16 @@ class HuggingFaceRegistry:
                 "README*",
                 "LICENSE*",
             ]
+            # Multi-shard GGUF: artifact looks like "model-00001-of-00003.gguf".
+            # Add a glob so all shards are downloaded together.
+            shard_match = re.search(
+                r"^(.*)-\d{5}-of-(\d{5})\.gguf$", artifact, re.IGNORECASE
+            )
+            if shard_match:
+                base = shard_match.group(1)
+                shard_total = shard_match.group(2)
+                patterns.append(f"{base}-*-of-{shard_total}.gguf")
+            return patterns
 
         if backend_hint == "diffusers" or any("model_index.json" in name for name in names):
             return None
@@ -587,6 +640,21 @@ class HuggingFaceRegistry:
                 "tokenizer*",
                 "vocab*",
                 "merges*",
+                "README*",
+                "LICENSE*",
+            ]
+
+        if backend_hint == "llama_cpp":
+            # When no specific artifact was requested, allow every GGUF in the
+            # repo plus the usual tokenizer/config files. Most GGUF mirror
+            # repos ship a single quantization, so this matches the common
+            # case; for repos with multiple GGUFs the user should pick a
+            # variant which fills `artifact` and constrains the download.
+            return [
+                "*.gguf",
+                "*.json",
+                "*.model",
+                "tokenizer*",
                 "README*",
                 "LICENSE*",
             ]
@@ -638,7 +706,85 @@ class HuggingFaceRegistry:
             return ".safetensors|.bin"
         if backend_hint == "whisper":
             return ".nemo|.safetensors|.bin|.pt"
+        if backend_hint == "llama_cpp":
+            return ".gguf"
         return ".safetensors|.bin"
+
+    def _gguf_variants(
+        self, items: list[dict[str, Any]], has_standard: bool
+    ) -> list[HFModelVariant]:
+        """One ``HFModelVariant`` per ``.gguf`` file in the repo.
+
+        Each GGUF in a HF repo is a self-contained quantization, so we expose
+        them as independent variants targeting the ``llama_cpp`` backend.
+        Multi-part GGUFs (``*-00001-of-00003.gguf``) are grouped under a
+        single variant keyed on the base name; the variant downloads all
+        shards via a glob pattern.
+        """
+        gguf_items = [item for item in items if item["name"].lower().endswith(".gguf")]
+        if not gguf_items:
+            return []
+
+        # Group multi-part shards: same prefix before "-00001-of-NNNNN".
+        shard_re = re.compile(r"-\d{5}-of-\d{5}\.gguf$", re.IGNORECASE)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for item in gguf_items:
+            stem = shard_re.sub("", item["name"])
+            groups.setdefault(stem, []).append(item)
+
+        variants: list[HFModelVariant] = []
+        # Sort groups so the most useful quantization tends to come first.
+        # Heuristic: prefer Q4_K_M, then by size ascending (lighter quants
+        # first). For a typical GGUF mirror the user will want a moderate
+        # quant rather than the largest.
+        def _sort_key(group_name: str) -> tuple[int, str]:
+            quant = self._extract_quant_from_filename(group_name) or ""
+            preferred = {"Q4_K_M": 0, "Q5_K_M": 1, "Q4_K_S": 2, "Q8_0": 3}
+            return (preferred.get(quant, 99), group_name.lower())
+
+        sorted_names = sorted(groups.keys(), key=_sort_key)
+        any_default_assigned = False
+        for stem in sorted_names:
+            shards = sorted(groups[stem], key=lambda entry: entry["name"].lower())
+            primary = shards[0]
+            total_size = sum(entry["size"] for entry in shards if entry["size"])
+            quant = self._extract_quant_from_filename(stem) or self._extract_quant_from_filename(
+                primary["name"]
+            )
+            label_quant = quant or "GGUF"
+            if len(shards) > 1:
+                label = f"{label_quant} ({len(shards)} shards)"
+                # For multi-shard, set artifact to the first part so the
+                # downloader can derive the glob; the allow_patterns logic
+                # treats the prefix as the match.
+                artifact = primary["name"]
+            else:
+                label = f"{label_quant}"
+                artifact = primary["name"]
+            # Use first listed quant as default only if there is no standard
+            # safetensors variant; otherwise standard remains the default.
+            is_default = not has_standard and not any_default_assigned
+            if is_default:
+                any_default_assigned = True
+            variants.append(
+                HFModelVariant(
+                    variant_id=Path(stem).stem.replace("/", "_") or "gguf",
+                    label=label,
+                    artifact=artifact,
+                    size_gb=(total_size / (1024**3)) if total_size > 0 else None,
+                    format="gguf",
+                    quantization=quant,
+                    backend_type="llama_cpp",
+                    is_default=is_default,
+                    installable=True,
+                    compatibility="compatible",
+                    compatibility_reason=(
+                        f"GGUF artifact {primary['name']} for llama.cpp."
+                    ),
+                    vllm_support=None,
+                )
+            )
+        return variants
 
     def _nemo_variants(self, repo_id: str, items: list[dict[str, Any]]) -> list[HFModelVariant]:
         nemo_items = [item for item in items if item["name"].lower().endswith(".nemo")]
