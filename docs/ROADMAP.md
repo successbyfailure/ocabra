@@ -318,21 +318,10 @@ cb3f61b, 727987a).
 
 ### Pendiente del bloque 17
 
-- **Wiring scanner→DB del fingerprint del tokenizer**: las columnas
-  `vocab_size`/`bos_id`/`eos_id` en `model_configs` (migración 0019) y la
-  extracción en `local_scanner.parse_gguf_tokenizer_fingerprint()` están en
-  su sitio, pero no hay path que persista los valores al añadir un modelo
-  via `POST /ocabra/models`. El endpoint `GET /ocabra/models/{id}/speculative-candidates`
-  funciona pero devolverá vacío hasta que se backfill manualmente o se
-  amplíe `add_model()` para aceptar y guardar estos campos. Tarea pequeña
-  para próxima iteración.
 - **Tests speculative pendientes de container rebuild**: 3 tests en
   `test_llama_cpp_speculative.py` requieren `fastapi` (no está en el host
   Python). Funcionan en contenedor tras `docker compose build api`. Los
-  43 tests restantes (Sprint 17.1-17.3 + parte 17.4) pasan en host.
-- **Limpieza opcional**: el directorio raíz `/docker/ocabra/workers/` tiene
-  duplicados legacy (`llama_cpp_worker.py`, `vllm_worker.py`, etc.) que ya
-  no se importan desde producción. PR aparte para borrarlos.
+  66 tests restantes pasan en host (Sprint 17.1-17.4 + estimator + e2e).
 
 ### Sprint 17.1 — Tier 1: flags triviales en UI per-model
 
