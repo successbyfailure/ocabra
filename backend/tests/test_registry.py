@@ -136,7 +136,7 @@ def test_vllm_recipe_detects_qwen3_defaults() -> None:
     assert recipe.recipe_id == "qwen3"
     assert recipe.model_impl == "vllm"
     assert recipe.runner == "generate"
-    assert recipe.suggested_config["tool_call_parser"] == "qwen3_json"
+    assert recipe.suggested_config["tool_call_parser"] == "qwen3_xml"
     assert recipe.suggested_tuning["gpu_memory_utilization"] == 0.9
     assert "reasoning_parser" in recipe.required_overrides
 
@@ -254,7 +254,7 @@ async def test_hf_detail_exposes_recipe_metadata(monkeypatch: pytest.MonkeyPatch
     assert detail.vllm_support.recipe_id == "qwen3"
     assert detail.vllm_support.recipe_model_impl == "vllm"
     assert detail.vllm_support.recipe_runner == "generate"
-    assert detail.vllm_support.suggested_config["tool_call_parser"] == "qwen3_json"
+    assert detail.vllm_support.suggested_config["tool_call_parser"] == "qwen3_xml"
     assert detail.vllm_support.suggested_tuning["gpu_memory_utilization"] == 0.9
     assert "reasoning_parser" in detail.vllm_support.required_overrides
 

@@ -370,7 +370,6 @@ class TestLoadUnload:
             mock_settings.vllm_tensor_parallel_size = None
             mock_settings.vllm_max_model_len = None
             mock_settings.vllm_enable_chunked_prefill = None
-            mock_settings.vllm_swap_space = None
             mock_settings.vllm_kv_cache_dtype = "fp8"
             mock_settings.vllm_enforce_eager = False
             mock_settings.vllm_attention_backend = None
@@ -415,7 +414,6 @@ class TestLoadUnload:
             mock_settings.vllm_tensor_parallel_size = None
             mock_settings.vllm_max_model_len = None
             mock_settings.vllm_enable_chunked_prefill = None
-            mock_settings.vllm_swap_space = None
             mock_settings.vllm_kv_cache_dtype = "fp8"
             mock_settings.vllm_enforce_eager = False
             mock_settings.vllm_attention_backend = None
@@ -432,7 +430,6 @@ class TestLoadUnload:
                         "max_num_seqs": 4,
                         "max_num_batched_tokens": 2048,
                         "enable_chunked_prefill": True,
-                        "swap_space": 8,
                         "kv_cache_dtype": None,
                         "enforce_eager": True,
                         "attention_backend": "FLASH_ATTN",
@@ -452,8 +449,8 @@ class TestLoadUnload:
         assert "--max-num-batched-tokens" in cmd
         assert "2048" in cmd
         assert "--enable-chunked-prefill" in cmd
-        assert "--swap-space" in cmd
-        assert "8" in cmd
+        # swap_space removed in vLLM 0.19+ — flag should never be emitted
+        assert "--swap-space" not in cmd
         assert "--kv-cache-dtype" not in cmd
         assert "--enforce-eager" in cmd
         assert "--attention-backend" in cmd

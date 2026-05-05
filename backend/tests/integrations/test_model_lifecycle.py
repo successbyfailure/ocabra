@@ -105,7 +105,10 @@ class TestModelLifecycle:
             await model_manager.load(model_id)
             state = await model_manager.get_state(model_id)
             assert state is not None
+            # Force both anchors into the past: the eviction watchdog uses
+            # max(last_request_at, loaded_at) so loaded_at must also be old.
             state.last_request_at = datetime(2020, 1, 1, tzinfo=UTC)
+            state.loaded_at = datetime(2020, 1, 1, tzinfo=UTC)
 
             await model_manager.check_idle_evictions()
             await asyncio.sleep(0.05)
