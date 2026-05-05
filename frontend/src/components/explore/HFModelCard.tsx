@@ -61,7 +61,19 @@ export function HFModelCard({ model, onInstall }: HFModelCardProps) {
         <span className="rounded bg-muted px-2 py-0.5">downloads {model.downloads.toLocaleString()}</span>
         <span className="rounded bg-muted px-2 py-0.5">task {model.task ?? "unknown"}</span>
         <span className="rounded bg-muted px-2 py-0.5">size {sizeLabel}</span>
-        <span className="rounded bg-muted px-2 py-0.5">backend {model.suggestedBackend}</span>
+        {/* If the repo supports more than one backend (e.g. safetensors +
+            GGUF in the same upload, or a GGUF-only mirror), surface them
+            all so the user knows the choice exists at variant time. */}
+        {model.backendOptions && model.backendOptions.length > 1 ? (
+          <span
+            className="rounded bg-muted px-2 py-0.5"
+            title="Este repositorio se puede servir con varios backends. Eliges en el modal de variantes."
+          >
+            backends {model.backendOptions.join(" · ")}
+          </span>
+        ) : (
+          <span className="rounded bg-muted px-2 py-0.5">backend {model.suggestedBackend}</span>
+        )}
         {supportLabel && <span className="rounded bg-muted px-2 py-0.5">vllm {supportLabel}</span>}
         {model.lastModified && (
           <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5" title={`Actualizado: ${new Date(model.lastModified).toLocaleDateString()}`}>

@@ -3,6 +3,7 @@
 // Streams 4-A/B/C/D consume this client.
 
 import type {
+  BackendType,
   GPUState,
   GPUStatHistory,
   ModelState,
@@ -576,6 +577,11 @@ function toHFModelCard(raw: unknown): HFModelCard {
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
     gated: Boolean(data.gated),
     suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelCard["suggestedBackend"],
+    backendOptions: Array.isArray(data.backend_options ?? data.backendOptions)
+      ? ((data.backend_options ?? data.backendOptions) as unknown[]).map(
+          (item) => String(item) as BackendType,
+        )
+      : undefined,
     compatibility: String(data.compatibility ?? "unknown"),
     compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
@@ -615,12 +621,14 @@ function toHFModelVariant(raw: unknown): HFModelVariant {
 function toLocalModel(raw: unknown): LocalModel {
   const data = isRecord(raw) ? raw : {}
   const modelRef = String(data.model_ref ?? data.modelRef ?? data.model_id ?? data.modelId ?? "")
+  const source = (data.source ?? null) as LocalModel["source"] | null
   return {
     modelId: modelRef,
     path: String(data.path ?? ""),
     sizeGb: Number(data.size_gb ?? data.sizeGb ?? 0),
     backendType: String(data.backend_type ?? data.backendType ?? "vllm") as LocalModel["backendType"],
     configured: Boolean(data.configured ?? false),
+    source: source ?? undefined,
   }
 }
 

@@ -44,14 +44,35 @@ export function StorageSettings({ localModels, config, onSave }: StorageSettings
       <div className="space-y-2">
         {localModels.map((model) => {
           const ratio = Math.max(8, (model.sizeGb / maxSize) * 100)
+          const isOllamaShared = model.source === "ollama-shared"
           return (
-            <div key={model.modelId} className="space-y-1">
-              <div className="flex justify-between text-xs text-muted-foreground">
-                <span>{model.modelId}</span>
-                <span>{model.sizeGb.toFixed(2)} GB</span>
+            <div key={`${model.modelId}::${model.path}`} className="space-y-1">
+              <div className="flex justify-between gap-2 text-xs text-muted-foreground">
+                <span className="flex items-center gap-2 truncate">
+                  <span className="truncate" title={model.path}>
+                    {model.modelId}
+                  </span>
+                  {isOllamaShared && (
+                    <span
+                      className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-sky-200"
+                      title="Compartido desde Ollama: el blob GGUF que Ollama ya tiene bajado se puede servir con nuestro backend llama.cpp sin volver a descargarlo."
+                    >
+                      via Ollama
+                    </span>
+                  )}
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+                    {model.backendType}
+                  </span>
+                </span>
+                <span className="shrink-0">{model.sizeGb.toFixed(2)} GB</span>
               </div>
               <div className="h-2 rounded-full bg-muted">
-                <div className="h-full rounded-full bg-sky-500" style={{ width: `${ratio}%` }} />
+                <div
+                  className={`h-full rounded-full ${
+                    isOllamaShared ? "bg-sky-400" : "bg-sky-500"
+                  }`}
+                  style={{ width: `${ratio}%` }}
+                />
               </div>
             </div>
           )

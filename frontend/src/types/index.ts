@@ -327,6 +327,9 @@ export interface HFModelCard {
   tags: string[]
   gated: boolean
   suggestedBackend: BackendType
+  // Backends that this repo can run on (suggestedBackend always first).
+  // Empty/missing array means just [suggestedBackend] is supported.
+  backendOptions?: BackendType[]
   compatibility?: string
   compatibilityReason?: string | null
   vllmSupport?: HFVLLMSupport | null
@@ -382,6 +385,10 @@ export interface LocalModel {
   sizeGb: number
   backendType: BackendType
   configured: boolean
+  // Where the file was discovered. "ollama-shared" entries point at a GGUF
+  // blob inside Ollama's content-addressed store and can be served by our
+  // llama.cpp backend without re-downloading.
+  source?: "huggingface" | "gguf" | "ollama" | "ollama-shared"
 }
 
 export interface ServerConfig {

@@ -85,4 +85,25 @@ describe("HFModelCard", () => {
     expect(screen.getAllByText(/override sugerido: tool_call_parser/i).length).toBeGreaterThan(0)
     expect(screen.getByText("probe: falta tool_call_parser")).toBeTruthy()
   })
+
+  it("shows multi-backend chip when repo supports several backends", () => {
+    render(
+      <HFModelCard
+        model={{
+          ...model,
+          backendOptions: ["vllm", "llama_cpp"],
+        }}
+        onInstall={vi.fn()}
+      />,
+    )
+
+    // Multi-backend variant: shows the joined list, hides the single-backend chip.
+    expect(screen.getByText("backends vllm · llama_cpp")).toBeTruthy()
+    expect(screen.queryByText(/^backend vllm$/)).toBeNull()
+  })
+
+  it("falls back to single-backend chip when no options array", () => {
+    render(<HFModelCard model={model} onInstall={vi.fn()} />)
+    expect(screen.getByText("backend vllm")).toBeTruthy()
+  })
 })
