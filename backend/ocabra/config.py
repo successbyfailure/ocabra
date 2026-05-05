@@ -73,7 +73,6 @@ class Settings(BaseSettings):
     vllm_reasoning_parser: str | None = None
     vllm_language_model_only: bool | None = None
     vllm_enable_chunked_prefill: bool | None = None
-    vllm_swap_space: float | None = None
     # Quantized KV cache can increase effective context capacity on Ampere/Ada/Hopper.
     # Leave unset to keep the runtime default.
     vllm_kv_cache_dtype: str | None = None
@@ -146,9 +145,14 @@ class Settings(BaseSettings):
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0
     # 11.1: Proactive VRAM eviction threshold (fraction 0.0-1.0).
-    # When used VRAM exceeds this fraction, the VRAM watchdog evicts LRU models.
+    # When used VRAM exceeds this fraction, the VRAM watchdog evicts LRU
+    # models. Default 0.96 — vLLM is configured per-model with
+    # ``gpu_memory_utilization`` (typ. 0.85-0.94), and a single model legitly
+    # using ~93-94% of VRAM must NOT trigger an auto-eviction of itself.
+    # 0.96 only activates the watchdog when memory is genuinely overcommitted
+    # (e.g. multiple workers stacked).
     vram_eviction_threshold: float = Field(
-        default=0.90,
+        default=0.96,
         ge=0.0,
         le=1.0,
         description="Fraction of total VRAM above which LRU models are proactively evicted.",
@@ -383,7 +387,6 @@ class Settings(BaseSettings):
         "vllm_reasoning_parser",
         "vllm_language_model_only",
         "vllm_enable_chunked_prefill",
-        "vllm_swap_space",
         "vllm_kv_cache_dtype",
         "llama_cpp_threads",
         "sglang_python_bin",

@@ -58,6 +58,18 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
     "Phi3SmallForCausalLM": {"chat": True, "tools": True},
     "GemmaForCausalLM": {"chat": True},
     "Gemma2ForCausalLM": {"chat": True, "tools": True},
+    "Gemma3ForCausalLM": {"chat": True, "tools": True},
+    "Gemma3ForConditionalGeneration": {"chat": True, "tools": True, "vision": True},
+    "Gemma3nForCausalLM": {"chat": True, "tools": True},
+    "Gemma3nForConditionalGeneration": {"chat": True, "tools": True, "vision": True, "audio_input": True},
+    "Gemma4ForCausalLM": {"chat": True, "tools": True, "reasoning": True},
+    "Gemma4ForConditionalGeneration": {
+        "chat": True, "tools": True, "reasoning": True, "vision": True, "audio_input": True
+    },
+    "NemotronHForCausalLM": {"chat": True, "tools": True, "reasoning": True},
+    "Qwen3_5MoeForConditionalGeneration": {
+        "chat": True, "tools": True, "reasoning": True, "vision": True, "video_input": True
+    },
     "Qwen2ForCausalLM": {"chat": True, "tools": True},
     "Qwen2MoeForCausalLM": {"chat": True, "tools": True},
     "CohereForCausalLM": {"chat": True, "tools": True},
@@ -76,7 +88,7 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
     "DebertaV2ForSequenceClassification": {"classification": True, "score": True},
 }
 
-_STARTUP_TIMEOUT_S = 120
+_STARTUP_TIMEOUT_S = 600
 _SHUTDOWN_TIMEOUT_S = 30
 _MIN_VLLM_VRAM_MB = 2048
 
@@ -110,8 +122,13 @@ class VLLMBackend(BackendInterface):
                 "g++",
             ],
             pip_packages=[
-                "vllm==0.17.1",
+                "vllm==0.19.1",
                 "torch>=2.5",
+                # transformers 5.7 is required to recognise model_type "gemma4";
+                # ships with tokenizers 0.23.0rc0 which can read the new
+                # tokenizer.json layout used by Gemma 4 / Qwen3.6 repos.
+                "transformers>=5.7",
+                "sentencepiece>=0.2",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
@@ -287,6 +304,12 @@ class VLLMBackend(BackendInterface):
             self._get_setting("vllm_tensor_parallel_size"),
         ) or len(gpu_indices)
 
+        pipeline_parallel = self._get_vllm_option(
+            extra_config,
+            "pipeline_parallel_size",
+            self._get_setting("vllm_pipeline_parallel_size"),
+        )
+
         cmd = [
             self._resolve_python_bin(),
             "-m",
@@ -354,11 +377,8 @@ class VLLMBackend(BackendInterface):
             cmd.append("--enable-chunked-prefill")
         elif enable_chunked_prefill is False:
             cmd.append("--no-enable-chunked-prefill")
-        swap_space = self._get_vllm_option(
-            extra_config, "swap_space", self._get_setting("vllm_swap_space")
-        )
-        if swap_space:
-            cmd.extend(["--swap-space", str(swap_space)])
+        # --swap-space was removed in vLLM 0.19; CPU offload is now controlled
+        # via --cpu-offload-gb. Silently drop legacy "swap_space" config keys.
         kv_cache_dtype = self._get_vllm_option(
             extra_config, "kv_cache_dtype", self._get_setting("vllm_kv_cache_dtype")
         )
@@ -432,6 +452,14 @@ class VLLMBackend(BackendInterface):
             self._get_setting("vllm_language_model_only"),
         ):
             cmd.append("--language-model-only")
+        if pipeline_parallel and int(pipeline_parallel) > 1:
+            cmd.extend(["--pipeline-parallel-size", str(int(pipeline_parallel))])
+        speculative_config = self._get_vllm_option(extra_config, "speculative_config", None)
+        if speculative_config:
+            cmd.extend(["--speculative-config", self._encode_vllm_json_option(speculative_config)])
+        extra_args = self._get_vllm_option(extra_config, "extra_args", None)
+        if isinstance(extra_args, list):
+            cmd.extend(str(a) for a in extra_args)
 
         env = {
             **os.environ,
@@ -449,6 +477,15 @@ class VLLMBackend(BackendInterface):
         if nvidia_ld:
             existing = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
+
+        # vLLM 0.19+ pulls flashinfer for prefill on hybrid models (NemotronH,
+        # Qwen3.5MoE). flashinfer JIT-compiles kernels at runtime via nvcc.
+        # If the slim image has cuda-nvcc-12-4 installed, expose it.
+        cuda_home = "/usr/local/cuda"
+        if Path(cuda_home).exists() and Path(f"{cuda_home}/bin/nvcc").exists():
+            env["CUDA_HOME"] = cuda_home
+            existing_path = env.get("PATH", os.environ.get("PATH", ""))
+            env["PATH"] = f"{cuda_home}/bin:{existing_path}"
 
         return cmd, env, cuda_devices
 
@@ -596,8 +633,30 @@ class VLLMBackend(BackendInterface):
         """
         Estimate VRAM from .safetensors file sizes × 1.2 overhead factor.
 
-        Falls back to 0 if the directory does not exist yet.
+        Falls back to 0 if the directory does not exist yet. Honours an
+        explicit ``extra_config["vram_estimate_mb"]`` override on the model
+        config (used when the file-size heuristic over-counts, e.g. quantised
+        weights with auxiliary tensors like MTP that don't all live on GPU).
         """
+        # Allow per-model override via DB-stored extra_config. Caller passes
+        # the backend-stripped id (e.g. "palmfuture/Qwen3.6-..."); the DB row
+        # is stored with the "vllm/" prefix.
+        try:
+            from ocabra.db.model_config import ModelConfig
+            from ocabra.database import AsyncSessionLocal
+            import sqlalchemy as sa
+            async with AsyncSessionLocal() as session:
+                row = await session.execute(
+                    sa.select(ModelConfig).where(ModelConfig.model_id == f"vllm/{model_id}")
+                )
+                cfg = row.scalar_one_or_none()
+                if cfg is not None:
+                    override = (cfg.extra_config or {}).get("vram_estimate_mb")
+                    if override:
+                        return int(override)
+        except Exception:
+            pass
+
         model_path = self._resolve_local_model_dir(model_id)
         if model_path is None:
             return 0
@@ -811,7 +870,7 @@ class VLLMBackend(BackendInterface):
         except ProcessLookupError:
             pass
 
-    async def _read_stderr_tail(self, proc: asyncio.subprocess.Process, limit: int = 4000) -> str:
+    async def _read_stderr_tail(self, proc: asyncio.subprocess.Process, limit: int = 16000) -> str:
         if proc.stderr is None:
             return ""
         try:

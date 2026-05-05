@@ -42,8 +42,10 @@ dev = [
     "ruff>=0.8",
 ]
 vllm = [
-    "vllm==0.17.1",
+    "vllm==0.19.1",
     "torch>=2.5",
+    "transformers>=5.7",
+    "sentencepiece>=0.2",
 ]
 diffusers = [
     "diffusers>=0.31",

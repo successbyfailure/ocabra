@@ -61,11 +61,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         gcc \
         git \
+        gnupg \
         libsndfile1 \
         libsox3 \
         ninja-build \
         sox \
     && rm -rf /var/lib/apt/lists/*
+
+# vLLM 0.19+ pulls flashinfer, which JIT-compiles attention kernels at
+# runtime via nvcc on hybrid-arch models (Mamba/attention). Without nvcc
+# the engine crashes the first prefill with "Could not find nvcc".
+# cuda-nvcc-12-4 alone is ~200 MB, plus dev headers ~120 MB.
+RUN curl -fsSL -o /tmp/cuda-keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        cuda-nvcc-12-4 \
+    && rm -rf /var/lib/apt/lists/* /tmp/cuda-keyring.deb
+ENV CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH}
 
 WORKDIR /app
 COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker

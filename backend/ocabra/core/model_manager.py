@@ -283,20 +283,35 @@ class ModelManager:
         return freed
 
     async def _vram_watchdog(self) -> None:
-        """Background loop: proactively evict when VRAM exceeds threshold."""
+        """Background loop: proactively evict when VRAM exceeds threshold.
+
+        Skips eviction when only one model is loaded on the GPU — evicting it
+        just to reload on the next request creates thrashing, and a single
+        worker using its configured ``gpu_memory_utilization`` is not actually
+        overcommitted.
+        """
         interval_s = max(1, int(settings.idle_eviction_check_interval_seconds))
         while True:
             try:
                 await asyncio.sleep(interval_s)
                 if not self._gpu_manager:
                     continue
-                threshold = float(getattr(settings, "vram_eviction_threshold", 0.90))
+                threshold = float(getattr(settings, "vram_eviction_threshold", 0.96))
                 gpu_states = await self._gpu_manager.get_all_states()
                 for gpu_state in gpu_states:
                     if gpu_state.total_vram_mb <= 0:
                         continue
                     ratio = gpu_state.used_vram_mb / gpu_state.total_vram_mb
                     if ratio > threshold:
+                        loaded_on_gpu = [
+                            s for s in self._states.values()
+                            if s.status == ModelStatus.LOADED
+                            and gpu_state.index in (s.current_gpu or [])
+                        ]
+                        if len(loaded_on_gpu) <= 1:
+                            # Single legit worker pushing past threshold via its
+                            # own gpu_memory_utilization. Evicting causes thrash.
+                            continue
                         over_mb = gpu_state.used_vram_mb - int(
                             gpu_state.total_vram_mb * threshold
                         )
@@ -309,6 +324,7 @@ class ModelManager:
                                 ratio=f"{ratio:.2f}",
                                 threshold=f"{threshold:.2f}",
                                 evicting_mb=over_mb,
+                                loaded_count=len(loaded_on_gpu),
                             )
                             await self._evict_for_space(gpu_state.index, over_mb)
             except asyncio.CancelledError:
@@ -973,11 +989,19 @@ class ModelManager:
                 continue
             if state.load_policy != LoadPolicy.ON_DEMAND:
                 continue
-            if state.last_request_at is None:
-                continue
             if self.is_busy(model_id):
                 continue
-            idle_s = (now - state.last_request_at).total_seconds()
+            # Idle clock starts at whichever is more recent: the last request
+            # served, or the moment the model was (re)loaded. Without the
+            # loaded_at floor a stale ``last_request_at`` persisted in Redis
+            # makes the watchdog evict a freshly-reloaded model on the first
+            # tick.
+            anchor = state.last_request_at
+            if state.loaded_at is not None and (anchor is None or state.loaded_at > anchor):
+                anchor = state.loaded_at
+            if anchor is None:
+                continue
+            idle_s = (now - anchor).total_seconds()
             if idle_s > settings.idle_timeout_seconds:
                 logger.info("idle_eviction", model_id=model_id, idle_s=int(idle_s))
                 self._create_background_task(
@@ -1048,6 +1072,14 @@ class ModelManager:
                 if state.status != ModelStatus.LOADED:
                     state.status = ModelStatus.LOADED
                     state.loaded_at = state.loaded_at or datetime.now(timezone.utc)
+                    # Refresh last_request_at so the idle eviction watchdog
+                    # does not immediately desalojate this model again. Without
+                    # this, a model the watchdog just unloaded but Ollama is
+                    # still holding in its keep_alive cache flips back to
+                    # LOADED with a stale last_request_at and gets re-evicted
+                    # every tick — a tight loop visible as repeated
+                    # ``idle_eviction`` log lines for the same model.
+                    state.last_request_at = datetime.now(timezone.utc)
                     state.error_message = None
                     state.current_gpu = []
                     state.vram_used_mb = loaded_vram
