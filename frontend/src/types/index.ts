@@ -148,6 +148,17 @@ export interface LlamaCppConfig {
   ctxSize?: number | null
   flashAttn?: boolean
   embedding?: boolean
+  // Sprint 17.1 — Tier 1 advanced controls.
+  threads?: number | null
+  batchSize?: number | null
+  ubatchSize?: number | null
+  mlock?: boolean
+  // Tri-state: undefined/null => use mmap (default); false => --no-mmap.
+  mmap?: boolean | null
+  seed?: number | null
+  noKvOffload?: boolean
+  ropeFreqBase?: number | null
+  ropeFreqScale?: number | null
 }
 
 export interface BitNetConfig {

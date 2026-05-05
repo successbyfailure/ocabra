@@ -69,7 +69,22 @@ const SGLANG_ROOT_KEYS = [
   "disable_radix_cache",
 ]
 
-const LLAMA_CPP_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn", "embedding"]
+const LLAMA_CPP_ROOT_KEYS = [
+  "gpu_layers",
+  "ctx_size",
+  "flash_attn",
+  "embedding",
+  // Sprint 17.1 — Tier 1 advanced controls.
+  "threads",
+  "batch_size",
+  "ubatch_size",
+  "mlock",
+  "mmap",
+  "seed",
+  "no_kv_offload",
+  "rope_freq_base",
+  "rope_freq_scale",
+]
 const BITNET_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn"]
 const TENSORRT_LLM_ROOT_KEYS = ["max_batch_size", "context_length", "trust_remote_code"]
 const WHISPER_ROOT_KEYS = ["diarization_enabled", "diarization_model_id"]
@@ -234,6 +249,17 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [llamaCtxSize, setLlamaCtxSize] = useState("")
   const [llamaFlashAttn, setLlamaFlashAttn] = useState(false)
   const [llamaEmbedding, setLlamaEmbedding] = useState(false)
+  // Sprint 17.1 — Tier 1 advanced controls (collapsed by default).
+  const [llamaAdvancedOpen, setLlamaAdvancedOpen] = useState(false)
+  const [llamaThreads, setLlamaThreads] = useState("")
+  const [llamaBatchSize, setLlamaBatchSize] = useState("")
+  const [llamaUbatchSize, setLlamaUbatchSize] = useState("")
+  const [llamaMlock, setLlamaMlock] = useState(false)
+  const [llamaMmap, setLlamaMmap] = useState(true)
+  const [llamaSeed, setLlamaSeed] = useState("")
+  const [llamaNoKvOffload, setLlamaNoKvOffload] = useState(false)
+  const [llamaRopeFreqBase, setLlamaRopeFreqBase] = useState("")
+  const [llamaRopeFreqScale, setLlamaRopeFreqScale] = useState("")
 
   const [bitnetGpuLayers, setBitnetGpuLayers] = useState("")
   const [bitnetCtxSize, setBitnetCtxSize] = useState("")
@@ -309,6 +335,20 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setLlamaCtxSize(llamaCpp?.ctxSize == null ? "" : String(llamaCpp.ctxSize))
     setLlamaFlashAttn(Boolean(llamaCpp?.flashAttn))
     setLlamaEmbedding(Boolean(llamaCpp?.embedding))
+    setLlamaThreads(llamaCpp?.threads == null ? "" : String(llamaCpp.threads))
+    setLlamaBatchSize(llamaCpp?.batchSize == null ? "" : String(llamaCpp.batchSize))
+    setLlamaUbatchSize(llamaCpp?.ubatchSize == null ? "" : String(llamaCpp.ubatchSize))
+    setLlamaMlock(Boolean(llamaCpp?.mlock))
+    // mmap defaults to true (use mmap); only persist false explicitly.
+    setLlamaMmap(llamaCpp?.mmap !== false)
+    setLlamaSeed(llamaCpp?.seed == null ? "" : String(llamaCpp.seed))
+    setLlamaNoKvOffload(Boolean(llamaCpp?.noKvOffload))
+    setLlamaRopeFreqBase(
+      llamaCpp?.ropeFreqBase == null ? "" : String(llamaCpp.ropeFreqBase),
+    )
+    setLlamaRopeFreqScale(
+      llamaCpp?.ropeFreqScale == null ? "" : String(llamaCpp.ropeFreqScale),
+    )
 
     setBitnetGpuLayers(bitnet?.gpuLayers == null ? "" : String(bitnet.gpuLayers))
     setBitnetCtxSize(bitnet?.ctxSize == null ? "" : String(bitnet.ctxSize))
@@ -484,6 +524,18 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           ctxSize: llamaCtxSize === "" ? null : Number(llamaCtxSize),
           flashAttn: llamaFlashAttn,
           embedding: llamaEmbedding,
+          // Sprint 17.1 — Tier 1 advanced controls.
+          threads: llamaThreads === "" ? null : Number(llamaThreads),
+          batchSize: llamaBatchSize === "" ? null : Number(llamaBatchSize),
+          ubatchSize: llamaUbatchSize === "" ? null : Number(llamaUbatchSize),
+          mlock: llamaMlock,
+          // Persist `mmap` only when opt-out (false); leave default unset
+          // so backend uses the global default.
+          mmap: llamaMmap ? null : false,
+          seed: llamaSeed === "" ? null : Number(llamaSeed),
+          noKvOffload: llamaNoKvOffload,
+          ropeFreqBase: llamaRopeFreqBase === "" ? null : Number(llamaRopeFreqBase),
+          ropeFreqScale: llamaRopeFreqScale === "" ? null : Number(llamaRopeFreqScale),
         },
         LLAMA_CPP_ROOT_KEYS,
       )
@@ -1172,6 +1224,115 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     embedding mode
                   </label>
                 </div>
+                <details
+                  className="rounded-md border border-border/70 bg-background/40"
+                  open={llamaAdvancedOpen}
+                  onToggle={(event) =>
+                    setLlamaAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)
+                  }
+                >
+                  <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">
+                    Avanzado
+                  </summary>
+                  <div className="space-y-4 px-3 pb-3 pt-1">
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">Threads</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={llamaThreads}
+                          onChange={(event) => setLlamaThreads(event.target.value)}
+                          placeholder="auto"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">Batch size</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={llamaBatchSize}
+                          onChange={(event) => setLlamaBatchSize(event.target.value)}
+                          placeholder="global"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">Ubatch size</span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={llamaUbatchSize}
+                          onChange={(event) => setLlamaUbatchSize(event.target.value)}
+                          placeholder="global"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">Seed</span>
+                        <input
+                          type="number"
+                          value={llamaSeed}
+                          onChange={(event) => setLlamaSeed(event.target.value)}
+                          placeholder="random"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                        <FieldHint>Fija la semilla del RNG para resultados reproducibles.</FieldHint>
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">RoPE freq base</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={llamaRopeFreqBase}
+                          onChange={(event) => setLlamaRopeFreqBase(event.target.value)}
+                          placeholder="del modelo"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1 block text-muted-foreground">RoPE freq scale</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={llamaRopeFreqScale}
+                          onChange={(event) => setLlamaRopeFreqScale(event.target.value)}
+                          placeholder="del modelo"
+                          className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        />
+                      </label>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={llamaMlock}
+                          onChange={(event) => setLlamaMlock(event.target.checked)}
+                        />
+                        mlock (pin VRAM)
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={llamaMmap}
+                          onChange={(event) => setLlamaMmap(event.target.checked)}
+                        />
+                        mmap (recomendado)
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={llamaNoKvOffload}
+                          onChange={(event) => setLlamaNoKvOffload(event.target.checked)}
+                        />
+                        no KV offload
+                      </label>
+                    </div>
+                  </div>
+                </details>
               </FieldSection>
             )}
 
