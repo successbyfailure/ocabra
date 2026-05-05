@@ -1,4 +1,5 @@
 import { Bot, BrainCircuit, ChevronDown, Cog, User } from "lucide-react"
+import { useState, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 
@@ -88,41 +89,37 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
           the final assistant response, so they appear above it in the bubble.
         */}
         {hasReasoning && (
-          <details className="group rounded-xl border border-amber-500/25 bg-amber-500/[0.05] p-3" open>
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <BrainCircuit size={15} className="text-amber-300" />
-                <span className="text-sm font-medium text-amber-100">Pensamiento</span>
-              </div>
-              <ChevronDown
-                size={15}
-                className="text-amber-200 transition-transform group-open:rotate-180"
-              />
-            </summary>
+          <Collapsible
+            tone="amber"
+            icon={<BrainCircuit size={15} className="text-amber-300" />}
+            title="Pensamiento"
+            preview={previewText(message.reasoning ?? "")}
+            forceOpen={streaming}
+          >
             <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-amber-50/90">
               {message.reasoning}
             </div>
-          </details>
+          </Collapsible>
         )}
 
         {hasToolCalls && (
-          <details className="group rounded-xl border border-cyan-500/25 bg-cyan-500/[0.05] p-3" open>
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Cog size={15} className="text-cyan-300" />
-                <span className="text-sm font-medium text-cyan-100">Tools y subagentes</span>
-              </div>
-              <ChevronDown
-                size={15}
-                className="text-cyan-200 transition-transform group-open:rotate-180"
-              />
-            </summary>
+          <Collapsible
+            tone="cyan"
+            icon={<Cog size={15} className="text-cyan-300" />}
+            title="Tools y subagentes"
+            preview={toolCallsPreview(toolCalls)}
+            forceOpen={streaming}
+          >
             <div className="mt-3 space-y-3">
               {toolCalls.map((toolCall) => (
-                <ToolTraceCard key={toolCall.id || `${toolCall.kind}-${toolCall.name}-${toolCall.args}`} toolCall={toolCall} />
+                <ToolTraceCard
+                  key={toolCall.id || `${toolCall.kind}-${toolCall.name}-${toolCall.args}`}
+                  toolCall={toolCall}
+                  streaming={streaming}
+                />
               ))}
             </div>
-          </details>
+          </Collapsible>
         )}
 
         {hasContent && (
@@ -147,7 +144,15 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
   )
 }
 
-function ToolTraceCard({ toolCall, depth = 0 }: { toolCall: ChatToolCall; depth?: number }) {
+function ToolTraceCard({
+  toolCall,
+  depth = 0,
+  streaming = false,
+}: {
+  toolCall: ChatToolCall
+  depth?: number
+  streaming?: boolean
+}) {
   const label = toolCall.kind === "subagent" ? "Subagente" : "Tool"
   const tone = toolCall.kind === "subagent" ? "border-fuchsia-500/25 bg-fuchsia-500/[0.06]" : "border-cyan-500/20 bg-background/40"
   const displayName =
@@ -175,25 +180,27 @@ function ToolTraceCard({ toolCall, depth = 0 }: { toolCall: ChatToolCall; depth?
       </div>
 
       {hasArgs && (
-        <div className="mt-3">
-          <p className="mb-1 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-            Args
-          </p>
-          <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-background/70 p-3 text-xs text-foreground/90">
+        <CollapsibleBlock
+          label="Args"
+          preview={previewText(toolCall.args)}
+          forceOpen={streaming}
+        >
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-background/70 p-3 text-xs text-foreground/90">
             {toolCall.args}
           </pre>
-        </div>
+        </CollapsibleBlock>
       )}
 
       {hasResult && (
-        <div className="mt-3">
-          <p className="mb-1 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-            Resultado
-          </p>
-          <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-background/70 p-3 text-xs text-foreground/80">
+        <CollapsibleBlock
+          label="Resultado"
+          preview={previewText(toolCall.resultSummary ?? "")}
+          forceOpen={streaming}
+        >
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-background/70 p-3 text-xs text-foreground/80">
             {toolCall.resultSummary}
           </pre>
-        </div>
+        </CollapsibleBlock>
       )}
 
       {toolCall.error && (
@@ -203,29 +210,175 @@ function ToolTraceCard({ toolCall, depth = 0 }: { toolCall: ChatToolCall; depth?
       )}
 
       {hasChildren && depth < 3 && (
-        <details className="group mt-3 rounded-lg border border-fuchsia-500/20 bg-fuchsia-500/[0.04] p-2" open={depth === 0}>
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-2">
-            <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-fuchsia-200">
-              Pasos del subagente ({childCalls.length})
-            </span>
-            <ChevronDown
-              size={13}
-              className="text-fuchsia-200 transition-transform group-open:rotate-180"
-            />
-          </summary>
-          <div className="mt-2 space-y-2 border-l border-fuchsia-500/20 pl-3">
-            {childCalls.map((child, idx) => (
-              <ToolTraceCard
-                key={child.id || `${child.kind}-${child.name}-${idx}`}
-                toolCall={child}
-                depth={depth + 1}
-              />
-            ))}
-          </div>
-        </details>
+        <div className="mt-3">
+          <Collapsible
+            tone="fuchsia"
+            compact
+            title={`Pasos del subagente (${childCalls.length})`}
+            preview={subagentStepsPreview(childCalls)}
+            forceOpen={streaming}
+          >
+            <div className="mt-2 space-y-2 border-l border-fuchsia-500/20 pl-3">
+              {childCalls.map((child, idx) => (
+                <ToolTraceCard
+                  key={child.id || `${child.kind}-${child.name}-${idx}`}
+                  toolCall={child}
+                  depth={depth + 1}
+                  streaming={streaming}
+                />
+              ))}
+            </div>
+          </Collapsible>
+        </div>
       )}
     </section>
   )
+}
+
+type CollapsibleTone = "amber" | "cyan" | "fuchsia"
+
+const collapsibleTones: Record<
+  CollapsibleTone,
+  { container: string; title: string; chevron: string; preview: string }
+> = {
+  amber: {
+    container: "border-amber-500/25 bg-amber-500/[0.05]",
+    title: "text-amber-100",
+    chevron: "text-amber-200",
+    preview: "text-amber-100/70",
+  },
+  cyan: {
+    container: "border-cyan-500/25 bg-cyan-500/[0.05]",
+    title: "text-cyan-100",
+    chevron: "text-cyan-200",
+    preview: "text-cyan-100/70",
+  },
+  fuchsia: {
+    container: "border-fuchsia-500/20 bg-fuchsia-500/[0.04]",
+    title: "text-fuchsia-200",
+    chevron: "text-fuchsia-200",
+    preview: "text-fuchsia-100/70",
+  },
+}
+
+function Collapsible({
+  tone,
+  icon,
+  title,
+  preview,
+  forceOpen = false,
+  compact = false,
+  children,
+}: {
+  tone: CollapsibleTone
+  icon?: ReactNode
+  title: string
+  preview?: string
+  forceOpen?: boolean
+  compact?: boolean
+  children: ReactNode
+}) {
+  const [pinned, setPinned] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const open = forceOpen || pinned || hovered
+  const styles = collapsibleTones[tone]
+  const padding = compact ? "p-2" : "p-3"
+  const titleSize = compact
+    ? "text-[11px] font-medium uppercase tracking-[0.18em]"
+    : "text-sm font-medium"
+
+  return (
+    <div
+      className={`rounded-xl border ${padding} ${styles.container}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <button
+        type="button"
+        onClick={() => setPinned((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full cursor-pointer items-center justify-between gap-3 text-left"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          {icon}
+          <span className={`${titleSize} ${styles.title}`}>{title}</span>
+          {!open && preview && (
+            <span className={`truncate text-xs ${styles.preview}`}>· {preview}</span>
+          )}
+        </div>
+        <ChevronDown
+          size={compact ? 13 : 15}
+          className={`shrink-0 transition-transform ${styles.chevron} ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && <div>{children}</div>}
+    </div>
+  )
+}
+
+function CollapsibleBlock({
+  label,
+  preview,
+  forceOpen = false,
+  children,
+}: {
+  label: string
+  preview?: string
+  forceOpen?: boolean
+  children: ReactNode
+}) {
+  const [pinned, setPinned] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const open = forceOpen || pinned || hovered
+
+  return (
+    <div
+      className="mt-3"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <button
+        type="button"
+        onClick={() => setPinned((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full cursor-pointer items-center justify-between gap-3 text-left"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            {label}
+          </span>
+          {!open && preview && (
+            <span className="truncate text-xs text-muted-foreground/80">· {preview}</span>
+          )}
+        </div>
+        <ChevronDown
+          size={13}
+          className={`shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && children}
+    </div>
+  )
+}
+
+function previewText(value: string, maxLen = 120): string {
+  const flat = value.replace(/\s+/g, " ").trim()
+  if (flat.length <= maxLen) return flat
+  return flat.slice(0, maxLen).trimEnd() + "…"
+}
+
+function toolCallsPreview(calls: ChatToolCall[]): string {
+  if (calls.length === 0) return ""
+  const names = calls
+    .map((c) => (c.kind === "subagent" && c.toolName ? `agent/${c.toolName}` : c.toolName || c.name))
+    .filter(Boolean)
+  const head = names.slice(0, 3).join(", ")
+  const extra = names.length > 3 ? ` +${names.length - 3}` : ""
+  return previewText(`${head}${extra}`, 100)
+}
+
+function subagentStepsPreview(children: ChatToolCall[]): string {
+  return toolCallsPreview(children)
 }
 
 function Chip({

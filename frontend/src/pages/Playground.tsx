@@ -98,6 +98,15 @@ export function Playground() {
     [models, selectedModelId],
   )
 
+  // When an agent is selected, resolve the underlying model so we can show the
+  // same "model not loaded" warning + a quick capabilities readout.
+  const agentBaseModel = useMemo(() => {
+    if (!selectedAgent?.baseModelId) return null
+    return models.find((item) => item.modelId === selectedAgent.baseModelId) ?? null
+  }, [models, selectedAgent])
+
+  const effectiveModel = selectedAgent ? agentBaseModel : selectedModel
+
   // When an agent is selected its base model/profile determines capabilities; for now
   // agents are chat-only so we force "chat" mode.
   const mode = selectedAgent ? "chat" : detectMode(selectedModel)
@@ -187,13 +196,23 @@ export function Playground() {
             </Tooltip.Provider>
           )}
 
-          {!selectedAgent && selectedModel && selectedModel.status !== "loaded" && (
+          {effectiveModel && effectiveModel.status !== "loaded" && (
             <div role="alert" className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
               <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" aria-hidden="true" />
               <div>
-                <span className="font-medium">Modelo no cargado</span>
-                {" — "}estado actual: <span className="font-mono">{selectedModel.status}</span>.
-                {" "}La primera llamada lo cargara automaticamente (puede tardar).{" "}
+                <span className="font-medium">
+                  {selectedAgent ? "Modelo del agente no cargado" : "Modelo no cargado"}
+                </span>
+                {" — "}estado actual:{" "}
+                <span className="font-mono">{effectiveModel.status}</span>
+                {selectedAgent && (
+                  <>
+                    {" ("}
+                    <span className="font-mono">{effectiveModel.displayName}</span>
+                    {")"}
+                  </>
+                )}
+                .{" "}La primera llamada lo cargara automaticamente (puede tardar 1-2 min en frio).{" "}
                 <Link to="/models" className="underline underline-offset-2 hover:text-amber-50">
                   Gestionar modelos
                 </Link>
@@ -209,6 +228,7 @@ export function Playground() {
                   modelId={selectedModelId}
                   backendType={selectedModel?.backendType ?? null}
                   params={effectiveParams}
+                  modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
                 />
               )}
               {mode === "pooling" && (
@@ -234,6 +254,7 @@ export function Playground() {
                 params={params}
                 onChange={setParams}
                 disableSystemPrompt={Boolean(selectedAgent)}
+                modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
               />
             )}
           </div>

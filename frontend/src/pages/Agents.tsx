@@ -60,6 +60,8 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
   const [subagentSlugs, setSubagentSlugs] = useState<string[]>([])
   const [groupId, setGroupId] = useState<string>("")
   const [bindings, setBindings] = useState<AgentMCPBinding[]>([])
+  const [defaultMaxTokens, setDefaultMaxTokens] = useState<string>("")
+  const [defaultTemperature, setDefaultTemperature] = useState<string>("")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -79,6 +81,13 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
       setSubagentSlugs(initial.subagentSlugs ?? [])
       setGroupId(initial.groupId ?? "")
       setBindings(initial.mcpServers)
+      const rd = initial.requestDefaults ?? {}
+      setDefaultMaxTokens(
+        typeof rd.max_tokens === "number" ? String(rd.max_tokens) : "",
+      )
+      setDefaultTemperature(
+        typeof rd.temperature === "number" ? String(rd.temperature) : "",
+      )
     } else {
       setSlug("")
       setDisplayName("")
@@ -93,6 +102,8 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
       setSubagentSlugs([])
       setGroupId("")
       setBindings([])
+      setDefaultMaxTokens("")
+      setDefaultTemperature("")
     }
     setErr(null)
   }, [open, initial])
@@ -182,6 +193,26 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
       return
     }
 
+    // Build request_defaults from the optional inputs. Only set keys that
+    // the user filled in; empty strings mean "no override".
+    const rd: Record<string, unknown> = {}
+    if (defaultMaxTokens.trim() !== "") {
+      const n = Number(defaultMaxTokens)
+      if (!Number.isFinite(n) || n < 1) {
+        setErr("max_tokens por defecto debe ser un entero >= 1.")
+        return
+      }
+      rd.max_tokens = Math.floor(n)
+    }
+    if (defaultTemperature.trim() !== "") {
+      const n = Number(defaultTemperature)
+      if (!Number.isFinite(n) || n < 0 || n > 2) {
+        setErr("temperature por defecto debe estar entre 0 y 2.")
+        return
+      }
+      rd.temperature = n
+    }
+
     const payload: AgentCreate = {
       slug: slug.trim(),
       displayName: displayName.trim(),
@@ -193,7 +224,7 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
       maxToolHops,
       toolTimeoutSeconds: toolTimeout,
       requireApproval,
-      requestDefaults: null,
+      requestDefaults: Object.keys(rd).length > 0 ? rd : null,
       subagentSlugs,
       groupId: groupId || null,
       mcpServers: bindings,
@@ -462,6 +493,53 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
                   onChange={(e) => setToolTimeout(Number(e.target.value))}
                   className="w-full"
                 />
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                Request defaults
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  Se aplican a peticiones que no especifiquen el parametro. El cliente puede sobreescribirlos.
+                </span>
+              </label>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <label
+                    className="mb-1 block text-xs text-muted-foreground"
+                    htmlFor="agent-default-max-tokens"
+                  >
+                    max_tokens (opcional)
+                  </label>
+                  <input
+                    id="agent-default-max-tokens"
+                    type="number"
+                    min={1}
+                    placeholder="sin limite"
+                    value={defaultMaxTokens}
+                    onChange={(e) => setDefaultMaxTokens(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label
+                    className="mb-1 block text-xs text-muted-foreground"
+                    htmlFor="agent-default-temperature"
+                  >
+                    temperature (opcional, 0-2)
+                  </label>
+                  <input
+                    id="agent-default-temperature"
+                    type="number"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    placeholder="por defecto del modelo"
+                    value={defaultTemperature}
+                    onChange={(e) => setDefaultTemperature(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                  />
+                </div>
               </div>
             </div>
 

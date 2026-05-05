@@ -16,6 +16,7 @@ Plan: docs/tasks/agents-mcp-plan.md — Fase 2.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ from ocabra.agents.executor import (
 )
 from ocabra.agents.resolver import AgentSpec, resolve_agent
 from ocabra.api.openai._deps import (
+    _do_ensure_loaded,
     _openai_error,
     compute_worker_key,
     raise_upstream_http_error,
@@ -47,7 +49,19 @@ logger = structlog.get_logger(__name__)
 
 
 class ProfileWorkerInvoker(WorkerInvoker):
-    """Invoker that forwards each hop to the agent's resolved base model."""
+    """Invoker that forwards each hop to the agent's resolved base model.
+
+    Two safety nets distinguish this from a raw ``WorkerPool.forward_*`` call:
+
+    * Each hop runs ``_do_ensure_loaded`` first so that an idle eviction or a
+      transient backend restart in the middle of an agent loop is recovered
+      before the next hop instead of surfacing as ``KeyError("No worker
+      found")``. This mirrors the behaviour of the non-agent chat endpoint.
+    * :meth:`acquire_run_lease` returns an async context manager that keeps the
+      model marked as in-flight for the whole agent run (including tool
+      execution windows), preventing the idle watchdog from desalojating it
+      between hops while the agent is still actively working.
+    """
 
     def __init__(
         self,
@@ -56,17 +70,29 @@ class ProfileWorkerInvoker(WorkerInvoker):
         worker_key: str,
         backend_model_id: str,
         vision_capable: bool,
+        model_manager,
     ) -> None:
         self._worker_pool = worker_pool
         self._worker_key = worker_key
         self._backend_model_id = backend_model_id
         self._vision_capable = vision_capable
+        self._model_manager = model_manager
 
     @property
     def vision_capable(self) -> bool:
         return self._vision_capable
 
+    async def _ensure_worker_loaded(self) -> None:
+        """Re-load the worker if it was evicted between hops.
+
+        Only the first call inside a hop pays the auto-load cost; once loaded,
+        ``_do_ensure_loaded`` is a fast no-op that just touches
+        ``last_request_at``.
+        """
+        await _do_ensure_loaded(self._model_manager, self._worker_key)
+
     async def forward(self, body: dict[str, Any]) -> dict[str, Any]:
+        await self._ensure_worker_loaded()
         # Always rewrite the model field to the backend's expected id.
         local_body = {**body, "model": self._backend_model_id}
         try:
@@ -78,11 +104,36 @@ class ProfileWorkerInvoker(WorkerInvoker):
             raise
 
     async def forward_stream(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
+        await self._ensure_worker_loaded()
         local_body = {**body, "model": self._backend_model_id}
         async for chunk in self._worker_pool.forward_stream(
             self._worker_key, "/v1/chat/completions", local_body
         ):
             yield chunk
+
+    @asynccontextmanager
+    async def acquire_run_lease(self) -> AsyncIterator[None]:
+        """Mark the worker as in-flight for the lifetime of the agent run.
+
+        The per-hop ``begin_request``/``end_request`` pair tracked by
+        :mod:`ocabra.stats.collector` only covers individual LLM calls. While
+        the agent is between hops (running tools, waiting on subagents), the
+        in-flight counter is zero and the idle watchdog can evict the model.
+        Holding an additional lease for the whole run keeps ``is_busy`` true
+        end-to-end.
+        """
+        request_id = self._model_manager.begin_request(self._worker_key)
+        try:
+            yield
+        finally:
+            try:
+                self._model_manager.end_request(self._worker_key, request_id)
+            except Exception as exc:  # noqa: BLE001 - never break the agent flow
+                logger.warning(
+                    "agent_run_lease_release_failed",
+                    worker_key=self._worker_key,
+                    error=str(exc),
+                )
 
 
 async def build_invoker_for_agent(
@@ -113,6 +164,7 @@ async def build_invoker_for_agent(
             worker_key=worker_key,
             backend_model_id=backend_model_id,
             vision_capable=vision_capable,
+            model_manager=model_manager,
         )
     if agent.base_model_id:
         # Treat it like a profile id: many deployments use base_model_id as the
@@ -135,6 +187,7 @@ async def build_invoker_for_agent(
             worker_key=worker_key,
             backend_model_id=backend_model_id,
             vision_capable=vision_capable,
+            model_manager=model_manager,
         )
     raise _openai_error(
         f"Agent '{agent.slug}' has no base model configured.",

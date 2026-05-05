@@ -13,6 +13,8 @@ interface ParamsPanelProps {
   params: PlaygroundParams
   onChange: (next: PlaygroundParams) => void
   disableSystemPrompt?: boolean
+  /** Max context length of the underlying model. Used to cap max_tokens. */
+  modelContextLength?: number | null
 }
 
 function ParamTooltip({ text }: { text: string }) {
@@ -36,7 +38,20 @@ function ParamTooltip({ text }: { text: string }) {
   )
 }
 
-export function ParamsPanel({ params, onChange, disableSystemPrompt = false }: ParamsPanelProps) {
+export function ParamsPanel({
+  params,
+  onChange,
+  disableSystemPrompt = false,
+  modelContextLength = null,
+}: ParamsPanelProps) {
+  // Cap max_tokens to a sensible upper bound. Modern context windows reach
+  // 128K-256K, but a single response of more than ~8K tokens is rarely useful
+  // and risks exceeding the model's window once the prompt is added.
+  // Hard ceiling: min(model context, 8192). Prompts will eat into the rest.
+  const ABSOLUTE_CEILING = 8192
+  const ctxCap = modelContextLength && modelContextLength > 0
+    ? Math.min(modelContextLength, ABSOLUTE_CEILING)
+    : ABSOLUTE_CEILING
   return (
     <Tooltip.Provider delayDuration={200}>
       <aside className="space-y-4 rounded-lg border border-border bg-card p-4">
@@ -66,16 +81,36 @@ export function ParamsPanel({ params, onChange, disableSystemPrompt = false }: P
         <div className="space-y-1">
           <div className="flex items-center text-sm text-muted-foreground">
             <span>max_tokens</span>
-            <ParamTooltip text="Numero maximo de tokens en la respuesta" />
+            <ParamTooltip
+              text={
+                modelContextLength
+                  ? `Tokens maximos en la respuesta. Limite: ${ctxCap.toLocaleString()} (modelo: ${modelContextLength.toLocaleString()} de contexto)`
+                  : "Tokens maximos en la respuesta"
+              }
+            />
+            <span className="ml-auto text-[10px] font-mono text-muted-foreground">
+              max {ctxCap.toLocaleString()}
+            </span>
           </div>
           <input
             type="number"
             min={1}
-            max={8192}
+            max={ctxCap}
             value={params.maxTokens}
-            onChange={(event) => onChange({ ...params, maxTokens: Number(event.target.value) })}
+            onChange={(event) => {
+              const raw = Number(event.target.value)
+              const clamped = Number.isFinite(raw)
+                ? Math.max(1, Math.min(raw, ctxCap))
+                : params.maxTokens
+              onChange({ ...params, maxTokens: clamped })
+            }}
             className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
+          {params.maxTokens > ctxCap && (
+            <p className="text-[10px] text-amber-400">
+              Tope ajustado a {ctxCap.toLocaleString()}.
+            </p>
+          )}
         </div>
 
         <div className="space-y-1">

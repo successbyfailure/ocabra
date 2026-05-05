@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from "react"
-import { Copy, ImagePlus, Send } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Copy, ImagePlus, Loader2, Send } from "lucide-react"
 import { toast } from "sonner"
 import {
   MessageBubble,
@@ -13,6 +13,8 @@ interface ChatInterfaceProps {
   modelId: string
   backendType: BackendType | null
   params: PlaygroundParams
+  /** Max sequence length of the underlying model (prompt + completion). */
+  modelContextLength?: number | null
 }
 
 interface ResponseContent {
@@ -41,13 +43,35 @@ interface ToolResultPatch {
   childCalls?: ChatToolCall[]
 }
 
-export function ChatInterface({ modelId, backendType, params }: ChatInterfaceProps) {
+export function ChatInterface({
+  modelId,
+  backendType,
+  params,
+  modelContextLength = null,
+}: ChatInterfaceProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [dragImage, setDragImage] = useState<string | null>(null)
+  // Becomes true 3 s after a request starts if no token has streamed back —
+  // a heuristic for "model is cold-loading or compiling kernels".
+  const [slowResponse, setSlowResponse] = useState(false)
+  const firstByteRef = useRef(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Drive the "cargando modelo" hint. Reset on each request.
+  useEffect(() => {
+    if (!sending) {
+      setSlowResponse(false)
+      return
+    }
+    firstByteRef.current = false
+    const handle = window.setTimeout(() => {
+      if (!firstByteRef.current) setSlowResponse(true)
+    }, 3000)
+    return () => window.clearTimeout(handle)
+  }, [sending])
 
   const buildOpenAIMessages = (userText: string) => {
     const history = messages.map((msg) => {
@@ -89,6 +113,31 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
     }
     const text = input.trim()
     if (!text && !dragImage) return
+
+    // Rough client-side check: ~4 chars/token (OpenAI estimate). Counts the
+    // system prompt + history + the new user turn. If the total + max_tokens
+    // is going to exceed the model's context window the server will return
+    // a 400 anyway, but giving immediate feedback is much nicer than a
+    // generic 500 once vLLM rejects the request.
+    if (modelContextLength && modelContextLength > 0) {
+      const charBudget =
+        (params.systemPrompt?.length ?? 0) +
+        messages.reduce((sum, m) => sum + (m.apiContent ?? m.content ?? "").length, 0) +
+        text.length +
+        (dragImage ? 4096 : 0) // image tokens are huge; rough placeholder
+      const estPromptTokens = Math.ceil(charBudget / 4)
+      const total = estPromptTokens + params.maxTokens
+      if (total > modelContextLength) {
+        toast.error(
+          `Demasiados tokens. Estimado ${estPromptTokens.toLocaleString()} prompt + ` +
+            `${params.maxTokens.toLocaleString()} max_tokens = ${total.toLocaleString()} > ` +
+            `${modelContextLength.toLocaleString()} contexto del modelo. ` +
+            `Reduce max_tokens o limpia el historial.`,
+          { duration: 8000 },
+        )
+        return
+      }
+    }
 
     const userMessage: ChatMessage = {
       id: `msg-${Date.now()}`,
@@ -155,18 +204,21 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
         throw new Error(typeof message === "string" ? message : JSON.stringify(message))
       }
 
+      const onPatch = (patch: AssistantPatch) => {
+        if (!firstByteRef.current) {
+          firstByteRef.current = true
+          setSlowResponse(false)
+        }
+        setMessages((prev) => updateAssistantMessage(prev, assistantId, patch))
+      }
       let responseContent = useOllama
         ? {
-            displayContent: await readOllamaChatStream(response, (patch) => {
-              setMessages((prev) => updateAssistantMessage(prev, assistantId, patch))
-            }),
+            displayContent: await readOllamaChatStream(response, onPatch),
             apiContent: "",
             reasoning: "",
             toolCalls: [],
           }
-        : await readOpenAIChatStream(response, (patch) => {
-            setMessages((prev) => updateAssistantMessage(prev, assistantId, patch))
-          })
+        : await readOpenAIChatStream(response, onPatch)
 
       if (!useOllama && isEmptyResponseContent(responseContent)) {
         responseContent = await retryOpenAINonStreaming(requestBody)
@@ -221,6 +273,17 @@ export function ChatInterface({ modelId, backendType, params }: ChatInterfacePro
             streaming={message.id === streamingMessageId}
           />
         ))}
+        {slowResponse && (
+          <div
+            role="status"
+            className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
+          >
+            <Loader2 size={14} className="shrink-0 animate-spin text-amber-400" aria-hidden="true" />
+            <span>
+              Cargando modelo o compilando kernels (primera vez puede tardar 60-120 s)...
+            </span>
+          </div>
+        )}
       </div>
 
       {dragImage && (

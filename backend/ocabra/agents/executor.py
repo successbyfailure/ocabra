@@ -140,6 +140,18 @@ class WorkerInvoker:
     def vision_capable(self) -> bool:
         return False
 
+    def acquire_run_lease(self):
+        """Hold the underlying model busy for the duration of a run.
+
+        Default implementation is a no-op (used by mocks and any invoker that
+        does not need busy-tracking). Real implementations — see
+        :class:`ocabra.agents.chat_glue.ProfileWorkerInvoker` — return an async
+        context manager that increments the in-flight counter on entry and
+        decrements it on exit, so the idle eviction watchdog cannot desalojate
+        the worker mid-loop.
+        """
+        return contextlib.nullcontext()
+
 
 # ── Internal helpers ───────────────────────────────────────────
 
@@ -888,99 +900,103 @@ class AgentExecutor:
         # the client is continuing a previous handshake — proceed normally.
         del last_role  # documentation only
 
-        for hop in range(agent.max_tool_hops + 1):
-            body = {
-                **merged_options,
-                "model": agent.base_model_id or agent.profile_id or "",
-                "messages": loop_messages,
-                "stream": False,
-            }
-            if all_tools:
-                body["tools"] = all_tools
-                body["tool_choice"] = tool_choice
-            t_hop_start = time.monotonic()
-            started = datetime.now(UTC)
-            try:
-                response = await worker.forward(body)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("agent_executor_worker_error", error=str(exc))
-                raise
-            duration_ms = int((time.monotonic() - t_hop_start) * 1000)
-            usage = (response or {}).get("usage") or {}
-            await _persist_hop_request_stat(
-                agent_id=agent_id,
-                parent_request_id=root_id,
-                base_model_id=str(body["model"]),
-                duration_ms=duration_ms,
-                input_tokens=usage.get("prompt_tokens"),
-                output_tokens=usage.get("completion_tokens"),
-                status_code=200,
-                error_message=None,
-                started_at=started,
-            )
-            last_response = response
+        # Hold the worker busy for the entire loop (LLM hops + tool execution)
+        # so the idle eviction watchdog cannot desalojate the model between
+        # hops. See ProfileWorkerInvoker.acquire_run_lease.
+        async with worker.acquire_run_lease():
+            for hop in range(agent.max_tool_hops + 1):
+                body = {
+                    **merged_options,
+                    "model": agent.base_model_id or agent.profile_id or "",
+                    "messages": loop_messages,
+                    "stream": False,
+                }
+                if all_tools:
+                    body["tools"] = all_tools
+                    body["tool_choice"] = tool_choice
+                t_hop_start = time.monotonic()
+                started = datetime.now(UTC)
+                try:
+                    response = await worker.forward(body)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("agent_executor_worker_error", error=str(exc))
+                    raise
+                duration_ms = int((time.monotonic() - t_hop_start) * 1000)
+                usage = (response or {}).get("usage") or {}
+                await _persist_hop_request_stat(
+                    agent_id=agent_id,
+                    parent_request_id=root_id,
+                    base_model_id=str(body["model"]),
+                    duration_ms=duration_ms,
+                    input_tokens=usage.get("prompt_tokens"),
+                    output_tokens=usage.get("completion_tokens"),
+                    status_code=200,
+                    error_message=None,
+                    started_at=started,
+                )
+                last_response = response
 
-            assistant_msg = _extract_message(response) or {}
-            tool_calls = assistant_msg.get("tool_calls") or []
-            finish_reason = _finish_reason(response)
+                assistant_msg = _extract_message(response) or {}
+                tool_calls = assistant_msg.get("tool_calls") or []
+                finish_reason = _finish_reason(response)
 
-            # Always append the assistant turn so subsequent hops see it.
-            loop_messages = [*loop_messages, assistant_msg]
+                # Always append the assistant turn so subsequent hops see it.
+                loop_messages = [*loop_messages, assistant_msg]
 
-            if not tool_calls or finish_reason in (None, "stop", "length", "content_filter"):
-                if not tool_calls:
+                if not tool_calls or finish_reason in (None, "stop", "length", "content_filter"):
+                    if not tool_calls:
+                        return AgentExecutorResult(
+                            openai_response=response,
+                            hops_used=hop,
+                            tool_calls=records,
+                        )
+
+                if hop >= agent.max_tool_hops:
+                    # Hop budget exhausted — return whatever the LLM said with a hint.
+                    response.setdefault("choices", [{}])
+                    if response["choices"]:
+                        response["choices"][0]["finish_reason"] = "tool_hop_limit"
                     return AgentExecutorResult(
                         openai_response=response,
                         hops_used=hop,
                         tool_calls=records,
                     )
 
-            if hop >= agent.max_tool_hops:
-                # Hop budget exhausted — return whatever the LLM said with a hint.
-                response.setdefault("choices", [{}])
-                if response["choices"]:
-                    response["choices"][0]["finish_reason"] = "tool_hop_limit"
-                return AgentExecutorResult(
-                    openai_response=response,
-                    hops_used=hop,
-                    tool_calls=records,
-                )
+                if require_approval == REQUIRE_APPROVAL_ALWAYS:
+                    # Two-turn handshake: hand the unresolved tool_calls back to
+                    # the caller and stop.
+                    return AgentExecutorResult(
+                        openai_response=response,
+                        hops_used=hop,
+                        tool_calls=records,
+                    )
 
-            if require_approval == REQUIRE_APPROVAL_ALWAYS:
-                # Two-turn handshake: hand the unresolved tool_calls back to
-                # the caller and stop.
-                return AgentExecutorResult(
-                    openai_response=response,
-                    hops_used=hop,
-                    tool_calls=records,
+                # Execute tool_calls in parallel (auto mode).
+                sem = asyncio.Semaphore(self._max_concurrency)
+                tasks = [
+                    self._invoke_tool(
+                        tool_call=tc,
+                        lookup=lookup,
+                        timeout_seconds=float(agent.tool_timeout_seconds),
+                        per_request_headers=per_request_headers,
+                        hop_index=hop,
+                        vision_capable=worker.vision_capable,
+                        sem=sem,
+                        user_ctx=user_ctx,
+                        agent_chain=agent_chain,
+                        per_request_allowed_tools=per_request_allowed_tools,
+                    )
+                    for tc in tool_calls
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=False)
+                for tool_msg, record in results:
+                    loop_messages.append(tool_msg)
+                    records.append(record)
+                await _persist_tool_call_stats(
+                    agent_id=agent_id,
+                    request_stat_id=root_id,
+                    records=[r for _, r in results],
                 )
-
-            # Execute tool_calls in parallel (auto mode).
-            sem = asyncio.Semaphore(self._max_concurrency)
-            tasks = [
-                self._invoke_tool(
-                    tool_call=tc,
-                    lookup=lookup,
-                    timeout_seconds=float(agent.tool_timeout_seconds),
-                    per_request_headers=per_request_headers,
-                    hop_index=hop,
-                    vision_capable=worker.vision_capable,
-                    sem=sem,
-                    user_ctx=user_ctx,
-                    agent_chain=agent_chain,
-                    per_request_allowed_tools=per_request_allowed_tools,
-                )
-                for tc in tool_calls
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=False)
-            for tool_msg, record in results:
-                loop_messages.append(tool_msg)
-                records.append(record)
-            await _persist_tool_call_stats(
-                agent_id=agent_id,
-                request_stat_id=root_id,
-                records=[r for _, r in results],
-            )
 
         # Should not reach here — the loop returns inside the body.
         return AgentExecutorResult(
@@ -1044,42 +1060,102 @@ class AgentExecutor:
         created_ts = int(time.time())
         base_model = agent.base_model_id or agent.profile_id or ""
 
-        for hop in range(agent.max_tool_hops + 1):
-            body: dict[str, Any] = {
-                **merged_options,
-                "model": base_model,
-                "messages": loop_messages,
-                "stream": False,
-            }
-            if all_tools:
-                body["tools"] = all_tools
-                body["tool_choice"] = tool_choice
+        # Hold the worker busy for the whole streaming run (LLM hops + tool
+        # execution + keepalives) so the idle eviction watchdog cannot
+        # desalojate the model between hops. See
+        # ProfileWorkerInvoker.acquire_run_lease.
+        async with worker.acquire_run_lease():
+            for hop in range(agent.max_tool_hops + 1):
+                body: dict[str, Any] = {
+                    **merged_options,
+                    "model": base_model,
+                    "messages": loop_messages,
+                    "stream": False,
+                }
+                if all_tools:
+                    body["tools"] = all_tools
+                    body["tool_choice"] = tool_choice
 
-            t_hop_start = time.monotonic()
-            started = datetime.now(UTC)
-            response = await worker.forward(body)
-            duration_ms = int((time.monotonic() - t_hop_start) * 1000)
-            usage = (response or {}).get("usage") or {}
-            await _persist_hop_request_stat(
-                agent_id=agent_id,
-                parent_request_id=root_id,
-                base_model_id=base_model,
-                duration_ms=duration_ms,
-                input_tokens=usage.get("prompt_tokens"),
-                output_tokens=usage.get("completion_tokens"),
-                status_code=200,
-                error_message=None,
-                started_at=started,
-            )
+                t_hop_start = time.monotonic()
+                started = datetime.now(UTC)
+                response = await worker.forward(body)
+                duration_ms = int((time.monotonic() - t_hop_start) * 1000)
+                usage = (response or {}).get("usage") or {}
+                await _persist_hop_request_stat(
+                    agent_id=agent_id,
+                    parent_request_id=root_id,
+                    base_model_id=base_model,
+                    duration_ms=duration_ms,
+                    input_tokens=usage.get("prompt_tokens"),
+                    output_tokens=usage.get("completion_tokens"),
+                    status_code=200,
+                    error_message=None,
+                    started_at=started,
+                )
 
-            assistant_msg = _extract_message(response) or {}
-            tool_calls = assistant_msg.get("tool_calls") or []
-            content_text = assistant_msg.get("content") or ""
+                assistant_msg = _extract_message(response) or {}
+                tool_calls = assistant_msg.get("tool_calls") or []
+                content_text = assistant_msg.get("content") or ""
 
-            loop_messages = [*loop_messages, assistant_msg]
+                loop_messages = [*loop_messages, assistant_msg]
 
-            if not tool_calls:
-                # Final hop: emit the content as a single delta chunk + final.
+                if not tool_calls:
+                    # Final hop: emit the content as a single delta chunk + final.
+                    yield _sse_chunk(
+                        {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": base_model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": content_text},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+                    yield _sse_chunk(
+                        {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": base_model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": _finish_reason(response) or "stop",
+                                }
+                            ],
+                            "usage": usage or None,
+                        }
+                    )
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                if hop >= agent.max_tool_hops:
+                    yield _sse_chunk(
+                        {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": base_model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": content_text},
+                                    "finish_reason": "tool_hop_limit",
+                                }
+                            ],
+                        }
+                    )
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                # Replay the assistant turn (with tool_calls) so client UIs can
+                # render them inline.
                 yield _sse_chunk(
                     {
                         "id": request_id,
@@ -1089,169 +1165,114 @@ class AgentExecutor:
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"role": "assistant", "content": content_text},
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": content_text,
+                                    "tool_calls": tool_calls,
+                                },
                                 "finish_reason": None,
                             }
                         ],
                     }
                 )
-                yield _sse_chunk(
-                    {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_ts,
-                        "model": base_model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": _finish_reason(response) or "stop",
-                            }
-                        ],
-                        "usage": usage or None,
-                    }
-                )
-                yield b"data: [DONE]\n\n"
-                return
 
-            if hop >= agent.max_tool_hops:
-                yield _sse_chunk(
-                    {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_ts,
-                        "model": base_model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": content_text},
-                                "finish_reason": "tool_hop_limit",
-                            }
-                        ],
-                    }
-                )
-                yield b"data: [DONE]\n\n"
-                return
-
-            # Replay the assistant turn (with tool_calls) so client UIs can
-            # render them inline.
-            yield _sse_chunk(
-                {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_ts,
-                    "model": base_model,
-                    "choices": [
+                if require_approval == REQUIRE_APPROVAL_ALWAYS:
+                    yield _sse_chunk(
                         {
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "content": content_text,
-                                "tool_calls": tool_calls,
-                            },
-                            "finish_reason": None,
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": base_model,
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
                         }
-                    ],
-                }
-            )
-
-            if require_approval == REQUIRE_APPROVAL_ALWAYS:
-                yield _sse_chunk(
-                    {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_ts,
-                        "model": base_model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                    }
-                )
-                yield b"data: [DONE]\n\n"
-                return
-
-            # Tell the client which tools are about to run so the UI can show
-            # "in progress" cards before the (possibly long) execution finishes.
-            for tc in tool_calls:
-                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-                yield _sse_event(
-                    "ocabra.tool_started",
-                    {
-                        "hop": hop,
-                        "tool_call_id": tc.get("id") if isinstance(tc, dict) else None,
-                        "name": fn.get("name") if isinstance(fn, dict) else None,
-                    },
-                )
-
-            sem = asyncio.Semaphore(self._max_concurrency)
-            tasks = [
-                self._invoke_tool(
-                    tool_call=tc,
-                    lookup=lookup,
-                    timeout_seconds=float(agent.tool_timeout_seconds),
-                    per_request_headers=per_request_headers,
-                    hop_index=hop,
-                    vision_capable=worker.vision_capable,
-                    sem=sem,
-                    user_ctx=user_ctx,
-                    agent_chain=agent_chain,
-                    per_request_allowed_tools=per_request_allowed_tools,
-                )
-                for tc in tool_calls
-            ]
-            # Subagent calls and slow MCP tools can keep gather() blocked for
-            # tens of seconds while the SSE stream emits nothing, which makes
-            # proxies and browsers drop the connection ("network error" in the
-            # playground). Emit an SSE comment as a keepalive every
-            # _KEEPALIVE_INTERVAL_S seconds while the gather is still running.
-            # Lines starting with `:` are SSE comments — the OpenAI parser
-            # ignores them, but they reset the proxy/browser inactivity timer.
-            # ``asyncio.gather`` already returns a ``_GatheringFuture``;
-            # wrap it through ``ensure_future`` (which accepts both coroutines
-            # and futures) so we can drive it from ``wait_for`` below.
-            gather_task = asyncio.ensure_future(
-                asyncio.gather(*tasks, return_exceptions=False)
-            )
-            while not gather_task.done():
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(gather_task),
-                        timeout=_KEEPALIVE_INTERVAL_S,
                     )
-                except TimeoutError:
-                    yield b": keepalive\n\n"
-            results = gather_task.result()
-            for tool_msg, record in results:
-                loop_messages.append(tool_msg)
-                tc_id = tool_msg.get("tool_call_id") or ""
-                yield _sse_event(
-                    "ocabra.tool_result",
-                    {
-                        "hop": hop,
-                        "tool_call_id": tc_id,
-                        "alias": record.alias,
-                        "tool_name": record.tool_name,
-                        "status": record.status,
-                        "duration_ms": record.duration_ms,
-                        "error": record.error,
-                        "result_summary": record.result_summary,
-                        "child_tool_calls": [
-                            {
-                                "alias": c.alias,
-                                "tool_name": c.tool_name,
-                                "status": c.status,
-                                "duration_ms": c.duration_ms,
-                                "error": c.error,
-                                "result_summary": c.result_summary,
-                                "hop_index": c.hop_index,
-                            }
-                            for c in record.child_tool_calls
-                        ],
-                    },
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                # Tell the client which tools are about to run so the UI can show
+                # "in progress" cards before the (possibly long) execution finishes.
+                for tc in tool_calls:
+                    fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                    yield _sse_event(
+                        "ocabra.tool_started",
+                        {
+                            "hop": hop,
+                            "tool_call_id": tc.get("id") if isinstance(tc, dict) else None,
+                            "name": fn.get("name") if isinstance(fn, dict) else None,
+                        },
+                    )
+
+                sem = asyncio.Semaphore(self._max_concurrency)
+                tasks = [
+                    self._invoke_tool(
+                        tool_call=tc,
+                        lookup=lookup,
+                        timeout_seconds=float(agent.tool_timeout_seconds),
+                        per_request_headers=per_request_headers,
+                        hop_index=hop,
+                        vision_capable=worker.vision_capable,
+                        sem=sem,
+                        user_ctx=user_ctx,
+                        agent_chain=agent_chain,
+                        per_request_allowed_tools=per_request_allowed_tools,
+                    )
+                    for tc in tool_calls
+                ]
+                # Subagent calls and slow MCP tools can keep gather() blocked for
+                # tens of seconds while the SSE stream emits nothing, which makes
+                # proxies and browsers drop the connection ("network error" in the
+                # playground). Emit an SSE comment as a keepalive every
+                # _KEEPALIVE_INTERVAL_S seconds while the gather is still running.
+                # Lines starting with `:` are SSE comments — the OpenAI parser
+                # ignores them, but they reset the proxy/browser inactivity timer.
+                # ``asyncio.gather`` already returns a ``_GatheringFuture``;
+                # wrap it through ``ensure_future`` (which accepts both coroutines
+                # and futures) so we can drive it from ``wait_for`` below.
+                gather_task = asyncio.ensure_future(
+                    asyncio.gather(*tasks, return_exceptions=False)
                 )
-            await _persist_tool_call_stats(
-                agent_id=agent_id,
-                request_stat_id=root_id,
-                records=[r for _, r in results],
-            )
+                while not gather_task.done():
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(gather_task),
+                            timeout=_KEEPALIVE_INTERVAL_S,
+                        )
+                    except TimeoutError:
+                        yield b": keepalive\n\n"
+                results = gather_task.result()
+                for tool_msg, record in results:
+                    loop_messages.append(tool_msg)
+                    tc_id = tool_msg.get("tool_call_id") or ""
+                    yield _sse_event(
+                        "ocabra.tool_result",
+                        {
+                            "hop": hop,
+                            "tool_call_id": tc_id,
+                            "alias": record.alias,
+                            "tool_name": record.tool_name,
+                            "status": record.status,
+                            "duration_ms": record.duration_ms,
+                            "error": record.error,
+                            "result_summary": record.result_summary,
+                            "child_tool_calls": [
+                                {
+                                    "alias": c.alias,
+                                    "tool_name": c.tool_name,
+                                    "status": c.status,
+                                    "duration_ms": c.duration_ms,
+                                    "error": c.error,
+                                    "result_summary": c.result_summary,
+                                    "hop_index": c.hop_index,
+                                }
+                                for c in record.child_tool_calls
+                            ],
+                        },
+                    )
+                await _persist_tool_call_stats(
+                    agent_id=agent_id,
+                    request_stat_id=root_id,
+                    records=[r for _, r in results],
+                )
 
         # If we exit the loop normally, the response is already terminated
         # inside the body.  This is just defensive.
