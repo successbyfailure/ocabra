@@ -30,7 +30,6 @@ _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_work
 
 
 class LlamaCppBackend(BackendInterface):
-
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
@@ -135,6 +134,18 @@ class LlamaCppBackend(BackendInterface):
             cmd.append("--mlock")
         if options["embedding"]:
             cmd.append("--embedding")
+        # Sprint 17.1 — Tier 1 flags.
+        # ``mmap`` is opt-out: False explicitly disables it.
+        if options["mmap"] is False:
+            cmd.append("--no-mmap")
+        if options["seed"] is not None:
+            cmd.extend(["--seed", str(options["seed"])])
+        if options["no_kv_offload"]:
+            cmd.append("--no-kv-offload")
+        if options["rope_freq_base"] is not None:
+            cmd.extend(["--rope-freq-base", str(options["rope_freq_base"])])
+        if options["rope_freq_scale"] is not None:
+            cmd.extend(["--rope-freq-scale", str(options["rope_freq_scale"])])
 
         env = {
             **os.environ,
@@ -249,7 +260,9 @@ class LlamaCppBackend(BackendInterface):
             raise KeyError(f"No llama.cpp worker for model '{model_id}'")
         _, port = entry
         async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", f"http://127.0.0.1:{port}{path}", json=body) as response:
+            async with client.stream(
+                "POST", f"http://127.0.0.1:{port}{path}", json=body
+            ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes():
                     yield chunk
@@ -259,7 +272,9 @@ class LlamaCppBackend(BackendInterface):
             "gpu_layers": int(
                 self._get_option(extra_config, "gpu_layers", settings.llama_cpp_gpu_layers)
             ),
-            "ctx_size": int(self._get_option(extra_config, "ctx_size", settings.llama_cpp_ctx_size)),
+            "ctx_size": int(
+                self._get_option(extra_config, "ctx_size", settings.llama_cpp_ctx_size)
+            ),
             "threads": self._to_int_or_none(
                 self._get_option(extra_config, "threads", settings.llama_cpp_threads)
             ),
@@ -286,14 +301,36 @@ class LlamaCppBackend(BackendInterface):
             "total_layers": int(
                 self._get_option(extra_config, "total_layers", _DEFAULT_TOTAL_LAYERS)
             ),
+            # --- Sprint 17.1 (Tier 1) flags ---
+            # ``mmap`` is tri-state: None => use llama-server default (mmap on),
+            # False => pass --no-mmap, True => explicit no-op (still on).
+            "mmap": self._to_bool_or_none(self._get_option(extra_config, "mmap", None)),
+            "seed": self._to_int_or_none(self._get_option(extra_config, "seed", None)),
+            "no_kv_offload": bool(self._get_option(extra_config, "no_kv_offload", False)),
+            "rope_freq_base": self._to_float_or_none(
+                self._get_option(extra_config, "rope_freq_base", None)
+            ),
+            "rope_freq_scale": self._to_float_or_none(
+                self._get_option(extra_config, "rope_freq_scale", None)
+            ),
         }
         return options
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
+        camel_key = "".join(
+            part.capitalize() if index else part for index, part in enumerate(key.split("_"))
+        )
         nested = extra_config.get("llama_cpp")
-        if isinstance(nested, dict) and key in nested:
-            return nested[key]
-        return extra_config.get(key, default)
+        if isinstance(nested, dict):
+            if key in nested:
+                return nested[key]
+            if camel_key in nested:
+                return nested[camel_key]
+        if key in extra_config:
+            return extra_config[key]
+        if camel_key in extra_config:
+            return extra_config[camel_key]
+        return default
 
     def _resolve_model_file(self, model_id: str, extra_config: dict[str, Any]) -> Path:
         explicit = self._get_option(extra_config, "model_path", None)
@@ -373,7 +410,9 @@ class LlamaCppBackend(BackendInterface):
         except ProcessLookupError:
             pass
 
-    async def _read_stderr_tail(self, process: asyncio.subprocess.Process, limit: int = 4000) -> str:
+    async def _read_stderr_tail(
+        self, process: asyncio.subprocess.Process, limit: int = 4000
+    ) -> str:
         if process.stderr is None:
             return ""
         try:
@@ -392,3 +431,13 @@ class LlamaCppBackend(BackendInterface):
         if value is None:
             return None
         return int(value)
+
+    def _to_float_or_none(self, value: Any) -> float | None:
+        if value is None:
+            return None
+        return float(value)
+
+    def _to_bool_or_none(self, value: Any) -> bool | None:
+        if value is None:
+            return None
+        return bool(value)

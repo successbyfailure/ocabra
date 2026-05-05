@@ -21,6 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flash-attn", action="store_true")
     parser.add_argument("--mlock", action="store_true")
     parser.add_argument("--embedding", action="store_true")
+    # --- Sprint 17.1 (Tier 1) flags ---
+    parser.add_argument("--no-mmap", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--no-kv-offload", action="store_true")
+    parser.add_argument("--rope-freq-base", type=float, default=None)
+    parser.add_argument("--rope-freq-scale", type=float, default=None)
     return parser.parse_args()
 
 
@@ -53,6 +59,17 @@ def main() -> None:
         cmd.append("--mlock")
     if args.embedding:
         cmd.append("--embedding")
+    # --- Sprint 17.1 (Tier 1) flags ---
+    if args.no_mmap:
+        cmd.append("--no-mmap")
+    if args.seed is not None:
+        cmd.extend(["--seed", str(args.seed)])
+    if args.no_kv_offload:
+        cmd.append("--no-kv-offload")
+    if args.rope_freq_base is not None:
+        cmd.extend(["--rope-freq-base", str(args.rope_freq_base)])
+    if args.rope_freq_scale is not None:
+        cmd.extend(["--rope-freq-scale", str(args.rope_freq_scale)])
 
     os.execvpe(args.server_bin, cmd, os.environ.copy())
 
