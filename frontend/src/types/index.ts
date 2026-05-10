@@ -85,6 +85,9 @@ export interface ModelState {
   profiles?: ModelProfile[]
   createdAt?: string | null
   updatedAt?: string | null
+  releaseDate?: string | null
+  lastUpdated?: string | null
+  metadataFetchedAt?: string | null
   federation?: {
     remote: boolean
     nodeName: string
@@ -312,6 +315,7 @@ export interface DownloadJob {
   error: string | null
   startedAt: string
   completedAt: string | null
+  kind: "install" | "update"
 }
 
 export type DownloadSource = "huggingface" | "ollama" | "bitnet"

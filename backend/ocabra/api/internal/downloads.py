@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import shutil
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -70,9 +71,12 @@ class DownloadManager:
         model_ref: str,
         artifact: str | None = None,
         register_config: dict | None = None,
+        kind: str = "install",
     ) -> DownloadJob:
         if source not in {"huggingface", "ollama", "bitnet"}:
             raise ValueError("source must be 'huggingface', 'ollama' or 'bitnet'")
+        if kind not in {"install", "update"}:
+            raise ValueError("kind must be 'install' or 'update'")
 
         now = datetime.now(UTC)
         job = DownloadJob(
@@ -88,6 +92,7 @@ class DownloadManager:
             error=None,
             started_at=now,
             completed_at=None,
+            kind=kind,
         )
 
         await set_key(f"download:job:{job.job_id}", job.model_dump(mode="json"))
@@ -148,6 +153,36 @@ class DownloadManager:
         cancel_flag = asyncio.Event()
         self._active_cancel_flags[job.job_id] = cancel_flag
         loop = asyncio.get_event_loop()
+
+        # Preflight free-space check. Bail out before allocating anything if
+        # the target dir is already below threshold — prevents the cascade of
+        # 80 enqueued re-pulls all failing mid-stream when the first one
+        # fills the disk.
+        try:
+            free_bytes = await asyncio.to_thread(
+                lambda: shutil.disk_usage(settings.models_dir).free
+            )
+        except Exception:
+            free_bytes = None
+        if free_bytes is not None:
+            free_gb = free_bytes / (1024 ** 3)
+            min_gb = float(settings.download_min_free_gb or 0)
+            if free_gb < min_gb:
+                failed = job.model_copy(
+                    update={
+                        "status": "failed",
+                        "error": (
+                            f"insufficient disk space: {free_gb:.1f} GB free in "
+                            f"{settings.models_dir} is below the configured "
+                            f"download_min_free_gb threshold ({min_gb:.0f} GB). "
+                            f"Free space and retry."
+                        ),
+                        "completed_at": datetime.now(UTC),
+                    }
+                )
+                await self._save_and_publish(failed)
+                self._active_cancel_flags.pop(job.job_id, None)
+                return
 
         downloading = job.model_copy(update={"status": "downloading"})
         await self._save_and_publish(downloading)
@@ -225,6 +260,7 @@ class DownloadManager:
             )
             await self._save_and_publish(completed)
             await self._auto_register_model(downloading)
+            await self._refresh_registry_metadata(downloading)
         except asyncio.CancelledError:
             cancelled = downloading.model_copy(
                 update={"status": "cancelled", "completed_at": datetime.now(UTC)}
@@ -290,6 +326,36 @@ class DownloadManager:
             )
         except Exception:
             pass  # Non-fatal: model can be registered manually
+
+    async def _refresh_registry_metadata(self, job: DownloadJob) -> None:
+        """Fetch upstream release / last-modified dates and persist them on the model.
+
+        Runs after a successful download (initial install or update). Skips
+        silently on any failure — metadata is best-effort.
+        """
+        if not self._app:
+            return
+        try:
+            from ocabra.registry.metadata import fetch_registry_metadata
+
+            mm = self._app.state.model_manager
+            backend_model_id = self._job_model_id(job)
+            if job.source == "ollama":
+                backend_type = "ollama"
+            elif job.source == "bitnet":
+                backend_type = "bitnet"
+            else:
+                backend_type = await self._hf_registry.infer_backend_for_repo(
+                    job.model_ref, artifact=job.artifact
+                )
+
+            model_id = build_model_ref(backend_type, backend_model_id)
+            metadata = await fetch_registry_metadata(backend_type, backend_model_id)
+            if metadata is None:
+                return
+            await mm.set_registry_metadata(model_id, metadata)
+        except Exception:
+            pass  # Non-fatal: metadata can be backfilled later.
 
     def _job_model_id(self, job: DownloadJob) -> str:
         if job.source not in {"huggingface", "bitnet"} or not job.artifact:

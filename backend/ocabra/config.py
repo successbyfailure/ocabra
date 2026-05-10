@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # Models storage
     models_dir: str = "/data/models"
     download_dir: str = ""  # default: {models_dir}/downloads
+    # Preflight free-space threshold (GB). Before each download job starts,
+    # the worker checks ``shutil.disk_usage(models_dir).free``. If it falls
+    # below this, the job fails fast with a clear error instead of partially
+    # writing files until the disk fills mid-stream — the cascade that took
+    # the pool to 100% during the 2026-05-09 update-all incident.
+    download_min_free_gb: int = 30
     # Bloque 15 — Modular backends install root (one subdir per backend).
     backends_dir: str = "/data/backends"
     # True on the fat image (all backends pre-installed): unknown backends

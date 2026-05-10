@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from threading import Lock
 from urllib.parse import urlparse
@@ -86,6 +86,13 @@ class ModelState:
             self.backend_model_id = self.model_id
 
     def to_dict(self) -> dict:
+        registry_meta = (
+            self.extra_config.get("registry_metadata")
+            if isinstance(self.extra_config, dict)
+            else None
+        )
+        if not isinstance(registry_meta, dict):
+            registry_meta = None
         return {
             "model_id": self.model_id,
             "backend_model_id": self.backend_model_id,
@@ -106,6 +113,13 @@ class ModelState:
             "extra_config": self.extra_config,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            # Registry-side dates (release / upstream last-modified). Populated
+            # by ``registry.metadata.fetch_registry_metadata`` and stored under
+            # ``extra_config["registry_metadata"]``. Surfaced top-level so the
+            # UI doesn't have to dig into extra_config.
+            "release_date": (registry_meta or {}).get("release_date"),
+            "last_updated": (registry_meta or {}).get("last_updated"),
+            "metadata_fetched_at": (registry_meta or {}).get("fetched_at"),
         }
 
 @dataclass
@@ -133,6 +147,10 @@ class ModelManager:
         self._busy_watchdog_task: asyncio.Task | None = None
         self._vram_watchdog_task: asyncio.Task | None = None
         self._stopped: bool = False
+        # Cache of expected load times (seconds) keyed by model_id.
+        # Value is (cached_at_monotonic, seconds | None). TTL: 5 minutes.
+        self._expected_load_cache: dict[str, tuple[float, int | None]] = {}
+        self._expected_load_cache_ttl_s: float = 300.0
 
     def begin_request(self, model_id: str) -> str:
         """Mark one request as in-flight. Returns request_id."""
@@ -163,7 +181,7 @@ class ModelManager:
         # Update last_request_at in memory for LRU eviction ordering
         state = self._states.get(model_id)
         if state:
-            state.last_request_at = datetime.now(timezone.utc)
+            state.last_request_at = datetime.now(UTC)
 
     def is_busy(self, model_id: str) -> bool:
         """Return True if there are in-flight requests for this model."""
@@ -241,7 +259,7 @@ class ModelManager:
         Only includes WARM or ON_DEMAND models (never PIN).
         Excludes models with in-flight requests.
         """
-        fallback_time = datetime.min.replace(tzinfo=timezone.utc)
+        fallback_time = datetime.min.replace(tzinfo=UTC)
         candidates = []
         for model_id, state in self._states.items():
             if state.status != ModelStatus.LOADED:
@@ -501,15 +519,15 @@ class ModelManager:
         except ValueError:
             return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
 
     async def touch_last_request_at(self, model_id: str, at: datetime | None = None) -> None:
         state = self._states.get(model_id)
         if not state:
             raise KeyError(f"Model '{model_id}' not configured")
 
-        state.last_request_at = at or datetime.now(timezone.utc)
+        state.last_request_at = at or datetime.now(UTC)
         await self._persist_state(model_id)
 
     def _notify_event_listeners(self, event: str, state: "ModelState") -> None:
@@ -560,7 +578,7 @@ class ModelManager:
 
             state.status = ModelStatus.LOADING
             await self._publish_event(model_id, "status_changed")
-            load_started_at = datetime.now(timezone.utc)
+            load_started_at = datetime.now(UTC)
 
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
@@ -637,7 +655,7 @@ class ModelManager:
                 state.vram_used_mb = worker_info.vram_used_mb
                 state.capabilities = capabilities
                 state.status = ModelStatus.LOADED
-                state.loaded_at = datetime.now(timezone.utc)
+                state.loaded_at = datetime.now(UTC)
                 state.error_message = None
 
                 await self._record_model_load_stat(
@@ -763,6 +781,62 @@ class ModelManager:
         except Exception as exc:
             logger.warning("model_load_stat_write_failed", model_id=model_id, error=str(exc))
 
+        # Invalidate the expected-load cache so the new sample is reflected on
+        # the next query.
+        self._expected_load_cache.pop(model_id, None)
+
+    async def get_expected_load_seconds(
+        self, model_id: str, *, sample_size: int = 5
+    ) -> int | None:
+        """Return the expected load time in seconds for *model_id*.
+
+        Uses the median ``duration_ms`` of the last ``sample_size`` successful
+        loads recorded in :class:`ModelLoadStat`. Results are cached in memory
+        for ``self._expected_load_cache_ttl_s`` seconds. Returns ``None`` if
+        there is no historical data (caller decides whether to omit the hint
+        or fall back to a default).
+        """
+        cached = self._expected_load_cache.get(model_id)
+        now_mono = time.monotonic()
+        if cached is not None:
+            cached_at, cached_value = cached
+            if now_mono - cached_at < self._expected_load_cache_ttl_s:
+                return cached_value
+
+        seconds: int | None = None
+        try:
+            async with database.AsyncSessionLocal() as session:
+                stmt = (
+                    sa.select(ModelLoadStat.duration_ms)
+                    .where(
+                        ModelLoadStat.model_id == model_id,
+                        ModelLoadStat.duration_ms.isnot(None),
+                        ModelLoadStat.finished_at.isnot(None),
+                    )
+                    .order_by(ModelLoadStat.started_at.desc())
+                    .limit(max(1, sample_size))
+                )
+                rows = (await session.execute(stmt)).scalars().all()
+        except Exception as exc:
+            logger.warning(
+                "expected_load_seconds_query_failed",
+                model_id=model_id,
+                error=str(exc),
+            )
+            rows = []
+
+        durations_ms = sorted(int(d) for d in rows if d is not None and d > 0)
+        if durations_ms:
+            mid = len(durations_ms) // 2
+            if len(durations_ms) % 2 == 1:
+                median_ms = durations_ms[mid]
+            else:
+                median_ms = (durations_ms[mid - 1] + durations_ms[mid]) // 2
+            seconds = max(1, int(round(median_ms / 1000)))
+
+        self._expected_load_cache[model_id] = (now_mono, seconds)
+        return seconds
+
     def _resolve_bitnet_option(self, state: "ModelState", key: str, default: int) -> int:
         return resolve_bitnet_option(state, key, default)
 
@@ -876,7 +950,7 @@ class ModelManager:
             LoadPolicy.WARM: 1,
             LoadPolicy.PIN: 2,
         }
-        fallback_time = datetime.min.replace(tzinfo=timezone.utc)
+        fallback_time = datetime.min.replace(tzinfo=UTC)
 
         candidates = [
             state
@@ -952,7 +1026,7 @@ class ModelManager:
     async def _watch_and_reload(self, model_id: str) -> None:
         if not self._gpu_scheduler:
             return
-        deadline = datetime.now(timezone.utc) + timedelta(
+        deadline = datetime.now(UTC) + timedelta(
             seconds=max(30, int(settings.model_load_wait_timeout_s))
         )
         while not self._stopped and model_id in self._states:
@@ -961,7 +1035,7 @@ class ModelManager:
                 return
             if state.status != ModelStatus.UNLOADED:
                 return
-            if datetime.now(timezone.utc) >= deadline:
+            if datetime.now(UTC) >= deadline:
                 logger.warning("watch_and_reload_timeout", model_id=model_id)
                 return
             await asyncio.sleep(30)
@@ -982,7 +1056,7 @@ class ModelManager:
 
     async def check_idle_evictions(self) -> None:
         global_timeout = int(settings.idle_timeout_seconds)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for model_id, state in list(self._states.items()):
             if state.status != ModelStatus.LOADED:
                 continue
@@ -1167,7 +1241,7 @@ class ModelManager:
                 loaded_vram = max(0, int(loaded_vram_map.get(backend_model_id, 0)))
                 if state.status != ModelStatus.LOADED:
                     state.status = ModelStatus.LOADED
-                    state.loaded_at = state.loaded_at or datetime.now(timezone.utc)
+                    state.loaded_at = state.loaded_at or datetime.now(UTC)
                     # Refresh last_request_at so the idle eviction watchdog
                     # does not immediately desalojate this model again. Without
                     # this, a model the watchdog just unloaded but Ollama is
@@ -1175,7 +1249,7 @@ class ModelManager:
                     # LOADED with a stale last_request_at and gets re-evicted
                     # every tick — a tight loop visible as repeated
                     # ``idle_eviction`` log lines for the same model.
-                    state.last_request_at = datetime.now(timezone.utc)
+                    state.last_request_at = datetime.now(UTC)
                     state.error_message = None
                     state.current_gpu = []
                     state.vram_used_mb = loaded_vram
@@ -1273,6 +1347,20 @@ class ModelManager:
         self._persisted_model_ids.add(normalized_model_id)
         self._notify_event_listeners("register", state)
         return state
+
+    async def set_registry_metadata(self, model_id: str, metadata: dict) -> bool:
+        """Merge ``metadata`` under ``extra_config['registry_metadata']``.
+
+        Returns True if the model was found and updated.
+        """
+        state = self._states.get(model_id)
+        if not state:
+            return False
+        existing = state.extra_config if isinstance(state.extra_config, dict) else {}
+        merged_extra = {**existing, "registry_metadata": metadata}
+        await self.update_config(model_id, {"extra_config": merged_extra})
+        await self._publish_event(model_id, "metadata_updated")
+        return True
 
     async def update_config(self, model_id: str, patch: dict) -> "ModelState":
         state = self._states.get(model_id)

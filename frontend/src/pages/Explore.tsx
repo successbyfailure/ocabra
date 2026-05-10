@@ -4,14 +4,12 @@ import * as Tabs from "@radix-ui/react-tabs"
 import { ChevronDown, ChevronRight, Search, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import { DownloadQueue } from "@/components/downloads/DownloadQueue"
 import { HFModelCard } from "@/components/explore/HFModelCard"
 import { OllamaModelCard } from "@/components/explore/OllamaModelCard"
 import { SearchFilters } from "@/components/explore/SearchFilters"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useDownloadStore } from "@/stores/downloadStore"
 import type {
-  DownloadJob,
   DownloadSource,
   HFModelCard as HFCardType,
   HFModelVariant,
@@ -381,16 +379,6 @@ export function Explore() {
       setInstallTarget(null)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No se pudo iniciar descarga")
-    }
-  }
-
-  const cancelJob = async (job: DownloadJob) => {
-    try {
-      await api.downloads.cancel(job.jobId)
-      setJobs(jobs.map((item) => (item.jobId === job.jobId ? { ...item, status: "cancelled" } : item)))
-      toast.success("Descarga cancelada")
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "No se pudo cancelar")
     }
   }
 
@@ -771,7 +759,6 @@ export function Explore() {
         </Dialog.Portal>
       </Dialog.Root>
 
-      <DownloadQueue jobs={jobs} onCancel={cancelJob} />
     </div>
   )
 }

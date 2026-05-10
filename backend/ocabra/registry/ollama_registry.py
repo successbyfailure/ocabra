@@ -191,6 +191,36 @@ class OllamaRegistry:
         plain = self._TEXT_RE.sub(" ", html)
         return " ".join(plain.split())
 
+    async def get_version(self) -> str | None:
+        """Return the version reported by the local Ollama daemon, or ``None`` on error."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(self._url("/api/version"))
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            logger.warning("ollama_version_unavailable: %s", exc)
+            return None
+        version = payload.get("version") if isinstance(payload, dict) else None
+        return str(version) if version else None
+
+    async def get_latest_version(self) -> str | None:
+        """Return the latest released Ollama version (without leading ``v``)."""
+        url = "https://api.github.com/repos/ollama/ollama/releases/latest"
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(url, headers={"Accept": "application/vnd.github+json"})
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            logger.warning("ollama_latest_version_unavailable: %s", exc)
+            return None
+        tag = payload.get("tag_name") if isinstance(payload, dict) else None
+        if not tag:
+            return None
+        tag = str(tag).strip()
+        return tag.lstrip("v") or None
+
     async def list_installed_details(self) -> list[dict]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(self._url("/api/tags"))

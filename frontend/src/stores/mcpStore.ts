@@ -198,7 +198,16 @@ export const useMCPStore = create<MCPStore>((set, get) => ({
     }
     const updated = await mcpApi.update(id, data)
     get().upsert(updated)
-    return updated
+    // The backend invalidates tools_cache on PATCH. Repopulate it eagerly so
+    // the next edit dialog opens on the checklist, not the comma-separated
+    // textarea fallback.
+    try {
+      const refreshed = await mcpApi.refresh(id)
+      get().upsert(refreshed)
+      return refreshed
+    } catch {
+      return updated
+    }
   },
 
   remove: async (id) => {

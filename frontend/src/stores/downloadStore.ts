@@ -29,6 +29,7 @@ export const useDownloadStore = create<DownloadStore>((set) => ({
               error: null,
               startedAt: new Date().toISOString(),
               completedAt: null,
+              kind: "install",
               ...patch,
             },
           ],

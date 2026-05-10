@@ -748,14 +748,18 @@ from ocabra.api.internal.downloads import router as downloads_router  # noqa: E4
 from ocabra.api.internal.registry import router as registry_router  # noqa: E402
 from ocabra.api.internal.services import router as services_router  # noqa: E402
 from ocabra.api.internal.host import router as host_router  # noqa: E402
+from ocabra.api.internal.ollama_admin import router as ollama_admin_router  # noqa: E402
+from ocabra.api.internal.models_update import router as models_update_router  # noqa: E402
 
 app.include_router(gpus_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(ws_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(registry_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(downloads_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(services_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(host_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(ollama_admin_router, prefix="/ocabra", include_in_schema=False)
 
 # Bloque 15 — Modular backends router
 from ocabra.api.internal.backends import router as backends_router  # noqa: E402

@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { api } from "@/api/client"
 import { BackendCard } from "@/components/backends/BackendCard"
 import { ConfirmUninstallDialog } from "@/components/backends/ConfirmUninstallDialog"
+import { OllamaServerCard } from "@/components/backends/OllamaServerCard"
 import { useBackendsStore } from "@/stores/backendsStore"
 import type { BackendInstallMethod, BackendModuleState } from "@/types"
 
@@ -104,6 +105,8 @@ export function Backends() {
           </div>
         </div>
       )}
+
+      <OllamaServerCard />
 
       {error && !usingMock && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">

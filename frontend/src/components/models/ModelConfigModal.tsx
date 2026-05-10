@@ -865,6 +865,25 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               <Dialog.Description className="text-sm text-muted-foreground">
                 {model?.displayName ?? ""}
               </Dialog.Description>
+              {model && (model.releaseDate || model.lastUpdated) && (
+                <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
+                  {model.releaseDate && (
+                    <span title={new Date(model.releaseDate).toLocaleString()}>
+                      Release: <span className="text-foreground">{new Date(model.releaseDate).toLocaleDateString()}</span>
+                    </span>
+                  )}
+                  {model.lastUpdated && (
+                    <span title={new Date(model.lastUpdated).toLocaleString()}>
+                      Última actualización: <span className="text-foreground">{new Date(model.lastUpdated).toLocaleDateString()}</span>
+                    </span>
+                  )}
+                  {model.metadataFetchedAt && (
+                    <span className="opacity-70" title={new Date(model.metadataFetchedAt).toLocaleString()}>
+                      (consultado {new Date(model.metadataFetchedAt).toLocaleDateString()})
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             <Dialog.Close className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close">
               <X size={16} />

@@ -11,6 +11,7 @@ import {
   PinOff,
   Play,
   Plus,
+  RefreshCw,
   Server,
   Share2,
   Square,
@@ -32,6 +33,7 @@ interface ModelCardProps {
   onConfigure: (model: ModelState) => void
   onDelete: (model: ModelState) => void
   onCompile?: (model: ModelState) => void
+  onUpdate?: (model: ModelState) => void
   onEditProfile: (model: ModelState, profile: ModelProfile | null) => void
   onToggleProfileEnabled: (profile: ModelProfile) => void
 }
@@ -102,6 +104,7 @@ export function ModelCard({
   onConfigure,
   onDelete,
   onCompile,
+  onUpdate,
   onEditProfile,
   onToggleProfileEnabled,
 }: ModelCardProps) {
@@ -149,12 +152,40 @@ export function ModelCard({
                 )}
               </div>
               <div className="text-xs text-muted-foreground">{model.modelId}</div>
-              {(model.createdAt || model.updatedAt) && (
-                <div className="text-[10px] text-muted-foreground/60 mt-0.5">
-                  {model.createdAt && `Registrado ${new Date(model.createdAt).toLocaleDateString()}`}
-                  {model.updatedAt && model.createdAt !== model.updatedAt && ` · Actualizado ${new Date(model.updatedAt).toLocaleDateString()}`}
-                </div>
-              )}
+              {(() => {
+                const release = model.releaseDate ?? null
+                const upstream = model.lastUpdated ?? null
+                const localCreated = model.createdAt ?? null
+                const localUpdated = model.updatedAt ?? null
+                if (!release && !upstream && !localCreated && !localUpdated) return null
+                const fmt = (iso: string | null) =>
+                  iso ? new Date(iso).toLocaleDateString() : "—"
+                const tooltipLines: string[] = []
+                if (release) tooltipLines.push(`Release: ${new Date(release).toLocaleString()}`)
+                if (upstream) tooltipLines.push(`Última actualización upstream: ${new Date(upstream).toLocaleString()}`)
+                if (localCreated) tooltipLines.push(`Registrado en oCabra: ${new Date(localCreated).toLocaleString()}`)
+                if (localUpdated && localUpdated !== localCreated) {
+                  tooltipLines.push(`Última edición de configuración: ${new Date(localUpdated).toLocaleString()}`)
+                }
+                const summary = release || upstream
+                  ? `Release ${fmt(release)} · Actualizado ${fmt(upstream)}`
+                  : `Registrado ${fmt(localCreated)}${localUpdated && localUpdated !== localCreated ? ` · Modificado ${fmt(localUpdated)}` : ""}`
+                return (
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <div className="text-[10px] text-muted-foreground/60 mt-0.5 cursor-help">{summary}</div>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content className="z-50 max-w-sm rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md" sideOffset={4}>
+                        {tooltipLines.map((line) => (
+                          <div key={line}>{line}</div>
+                        ))}
+                        <Tooltip.Arrow className="fill-border" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                )
+              })()}
             </div>
           </div>
         </td>
@@ -249,6 +280,15 @@ export function ModelCard({
                     >
                       <Cpu size={14} />
                       Compilar TRT
+                    </DropdownMenu.Item>
+                  )}
+                  {onUpdate && (
+                    <DropdownMenu.Item
+                      className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer outline-none hover:bg-muted focus:bg-muted"
+                      onSelect={() => onUpdate(model)}
+                    >
+                      <RefreshCw size={14} />
+                      Actualizar
                     </DropdownMenu.Item>
                   )}
                   <DropdownMenu.Separator className="my-1 h-px bg-border" />

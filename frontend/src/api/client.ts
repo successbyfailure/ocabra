@@ -531,6 +531,9 @@ function toModelState(raw: unknown): ModelState {
         nodeId: String(fed.node_id ?? fed.nodeId ?? ""),
       }
     })(),
+    releaseDate: (data.release_date ?? data.releaseDate ?? null) as string | null,
+    lastUpdated: (data.last_updated ?? data.lastUpdated ?? null) as string | null,
+    metadataFetchedAt: (data.metadata_fetched_at ?? data.metadataFetchedAt ?? null) as string | null,
   }
 }
 
@@ -562,6 +565,7 @@ function toDownloadJob(raw: unknown): DownloadJob {
     error: (data.error ?? null) as string | null,
     startedAt: String(data.started_at ?? data.startedAt ?? new Date(0).toISOString()),
     completedAt: (data.completed_at ?? data.completedAt ?? null) as string | null,
+    kind: (data.kind === "update" ? "update" : "install") as DownloadJob["kind"],
   }
 }
 
@@ -1042,6 +1046,33 @@ export const api = {
         run_probe: Boolean(body.runProbe),
       }).then(toModelMemoryEstimate),
     delete: (modelId: string) => request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
+    update: async (modelId: string) =>
+      toDownloadJob(
+        await request<unknown>(
+          "POST",
+          `/ocabra/models/${encodeURIComponent(modelId)}/update`,
+        ),
+      ),
+    refreshMetadata: async (): Promise<{ refreshed: string[]; skipped: { modelId: string; reason: string }[] }> => {
+      const raw = await request<{
+        refreshed: string[]
+        skipped: { model_id: string; reason: string }[]
+      }>("POST", "/ocabra/models/refresh-metadata")
+      return {
+        refreshed: raw.refreshed ?? [],
+        skipped: (raw.skipped ?? []).map((s) => ({ modelId: s.model_id, reason: s.reason })),
+      }
+    },
+    updateAll: async (): Promise<{ enqueued: DownloadJob[]; skipped: { modelId: string; reason: string }[] }> => {
+      const raw = await request<{
+        enqueued: unknown[]
+        skipped: { model_id: string; reason: string }[]
+      }>("POST", "/ocabra/models/update-all")
+      return {
+        enqueued: (raw.enqueued ?? []).map(toDownloadJob),
+        skipped: (raw.skipped ?? []).map((s) => ({ modelId: s.model_id, reason: s.reason })),
+      }
+    },
     // Sprint 17.4 — list llama.cpp models compatible as speculative-decoding drafts.
     speculativeCandidates: async (
       modelId: string,
@@ -1309,6 +1340,47 @@ export const api = {
 
   host: {
     stats: async () => toHostStats(await request<unknown>("GET", "/ocabra/host/stats")),
+  },
+
+  ollama: {
+    version: async (): Promise<{ current: string | null; latest: string | null; updateAvailable: boolean }> => {
+      const raw = await request<{ current: string | null; latest: string | null; update_available: boolean }>(
+        "GET",
+        "/ocabra/ollama/version",
+      )
+      return {
+        current: raw.current,
+        latest: raw.latest,
+        updateAvailable: Boolean(raw.update_available),
+      }
+    },
+    serverUpdateStatus: async (): Promise<{
+      status: "idle" | "pulling" | "restarting" | "done" | "error"
+      detail: string | null
+      startedAt: string | null
+      finishedAt: string | null
+      fromVersion: string | null
+      toVersion: string | null
+    }> => {
+      const raw = await request<{
+        status: "idle" | "pulling" | "restarting" | "done" | "error"
+        detail: string | null
+        started_at: string | null
+        finished_at: string | null
+        from_version: string | null
+        to_version: string | null
+      }>("GET", "/ocabra/ollama/server/update")
+      return {
+        status: raw.status,
+        detail: raw.detail,
+        startedAt: raw.started_at,
+        finishedAt: raw.finished_at,
+        fromVersion: raw.from_version,
+        toVersion: raw.to_version,
+      }
+    },
+    startServerUpdate: async () =>
+      request<{ status: string; detail: string | null }>("POST", "/ocabra/ollama/server/update"),
   },
 
   config: {

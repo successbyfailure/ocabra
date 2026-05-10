@@ -50,6 +50,44 @@ El campo `model` acepta **profile_id** (recomendado) o model_id canonico (legacy
 | GET | `/v1/models` | Listar modelos/perfiles disponibles |
 | GET | `/v1/models/{model_id}` | Detalle de un modelo |
 
+#### Headers de carga en respuestas streaming
+
+Cuando una peticion `stream=true` toca un modelo que aun no esta cargado, oCabra
+hace **flush de los headers antes de bloquear**, de forma que el cliente sepa
+desde el primer momento que va a haber espera. Headers expuestos:
+
+| Header | Valor |
+|--------|-------|
+| `X-Ocabra-Model-Status` | Estado del worker en el momento de abrir el stream (`configured`, `loading`, `loaded`, ...) |
+| `X-Ocabra-Model-Id` | ID canonico del modelo resuelto |
+| `X-Ocabra-Expected-Wait-Seconds` | Estimacion (mediana de las ultimas 5 cargas) del tiempo de carga si el modelo no esta `loaded`. Ausente si no hay historico. |
+
+Ademas de los headers, dentro del propio stream se envian dos **eventos SSE
+con nombre `ocabra.<name>`** siguiendo la misma convencion que ya usa
+`ocabra.tool_started` / `ocabra.tool_result` en los agentes. Clientes que no
+reconozcan estos nombres simplemente los ignoran; el resto del stream son
+chunks `data: {...}` de OpenAI estandar.
+
+Formato:
+
+```
+event: ocabra.model_loading
+data: {"model_id":"...","worker_key":"...","status":"configured","expected_wait_seconds":12}
+
+event: ocabra.model_ready
+data: {"model_id":"...","worker_key":"...","load_duration_ms":11820,"was_cold_start":true}
+```
+
+- `ocabra.model_loading`: emitido inmediatamente al abrir el stream. `status`
+  es el estado del worker antes del load (`loaded`, `configured`, `loading`,
+  etc.). `expected_wait_seconds` es `null` si no hay historico.
+- `ocabra.model_ready`: emitido tras completarse el load (o inmediatamente si
+  el modelo ya estaba en memoria, con `was_cold_start: false`).
+
+Si la carga falla o el modelo no soporta la operacion, el error se emite como
+evento SSE `data:` con payload `{"error": ...}` (no como HTTP error, porque
+los headers ya se enviaron).
+
 **POST /v1/chat/completions**
 ```json
 {
@@ -162,9 +200,34 @@ API compatible con el protocolo de Ollama. Clientes como `ollama-python` funcion
 | POST | `/api/embed` | Embeddings |
 | POST | `/api/embeddings` | Embeddings (legacy) |
 | GET | `/api/tags` | Listar modelos |
+| GET | `/api/ps` | Listar modelos cargados en memoria |
 | POST | `/api/show` | Detalle de un modelo |
 | POST | `/api/pull` | Descargar un modelo de Ollama |
 | DELETE | `/api/delete` | Eliminar un modelo |
+
+**GET /api/ps**
+
+Devuelve solo los modelos en estado `LOADED`. Cada entrada incluye los campos
+estandar Ollama (`name`, `model`, `size`, `size_vram`, `digest`, `details`,
+`expires_at`) mas un campo extra `expected_load_seconds` (mediana historica)
+util para estimar el cold-start de modelos que **no** salgan en esta lista.
+
+```json
+{
+  "models": [
+    {
+      "name": "qwen3-8b",
+      "model": "qwen3-8b",
+      "size": 5137025024,
+      "size_vram": 5368709120,
+      "digest": "sha256:...",
+      "details": {"family": "llm", "format": "safetensors", ...},
+      "expires_at": "2026-05-10T18:42:00Z",
+      "expected_load_seconds": 12
+    }
+  ]
+}
+```
 
 ---
 

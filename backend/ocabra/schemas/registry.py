@@ -147,3 +147,8 @@ class DownloadJob(BaseModel):
     error: str | None
     started_at: datetime
     completed_at: datetime | None
+    # ``install`` for first-time downloads triggered from Explore; ``update``
+    # for re-pulls of an already configured model. The download flow is
+    # identical (the registry deduplicates blobs by digest); the field exists
+    # so the UI can label progress correctly.
+    kind: Literal["install", "update"] = "install"

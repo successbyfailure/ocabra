@@ -11,28 +11,16 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Annotated, Any
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from ocabra.api._deps_auth import UserContext
-
-from ._deps import (
-    check_capability,
-    compute_worker_key,
-    get_federation_manager,
-    get_model_manager,
-    get_openai_user,
-    get_profile_registry,
-    merge_profile_defaults,
-    raise_upstream_http_error,
-    resolve_profile,
-    to_backend_body,
-)
 from ocabra.agents.chat_glue import (
     build_invoker_for_agent,
     build_subagent_runner,
@@ -42,13 +30,37 @@ from ocabra.agents.chat_glue import (
 from ocabra.agents.executor import AgentExecutor
 from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
 from ocabra.agents.resolver import is_agent_model, resolve_agent
+from ocabra.api._deps_auth import UserContext
 from ocabra.database import AsyncSessionLocal
+
+from ._deps import (
+    STREAMING_LOAD_RESPONSE_DOC,
+    build_model_status_headers,
+    check_capability,
+    compute_worker_key,
+    ensure_worker_loaded,
+    keepalive_until_done,
+    get_federation_manager,
+    get_model_manager,
+    get_openai_user,
+    get_profile_registry,
+    lookup_profile,
+    merge_profile_defaults,
+    raise_upstream_http_error,
+    resolve_profile,
+    sse_ocabra_event,
+    to_backend_body,
+)
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
 
 
-@router.post("/chat/completions", summary="Create chat completion")
+@router.post(
+    "/chat/completions",
+    summary="Create chat completion",
+    responses=STREAMING_LOAD_RESPONSE_DOC,
+)
 async def chat_completions(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -125,6 +137,47 @@ async def chat_completions(
             user_id=user.user_id,
         )
 
+    _content_kinds = _detect_message_content_kinds(body.get("messages") or [])
+    worker_pool = request.app.state.worker_pool
+
+    # Streaming path: pre-flush response headers (including
+    # ``X-Ocabra-Expected-Wait-Seconds``) *before* triggering the load, so
+    # clients see the wait estimate up front instead of after the cold start.
+    if stream:
+        try:
+            profile = await lookup_profile(model_id, profile_registry, user=user)
+        except HTTPException:
+            # Legacy / model-id fallback paths aren't covered by lookup_profile.
+            # Fall through to the regular resolve_profile path; the wait header
+            # will be missing for these requests.
+            profile = None
+
+        if profile is not None:
+            worker_key = compute_worker_key(
+                profile.base_model_id, profile.load_overrides
+            )
+            headers = {
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            }
+            headers.update(
+                await build_model_status_headers(
+                    model_manager, worker_key, profile.base_model_id
+                )
+            )
+            return StreamingResponse(
+                _stream_chat_with_load(
+                    model_manager=model_manager,
+                    worker_pool=worker_pool,
+                    profile=profile,
+                    worker_key=worker_key,
+                    body=body,
+                    content_kinds=_content_kinds,
+                ),
+                media_type="text/event-stream",
+                headers=headers,
+            )
+
     profile, state = await resolve_profile(
         model_id,
         model_manager,
@@ -139,7 +192,6 @@ async def chat_completions(
     # backend untouched: when the upstream (e.g. Ollama) starts accepting
     # ``input_audio`` / ``video_url``, oCabra will pass it through with no
     # further changes.
-    _content_kinds = _detect_message_content_kinds(body.get("messages") or [])
     if "image_url" in _content_kinds:
         check_capability(state, "vision", "image input")
     if "input_audio" in _content_kinds:
@@ -149,8 +201,6 @@ async def chat_completions(
 
     merged_body = merge_profile_defaults(profile, body)
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
-
-    worker_pool = request.app.state.worker_pool
 
     if stream:
         return StreamingResponse(
@@ -170,6 +220,13 @@ async def chat_completions(
     return result
 
 
+def _sse_error(message: str, code: str) -> bytes:
+    payload = json.dumps(
+        {"error": {"message": message, "type": "server_error", "code": code}}
+    )
+    return f"data: {payload}\n\n".encode() + b"data: [DONE]\n\n"
+
+
 async def _stream_chat(worker_pool, model_id: str, body: dict):
     """Yield SSE chunks from the resolved model worker."""
     try:
@@ -181,6 +238,110 @@ async def _stream_chat(worker_pool, model_id: str, body: dict):
         )
         yield f"data: {error_payload}\n\n".encode()
         yield b"data: [DONE]\n\n"
+
+
+async def _stream_chat_with_load(
+    *,
+    model_manager,
+    worker_pool,
+    profile,
+    worker_key: str,
+    body: dict,
+    content_kinds: set[str],
+):
+    """SSE generator that triggers the model load lazily.
+
+    Flushes HTTP response headers (including ``X-Ocabra-Expected-Wait-Seconds``)
+    plus a JSON-bearing SSE comment with the load status before blocking. When
+    the load finishes a second comment carries the actual ``load_duration_ms``.
+    Capability checks and load errors are surfaced as SSE error events instead
+    of HTTP error responses, since headers have already been sent.
+    """
+    pre_state = await model_manager.get_state(worker_key)
+    if pre_state is None and worker_key != profile.base_model_id:
+        pre_state = await model_manager.get_state(profile.base_model_id)
+    pre_status = pre_state.status.value if pre_state is not None else "unknown"
+    expected_wait = None
+    if pre_status != "loaded":
+        expected_wait = await model_manager.get_expected_load_seconds(worker_key)
+        if expected_wait is None and worker_key != profile.base_model_id:
+            expected_wait = await model_manager.get_expected_load_seconds(
+                profile.base_model_id
+            )
+
+    # First frame: comment-only SSE event with status. Forces header flush and
+    # gives clients an immediate, parseable load hint.
+    yield sse_ocabra_event(
+        "model_loading",
+        model_id=profile.base_model_id,
+        worker_key=worker_key,
+        status=pre_status,
+        expected_wait_seconds=expected_wait,
+    )
+
+    load_started_at = time.monotonic()
+    load_task = asyncio.ensure_future(
+        ensure_worker_loaded(
+            model_manager,
+            profile.base_model_id,
+            worker_key,
+            profile.load_overrides,
+        )
+    )
+    # Drip ``: keepalive`` comments while the load runs so reverse proxies
+    # (NPM, Cloudflare, ...) don't close the connection on a 60s read timeout
+    # for cold starts of large models.
+    async for ka in keepalive_until_done(load_task):
+        yield ka
+    if load_task.exception() is not None:
+        exc = load_task.exception()
+        if isinstance(exc, HTTPException):
+            detail = exc.detail.get("error", {}) if isinstance(exc.detail, dict) else {}
+            yield _sse_error(
+                detail.get("message") or str(exc.detail),
+                detail.get("code") or "model_load_failed",
+            )
+        else:
+            yield _sse_error(str(exc), "model_load_failed")
+        return
+    state = load_task.result()
+
+    load_duration_ms = int((time.monotonic() - load_started_at) * 1000)
+    yield sse_ocabra_event(
+        "model_ready",
+        model_id=state.model_id,
+        worker_key=worker_key,
+        load_duration_ms=load_duration_ms,
+        was_cold_start=(pre_status != "loaded"),
+    )
+
+    try:
+        check_capability(state, "chat", "chat completions")
+        if body.get("tools"):
+            check_capability(state, "tools", "tool calling")
+        if "image_url" in content_kinds:
+            check_capability(state, "vision", "image input")
+        if "input_audio" in content_kinds:
+            check_capability(state, "audio_input", "audio input")
+        if "video_url" in content_kinds:
+            check_capability(state, "video_input", "video input")
+    except HTTPException as exc:
+        detail = exc.detail.get("error", {}) if isinstance(exc.detail, dict) else {}
+        yield _sse_error(
+            detail.get("message") or str(exc.detail),
+            detail.get("code") or "model_not_capable",
+        )
+        return
+
+    merged_body = merge_profile_defaults(profile, body)
+    backend_body = to_backend_body(state, merged_body)
+    try:
+        async for chunk in worker_pool.forward_stream(
+            worker_key, "/v1/chat/completions", backend_body
+        ):
+            yield chunk
+    except Exception as exc:
+        yield _sse_error(str(exc), "stream_error")
 
 
 async def _dispatch_agent(

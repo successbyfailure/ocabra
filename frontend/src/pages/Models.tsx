@@ -13,7 +13,7 @@ import { getModelContextSummary } from "@/lib/modelContext"
 import { useBackendsStore } from "@/stores/backendsStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
-import { Search } from "lucide-react"
+import { Loader2, RefreshCw, Search } from "lucide-react"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { SkeletonList } from "@/components/common/Skeleton"
 import { StyledSelect } from "@/components/common/StyledSelect"
@@ -39,6 +39,8 @@ export function Models() {
   >("name")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc")
   const [busyModelId, setBusyModelId] = useState<string | null>(null)
+  const [updatingAll, setUpdatingAll] = useState(false)
+  const [refreshingMetadata, setRefreshingMetadata] = useState(false)
   const [configModel, setConfigModel] = useState<ModelState | null>(null)
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
@@ -201,6 +203,56 @@ export function Models() {
     }
   }
 
+  const handleUpdateModel = async (model: ModelState) => {
+    setBusyModelId(model.modelId)
+    try {
+      await api.models.update(model.modelId)
+      toast.success(`Re-pull encolado · ${model.displayName || model.modelId}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo actualizar el modelo")
+    } finally {
+      setBusyModelId(null)
+    }
+  }
+
+  const handleRefreshMetadata = async () => {
+    if (refreshingMetadata) return
+    setRefreshingMetadata(true)
+    try {
+      const result = await api.models.refreshMetadata()
+      const refreshed = result.refreshed.length
+      const skipped = result.skipped.length
+      toast.success(
+        `Metadata actualizada: ${refreshed} modelo${refreshed === 1 ? "" : "s"}` +
+          (skipped > 0 ? ` · ${skipped} sin origen remoto` : ""),
+      )
+      await refresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error al refrescar metadata")
+    } finally {
+      setRefreshingMetadata(false)
+    }
+  }
+
+  const handleUpdateAll = async () => {
+    if (updatingAll) return
+    if (!confirm("Se encolará un re-pull de todos los modelos actualizables. ¿Continuar?")) return
+    setUpdatingAll(true)
+    try {
+      const result = await api.models.updateAll()
+      const enq = result.enqueued.length
+      const skipped = result.skipped.length
+      toast.success(
+        `Re-pull encolado: ${enq} modelo${enq === 1 ? "" : "s"}` +
+          (skipped > 0 ? ` · ${skipped} omitido${skipped === 1 ? "" : "s"}` : ""),
+      )
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error al actualizar modelos")
+    } finally {
+      setUpdatingAll(false)
+    }
+  }
+
   const togglePin = async (model: ModelState) => {
     const nextPolicy: LoadPolicy = model.loadPolicy === "pin" ? "on_demand" : "pin"
     await runAction(model.modelId, async () => {
@@ -249,9 +301,33 @@ export function Models() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold">Models</h1>
-        <p className="text-muted-foreground">Gestion de modelos instalados y ciclo de vida.</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Models</h1>
+          <p className="text-muted-foreground">Gestion de modelos instalados y ciclo de vida.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void handleRefreshMetadata()}
+            disabled={refreshingMetadata || modelList.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            title="Refresca fechas de release y last-modified desde el registry upstream (HuggingFace / Ollama)"
+          >
+            {refreshingMetadata ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            Refrescar metadata
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleUpdateAll()}
+            disabled={updatingAll || modelList.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            title="Re-pull de todos los modelos con origen remoto conocido"
+          >
+            {updatingAll ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            Actualizar todos
+          </button>
+        </div>
       </div>
 
       {storage && (() => {
@@ -459,6 +535,7 @@ export function Models() {
                     onConfigure={(item) => setConfigModel(item)}
                     onDelete={(item) => setDeleteModel(item)}
                     onCompile={(item) => setCompileModel(item)}
+                    onUpdate={(item) => void handleUpdateModel(item)}
                     onEditProfile={openProfileModal}
                     onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
                   />

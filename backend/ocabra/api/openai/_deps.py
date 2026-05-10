@@ -289,6 +289,202 @@ async def resolve_profile(
     )
 
 
+# OpenAPI: shared response metadata for streaming endpoints. Surfaces the
+# X-Ocabra-* headers (only set when the request asks for stream=true) and a
+# short description of the SSE comment events the server interleaves.
+STREAMING_LOAD_RESPONSE_DOC: dict = {
+    200: {
+        "description": (
+            "Successful response. When ``stream=true`` the body is "
+            "``text/event-stream``; oCabra pre-flushes the response headers "
+            "below before triggering any model load, and interleaves two "
+            "named SSE events carrying load progress (same convention as "
+            "``ocabra.tool_started`` / ``ocabra.tool_result``):\n\n"
+            "``event: ocabra.model_loading\\ndata: {\"model_id\": ..., "
+            "\"worker_key\": ..., \"status\": ..., "
+            "\"expected_wait_seconds\": ...}\\n\\n`` on stream open, and "
+            "``event: ocabra.model_ready\\ndata: {\"model_id\": ..., "
+            "\"load_duration_ms\": ..., \"was_cold_start\": ...}\\n\\n`` "
+            "once the model is ready. Clients that don't recognise these "
+            "named events ignore them; the rest of the stream is plain "
+            "OpenAI-format ``data: {...}`` chunks."
+        ),
+        "headers": {
+            "X-Ocabra-Model-Status": {
+                "description": (
+                    "Worker status when the stream was opened: "
+                    "``configured``, ``loading``, ``loaded``, etc. "
+                    "Streaming responses only."
+                ),
+                "schema": {"type": "string"},
+            },
+            "X-Ocabra-Model-Id": {
+                "description": "Canonical model id resolved from the request.",
+                "schema": {"type": "string"},
+            },
+            "X-Ocabra-Expected-Wait-Seconds": {
+                "description": (
+                    "Median load time (seconds) over the last 5 successful "
+                    "loads of this model. Only emitted when the worker is "
+                    "not yet ``loaded`` and historical samples exist."
+                ),
+                "schema": {"type": "integer"},
+            },
+        },
+    },
+}
+
+
+SSE_KEEPALIVE_INTERVAL_S = 10.0
+
+
+async def keepalive_until_done(task: asyncio.Task, interval: float = SSE_KEEPALIVE_INTERVAL_S):
+    """Yield ``b": keepalive\\n\\n"`` every *interval* seconds until *task* finishes.
+
+    Mirrors the pattern from :mod:`ocabra.agents.executor`: shields the task
+    so the wait_for timeout doesn't cancel it, emits a comment-line keepalive
+    on each timeout to keep proxies (NPM, Cloudflare, ...) from closing the
+    connection during long model loads, and exits when the task completes —
+    leaving the caller to inspect ``task.result()`` / ``task.exception()``.
+    """
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=interval)
+        except TimeoutError:
+            yield b": keepalive\n\n"
+
+
+def sse_ocabra_event(event: str, **fields: object) -> bytes:
+    """Encode an oCabra-specific named SSE event.
+
+    Emits ``event: ocabra.<event>\\ndata: {...}\\n\\n`` to match the
+    convention already used for ``ocabra.tool_started`` /
+    ``ocabra.tool_result`` in :mod:`ocabra.agents.executor`. Clients that
+    don't recognise these named events ignore the frame; the standard
+    ``data:`` chunks remain valid OpenAI-compat output.
+    """
+    encoded = json.dumps(fields, ensure_ascii=False, default=str)
+    return f"event: ocabra.{event}\ndata: {encoded}\n\n".encode()
+
+
+async def build_model_status_headers(
+    model_manager: ModelManager,
+    worker_key: str,
+    base_model_id: str,
+) -> dict[str, str]:
+    """Return diagnostic headers describing the worker's current load state.
+
+    Always includes ``X-Ocabra-Model-Status`` and ``X-Ocabra-Model-Id``. When
+    the worker is not yet loaded, also adds
+    ``X-Ocabra-Expected-Wait-Seconds`` based on historical load times. Headers
+    are intended to be flushed *before* the load begins (streaming endpoints)
+    so the client learns the wait time up front.
+    """
+    state = await model_manager.get_state(worker_key)
+    if state is None and worker_key != base_model_id:
+        state = await model_manager.get_state(base_model_id)
+
+    if state is None:
+        return {}
+
+    headers: dict[str, str] = {
+        "X-Ocabra-Model-Status": state.status.value,
+        "X-Ocabra-Model-Id": state.model_id,
+    }
+    if state.status.value != "loaded":
+        # Try the worker key first (covers per-profile workers); fall back to
+        # the base model so we still surface a hint when this is the first
+        # load of an override variant.
+        expected = await model_manager.get_expected_load_seconds(worker_key)
+        if expected is None and worker_key != base_model_id:
+            expected = await model_manager.get_expected_load_seconds(base_model_id)
+        if expected is not None:
+            headers["X-Ocabra-Expected-Wait-Seconds"] = str(expected)
+    return headers
+
+
+async def lookup_profile(
+    profile_id: str,
+    profile_registry: ProfileRegistry,
+    *,
+    user: UserContext | None = None,
+) -> ModelProfile:
+    """Resolve *profile_id* to its :class:`ModelProfile` **without** loading.
+
+    Mirrors :func:`resolve_profile` for lookup/access-control but does not
+    call :func:`_ensure_worker_loaded`. Use this when you need the profile
+    metadata before deciding whether/when to trigger the load (e.g. to
+    pre-flush response headers in a streaming endpoint).
+    """
+    from ocabra.config import settings
+
+    requested = str(profile_id or "").strip()
+    if not requested:
+        raise _openai_error(
+            "The 'model' field is required.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+
+    profile = await profile_registry.get(requested)
+    if profile is not None:
+        if not profile.enabled:
+            raise _openai_error(
+                f"The model '{requested}' is not available.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                status_code=404,
+            )
+        if (
+            user is not None
+            and not user.is_admin
+            and requested not in user.accessible_model_ids
+            and profile.base_model_id not in user.accessible_model_ids
+        ):
+            raise _openai_error(
+                f"The model '{requested}' does not exist.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                status_code=404,
+            )
+        return profile
+
+    if "/" in requested and settings.legacy_model_id_fallback:
+        # Legacy path: callers must use resolve_profile to get the loaded state
+        # for legacy model ids, since we'd otherwise need to query the model
+        # manager here. Surface a 404 — streaming endpoints should fall back
+        # to resolve_profile in that case.
+        pass
+
+    raise _openai_error(
+        f"The model '{requested}' does not exist.",
+        "invalid_request_error",
+        param="model",
+        code="model_not_found",
+        status_code=404,
+    )
+
+
+async def ensure_worker_loaded(
+    model_manager: ModelManager,
+    base_model_id: str,
+    worker_key: str,
+    load_overrides: dict | None,
+) -> ModelState:
+    """Public wrapper around :func:`_ensure_worker_loaded`.
+
+    Exposed for streaming endpoints that pre-flush headers and trigger the
+    actual load from inside the SSE generator.
+    """
+    return await _ensure_worker_loaded(
+        model_manager, base_model_id, worker_key, load_overrides
+    )
+
+
 async def _ensure_worker_loaded(
     model_manager: ModelManager,
     base_model_id: str,

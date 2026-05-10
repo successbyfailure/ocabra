@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react"
 import { Header } from "./Header"
 import { Sidebar } from "./Sidebar"
+import { DownloadQueue } from "@/components/downloads/DownloadQueue"
 import { useWebSocket } from "@/hooks/useWebSocket"
 
 interface LayoutProps {
@@ -58,6 +59,7 @@ export function Layout({ children }: LayoutProps) {
         />
         {children}
       </main>
+      <DownloadQueue />
     </div>
   )
 }
