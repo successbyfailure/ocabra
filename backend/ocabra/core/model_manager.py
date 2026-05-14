@@ -389,8 +389,16 @@ class ModelManager:
         await self._load_configs_from_db()
         await self._hydrate_last_request_at_from_redis()
         for model_id, state in self._states.items():
-            if state.load_policy == LoadPolicy.PIN:
-                logger.info("auto_loading_pinned_model", model_id=model_id)
+            # PIN: always preload, never evictable.
+            # WARM: preload at boot so the first request doesn't pay cold-start.
+            #       Still evictable under VRAM pressure (auto_reload brings it
+            #       back). ON_DEMAND stays lazy.
+            if state.load_policy in (LoadPolicy.PIN, LoadPolicy.WARM):
+                logger.info(
+                    "auto_loading_managed_model",
+                    model_id=model_id,
+                    policy=state.load_policy.value,
+                )
                 self._create_background_task(
                     self._load_model(model_id),
                     task_name=f"load:{model_id}",
@@ -644,6 +652,7 @@ class ModelManager:
                     gpu_indices,
                     port=assigned_port,
                     extra_config=state.extra_config,
+                    load_policy=state.load_policy.value,
                 )
                 backend_loaded = True
                 capabilities = await backend.get_capabilities(state.backend_model_id)

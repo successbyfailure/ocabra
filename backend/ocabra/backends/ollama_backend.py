@@ -23,8 +23,18 @@ class OllamaBackend(BackendInterface):
         self._caps_cache: dict[str, BackendCapabilities] = {}
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
-        _ = kwargs
-        await self._registry.load(model_id)
+        _ = gpu_indices
+        # Honour the oCabra load_policy when telling Ollama how long to keep
+        # the weights in memory. For warm/pin models we pass keep_alive=-1
+        # ("never evict") so Ollama doesn't silently drop the weights after
+        # its global ``OLLAMA_KEEP_ALIVE`` window — that would turn what
+        # oCabra still considers a LOADED state into a cold start on the
+        # next request. on_demand falls back to the default keep_alive.
+        load_policy = kwargs.get("load_policy")
+        keep_alive: int | str | None = None
+        if load_policy in ("warm", "pin"):
+            keep_alive = -1
+        await self._registry.load(model_id, keep_alive=keep_alive)
         self._loaded.add(model_id)
 
         parsed = urlparse(settings.ollama_base_url)
