@@ -180,6 +180,27 @@ async def stats_by_group(
 
 
 @router.get(
+    "/stats/by-model",
+    summary="Stats aggregated by model",
+    description="Return request totals, error counts, latency and token usage grouped by model_id.",
+)
+async def stats_by_model(
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return request statistics grouped by model.
+
+    Returns:
+        { byModel: [{ modelId, backendTypes, totalRequests, totalErrors,
+                      avgDurationMs, totalInputTokens, totalOutputTokens,
+                      totalTokens, totalEnergyWh, estimatedCostUsd }] }
+    """
+    from ocabra.stats.aggregator import get_stats_by_model
+    return await get_stats_by_model(from_dt, to_dt)
+
+
+@router.get(
     "/stats/my",
     summary="Own user stats",
     description="Return overview statistics filtered to the currently authenticated user's requests.",
@@ -240,12 +261,15 @@ async def stats_by_api_key(
 
 
 @router.get(
-    "/stats/user/{user_id}/detail",
+    "/stats/user/{identifier}/detail",
     summary="Detailed stats for a user",
-    description="Return detailed request stats, top models, and token time series for a specific user.",
+    description=(
+        "Return detailed request stats, top models, and token time series for a "
+        "specific user. `identifier` accepts a UUID, username, or email."
+    ),
 )
 async def user_detail_stats(
-    user_id: str,
+    identifier: str,
     from_dt: datetime | None = Query(None, alias="from"),
     to_dt: datetime | None = Query(None, alias="to"),
     _user: UserContext = Depends(require_role("model_manager")),
@@ -253,7 +277,7 @@ async def user_detail_stats(
     """Return detailed statistics for a specific user.
 
     Args:
-        user_id: UUID of the user to query.
+        identifier: UUID, username, or email of the user to query.
 
     Returns:
         { userId, username, totalRequests, totalErrors, totalInputTokens,
@@ -261,7 +285,7 @@ async def user_detail_stats(
           topModels, byRequestKind, tokenSeries }
     """
     from ocabra.stats.aggregator import get_user_detail
-    return await get_user_detail(user_id, from_dt, to_dt)
+    return await get_user_detail(identifier, from_dt, to_dt)
 
 
 @router.get(

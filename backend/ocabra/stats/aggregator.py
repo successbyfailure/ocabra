@@ -361,6 +361,48 @@ async def get_stats_by_group(
     return {"byGroup": summaries}
 
 
+async def get_stats_by_model(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Return request stats aggregated by model_id."""
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+        )
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    by_model: dict = defaultdict(list)
+    for row in rows:
+        by_model[row.model_id].append(row)
+
+    summaries = []
+    for model_id, mrows in sorted(by_model.items(), key=lambda x: -len(x[1])):
+        n = len(mrows)
+        durations = [max(0, int(r.duration_ms or 0)) for r in mrows]
+        errors = sum(1 for r in mrows if r.error or (r.status_code is not None and r.status_code >= 400))
+        backends = sorted({r.backend_type for r in mrows if r.backend_type})
+        total_input = sum(max(0, int(r.input_tokens or 0)) for r in mrows)
+        total_output = sum(max(0, int(r.output_tokens or 0)) for r in mrows)
+        summaries.append({
+            "modelId": model_id,
+            "backendTypes": backends,
+            "totalRequests": n,
+            "totalErrors": errors,
+            "avgDurationMs": int(sum(durations) / n) if n else 0,
+            "totalInputTokens": total_input,
+            "totalOutputTokens": total_output,
+            "totalTokens": total_input + total_output,
+            "totalEnergyWh": round(sum(r.energy_wh or 0 for r in mrows), 2),
+            "estimatedCostUsd": round(estimate_cost_for_rows(mrows), 4),
+        })
+    return {"byModel": summaries}
+
+
 async def get_recent_requests(limit: int = 20) -> dict:
     """Return the most recent N requests with user/group info."""
     from ocabra.db.auth import Group, User
@@ -772,23 +814,48 @@ async def get_user_detail(
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,
 ) -> dict:
-    """Return detailed stats for a single user."""
+    """Return detailed stats for a single user.
+
+    `user_id` may be a UUID, a username, or an email address — they are
+    resolved against the ``users`` table before querying ``request_stats``.
+    """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
     import uuid as _uuid
     from ocabra.db.auth import User
 
+    uid: _uuid.UUID | None = None
     try:
         uid = _uuid.UUID(str(user_id))
-    except ValueError:
-        return {
-            "userId": user_id, "username": user_id,
-            "totalRequests": 0, "totalErrors": 0,
-            "totalInputTokens": 0, "totalOutputTokens": 0,
-            "totalEnergyWh": 0.0, "estimatedCostUsd": 0.0,
-            "topModels": [], "byRequestKind": [], "tokenSeries": [],
-        }
+    except (ValueError, AttributeError):
+        uid = None
 
     async with AsyncSessionLocal() as session:
+        u_obj: User | None = None
+        if uid is not None:
+            u_obj = (
+                await session.execute(sa.select(User).where(User.id == uid))
+            ).scalar_one_or_none()
+        else:
+            # Resolve by username first, then email — both columns are unique.
+            u_obj = (
+                await session.execute(sa.select(User).where(User.username == user_id))
+            ).scalar_one_or_none()
+            if u_obj is None:
+                u_obj = (
+                    await session.execute(sa.select(User).where(User.email == user_id))
+                ).scalar_one_or_none()
+            if u_obj is not None:
+                uid = u_obj.id
+
+        if uid is None or u_obj is None:
+            return {
+                "userId": user_id, "username": user_id,
+                "totalRequests": 0, "totalErrors": 0,
+                "totalInputTokens": 0, "totalOutputTokens": 0,
+                "totalEnergyWh": 0.0, "estimatedCostUsd": 0.0,
+                "topModels": [], "byRequestKind": [], "tokenSeries": [],
+            }
+
         q = sa.select(RequestStat).where(
             RequestStat.started_at >= from_dt,
             RequestStat.started_at <= to_dt,
@@ -797,11 +864,7 @@ async def get_user_detail(
         result = await session.execute(q)
         rows = result.scalars().all()
 
-        username = str(uid)
-        u_result = await session.execute(sa.select(User).where(User.id == uid))
-        u_obj = u_result.scalar_one_or_none()
-        if u_obj:
-            username = u_obj.username
+        username = u_obj.username
 
     n = len(rows)
     if n == 0:

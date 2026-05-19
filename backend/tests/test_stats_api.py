@@ -100,3 +100,71 @@ def test_overview_endpoint_exists_and_filters_model() -> None:
     assert resp.status_code == 200
     assert resp.json() == fake_payload
     assert mock_get.await_args.args[2] == "test-model"
+
+
+def test_user_detail_accepts_uuid_username_and_email():
+    """The /stats/user/{identifier}/detail route forwards arbitrary strings
+    (UUID, username, email) to the aggregator without path validation rejecting
+    non-UUID inputs."""
+    app = _make_app()
+    client = TestClient(app)
+
+    fake_payload = {
+        "userId": "x",
+        "username": "x",
+        "totalRequests": 0,
+        "totalErrors": 0,
+        "totalInputTokens": 0,
+        "totalOutputTokens": 0,
+        "totalEnergyWh": 0.0,
+        "estimatedCostUsd": 0.0,
+        "topModels": [],
+        "byRequestKind": [],
+        "tokenSeries": [],
+    }
+
+    cases = [
+        "2c1409c0-22d6-43ff-a8d7-fa41f2032239",
+        "davidpoza",
+        "darkjavi@gmail.com",
+    ]
+    for identifier in cases:
+        with patch(
+            "ocabra.stats.aggregator.get_user_detail",
+            new=AsyncMock(return_value=fake_payload),
+        ) as mock_get:
+            resp = client.get(f"/ocabra/stats/user/{identifier}/detail")
+        assert resp.status_code == 200, f"failed for {identifier}: {resp.text}"
+        # First positional arg is the identifier as-is.
+        assert mock_get.await_args.args[0] == identifier
+
+
+def test_by_model_endpoint_returns_payload():
+    app = _make_app()
+    client = TestClient(app)
+
+    fake_payload = {
+        "byModel": [
+            {
+                "modelId": "llama3:8b",
+                "backendTypes": ["ollama"],
+                "totalRequests": 42,
+                "totalErrors": 1,
+                "avgDurationMs": 800,
+                "totalInputTokens": 1000,
+                "totalOutputTokens": 500,
+                "totalTokens": 1500,
+                "totalEnergyWh": 0.12,
+                "estimatedCostUsd": 0.0034,
+            },
+        ],
+    }
+
+    with patch(
+        "ocabra.stats.aggregator.get_stats_by_model",
+        new=AsyncMock(return_value=fake_payload),
+    ):
+        resp = client.get("/ocabra/stats/by-model")
+
+    assert resp.status_code == 200
+    assert resp.json() == fake_payload
