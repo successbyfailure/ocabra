@@ -175,16 +175,27 @@ services:
     build:
       context: ./Hunyuan3D-2.1
       dockerfile: docker/Dockerfile
+    # NOTE: --low_vram_mode y HUNYUAN_ENABLE_CPU_OFFLOAD activan model_cpu_offload,
+    # que copia pesos CPU<->GPU por capa. En esta máquina (3090 con 18+ GB libres)
+    # eso es contraproducente y, con presión de swap en el host, hace que la
+    # generación tarde horas. Mantenerlos en false salvo VRAM realmente escasa.
+    # --root-path debe ser un prefijo de path ASGI (p.ej. /hunyuan) o vacío
+    # cuando el servicio se sirve en la raíz de un subdominio. NO una URL completa.
+    # --root-path: prefijo ASGI (vacío al servir en raíz de subdominio).
+    # --public-url: URL pública completa para gradio.mount_gradio_app, necesaria
+    #   porque nuestro gateway no reenvía X-Forwarded-Host/Proto y gradio no
+    #   puede derivar el root del navegador.
     command: ["python", "gradio_app.py", "--host", "0.0.0.0", "--port", "8080",
-              "--cache-path", "./gradio_cache", "--low_vram_mode",
-              "--root-path", "${HUNYUAN_UI_URL:-}"]
+              "--cache-path", "./gradio_cache",
+              "--root-path", "${HUNYUAN_ROOT_PATH:-}",
+              "--public-url", "${HUNYUAN_UI_URL:-}"]
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       IDLE_TIMEOUT_SECONDS: ${HUNYUAN_IDLE_UNLOAD_SECONDS:-300}
       IDLE_CHECK_INTERVAL_SECONDS: 30
-      HUNYUAN_ENABLE_CPU_OFFLOAD: ${HUNYUAN_ENABLE_CPU_OFFLOAD:-true}
+      HUNYUAN_ENABLE_CPU_OFFLOAD: ${HUNYUAN_ENABLE_CPU_OFFLOAD:-false}
       MALLOC_TRIM_THRESHOLD_: 0
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub

@@ -1038,11 +1038,13 @@ class ServiceManager:
     async def _compose_up(self, state: ServiceState) -> None:
         """Run `docker compose up -d <service>` (builds if image missing)."""
         compose_dir = settings.compose_project_dir
-        code, _out, err = await self._run_docker_compose(
+        args = [
+            "--profile", "services",
             "-f", f"{compose_dir}/docker-compose.yml",
             "--env-file", f"{compose_dir}/.env",
-            "up", "-d", "--build", state.compose_service_name,
-        )
+            "up", "-d", "--build", "--pull", "missing", state.compose_service_name,
+        ]
+        code, _out, err = await self._run_docker_compose(*args)
         if code == 0:
             logger.info("compose_up_ok", service=state.compose_service_name)
             return
@@ -1068,7 +1070,18 @@ class ServiceManager:
                 await self._publish_state(state, "service_starting")
                 code, _out, _err = await self._run_docker_command("start", state.docker_container_name)
                 if code != 0:
-                    raise RuntimeError(f"docker start failed: exit_code={code}")
+                    logger.warning(
+                        "container_start_failed",
+                        container=state.docker_container_name,
+                        error=_err or f"exit_code={code}",
+                    )
+                    if state.compose_service_name:
+                        state.status = "building"
+                        state.detail = "rebuilding image and creating container"
+                        await self._publish_state(state, "service_building")
+                        await self._compose_up(state)
+                    else:
+                        raise RuntimeError(f"docker start failed: exit_code={code}")
             elif state.compose_service_name:
                 # Need compose up (may build image first)
                 state.status = "building"

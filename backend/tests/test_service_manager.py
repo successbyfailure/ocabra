@@ -188,6 +188,69 @@ async def test_start_disabled_service_raises(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_compose_up_uses_services_profile_and_pull(monkeypatch) -> None:
+    called_args: list[str] = []
+
+    async def fake_run_docker_compose(self, *args: str):
+        called_args.extend(args)
+        return 0, "ok", ""
+
+    monkeypatch.setattr(ServiceManager, "_run_docker_compose", fake_run_docker_compose)
+
+    manager = ServiceManager()
+    state = await manager.get_state("hunyuan")
+    assert state is not None
+
+    await manager._compose_up(state)
+
+    assert "--profile" in called_args
+    assert "services" in called_args
+    assert "--pull" in called_args
+    assert "missing" in called_args
+    assert "--build" in called_args
+
+
+@pytest.mark.asyncio
+async def test_start_container_bg_rebuilds_on_failed_docker_start(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def fake_run_docker_command(self, *args: str):
+        if args[0] == "inspect":
+            return 0, "exited", ""
+        if args[0] == "start":
+            return 1, "", "failed to start"
+        raise AssertionError(f"unexpected docker command: {args}")
+
+    compose_up_calls: list[str] = []
+
+    async def fake_compose_up(self, state):
+        compose_up_calls.append(state.service_id)
+
+    async def fake_check_service_alive(self, state):
+        return True
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(ServiceManager, "_run_docker_command", fake_run_docker_command)
+    monkeypatch.setattr(ServiceManager, "_compose_up", fake_compose_up)
+    monkeypatch.setattr(ServiceManager, "_check_service_alive", fake_check_service_alive)
+
+    manager = ServiceManager()
+    state = await manager.get_state("hunyuan")
+    assert state is not None
+    state.service_alive = False
+    state.status = "unknown"
+
+    await manager._start_container_bg(state)
+
+    assert compose_up_calls == ["hunyuan"]
+
+
+@pytest.mark.asyncio
 async def test_set_enabled_persists_overrides(monkeypatch) -> None:
     async def fake_publish(channel: str, data: dict) -> None:
         _ = channel, data
