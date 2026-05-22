@@ -65,6 +65,7 @@ services:
       - /docker/ai-models/ocabra/models:/data/models
       - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
       - ./data/openai_files:/data/openai_files
+      - ./data/image_outputs:/data/image_outputs
       - backends_data:/data/backends
       # Read-only mount of Ollama's manifest/blob store so the local scanner
       # can surface Ollama-pulled GGUFs as llama.cpp candidates without a

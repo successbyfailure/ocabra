@@ -314,6 +314,18 @@ class Settings(BaseSettings):
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"
+
+    # OpenAI Images API: URL response_format support
+    # Generated PNGs are written here and served via GET /v1/images/files/{name}
+    image_outputs_dir: str = "/data/image_outputs"
+    # Seconds before a generated image file is garbage-collected. OpenAI's URLs
+    # are valid for 60 min; mirror that by default.
+    image_url_ttl_seconds: int = 3600
+    # Base URL prepended to image URLs (and any other public absolute link).
+    # Empty → derive from the incoming request (works only when uvicorn trusts
+    # X-Forwarded-* headers; behind our gateway that's not the case, so set this
+    # explicitly to e.g. https://api.example.com when response_format=url is used.
+    public_url: str = ""
     batch_max_concurrency: int = Field(
         default=4, ge=1, description="Max concurrent requests dispatched per batch."
     )

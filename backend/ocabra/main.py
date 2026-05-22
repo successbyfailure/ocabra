@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from contextlib import suppress
 
@@ -142,6 +143,47 @@ async def _service_health_loop(service_manager, stop_event: asyncio.Event) -> No
         except Exception as exc:
             logger.warning("service_health_loop_error", error=str(exc))
     logger.info("service_health_loop_stopped")
+
+
+async def _image_outputs_cleanup_loop(stop_event: asyncio.Event) -> None:
+    """Delete generated image files older than ``settings.image_url_ttl_seconds``.
+
+    Implements the TTL promised by ``/v1/images/generations`` when
+    ``response_format=url`` (URLs expire and disk doesn't grow unbounded).
+    """
+    from pathlib import Path
+
+    from ocabra.config import settings as _settings
+
+    interval_s = max(60, _settings.image_url_ttl_seconds // 6)
+    logger.info("image_outputs_cleanup_loop_started",
+                ttl_s=_settings.image_url_ttl_seconds, interval_s=interval_s)
+    while not stop_event.is_set():
+        try:
+            out_dir = Path(_settings.image_outputs_dir)
+            if out_dir.is_dir():
+                cutoff = time.time() - _settings.image_url_ttl_seconds
+                removed = 0
+                for path in out_dir.iterdir():
+                    if not path.is_file():
+                        continue
+                    try:
+                        if path.stat().st_mtime < cutoff:
+                            path.unlink(missing_ok=True)
+                            removed += 1
+                    except OSError as exc:
+                        logger.warning("image_outputs_cleanup_unlink_failed",
+                                       path=str(path), error=str(exc))
+                if removed:
+                    logger.info("image_outputs_cleanup_ran", removed=removed)
+        except Exception as exc:
+            logger.warning("image_outputs_cleanup_loop_error", error=str(exc))
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    logger.info("image_outputs_cleanup_loop_stopped")
 
 
 def _find_tokenizer_for_engine(engine_name: str, models_root) -> str | None:
@@ -402,6 +444,11 @@ async def lifespan(app: FastAPI):
         _service_health_loop(service_manager, service_health_stop),
         name="service-health-loop",
     )
+    image_outputs_cleanup_stop = asyncio.Event()
+    image_outputs_cleanup_task = asyncio.create_task(
+        _image_outputs_cleanup_loop(image_outputs_cleanup_stop),
+        name="image-outputs-cleanup-loop",
+    )
 
     # Profile Registry
     from ocabra.core.profile_registry import ProfileRegistry
@@ -517,6 +564,11 @@ async def lifespan(app: FastAPI):
     service_health_task.cancel()
     with suppress(asyncio.CancelledError):
         await service_health_task
+
+    image_outputs_cleanup_stop.set()
+    image_outputs_cleanup_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await image_outputs_cleanup_task
 
     if getattr(app.state, "batch_processor", None) is not None:
         await app.state.batch_processor.stop()

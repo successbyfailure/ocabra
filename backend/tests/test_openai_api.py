@@ -874,6 +874,89 @@ class TestImageGenerations:
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
 
+    def _diffusers_app(self, tmp_path):
+        """An app whose mocked worker returns a 1×1 transparent PNG."""
+        import base64
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.config import settings
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        # 1×1 transparent PNG
+        png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNg"
+            "YAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+        state = ModelState(
+            model_id="sdxl",
+            display_name="SDXL",
+            backend_type="diffusers",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(image_generation=True),
+        )
+        app = _make_app(
+            model_state=state,
+            worker_result={"images": [{"b64_json": png_b64}]},
+        )
+        settings.image_outputs_dir = str(tmp_path)
+        settings.public_url = "https://api.test.local"
+        return app, png_b64
+
+    def test_image_generation_default_returns_b64(self, tmp_path):
+        app, png_b64 = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post("/v1/images/generations", json={
+            "model": "sdxl", "prompt": "a cat",
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["data"][0]["b64_json"] == png_b64
+        # Nothing written to disk in b64 mode
+        assert list(tmp_path.iterdir()) == []
+
+    def test_image_generation_url_persists_and_serves(self, tmp_path):
+        app, _ = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post("/v1/images/generations", json={
+            "model": "sdxl", "prompt": "a cat", "response_format": "url",
+        })
+        assert resp.status_code == 200
+        url = resp.json()["data"][0]["url"]
+        assert url.startswith("https://api.test.local/v1/images/files/")
+        name = url.rsplit("/", 1)[-1]
+        assert (tmp_path / name).is_file()
+
+        # The serving route returns the PNG bytes.
+        served = client.get(f"/v1/images/files/{name}")
+        assert served.status_code == 200
+        assert served.headers["content-type"] == "image/png"
+        assert served.content == (tmp_path / name).read_bytes()
+
+    def test_image_generation_rejects_invalid_response_format(self, tmp_path):
+        app, _ = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post("/v1/images/generations", json={
+            "model": "sdxl", "prompt": "a cat", "response_format": "html",
+        })
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["param"] == "response_format"
+
+    def test_image_files_route_blocks_path_traversal(self, tmp_path):
+        app, _ = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        # Any name that isn't a bare <uuid>.png must 404 without touching disk.
+        for bad in ("../etc/passwd", "foo.png", "a/b.png", "evil.txt"):
+            resp = client.get(f"/v1/images/files/{bad}")
+            assert resp.status_code == 404, bad
+
+    def test_image_files_route_404_when_expired(self, tmp_path):
+        app, _ = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        # Well-formed name but file isn't there → 404 (mimics post-TTL state).
+        import uuid as _uuid
+        resp = client.get(f"/v1/images/files/{_uuid.uuid4()}.png")
+        assert resp.status_code == 404
+
 class TestBackendAgnosticRouting:
     def test_chat_routes_for_sglang_backend(self):
         from ocabra.backends.base import BackendCapabilities

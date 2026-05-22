@@ -1,17 +1,25 @@
 """
 POST /v1/images/generations — image generation endpoint.
+GET  /v1/images/files/{name} — serve a generated image (URL response_format).
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import time
+import uuid
+from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import Response
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, Response
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.config import settings
 
 from ._deps import (
     check_capability,
@@ -26,6 +34,49 @@ from ._deps import (
 )
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
+
+# Allowed values for the OpenAI `response_format` field.
+_RESPONSE_FORMATS = {"b64_json", "url"}
+
+# Generated filenames are <uuid>.png — restrict the public route to that shape
+# so the file server can never be coerced into reading arbitrary paths.
+_IMAGE_NAME_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.png$")
+
+
+def _ensure_output_dir() -> Path:
+    path = Path(settings.image_outputs_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_image(b64_data: str) -> str:
+    """Decode a base64 PNG payload and store it. Returns the bare filename."""
+    try:
+        raw = base64.b64decode(b64_data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": {
+                "message": f"Backend returned invalid base64 image data: {exc}",
+                "type": "internal_error",
+            }},
+        ) from exc
+
+    out_dir = _ensure_output_dir()
+    name = f"{uuid.uuid4()}.png"
+    (out_dir / name).write_bytes(raw)
+    return name
+
+
+def _build_public_url(request: Request, name: str) -> str:
+    """Build an absolute URL for a generated image filename."""
+    base = (settings.public_url or "").rstrip("/")
+    if not base:
+        # Fall back to the request's base URL (works behind proxies that pass
+        # X-Forwarded-* and Host correctly).
+        base = str(request.base_url).rstrip("/")
+    return f"{base}/v1/images/files/{name}"
 
 
 @router.post("/images/generations", summary="Create image")
@@ -39,9 +90,25 @@ async def image_generations(
     Requires a model with capability image_generation=True.
 
     Supports OpenAI size strings: 256x256, 512x512, 1024x1024, 1792x1024, 1024x1792.
+    Supports `response_format`: ``b64_json`` (default, preserves existing behavior)
+    or ``url`` (image is persisted to disk and a temporary URL is returned).
     """
     body = await request.json()
     model_id: str = body.get("model", "")
+
+    response_format = body.get("response_format", "b64_json")
+    if response_format not in _RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {
+                "message": (
+                    f"Invalid response_format '{response_format}'. "
+                    f"Must be one of: {sorted(_RESPONSE_FORMATS)}"
+                ),
+                "type": "invalid_request_error",
+                "param": "response_format",
+            }},
+        )
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
@@ -103,10 +170,41 @@ async def image_generations(
 
     # Translate back to OpenAI format
     images = result.get("images", [])
+    if response_format == "url":
+        data = []
+        for img in images:
+            b64 = img.get("b64_json", "")
+            if not b64:
+                continue
+            name = _save_image(b64)
+            data.append({"url": _build_public_url(request, name)})
+        return {"created": int(time.time()), "data": data}
+
+    # Default: b64_json
     return {
         "created": int(time.time()),
         "data": [{"b64_json": img.get("b64_json", "")} for img in images],
     }
+
+
+@router.get("/images/files/{name}", summary="Retrieve a generated image")
+async def get_generated_image(name: str):
+    """
+    Serve a previously generated image.
+
+    The URL is the one returned by ``/v1/images/generations`` when
+    ``response_format=url``. Authentication is intentionally not required:
+    the UUID-based filename acts as an unguessable token, and files expire
+    after ``settings.image_url_ttl_seconds`` (mirroring OpenAI's 60-min URLs).
+    """
+    if not _IMAGE_NAME_RE.match(name):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    path = Path(settings.image_outputs_dir) / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Image expired or not found")
+
+    return FileResponse(path=path, media_type="image/png", filename=name)
 
 
 def _parse_size(size: str) -> tuple[int, int]:
