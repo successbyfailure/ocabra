@@ -163,10 +163,19 @@ async def image_generations(
     }
 
     worker_pool = request.app.state.worker_pool
+    # begin_request marks the model as in-flight so model_manager's idle
+    # eviction loop doesn't unload it mid-generation. The stats middleware
+    # tracks the same thing but keyed by the user-facing profile_id, which
+    # doesn't match the canonical state key — image generation requests can
+    # take minutes (sequential offload on contended GPUs), well past the
+    # 300s idle_timeout, so we need the canonical-keyed marker too.
+    inflight_request_id = model_manager.begin_request(worker_key)
     try:
         result = await worker_pool.forward_request(worker_key, "/generate", worker_body)
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    finally:
+        model_manager.end_request(worker_key, inflight_request_id)
 
     # Translate back to OpenAI format
     images = result.get("images", [])

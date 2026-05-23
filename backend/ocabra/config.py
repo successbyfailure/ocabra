@@ -149,10 +149,19 @@ class Settings(BaseSettings):
     bitnet_mlock: bool = True
     bitnet_startup_timeout_s: int = 30
     # Diffusers worker tuning.
-    diffusers_torch_dtype: str = "auto"
+    # bfloat16 is the right default for modern image models: FLUX.2, SD3.5
+    # and Z-Image are all trained in bf16, and fp16 underflows the T5 text
+    # encoder (silent NaN that aborts generation). "auto" resolves to fp16
+    # on CUDA in the worker, so spell out bf16 explicitly.
+    diffusers_torch_dtype: str = "bfloat16"
     diffusers_enable_torch_compile: bool = False
     diffusers_enable_xformers: bool = False
-    diffusers_offload_mode: str = "none"
+    # "sequential" offloads at the layer level: peak VRAM stays ~2-3 GB so
+    # even contested GPUs fit FLUX.2/SD3.5. The cost is ~30-50% slower
+    # generation. "model" is faster but keeps each component fully on GPU
+    # during its forward (T5-XXL alone is 9.5 GB and OOMs the 3060 when
+    # any other process is on the card).
+    diffusers_offload_mode: str = "sequential"
     diffusers_allow_tf32: bool = True
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0

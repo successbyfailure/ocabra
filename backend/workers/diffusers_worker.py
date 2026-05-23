@@ -25,8 +25,11 @@ except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
 
 SUPPORTED_PIPELINES = {
     "FluxPipeline",
+    "Flux2KleinPipeline",
+    "StableDiffusion3Pipeline",
     "StableDiffusionXLPipeline",
     "StableDiffusionPipeline",
+    "ZImagePipeline",
 }
 
 
@@ -114,20 +117,20 @@ def detect_pipeline_class(model_path: Path) -> str:
 
 
 def resolve_pipeline_class(pipeline_type: str) -> type:
-    from diffusers import (
-        FluxPipeline,
-        StableDiffusionPipeline,
-        StableDiffusionXLPipeline,
-    )
+    # Import lazily so a missing optional class (e.g. Flux2KleinPipeline on an
+    # old diffusers) doesn't crash the worker at import time for unrelated
+    # models. Each requested pipeline is fetched on demand from the package.
+    import diffusers as _diffusers
 
-    mapping = {
-        "FluxPipeline": FluxPipeline,
-        "StableDiffusionXLPipeline": StableDiffusionXLPipeline,
-        "StableDiffusionPipeline": StableDiffusionPipeline,
-    }
-    if pipeline_type not in mapping:
+    cls = getattr(_diffusers, pipeline_type, None)
+    if cls is None:
+        raise ValueError(
+            f"Pipeline '{pipeline_type}' is not available in this diffusers "
+            f"build (version={getattr(_diffusers, '__version__', 'unknown')})"
+        )
+    if pipeline_type not in SUPPORTED_PIPELINES:
         raise ValueError(f"Unsupported pipeline type: {pipeline_type}")
-    return mapping[pipeline_type]
+    return cls
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -240,6 +243,33 @@ def pil_to_b64(image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def _filter_pipeline_kwargs(pipeline: Any, kwargs: dict) -> dict:
+    """Drop kwargs the pipeline's ``__call__`` doesn't accept.
+
+    Different diffusers pipelines accept different parameter sets — e.g.
+    distilled FLUX.2 Klein and Z-Image Turbo don't take ``negative_prompt``
+    or ``guidance_scale``. Inspect the signature once per call and pass
+    only what's supported (and drop ``None`` values so we don't override
+    pipeline-side defaults with explicit nulls).
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(pipeline.__call__)
+    except (TypeError, ValueError):
+        return {k: v for k, v in kwargs.items() if v is not None}
+
+    accepts_kwargs = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    allowed = set(sig.parameters)
+    return {
+        k: v
+        for k, v in kwargs.items()
+        if v is not None and (accepts_kwargs or k in allowed)
+    }
+
+
 def generate_sync(state: WorkerState, req: GenerateRequest) -> GenerateResponse:
     if torch is None:
         raise RuntimeError("torch is required to run diffusers_worker")
@@ -255,17 +285,23 @@ def generate_sync(state: WorkerState, req: GenerateRequest) -> GenerateResponse:
     else:
         generator = torch.Generator().manual_seed(seed_used)
 
+    # Build the kwargs we'd like to pass, then filter to those the pipeline
+    # actually accepts. Distilled pipelines (Flux2Klein, Z-Image-Turbo) drop
+    # ``negative_prompt`` and ``guidance_scale``; SD3 / SDXL / SD1.5 keep them.
+    candidate_kwargs: dict[str, Any] = {
+        "prompt": req.prompt,
+        "negative_prompt": req.negative_prompt,
+        "width": req.width,
+        "height": req.height,
+        "num_inference_steps": req.num_inference_steps,
+        "guidance_scale": req.guidance_scale,
+        "num_images_per_prompt": req.num_images,
+        "generator": generator,
+    }
+    call_kwargs = _filter_pipeline_kwargs(state.pipeline, candidate_kwargs)
+
     started = time.perf_counter()
-    output = state.pipeline(
-        prompt=req.prompt,
-        negative_prompt=req.negative_prompt,
-        width=req.width,
-        height=req.height,
-        num_inference_steps=req.num_inference_steps,
-        guidance_scale=req.guidance_scale,
-        num_images_per_prompt=req.num_images,
-        generator=generator,
-    )
+    output = state.pipeline(**call_kwargs)
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     images = [GenerateImage(b64_json=pil_to_b64(image)) for image in output.images]

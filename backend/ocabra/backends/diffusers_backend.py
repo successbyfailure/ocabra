@@ -49,27 +49,31 @@ class DiffusersBackend(BackendInterface):
             pip_packages=[
                 "torch>=2.5",
                 "torchvision>=0.20",
-                # diffusers 0.31..0.37 expected the transformers 4.x CLIP API
-                # (``CLIPTextModel.text_model``). transformers 5.x renamed
-                # the inner module and ``from_single_file`` for SDXL crashes
-                # with AttributeError. Pin transformers to the 4.x line and
-                # bump the diffusers floor to 0.32 so the rest of the stack
-                # picks up the SDXL single-file fixes.
-                "diffusers>=0.32,<0.40",
+                # diffusers >=0.37 bundles Flux2KleinPipeline, ZImagePipeline
+                # and StableDiffusion3Pipeline (all used by oCabra's image
+                # generation profiles). transformers stays on 4.x because
+                # diffusers 0.37 still expects the 4.x CLIP API and the SDXL
+                # ``from_single_file`` path breaks on transformers 5.x.
+                "diffusers>=0.37,<0.40",
                 "accelerate>=1.2",
-                "transformers>=4.47,<5.0",
+                "transformers>=4.57,<5.0",
                 "Pillow>=11.0",
                 "safetensors>=0.4",
                 "numpy",
+                # SD 3.5 ships a T5-XXL tokenizer that requires sentencepiece
+                # + protobuf to build from the slow tokenizer files. Without
+                # them the pipeline load aborts on a cryptic ImportError.
+                "sentencepiece>=0.2",
+                "protobuf>=4,<6",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
             ],
             estimated_size_mb=6000,
-            display_name="Diffusers (Stable Diffusion / SDXL / FLUX)",
+            display_name="Diffusers (FLUX / SD3 / SDXL / Z-Image)",
             description=(
-                "Image generation backend for Stable Diffusion, SDXL and "
-                "FLUX models via Hugging Face diffusers"
+                "Image generation backend for FLUX.1, FLUX.2 klein, Stable "
+                "Diffusion 3.5, SDXL and Z-Image via Hugging Face diffusers"
             ),
             tags=["Image", "GPU", "CUDA"],
         )
@@ -112,6 +116,14 @@ class DiffusersBackend(BackendInterface):
         env["DIFFUSERS_ENABLE_XFORMERS"] = str(settings.diffusers_enable_xformers).lower()
         env["DIFFUSERS_OFFLOAD_MODE"] = settings.diffusers_offload_mode
         env["DIFFUSERS_ALLOW_TF32"] = str(settings.diffusers_allow_tf32).lower()
+        # Some pipelines (Flux2Klein, Z-Image) auto-trigger torch.compile on
+        # first forward, which spawns a pool of CPU compile_workers per core
+        # and ptxas instances that nuke RAM/swap on shared hosts. Disable
+        # dynamo unless the caller explicitly opted in via the flag above.
+        if not settings.diffusers_enable_torch_compile:
+            env["TORCHDYNAMO_DISABLE"] = "1"
+            env["TORCH_COMPILE_DISABLE"] = "1"
+            env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "2")
 
         # Slim image needs the venv's CUDA libs on LD path (Deuda D14).
         nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "diffusers")
@@ -133,7 +145,12 @@ class DiffusersBackend(BackendInterface):
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            # stderr to file so we can diagnose worker crashes (OOM, missing
+            # deps, etc.) that would otherwise show up as opaque 500s. Keeping
+            # this on disk is fine — file is overwritten on each (re)load.
+            stderr=open(
+                f"/tmp/diffusers_worker_{model_id.replace('/', '_')}.log", "wb"
+            ),
             env=env,
         )
 
@@ -189,11 +206,30 @@ class DiffusersBackend(BackendInterface):
         if not model_path.exists():
             return 0
 
-        total_bytes = 0
-        for tensor_file in model_path.rglob("*.safetensors"):
-            if tensor_file.is_file():
-                total_bytes += tensor_file.stat().st_size
+        # For HuggingFace diffusers trees we estimate VRAM as transformer/UNet +
+        # VAE only. Text encoders (often Qwen/T5/CLIP) live in CPU when the
+        # pipeline runs with ``enable_model_cpu_offload``, which is the default
+        # for large FLUX/SD3 models. Counting them inflates the estimate by
+        # 5-15 GB and triggers spurious "insufficient VRAM" rejections.
+        #
+        # When neither a transformer/ nor a unet/ subdirectory exists (e.g.
+        # single-file SDXL checkpoints), fall back to summing every
+        # ``.safetensors`` file in the tree.
+        skip_dirs = {"text_encoder", "text_encoder_2", "text_encoder_3"}
+        weight_dirs = (model_path / "transformer", model_path / "unet")
+        candidates: list[Path] = []
+        if any(d.is_dir() for d in weight_dirs):
+            for tensor_file in model_path.rglob("*.safetensors"):
+                if not tensor_file.is_file():
+                    continue
+                rel = tensor_file.relative_to(model_path)
+                if rel.parts and rel.parts[0] in skip_dirs:
+                    continue
+                candidates.append(tensor_file)
+        else:
+            candidates = [p for p in model_path.rglob("*.safetensors") if p.is_file()]
 
+        total_bytes = sum(p.stat().st_size for p in candidates)
         total_mb = total_bytes / (1024 * 1024)
         return int(math.ceil(total_mb * 1.3))
 

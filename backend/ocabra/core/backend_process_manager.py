@@ -99,9 +99,15 @@ class BackendProcessManager:
             await self._handle_worker_death(model_id, reason="pid_dead")
             return
 
-        # Step 2: HTTP health check
+        # Step 2: HTTP health check. The 30s timeout and 5-failure tolerance
+        # exist for image generation workers with sequential cpu offload:
+        # the python GIL is held for tens of seconds during a single
+        # diffusion step's tensor.to(GPU) calls, which delays the worker's
+        # asyncio loop from servicing /health. A tighter window kills
+        # mid-generation workers and produces "Internal Server Error" 500s
+        # instead of completed images.
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(f"http://127.0.0.1:{port}/health")
                 resp.raise_for_status()
             # Health OK -- reset counters
@@ -110,7 +116,7 @@ class BackendProcessManager:
         except Exception:
             count = self._health_fail_counts.get(model_id, 0) + 1
             self._health_fail_counts[model_id] = count
-            if count >= 3:
+            if count >= 5:
                 logger.error(
                     "worker_health_failed",
                     model_id=model_id,
