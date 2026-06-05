@@ -68,6 +68,24 @@ def test_install_spec_opts_in_to_core_runtime() -> None:
     assert WhisperBackend().install_spec.include_core_runtime is True
 
 
+def test_install_spec_pins_nvidia_cuda_runtime_libs() -> None:
+    """ctranslate2 (faster-whisper engine) loads ``libcublas.so.12`` and
+    ``libcudnn*.so.9`` dynamically. They normally arrive as transitive deps
+    of torch from the cu124 index, but pip resolution can pick a torch build
+    that omits them, and then the worker boots fine, ``/health`` passes,
+    and the *first* transcription dies with
+    ``Library libcublas.so.12 is not found or cannot be loaded``. We pin
+    them explicitly so a clean modular install on a slim image always works.
+    """
+
+    packages = " ".join(WhisperBackend().install_spec.pip_packages).lower()
+    for required in ("nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+        assert required in packages, (
+            f"missing explicit CUDA runtime lib '{required}' in install_spec — "
+            "without it ctranslate2 cannot load the encoder at inference time"
+        )
+
+
 # ---------------------------------------------------------------------------
 # _resolve_python_bin
 # ---------------------------------------------------------------------------

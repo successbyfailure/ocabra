@@ -93,6 +93,19 @@ class WhisperBackend(BackendInterface):
                 "librosa>=0.10",
                 "matplotlib>=3.10",
                 "numpy",
+                # ctranslate2 (the engine behind faster-whisper) loads
+                # libcublas.so.12 / libcudnn*.so.9 dynamically from
+                # site-packages/nvidia/*/lib via LD_LIBRARY_PATH (see
+                # whisper_backend.load()). Torch *usually* pulls these as
+                # transitive deps when installed from the cu124 index, but
+                # pip resolution can pick a torch build that doesn't, and
+                # then the worker boots fine, model_loaded fires, /health
+                # passes, and the *first* transcription dies with
+                # "Library libcublas.so.12 is not found".  Pin them
+                # explicitly so a clean modular install always works on a
+                # slim image.
+                "nvidia-cublas-cu12>=12.4",
+                "nvidia-cudnn-cu12>=9.1",
             ],
             pip_extra_index_urls=[
                 # Pull CUDA 12.4 torch wheels; CPU-only wheels from PyPI do
