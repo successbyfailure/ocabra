@@ -17,6 +17,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react"
+import { CapabilityBadge } from "@/components/common/CapabilityBadge"
 import { BackendBadge } from "@/components/models/BackendBadge"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
@@ -189,7 +190,13 @@ export function ModelCard({
             </div>
           </div>
         </td>
-        <td className="px-3 py-3 text-muted-foreground">{modelType(model)}</td>
+        <td className="px-3 py-3 text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-1">
+            <span>{modelType(model)}</span>
+            {model.capabilities.audioInput && <CapabilityBadge capability="audioInput" />}
+            {model.capabilities.videoInput && <CapabilityBadge capability="videoInput" />}
+          </div>
+        </td>
         <td className="px-3 py-3 hidden lg:table-cell">
           <BackendBadge backendType={model.backendType} />
         </td>
