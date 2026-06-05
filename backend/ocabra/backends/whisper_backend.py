@@ -177,6 +177,21 @@ class WhisperBackend(BackendInterface):
         if nvidia_ld:
             existing = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
+        elif gpu_indices:
+            # GPU assigned but no nvidia/*/lib in the venv → the worker will
+            # boot, the model will appear LOADED, and the *first* transcription
+            # will fail with "libcublas.so.12 is not found". Warn early so the
+            # operator sees it in the API log, not buried in the worker log.
+            logger.warning(
+                "whisper_worker_missing_cuda_libs",
+                model_id=model_id,
+                hint=(
+                    "/data/backends/whisper/venv has no nvidia/*/lib — reinstall the "
+                    "whisper backend or run "
+                    "`/data/backends/whisper/venv/bin/pip install "
+                    "nvidia-cublas-cu12 nvidia-cudnn-cu12` and restart the API"
+                ),
+            )
 
         python_bin = self._resolve_python_bin()
         args = [
