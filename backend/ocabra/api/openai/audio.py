@@ -56,9 +56,30 @@ async def transcriptions(
 
     Supported response_format: json (default), text, srt, vtt, verbose_json.
     """
-    form = await request.form(
-        max_part_size=max(1, int(settings.openai_audio_max_part_size_mb)) * 1024 * 1024
+    # Diagnostic: prints unconditionally even if structlog / exception_handler
+    # are misbehaving. Lets us confirm the handler is actually being entered.
+    import sys as _sys
+
+    print(
+        f"[transcribe-entry] user={getattr(user, 'username', '?')} "
+        f"content_type={file.content_type!r} filename={file.filename!r}",
+        file=_sys.stderr,
+        flush=True,
     )
+
+    try:
+        form = await request.form(
+            max_part_size=max(1, int(settings.openai_audio_max_part_size_mb)) * 1024 * 1024
+        )
+    except Exception as _exc:
+        import traceback as _tb
+
+        print(
+            f"[transcribe-form-error] {type(_exc).__name__}: {_exc}\n{_tb.format_exc()}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        raise
     model_id: str = form.get("model", "")
     language: str | None = form.get("language")
     response_format: str = form.get("response_format", "json")
@@ -220,15 +241,31 @@ async def transcriptions(
                 # Fall through to local processing.
     # --- End federation hook ---
 
-    profile, state = await resolve_profile(
-        model_id,
-        model_manager,
-        profile_registry,
-        user=user,
-    )
-    check_capability(state, "audio_transcription", "audio transcription")
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
-    request.state.stats_model_id = worker_key
+    print("[transcribe-local-start] entering local processing", file=_sys.stderr, flush=True)
+    try:
+        profile, state = await resolve_profile(
+            model_id,
+            model_manager,
+            profile_registry,
+            user=user,
+        )
+        check_capability(state, "audio_transcription", "audio transcription")
+        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        request.state.stats_model_id = worker_key
+        print(
+            f"[transcribe-local-resolved] worker_key={worker_key!r} backend={state.backend_type!r}",
+            file=_sys.stderr,
+            flush=True,
+        )
+    except Exception as _exc:
+        import traceback as _tb
+
+        print(
+            f"[transcribe-local-resolve-error] {type(_exc).__name__}: {_exc}\n{_tb.format_exc()}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        raise
 
     worker_pool = request.app.state.worker_pool
 
@@ -241,6 +278,12 @@ async def transcriptions(
             worker = worker_pool.get_worker(worker_key)
             backend = await worker_pool.get_backend(state.backend_type)
             worker_healthy = bool(worker) and await backend.health_check(state.backend_model_id)
+            print(
+                f"[transcribe-local-attempt] n={attempt} "
+                f"worker={'yes' if worker else 'no'} healthy={worker_healthy}",
+                file=_sys.stderr,
+                flush=True,
+            )
 
             if not worker or not worker_healthy:
                 if attempt == 0:
