@@ -1091,6 +1091,56 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_local_scanner_caches_repeated_scans(tmp_path: Path) -> None:
+    """Second scan within the TTL returns the cached result and skips disk."""
+    hf_dir = tmp_path / "hf-model"
+    hf_dir.mkdir()
+    (hf_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    scanner = LocalScanner()
+    first = await scanner.scan(tmp_path)
+    assert any(m.model_ref == "hf-model" for m in first)
+
+    # Add a second model AFTER the first scan. Without cache busting the
+    # second scan returns the stale snapshot — that's the desired behaviour
+    # within the TTL window.
+    new_dir = tmp_path / "added-after"
+    new_dir.mkdir()
+    (new_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    cached = await scanner.scan(tmp_path)
+    assert [m.path for m in cached] == [m.path for m in first]
+    assert not any(m.model_ref == "added-after" for m in cached)
+
+    # invalidate() forces the next scan to re-walk disk and pick up the new model.
+    scanner.invalidate()
+    fresh = await scanner.scan(tmp_path)
+    assert any(m.model_ref == "added-after" for m in fresh)
+
+
+@pytest.mark.asyncio
+async def test_local_scanner_gguf_fingerprint_cache_skips_repeat_reads(
+    tmp_path: Path,
+) -> None:
+    """A second scan does not call parse_gguf_tokenizer_fingerprint again."""
+    from unittest.mock import patch
+
+    gguf = tmp_path / "tiny.gguf"
+    gguf.write_bytes(b"GGUF" + b"\x00" * 1024)
+
+    scanner = LocalScanner()
+    parser = "ocabra.registry.local_scanner.parse_gguf_tokenizer_fingerprint"
+    with patch(parser, return_value=(32000, 1, 2)) as parser_mock:
+        await scanner.scan(tmp_path)
+        assert parser_mock.call_count == 1
+        scanner.invalidate()
+        await scanner.scan(tmp_path)
+        # The fingerprint cache is keyed by (path, mtime_ns, size); since the
+        # file hasn't changed, the parser is not invoked again.
+        assert parser_mock.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_local_scanner_exposes_ollama_shared_blobs_as_llama_cpp(tmp_path: Path) -> None:
     """When ollama_shared_dir is given, pulled GGUFs surface as llama_cpp candidates."""
     import json as _json

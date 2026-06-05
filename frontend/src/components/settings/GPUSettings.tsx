@@ -82,8 +82,11 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
 
   const pctOfDefault = limits.default_w > 0 ? Math.round((limits.current_w / limits.default_w) * 100) : 0
   const isReduced = limits.current_w < limits.default_w
-  const isPersisted = limits.saved_w !== null && limits.saved_w === limits.current_w
-  const persistedButStale = limits.saved_w !== null && limits.saved_w !== limits.current_w
+  // saved_w may be undefined when the user's browser caches a new JS bundle but
+  // the API is older — coalesce to null to avoid rendering `Guardado: undefinedW`.
+  const savedW = limits.saved_w ?? null
+  const isPersisted = savedW !== null && savedW === limits.current_w
+  const persistedButStale = savedW !== null && savedW !== limits.current_w
 
   return (
     <div className="rounded-md border border-border/60 bg-muted/10 p-3 space-y-2">
@@ -102,10 +105,10 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
           )}
           {persistedButStale && (
             <span
-              title={`Guardado: ${limits.saved_w}W (no coincide con el actual)`}
+              title={`Guardado: ${savedW}W (no coincide con el actual)`}
               className="inline-flex items-center gap-1 rounded-full border border-amber-700/40 bg-amber-950/40 px-1.5 py-0.5 text-[10px] text-amber-300"
             >
-              <Save size={9} /> Guardado: {limits.saved_w}W
+              <Save size={9} /> Guardado: {savedW}W
             </span>
           )}
         </div>

@@ -536,6 +536,11 @@ async def delete_model(
     deleted_path: str | None = None
     if delete_files:
         deleted_path = await _delete_model_files(model_id, state.backend_type)
+        # Drop the LocalScanner cache so the user sees the deletion reflected
+        # in /registry/local without having to wait for the TTL.
+        from ocabra.api.internal.registry import invalidate_local_scan
+
+        invalidate_local_scan()
 
     return {"ok": True, "deleted_path": deleted_path}
 

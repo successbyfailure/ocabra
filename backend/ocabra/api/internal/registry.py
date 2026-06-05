@@ -112,14 +112,31 @@ async def get_ollama_variants(
     "/registry/local",
     response_model=list[LocalModel],
     summary="List local models",
-    description="Scan the models directory and return all locally available model files.",
+    description=(
+        "Scan the models directory and return all locally available model "
+        "files. Results are cached for ~30 s — pass ``?refresh=true`` to "
+        "force a re-scan after a manual file change."
+    ),
 )
 async def list_local_models(
+    refresh: bool = Query(default=False, description="Bypass the 30-s scan cache"),
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[LocalModel]:
+    if refresh:
+        _local_scanner.invalidate()
     ollama_shared = (
         Path(settings.ollama_shared_models_dir)
         if settings.ollama_shared_models_dir
         else None
     )
     return await _local_scanner.scan(Path(settings.models_dir), ollama_shared)
+
+
+def invalidate_local_scan() -> None:
+    """Drop the cached LocalScanner result so the next scan re-walks disk.
+
+    Call this from download/delete endpoints that mutate the models tree.
+    Exported as a module-level helper so other routers can import it without
+    poking at the private ``_local_scanner`` singleton directly.
+    """
+    _local_scanner.invalidate()

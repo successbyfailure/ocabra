@@ -173,10 +173,47 @@ def parse_gguf_tokenizer_fingerprint(
 
 
 class LocalScanner:
+    # Walking 200+ dirs and reading 14 × 64 MB of GGUF headers takes 15-25s on
+    # this host. The Settings and Models pages both consume the scan and the
+    # underlying tree only changes when the admin downloads / removes a model,
+    # so we cache the result for a short TTL and additionally memoise the GGUF
+    # fingerprint by (path, mtime, size) to avoid re-reading headers that
+    # haven't changed.
+    _SCAN_TTL_S = 30.0
+
+    def __init__(self) -> None:
+        self._scan_cache: tuple[float, tuple[str, str | None], list[LocalModel]] | None = None
+        self._scan_lock = asyncio.Lock()
+        # (path, mtime_ns, size) -> (vocab_size, bos_id, eos_id)
+        self._gguf_fingerprint_cache: dict[tuple[str, int, int], tuple[int | None, int | None, int | None]] = {}
+
+    def invalidate(self) -> None:
+        """Drop the cached scan result. Call after a download/delete."""
+        self._scan_cache = None
+
     async def scan(
         self, models_dir: Path, ollama_shared_dir: Path | None = None
     ) -> list[LocalModel]:
-        return await asyncio.to_thread(self._scan_sync, models_dir, ollama_shared_dir)
+        cache_key = (str(models_dir), str(ollama_shared_dir) if ollama_shared_dir else None)
+
+        # Fast path: serve from cache without acquiring the lock.
+        cached = self._scan_cache
+        if cached is not None:
+            stamp, key, result = cached
+            if key == cache_key and (asyncio.get_event_loop().time() - stamp) < self._SCAN_TTL_S:
+                return result
+
+        # Slow path: lock so concurrent callers coalesce into one disk walk.
+        async with self._scan_lock:
+            cached = self._scan_cache
+            if cached is not None:
+                stamp, key, result = cached
+                if key == cache_key and (asyncio.get_event_loop().time() - stamp) < self._SCAN_TTL_S:
+                    return result
+
+            result = await asyncio.to_thread(self._scan_sync, models_dir, ollama_shared_dir)
+            self._scan_cache = (asyncio.get_event_loop().time(), cache_key, result)
+            return result
 
     def _scan_sync(
         self, models_dir: Path, ollama_shared_dir: Path | None = None
@@ -224,7 +261,21 @@ class LocalScanner:
                 # Bitnet quantizations (i2_s, "bitnet" in name) need their
                 # specialised backend.
                 backend_type = "bitnet" if self._is_bitnet_gguf(path) else "llama_cpp"
-                vocab_size, bos_id, eos_id = parse_gguf_tokenizer_fingerprint(path)
+                # Tokenizer fingerprint requires reading up to 64 MB from disk
+                # per file. Memoise by (path, mtime_ns, size) so re-scans don't
+                # re-hit the disk for files that haven't changed.
+                try:
+                    st = path.stat()
+                    fp_key = (str(path), st.st_mtime_ns, st.st_size)
+                except OSError:
+                    fp_key = None
+                cached_fp = self._gguf_fingerprint_cache.get(fp_key) if fp_key else None
+                if cached_fp is not None:
+                    vocab_size, bos_id, eos_id = cached_fp
+                else:
+                    vocab_size, bos_id, eos_id = parse_gguf_tokenizer_fingerprint(path)
+                    if fp_key is not None:
+                        self._gguf_fingerprint_cache[fp_key] = (vocab_size, bos_id, eos_id)
                 models.append(
                     LocalModel(
                         model_ref=path.stem,

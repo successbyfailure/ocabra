@@ -1218,7 +1218,11 @@ export const api = {
       (await request<unknown[]>("GET", `/ocabra/registry/ollama/${encodeURIComponent(modelName)}/variants`)).map(
         toOllamaVariant,
       ),
-    listLocal: async () => (await request<unknown[]>("GET", "/ocabra/registry/local")).map(toLocalModel),
+    listLocal: async (opts: { refresh?: boolean } = {}) =>
+      (await request<unknown[]>(
+        "GET",
+        opts.refresh ? "/ocabra/registry/local?refresh=true" : "/ocabra/registry/local",
+      )).map(toLocalModel),
   },
 
   stats: {
