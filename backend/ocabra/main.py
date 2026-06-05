@@ -310,6 +310,25 @@ async def lifespan(app: FastAPI):
     app.state.gpu_scheduler = gpu_scheduler
     logger.info("gpu_manager_ready")
 
+    # Re-apply persisted GPU power caps + persistence-mode flags. Runs in a
+    # background task so it can wait for hw-monitor's heartbeat (where the
+    # privileged NVML calls actually happen) without blocking the rest of
+    # startup. Best-effort: failures are logged, never raised.
+    async def _reapply_gpu_power_caps() -> None:
+        try:
+            from ocabra.database import AsyncSessionLocal
+            from ocabra.db.gpu_power_settings import reapply_persisted_settings
+
+            summary = await reapply_persisted_settings(AsyncSessionLocal)
+            logger.info("gpu_power_reapply_summary", **summary)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gpu_power_reapply_unexpected_error", error=str(exc))
+
+    gpu_power_reapply_task = asyncio.create_task(
+        _reapply_gpu_power_caps(),
+        name="gpu-power-reapply",
+    )
+
     # Stream 1-B: Worker Pool + Model Manager
     from ocabra.core.worker_pool import WorkerPool
     from ocabra.core.model_manager import ModelManager

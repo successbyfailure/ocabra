@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react"
-import { Zap, RotateCcw } from "lucide-react"
+import { Save, Zap, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 import { useAuthStore } from "@/stores/authStore"
 import type { GPUState, ServerConfig } from "@/types"
@@ -11,6 +11,8 @@ interface PowerLimits {
   min_w: number
   max_w: number
   persistence_mode: boolean
+  saved_w: number | null
+  saved_persistence_mode: boolean | null
 }
 
 function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
@@ -80,6 +82,8 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
 
   const pctOfDefault = limits.default_w > 0 ? Math.round((limits.current_w / limits.default_w) * 100) : 0
   const isReduced = limits.current_w < limits.default_w
+  const isPersisted = limits.saved_w !== null && limits.saved_w === limits.current_w
+  const persistedButStale = limits.saved_w !== null && limits.saved_w !== limits.current_w
 
   return (
     <div className="rounded-md border border-border/60 bg-muted/10 p-3 space-y-2">
@@ -88,6 +92,22 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
           <Zap size={14} className={isReduced ? "text-amber-400" : "text-emerald-400"} />
           <span className="text-sm font-medium">GPU {gpu.index}</span>
           <span className="text-xs text-muted-foreground">{gpu.name}</span>
+          {isPersisted && (
+            <span
+              title="Guardado: este valor se reaplicará en el próximo arranque"
+              className="inline-flex items-center gap-1 rounded-full border border-emerald-700/40 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-300"
+            >
+              <Save size={9} /> Guardado
+            </span>
+          )}
+          {persistedButStale && (
+            <span
+              title={`Guardado: ${limits.saved_w}W (no coincide con el actual)`}
+              className="inline-flex items-center gap-1 rounded-full border border-amber-700/40 bg-amber-950/40 px-1.5 py-0.5 text-[10px] text-amber-300"
+            >
+              <Save size={9} /> Guardado: {limits.saved_w}W
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 text-xs">
           <span className="font-mono">
@@ -301,7 +321,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
         Limites de potencia
       </h2>
       <p className="text-xs text-muted-foreground -mt-1">
-        Reduce el TDP para ahorrar energia y reducir ruido/temperatura.
+        Reduce el TDP para ahorrar energia y reducir ruido/temperatura. Los valores aplicados se persisten en la BD y se reaplican automaticamente en el siguiente arranque.
       </p>
       <div className="space-y-2">
         {gpus.map((gpu) => (

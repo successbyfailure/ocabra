@@ -108,7 +108,12 @@ async def get_gpu_power_limits(
     index: int,
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Return power limit info for a single GPU."""
+    """Return power limit info for a single GPU.
+
+    Adds ``saved_w`` / ``saved_persistence_mode`` so the UI can show whether
+    the current values are pinned in the DB (and survive container restarts)
+    vs. just-runtime.
+    """
     import pynvml
 
     try:
@@ -118,6 +123,20 @@ async def get_gpu_power_limits(
         default = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
         min_w, max_w = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
         persistence = pynvml.nvmlDeviceGetPersistenceMode(handle)
+
+        saved_w: int | None = None
+        saved_persistence_mode: bool | None = None
+        from ocabra.database import AsyncSessionLocal
+        from ocabra.db.gpu_power_settings import GpuPowerSetting, read_gpu_uuid
+
+        gpu_uuid = read_gpu_uuid(index)
+        if gpu_uuid:
+            async with AsyncSessionLocal() as session:
+                row = await session.get(GpuPowerSetting, gpu_uuid)
+                if row is not None:
+                    saved_w = row.power_limit_w
+                    saved_persistence_mode = row.persistence_mode
+
         return {
             "gpu_index": index,
             "current_w": current // 1000,
@@ -125,6 +144,8 @@ async def get_gpu_power_limits(
             "min_w": min_w // 1000,
             "max_w": max_w // 1000,
             "persistence_mode": bool(persistence),
+            "saved_w": saved_w,
+            "saved_persistence_mode": saved_persistence_mode,
         }
     except pynvml.NVMLError as exc:
         raise HTTPException(status_code=500, detail=f"NVML error: {exc}")
@@ -196,6 +217,52 @@ async def set_gpu_power(
         default = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
         min_w, max_w = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
         persistence = pynvml.nvmlDeviceGetPersistenceMode(handle)
+
+        # Persist so the cap survives container restarts / host reboots.
+        # ``power_limit_w == 0`` (reset-to-default) clears the row's value so
+        # we don't keep re-applying the manufacturer default forever; if both
+        # fields end up NULL the row is removed.
+        from ocabra.database import AsyncSessionLocal
+        from ocabra.db.gpu_power_settings import (
+            GpuPowerSetting,
+            read_gpu_name,
+            read_gpu_uuid,
+            upsert_setting,
+        )
+
+        gpu_uuid = read_gpu_uuid(index)
+        if gpu_uuid:
+            persist_power_w: int | None
+            if body.power_limit_w is None:
+                persist_power_w = None  # don't touch
+            elif body.power_limit_w == 0:
+                persist_power_w = 0  # sentinel: reset-to-default → clear row
+            else:
+                persist_power_w = body.power_limit_w
+            async with AsyncSessionLocal() as session:
+                if persist_power_w == 0 and body.persistence_mode is None:
+                    # Delete the row entirely so we don't keep re-applying it.
+                    existing = await session.get(GpuPowerSetting, gpu_uuid)
+                    if existing is not None:
+                        await session.delete(existing)
+                else:
+                    await upsert_setting(
+                        session,
+                        gpu_uuid=gpu_uuid,
+                        power_limit_w=persist_power_w if persist_power_w != 0 else None,
+                        persistence_mode=body.persistence_mode,
+                        last_known_index=index,
+                        last_known_name=read_gpu_name(index),
+                    )
+                await session.commit()
+            logger.info(
+                "gpu_power_setting_persisted",
+                gpu_uuid=gpu_uuid,
+                gpu_index=index,
+                power_limit_w=body.power_limit_w,
+                persistence_mode=body.persistence_mode,
+            )
+
         return {
             "gpu_index": index,
             "current_w": current // 1000,
