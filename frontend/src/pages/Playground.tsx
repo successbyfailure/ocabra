@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { AlertTriangle, MessageSquarePlus, SlidersHorizontal, Sparkles } from "lucide-react"
+import { AlertTriangle, MessageSquarePlus, Radio, SlidersHorizontal, Sparkles } from "lucide-react"
 import { Link } from "react-router-dom"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
@@ -11,7 +11,10 @@ import { ImageInterface } from "@/components/playground/ImageInterface"
 import { ModelSelector } from "@/components/playground/ModelSelector"
 import { ParamsPanel, type PlaygroundParams } from "@/components/playground/ParamsPanel"
 import { PoolingInterface } from "@/components/playground/PoolingInterface"
+import { RealtimeInterface } from "@/components/playground/RealtimeInterface"
 import type { ModelState } from "@/types"
+
+type PlaygroundTab = "modal" | "realtime"
 
 function detectMode(model: ModelState | null): "chat" | "image" | "audio" | "pooling" {
   if (!model) return "chat"
@@ -43,6 +46,7 @@ export function Playground() {
     typeof window !== "undefined" && window.innerWidth >= 1280,
   )
   const [chatKey, setChatKey] = useState(0)
+  const [tab, setTab] = useState<PlaygroundTab>("modal")
 
   const agents = useAgentsStore((s) => s.agents)
   const fetchAgents = useAgentsStore((s) => s.fetchAll)
@@ -131,6 +135,37 @@ export function Playground() {
         </div>
       ) : (
         <>
+          <div className="inline-flex rounded-md border border-border bg-card p-0.5">
+            <button
+              type="button"
+              onClick={() => setTab("modal")}
+              className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm transition-colors ${
+                tab === "modal"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <MessageSquarePlus size={14} />
+              Modal
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("realtime")}
+              className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm transition-colors ${
+                tab === "realtime"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Radio size={14} />
+              Realtime
+            </button>
+          </div>
+
+          {tab === "realtime" ? (
+            <RealtimeInterface models={models} />
+          ) : (
+          <>
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex-1 min-w-0">
               <ModelSelector
@@ -259,6 +294,8 @@ export function Playground() {
               />
             )}
           </div>
+          </>
+          )}
         </>
       )}
     </div>
