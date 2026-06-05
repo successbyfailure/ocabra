@@ -688,11 +688,20 @@ class FederationManager:
 
 
 # HTTP statuses the peer returns when it can't serve a model for this token
-# (access denied, model not found for this user, auth issue). On these we
-# fall back to local processing instead of bubbling the peer's error — the
-# common cause is that the federation api_key on the peer lacks group access
-# to the model even though the model is loaded.
-PEER_FALLBACK_STATUSES = frozenset({401, 403, 404})
+# or is temporarily broken. On these we fall back to local processing instead
+# of bubbling the peer's error to the client.
+#
+#   401 / 403 / 404 — federation api_key lacks access on the peer (typical
+#     when the peer hasn't granted the api_key access to the model the peer
+#     itself reports as LOADED in its heartbeat).
+#   500 / 502 / 503 / 504 — peer-side failure that the local node can probably
+#     handle by itself. We'd rather pay a cold-start than surface a 5xx
+#     produced by *somebody else's node*.
+#
+# The user's request is one indivisible thing from their point of view; if
+# we routed it to a peer and the peer can't serve it, the right answer is to
+# try locally before giving up.
+PEER_FALLBACK_STATUSES = frozenset({401, 403, 404, 500, 502, 503, 504})
 
 
 def should_fallback_to_local(status_code: int) -> bool:

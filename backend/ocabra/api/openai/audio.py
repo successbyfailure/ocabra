@@ -113,7 +113,6 @@ async def transcriptions(
                 from ocabra.core.federation import should_fallback_to_local
 
                 request.state.federation_remote_node_id = peer.peer_id
-                fed_resp: httpx.Response | None = None
                 try:
                     form_data: dict[str, str] = {
                         "model": model_id,
@@ -127,6 +126,7 @@ async def transcriptions(
                     if diarize is not None:
                         form_data["diarize"] = diarize
 
+                    fed_resp: httpx.Response | None
                     try:
                         fed_resp = await federation_manager.proxy_multipart(
                             peer=peer,
@@ -150,41 +150,71 @@ async def transcriptions(
                             error_type=type(exc).__name__,
                         )
                         fed_resp = None
+
+                    if fed_resp is not None and fed_resp.status_code < 400:
+                        normalized_format = str(response_format).lower()
+                        if normalized_format in {"text", "srt", "vtt"}:
+                            return PlainTextResponse(fed_resp.text)
+                        try:
+                            return fed_resp.json()
+                        except Exception as exc:
+                            logger.warning(
+                                "federation_peer_non_json_response_fallback_local",
+                                peer=peer.name,
+                                model_id=model_id,
+                                error=str(exc),
+                                body_preview=fed_resp.text[:200],
+                            )
+                            fed_resp = None
+
+                    if fed_resp is not None and not should_fallback_to_local(
+                        fed_resp.status_code
+                    ):
+                        # Non-recoverable peer error → propagate. Logged so a
+                        # surprise 5xx from a peer never reaches the client
+                        # without a server-side trace explaining where it
+                        # came from.
+                        logger.warning(
+                            "federation_peer_error_propagated",
+                            peer=peer.name,
+                            model_id=model_id,
+                            status=fed_resp.status_code,
+                            body_preview=fed_resp.text[:300],
+                        )
+                        normalized_format = str(response_format).lower()
+                        if normalized_format in {"text", "srt", "vtt"}:
+                            return PlainTextResponse(
+                                fed_resp.text, status_code=fed_resp.status_code
+                            )
+                        return Response(
+                            content=fed_resp.content,
+                            status_code=fed_resp.status_code,
+                            media_type=fed_resp.headers.get("content-type"),
+                        )
+
+                    if fed_resp is not None:
+                        # Recoverable: peer can't serve this model for this token
+                        # (typical cause: federation api_key lacks group access).
+                        logger.warning(
+                            "federation_peer_rejected_fallback_local",
+                            peer=peer.name,
+                            model_id=model_id,
+                            status=fed_resp.status_code,
+                            body_preview=fed_resp.text[:200],
+                        )
                 except Exception as exc:
-                    logger.exception(
+                    # Anything we missed inside the federation block: log the
+                    # full traceback and fall back to local instead of letting
+                    # FastAPI return an opaque 500.
+                    import traceback as _tb
+
+                    logger.warning(
                         "federation_proxy_unexpected_error",
                         peer=peer.name,
                         model_id=model_id,
                         error=str(exc),
-                    )
-                    fed_resp = None
-
-                if fed_resp is not None and fed_resp.status_code < 400:
-                    normalized_format = str(response_format).lower()
-                    if normalized_format in {"text", "srt", "vtt"}:
-                        return PlainTextResponse(fed_resp.text)
-                    return fed_resp.json()
-
-                if fed_resp is not None and not should_fallback_to_local(fed_resp.status_code):
-                    # 5xx or other non-recoverable peer error → propagate.
-                    normalized_format = str(response_format).lower()
-                    if normalized_format in {"text", "srt", "vtt"}:
-                        return PlainTextResponse(fed_resp.text, status_code=fed_resp.status_code)
-                    return Response(
-                        content=fed_resp.content,
-                        status_code=fed_resp.status_code,
-                        media_type=fed_resp.headers.get("content-type"),
-                    )
-
-                if fed_resp is not None:
-                    # Recoverable: peer can't serve this model for this token
-                    # (typical cause: federation api_key lacks group access).
-                    logger.warning(
-                        "federation_peer_rejected_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        status=fed_resp.status_code,
-                        body_preview=fed_resp.text[:200],
+                        error_type=type(exc).__name__,
+                        traceback=_tb.format_exc(),
                     )
                 request.state.federation_remote_node_id = None
                 # Fall through to local processing.
