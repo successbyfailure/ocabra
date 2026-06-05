@@ -11,6 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.model_ref import parse_model_ref
+from ocabra.db.model_config import (
+    get_all_model_schedule_rows,
+    get_model_schedule_rows,
+    model_schedule_rows_to_payload,
+    replace_model_schedules,
+)
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 router = APIRouter(tags=["models"])
@@ -77,6 +83,23 @@ async def list_models(
     if federation_manager is not None:
         remote_models = federation_manager.get_remote_models()
 
+    # Bulk-fetch every per-model schedule row in one query and group by model_id
+    # so we don't trigger one query per model during serialization.
+    from collections import defaultdict
+
+    from ocabra.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        all_schedule_rows = await get_all_model_schedule_rows(session)
+    rows_by_model: dict[str, list] = defaultdict(list)
+    for row in all_schedule_rows:
+        if row.model_id is not None:
+            rows_by_model[row.model_id].append(row)
+    schedules_by_model: dict[str, list[dict]] = {
+        model_id: model_schedule_rows_to_payload(rows)
+        for model_id, rows in rows_by_model.items()
+    }
+
     profile_registry = getattr(request.app.state, "profile_registry", None)
 
     async def _is_accessible(model_id: str) -> bool:
@@ -95,7 +118,12 @@ async def list_models(
     for state in states:
         if not await _is_accessible(state.model_id):
             continue
-        item = await _serialize_model_state(request, state, ollama_sizes)
+        item = await _serialize_model_state(
+            request,
+            state,
+            ollama_sizes,
+            schedules=schedules_by_model.get(state.model_id, []),
+        )
         local_model_ids.add(state.model_id)
 
         # Add federation metadata if enabled
@@ -301,17 +329,48 @@ async def update_model(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Update model configuration."""
+    """Update model configuration.
+
+    The ``schedules`` field is persisted separately from ``update_config`` since
+    eviction schedules live in their own table. Fields the lower-level
+    ``update_config`` does not accept (``backend_type``, ``vram_estimate_mb``)
+    are silently dropped — they exist in the API schema for forward
+    compatibility but are not yet mutable post-registration.
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
     patch = body.model_dump(exclude_unset=True)
-    try:
-        updated = await mm.update_config(model_id, patch)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return updated.to_dict()
+
+    schedules_payload = patch.pop("schedules", None)
+    # Not yet supported by update_config; ignore for now.
+    patch.pop("backend_type", None)
+    patch.pop("vram_estimate_mb", None)
+
+    if schedules_payload is not None:
+        from ocabra.database import AsyncSessionLocal
+
+        try:
+            async with AsyncSessionLocal() as session:
+                await replace_model_schedules(session, model_id, schedules_payload)
+                await session.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if patch:
+        try:
+            updated = await mm.update_config(model_id, patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        updated = state
+
+    ollama_sizes = (
+        await _get_ollama_sizes_bytes() if updated.backend_type == "ollama" else {}
+    )
+    return await _serialize_model_state(request, updated, ollama_sizes)
 
 
 @router.post(
@@ -832,6 +891,7 @@ async def _serialize_model_state(
     request: Request,
     state,
     ollama_sizes: dict[str, int],
+    schedules: list[dict] | None = None,
 ) -> dict:
     item = state.to_dict()
     item["disk_size_bytes"] = await _resolve_disk_size_bytes(state, ollama_sizes)
@@ -846,6 +906,15 @@ async def _serialize_model_state(
         item["profiles"] = [ProfileOut.model_validate(p).model_dump(mode="json") for p in profiles]
     else:
         item["profiles"] = []
+
+    # Per-model eviction schedules (UI shape: {id, days, start, end, enabled}).
+    if schedules is None:
+        from ocabra.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            rows = await get_model_schedule_rows(session, state.model_id)
+        schedules = model_schedule_rows_to_payload(rows)
+    item["schedules"] = schedules
 
     return item
 

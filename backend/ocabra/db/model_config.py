@@ -87,6 +87,11 @@ class EvictionSchedule(Base):
 GLOBAL_SCHEDULE_START_ACTION = "evict_all"
 GLOBAL_SCHEDULE_END_ACTION = "reload"
 
+# Per-model schedules use evict_warm (no point in evicting PIN through a
+# per-model rule) + reload. Same UI shape, narrower scope.
+MODEL_SCHEDULE_START_ACTION = "evict_warm"
+MODEL_SCHEDULE_END_ACTION = "reload"
+
 
 def _normalize_days(days: Sequence[int]) -> list[int]:
     normalized = sorted({int(day) for day in days if 0 <= int(day) <= 6})
@@ -118,12 +123,17 @@ def _shift_days(days: Sequence[int], offset: int) -> list[int]:
     return sorted({(int(day) + offset) % 7 for day in _normalize_days(days)})
 
 
-def global_schedule_payload_to_rows(
+def _schedule_payload_to_rows(
+    *,
+    model_id: str | None,
     schedule_id: str,
     days: Sequence[int],
     start: str,
     end: str,
     enabled: bool,
+    start_action: str,
+    end_action: str,
+    id_label: str,
 ) -> list[EvictionSchedule]:
     start_hour, start_minute = _parse_time(start)
     end_hour, end_minute = _parse_time(end)
@@ -138,24 +148,67 @@ def global_schedule_payload_to_rows(
 
     label = str(schedule_id).strip()
     if not label:
-        raise ValueError("globalSchedules.id must be a non-empty string")
+        raise ValueError(f"{id_label}.id must be a non-empty string")
 
     return [
         EvictionSchedule(
-            model_id=None,
+            model_id=model_id,
             cron_expr=f"{start_minute} {start_hour} * * {_days_to_cron_field(normalized_days)}",
-            action=GLOBAL_SCHEDULE_START_ACTION,
+            action=start_action,
             label=label,
             enabled=bool(enabled),
         ),
         EvictionSchedule(
-            model_id=None,
+            model_id=model_id,
             cron_expr=f"{end_minute} {end_hour} * * {_days_to_cron_field(end_days)}",
-            action=GLOBAL_SCHEDULE_END_ACTION,
+            action=end_action,
             label=label,
             enabled=bool(enabled),
         ),
     ]
+
+
+def global_schedule_payload_to_rows(
+    schedule_id: str,
+    days: Sequence[int],
+    start: str,
+    end: str,
+    enabled: bool,
+) -> list[EvictionSchedule]:
+    return _schedule_payload_to_rows(
+        model_id=None,
+        schedule_id=schedule_id,
+        days=days,
+        start=start,
+        end=end,
+        enabled=enabled,
+        start_action=GLOBAL_SCHEDULE_START_ACTION,
+        end_action=GLOBAL_SCHEDULE_END_ACTION,
+        id_label="globalSchedules",
+    )
+
+
+def model_schedule_payload_to_rows(
+    model_id: str,
+    schedule_id: str,
+    days: Sequence[int],
+    start: str,
+    end: str,
+    enabled: bool,
+) -> list[EvictionSchedule]:
+    if not model_id:
+        raise ValueError("model_id is required for per-model schedules")
+    return _schedule_payload_to_rows(
+        model_id=model_id,
+        schedule_id=schedule_id,
+        days=days,
+        start=start,
+        end=end,
+        enabled=enabled,
+        start_action=MODEL_SCHEDULE_START_ACTION,
+        end_action=MODEL_SCHEDULE_END_ACTION,
+        id_label="schedules",
+    )
 
 
 def _parse_day_field(field: str) -> list[int]:
@@ -187,18 +240,23 @@ def _cron_to_time_and_days(cron_expr: str) -> tuple[list[int], str]:
     return _parse_day_field(weekday), _format_time(int(hour), int(minute))
 
 
-def _group_global_schedule_rows(rows: Sequence[EvictionSchedule]) -> list[dict[str, object]]:
+def _group_schedule_rows(
+    rows: Sequence[EvictionSchedule],
+    *,
+    start_action: str,
+    end_action: str,
+) -> list[dict[str, object]]:
     grouped: dict[str, dict[str, object]] = {}
     for row in rows:
         label = str(row.label or row.id)
         bucket = grouped.setdefault(label, {"enabled": True})
         bucket["enabled"] = bool(bucket["enabled"]) and bool(row.enabled)
         bucket.setdefault("label", label)
-        if row.action == GLOBAL_SCHEDULE_START_ACTION:
+        if row.action == start_action:
             days, start = _cron_to_time_and_days(row.cron_expr)
             bucket["days"] = days
             bucket["start"] = start
-        elif row.action == GLOBAL_SCHEDULE_END_ACTION:
+        elif row.action == end_action:
             _days, end = _cron_to_time_and_days(row.cron_expr)
             bucket["end"] = end
 
@@ -252,4 +310,62 @@ async def replace_global_schedules(session, payloads: Sequence[dict[str, object]
 
 
 def global_schedule_rows_to_payload(rows: Sequence[EvictionSchedule]) -> list[dict[str, object]]:
-    return _group_global_schedule_rows(rows)
+    return _group_schedule_rows(
+        rows,
+        start_action=GLOBAL_SCHEDULE_START_ACTION,
+        end_action=GLOBAL_SCHEDULE_END_ACTION,
+    )
+
+
+async def get_model_schedule_rows(session, model_id: str) -> list[EvictionSchedule]:
+    import sqlalchemy as sa
+
+    result = await session.execute(
+        sa.select(EvictionSchedule).where(EvictionSchedule.model_id == model_id)
+    )
+    return list(result.scalars().all())
+
+
+async def get_all_model_schedule_rows(session) -> list[EvictionSchedule]:
+    """Return every non-global schedule, useful to enrich the model listing."""
+    import sqlalchemy as sa
+
+    result = await session.execute(
+        sa.select(EvictionSchedule).where(EvictionSchedule.model_id.is_not(None))
+    )
+    return list(result.scalars().all())
+
+
+async def replace_model_schedules(
+    session, model_id: str, payloads: Sequence[dict[str, object]]
+) -> None:
+    if not model_id:
+        raise ValueError("model_id is required for per-model schedules")
+    existing_rows = await get_model_schedule_rows(session, model_id)
+    for row in existing_rows:
+        await session.delete(row)
+
+    new_rows: list[EvictionSchedule] = []
+    for payload in payloads:
+        new_rows.extend(
+            model_schedule_payload_to_rows(
+                model_id=model_id,
+                schedule_id=str(payload["id"]),
+                days=payload["days"],  # type: ignore[arg-type]
+                start=str(payload["start"]),
+                end=str(payload["end"]),
+                enabled=bool(payload.get("enabled", True)),
+            )
+        )
+
+    session.add_all(new_rows)
+
+
+def model_schedule_rows_to_payload(
+    rows: Sequence[EvictionSchedule],
+) -> list[dict[str, object]]:
+    return _group_schedule_rows(
+        rows,
+        start_action=MODEL_SCHEDULE_START_ACTION,
+        end_action=MODEL_SCHEDULE_END_ACTION,
+    )
