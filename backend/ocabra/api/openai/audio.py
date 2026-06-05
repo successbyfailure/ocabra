@@ -111,6 +111,8 @@ async def transcriptions(
             )
             if target == "remote":
                 request.state.federation_remote_node_id = peer.peer_id
+                from ocabra.core.federation import should_fallback_to_local
+
                 form_data: dict[str, str] = {
                     "model": model_id,
                     "response_format": response_format,
@@ -122,6 +124,8 @@ async def transcriptions(
                     form_data["prompt"] = prompt
                 if diarize is not None:
                     form_data["diarize"] = diarize
+
+                resp: httpx.Response | None
                 try:
                     resp = await federation_manager.proxy_multipart(
                         peer=peer,
@@ -137,25 +141,43 @@ async def transcriptions(
                         headers=dict(request.headers),
                     )
                 except Exception as exc:
-                    raise _openai_error(
-                        f"Federation peer '{peer.name}' transcription failed: {exc}",
-                        "server_error",
-                        code="federation_peer_error",
-                        status_code=502,
-                    ) from exc
-                normalized_format = str(response_format).lower()
-                if normalized_format in {"text", "srt", "vtt"}:
-                    return PlainTextResponse(
-                        resp.text,
-                        status_code=resp.status_code,
+                    logger.warning(
+                        "federation_peer_network_error_fallback_local",
+                        peer=peer.name,
+                        model_id=model_id,
+                        error=str(exc),
                     )
-                if resp.status_code >= 400:
+                    resp = None
+
+                if resp is not None and resp.status_code < 400:
+                    normalized_format = str(response_format).lower()
+                    if normalized_format in {"text", "srt", "vtt"}:
+                        return PlainTextResponse(resp.text)
+                    return resp.json()
+
+                if resp is not None and not should_fallback_to_local(resp.status_code):
+                    # 5xx or other non-recoverable peer error → propagate.
+                    normalized_format = str(response_format).lower()
+                    if normalized_format in {"text", "srt", "vtt"}:
+                        return PlainTextResponse(resp.text, status_code=resp.status_code)
                     return Response(
                         content=resp.content,
                         status_code=resp.status_code,
                         media_type=resp.headers.get("content-type"),
                     )
-                return resp.json()
+
+                if resp is not None:
+                    # Recoverable: peer can't serve this model for this token
+                    # (typical cause: federation api_key lacks group access).
+                    logger.warning(
+                        "federation_peer_rejected_fallback_local",
+                        peer=peer.name,
+                        model_id=model_id,
+                        status=resp.status_code,
+                        body_preview=resp.text[:200],
+                    )
+                    request.state.federation_remote_node_id = None
+                # Fall through to local processing.
     # --- End federation hook ---
 
     profile, state = await resolve_profile(
@@ -503,21 +525,47 @@ async def generate_music(
                 model_id, model_manager, federation_manager, profile_registry
             )
             if target == "remote":
+                from ocabra.core.federation import should_fallback_to_local
+
                 request.state.federation_remote_node_id = peer.peer_id
-                resp = await federation_manager.proxy_request(
-                    peer=peer,
-                    path=request.url.path,
-                    body=body,
-                    headers=dict(request.headers),
-                )
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type"),
-                    headers={
-                        "Content-Disposition": f'attachment; filename="music.{response_format}"',
-                    },
-                )
+                try:
+                    resp = await federation_manager.proxy_request(
+                        peer=peer,
+                        path=request.url.path,
+                        body=body,
+                        headers=dict(request.headers),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "federation_peer_network_error_fallback_local",
+                        peer=peer.name,
+                        model_id=model_id,
+                        error=str(exc),
+                    )
+                    request.state.federation_remote_node_id = None
+                    resp = None
+                if resp is not None and (
+                    resp.status_code < 400
+                    or not should_fallback_to_local(resp.status_code)
+                ):
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type"),
+                        headers={
+                            "Content-Disposition": f'attachment; filename="music.{response_format}"',
+                        },
+                    )
+                if resp is not None:
+                    logger.warning(
+                        "federation_peer_rejected_fallback_local",
+                        peer=peer.name,
+                        model_id=model_id,
+                        status=resp.status_code,
+                        body_preview=resp.text[:200],
+                    )
+                    request.state.federation_remote_node_id = None
+                # Fall through to local processing.
     # --- End federation hook ---
 
     profile, state = await resolve_profile(

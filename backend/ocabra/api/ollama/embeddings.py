@@ -51,25 +51,54 @@ async def _run_embeddings(
 
             target, peer = await resolve_federated(ollama_model, model_manager, federation_manager)
             if target == "remote":
+                import json as _json
+
+                import structlog as _structlog
+
+                from ocabra.core.federation import should_fallback_to_local
+
+                _fed_logger = _structlog.get_logger(__name__)
                 request.state.federation_remote_node_id = peer.peer_id
                 # Determine which Ollama embed path to use
                 embed_path = "/api/embed" if not legacy else "/api/embeddings"
-                resp = await federation_manager.proxy_request(
-                    peer=peer,
-                    path=embed_path,
-                    body=body,
-                    headers=dict(request.headers),
-                )
-                import json as _json
-
                 try:
-                    return _json.loads(resp.content)
-                except Exception:
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
+                    resp = await federation_manager.proxy_request(
+                        peer=peer,
+                        path=embed_path,
+                        body=body,
+                        headers=dict(request.headers),
                     )
+                except Exception as exc:
+                    _fed_logger.warning(
+                        "federation_peer_network_error_fallback_local",
+                        peer=peer.name,
+                        model_id=ollama_model,
+                        error=str(exc),
+                    )
+                    request.state.federation_remote_node_id = None
+                    resp = None
+                if resp is not None and (
+                    resp.status_code < 400
+                    or not should_fallback_to_local(resp.status_code)
+                ):
+                    try:
+                        return _json.loads(resp.content)
+                    except Exception:
+                        return Response(
+                            content=resp.content,
+                            status_code=resp.status_code,
+                            media_type=resp.headers.get("content-type"),
+                        )
+                if resp is not None:
+                    _fed_logger.warning(
+                        "federation_peer_rejected_fallback_local",
+                        peer=peer.name,
+                        model_id=ollama_model,
+                        status=resp.status_code,
+                        body_preview=resp.text[:200],
+                    )
+                    request.state.federation_remote_node_id = None
+                # Fall through to local processing.
     # --- End federation hook ---
 
     # Try profile resolution first

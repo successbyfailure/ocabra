@@ -674,6 +674,19 @@ class FederationManager:
 # ---------------------------------------------------------------------------
 
 
+# HTTP statuses the peer returns when it can't serve a model for this token
+# (access denied, model not found for this user, auth issue). On these we
+# fall back to local processing instead of bubbling the peer's error — the
+# common cause is that the federation api_key on the peer lacks group access
+# to the model even though the model is loaded.
+PEER_FALLBACK_STATUSES = frozenset({401, 403, 404})
+
+
+def should_fallback_to_local(status_code: int) -> bool:
+    """True when a peer's response should trigger a local retry."""
+    return status_code in PEER_FALLBACK_STATUSES
+
+
 async def resolve_federated(
     model_id: str,
     model_manager: ModelManager,

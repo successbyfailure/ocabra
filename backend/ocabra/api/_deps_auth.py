@@ -211,30 +211,41 @@ async def _fetch_accessible_models(role: str, group_ids: list[str], session) -> 
 
     Admins receive an empty set; callers must check ``user.is_admin`` to grant
     unrestricted access — an empty set for non-admins means *no models accessible*.
-    Regular users receive the union of model IDs across their groups.
+    Regular users receive the union of model IDs across their groups **plus**
+    the models assigned to the default group (``Group.is_default = True``).
+    The default group represents "implicit access for every user" — matching
+    the UI label and the anonymous-context resolver above. Without this,
+    federation api-keys (which only sit in their own group) never saw models
+    that the operator had only attached to the default group.
     """
     if role == "system_admin":
         return set()
 
-    if not group_ids:
-        return set()
+    from ocabra.db.auth import Group, GroupModel
 
-    from ocabra.db.auth import GroupModel
-
-    parsed_ids = []
+    parsed_ids: list[_uuid.UUID] = []
     for gid in group_ids:
         try:
             parsed_ids.append(_uuid.UUID(gid))
         except ValueError:
             pass
 
-    if not parsed_ids:
-        return set()
-
-    result = await session.execute(
-        select(GroupModel.model_id).where(GroupModel.group_id.in_(parsed_ids))
+    # Always fetch the default group's models — these apply to every non-admin
+    # user, even when the user has no other group memberships.
+    default_models_result = await session.execute(
+        select(GroupModel.model_id)
+        .join(Group, Group.id == GroupModel.group_id)
+        .where(Group.is_default.is_(True))
     )
-    return set(result.scalars().all())
+    accessible: set[str] = set(default_models_result.scalars().all())
+
+    if parsed_ids:
+        explicit_result = await session.execute(
+            select(GroupModel.model_id).where(GroupModel.group_id.in_(parsed_ids))
+        )
+        accessible.update(explicit_result.scalars().all())
+
+    return accessible
 
 
 # ── Public dependencies ───────────────────────────────────────────────────────

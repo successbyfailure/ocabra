@@ -222,12 +222,15 @@ def test_me_with_valid_session_returns_user():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
-    # Auth: 2 calls (user lookup + group ids). _fetch_accessible_models skips
-    # DB call because group_ids is empty. Then /me endpoint re-fetches user.
+    # Auth flow: user lookup → group_ids → default-group models (implicit
+    # access — always queried). Then /me endpoint re-fetches user.
+    default_models_result = MagicMock()
+    default_models_result.scalars.return_value.all.return_value = []
     mock_session.execute.side_effect = [
-        user_select_result,   # _resolve_jwt_cookie: load user
-        group_result,          # _resolve_jwt_cookie: load group ids
-        user_select_result,   # me endpoint: re-fetch user
+        user_select_result,    # _resolve_jwt_cookie: load user
+        group_result,           # _resolve_jwt_cookie: load user's group ids
+        default_models_result,  # _fetch_accessible_models: default-group query
+        user_select_result,    # me endpoint: re-fetch user
     ]
 
     with (

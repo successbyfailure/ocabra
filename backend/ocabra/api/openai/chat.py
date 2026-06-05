@@ -96,8 +96,13 @@ async def chat_completions(
                 model_id, model_manager, federation_manager, profile_registry
             )
             if target == "remote":
+                from ocabra.core.federation import should_fallback_to_local
+
                 request.state.federation_remote_node_id = peer.peer_id
                 if stream:
+                    # SSE: can't peek status before streaming starts, so we
+                    # rely on the peer's first chunk including the auth error
+                    # if any. No local fallback for streaming requests.
                     return StreamingResponse(
                         federation_manager.proxy_stream(
                             peer=peer,
@@ -108,17 +113,44 @@ async def chat_completions(
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                     )
-                resp = await federation_manager.proxy_request(
-                    peer=peer,
-                    path=request.url.path,
-                    body=body,
-                    headers=dict(request.headers),
-                )
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type"),
-                )
+                try:
+                    resp = await federation_manager.proxy_request(
+                        peer=peer,
+                        path=request.url.path,
+                        body=body,
+                        headers=dict(request.headers),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "federation_peer_network_error_fallback_local",
+                        peer=peer.name,
+                        model_id=model_id,
+                        error=str(exc),
+                    )
+                    request.state.federation_remote_node_id = None
+                    resp = None
+                if resp is not None and resp.status_code < 400:
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type"),
+                    )
+                if resp is not None and not should_fallback_to_local(resp.status_code):
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type"),
+                    )
+                if resp is not None:
+                    logger.warning(
+                        "federation_peer_rejected_fallback_local",
+                        peer=peer.name,
+                        model_id=model_id,
+                        status=resp.status_code,
+                        body_preview=resp.text[:200],
+                    )
+                    request.state.federation_remote_node_id = None
+                # Fall through to local processing.
     # --- End federation hook ---
 
     # --- Agent dispatch: model="agent/<slug>" ---

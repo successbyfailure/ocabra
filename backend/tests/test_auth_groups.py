@@ -32,38 +32,53 @@ async def test_admin_gets_empty_set_meaning_all_models():
     mock_session.execute.assert_not_awaited()  # admins skip DB query
 
 
-async def test_user_with_no_groups_gets_empty_set():
-    """A user with no group memberships gets an empty accessible set."""
+def _scalars_result(items: list[str]) -> MagicMock:
+    res = MagicMock()
+    res.scalars.return_value.all.return_value = items
+    return res
+
+
+async def test_user_with_no_groups_gets_default_group_models():
+    """A user with no explicit group memberships still inherits the default
+    group's models (every user has implicit access to the default group)."""
     mock_session = AsyncMock()
+    # Only one execute call expected (default group query).
+    mock_session.execute.return_value = _scalars_result(["default-model"])
 
     result = await _fetch_accessible_models("user", [], mock_session)
 
-    assert result == set()
+    assert result == {"default-model"}
 
 
-async def test_user_gets_union_of_group_models():
-    """A user gets the union of model_ids from all their groups."""
+async def test_user_gets_union_of_group_models_plus_default():
+    """A user gets the union of their explicit groups *and* the default
+    group's models."""
     group_id = str(uuid.uuid4())
 
-    model_ids_result = MagicMock()
-    model_ids_result.scalars.return_value.all.return_value = ["model-a", "model-b"]
+    default_result = _scalars_result(["default-model"])
+    explicit_result = _scalars_result(["model-a", "model-b"])
 
     mock_session = AsyncMock()
-    mock_session.execute.return_value = model_ids_result
+    mock_session.execute.side_effect = [default_result, explicit_result]
 
     result = await _fetch_accessible_models("user", [group_id], mock_session)
 
-    assert result == {"model-a", "model-b"}
+    assert result == {"default-model", "model-a", "model-b"}
 
 
-async def test_user_with_invalid_group_uuid_skips_gracefully():
-    """Invalid group UUIDs in the list must be skipped without crashing."""
+async def test_user_with_invalid_group_uuid_still_gets_default_models():
+    """Invalid group UUIDs are skipped but the default group is still
+    consulted — implicit access doesn't depend on the user's own groups."""
     mock_session = AsyncMock()
+    mock_session.execute.return_value = _scalars_result(["default-only"])
 
-    result = await _fetch_accessible_models("user", ["not-a-uuid", "also-not-a-uuid"], mock_session)
+    result = await _fetch_accessible_models(
+        "user", ["not-a-uuid", "also-not-a-uuid"], mock_session
+    )
 
-    assert result == set()
-    mock_session.execute.assert_not_awaited()
+    assert result == {"default-only"}
+    # Default group query was issued (exactly once).
+    assert mock_session.execute.await_count == 1
 
 
 # ── _build_anonymous_context ──────────────────────────────────────────────────
@@ -209,16 +224,17 @@ def test_anonymous_blocked_when_require_key_true():
 # ── Model visibility per user ─────────────────────────────────────────────────
 
 
-async def test_user_only_sees_models_in_their_groups():
-    """A regular user should only have the models from their groups accessible."""
+async def test_user_only_sees_models_in_their_groups_and_default():
+    """A regular user has access to their explicit-group models and the default
+    group's models — nothing else."""
     group_id = str(uuid.uuid4())
     allowed_model = "group-specific-model"
 
-    model_ids_result = MagicMock()
-    model_ids_result.scalars.return_value.all.return_value = [allowed_model]
+    default_result = _scalars_result([])
+    explicit_result = _scalars_result([allowed_model])
 
     mock_session = AsyncMock()
-    mock_session.execute.return_value = model_ids_result
+    mock_session.execute.side_effect = [default_result, explicit_result]
 
     ctx_accessible = await _fetch_accessible_models("user", [group_id], mock_session)
 
@@ -237,23 +253,18 @@ async def test_admin_sees_all_models():
 
 
 async def test_model_not_in_group_returns_404_not_403():
-    """When a model is not in user's groups, the endpoint should 404, not 403.
-
-    This test verifies the UserContext.accessible_model_ids set correctly
-    excludes models not in the user's groups.  The actual 404 vs 403 logic
-    is the responsibility of individual endpoints, not the auth layer.
-    """
+    """When a model is not in user's groups (or the default group), the
+    endpoint should 404, not 403. Verifies the accessible set excludes
+    forbidden models."""
     group_id = str(uuid.uuid4())
 
-    model_ids_result = MagicMock()
-    model_ids_result.scalars.return_value.all.return_value = ["allowed-model"]
+    default_result = _scalars_result([])
+    explicit_result = _scalars_result(["allowed-model"])
 
     mock_session = AsyncMock()
-    mock_session.execute.return_value = model_ids_result
+    mock_session.execute.side_effect = [default_result, explicit_result]
 
     accessible = await _fetch_accessible_models("user", [group_id], mock_session)
 
-    # The model the user wants is NOT in their allowed set
     assert "forbidden-model" not in accessible
-    # The allowed model IS in their set
     assert "allowed-model" in accessible
