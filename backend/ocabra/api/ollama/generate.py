@@ -68,12 +68,20 @@ async def generate(
                 request.state.federation_remote_node_id = peer.peer_id
                 if stream:
                     return StreamingResponse(
-                        federation_manager.proxy_stream(peer, "POST", request.url.path, body),
+                        federation_manager.proxy_stream(
+                            peer=peer,
+                            path=request.url.path,
+                            body=body,
+                            headers=dict(request.headers),
+                        ),
                         media_type="application/x-ndjson",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                     )
                 resp = await federation_manager.proxy_request(
-                    peer, "POST", request.url.path, body,
+                    peer=peer,
+                    path=request.url.path,
+                    body=body,
+                    headers=dict(request.headers),
                 )
                 return Response(
                     content=resp.content,

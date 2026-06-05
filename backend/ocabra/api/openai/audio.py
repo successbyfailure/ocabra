@@ -94,6 +94,70 @@ async def transcriptions(
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
 
+    audio_bytes = await file.read()
+
+    # --- Federation hook ---
+    # Proxy whisper requests to a peer when it already has the model warm —
+    # avoids loading a local worker just for one transcription.
+    federation_manager = get_federation_manager(request)
+    if federation_manager is not None:
+        from ocabra.config import settings as _settings
+
+        if _settings.federation_enabled:
+            from ocabra.core.federation import resolve_federated
+
+            target, peer = await resolve_federated(
+                model_id, model_manager, federation_manager, profile_registry
+            )
+            if target == "remote":
+                request.state.federation_remote_node_id = peer.peer_id
+                form_data: dict[str, str] = {
+                    "model": model_id,
+                    "response_format": response_format,
+                    "temperature": str(temperature),
+                }
+                if language:
+                    form_data["language"] = language
+                if prompt:
+                    form_data["prompt"] = prompt
+                if diarize is not None:
+                    form_data["diarize"] = diarize
+                try:
+                    resp = await federation_manager.proxy_multipart(
+                        peer=peer,
+                        path=request.url.path,
+                        files={
+                            "file": (
+                                file.filename or "audio",
+                                audio_bytes,
+                                file.content_type or "audio/mpeg",
+                            )
+                        },
+                        data=form_data,
+                        headers=dict(request.headers),
+                    )
+                except Exception as exc:
+                    raise _openai_error(
+                        f"Federation peer '{peer.name}' transcription failed: {exc}",
+                        "server_error",
+                        code="federation_peer_error",
+                        status_code=502,
+                    ) from exc
+                normalized_format = str(response_format).lower()
+                if normalized_format in {"text", "srt", "vtt"}:
+                    return PlainTextResponse(
+                        resp.text,
+                        status_code=resp.status_code,
+                    )
+                if resp.status_code >= 400:
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type"),
+                    )
+                return resp.json()
+    # --- End federation hook ---
+
     profile, state = await resolve_profile(
         model_id,
         model_manager,
@@ -105,7 +169,6 @@ async def transcriptions(
     request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool
-    audio_bytes = await file.read()
 
     resp: httpx.Response | None = None
     last_error: Exception | None = None
@@ -290,10 +353,20 @@ async def speech(
             )
             if target == "remote":
                 request.state.federation_remote_node_id = peer.peer_id
-                # TTS is streaming audio — proxy as stream
+                # TTS is streaming audio — proxy as stream.
+                response_format = str(body.get("response_format") or "mp3").lower()
+                media_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
                 return StreamingResponse(
-                    federation_manager.proxy_stream(peer, "POST", request.url.path, body),
-                    media_type="audio/mpeg",
+                    federation_manager.proxy_stream(
+                        peer=peer,
+                        path=request.url.path,
+                        body=body,
+                        headers=dict(request.headers),
+                    ),
+                    media_type=media_type,
+                    headers={
+                        "Content-Disposition": f'attachment; filename="speech.{response_format}"',
+                    },
                 )
     # --- End federation hook ---
 
@@ -417,6 +490,35 @@ async def generate_music(
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
+
+    # --- Federation hook ---
+    federation_manager = get_federation_manager(request)
+    if federation_manager is not None:
+        from ocabra.config import settings as _settings
+
+        if _settings.federation_enabled:
+            from ocabra.core.federation import resolve_federated
+
+            target, peer = await resolve_federated(
+                model_id, model_manager, federation_manager, profile_registry
+            )
+            if target == "remote":
+                request.state.federation_remote_node_id = peer.peer_id
+                resp = await federation_manager.proxy_request(
+                    peer=peer,
+                    path=request.url.path,
+                    body=body,
+                    headers=dict(request.headers),
+                )
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"),
+                    headers={
+                        "Content-Disposition": f'attachment; filename="music.{response_format}"',
+                    },
+                )
+    # --- End federation hook ---
 
     profile, state = await resolve_profile(
         model_id,

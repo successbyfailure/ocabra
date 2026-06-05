@@ -590,6 +590,53 @@ class FederationManager:
             async for chunk in response.aiter_bytes():
                 yield chunk
 
+    async def proxy_multipart(
+        self,
+        peer: PeerState,
+        path: str,
+        files: dict[str, Any],
+        data: dict[str, str],
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        """Proxy a multipart/form-data request to a federation peer.
+
+        Used by endpoints like ``/v1/audio/transcriptions`` that accept file
+        uploads. The original ``Content-Type`` header is dropped so httpx can
+        rebuild the multipart boundary; only safe forwarded headers are kept.
+
+        Args:
+            peer: Target peer state.
+            path: API path (e.g. ``/v1/audio/transcriptions``).
+            files: ``{"file": (filename, bytes, content_type)}`` mapping.
+            data: Form fields (model, language, etc.).
+            headers: Optional original headers to inherit (auth/content-type
+                are stripped and rewritten).
+            timeout: Optional timeout override.
+
+        Returns:
+            The httpx.Response from the peer.
+        """
+        if self._http_client is None:
+            raise RuntimeError("FederationManager not started")
+        proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
+        proxy_headers: dict[str, str] = {}
+        if headers:
+            for k, v in headers.items():
+                lower = k.lower()
+                if lower in {"authorization", "content-type", "content-length", "host"}:
+                    continue
+                proxy_headers[k] = v
+        proxy_headers["Authorization"] = f"Bearer {peer.api_key}"
+        url = f"{peer.url}{path}"
+        return await self._http_client.post(
+            url,
+            files=files,
+            data=data,
+            headers=proxy_headers,
+            timeout=proxy_timeout,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Federated resolution helper
@@ -604,21 +651,28 @@ async def resolve_federated(
 ) -> tuple[str, PeerState | None]:
     """Decide whether to handle a request locally or proxy to a remote peer.
 
-    Resolution order:
-        1. Model loaded locally -> ``("local", None)``
-        2. Model exists locally (can be loaded) -> ``("local", None)``
-        3. Model available on a remote peer -> ``("remote", best_peer)``
-        4. Not found anywhere -> raise ``HTTPException(404)``
+    The resolution favours **warm** workers across the cluster: if a peer
+    already has the model loaded, the request is proxied there instead of
+    paying a cold-start cost locally. Order:
+
+        1. Loaded locally → load balancer decides (local bias of -5).
+        2. Not loaded locally but loaded on at least one peer → ``("remote",
+           best_peer)``. Avoids spinning a local worker when a cluster
+           neighbour already has the model warm.
+        3. Not loaded anywhere remote, but the model is registered locally
+           (CONFIGURED / UNLOADED / LOADING / ERROR) → ``("local", None)``
+           — fall back to a local load.
+        4. Not found anywhere → raise ``HTTPException(404)``.
 
     Args:
-        model_id: The ``model`` field as the client sent it.  Can be either a
+        model_id: The ``model`` field as the client sent it. Can be either a
             canonical model id (``ollama/qwen3:8b``,
             ``diffusers/image/checkpoints/sd_xl_base_1.0.safetensors``) or a
             short profile id (``sdxl-base``, ``acestep/turbo``).
-        profile_registry: Optional :class:`ProfileRegistry`.  When provided,
+        profile_registry: Optional :class:`ProfileRegistry`. When provided,
             *model_id* is first resolved through the registry; if it matches a
             profile, the profile's ``base_model_id`` is used for the local /
-            remote checks.  Without this, callers passing a profile id would
+            remote checks. Without this, callers passing a profile id would
             hit step 4 and 404 even when the underlying base model exists.
     """
     from fastapi import HTTPException
@@ -638,46 +692,51 @@ async def resolve_federated(
         if profile is not None:
             model_id = profile.base_model_id
 
-    # 1. Check if loaded locally
-    # If model_id is not canonical (e.g. "qwen3:8b" from Ollama), also try
-    # the canonical form "ollama/<model_id>".
+    # Look up local state — also try the canonical ``ollama/<id>`` form for
+    # bare Ollama names.
     state = await model_manager.get_state(model_id)
     if state is None and _split_canonical_model_ref(model_id) is None:
         canonical = build_model_ref("ollama", model_id)
-        state = await model_manager.get_state(canonical)
-    if state is not None and state.status == ModelStatus.LOADED:
-        # Model is loaded — still ask the load balancer if a peer is better
+        canonical_state = await model_manager.get_state(canonical)
+        if canonical_state is not None:
+            state = canonical_state
+            model_id = canonical
+
+    local_loaded = state is not None and state.status == ModelStatus.LOADED
+    local_known = state is not None
+
+    # Look up remote candidates that have the model LOADED right now. Try the
+    # ollama/<id> canonical form too when the input wasn't canonical.
+    remote_peers: list[PeerState] = []
+    if federation_manager is not None:
+        remote_models = federation_manager.get_remote_models()
+        remote_peers = list(remote_models.get(model_id, []))
+        if not remote_peers and _split_canonical_model_ref(model_id) is None:
+            canonical = build_model_ref("ollama", model_id)
+            canonical_peers = remote_models.get(canonical, [])
+            if canonical_peers:
+                remote_peers = list(canonical_peers)
+                model_id = canonical
+
+    # 1. Loaded locally → let the load balancer pick (it knows the local bias).
+    if local_loaded:
         if federation_manager is not None:
             target = federation_manager.select_target(model_id, local_available=True)
             if target != "local" and target is not None:
                 return ("remote", target)
         return ("local", None)
 
-    # 2. Model exists locally but not loaded — prefer local (will be loaded)
-    if state is not None and state.status in (
-        ModelStatus.CONFIGURED,
-        ModelStatus.UNLOADED,
-        ModelStatus.LOADING,
-        ModelStatus.ERROR,
-    ):
+    # 2. Not loaded locally but a peer has it warm → proxy to the peer.
+    if remote_peers and federation_manager is not None:
+        best_peer = federation_manager.find_best_peer(model_id)
+        if best_peer is not None:
+            return ("remote", best_peer)
+
+    # 3. Nobody has it loaded, but it's registered locally → load it locally.
+    if local_known:
         return ("local", None)
 
-    # 3. Check remote peers
-    if federation_manager is not None:
-        remote_models = federation_manager.get_remote_models()
-        remote_peers = remote_models.get(model_id, [])
-        # Also try canonical form for Ollama names
-        if not remote_peers and _split_canonical_model_ref(model_id) is None:
-            canonical = build_model_ref("ollama", model_id)
-            remote_peers = remote_models.get(canonical, [])
-            if remote_peers:
-                model_id = canonical
-        if remote_peers:
-            best_peer = federation_manager.find_best_peer(model_id)
-            if best_peer is not None:
-                return ("remote", best_peer)
-
-    # 4. Not found
+    # 4. Not found anywhere.
     raise HTTPException(
         status_code=404,
         detail={

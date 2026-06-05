@@ -127,7 +127,10 @@ async def image_generations(
             if target == "remote":
                 request.state.federation_remote_node_id = peer.peer_id
                 resp = await federation_manager.proxy_request(
-                    peer, "POST", request.url.path, body,
+                    peer=peer,
+                    path=request.url.path,
+                    body=body,
+                    headers=dict(request.headers),
                 )
                 return Response(
                     content=resp.content,

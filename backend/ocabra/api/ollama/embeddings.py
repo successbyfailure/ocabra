@@ -55,7 +55,10 @@ async def _run_embeddings(
                 # Determine which Ollama embed path to use
                 embed_path = "/api/embed" if not legacy else "/api/embeddings"
                 resp = await federation_manager.proxy_request(
-                    peer, "POST", embed_path, body,
+                    peer=peer,
+                    path=embed_path,
+                    body=body,
+                    headers=dict(request.headers),
                 )
                 import json as _json
 

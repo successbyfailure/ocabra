@@ -152,6 +152,42 @@ class TestResolveFederated:
             await resolve_federated("missing-model", mm, None)
         assert exc_info.value.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_local_unloaded_prefers_warm_peer(self):
+        """Local model is registered but UNLOADED; a peer has it warm.
+
+        Federation must proxy to the peer instead of paying a cold-start
+        locally — that's the whole reason federation exists.
+        """
+        mm = _FakeModelManager({"whisper-large": _FakeModelState("whisper-large", status="unloaded")})
+        peer = _make_peer(
+            models=[{"model_id": "whisper-large", "status": "LOADED", "profiles": []}],
+        )
+        fm = _make_fm_with_peers(peer)
+        target, returned_peer = await resolve_federated("whisper-large", mm, fm)
+        assert target == "remote"
+        assert returned_peer is peer
+
+    @pytest.mark.asyncio
+    async def test_local_loading_prefers_warm_peer(self):
+        """A local LOADING state should not block proxying to a warm peer."""
+        mm = _FakeModelManager({"whisper-large": _FakeModelState("whisper-large", status="loading")})
+        peer = _make_peer(
+            models=[{"model_id": "whisper-large", "status": "LOADED", "profiles": []}],
+        )
+        fm = _make_fm_with_peers(peer)
+        target, returned_peer = await resolve_federated("whisper-large", mm, fm)
+        assert target == "remote"
+        assert returned_peer is peer
+
+    @pytest.mark.asyncio
+    async def test_local_unloaded_no_peer_falls_back_to_local(self):
+        mm = _FakeModelManager({"whisper-large": _FakeModelState("whisper-large", status="unloaded")})
+        fm = _make_fm_with_peers()
+        target, peer = await resolve_federated("whisper-large", mm, fm)
+        assert target == "local"
+        assert peer is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: select_target
