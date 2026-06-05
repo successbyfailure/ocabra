@@ -136,6 +136,7 @@ export interface VLLMConfig {
   trustRemoteCode?: boolean
   swapSpace?: number | null
   kvCacheDtype?: string | null
+  limitMmPerPrompt?: { image?: number; audio?: number; video?: number } | null
 }
 
 export interface SGLangConfig {

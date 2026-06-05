@@ -59,6 +59,7 @@ const VLLM_ROOT_KEYS = [
   "chat_template",
   "tool_call_parser",
   "reasoning_parser",
+  "limit_mm_per_prompt",
 ]
 
 const SGLANG_ROOT_KEYS = [
@@ -250,6 +251,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [gpuMemoryUtilization, setGpuMemoryUtilization] = useState("")
   const [enablePrefixCaching, setEnablePrefixCaching] = useState(true)
   const [trustRemoteCode, setTrustRemoteCode] = useState(false)
+  const [limitMmImage, setLimitMmImage] = useState("")
+  const [limitMmAudio, setLimitMmAudio] = useState("")
+  const [limitMmVideo, setLimitMmVideo] = useState("")
 
   const [sglangTensorParallelSize, setSGLangTensorParallelSize] = useState("")
   const [sglangContextLength, setSGLangContextLength] = useState("")
@@ -362,6 +366,17 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setChatTemplate(vllm?.chatTemplate == null ? "" : String(vllm.chatTemplate))
     setToolCallParser(vllm?.toolCallParser == null ? "" : String(vllm.toolCallParser))
     setReasoningParser(vllm?.reasoningParser == null ? "" : String(vllm.reasoningParser))
+    const vllmRaw = (vllm ?? {}) as Record<string, unknown>
+    const mmRaw =
+      (vllm?.limitMmPerPrompt as Record<string, unknown> | null | undefined) ??
+      (vllmRaw.limit_mm_per_prompt as Record<string, unknown> | null | undefined) ??
+      null
+    const mmImage = mmRaw && typeof mmRaw.image === "number" ? mmRaw.image : null
+    const mmAudio = mmRaw && typeof mmRaw.audio === "number" ? mmRaw.audio : null
+    const mmVideo = mmRaw && typeof mmRaw.video === "number" ? mmRaw.video : null
+    setLimitMmImage(mmImage == null ? "" : String(mmImage))
+    setLimitMmAudio(mmAudio == null ? "" : String(mmAudio))
+    setLimitMmVideo(mmVideo == null ? "" : String(mmVideo))
 
     setSGLangTensorParallelSize(
       sglang?.tensorParallelSize == null ? "" : String(sglang.tensorParallelSize),
@@ -591,11 +606,21 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     const current = getWritableExtraConfig(model)
 
     if (model.backendType === "vllm") {
+      const mmImageNum = limitMmImage === "" ? 0 : Number(limitMmImage)
+      const mmAudioNum = limitMmAudio === "" ? 0 : Number(limitMmAudio)
+      const mmVideoNum = limitMmVideo === "" ? 0 : Number(limitMmVideo)
+      const mmPayload: { image?: number; audio?: number; video?: number } = {}
+      if (Number.isFinite(mmImageNum) && mmImageNum > 0) mmPayload.image = mmImageNum
+      if (Number.isFinite(mmAudioNum) && mmAudioNum > 0) mmPayload.audio = mmAudioNum
+      if (Number.isFinite(mmVideoNum) && mmVideoNum > 0) mmPayload.video = mmVideoNum
+      const limitMmPerPrompt = Object.keys(mmPayload).length > 0 ? mmPayload : null
+      const vllmBase = { ...(vllm ?? {}) } as Record<string, unknown>
+      delete vllmBase.limit_mm_per_prompt
       const next = setNestedConfig(
         current,
         "vllm",
         {
-          ...(vllm ?? {}),
+          ...vllmBase,
           recipeId,
           recipeNotes,
           recipeModelImpl,
@@ -620,6 +645,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           chatTemplate: chatTemplate === "" ? null : chatTemplate,
           toolCallParser: toolCallParser === "" ? null : toolCallParser,
           reasoningParser: reasoningParser === "" ? null : reasoningParser,
+          limitMmPerPrompt,
         } satisfies VLLMConfig,
         VLLM_ROOT_KEYS,
       )
@@ -1252,6 +1278,59 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     />
                     prefix caching
                   </label>
+                </FieldSection>
+
+                <FieldSection
+                  title="Multimodal per-request limits"
+                  description="Per-request multimodal caps. Required by Gemma 4 / Gemma 3n / Qwen-Omni for audio or extra images. Defaults to image:1, audio:0 if unset (vLLM default)."
+                >
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">image</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={limitMmImage}
+                        onChange={(event) =>
+                          setLimitMmImage(event.target.value === "" ? "" : clampIntegerInput(event.target.value, 0))
+                        }
+                        placeholder="0"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">audio</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={limitMmAudio}
+                        onChange={(event) =>
+                          setLimitMmAudio(event.target.value === "" ? "" : clampIntegerInput(event.target.value, 0))
+                        }
+                        placeholder="0"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">video</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={limitMmVideo}
+                        onChange={(event) =>
+                          setLimitMmVideo(event.target.value === "" ? "" : clampIntegerInput(event.target.value, 0))
+                        }
+                        placeholder="0"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+                  </div>
+                  <FieldHint>
+                    Valores en 0 o vacíos se omiten del payload. Si las tres están en 0, no se envía `limit_mm_per_prompt`.
+                  </FieldHint>
                 </FieldSection>
 
                 {showVLLMCompatibility && (
