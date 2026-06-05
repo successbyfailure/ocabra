@@ -1,6 +1,30 @@
 // Base types mirroring docs/CONTRACTS.md
 // Stream 1-D expands these. All streams consume them.
 
+export type ChatAudioFormat = "wav" | "mp3" | "m4a" | "webm" | "ogg" | "flac"
+
+export interface ChatTextPart {
+  type: "text"
+  text: string
+}
+
+export interface ChatImageUrlPart {
+  type: "image_url"
+  image_url: { url: string }
+}
+
+export interface ChatInputAudioPart {
+  type: "input_audio"
+  input_audio: { data: string; format: ChatAudioFormat }
+}
+
+export type ChatContentPart = ChatTextPart | ChatImageUrlPart | ChatInputAudioPart
+
+export interface ChatRequestMessage {
+  role: "system" | "user" | "assistant"
+  content: string | ChatContentPart[]
+}
+
 export interface GPUProcessInfo {
   pid: number
   processName: string | null

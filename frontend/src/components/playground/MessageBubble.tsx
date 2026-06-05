@@ -1,7 +1,8 @@
-import { Bot, BrainCircuit, ChevronDown, Cog, User } from "lucide-react"
+import { AudioLines, Bot, BrainCircuit, ChevronDown, Cog, User } from "lucide-react"
 import { useState, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
+import type { ChatAudioFormat } from "@/types"
 
 export interface ChatToolCall {
   id: string
@@ -19,6 +20,12 @@ export interface ChatToolCall {
   childCalls?: ChatToolCall[]
 }
 
+export interface ChatAudioAttachment {
+  name: string
+  format: ChatAudioFormat
+  durationSec?: number | null
+}
+
 export interface ChatMessage {
   id: string
   role: "user" | "assistant" | "tool"
@@ -26,6 +33,7 @@ export interface ChatMessage {
   apiContent?: string
   reasoning?: string
   image?: string
+  audio?: ChatAudioAttachment
   toolCalls?: ChatToolCall[]
 }
 
@@ -82,6 +90,17 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
             alt="Vision input"
             className="max-h-72 rounded-xl border border-border object-contain"
           />
+        )}
+
+        {message.audio && (
+          <div className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-1.5 text-xs text-violet-100">
+            <AudioLines size={14} className="shrink-0" aria-hidden="true" />
+            <span className="truncate font-medium">{message.audio.name}</span>
+            <span className="text-violet-100/70">{message.audio.format.toUpperCase()}</span>
+            {typeof message.audio.durationSec === "number" && message.audio.durationSec > 0 && (
+              <span className="text-violet-100/70">{formatDuration(message.audio.durationSec)}</span>
+            )}
+          </div>
         )}
 
         {/*
@@ -424,4 +443,11 @@ function statusTone(status: ChatToolCall["status"]): "amber" | "emerald" | "rose
   if (status === "ok") return "emerald"
   if (status === "timeout" || status === "schema_error" || status === "mcp_error") return "rose"
   return "amber"
+}
+
+function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s.toString().padStart(2, "0")}`
 }

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Copy, ImagePlus, Loader2, Send } from "lucide-react"
+import { AudioLines, Copy, ImagePlus, Loader2, Mic, Send, X } from "lucide-react"
 import { toast } from "sonner"
 import {
   MessageBubble,
+  type ChatAudioAttachment,
   type ChatMessage,
   type ChatToolCall,
 } from "@/components/playground/MessageBubble"
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
-import type { BackendType } from "@/types"
+import type { BackendType, ChatAudioFormat, ChatContentPart, ChatRequestMessage } from "@/types"
 
 interface ChatInterfaceProps {
   modelId: string
@@ -15,6 +16,42 @@ interface ChatInterfaceProps {
   params: PlaygroundParams
   /** Max sequence length of the underlying model (prompt + completion). */
   modelContextLength?: number | null
+  /** True if the selected model declares native audio input capability. */
+  audioInputCapable?: boolean
+}
+
+interface AudioAttachment {
+  name: string
+  format: ChatAudioFormat
+  /** base64 of raw bytes (no data: prefix). */
+  dataBase64: string
+  durationSec: number | null
+}
+
+const AUDIO_ACCEPT = ".wav,.mp3,.m4a,.webm,.ogg,.flac,audio/*"
+const AUDIO_FORMAT_BY_MIME: Record<string, ChatAudioFormat> = {
+  "audio/wav": "wav",
+  "audio/wave": "wav",
+  "audio/x-wav": "wav",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/mp4": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/aac": "m4a",
+  "audio/webm": "webm",
+  "audio/ogg": "ogg",
+  "audio/oga": "ogg",
+  "audio/flac": "flac",
+  "audio/x-flac": "flac",
+}
+const AUDIO_FORMAT_BY_EXT: Record<string, ChatAudioFormat> = {
+  wav: "wav",
+  mp3: "mp3",
+  m4a: "m4a",
+  webm: "webm",
+  ogg: "ogg",
+  oga: "ogg",
+  flac: "flac",
 }
 
 interface ResponseContent {
@@ -48,17 +85,31 @@ export function ChatInterface({
   backendType,
   params,
   modelContextLength = null,
+  audioInputCapable = false,
 }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [dragImage, setDragImage] = useState<string | null>(null)
+  const [audioAttachment, setAudioAttachment] = useState<AudioAttachment | null>(null)
+  const [recording, setRecording] = useState(false)
   // Becomes true 3 s after a request starts if no token has streamed back —
   // a heuristic for "model is cold-loading or compiling kernels".
   const [slowResponse, setSlowResponse] = useState(false)
   const firstByteRef = useRef(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const audioFileRef = useRef<HTMLInputElement>(null)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recorderChunksRef = useRef<Blob[]>([])
+  const recorderStartRef = useRef<number>(0)
+  const recorderStreamRef = useRef<MediaStream | null>(null)
+
+  useEffect(() => {
+    return () => {
+      stopRecorderStream(recorderStreamRef.current)
+    }
+  }, [])
 
   // Drive the "cargando modelo" hint. Reset on each request.
   useEffect(() => {
@@ -73,23 +124,42 @@ export function ChatInterface({
     return () => window.clearTimeout(handle)
   }, [sending])
 
-  const buildOpenAIMessages = (userText: string) => {
-    const history = messages.map((msg) => {
+  const buildOpenAIMessages = (userText: string): ChatRequestMessage[] => {
+    const history: ChatRequestMessage[] = messages.map((msg) => {
       if (msg.role === "assistant") {
-        return { role: "assistant" as const, content: msg.apiContent ?? msg.content }
+        return { role: "assistant", content: msg.apiContent ?? msg.content }
       }
-      return { role: "user" as const, content: msg.content }
+      return { role: "user", content: msg.content }
     })
-    const userContent = dragImage
-      ? [
-          { type: "text", text: userText || "Describe la imagen" },
-          { type: "image_url", image_url: { url: dragImage } },
-        ]
-      : userText
+
+    let userContent: string | ChatContentPart[]
+    if (dragImage || audioAttachment) {
+      const parts: ChatContentPart[] = []
+      const fallbackText = audioAttachment
+        ? "Transcribe / responde al audio"
+        : "Describe la imagen"
+      parts.push({ type: "text", text: userText || fallbackText })
+      if (dragImage) {
+        parts.push({ type: "image_url", image_url: { url: dragImage } })
+      }
+      if (audioAttachment) {
+        parts.push({
+          type: "input_audio",
+          input_audio: {
+            data: audioAttachment.dataBase64,
+            format: audioAttachment.format,
+          },
+        })
+      }
+      userContent = parts
+    } else {
+      userContent = userText
+    }
+
     return [
-      { role: "system" as const, content: params.systemPrompt },
+      { role: "system", content: params.systemPrompt },
       ...history,
-      { role: "user" as const, content: userContent },
+      { role: "user", content: userContent },
     ]
   }
 
@@ -104,7 +174,7 @@ export function ChatInterface({
       stream: true,
     })
     return `curl -X POST ${origin}/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer YOUR_API_KEY' \\\n  -d '${body}'`
-  }, [input, modelId, params.maxTokens, params.systemPrompt, params.temperature, params.topP, messages, dragImage])
+  }, [input, modelId, params.maxTokens, params.systemPrompt, params.temperature, params.topP, messages, dragImage, audioAttachment])
 
   const sendMessage = async () => {
     if (!modelId) {
@@ -112,7 +182,11 @@ export function ChatInterface({
       return
     }
     const text = input.trim()
-    if (!text && !dragImage) return
+    if (!text && !dragImage && !audioAttachment) return
+    if (audioAttachment && !audioInputCapable) {
+      toast.error("El modelo seleccionado no acepta audio como entrada")
+      return
+    }
 
     // Rough client-side check: ~4 chars/token (OpenAI estimate). Counts the
     // system prompt + history + the new user turn. If the total + max_tokens
@@ -139,11 +213,19 @@ export function ChatInterface({
       }
     }
 
+    const fallbackContent = audioAttachment ? "[audio]" : "[imagen]"
     const userMessage: ChatMessage = {
       id: `msg-${Date.now()}`,
       role: "user",
-      content: text || "[imagen]",
+      content: text || fallbackContent,
       image: dragImage ?? undefined,
+      audio: audioAttachment
+        ? ({
+            name: audioAttachment.name,
+            format: audioAttachment.format,
+            durationSec: audioAttachment.durationSec,
+          } satisfies ChatAudioAttachment)
+        : undefined,
     }
 
     setMessages((prev) => [...prev, userMessage])
@@ -232,6 +314,7 @@ export function ChatInterface({
         ),
       )
       setDragImage(null)
+      setAudioAttachment(null)
     } catch (err) {
       setMessages((prev) => prev.filter((msg) => msg.id !== assistantId))
       toast.error(err instanceof Error ? err.message : "Error en chat")
@@ -250,6 +333,94 @@ export function ChatInterface({
     reader.readAsDataURL(file)
   }
 
+  const onAttachAudioFile = async (file: File) => {
+    if (!audioInputCapable) {
+      toast.error("El modelo seleccionado no acepta audio como entrada")
+      return
+    }
+    try {
+      const format = detectAudioFormat(file)
+      if (!format) {
+        toast.error("Formato de audio no soportado")
+        return
+      }
+      const dataBase64 = await fileToBase64(file)
+      const durationSec = await probeAudioDurationSec(file).catch(() => null)
+      setAudioAttachment({ name: file.name, format, dataBase64, durationSec })
+      toast.success("Audio adjuntado")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error leyendo audio")
+    }
+  }
+
+  const startRecording = async () => {
+    if (!audioInputCapable) {
+      toast.error("El modelo seleccionado no acepta audio como entrada")
+      return
+    }
+    if (recording) return
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      toast.error("Tu navegador no soporta grabación de audio")
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeType = pickRecorderMimeType()
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+      recorderChunksRef.current = []
+      recorderStartRef.current = performance.now()
+      recorderStreamRef.current = stream
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recorderChunksRef.current.push(event.data)
+        }
+      }
+      recorder.onstop = async () => {
+        const elapsedSec = (performance.now() - recorderStartRef.current) / 1000
+        stopRecorderStream(recorderStreamRef.current)
+        recorderStreamRef.current = null
+        const chunks = recorderChunksRef.current
+        recorderChunksRef.current = []
+        if (chunks.length === 0) {
+          setRecording(false)
+          return
+        }
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" })
+        const format = mimeToFormat(blob.type) ?? "webm"
+        const ext = format === "m4a" ? "m4a" : format
+        const name = `recording-${Date.now()}.${ext}`
+        try {
+          const dataBase64 = await blobToBase64(blob)
+          setAudioAttachment({
+            name,
+            format,
+            dataBase64,
+            durationSec: Number.isFinite(elapsedSec) ? Math.round(elapsedSec) : null,
+          })
+          toast.success("Grabación lista")
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Error al codificar audio")
+        } finally {
+          setRecording(false)
+        }
+      }
+      recorderRef.current = recorder
+      recorder.start()
+      setRecording(true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo acceder al micrófono")
+    }
+  }
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop()
+    } else {
+      setRecording(false)
+    }
+  }
+
   return (
     <div className="flex h-full flex-col rounded-lg border border-border bg-card">
       <div
@@ -258,13 +429,20 @@ export function ChatInterface({
         onDrop={(event) => {
           event.preventDefault()
           const file = event.dataTransfer.files[0]
-          if (file?.type.startsWith("image/")) {
+          if (!file) return
+          if (file.type.startsWith("image/")) {
             onDropImage(file)
+            return
+          }
+          if (file.type.startsWith("audio/") || detectAudioFormat(file)) {
+            void onAttachAudioFile(file)
           }
         }}
       >
         {messages.length === 0 && (
-          <p className="text-sm text-muted-foreground">Escribe un prompt o arrastra una imagen para vision.</p>
+          <p className="text-sm text-muted-foreground">
+            Escribe un prompt o arrastra una imagen / audio (.wav, .mp3, .m4a, .webm, .ogg, .flac).
+          </p>
         )}
         {messages.map((message) => (
           <MessageBubble
@@ -286,12 +464,40 @@ export function ChatInterface({
         )}
       </div>
 
-      {dragImage && (
-        <div className="border-t border-border px-3 py-2">
-          <div className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs">
-            <ImagePlus size={14} />
-            Imagen adjuntada
-          </div>
+      {(dragImage || audioAttachment) && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2">
+          {dragImage && (
+            <span className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs">
+              <ImagePlus size={14} />
+              Imagen adjuntada
+              <button
+                type="button"
+                onClick={() => setDragImage(null)}
+                className="ml-1 rounded-sm p-0.5 text-primary/70 hover:bg-primary/20 hover:text-primary"
+                aria-label="Quitar imagen"
+              >
+                <X size={12} />
+              </button>
+            </span>
+          )}
+          {audioAttachment && (
+            <span className="inline-flex items-center gap-2 rounded-md border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-xs text-violet-100">
+              <AudioLines size={14} />
+              <span className="max-w-[16rem] truncate font-medium">{audioAttachment.name}</span>
+              <span className="text-violet-100/70">{audioAttachment.format.toUpperCase()}</span>
+              {typeof audioAttachment.durationSec === "number" && audioAttachment.durationSec > 0 && (
+                <span className="text-violet-100/70">{formatDurationLabel(audioAttachment.durationSec)}</span>
+              )}
+              <button
+                type="button"
+                onClick={() => setAudioAttachment(null)}
+                className="ml-1 rounded-sm p-0.5 text-violet-100/70 hover:bg-violet-500/20 hover:text-violet-50"
+                aria-label="Quitar audio"
+              >
+                <X size={12} />
+              </button>
+            </span>
+          )}
         </div>
       )}
 
@@ -316,6 +522,40 @@ export function ChatInterface({
               className="rounded-md border border-border px-3 py-2 text-xs hover:bg-muted"
             >
               Vision input
+            </button>
+            <button
+              type="button"
+              onClick={() => audioFileRef.current?.click()}
+              disabled={!audioInputCapable}
+              title={
+                audioInputCapable
+                  ? "Adjuntar audio (.wav, .mp3, .m4a, .webm, .ogg, .flac)"
+                  : "Selected model does not support audio input"
+              }
+              className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-2 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <AudioLines size={14} />
+              Audio input
+            </button>
+            <button
+              type="button"
+              onClick={() => (recording ? stopRecording() : void startRecording())}
+              disabled={!audioInputCapable}
+              title={
+                audioInputCapable
+                  ? recording
+                    ? "Detener grabación"
+                    : "Grabar audio del micrófono"
+                  : "Selected model does not support audio input"
+              }
+              className={`inline-flex items-center gap-1 rounded-md border px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 ${
+                recording
+                  ? "border-rose-500/50 bg-rose-500/15 text-rose-100 hover:bg-rose-500/25"
+                  : "border-border hover:bg-muted"
+              }`}
+            >
+              <Mic size={14} className={recording ? "animate-pulse" : ""} />
+              {recording ? "Detener" : "Grabar"}
             </button>
             <button
               type="button"
@@ -350,6 +590,18 @@ export function ChatInterface({
         onChange={(event) => {
           const file = event.target.files?.[0]
           if (file) onDropImage(file)
+        }}
+      />
+
+      <input
+        ref={audioFileRef}
+        type="file"
+        accept={AUDIO_ACCEPT}
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          if (file) void onAttachAudioFile(file)
+          event.target.value = ""
         }}
       />
     </div>
@@ -802,6 +1054,98 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isEmptyResponseContent(value: ResponseContent): boolean {
   return !value.displayContent.trim() && !value.reasoning.trim() && value.toolCalls.length === 0
+}
+
+function detectAudioFormat(file: File): ChatAudioFormat | null {
+  const mime = file.type.toLowerCase()
+  const fromMime = AUDIO_FORMAT_BY_MIME[mime] ?? mimeToFormat(mime)
+  if (fromMime) return fromMime
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? ""
+  return AUDIO_FORMAT_BY_EXT[ext] ?? null
+}
+
+function mimeToFormat(mime: string): ChatAudioFormat | null {
+  if (!mime) return null
+  if (mime.includes("webm")) return "webm"
+  if (mime.includes("ogg")) return "ogg"
+  if (mime.includes("wav")) return "wav"
+  if (mime.includes("mpeg") || mime.includes("mp3")) return "mp3"
+  if (mime.includes("mp4") || mime.includes("m4a") || mime.includes("aac")) return "m4a"
+  if (mime.includes("flac")) return "flac"
+  return null
+}
+
+function pickRecorderMimeType(): string | null {
+  if (typeof MediaRecorder === "undefined") return null
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg",
+    "audio/mp4",
+  ]
+  for (const candidate of candidates) {
+    if (MediaRecorder.isTypeSupported?.(candidate)) return candidate
+  }
+  return null
+}
+
+function stopRecorderStream(stream: MediaStream | null): void {
+  if (!stream) return
+  for (const track of stream.getTracks()) {
+    try {
+      track.stop()
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return blobToBase64(file)
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader error"))
+    reader.onload = () => {
+      const result = String(reader.result ?? "")
+      const comma = result.indexOf(",")
+      resolve(comma === -1 ? result : result.slice(comma + 1))
+    }
+    reader.readAsDataURL(blob)
+  })
+}
+
+function probeAudioDurationSec(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || typeof URL === "undefined") {
+      resolve(null)
+      return
+    }
+    const url = URL.createObjectURL(file)
+    const audio = new Audio()
+    audio.preload = "metadata"
+    const cleanup = () => URL.revokeObjectURL(url)
+    audio.onloadedmetadata = () => {
+      const value = Number.isFinite(audio.duration) ? Math.round(audio.duration) : null
+      cleanup()
+      resolve(value)
+    }
+    audio.onerror = () => {
+      cleanup()
+      resolve(null)
+    }
+    audio.src = url
+  })
+}
+
+function formatDurationLabel(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s.toString().padStart(2, "0")}`
 }
 
 export {

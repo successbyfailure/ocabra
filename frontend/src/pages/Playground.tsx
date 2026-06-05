@@ -229,6 +229,7 @@ export function Playground() {
                   backendType={selectedModel?.backendType ?? null}
                   params={effectiveParams}
                   modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
+                  audioInputCapable={Boolean(effectiveModel?.capabilities.audioInput)}
                 />
               )}
               {mode === "pooling" && (
