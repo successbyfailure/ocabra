@@ -106,7 +106,10 @@ class RealtimeSession:
         self.voice = "alloy"
         self.instructions = ""
         self.audio_buffer = bytearray()
-        self.conversation: list[dict[str, str]] = []
+        # Conversation entries may contain either plain text ``content`` or a
+        # list of OpenAI-style content parts (e.g. ``input_audio``) when the
+        # LLM supports native audio input.
+        self.conversation: list[dict[str, Any]] = []
         self.vad_enabled = True
         self.modalities: list[str] = ["text", "audio"]
         self.input_audio_format = "pcm16"
@@ -122,6 +125,14 @@ class RealtimeSession:
         self._background_load_task: asyncio.Task[None] | None = None
         self._llm_ready = asyncio.Event()
         self._tts_ready = asyncio.Event()
+        # Cached capability flag — populated lazily on first turn from the
+        # selected LLM's ``ModelState.capabilities.audio_input``.
+        # ``None`` = not resolved yet; ``True``/``False`` = decision known.
+        self._native_audio_input: bool | None = None
+        # Explicit client override via ``session.update.input_audio_routing``:
+        # one of ``"auto"`` (default), ``"native"`` (force native), ``"stt"``
+        # (force Whisper path even if the LLM advertises audio_input).
+        self._input_audio_routing: str = "auto"
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -181,7 +192,9 @@ class RealtimeSession:
         try:
             state = await self._model_manager.get_state(model_id)
             if not state:
-                await self._send_error(f"Model '{model_id}' ({role}) not configured", "model_not_found")
+                await self._send_error(
+                    f"Model '{model_id}' ({role}) not configured", "model_not_found"
+                )
                 return False
             if state.status.value == "loaded":
                 return True
@@ -197,12 +210,17 @@ class RealtimeSession:
             logger.info("realtime_cold_start_loaded", model_id=model_id, role=role)
             return True
         except Exception as exc:
-            logger.warning("realtime_auto_load_failed", model_id=model_id, role=role, error=str(exc))
-            await self._send_error(f"Failed to load {role} model '{model_id}': {exc}", "model_load_error")
+            logger.warning(
+                "realtime_auto_load_failed", model_id=model_id, role=role, error=str(exc)
+            )
+            await self._send_error(
+                f"Failed to load {role} model '{model_id}': {exc}", "model_load_error"
+            )
             return False
 
     async def _load_remaining_models(self) -> None:
         """Background task: load LLM and TTS in parallel after session starts."""
+
         async def _load_llm():
             ok = await self._load_model_with_progress("llm", self.llm_model_id)
             if ok:
@@ -271,6 +289,15 @@ class RealtimeSession:
         # TTS model (extension: not in official API, but useful for oCabra)
         if "tts_model" in session_cfg:
             self.tts_model_id = session_cfg["tts_model"]
+
+        # oCabra extension: explicit input-audio routing override. Auto by
+        # default — picks native when the LLM advertises ``audio_input``.
+        if "input_audio_routing" in session_cfg:
+            routing = str(session_cfg["input_audio_routing"]).lower()
+            if routing in ("auto", "native", "stt"):
+                self._input_audio_routing = routing
+                # Invalidate cached decision so the next turn re-evaluates.
+                self._native_audio_input = None
 
         # Auto-load changed models (STT sync, LLM+TTS in background)
         if iat or "tts_model" in session_cfg:
@@ -365,13 +392,42 @@ class RealtimeSession:
 
     # ── Pipeline helpers ────────────────────────────────────────────────
 
+    async def _should_use_native_audio(self) -> bool:
+        """Decide whether the selected LLM can ingest raw audio directly.
+
+        Caches the answer on the session — the LLM does not change mid-session
+        unless explicitly re-routed via ``session.update.input_audio_routing``.
+        """
+        if self._input_audio_routing == "native":
+            self._native_audio_input = True
+            return True
+        if self._input_audio_routing == "stt":
+            self._native_audio_input = False
+            return False
+        if self._native_audio_input is not None:
+            return self._native_audio_input
+        try:
+            state = await self._model_manager.get_state(self.llm_model_id)
+        except Exception:
+            state = None
+        caps = getattr(state, "capabilities", None) if state else None
+        self._native_audio_input = bool(getattr(caps, "audio_input", False))
+        return self._native_audio_input
+
     async def _commit_and_respond(self) -> None:
         """Commit the audio buffer and trigger the full pipeline."""
         await self._commit_audio_only()
         await self._generate_response()
 
     async def _commit_audio_only(self) -> None:
-        """Commit the audio buffer: transcribe and add to conversation."""
+        """Commit the audio buffer.
+
+        Routing depends on the selected LLM's ``audio_input`` capability:
+        - native audio LLM → embed the WAV as an ``input_audio`` content part
+          and let the LLM transcribe + answer in one shot (no Whisper).
+        - everything else → send to Whisper as before, store the transcript
+          as a plain text user message.
+        """
         if not self.audio_buffer:
             await self._send_event("input_audio_buffer.committed", item_id=_new_item_id())
             return
@@ -383,7 +439,40 @@ class RealtimeSession:
         item_id = _new_item_id()
         await self._send_event("input_audio_buffer.committed", item_id=item_id)
 
-        # STT: transcribe audio
+        if await self._should_use_native_audio():
+            wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
+            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+            self.conversation.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": audio_b64, "format": "wav"},
+                        }
+                    ],
+                }
+            )
+            await self._send_event(
+                "conversation.item.created",
+                item={
+                    "id": item_id,
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            # Transcript is left empty — the native-audio LLM
+                            # may surface its own transcription in the next
+                            # response.audio_transcript.* stream.
+                            "transcript": "",
+                        }
+                    ],
+                },
+            )
+            return
+
+        # STT path: transcribe audio
         transcript = await self._transcribe(pcm_data)
 
         if transcript:
@@ -429,6 +518,16 @@ class RealtimeSession:
         output_item_id = _new_item_id()
         start_time = time.monotonic()
 
+        # Surface routing decision per-turn for ops/debugging. The decision
+        # itself was made (and cached) at commit time; this just reports it.
+        mode = "native_audio" if self._native_audio_input else "stt"
+        logger.debug(
+            "realtime_turn_route",
+            mode=mode,
+            llm=self.llm_model_id,
+            session_id=self._session_id,
+        )
+
         # Wait for LLM to be ready (may still be loading from cold start)
         if not self._llm_ready.is_set():
             await self._send_event(
@@ -440,7 +539,9 @@ class RealtimeSession:
             try:
                 await asyncio.wait_for(self._llm_ready.wait(), timeout=300)
             except TimeoutError:
-                await self._send_error("LLM model failed to load within timeout", "model_load_timeout")
+                await self._send_error(
+                    "LLM model failed to load within timeout", "model_load_timeout"
+                )
                 return
 
         await self._send_event(
@@ -611,8 +712,13 @@ class RealtimeSession:
 
     # ── LLM streaming ───────────────────────────────────────────────────
 
-    async def _stream_llm(self, messages: list[dict[str, str]]) -> AsyncIteratorWrapper:
-        """Stream text from the LLM worker via SSE.
+    async def _stream_llm(self, messages: list[dict[str, Any]]) -> AsyncIteratorWrapper:
+        """Stream text from the LLM via the shared chat-completions pipeline.
+
+        Routes through :meth:`WorkerPool.forward_stream` so the same code path
+        as ``/v1/chat/completions`` is reused (Ollama URL resolution, reasoning
+        field normalisation, Langfuse tracing). Native-audio LLMs receive the
+        message verbatim — including ``input_audio`` content parts.
 
         Yields text content deltas.
         """
@@ -623,7 +729,9 @@ class RealtimeSession:
                 await self._model_manager.load(self.llm_model_id)
                 worker = self._worker_pool.get_worker(self.llm_model_id)
             except Exception as exc:
-                logger.warning("realtime_llm_load_failed", model_id=self.llm_model_id, error=str(exc))
+                logger.warning(
+                    "realtime_llm_load_failed", model_id=self.llm_model_id, error=str(exc)
+                )
             if not worker:
                 logger.warning("realtime_llm_worker_missing", model_id=self.llm_model_id)
                 return
@@ -635,43 +743,39 @@ class RealtimeSession:
 
         backend_model_id = state.backend_model_id or self.llm_model_id
 
-        if worker.backend_type == "ollama":
-            from ocabra.config import settings
-
-            base = settings.ollama_base_url.rstrip("/")
-            url = f"{base}/v1/chat/completions"
-        else:
-            url = f"http://127.0.0.1:{worker.port}/v1/chat/completions"
-
         body = {
             "model": backend_model_id,
             "messages": messages,
             "stream": True,
         }
 
+        line_buf = b""
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                async with client.stream("POST", url, json=body) as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if self._cancel_event.is_set():
-                            break
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = data.get("choices", [])
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content")
-                        if content:
-                            yield content
+            async for chunk in self._worker_pool.forward_stream(
+                self.llm_model_id, "/v1/chat/completions", body
+            ):
+                if self._cancel_event.is_set():
+                    break
+                line_buf += chunk
+                while b"\n" in line_buf:
+                    raw_line, line_buf = line_buf.split(b"\n", 1)
+                    line = raw_line.rstrip(b"\r").decode("utf-8", errors="ignore")
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        return
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        yield content
         except httpx.HTTPStatusError as exc:
             logger.warning("realtime_llm_http_error", status=exc.response.status_code)
         except Exception as exc:
@@ -746,9 +850,14 @@ class RealtimeSession:
 
     # ── Message helpers ─────────────────────────────────────────────────
 
-    def _build_llm_messages(self, instructions_override: str | None = None) -> list[dict[str, str]]:
-        """Build the messages array for the LLM, including system instructions."""
-        messages: list[dict[str, str]] = []
+    def _build_llm_messages(self, instructions_override: str | None = None) -> list[dict[str, Any]]:
+        """Build the messages array for the LLM, including system instructions.
+
+        Conversation entries may carry either plain ``content`` strings (STT
+        path) or a list of OpenAI-style content parts (native-audio path —
+        ``input_audio``). Both forms are forwarded verbatim.
+        """
+        messages: list[dict[str, Any]] = []
 
         instructions = instructions_override or self.instructions
         if instructions:
@@ -787,6 +896,7 @@ class RealtimeSession:
             ),
             "tools": [],  # Tool calls not yet implemented
             "tool_choice": "none",
+            "input_audio_routing": self._input_audio_routing,
         }
 
     # ── WebSocket event helpers ─────────────────────────────────────────
