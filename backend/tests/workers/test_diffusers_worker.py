@@ -35,10 +35,16 @@ def worker_module(monkeypatch: pytest.MonkeyPatch):
             return self
 
     _stub("uvicorn", run=lambda *a, **k: None)
+    class _HTTPException(Exception):
+        def __init__(self, *args, status_code=None, detail=None, **_):
+            super().__init__(detail or (args[0] if args else None))
+            self.status_code = status_code
+            self.detail = detail
+
     _stub(
         "fastapi",
         FastAPI=_Stub,
-        HTTPException=type("HTTPException", (Exception,), {}),
+        HTTPException=_HTTPException,
     )
     _stub(
         "pydantic",
@@ -144,3 +150,80 @@ def test_detect_pipeline_class_env_override_validates_class(
     ckpt.write_text("placeholder")
     with pytest.raises(ValueError, match="DIFFUSERS_PIPELINE_OVERRIDE"):
         worker_module.detect_pipeline_class(ckpt)
+
+
+# ---------------------------------------------------------------------------
+# Edit helpers — mask conversion and pipeline derivation
+# ---------------------------------------------------------------------------
+
+
+def _pil_or_skip():
+    pytest.importorskip("PIL")
+    from PIL import Image  # noqa: F401
+
+    return True
+
+
+def test_mask_from_alpha_inverts_rgba_alpha_channel(worker_module) -> None:
+    """OpenAI mask: transparent = edit. Diffusers: white = edit. So invert."""
+    _pil_or_skip()
+    from PIL import Image
+
+    mask = Image.new("RGBA", (4, 4), (0, 0, 0, 0))  # fully transparent
+    for x, y in [(0, 0), (1, 1)]:
+        mask.putpixel((x, y), (0, 0, 0, 255))  # opaque keep-pixels
+
+    result = worker_module._mask_from_alpha(mask)
+    assert result.mode == "L"
+    assert result.size == (4, 4)
+    # Transparent pixels became white (255 = edit); opaque pixels became black.
+    assert result.getpixel((2, 2)) == 255
+    assert result.getpixel((0, 0)) == 0
+
+
+def test_mask_from_alpha_grayscale_passthrough(worker_module) -> None:
+    """A plain L mask without alpha is converted to L unchanged."""
+    _pil_or_skip()
+    from PIL import Image
+
+    mask = Image.new("L", (3, 3), 128)
+    result = worker_module._mask_from_alpha(mask)
+    assert result.mode == "L"
+    assert result.getpixel((1, 1)) == 128
+
+
+def test_derive_edit_pipeline_raises_http_400_when_unsupported(
+    worker_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pipelines outside the AutoPipeline mapping must surface as HTTP 400.
+
+    Distilled FLUX.2 Klein / Z-Image-Turbo only ship a text2img variant —
+    ``AutoPipelineForInpainting.from_pipe`` raises ``ValueError`` for them.
+    The worker should surface that as HTTPException(400) so the API layer can
+    translate it into a clean ``mask_unsupported`` / ``edit_unsupported``.
+    """
+    import types
+
+    diffusers_stub = types.ModuleType("diffusers")
+
+    class _AutoFail:
+        @staticmethod
+        def from_pipe(_pipe):
+            raise ValueError("no mapping")
+
+    diffusers_stub.AutoPipelineForImage2Image = _AutoFail
+    diffusers_stub.AutoPipelineForInpainting = _AutoFail
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers_stub)
+
+    state = worker_module.WorkerState(
+        model_id="z-image",
+        model_path=Path("/tmp/none"),
+        pipeline_type="ZImagePipeline",
+        pipeline=object(),
+    )
+
+    HTTPException = sys.modules["fastapi"].HTTPException
+    with pytest.raises(HTTPException):
+        worker_module._derive_edit_pipeline(state, with_mask=True)
+    with pytest.raises(HTTPException):
+        worker_module._derive_edit_pipeline(state, with_mask=False)

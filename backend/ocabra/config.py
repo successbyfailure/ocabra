@@ -327,6 +327,13 @@ class Settings(BaseSettings):
     # OpenAI Images API: URL response_format support
     # Generated PNGs are written here and served via GET /v1/images/files/{name}
     image_outputs_dir: str = "/data/image_outputs"
+    # Per-part cap for multipart uploads to /v1/images/edits (one image + one
+    # optional mask). OpenAI's hard limit is 25 MB per file; we mirror that.
+    openai_image_max_part_size_mb: int = Field(
+        default=25,
+        ge=1,
+        description="Max size in MB for image/mask uploads at /v1/images/edits.",
+    )
     # Seconds before a generated image file is garbage-collected. OpenAI's URLs
     # are valid for 60 min; mirror that by default.
     image_url_ttl_seconds: int = 3600

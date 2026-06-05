@@ -56,6 +56,25 @@ class GenerateResponse(BaseModel):
     seed_used: int
 
 
+class EditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str
+    image_b64: str
+    mask_b64: str | None = None
+    negative_prompt: str | None = None
+    # When omitted, output keeps the input image's dimensions.
+    width: int | None = None
+    height: int | None = None
+    num_inference_steps: int = 30
+    guidance_scale: float = 7.5
+    # img2img strength — 0=identity, 1=fully re-imagined. Ignored by inpainting
+    # pipelines that don't take this kwarg (filtered out via signature inspect).
+    strength: float = 0.8
+    seed: int | None = None
+    num_images: int = 1
+
+
 @dataclass
 class WorkerState:
     model_id: str
@@ -63,6 +82,11 @@ class WorkerState:
     pipeline_type: str
     pipeline: Any = None
     load_error: str | None = None
+    # Derived pipelines for image editing — built lazily on first use via
+    # diffusers' AutoPipeline*.from_pipe(), which shares weights with the
+    # text2img pipeline (no extra VRAM, no second load).
+    img2img_pipeline: Any = None
+    inpaint_pipeline: Any = None
 
 
 def detect_pipeline_class(model_path: Path) -> str:
@@ -310,6 +334,139 @@ def generate_sync(state: WorkerState, req: GenerateRequest) -> GenerateResponse:
     )
 
 
+def _decode_b64_image(data: str, *, field: str):
+    """Decode a base64-encoded image payload into a PIL RGB image."""
+    from PIL import Image
+
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid base64 for '{field}': {exc}",
+        ) from exc
+    try:
+        return Image.open(BytesIO(raw))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot decode '{field}' as an image: {exc}",
+        ) from exc
+
+
+def _mask_from_alpha(mask_image):
+    """Build a diffusers-style mask (white=edit) from an OpenAI-style mask.
+
+    OpenAI's spec uses the alpha channel: transparent pixels mark the area to
+    edit. Diffusers' inpainting pipelines expect a single-channel image where
+    *white* pixels are the area to repaint. We invert the alpha so transparent
+    (=0) becomes 255 (=edit) and opaque (=255) becomes 0 (=keep). Masks without
+    an alpha channel are passed through converted to "L".
+    """
+    from PIL import ImageOps
+
+    if mask_image.mode in ("RGBA", "LA") or "A" in mask_image.getbands():
+        alpha = mask_image.convert("RGBA").split()[-1]
+        return ImageOps.invert(alpha)
+    return mask_image.convert("L")
+
+
+def _derive_edit_pipeline(state: WorkerState, *, with_mask: bool) -> Any:
+    """Lazily build (and cache) the img2img or inpainting variant.
+
+    Uses ``AutoPipelineForImage2Image.from_pipe`` / ``AutoPipelineForInpainting``
+    which share weights with the loaded text2img pipeline — no VRAM cost. When
+    the base pipeline isn't in the auto-mapping (e.g. distilled FLUX.2 Klein or
+    Z-Image-Turbo, which only ship a text2img variant) ``from_pipe`` raises
+    ``ValueError`` and we propagate it as a 400 so the API layer can return a
+    clean ``edit_unsupported`` / ``mask_unsupported`` error.
+    """
+    from diffusers import AutoPipelineForImage2Image, AutoPipelineForInpainting
+
+    if with_mask:
+        if state.inpaint_pipeline is None:
+            try:
+                state.inpaint_pipeline = AutoPipelineForInpainting.from_pipe(state.pipeline)
+            except (ValueError, KeyError, NotImplementedError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Inpainting (mask edit) is not supported for pipeline "
+                        f"'{state.pipeline_type}': {exc}"
+                    ),
+                ) from exc
+        return state.inpaint_pipeline
+
+    if state.img2img_pipeline is None:
+        try:
+            state.img2img_pipeline = AutoPipelineForImage2Image.from_pipe(state.pipeline)
+        except (ValueError, KeyError, NotImplementedError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Image-to-image editing is not supported for pipeline "
+                    f"'{state.pipeline_type}': {exc}"
+                ),
+            ) from exc
+    return state.img2img_pipeline
+
+
+def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
+    if torch is None:
+        raise RuntimeError("torch is required to run diffusers_worker")
+    if state.pipeline is None:
+        raise RuntimeError("Pipeline not loaded")
+
+    base_image = _decode_b64_image(req.image_b64, field="image_b64").convert("RGB")
+
+    mask_image = None
+    if req.mask_b64:
+        raw_mask = _decode_b64_image(req.mask_b64, field="mask_b64")
+        mask_image = _mask_from_alpha(raw_mask)
+        if mask_image.size != base_image.size:
+            mask_image = mask_image.resize(base_image.size)
+
+    # Output keeps the input geometry unless the caller forces a size.
+    width = req.width or base_image.width
+    height = req.height or base_image.height
+    if (width, height) != base_image.size:
+        base_image = base_image.resize((width, height))
+        if mask_image is not None:
+            mask_image = mask_image.resize((width, height))
+
+    edit_pipeline = _derive_edit_pipeline(state, with_mask=mask_image is not None)
+
+    seed_used = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
+    if torch.cuda.is_available():
+        generator = torch.Generator(device="cuda").manual_seed(seed_used)
+    else:
+        generator = torch.Generator().manual_seed(seed_used)
+
+    candidate_kwargs: dict[str, Any] = {
+        "prompt": req.prompt,
+        "negative_prompt": req.negative_prompt,
+        "image": base_image,
+        "mask_image": mask_image,
+        "width": width,
+        "height": height,
+        "num_inference_steps": req.num_inference_steps,
+        "guidance_scale": req.guidance_scale,
+        "strength": req.strength,
+        "num_images_per_prompt": req.num_images,
+        "generator": generator,
+    }
+    call_kwargs = _filter_pipeline_kwargs(edit_pipeline, candidate_kwargs)
+
+    started = time.perf_counter()
+    output = edit_pipeline(**call_kwargs)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+
+    images = [GenerateImage(b64_json=pil_to_b64(image)) for image in output.images]
+    return GenerateResponse(
+        images=images, generation_time_ms=duration_ms, seed_used=seed_used
+    )
+
+
 def create_app(state: WorkerState) -> FastAPI:
     app = FastAPI(title="oCabra Diffusers Worker")
 
@@ -322,6 +479,17 @@ def create_app(state: WorkerState) -> FastAPI:
 
         loop = asyncio.get_running_loop()
         run = partial(generate_sync, state, req)
+        return await loop.run_in_executor(None, run)
+
+    @app.post("/edit", response_model=GenerateResponse)
+    async def edit(req: EditRequest) -> GenerateResponse:
+        if state.pipeline is None:
+            raise HTTPException(
+                status_code=503, detail=state.load_error or "Pipeline not ready"
+            )
+
+        loop = asyncio.get_running_loop()
+        run = partial(edit_sync, state, req)
         return await loop.run_in_executor(None, run)
 
     @app.get("/health")

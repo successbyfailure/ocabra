@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import Request, Response
@@ -36,6 +36,7 @@ def _classify_request_kind(path: str) -> str:
         "/v1/completions": "completion",
         "/v1/embeddings": "embedding",
         "/v1/images/generations": "image_generation",
+        "/v1/images/edits": "image_generation",
         "/v1/audio/transcriptions": "audio_transcription",
         "/v1/audio/speech": "tts",
         "/api/chat": "ollama_chat",
@@ -112,7 +113,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         start = time.monotonic()
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         request_payload = await _extract_request_payload(request)
         request_kind = _classify_request_kind(path)
 

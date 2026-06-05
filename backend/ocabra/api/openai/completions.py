@@ -12,7 +12,7 @@ from typing import Annotated, Any
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
 
@@ -22,11 +22,11 @@ from ._deps import (
     check_capability,
     compute_worker_key,
     ensure_worker_loaded,
-    keepalive_until_done,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
     get_profile_registry,
+    keepalive_until_done,
     lookup_profile,
     merge_profile_defaults,
     raise_upstream_http_error,
@@ -58,9 +58,8 @@ async def completions(
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
 
-    # --- Federation hook ---
     federation_manager = get_federation_manager(request)
-    if federation_manager is not None:
+    if stream and federation_manager is not None:
         from ocabra.config import settings as _settings
 
         if _settings.federation_enabled:
@@ -69,57 +68,33 @@ async def completions(
             target, peer = await resolve_federated(
                 model_id, model_manager, federation_manager, profile_registry
             )
-            if target == "remote":
-                from ocabra.core.federation import should_fallback_to_local
-
+            if target == "remote" and peer is not None:
                 request.state.federation_remote_node_id = peer.peer_id
-                if stream:
-                    return StreamingResponse(
-                        federation_manager.proxy_stream(
-                            peer=peer,
-                            path=request.url.path,
-                            body=body,
-                            headers=dict(request.headers),
-                        ),
-                        media_type="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                    )
-                try:
-                    resp = await federation_manager.proxy_request(
+                return StreamingResponse(
+                    federation_manager.proxy_stream(
                         peer=peer,
                         path=request.url.path,
                         body=body,
                         headers=dict(request.headers),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "federation_peer_network_error_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        error=str(exc),
-                    )
-                    request.state.federation_remote_node_id = None
-                    resp = None
-                if resp is not None and (
-                    resp.status_code < 400
-                    or not should_fallback_to_local(resp.status_code)
-                ):
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
-                    )
-                if resp is not None:
-                    logger.warning(
-                        "federation_peer_rejected_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        status=resp.status_code,
-                        body_preview=resp.text[:200],
-                    )
-                    request.state.federation_remote_node_id = None
-                # Fall through to local processing.
-    # --- End federation hook ---
+                    ),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+
+    if not stream:
+        from ._federation import try_proxy_json
+
+        fed_resp = await try_proxy_json(
+            request,
+            model_id=model_id,
+            body=body,
+            federation_manager=federation_manager,
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            logger=logger,
+        )
+        if fed_resp is not None:
+            return fed_resp
 
     worker_pool = request.app.state.worker_pool
 

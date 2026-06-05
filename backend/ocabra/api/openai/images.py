@@ -15,13 +15,14 @@ from typing import Annotated, Any
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 
 from ._deps import (
+    _openai_error,
     check_capability,
     compute_worker_key,
     get_federation_manager,
@@ -32,6 +33,7 @@ from ._deps import (
     raise_upstream_http_error,
     resolve_profile,
 )
+from ._federation import try_proxy_json, try_proxy_multipart
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -113,57 +115,17 @@ async def image_generations(
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
 
-    # --- Federation hook ---
-    federation_manager = get_federation_manager(request)
-    if federation_manager is not None:
-        from ocabra.config import settings as _settings
-
-        if _settings.federation_enabled:
-            from ocabra.core.federation import resolve_federated
-
-            target, peer = await resolve_federated(
-                model_id, model_manager, federation_manager, profile_registry
-            )
-            if target == "remote":
-                from ocabra.core.federation import should_fallback_to_local
-
-                request.state.federation_remote_node_id = peer.peer_id
-                try:
-                    resp = await federation_manager.proxy_request(
-                        peer=peer,
-                        path=request.url.path,
-                        body=body,
-                        headers=dict(request.headers),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "federation_peer_network_error_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        error=str(exc),
-                    )
-                    request.state.federation_remote_node_id = None
-                    resp = None
-                if resp is not None and (
-                    resp.status_code < 400
-                    or not should_fallback_to_local(resp.status_code)
-                ):
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
-                    )
-                if resp is not None:
-                    logger.warning(
-                        "federation_peer_rejected_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        status=resp.status_code,
-                        body_preview=resp.text[:200],
-                    )
-                    request.state.federation_remote_node_id = None
-                # Fall through to local processing.
-    # --- End federation hook ---
+    fed_resp = await try_proxy_json(
+        request,
+        model_id=model_id,
+        body=body,
+        federation_manager=get_federation_manager(request),
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        logger=logger,
+    )
+    if fed_resp is not None:
+        return fed_resp
 
     profile, state = await resolve_profile(
         model_id,
@@ -219,6 +181,219 @@ async def image_generations(
         return {"created": int(time.time()), "data": data}
 
     # Default: b64_json
+    return {
+        "created": int(time.time()),
+        "data": [{"b64_json": img.get("b64_json", "")} for img in images],
+    }
+
+
+@router.post("/images/edits", summary="Edit image")
+async def image_edits(
+    request: Request,
+    image: UploadFile,
+    user: Annotated[UserContext, Depends(get_openai_user)],
+) -> Any:
+    """
+    Edit an image from a text prompt (OpenAI ``/v1/images/edits`` compatible).
+
+    Accepts ``multipart/form-data`` with:
+
+    * ``image`` — base PNG to edit (required).
+    * ``mask`` — optional PNG; transparent pixels mark the area to repaint.
+      When omitted the edit is performed as img2img over the full image.
+    * ``model`` — profile_id (required).
+    * ``prompt`` — edit description (required).
+    * ``n``, ``size``, ``response_format``, ``user`` — same semantics as
+      ``/v1/images/generations``.
+
+    Returns 400 ``mask_unsupported`` when the loaded pipeline has no inpainting
+    variant in diffusers' auto-mapping (e.g. distilled FLUX.2 Klein,
+    Z-Image-Turbo), and 400 ``edit_unsupported`` when no img2img variant is
+    available either.
+    """
+    form = await request.form(
+        max_part_size=max(1, int(settings.openai_image_max_part_size_mb)) * 1024 * 1024
+    )
+    model_id: str = form.get("model", "")
+    prompt: str = form.get("prompt", "")
+    response_format: str = form.get("response_format", "b64_json")
+
+    if response_format not in _RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {
+                "message": (
+                    f"Invalid response_format '{response_format}'. "
+                    f"Must be one of: {sorted(_RESPONSE_FORMATS)}"
+                ),
+                "type": "invalid_request_error",
+                "param": "response_format",
+            }},
+        )
+    if not prompt:
+        raise _openai_error(
+            "The 'prompt' field is required.",
+            "invalid_request_error",
+            param="prompt",
+        )
+
+    image_bytes = await image.read()
+    mask_upload = form.get("mask")
+    mask_bytes: bytes | None = None
+    mask_filename: str | None = None
+    mask_content_type: str | None = None
+    # Duck-type instead of ``isinstance(UploadFile)``: starlette's UploadFile
+    # and FastAPI's re-exported one can resolve to different classes in some
+    # import paths, and any file-like part has ``.read()``.
+    if mask_upload is not None and hasattr(mask_upload, "read"):
+        mask_bytes = await mask_upload.read()
+        mask_filename = getattr(mask_upload, "filename", None)
+        mask_content_type = getattr(mask_upload, "content_type", None)
+
+    model_manager = get_model_manager(request)
+    profile_registry = get_profile_registry(request)
+
+    federation_form_data: dict[str, str] = {
+        "model": model_id,
+        "prompt": prompt,
+        "response_format": response_format,
+    }
+    for field in ("n", "size", "user"):
+        val = form.get(field)
+        if val is not None and not hasattr(val, "read"):
+            federation_form_data[field] = str(val)
+
+    federation_files: dict[str, tuple[str, bytes, str]] = {
+        "image": (
+            image.filename or "image.png",
+            image_bytes,
+            image.content_type or "image/png",
+        )
+    }
+    if mask_bytes is not None:
+        federation_files["mask"] = (
+            mask_filename or "mask.png",
+            mask_bytes,
+            mask_content_type or "image/png",
+        )
+
+    fed_resp = await try_proxy_multipart(
+        request,
+        model_id=model_id,
+        files=federation_files,
+        data=federation_form_data,
+        federation_manager=get_federation_manager(request),
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        logger=logger,
+    )
+    if fed_resp is not None:
+        return Response(
+            content=fed_resp.content,
+            status_code=fed_resp.status_code,
+            media_type=fed_resp.headers.get("content-type"),
+        )
+
+    profile, state = await resolve_profile(
+        model_id,
+        model_manager,
+        profile_registry,
+        user=user,
+    )
+    check_capability(state, "image_generation", "image editing")
+
+    request_body: dict[str, Any] = {"prompt": prompt}
+    for field in ("negative_prompt", "num_inference_steps", "guidance_scale",
+                  "strength", "seed"):
+        val = form.get(field)
+        if val is not None and not hasattr(val, "read"):
+            request_body[field] = val
+    n_val = form.get("n")
+    if n_val is not None and not hasattr(n_val, "read"):
+        try:
+            request_body["n"] = int(n_val)
+        except (TypeError, ValueError) as exc:
+            raise _openai_error(
+                "Field 'n' must be an integer.",
+                "invalid_request_error",
+                param="n",
+            ) from exc
+
+    merged_body = merge_profile_defaults(profile, request_body)
+    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+
+    size_raw = form.get("size")
+    width: int | None = None
+    height: int | None = None
+    if size_raw and not hasattr(size_raw, "read"):
+        width, height = _parse_size(str(size_raw))
+
+    worker_body: dict[str, Any] = {
+        "prompt": merged_body.get("prompt", ""),
+        "image_b64": base64.b64encode(image_bytes).decode("ascii"),
+    }
+    if mask_bytes is not None:
+        worker_body["mask_b64"] = base64.b64encode(mask_bytes).decode("ascii")
+    if merged_body.get("negative_prompt") is not None:
+        worker_body["negative_prompt"] = merged_body["negative_prompt"]
+    if width is not None and height is not None:
+        worker_body["width"] = width
+        worker_body["height"] = height
+    if "num_inference_steps" in merged_body:
+        try:
+            worker_body["num_inference_steps"] = int(merged_body["num_inference_steps"])
+        except (TypeError, ValueError):
+            pass
+    if "guidance_scale" in merged_body:
+        try:
+            worker_body["guidance_scale"] = float(merged_body["guidance_scale"])
+        except (TypeError, ValueError):
+            pass
+    if "strength" in merged_body:
+        try:
+            worker_body["strength"] = float(merged_body["strength"])
+        except (TypeError, ValueError):
+            pass
+    if "seed" in merged_body and merged_body["seed"] is not None:
+        try:
+            worker_body["seed"] = int(merged_body["seed"])
+        except (TypeError, ValueError):
+            pass
+    worker_body["num_images"] = int(merged_body.get("n", 1) or 1)
+
+    worker_pool = request.app.state.worker_pool
+    inflight_request_id = model_manager.begin_request(worker_key)
+    try:
+        result = await worker_pool.forward_request(worker_key, "/edit", worker_body)
+    except httpx.HTTPStatusError as exc:
+        # The worker translates "mask not supported by this pipeline" /
+        # "img2img not supported" into HTTP 400; surface them with a stable
+        # OpenAI-style error code so clients can branch on it.
+        if exc.response.status_code == 400:
+            detail_text = exc.response.text or ""
+            code = "mask_unsupported" if mask_bytes is not None else "edit_unsupported"
+            raise _openai_error(
+                detail_text.strip() or "Image editing not supported by this model.",
+                "invalid_request_error",
+                param="model",
+                code=code,
+                status_code=400,
+            ) from exc
+        raise_upstream_http_error(exc)
+    finally:
+        model_manager.end_request(worker_key, inflight_request_id)
+
+    images = result.get("images", [])
+    if response_format == "url":
+        data = []
+        for img in images:
+            b64 = img.get("b64_json", "")
+            if not b64:
+                continue
+            name = _save_image(b64)
+            data.append({"url": _build_public_url(request, name)})
+        return {"created": int(time.time()), "data": data}
+
     return {
         "created": int(time.time()),
         "data": [{"b64_json": img.get("b64_json", "")} for img in images],

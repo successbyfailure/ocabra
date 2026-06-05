@@ -6,7 +6,7 @@ Uses FastAPI TestClient with mocked ModelManager and WorkerPool.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from fastapi import FastAPI
@@ -876,7 +876,6 @@ class TestImageGenerations:
 
     def _diffusers_app(self, tmp_path):
         """An app whose mocked worker returns a 1×1 transparent PNG."""
-        import base64
         from ocabra.backends.base import BackendCapabilities
         from ocabra.config import settings
         from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
@@ -956,6 +955,247 @@ class TestImageGenerations:
         import uuid as _uuid
         resp = client.get(f"/v1/images/files/{_uuid.uuid4()}.png")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/images/edits
+# ---------------------------------------------------------------------------
+
+class TestImageEdits:
+    _PNG_B64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNg"
+        "YAAAAAMAASsJTYQAAAAASUVORK5CYII="
+    )
+
+    def _png_bytes(self) -> bytes:
+        import base64
+        return base64.b64decode(self._PNG_B64)
+
+    def _diffusers_app(self, tmp_path):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.config import settings
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="sdxl",
+            display_name="SDXL",
+            backend_type="diffusers",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(image_generation=True),
+        )
+        app = _make_app(
+            model_state=state,
+            worker_result={"images": [{"b64_json": self._PNG_B64}]},
+        )
+        settings.image_outputs_dir = str(tmp_path)
+        settings.public_url = "https://api.test.local"
+        return app
+
+    def test_edit_requires_capability(self):
+        app = _make_app()  # default capabilities → image_generation=False
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/images/edits",
+            data={"model": "test-model", "prompt": "make it red"},
+            files={"image": ("in.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
+
+    def test_edit_requires_prompt(self, tmp_path):
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/images/edits",
+            data={"model": "sdxl"},
+            files={"image": ("in.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["param"] == "prompt"
+
+    def test_edit_b64_roundtrip_forwards_image_to_worker(self, tmp_path):
+        import base64
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/images/edits",
+            data={"model": "sdxl", "prompt": "make it red"},
+            files={"image": ("in.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["data"][0]["b64_json"] == self._PNG_B64
+
+        # Worker received the image as base64 on /edit, no mask field.
+        forward = app.state.worker_pool.forward_request
+        forward.assert_awaited_once()
+        args, _ = forward.await_args
+        worker_key, path, worker_body = args
+        assert path == "/edit"
+        assert "mask_b64" not in worker_body
+        assert base64.b64decode(worker_body["image_b64"]) == self._png_bytes()
+        assert worker_body["prompt"] == "make it red"
+
+    def test_edit_forwards_mask_when_provided(self, tmp_path):
+        import base64
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        png = self._png_bytes()
+
+        resp = client.post(
+            "/v1/images/edits",
+            data={"model": "sdxl", "prompt": "erase the cat"},
+            files={
+                "image": ("in.png", png, "image/png"),
+                "mask": ("mask.png", png, "image/png"),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        worker_body = app.state.worker_pool.forward_request.await_args.args[2]
+        assert base64.b64decode(worker_body["mask_b64"]) == png
+
+    def test_edit_url_response_persists_file(self, tmp_path):
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/images/edits",
+            data={
+                "model": "sdxl",
+                "prompt": "make it red",
+                "response_format": "url",
+            },
+            files={"image": ("in.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 200, resp.text
+        url = resp.json()["data"][0]["url"]
+        assert url.startswith("https://api.test.local/v1/images/files/")
+        name = url.rsplit("/", 1)[-1]
+        assert (tmp_path / name).is_file()
+
+    def test_edit_rejects_invalid_response_format(self, tmp_path):
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/images/edits",
+            data={
+                "model": "sdxl",
+                "prompt": "p",
+                "response_format": "html",
+            },
+            files={"image": ("in.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["param"] == "response_format"
+
+    def test_edit_returns_mask_unsupported_when_worker_rejects_mask(self, tmp_path):
+        """Worker returns HTTP 400 → API surfaces ``mask_unsupported``.
+
+        Mirrors what happens with distilled FLUX.2 Klein / Z-Image-Turbo where
+        diffusers has no inpainting auto-mapping for the loaded pipeline.
+        """
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+
+        async def _raise_400(*args, **kwargs):
+            req = httpx.Request("POST", "http://worker/edit")
+            resp = httpx.Response(
+                400,
+                text="Inpainting (mask edit) is not supported for pipeline 'ZImagePipeline'",
+                request=req,
+            )
+            raise httpx.HTTPStatusError("400", request=req, response=resp)
+
+        app.state.worker_pool.forward_request = AsyncMock(side_effect=_raise_400)
+
+        resp = client.post(
+            "/v1/images/edits",
+            data={"model": "sdxl", "prompt": "edit"},
+            files={
+                "image": ("in.png", self._png_bytes(), "image/png"),
+                "mask": ("mask.png", self._png_bytes(), "image/png"),
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "mask_unsupported"
+
+    def test_edit_proxies_to_federation_peer_when_remote(self, tmp_path):
+        """When the federation manager flags the model as remote, ``proxy_multipart``
+        is called with image + mask and the peer's body is returned verbatim."""
+        import httpx as _httpx
+
+        from ocabra.config import settings as _settings
+
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+
+        peer_body = b'{"created": 1, "data": [{"b64_json": "ZZZ"}]}'
+        peer_response = _httpx.Response(
+            200,
+            content=peer_body,
+            headers={"content-type": "application/json"},
+        )
+
+        fm = MagicMock()
+        peer = SimpleNamespace(peer_id="p1", name="peer-1", url="http://peer")
+
+        async def _resolve(*a, **kw):
+            return ("remote", peer)
+
+        fm.proxy_multipart = AsyncMock(return_value=peer_response)
+        app.state.federation_manager = fm
+
+        original_enabled = _settings.federation_enabled
+        _settings.federation_enabled = True
+        try:
+            with patch(
+                "ocabra.core.federation.resolve_federated", new=AsyncMock(side_effect=_resolve)
+            ):
+                resp = client.post(
+                    "/v1/images/edits",
+                    data={"model": "sdxl", "prompt": "edit"},
+                    files={
+                        "image": ("in.png", self._png_bytes(), "image/png"),
+                        "mask": ("mask.png", self._png_bytes(), "image/png"),
+                    },
+                )
+        finally:
+            _settings.federation_enabled = original_enabled
+
+        assert resp.status_code == 200, resp.text
+        assert resp.content == peer_body
+        fm.proxy_multipart.assert_awaited_once()
+        call_kwargs = fm.proxy_multipart.await_args.kwargs
+        assert call_kwargs["path"] == "/v1/images/edits"
+        assert set(call_kwargs["files"]) == {"image", "mask"}
+        # Local worker should never have been called.
+        app.state.worker_pool.forward_request.assert_not_called()
+
+    def test_edit_returns_edit_unsupported_when_worker_rejects_img2img(self, tmp_path):
+        """Same path without a mask → ``edit_unsupported`` instead."""
+        app = self._diffusers_app(tmp_path)
+        client = TestClient(app)
+
+        async def _raise_400(*args, **kwargs):
+            req = httpx.Request("POST", "http://worker/edit")
+            resp = httpx.Response(
+                400,
+                text="Image-to-image editing is not supported for pipeline 'Flux2KleinPipeline'",
+                request=req,
+            )
+            raise httpx.HTTPStatusError("400", request=req, response=resp)
+
+        app.state.worker_pool.forward_request = AsyncMock(side_effect=_raise_400)
+
+        resp = client.post(
+            "/v1/images/edits",
+            data={"model": "sdxl", "prompt": "edit"},
+            files={"image": ("in.png", self._png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "edit_unsupported"
+
 
 class TestBackendAgnosticRouting:
     def test_chat_routes_for_sglang_backend(self):
