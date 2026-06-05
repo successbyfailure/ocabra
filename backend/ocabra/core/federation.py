@@ -531,6 +531,37 @@ class FederationManager:
 
     # ── Proxy methods ───────────────────────────────────────────
 
+    def _build_proxy_headers(
+        self,
+        peer: PeerState,
+        headers: dict[str, str] | None,
+        *,
+        drop_content_type: bool = False,
+    ) -> dict[str, str]:
+        """Sanitise incoming headers before forwarding to a peer.
+
+        Always strips:
+            - ``authorization``: the peer must see its own bearer token.
+            - ``cookie`` / ``set-cookie``: the user's local session cookie is a
+              JWT signed by this node's secret; the peer would reject it and
+              never check the bearer token (the auth dep tries cookies first).
+            - ``host`` / ``content-length``: rewritten by httpx for the new URL.
+
+        Optionally strips ``content-type`` (used by ``proxy_multipart`` so
+        httpx can rebuild the boundary with the new body).
+        """
+        always_strip = {"authorization", "cookie", "set-cookie", "host", "content-length"}
+        if drop_content_type:
+            always_strip.add("content-type")
+        out: dict[str, str] = {}
+        if headers:
+            for k, v in headers.items():
+                if k.lower() in always_strip:
+                    continue
+                out[k] = v
+        out["Authorization"] = f"Bearer {peer.api_key}"
+        return out
+
     async def proxy_request(
         self,
         peer: PeerState,
@@ -545,7 +576,8 @@ class FederationManager:
             peer: Target peer state.
             path: API path (e.g. '/v1/chat/completions').
             body: Request JSON body.
-            headers: Original request headers (Authorization will be replaced).
+            headers: Original request headers (auth/cookie are stripped and
+                rewritten so the peer's auth dep sees only its own bearer).
             timeout: Optional timeout override.
 
         Returns:
@@ -554,8 +586,7 @@ class FederationManager:
         if self._http_client is None:
             raise RuntimeError("FederationManager not started")
         proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
-        proxy_headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
-        proxy_headers["Authorization"] = f"Bearer {peer.api_key}"
+        proxy_headers = self._build_proxy_headers(peer, headers)
         url = f"{peer.url}{path}"
         return await self._http_client.post(
             url,
@@ -577,15 +608,14 @@ class FederationManager:
             peer: Target peer state.
             path: API path.
             body: Request JSON body.
-            headers: Original request headers.
+            headers: Original request headers (auth/cookie stripped).
 
         Yields:
             Raw bytes from the SSE stream.
         """
         if self._http_client is None:
             raise RuntimeError("FederationManager not started")
-        proxy_headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
-        proxy_headers["Authorization"] = f"Bearer {peer.api_key}"
+        proxy_headers = self._build_proxy_headers(peer, headers)
         url = f"{peer.url}{path}"
         async with self._http_client.stream(
             "POST",
@@ -628,14 +658,7 @@ class FederationManager:
         if self._http_client is None:
             raise RuntimeError("FederationManager not started")
         proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
-        proxy_headers: dict[str, str] = {}
-        if headers:
-            for k, v in headers.items():
-                lower = k.lower()
-                if lower in {"authorization", "content-type", "content-length", "host"}:
-                    continue
-                proxy_headers[k] = v
-        proxy_headers["Authorization"] = f"Bearer {peer.api_key}"
+        proxy_headers = self._build_proxy_headers(peer, headers, drop_content_type=True)
         url = f"{peer.url}{path}"
         return await self._http_client.post(
             url,

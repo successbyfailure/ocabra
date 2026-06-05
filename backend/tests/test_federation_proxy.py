@@ -284,6 +284,43 @@ class TestProxyRequest:
         assert call_kwargs["headers"]["Authorization"] == "Bearer sk-key"
         assert call_kwargs["headers"]["x-custom"] == "keep"
 
+    @pytest.mark.asyncio
+    async def test_strips_local_session_cookie(self):
+        """Local session cookies must not be forwarded to the peer.
+
+        The peer's auth dep tries cookies before bearer tokens; a JWT signed
+        by our node's secret would fail validation on the peer and short-circuit
+        to 401 ("Session expired or invalid") without ever checking the bearer.
+        """
+        peer = _make_peer(url="https://remote:8000", api_key="sk-key")
+        fm = _make_fm_with_peers(peer)
+
+        mock_response = httpx.Response(
+            200, json={},
+            request=httpx.Request("POST", "https://remote:8000/v1/chat/completions"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        fm._http_client = mock_client
+
+        await fm.proxy_request(
+            peer, "/v1/chat/completions", {},
+            headers={
+                "cookie": "ocabra_session=local-jwt; theme=dark",
+                "host": "local.example.com",
+                "content-length": "9999",
+                "x-keep": "yes",
+            },
+        )
+
+        forwarded = call_kwargs = mock_client.post.call_args[1]["headers"]
+        assert forwarded["Authorization"] == "Bearer sk-key"
+        assert "cookie" not in {k.lower() for k in forwarded}
+        assert "host" not in {k.lower() for k in forwarded}
+        assert "content-length" not in {k.lower() for k in forwarded}
+        assert forwarded.get("x-keep") == "yes"
+        _ = call_kwargs  # avoid unused alias warning
+
 
 # ---------------------------------------------------------------------------
 # Tests: proxy_stream
