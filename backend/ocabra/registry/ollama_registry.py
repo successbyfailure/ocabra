@@ -338,6 +338,8 @@ class OllamaRegistry:
                     except json.JSONDecodeError:
                         continue
 
+                    if data.get("error"):
+                        raise RuntimeError(str(data["error"]))
                     status = str(data.get("status") or "").lower()
                     if status == "success":
                         saw_success = True
@@ -358,7 +360,7 @@ class OllamaRegistry:
                     last_pct = pct
 
         if not saw_success:
-            logger.warning("ollama_pull_missing_success_marker", model_ref=model_ref)
+            logger.warning("ollama_pull_missing_success_marker: %s", model_ref)
 
         progress_callback(100.0, None)
         return Path(settings.models_dir) / "ollama" / model_ref.replace(":", "_")
