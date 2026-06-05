@@ -781,6 +781,38 @@ app.add_middleware(
     **_build_cors_config(),
 )
 
+
+# Global 500 logger: FastAPI's default exception handler returns a bare
+# "Internal Server Error" with no traceback in the logs, which makes
+# diagnosing federation/proxy issues painful. Log the full traceback for
+# every uncaught exception so it's never silent.
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request, exc):
+    import traceback as _tb
+
+    from fastapi.responses import JSONResponse
+
+    logger.warning(
+        "unhandled_exception",
+        path=request.url.path,
+        method=request.method,
+        error=str(exc),
+        error_type=type(exc).__name__,
+        traceback=_tb.format_exc(),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "error": {
+                    "message": "Internal Server Error",
+                    "type": "server_error",
+                    "code": type(exc).__name__,
+                }
+            }
+        },
+    )
+
 # Stream 3-A: Stats middleware for /v1/* endpoints
 from ocabra.stats.collector import StatsMiddleware  # noqa: E402
 
