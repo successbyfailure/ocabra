@@ -300,6 +300,11 @@ async def transcriptions(
                 )
 
             url = f"http://127.0.0.1:{worker.port}/transcribe"
+            print(
+                f"[transcribe-local-posting] url={url} audio_bytes_len={len(audio_bytes)}",
+                file=_sys.stderr,
+                flush=True,
+            )
 
             try:
                 async with httpx.AsyncClient(timeout=300.0) as client:
@@ -314,18 +319,45 @@ async def transcriptions(
                     if diarize is not None:
                         form_data["diarize"] = diarize
 
-                    resp = await client.post(
-                        url,
-                        files={
-                            "file": (
-                                file.filename or "audio",
-                                audio_bytes,
-                                file.content_type or "audio/mpeg",
-                            )
-                        },
-                        data=form_data,
+                    try:
+                        resp = await client.post(
+                            url,
+                            files={
+                                "file": (
+                                    file.filename or "audio",
+                                    audio_bytes,
+                                    file.content_type or "audio/mpeg",
+                                )
+                            },
+                            data=form_data,
+                        )
+                    except Exception as _exc:
+                        import traceback as _tb
+
+                        print(
+                            f"[transcribe-local-post-raised] {type(_exc).__name__}: {_exc}\n{_tb.format_exc()}",
+                            file=_sys.stderr,
+                            flush=True,
+                        )
+                        raise
+                    print(
+                        f"[transcribe-local-posted] status={resp.status_code} "
+                        f"content_type={resp.headers.get('content-type')!r} body_len={len(resp.content)}",
+                        file=_sys.stderr,
+                        flush=True,
                     )
-                    resp.raise_for_status()
+                    try:
+                        resp.raise_for_status()
+                    except Exception as _exc:
+                        import traceback as _tb
+
+                        print(
+                            f"[transcribe-local-raise-for-status] {type(_exc).__name__}: {_exc}\n"
+                            f"body_preview={resp.text[:300]!r}\n{_tb.format_exc()}",
+                            file=_sys.stderr,
+                            flush=True,
+                        )
+                        raise
                 break
             except httpx.TransportError as exc:
                 last_error = exc
