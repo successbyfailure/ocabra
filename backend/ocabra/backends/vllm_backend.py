@@ -457,6 +457,13 @@ class VLLMBackend(BackendInterface):
         speculative_config = self._get_vllm_option(extra_config, "speculative_config", None)
         if speculative_config:
             cmd.extend(["--speculative-config", self._encode_vllm_json_option(speculative_config)])
+        limit_mm_per_prompt = self._get_vllm_option(
+            extra_config, "limit_mm_per_prompt", self._get_setting("vllm_limit_mm_per_prompt")
+        )
+        if limit_mm_per_prompt:
+            cmd.extend(
+                ["--limit-mm-per-prompt", self._encode_vllm_json_option(limit_mm_per_prompt)]
+            )
         extra_args = self._get_vllm_option(extra_config, "extra_args", None)
         if isinstance(extra_args, list):
             cmd.extend(str(a) for a in extra_args)
