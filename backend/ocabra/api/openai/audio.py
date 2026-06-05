@@ -110,73 +110,83 @@ async def transcriptions(
                 model_id, model_manager, federation_manager, profile_registry
             )
             if target == "remote":
-                request.state.federation_remote_node_id = peer.peer_id
                 from ocabra.core.federation import should_fallback_to_local
 
-                form_data: dict[str, str] = {
-                    "model": model_id,
-                    "response_format": response_format,
-                    "temperature": str(temperature),
-                }
-                if language:
-                    form_data["language"] = language
-                if prompt:
-                    form_data["prompt"] = prompt
-                if diarize is not None:
-                    form_data["diarize"] = diarize
-
-                resp: httpx.Response | None
+                request.state.federation_remote_node_id = peer.peer_id
+                fed_resp: httpx.Response | None = None
                 try:
-                    resp = await federation_manager.proxy_multipart(
-                        peer=peer,
-                        path=request.url.path,
-                        files={
-                            "file": (
-                                file.filename or "audio",
-                                audio_bytes,
-                                file.content_type or "audio/mpeg",
-                            )
-                        },
-                        data=form_data,
-                        headers=dict(request.headers),
-                    )
+                    form_data: dict[str, str] = {
+                        "model": model_id,
+                        "response_format": response_format,
+                        "temperature": str(temperature),
+                    }
+                    if language:
+                        form_data["language"] = language
+                    if prompt:
+                        form_data["prompt"] = prompt
+                    if diarize is not None:
+                        form_data["diarize"] = diarize
+
+                    try:
+                        fed_resp = await federation_manager.proxy_multipart(
+                            peer=peer,
+                            path=request.url.path,
+                            files={
+                                "file": (
+                                    file.filename or "audio",
+                                    audio_bytes,
+                                    file.content_type or "audio/mpeg",
+                                )
+                            },
+                            data=form_data,
+                            headers=dict(request.headers),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "federation_peer_network_error_fallback_local",
+                            peer=peer.name,
+                            model_id=model_id,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
+                        fed_resp = None
                 except Exception as exc:
-                    logger.warning(
-                        "federation_peer_network_error_fallback_local",
+                    logger.exception(
+                        "federation_proxy_unexpected_error",
                         peer=peer.name,
                         model_id=model_id,
                         error=str(exc),
                     )
-                    resp = None
+                    fed_resp = None
 
-                if resp is not None and resp.status_code < 400:
+                if fed_resp is not None and fed_resp.status_code < 400:
                     normalized_format = str(response_format).lower()
                     if normalized_format in {"text", "srt", "vtt"}:
-                        return PlainTextResponse(resp.text)
-                    return resp.json()
+                        return PlainTextResponse(fed_resp.text)
+                    return fed_resp.json()
 
-                if resp is not None and not should_fallback_to_local(resp.status_code):
+                if fed_resp is not None and not should_fallback_to_local(fed_resp.status_code):
                     # 5xx or other non-recoverable peer error → propagate.
                     normalized_format = str(response_format).lower()
                     if normalized_format in {"text", "srt", "vtt"}:
-                        return PlainTextResponse(resp.text, status_code=resp.status_code)
+                        return PlainTextResponse(fed_resp.text, status_code=fed_resp.status_code)
                     return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
+                        content=fed_resp.content,
+                        status_code=fed_resp.status_code,
+                        media_type=fed_resp.headers.get("content-type"),
                     )
 
-                if resp is not None:
+                if fed_resp is not None:
                     # Recoverable: peer can't serve this model for this token
                     # (typical cause: federation api_key lacks group access).
                     logger.warning(
                         "federation_peer_rejected_fallback_local",
                         peer=peer.name,
                         model_id=model_id,
-                        status=resp.status_code,
-                        body_preview=resp.text[:200],
+                        status=fed_resp.status_code,
+                        body_preview=fed_resp.text[:200],
                     )
-                    request.state.federation_remote_node_id = None
+                request.state.federation_remote_node_id = None
                 # Fall through to local processing.
     # --- End federation hook ---
 

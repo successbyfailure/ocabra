@@ -81,13 +81,25 @@ class FederationManager:
     # ── Lifecycle ────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Load peers from DB, start heartbeat loop."""
+        """Load peers from DB, poll them once, then start the heartbeat loop.
+
+        The initial poll runs synchronously so federated resolution works for
+        the very first request — otherwise every peer is treated as offline
+        for the first ``federation_heartbeat_interval`` seconds and we'd
+        fall back to local even when a peer is ready.
+        """
         self._started_at = time.monotonic()
         self._http_client = httpx.AsyncClient(
             verify=self._settings.federation_verify_ssl,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
         await self._load_peers_from_db()
+        # Initial poll — block startup briefly so the first request sees fresh
+        # peer state. Don't fail startup if a peer is unreachable.
+        try:
+            await self._poll_all_peers()
+        except Exception as exc:
+            logger.warning("federation_initial_poll_error", error=str(exc))
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(),
             name="federation-heartbeat-loop",
@@ -97,6 +109,7 @@ class FederationManager:
             node_id=self._node_id,
             node_name=self._node_name,
             peer_count=len(self._peers),
+            online_after_initial_poll=len(self.get_online_peers()),
         )
 
     async def stop(self) -> None:
