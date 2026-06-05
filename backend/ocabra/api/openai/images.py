@@ -361,6 +361,20 @@ async def image_edits(
             pass
     worker_body["num_images"] = int(merged_body.get("n", 1) or 1)
 
+    # Diagnostic: surface what we actually forward to the worker. Image bytes
+    # are redacted (only the size is informative); everything else is the
+    # full payload the pipeline will see.
+    log_payload = {k: v for k, v in worker_body.items() if k not in ("image_b64", "mask_b64")}
+    log_payload["image_bytes"] = len(worker_body.get("image_b64", "")) * 3 // 4
+    if "mask_b64" in worker_body:
+        log_payload["mask_bytes"] = len(worker_body["mask_b64"]) * 3 // 4
+    logger.info(
+        "image_edit_forward",
+        worker_key=worker_key,
+        has_mask="mask_b64" in worker_body,
+        **log_payload,
+    )
+
     worker_pool = request.app.state.worker_pool
     inflight_request_id = model_manager.begin_request(worker_key)
     try:

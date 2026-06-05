@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -457,9 +458,35 @@ def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
     }
     call_kwargs = _filter_pipeline_kwargs(edit_pipeline, candidate_kwargs)
 
+    # Diagnostic: lets us verify which kwargs actually reach the pipeline.
+    # The user can otherwise only see "200 OK" with no insight into whether
+    # prompt/strength/etc. were applied — this lights up the surface.
+    accepted = sorted(k for k in candidate_kwargs if k in call_kwargs)
+    dropped = sorted(k for k in candidate_kwargs if k not in call_kwargs)
+    print(
+        f"[diffusers/edit] pipeline={type(edit_pipeline).__name__} "
+        f"mode={'inpaint' if mask_image is not None else 'img2img'} "
+        f"prompt_chars={len(req.prompt)} "
+        f"prompt_preview={req.prompt[:60]!r} "
+        f"strength={call_kwargs.get('strength')} "
+        f"steps={call_kwargs.get('num_inference_steps')} "
+        f"guidance={call_kwargs.get('guidance_scale')} "
+        f"size={width}x{height} "
+        f"accepted={accepted} dropped={dropped} "
+        f"seed={seed_used}",
+        file=sys.stderr,
+        flush=True,
+    )
+
     started = time.perf_counter()
     output = edit_pipeline(**call_kwargs)
     duration_ms = int((time.perf_counter() - started) * 1000)
+    print(
+        f"[diffusers/edit] done in {duration_ms}ms — "
+        f"{len(output.images)} image(s)",
+        file=sys.stderr,
+        flush=True,
+    )
 
     images = [GenerateImage(b64_json=pil_to_b64(image)) for image in output.images]
     return GenerateResponse(
