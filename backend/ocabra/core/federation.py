@@ -369,6 +369,11 @@ class FederationManager:
                 peer=peer.name,
                 models_count=len(peer.models),
                 gpus_count=len(peer.gpus),
+                loaded_model_ids=[
+                    m.get("model_id")
+                    for m in peer.models
+                    if str(m.get("status", "")).upper() == "LOADED"
+                ],
             )
         except Exception as exc:
             peer.consecutive_failures += 1
@@ -450,12 +455,15 @@ class FederationManager:
         """Return a mapping of model_id to list of peers that have it loaded.
 
         Only considers online, enabled peers with models in LOADED status.
+        The status comparison is case-insensitive — ``ModelStatus.LOADED.value``
+        is lowercase (``"loaded"``) but the federation plan and the inventory
+        tests use uppercase. Accept either.
         """
         model_map: dict[str, list[PeerState]] = {}
         for peer in self.get_online_peers():
             for model in peer.models:
                 model_id = model.get("model_id", "")
-                status = model.get("status", "")
+                status = str(model.get("status", "")).upper()
                 if model_id and status == "LOADED":
                     model_map.setdefault(model_id, []).append(peer)
         return model_map
@@ -723,17 +731,58 @@ async def resolve_federated(
         if federation_manager is not None:
             target = federation_manager.select_target(model_id, local_available=True)
             if target != "local" and target is not None:
+                logger.info(
+                    "federation_resolve",
+                    decision="remote",
+                    reason="local_loaded_peer_lower_load",
+                    model_id=model_id,
+                    peer=getattr(target, "name", None),
+                )
                 return ("remote", target)
+        logger.info(
+            "federation_resolve",
+            decision="local",
+            reason="local_loaded",
+            model_id=model_id,
+        )
         return ("local", None)
 
     # 2. Not loaded locally but a peer has it warm → proxy to the peer.
     if remote_peers and federation_manager is not None:
         best_peer = federation_manager.find_best_peer(model_id)
         if best_peer is not None:
+            logger.info(
+                "federation_resolve",
+                decision="remote",
+                reason="local_cold_peer_warm",
+                model_id=model_id,
+                peer=best_peer.name,
+            )
             return ("remote", best_peer)
 
     # 3. Nobody has it loaded, but it's registered locally → load it locally.
     if local_known:
+        logger.info(
+            "federation_resolve",
+            decision="local",
+            reason="no_peer_has_model",
+            model_id=model_id,
+            local_status=(
+                getattr(state.status, "value", state.status) if state is not None else None
+            ),
+            peer_loaded_models=(
+                {
+                    p.name: [
+                        m.get("model_id")
+                        for m in p.models
+                        if str(m.get("status", "")).upper() == "LOADED"
+                    ]
+                    for p in federation_manager.get_online_peers()
+                }
+                if federation_manager is not None
+                else {}
+            ),
+        )
         return ("local", None)
 
     # 4. Not found anywhere.

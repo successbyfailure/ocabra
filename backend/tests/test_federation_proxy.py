@@ -382,3 +382,14 @@ class TestFederationManagerBasics:
         fm = _make_fm_with_peers(peer)
         remote = fm.get_remote_models()
         assert len(remote) == 0
+
+    def test_get_remote_models_status_is_case_insensitive(self):
+        """Real peers send ``ModelStatus.LOADED.value`` which is the lowercase
+        string ``"loaded"`` — make sure the consumer accepts that too. This
+        regression silently broke federated proxying for every endpoint."""
+        peer = _make_peer(
+            models=[{"model_id": "whisper/large-v3", "status": "loaded"}],
+        )
+        fm = _make_fm_with_peers(peer)
+        remote = fm.get_remote_models()
+        assert "whisper/large-v3" in remote
