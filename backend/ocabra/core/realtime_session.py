@@ -150,12 +150,17 @@ class RealtimeSession:
     async def run(self) -> None:
         """Main session loop: receive client events and dispatch them.
 
-        Cold-start strategy:
-        1. Load STT first (blocking) — needed immediately for audio input
-        2. Send session.created — client can start talking
-        3. Load LLM + TTS in background — needed when first speech turn ends
-        By the time the user finishes their first sentence (~3-10s),
-        LLM and TTS are likely loaded.
+        Cold-start strategy depends on the routing decision for the
+        selected LLM:
+
+        Classic (Whisper -> text -> LLM): STT is on the critical path, so
+        Phase 1 blocks until Whisper is loaded.
+
+        Native-audio LLM: Whisper is no longer critical — the LLM ingests
+        audio directly. STT moves to Phase 3 (background) when
+        ``transcribe_user_audio`` is true (so the parallel transcript is
+        still available eventually), or is skipped entirely when it's
+        false. The session is usable from the first byte.
         """
         # Mark models that are already loaded as ready
         if self._worker_pool.get_worker(self.llm_model_id):
@@ -163,16 +168,32 @@ class RealtimeSession:
         if not self.tts_model_id or self._worker_pool.get_worker(self.tts_model_id):
             self._tts_ready.set()
 
-        # Phase 1: Load STT synchronously — smallest model, needed first
-        await self._load_model_with_progress("stt", self.stt_model_id)
+        # Phase 0: resolve routing so the cold-start strategy knows whether
+        # STT belongs on the critical path or in the background.
+        will_use_native = await self._should_use_native_audio()
+        stt_needed = bool(self.stt_model_id) and (
+            (not will_use_native) or self._transcribe_user_audio
+        )
+
+        # Phase 1: Load STT synchronously only when it's on the critical
+        # path (classic Whisper -> text -> LLM flow).
+        if stt_needed and not will_use_native:
+            await self._load_model_with_progress("stt", self.stt_model_id)
 
         # Phase 2: Session is usable — send created, client can start talking
         await self._send_session_created()
 
-        # Phase 3: Load LLM + TTS in background while user speaks
-        if not self._llm_ready.is_set() or not self._tts_ready.is_set():
+        # Phase 3: Load LLM + TTS (+ optional STT for native flow) in background
+        stt_bg = stt_needed and will_use_native
+        need_bg = (
+            not self._llm_ready.is_set()
+            or not self._tts_ready.is_set()
+            or stt_bg
+        )
+        if need_bg:
             self._background_load_task = asyncio.create_task(
-                self._load_remaining_models(), name="realtime-bg-load"
+                self._load_remaining_models(include_stt=stt_bg),
+                name="realtime-bg-load",
             )
 
         try:
@@ -229,8 +250,8 @@ class RealtimeSession:
             )
             return False
 
-    async def _load_remaining_models(self) -> None:
-        """Background task: load LLM and TTS in parallel after session starts."""
+    async def _load_remaining_models(self, include_stt: bool = False) -> None:
+        """Background task: load LLM, TTS, optionally STT after session starts."""
 
         async def _load_llm():
             ok = await self._load_model_with_progress("llm", self.llm_model_id)
@@ -245,8 +266,13 @@ class RealtimeSession:
             else:
                 self._tts_ready.set()
 
-        # Load LLM and TTS concurrently
-        await asyncio.gather(_load_llm(), _load_tts(), return_exceptions=True)
+        async def _load_stt():
+            await self._load_model_with_progress("stt", self.stt_model_id)
+
+        coros = [_load_llm(), _load_tts()]
+        if include_stt and self.stt_model_id:
+            coros.append(_load_stt())
+        await asyncio.gather(*coros, return_exceptions=True)
 
     # ── Event dispatch ──────────────────────────────────────────────────
 
