@@ -102,6 +102,7 @@ export function RealtimeInterface({ models }: RealtimeInterfaceProps) {
   const [turns, setTurns] = useState<TurnEntry[]>([])
   const [error, setError] = useState<string | null>(null)
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
+  const [transcribeUserAudio, setTranscribeUserAudio] = useState<boolean>(true)
 
   const wsRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -256,17 +257,27 @@ export function RealtimeInterface({ models }: RealtimeInterfaceProps) {
           break
         }
         case "conversation.item.created": {
-          const item = ev.item as { role?: string; content?: Array<{ transcript?: string; text?: string; type?: string }> } | undefined
+          const item = ev.item as { id?: string; role?: string; content?: Array<{ transcript?: string; text?: string; type?: string }> } | undefined
           if (item?.role === "user") {
             const transcript = item.content?.find((c) => typeof c?.transcript === "string")?.transcript ?? ""
             const native = !transcript
+            const itemId = item.id ?? `u_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
             appendTurn({
-              id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              id: itemId,
               role: "user",
-              text: native ? "<audio enviado>" : transcript,
+              text: native ? (transcribeUserAudio ? "<transcribiendo…>" : "<audio enviado>") : transcript,
               native,
             })
           }
+          break
+        }
+        case "conversation.item.input_audio_transcription.completed": {
+          const itemId = typeof ev.item_id === "string" ? ev.item_id : null
+          const transcript = typeof ev.transcript === "string" ? ev.transcript : ""
+          if (!itemId || !transcript) break
+          setTurns((prev) =>
+            prev.map((t) => (t.id === itemId ? { ...t, text: transcript } : t)),
+          )
           break
         }
         case "response.created": {
@@ -324,19 +335,25 @@ export function RealtimeInterface({ models }: RealtimeInterfaceProps) {
       output_audio_format: "pcm16",
       voice: "alloy",
       input_audio_routing: audioNative ? "auto" : "stt",
+      transcribe_user_audio: transcribeUserAudio,
       turn_detection:
         inputMode === "vad"
           ? { type: "server_vad", threshold: 0.5, silence_duration_ms: 600, prefix_padding_ms: 300 }
           : { type: "none" },
     }
-    if (serverConfig?.realtimeDefaultSttModel) {
+    // Skip declaring the STT model entirely in native mode + transcript off:
+    // the backend won't need Whisper and avoids unnecessary cold loads.
+    if (
+      serverConfig?.realtimeDefaultSttModel &&
+      (!audioNative || transcribeUserAudio)
+    ) {
       session.input_audio_transcription = { model: serverConfig.realtimeDefaultSttModel }
     }
     if (serverConfig?.realtimeDefaultTtsModel) {
       session.tts_model = serverConfig.realtimeDefaultTtsModel
     }
     ws.send(JSON.stringify({ type: "session.update", session }))
-  }, [audioNative, inputMode, serverConfig])
+  }, [audioNative, inputMode, serverConfig, transcribeUserAudio])
 
   const connect = useCallback(async () => {
     if (!selectedModelId) {
@@ -628,6 +645,25 @@ export function RealtimeInterface({ models }: RealtimeInterfaceProps) {
             </button>
           </div>
         </div>
+
+        <label
+          className="flex items-center gap-2 text-xs text-muted-foreground"
+          title={
+            audioNative
+              ? "En modo audio nativo el LLM escucha el audio directamente. Whisper solo se usa para mostrar tu transcripción en la UI; puedes desactivarlo para evitar cargarlo."
+              : "Whisper transcribe tu voz antes de pasarla al LLM. No se puede desactivar en este modo."
+          }
+        >
+          <input
+            type="checkbox"
+            className="h-3.5 w-3.5 cursor-pointer accent-primary"
+            checked={transcribeUserAudio || !audioNative}
+            disabled={!audioNative}
+            onChange={(e) => setTranscribeUserAudio(e.target.checked)}
+          />
+          Transcribir audio del usuario para mostrar en UI
+          {!audioNative && <span className="text-muted-foreground/70">(siempre activo en modo STT)</span>}
+        </label>
 
         {inputMode === "ptt" ? (
           <button

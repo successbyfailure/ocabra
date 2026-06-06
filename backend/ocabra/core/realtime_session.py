@@ -343,12 +343,26 @@ class RealtimeSession:
         if "transcribe_user_audio" in session_cfg:
             self._transcribe_user_audio = bool(session_cfg["transcribe_user_audio"])
 
-        # Auto-load changed models (STT sync, LLM+TTS in background)
-        if iat or "tts_model" in session_cfg:
-            await self._load_model_with_progress("stt", self.stt_model_id)
-            if "tts_model" in session_cfg and self.tts_model_id:
-                self._tts_ready.clear()
-                asyncio.create_task(self._load_remaining_models())
+        # Auto-load changed models. Mirror the cold-start strategy from
+        # ``run()``: STT is only on the critical path for the classic
+        # Whisper -> text -> LLM flow. With a native-audio LLM, STT (when
+        # needed for the parallel transcript) is loaded in the background
+        # so the dispatch loop never blocks here.
+        if iat:
+            will_use_native = await self._should_use_native_audio()
+            stt_needed = bool(self.stt_model_id) and (
+                (not will_use_native) or self._transcribe_user_audio
+            )
+            if stt_needed and not will_use_native:
+                await self._load_model_with_progress("stt", self.stt_model_id)
+            elif stt_needed and will_use_native:
+                asyncio.create_task(
+                    self._load_model_with_progress("stt", self.stt_model_id),
+                    name="realtime-session-update-stt",
+                )
+        if "tts_model" in session_cfg and self.tts_model_id:
+            self._tts_ready.clear()
+            asyncio.create_task(self._load_remaining_models())
 
         # VAD configuration
         turn_detection = session_cfg.get("turn_detection")
