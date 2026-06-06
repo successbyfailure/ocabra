@@ -18,6 +18,7 @@ const LABELS: Partial<Record<keyof ModelCapabilities, string>> = {
   audioTranscription: "Audio",
   tts: "TTS",
   audioInput: "Audio in",
+  audioOutput: "Audio out",
   videoInput: "Video in",
   musicGeneration: "Music",
 }

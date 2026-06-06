@@ -61,6 +61,9 @@ async def test_should_use_native_audio_respects_explicit_stt_override() -> None:
 async def test_commit_native_audio_embeds_input_audio_part() -> None:
     session = _make_session(audio_input_capable=True)
     session.audio_buffer.extend(b"\x00\x01" * 1600)  # 0.1s of PCM16 @ 16kHz
+    # Disable the optional parallel STT for this specific assertion — we
+    # want to verify the strict "no Whisper" path.
+    session._transcribe_user_audio = False
 
     # Should NOT touch Whisper at all.
     session._transcribe = AsyncMock(side_effect=AssertionError("STT must not run"))
@@ -90,3 +93,69 @@ async def test_commit_stt_path_calls_whisper_and_stores_text() -> None:
 
     session._transcribe.assert_awaited_once()
     assert session.conversation == [{"role": "user", "content": "hello there"}]
+
+
+@pytest.mark.asyncio
+async def test_native_audio_with_parallel_transcript_emits_event() -> None:
+    """Native mode + transcribe_user_audio=true also runs Whisper async."""
+    import asyncio
+
+    session = _make_session(audio_input_capable=True)
+    session.audio_buffer.extend(b"\x00\x01" * 1600)
+    session.stt_model_id = "ollama/whisper-tiny"
+    session._transcribe_user_audio = True
+    session._transcribe = AsyncMock(return_value="parallel transcript")
+    session._send_event = AsyncMock()
+
+    await session._commit_audio_only()
+
+    # Drain any scheduled fire-and-forget tasks.
+    pending = [
+        t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    session._transcribe.assert_awaited_once()
+    transcript_event = [
+        c.kwargs
+        for c in session._send_event.await_args_list
+        if c.args
+        and c.args[0] == "conversation.item.input_audio_transcription.completed"
+    ]
+    assert transcript_event, "parallel STT did not emit transcription event"
+    assert transcript_event[0]["transcript"] == "parallel transcript"
+
+
+@pytest.mark.asyncio
+async def test_native_audio_with_transcribe_disabled_skips_parallel_stt() -> None:
+    """transcribe_user_audio=false keeps the strict no-Whisper guarantee."""
+    session = _make_session(audio_input_capable=True)
+    session.audio_buffer.extend(b"\x00\x01" * 1600)
+    session.stt_model_id = "ollama/whisper-tiny"
+    session._transcribe_user_audio = False
+    session._transcribe = AsyncMock(side_effect=AssertionError("STT must not run"))
+
+    await session._commit_audio_only()
+
+    session._transcribe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_should_use_native_audio_output_reads_capability() -> None:
+    """Symmetric helper for output bypass — defaults to False today."""
+    ws = MagicMock()
+    ws.send_text = AsyncMock()
+    state = SimpleNamespace(
+        capabilities=BackendCapabilities(chat=True, audio_output=True),
+        backend_model_id="m",
+    )
+    mm = MagicMock()
+    mm.get_state = AsyncMock(return_value=state)
+    wp = MagicMock()
+    wp.get_worker = MagicMock(return_value=None)
+    session = RealtimeSession(
+        ws=ws, model_id="vllm/omni", worker_pool=wp, model_manager=mm
+    )
+
+    assert await session._should_use_native_audio_output() is True

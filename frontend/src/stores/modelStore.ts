@@ -49,6 +49,7 @@ export const useModelStore = create<ModelStore>((set) => ({
                 musicGeneration: false,
                 tts: false,
         audioInput: false,
+        audioOutput: false,
         videoInput: false,
                 streaming: false,
                 contextLength: 0,

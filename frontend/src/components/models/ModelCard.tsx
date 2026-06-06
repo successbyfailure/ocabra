@@ -194,6 +194,7 @@ export function ModelCard({
           <div className="flex flex-wrap items-center gap-1">
             <span>{modelType(model)}</span>
             {model.capabilities.audioInput && <CapabilityBadge capability="audioInput" />}
+            {model.capabilities.audioOutput && <CapabilityBadge capability="audioOutput" />}
             {model.capabilities.videoInput && <CapabilityBadge capability="videoInput" />}
           </div>
         </td>

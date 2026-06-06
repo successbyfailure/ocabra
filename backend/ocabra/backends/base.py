@@ -101,10 +101,13 @@ class BackendCapabilities:
     # Multimodal input in /v1/chat/completions:
     # ``audio_input``  → accepts ``{type:"input_audio", input_audio:{data, format}}`` content parts.
     # ``video_input``  → accepts ``{type:"video_url",  video_url:{url}}`` content parts.
-    # These are about *consuming* media inside chat, distinct from
-    # ``audio_transcription`` (a dedicated STT endpoint) or ``vision`` (image input).
+    # ``audio_output`` → emits audio chunks in the response stream (e.g. Qwen-Omni, GPT-4o-realtime).
+    # These are about *consuming/producing* media inside chat, distinct from
+    # ``audio_transcription`` (a dedicated STT endpoint), ``tts`` (a dedicated
+    # synthesis endpoint), or ``vision`` (image input).
     audio_input: bool = False
     video_input: bool = False
+    audio_output: bool = False
     streaming: bool = False
     context_length: int = 0
 

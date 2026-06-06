@@ -360,6 +360,7 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     musicGeneration: Boolean(data.music_generation ?? data.musicGeneration),
     tts: Boolean(data.tts),
     audioInput: Boolean(data.audio_input ?? data.audioInput),
+    audioOutput: Boolean(data.audio_output ?? data.audioOutput),
     videoInput: Boolean(data.video_input ?? data.videoInput),
     streaming: Boolean(data.streaming),
     contextLength: Number(data.context_length ?? data.contextLength ?? 0),

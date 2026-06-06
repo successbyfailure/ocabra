@@ -133,6 +133,17 @@ class RealtimeSession:
         # one of ``"auto"`` (default), ``"native"`` (force native), ``"stt"``
         # (force Whisper path even if the LLM advertises audio_input).
         self._input_audio_routing: str = "auto"
+        # When native-audio mode is active, also run Whisper in parallel just
+        # to surface a user transcript via ``conversation.item.input_audio_
+        # transcription.completed`` (OpenAI Realtime standard). Off-by-default
+        # would force the UI to render "<audio>" placeholders — on by default
+        # is the friendlier UX. Toggle via ``session.update.transcribe_user_audio``.
+        self._transcribe_user_audio: bool = True
+        # Cached capability flag for symmetric output bypass — populated lazily
+        # from ``audio_output``. Currently no model in the registry declares
+        # this true, but the hook is in place for Qwen2.5-Omni / GPT-4o-realtime
+        # style models that emit audio directly without a separate TTS step.
+        self._native_audio_output: bool | None = None
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -296,8 +307,15 @@ class RealtimeSession:
             routing = str(session_cfg["input_audio_routing"]).lower()
             if routing in ("auto", "native", "stt"):
                 self._input_audio_routing = routing
-                # Invalidate cached decision so the next turn re-evaluates.
+                # Invalidate cached decisions so the next turn re-evaluates.
                 self._native_audio_input = None
+                self._native_audio_output = None
+
+        # oCabra extension: when native-audio routing is active, optionally
+        # still run Whisper in parallel to populate the user's transcript on
+        # the UI (default true). Set to false to save the STT compute.
+        if "transcribe_user_audio" in session_cfg:
+            self._transcribe_user_audio = bool(session_cfg["transcribe_user_audio"])
 
         # Auto-load changed models (STT sync, LLM+TTS in background)
         if iat or "tts_model" in session_cfg:
@@ -414,6 +432,25 @@ class RealtimeSession:
         self._native_audio_input = bool(getattr(caps, "audio_input", False))
         return self._native_audio_input
 
+    async def _should_use_native_audio_output(self) -> bool:
+        """Symmetric hook to ``_should_use_native_audio`` for output bypass.
+
+        When the LLM advertises ``audio_output`` it emits PCM/Opus chunks in
+        its response stream directly (Qwen2.5-Omni, GPT-4o-realtime). In that
+        case the TTS step is redundant. Today no model in the registry sets
+        this flag — the helper exists so the pipeline already routes around
+        TTS when one shows up. Returns False if the LLM cannot be resolved.
+        """
+        if self._native_audio_output is not None:
+            return self._native_audio_output
+        try:
+            state = await self._model_manager.get_state(self.llm_model_id)
+        except Exception:
+            state = None
+        caps = getattr(state, "capabilities", None) if state else None
+        self._native_audio_output = bool(getattr(caps, "audio_output", False))
+        return self._native_audio_output
+
     async def _commit_and_respond(self) -> None:
         """Commit the audio buffer and trigger the full pipeline."""
         await self._commit_audio_only()
@@ -462,14 +499,20 @@ class RealtimeSession:
                     "content": [
                         {
                             "type": "input_audio",
-                            # Transcript is left empty — the native-audio LLM
-                            # may surface its own transcription in the next
-                            # response.audio_transcript.* stream.
+                            # Transcript is left empty here — populated by the
+                            # parallel STT task below (if enabled) via the
+                            # standard ``input_audio_transcription.completed``
+                            # event the UI already knows how to render.
                             "transcript": "",
                         }
                     ],
                 },
             )
+            if self._transcribe_user_audio and self.stt_model_id:
+                asyncio.create_task(
+                    self._emit_parallel_user_transcript(pcm_data, item_id),
+                    name="realtime-parallel-stt",
+                )
             return
 
         # STT path: transcribe audio
@@ -557,6 +600,18 @@ class RealtimeSession:
             # Build LLM messages
             messages = self._build_llm_messages(instructions_override)
 
+            # Resolve symmetric output routing once per turn. When the LLM
+            # emits audio natively (audio_output capability) we skip the
+            # discrete TTS step — the response audio chunks come through the
+            # same LLM stream. Today no model declares this; keeps the door
+            # open for Qwen2.5-Omni / GPT-4o-realtime style backends.
+            tts_bypassed_by_native = await self._should_use_native_audio_output()
+            tts_enabled = (
+                "audio" in self.modalities
+                and self.tts_model_id
+                and not tts_bypassed_by_native
+            )
+
             # Stream LLM response
             full_text = ""
             sentence_buffer = ""
@@ -586,7 +641,7 @@ class RealtimeSession:
                     for sentence in sentences[:-1]:
                         if self._cancel_event.is_set():
                             break
-                        if "audio" in self.modalities and self.tts_model_id:
+                        if tts_enabled:
                             await self._synthesize_and_send(sentence, response_id, output_item_id)
                             audio_sent = True
                     sentence_buffer = sentences[-1]
@@ -672,6 +727,33 @@ class RealtimeSession:
                     "output": [],
                 },
             )
+
+    async def _emit_parallel_user_transcript(
+        self, pcm_data: bytes, item_id: str
+    ) -> None:
+        """Run Whisper in parallel and emit a transcription event.
+
+        Only fires when native-audio mode is active and
+        ``session.transcribe_user_audio`` is true. Failures are silent — the
+        LLM response is the primary signal; the transcript is purely cosmetic.
+        """
+        try:
+            transcript = await self._transcribe(pcm_data)
+        except Exception as exc:
+            logger.warning(
+                "realtime_parallel_stt_failed",
+                session_id=self._session_id,
+                error=str(exc),
+            )
+            return
+        if not transcript:
+            return
+        await self._send_event(
+            "conversation.item.input_audio_transcription.completed",
+            item_id=item_id,
+            content_index=0,
+            transcript=transcript,
+        )
 
     # ── STT (Whisper) ───────────────────────────────────────────────────
 
@@ -897,6 +979,7 @@ class RealtimeSession:
             "tools": [],  # Tool calls not yet implemented
             "tool_choice": "none",
             "input_audio_routing": self._input_audio_routing,
+            "transcribe_user_audio": self._transcribe_user_audio,
         }
 
     # ── WebSocket event helpers ─────────────────────────────────────────
