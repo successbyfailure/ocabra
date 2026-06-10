@@ -97,14 +97,29 @@ async def create_user(
     from ocabra.core.auth_manager import hash_password
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, User, UserGroup
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
+    from sqlalchemy.exc import IntegrityError
 
     async with AsyncSessionLocal() as session:
-        existing = await session.execute(
-            select(User).where(User.username == body.username)
-        )
-        if existing.scalar_one_or_none() is not None:
-            raise HTTPException(status_code=409, detail="Username already exists")
+        # Pre-check both unique columns so the common case returns 409 with a
+        # field-specific message. The IntegrityError catch below still covers
+        # races (two concurrent inserts both pass the pre-check) and any other
+        # unique constraint we haven't enumerated here.
+        clauses = [User.username == body.username]
+        if body.email is not None:
+            clauses.append(User.email == body.email)
+        existing = await session.execute(select(User).where(or_(*clauses)))
+        existing_row = existing.scalar_one_or_none()
+        if existing_row is not None:
+            if existing_row.username == body.username:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": "username_taken", "message": "Username already exists"},
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "email_taken", "message": "Email already in use"},
+            )
 
         new_user = User(
             username=body.username,
@@ -114,16 +129,40 @@ async def create_user(
             is_active=True,
         )
         session.add(new_user)
-        await session.flush()
+        try:
+            await session.flush()
 
-        # Add user to the default group so they can see models immediately.
-        default_group = (
-            await session.execute(select(Group).where(Group.is_default.is_(True)))
-        ).scalar_one_or_none()
-        if default_group is not None:
-            session.add(UserGroup(user_id=new_user.id, group_id=default_group.id))
+            # Add user to the default group so they can see models immediately.
+            default_group = (
+                await session.execute(select(Group).where(Group.is_default.is_(True)))
+            ).scalar_one_or_none()
+            if default_group is not None:
+                session.add(UserGroup(user_id=new_user.id, group_id=default_group.id))
 
-        await session.commit()
+            await session.commit()
+        except IntegrityError as exc:
+            # Race: another request inserted the same username/email between
+            # our pre-check and flush, or a constraint we don't pre-check
+            # (e.g. some future partial index) was violated.
+            await session.rollback()
+            msg = str(getattr(exc.orig, "args", [""])[0] or exc).lower()
+            if "email" in msg:
+                code, message = "email_taken", "Email already in use"
+            elif "username" in msg:
+                code, message = "username_taken", "Username already exists"
+            else:
+                code, message = "user_exists", "User already exists"
+            logger.info(
+                "user_create_conflict",
+                username=body.username,
+                email=body.email,
+                code=code,
+                by=caller.username,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"error": code, "message": message},
+            ) from exc
         await session.refresh(new_user)
 
     logger.info("user_created", username=new_user.username, role=new_user.role, by=caller.username)
