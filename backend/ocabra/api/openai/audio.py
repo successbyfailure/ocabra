@@ -66,6 +66,15 @@ async def transcriptions(
     prompt: str | None = form.get("prompt")
     temperature: float = float(form.get("temperature", 0.0))
     diarize: str | None = form.get("diarize")
+    # OpenAI sends repeated `timestamp_granularities[]` fields; accept the
+    # bracketed and plain spellings so word/segment timestamps reach the worker.
+    granularities: list[str] = [
+        str(value)
+        for value in (
+            form.getlist("timestamp_granularities[]")
+            or form.getlist("timestamp_granularities")
+        )
+    ]
 
     # Log a warning if the client sends a format that may not be handled by
     # all Whisper backends (e.g. M4A/AAC from Android MediaRecorder).
@@ -99,7 +108,7 @@ async def transcriptions(
 
     # Proxy whisper requests to a peer when it already has the model warm —
     # avoids loading a local worker just for one transcription.
-    fed_form_data: dict[str, str] = {
+    fed_form_data: dict[str, Any] = {
         "model": model_id,
         "response_format": response_format,
         "temperature": str(temperature),
@@ -110,6 +119,8 @@ async def transcriptions(
         fed_form_data["prompt"] = prompt
     if diarize is not None:
         fed_form_data["diarize"] = diarize
+    if granularities:
+        fed_form_data["timestamp_granularities"] = granularities
 
     fed_resp = await try_proxy_multipart(
         request,
@@ -196,7 +207,7 @@ async def transcriptions(
 
             try:
                 async with httpx.AsyncClient(timeout=300.0) as client:
-                    form_data: dict[str, str] = {
+                    form_data: dict[str, Any] = {
                         "response_format": response_format,
                         "temperature": str(temperature),
                     }
@@ -206,6 +217,8 @@ async def transcriptions(
                         form_data["prompt"] = prompt
                     if diarize is not None:
                         form_data["diarize"] = diarize
+                    if granularities:
+                        form_data["timestamp_granularities"] = granularities
 
                     resp = await client.post(
                         url,

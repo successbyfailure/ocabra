@@ -158,6 +158,7 @@ def create_app(
                     temperature,
                     use_diarization,
                     runtime.diarization_pipeline,
+                    timestamp_granularities,
                 )
             except Exception as exc:
                 if runtime.device == "cuda" and _is_missing_cudnn_error(exc):
@@ -179,6 +180,7 @@ def create_app(
                         temperature,
                         use_diarization,
                         runtime.diarization_pipeline,
+                        timestamp_granularities,
                     )
                 else:
                     raise
@@ -204,6 +206,8 @@ def create_app(
                 "segments": segments,
                 "timestamp_granularities": timestamp_granularities,
             }
+            if result.get("words") is not None:
+                payload["words"] = result["words"]
             if result.get("diarization") is not None:
                 payload["diarization"] = result["diarization"]
                 payload["speakers"] = result.get("speakers", [])
@@ -242,8 +246,13 @@ class _NemoModelAdapter:
         language: str | None = None,
         initial_prompt: str | None = None,
         temperature: float = 0.0,
+        word_timestamps: bool = False,
+        vad_filter: bool = False,
     ) -> tuple[list[Any], Any]:
-        _ = initial_prompt, temperature
+        # NeMo checkpoints here produce a single transcript without word-level
+        # timestamps; accept (and ignore) the faster-whisper-only options so the
+        # shared call site can pass them uniformly.
+        _ = initial_prompt, temperature, word_timestamps, vad_filter
         text = _nemo_transcribe_text(self._model, audio_path=audio_path, language=language)
         segment = SimpleNamespace(start=0.0, end=0.0, text=text)
         info = SimpleNamespace(language=language or "unknown")
@@ -502,12 +511,24 @@ def _run_transcription(
     temperature: float,
     diarize: bool,
     diarization_pipeline: Any,
+    timestamp_granularities: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    granularities = list(timestamp_granularities or ["segment"])
+    expose_words = "word" in granularities
+    diarizing = bool(diarize and diarization_pipeline is not None)
+    # Word timestamps are needed when the caller requests word granularity, and
+    # also internally for diarization so segments can be split on speaker turns.
+    need_words = expose_words or diarizing
+
     segments, info = model.transcribe(
         audio_path,
         language=language,
         initial_prompt=prompt,
         temperature=temperature,
+        word_timestamps=need_words,
+        # VAD splits the audio on silences so faster-whisper emits per-utterance
+        # segments instead of collapsing everything into one block.
+        vad_filter=True,
     )
 
     segment_list: list[dict[str, Any]] = []
@@ -515,18 +536,28 @@ def _run_transcription(
 
     for idx, segment in enumerate(segments):
         text_parts.append(segment.text)
-        segment_list.append(
-            {
-                "id": idx,
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "text": segment.text.strip(),
-            }
-        )
+        entry: dict[str, Any] = {
+            "id": idx,
+            "start": float(segment.start),
+            "end": float(segment.end),
+            "text": segment.text.strip(),
+        }
+        seg_words = getattr(segment, "words", None)
+        if need_words and seg_words:
+            entry["words"] = [
+                {
+                    "word": word.word,
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "probability": float(getattr(word, "probability", 0.0) or 0.0),
+                }
+                for word in seg_words
+            ]
+        segment_list.append(entry)
 
     diarization_turns: list[dict[str, Any]] | None = None
     speakers: list[str] = []
-    if diarize and diarization_pipeline is not None:
+    if diarizing:
         # pyannote ≥4.0 uses torchcodec (requires FFmpeg shared libs) for
         # audio I/O. Since torchcodec may not be available, load the audio
         # via PyAV (bundled with faster-whisper) and pass a waveform dict.
@@ -548,18 +579,32 @@ def _run_transcription(
         _audio_input: Any = {"waveform": _waveform, "sample_rate": _sr_target}
         annotation = diarization_pipeline(_audio_input)
         diarization_turns = _collect_diarization_turns(annotation)
-        speakers = _attach_speakers(segment_list, diarization_turns)
+        # Split segments on speaker turns (using word timestamps when present)
+        # so each segment carries the speaker that actually spoke it.
+        segment_list = _split_segments_by_speaker(segment_list, diarization_turns)
+        # The speaker roster reflects every speaker in the diarization track,
+        # not just the ones that happened to win a segment.
+        speakers = sorted({turn["speaker"] for turn in diarization_turns})
+
+    # Drop the internal word data unless the caller asked for word granularity.
+    if not expose_words:
+        for segment in segment_list:
+            segment.pop("words", None)
 
     if diarization_turns is not None:
         final_text = _to_text(segment_list)
     else:
         final_text = " ".join(part.strip() for part in text_parts if part).strip()
 
-    payload = {
+    payload: dict[str, Any] = {
         "text": final_text,
         "segments": segment_list,
         "language": getattr(info, "language", language or "unknown"),
     }
+    if expose_words:
+        payload["words"] = [
+            word for segment in segment_list for word in segment.get("words", [])
+        ]
     if diarization_turns is not None:
         payload["diarization"] = diarization_turns
         payload["speakers"] = speakers
@@ -700,29 +745,83 @@ def _collect_diarization_turns(annotation: Any) -> list[dict[str, Any]]:
     return turns
 
 
-def _attach_speakers(
+def _speaker_for_interval(
+    start: float,
+    end: float,
+    diarization_turns: list[dict[str, Any]],
+) -> str | None:
+    """Return the speaker whose diarization turn overlaps [start, end] most."""
+    best_speaker: str | None = None
+    best_overlap = 0.0
+    for turn in diarization_turns:
+        overlap = max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = turn["speaker"]
+    return best_speaker
+
+
+def _split_segments_by_speaker(
     segments: list[dict[str, Any]],
     diarization_turns: list[dict[str, Any]],
-) -> list[str]:
-    speakers: set[str] = set()
+) -> list[dict[str, Any]]:
+    """Re-segment the transcript so each segment maps to a single speaker.
+
+    When a segment has word-level timestamps, consecutive words are grouped by
+    their overlapping diarization speaker and emitted as separate segments on
+    speaker changes. Segments without words fall back to whole-segment overlap.
+    """
+    result: list[dict[str, Any]] = []
+    next_id = 0
 
     for segment in segments:
-        start = float(segment["start"])
-        end = float(segment["end"])
-        best_speaker: str | None = None
-        best_overlap = 0.0
+        words = segment.get("words")
+        if not words:
+            speaker = _speaker_for_interval(
+                float(segment["start"]), float(segment["end"]), diarization_turns
+            )
+            new_segment = {**segment, "id": next_id}
+            if speaker is not None:
+                new_segment["speaker"] = speaker
+            result.append(new_segment)
+            next_id += 1
+            continue
 
-        for turn in diarization_turns:
-            overlap = max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_speaker = turn["speaker"]
+        group_words: list[dict[str, Any]] = []
+        group_speaker: str | None = None
+        for word in words:
+            speaker = _speaker_for_interval(
+                float(word["start"]), float(word["end"]), diarization_turns
+            )
+            if group_words and speaker != group_speaker:
+                result.append(_segment_from_words(next_id, group_words, group_speaker))
+                next_id += 1
+                group_words = []
+            group_speaker = speaker
+            group_words.append(word)
 
-        if best_speaker is not None:
-            segment["speaker"] = best_speaker
-            speakers.add(best_speaker)
+        if group_words:
+            result.append(_segment_from_words(next_id, group_words, group_speaker))
+            next_id += 1
 
-    return sorted(speakers)
+    return result
+
+
+def _segment_from_words(
+    segment_id: int,
+    words: list[dict[str, Any]],
+    speaker: str | None,
+) -> dict[str, Any]:
+    segment: dict[str, Any] = {
+        "id": segment_id,
+        "start": float(words[0]["start"]),
+        "end": float(words[-1]["end"]),
+        "text": "".join(word["word"] for word in words).strip(),
+        "words": words,
+    }
+    if speaker is not None:
+        segment["speaker"] = speaker
+    return segment
 
 
 def _parse_optional_bool(value: str | None) -> bool | None:
