@@ -254,6 +254,91 @@ def test_to_backend_body_vllm_keeps_chat_template_kwargs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cold-model capability display (cache + declared fallback)
+# ---------------------------------------------------------------------------
+
+def _make_state(backend_type, model_id, *, status=None, capabilities=None, extra_config=None):
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id=model_id,
+        backend_model_id=model_id.split("/", 1)[-1],
+        display_name=model_id,
+        backend_type=backend_type,
+        status=status or ModelStatus.CONFIGURED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=capabilities or BackendCapabilities(),
+        extra_config=extra_config or {},
+    )
+
+
+def test_backend_capabilities_from_dict_roundtrip():
+    from ocabra.backends.base import BackendCapabilities
+
+    caps = BackendCapabilities(chat=True, vision=True, context_length=8192)
+    restored = BackendCapabilities.from_dict({**caps.to_dict(), "bogus_key": 1})
+    assert restored == caps
+
+
+def test_declared_capabilities_llm_and_variants():
+    from ocabra.core.model_manager import declared_capabilities
+
+    chat = declared_capabilities(_make_state("vllm", "vllm/Qwen/Qwen3-8B"))
+    assert chat.chat and chat.completion and chat.streaming and not chat.vision
+
+    vl = declared_capabilities(_make_state("ollama", "ollama/qwen3-vl:8b"))
+    assert vl.vision and vl.chat
+
+    embed = declared_capabilities(_make_state("ollama", "ollama/qwen3-embedding:8b"))
+    assert embed.embeddings and embed.pooling and not embed.chat
+
+    rerank = declared_capabilities(_make_state("vllm", "vllm/BAAI/bge-reranker-v2-m3"))
+    assert rerank.rerank and rerank.score and not rerank.chat
+
+    tts = declared_capabilities(_make_state("chatterbox", "chatterbox/ResembleAI/chatterbox"))
+    assert tts.tts and not tts.chat
+
+    stt = declared_capabilities(_make_state("whisper", "whisper/large-v3"))
+    assert stt.audio_transcription
+
+
+def test_declared_capabilities_uses_context_length_fallback():
+    from ocabra.core.model_manager import declared_capabilities
+
+    state = _make_state(
+        "vllm", "vllm/Qwen/Qwen3-8B", extra_config={"vllm": {"max_model_len": 32768}}
+    )
+    assert declared_capabilities(state).context_length == 32768
+
+
+def test_resolve_display_capabilities_sources():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import ModelStatus, resolve_display_capabilities
+
+    # Loaded → live (authoritative)
+    loaded = _make_state(
+        "vllm", "vllm/demo", status=ModelStatus.LOADED,
+        capabilities=BackendCapabilities(chat=True, context_length=4096),
+    )
+    caps, source = resolve_display_capabilities(loaded)
+    assert source == "live" and caps["chat"] is True
+
+    # Cold but retaining last-known caps → cached
+    cached = _make_state(
+        "vllm", "vllm/demo", status=ModelStatus.UNLOADED,
+        capabilities=BackendCapabilities(chat=True, context_length=4096),
+    )
+    caps, source = resolve_display_capabilities(cached)
+    assert source == "cached" and caps["context_length"] == 4096
+
+    # Cold, never loaded → declared heuristic
+    cold = _make_state("vllm", "vllm/Qwen/Qwen3-8B")
+    caps, source = resolve_display_capabilities(cold)
+    assert source == "declared" and caps["chat"] is True
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------
 

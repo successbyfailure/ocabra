@@ -516,6 +516,15 @@ class ModelManager:
             if parsed is not None:
                 state.last_request_at = parsed
 
+            # Restore the last-known capabilities so cold models can report
+            # them ("cached") instead of all-false until their first load.
+            if state.status != ModelStatus.LOADED and not capabilities_populated(
+                state.capabilities
+            ):
+                restored = BackendCapabilities.from_dict(payload.get("capabilities"))
+                if capabilities_populated(restored):
+                    state.capabilities = restored
+
     @staticmethod
     def _parse_datetime(value: object) -> datetime | None:
         if not isinstance(value, str) or not value.strip():
@@ -1439,3 +1448,84 @@ class ModelManager:
         self._states.pop(model_id, None)
         self._load_locks.pop(model_id, None)
         self._persisted_model_ids.discard(model_id)
+
+
+# ── Capability display resolution ──────────────────────────────────────────
+# Models only report their *real* capabilities once loaded. For cold models we
+# fall back to (in order): the last-loaded capabilities still held in memory or
+# rehydrated from Redis ("cached"), then a heuristic derived from backend type /
+# model name ("declared"). Lets ``/v1/models`` expose useful capability/context
+# info without forcing a load. See resolve_display_capabilities().
+
+# Backend families whose models are text LLMs (chat/completion) by default.
+_TEXT_LLM_BACKENDS = {
+    "vllm",
+    "sglang",
+    "llama_cpp",
+    "bitnet",
+    "tensorrt_llm",
+    "ollama",
+    "transformers",
+}
+
+
+def capabilities_populated(capabilities: BackendCapabilities) -> bool:
+    """True when *capabilities* carries any real signal (a flag or context len)."""
+    data = capabilities.to_dict()
+    if int(data.get("context_length", 0) or 0) > 0:
+        return True
+    return any(value is True for value in data.values())
+
+
+def declared_capabilities(state: "ModelState") -> BackendCapabilities:
+    """Best-effort capabilities for a never-loaded model, from backend + name.
+
+    Heuristic only — meant to give clients a usable hint while a model is cold,
+    not an authoritative answer (that arrives once the model is loaded).
+    """
+    caps = BackendCapabilities()
+    backend_type = (state.backend_type or "").strip().lower()
+    name = f"{state.backend_model_id or ''} {state.model_id or ''}".lower()
+
+    context_length = ModelManager._resolve_context_length_fallback(state)
+    if context_length > 0:
+        caps.context_length = context_length
+
+    if backend_type in _TEXT_LLM_BACKENDS:
+        if "embed" in name:
+            caps.embeddings = True
+            caps.pooling = True
+        elif "rerank" in name or "re-rank" in name or "cross-encoder" in name:
+            caps.rerank = True
+            caps.score = True
+        else:
+            caps.chat = True
+            caps.completion = True
+            caps.streaming = True
+            if any(hint in name for hint in ("-vl", "vl-", "vision", "llava", "omni")):
+                caps.vision = True
+    elif backend_type == "whisper":
+        caps.audio_transcription = True
+    elif backend_type in {"chatterbox", "tts", "voxtral"}:
+        caps.tts = True
+        caps.streaming = True
+    elif backend_type == "diffusers":
+        caps.image_generation = True
+    elif backend_type == "acestep":
+        caps.music_generation = True
+
+    return caps
+
+
+def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:
+    """Return ``(capabilities_dict, source)`` for display purposes.
+
+    ``source`` is one of ``"live"`` (model loaded — authoritative),
+    ``"cached"`` (last-known capabilities from a previous load) or
+    ``"declared"`` (heuristic for a model never loaded this deployment).
+    """
+    if state.status == ModelStatus.LOADED:
+        return state.capabilities.to_dict(), "live"
+    if capabilities_populated(state.capabilities):
+        return state.capabilities.to_dict(), "cached"
+    return declared_capabilities(state).to_dict(), "declared"
