@@ -799,26 +799,32 @@ def _thinking_disable_intent(body: dict) -> bool | None:
     return None
 
 
-def _normalize_ollama_reasoning(payload: dict) -> dict:
-    """Translate thinking-control flags into knobs Ollama's OpenAI-compatible
-    ``/v1/chat/completions`` endpoint understands.
+def _apply_thinking_controls(state: ModelState, payload: dict) -> None:
+    """Map the client's thinking-disable intent onto backend-specific knobs.
 
-    Ollama's ``/v1`` endpoint ignores the native ``think`` flag and vLLM's
-    ``chat_template_kwargs``; the supported lever is ``reasoning_effort`` /
-    ``reasoning`` (``"none"`` to disable). We map the client's intent onto it
-    and drop the vLLM-only ``chat_template_kwargs`` noise. ``think`` is left in
-    place as a harmless hint for Ollama builds that do honour it.
+    Backends disagree on how (and whether) reasoning can be turned off:
 
-    Note: some models (e.g. Gemma) currently ignore ``reasoning_effort`` on the
-    ``/v1`` endpoint upstream (ollama/ollama#15288); fully bypassing that
-    requires routing through the native ``/api/chat`` endpoint.
+    - **vLLM / sglang** honour it through the chat template, so we set
+      ``chat_template_kwargs.enable_thinking = false``. This genuinely
+      suppresses the ``<think>`` block for models that support the flag
+      (e.g. Qwen3) and is silently ignored by templates that don't.
+    - **Ollama** cannot disable reasoning through its OpenAI-compatible
+      endpoint for current reasoning models: a string ``reasoning`` 400s
+      (it expects an ``openai.Reasoning`` object) and ``reasoning_effort``
+      only relocates the chain-of-thought inline. So we inject nothing and
+      just drop the vLLM-only ``chat_template_kwargs`` to avoid confusing the
+      upstream. Disabling reasoning there needs a prompt-level switch (e.g.
+      Qwen's ``/no_think``) or an upstream Ollama fix (ollama/ollama#15288).
     """
-    intent = _thinking_disable_intent(payload)
-    if intent is True:
-        payload.setdefault("reasoning_effort", "none")
-        payload.setdefault("reasoning", "none")
-    payload.pop("chat_template_kwargs", None)
-    return payload
+    backend_type = getattr(state, "backend_type", "")
+    if backend_type == "ollama":
+        payload.pop("chat_template_kwargs", None)
+        return
+    if backend_type in {"vllm", "sglang"} and _thinking_disable_intent(payload) is True:
+        cct = payload.get("chat_template_kwargs")
+        cct = dict(cct) if isinstance(cct, dict) else {}
+        cct.setdefault("enable_thinking", False)
+        payload["chat_template_kwargs"] = cct
 
 
 def to_backend_body(state: ModelState, body: dict) -> dict:
@@ -831,10 +837,7 @@ def to_backend_body(state: ModelState, body: dict) -> dict:
             payload["stream_options"] = {**stream_options, "include_usage": True}
         else:
             payload["stream_options"] = {"include_usage": True}
-    # Ollama's OpenAI-compatible endpoint needs reasoning toggles translated;
-    # vLLM/sglang honour chat_template_kwargs natively so leave those untouched.
-    if getattr(state, "backend_type", "") == "ollama":
-        payload = _normalize_ollama_reasoning(payload)
+    _apply_thinking_controls(state, payload)
     return payload
 
 
