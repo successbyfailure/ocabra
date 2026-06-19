@@ -183,53 +183,11 @@ def _ollama_state():
     )
 
 
-def test_to_backend_body_ollama_translates_think_false() -> None:
-    from ocabra.api.openai._deps import to_backend_body
-
-    payload = to_backend_body(
-        _ollama_state(),
-        {"model": "gemma4:26b", "think": False, "messages": []},
-    )
-
-    assert payload["reasoning_effort"] == "none"
-    assert payload["reasoning"] == "none"
-
-
-def test_to_backend_body_ollama_translates_enable_thinking_false() -> None:
-    from ocabra.api.openai._deps import to_backend_body
-
-    payload = to_backend_body(
-        _ollama_state(),
-        {
-            "model": "gemma4:26b",
-            "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [],
-        },
-    )
-
-    assert payload["reasoning_effort"] == "none"
-    # The vLLM-only chat_template_kwargs must not leak to Ollama's /v1 endpoint.
-    assert "chat_template_kwargs" not in payload
-
-
-def test_to_backend_body_ollama_leaves_thinking_on_by_default() -> None:
-    from ocabra.api.openai._deps import to_backend_body
-
-    payload = to_backend_body(
-        _ollama_state(),
-        {"model": "gemma4:26b", "messages": []},
-    )
-
-    assert "reasoning_effort" not in payload
-    assert "reasoning" not in payload
-
-
-def test_to_backend_body_vllm_keeps_chat_template_kwargs() -> None:
-    from ocabra.api.openai._deps import to_backend_body
+def _vllm_state():
     from ocabra.backends.base import BackendCapabilities
     from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
-    state = ModelState(
+    return ModelState(
         model_id="vllm/demo",
         backend_model_id="demo",
         display_name="Demo",
@@ -239,18 +197,60 @@ def test_to_backend_body_vllm_keeps_chat_template_kwargs() -> None:
         capabilities=BackendCapabilities(chat=True, streaming=True),
     )
 
+
+def test_to_backend_body_ollama_never_injects_reasoning_knobs() -> None:
+    # Ollama's /v1 can't disable reasoning via params (a string `reasoning`
+    # 400s upstream); oCabra must not inject any knob and must drop the
+    # vLLM-only chat_template_kwargs.
+    from ocabra.api.openai._deps import to_backend_body
+
     payload = to_backend_body(
-        state,
+        _ollama_state(),
         {
-            "model": "vllm/demo",
+            "model": "gemma4:26b",
+            "think": False,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [],
         },
     )
 
-    # vLLM honours chat_template_kwargs natively, so it must be preserved.
-    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning" not in payload
     assert "reasoning_effort" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+def test_to_backend_body_vllm_translates_think_false_to_enable_thinking() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+
+    payload = to_backend_body(
+        _vllm_state(),
+        {"model": "vllm/demo", "think": False, "messages": []},
+    )
+
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_to_backend_body_vllm_preserves_explicit_chat_template_kwargs() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+
+    payload = to_backend_body(
+        _vllm_state(),
+        {
+            "model": "vllm/demo",
+            "chat_template_kwargs": {"enable_thinking": False, "custom": 1},
+            "messages": [],
+        },
+    )
+
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False, "custom": 1}
+
+
+def test_to_backend_body_vllm_leaves_thinking_on_by_default() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+
+    payload = to_backend_body(_vllm_state(), {"model": "vllm/demo", "messages": []})
+
+    assert "chat_template_kwargs" not in payload
 
 
 # ---------------------------------------------------------------------------
