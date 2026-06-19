@@ -63,7 +63,7 @@ async def list_models(
     into the listing. Duplicate models (same model_id available both locally
     and remotely) appear once with metadata about all available nodes.
     """
-    from ocabra.core.model_manager import ModelStatus
+    from ocabra.core.model_manager import ModelStatus, resolve_display_capabilities
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
@@ -105,6 +105,7 @@ async def list_models(
         local_model_ids.add(profile.base_model_id)
         local_profile_ids.add(profile.profile_id)
 
+        capabilities, capabilities_source = resolve_display_capabilities(base_state)
         entry: dict[str, Any] = {
             "id": profile.profile_id,
             "object": "model",
@@ -113,7 +114,8 @@ async def list_models(
             "ocabra": {
                 "category": profile.category,
                 "status": base_state.status.value,
-                "capabilities": base_state.capabilities.to_dict(),
+                "capabilities": capabilities,
+                "capabilities_source": capabilities_source,
                 "display_name": profile.display_name or base_state.display_name,
                 "base_model_id": profile.base_model_id,
                 "load_policy": base_state.load_policy.value,
