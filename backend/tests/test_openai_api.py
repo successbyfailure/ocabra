@@ -168,6 +168,91 @@ def test_to_backend_body_preserves_existing_stream_options() -> None:
     assert payload["stream_options"] == {"foo": "bar", "include_usage": True}
 
 
+def _ollama_state():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id="ollama/gemma4:26b",
+        backend_model_id="gemma4:26b",
+        display_name="Gemma 4 26B",
+        backend_type="ollama",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, streaming=True),
+    )
+
+
+def test_to_backend_body_ollama_translates_think_false() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+
+    payload = to_backend_body(
+        _ollama_state(),
+        {"model": "gemma4:26b", "think": False, "messages": []},
+    )
+
+    assert payload["reasoning_effort"] == "none"
+    assert payload["reasoning"] == "none"
+
+
+def test_to_backend_body_ollama_translates_enable_thinking_false() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+
+    payload = to_backend_body(
+        _ollama_state(),
+        {
+            "model": "gemma4:26b",
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [],
+        },
+    )
+
+    assert payload["reasoning_effort"] == "none"
+    # The vLLM-only chat_template_kwargs must not leak to Ollama's /v1 endpoint.
+    assert "chat_template_kwargs" not in payload
+
+
+def test_to_backend_body_ollama_leaves_thinking_on_by_default() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+
+    payload = to_backend_body(
+        _ollama_state(),
+        {"model": "gemma4:26b", "messages": []},
+    )
+
+    assert "reasoning_effort" not in payload
+    assert "reasoning" not in payload
+
+
+def test_to_backend_body_vllm_keeps_chat_template_kwargs() -> None:
+    from ocabra.api.openai._deps import to_backend_body
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    state = ModelState(
+        model_id="vllm/demo",
+        backend_model_id="demo",
+        display_name="Demo",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, streaming=True),
+    )
+
+    payload = to_backend_body(
+        state,
+        {
+            "model": "vllm/demo",
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [],
+        },
+    )
+
+    # vLLM honours chat_template_kwargs natively, so it must be preserved.
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in payload
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------
