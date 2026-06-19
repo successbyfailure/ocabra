@@ -109,7 +109,7 @@ async def try_proxy_multipart(
     *,
     model_id: str,
     files: dict[str, tuple[str, bytes, str]],
-    data: dict[str, str],
+    data: dict[str, Any],
     federation_manager: Any,
     model_manager: Any,
     profile_registry: Any,

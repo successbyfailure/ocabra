@@ -646,7 +646,7 @@ class FederationManager:
         peer: PeerState,
         path: str,
         files: dict[str, Any],
-        data: dict[str, str],
+        data: dict[str, Any],
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
