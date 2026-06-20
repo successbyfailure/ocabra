@@ -178,12 +178,15 @@ async def set_gpu_power(
             pynvml.nvmlDeviceSetPersistenceMode(handle, mode)
             logger.info("gpu_persistence_mode_set", gpu=index, enabled=body.persistence_mode)
 
+        applied_ok = True
+        verify_target_w: int | None = None
         if body.power_limit_w is not None:
             target_w = body.power_limit_w
             if target_w == 0:
                 # Reset to default
                 default = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
                 target_w = default // 1000
+            verify_target_w = target_w
 
             # Try via hw-monitor (privileged) first, fall back to direct pynvml
             from ocabra.redis_client import publish as redis_publish
@@ -198,9 +201,6 @@ async def set_gpu_power(
                     {"gpu_index": index, "limit_w": target_w},
                 )
                 logger.info("gpu_power_limit_requested_via_hw_monitor", gpu=index, watts=target_w)
-                # Give hw-monitor a moment to apply
-                import asyncio
-                await asyncio.sleep(0.5)
             except Exception:
                 # Fallback: try direct pynvml (will fail if not privileged)
                 try:
@@ -211,6 +211,19 @@ async def set_gpu_power(
                         status_code=503,
                         detail=f"Cannot set power limit: {nvml_exc}. Ensure hw-monitor is running.",
                     )
+
+            # hw-monitor applies asynchronously over Redis. Poll the live NVML
+            # value so we report real success/failure instead of a phantom 200
+            # when the listener is down and silently drops the change.
+            import asyncio
+
+            applied_ok = False
+            for _ in range(20):  # up to ~2s
+                await asyncio.sleep(0.1)
+                applied_now = pynvml.nvmlDeviceGetPowerManagementLimit(handle) // 1000
+                if abs(applied_now - target_w) <= 2:
+                    applied_ok = True
+                    break
 
         # Return updated state
         current = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
@@ -261,6 +274,20 @@ async def set_gpu_power(
                 gpu_index=index,
                 power_limit_w=body.power_limit_w,
                 persistence_mode=body.persistence_mode,
+            )
+
+        # The intent is now persisted (so the next reapply can retry), but if
+        # the cap never landed surface a real error instead of a phantom 200 —
+        # the UI shows this detail to the operator.
+        if not applied_ok:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Power limit requested ({verify_target_w} W) was not applied "
+                    f"(GPU {index} still at {current // 1000} W). The hw-monitor "
+                    "service may be down or not subscribed to Redis. The setting "
+                    "was saved and will be retried on the next reapply."
+                ),
             )
 
         return {
