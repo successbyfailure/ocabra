@@ -7,6 +7,7 @@ to Redis, and persists per-minute averages to PostgreSQL.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -299,28 +300,50 @@ def _read_gpu(index: int) -> dict:
 
 
 async def _power_limit_listener() -> None:
-    """Subscribe to ``gpu:set_power_limit`` and apply power limits via NVML."""
-    r = await _get_redis()
-    pubsub = r.pubsub()
-    await pubsub.subscribe("gpu:set_power_limit")
-    logger.info("power_limit_listener_started")
-    try:
-        async for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
+    """Subscribe to ``gpu:set_power_limit`` and apply power limits via NVML.
+
+    Wrapped in a reconnect loop: if the Redis pub/sub connection drops (idle
+    timeout, Redis restart, transient network blip) the subscription is
+    silently lost and ``pubsub.listen()`` stops yielding. Without re-subscribing
+    the listener would die permanently and power-cap changes would stop being
+    applied until the service restarts (while the heartbeat keeps running, so
+    callers wrongly assume hw-monitor is healthy). Re-subscribe with a capped
+    exponential backoff so the listener self-heals.
+    """
+    backoff = 1.0
+    while True:
+        try:
+            r = await _get_redis()
+            pubsub = r.pubsub()
+            await pubsub.subscribe("gpu:set_power_limit")
+            logger.info("power_limit_listener_started")
+            backoff = 1.0  # reset after a successful (re)subscribe
             try:
-                data = json.loads(message["data"])
-                gpu_index = int(data["gpu_index"])
-                limit_w = float(data["limit_w"])
-                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-                limit_mw = int(limit_w * 1000)
-                pynvml.nvmlDeviceSetPowerManagementLimit(handle, limit_mw)
-                logger.info("power_limit_set", gpu=gpu_index, limit_w=limit_w)
-            except Exception as exc:
-                logger.error("power_limit_error", error=str(exc))
-    finally:
-        await pubsub.unsubscribe("gpu:set_power_limit")
-        await pubsub.aclose()
+                async for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(message["data"])
+                        gpu_index = int(data["gpu_index"])
+                        limit_w = float(data["limit_w"])
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+                        limit_mw = int(limit_w * 1000)
+                        pynvml.nvmlDeviceSetPowerManagementLimit(handle, limit_mw)
+                        logger.info("power_limit_set", gpu=gpu_index, limit_w=limit_w)
+                    except Exception as exc:
+                        logger.error("power_limit_error", error=str(exc))
+            finally:
+                with contextlib.suppress(Exception):
+                    await pubsub.unsubscribe("gpu:set_power_limit")
+                    await pubsub.aclose()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "power_limit_listener_reconnect", error=str(exc), backoff_s=backoff
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
 
 
 # ---------------------------------------------------------------------------
