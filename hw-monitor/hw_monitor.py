@@ -332,8 +332,16 @@ async def _power_limit_listener() -> None:
             logger.info("power_limit_listener_started")
             backoff = 1.0  # reset after a successful (re)subscribe
             try:
-                async for message in pubsub.listen():
-                    if message["type"] != "message":
+                # Poll with a timeout instead of ``listen()``: an idle pub/sub
+                # connection with a socket read timeout makes ``listen()`` raise
+                # ``Timeout reading from redis`` every few seconds. ``get_message``
+                # with a timeout simply returns ``None`` when idle, so we don't
+                # churn the subscription (and miss messages) on a quiet channel.
+                while True:
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=1.0
+                    )
+                    if message is None or message.get("type") != "message":
                         continue
                     try:
                         data = json.loads(message["data"])
