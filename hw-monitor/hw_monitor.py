@@ -32,6 +32,19 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://ocabra:ocabr
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "2"))
 PERSIST_INTERVAL_POLLS = int(os.environ.get("PERSIST_INTERVAL_POLLS", "30"))
 
+# --- Thermal power-cap protection ---
+# When a GPU reaches the warning temperature, temporarily drop its power limit
+# to THERMAL_CAP_PCT of the current limit until it cools back below the restore
+# temperature (hysteresis). Opt-out via THERMAL_CAP_ENABLED=false.
+def _env_bool(name: str, default: bool) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+THERMAL_CAP_ENABLED = _env_bool("THERMAL_CAP_ENABLED", True)
+THERMAL_WARN_TEMP_C = float(os.environ.get("THERMAL_WARN_TEMP_C", "80"))
+THERMAL_RESTORE_TEMP_C = float(os.environ.get("THERMAL_RESTORE_TEMP_C", "72"))
+THERMAL_CAP_PCT = float(os.environ.get("THERMAL_CAP_PCT", "0.75"))
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -346,6 +359,61 @@ async def _power_limit_listener() -> None:
             backoff = min(backoff * 2, 30.0)
 
 
+async def _apply_thermal_caps(r, gpu_states: list[dict], throttled: dict[int, tuple[int, int]]) -> None:
+    """Temporarily reduce a GPU's power limit while it runs hot.
+
+    ``throttled`` maps gpu_index -> (pre_throttle_limit_mw, capped_limit_mw) for
+    GPUs currently under a thermal cap. On warning temperature we drop to
+    THERMAL_CAP_PCT of the live limit; once cooled below the restore temperature
+    we put the original limit back. A short-TTL Redis flag (``gpu:thermal_throttle:{i}``)
+    lets the UI surface that a thermal cap is active.
+    """
+    for i, state in enumerate(gpu_states):
+        temp = state.get("temperature_c")
+        if temp is None:
+            continue
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            if i not in throttled:
+                if temp >= THERMAL_WARN_TEMP_C:
+                    cur_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+                    min_mw, _max_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+                    target_mw = max(min_mw, int(cur_mw * THERMAL_CAP_PCT))
+                    if target_mw < cur_mw:
+                        pynvml.nvmlDeviceSetPowerManagementLimit(handle, target_mw)
+                        throttled[i] = (cur_mw, target_mw)
+                        logger.warning(
+                            "thermal_powercap_applied",
+                            gpu=i, temp_c=round(temp, 1),
+                            from_w=cur_mw // 1000, to_w=target_mw // 1000,
+                            warn_c=THERMAL_WARN_TEMP_C,
+                        )
+            elif temp <= THERMAL_RESTORE_TEMP_C:
+                restore_mw, _capped_mw = throttled.pop(i)
+                pynvml.nvmlDeviceSetPowerManagementLimit(handle, restore_mw)
+                logger.info(
+                    "thermal_powercap_restored",
+                    gpu=i, temp_c=round(temp, 1), to_w=restore_mw // 1000,
+                )
+                await r.delete(f"gpu:thermal_throttle:{i}")
+                continue
+
+            if i in throttled:
+                restore_mw, capped_mw = throttled[i]
+                await r.setex(
+                    f"gpu:thermal_throttle:{i}",
+                    max(5, int(POLL_INTERVAL_S * 3)),
+                    json.dumps({
+                        "active": True,
+                        "temp_c": round(temp, 1),
+                        "capped_w": capped_mw // 1000,
+                        "restore_w": restore_mw // 1000,
+                    }),
+                )
+        except pynvml.NVMLError as exc:
+            logger.error("thermal_powercap_error", gpu=i, error=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -389,6 +457,14 @@ async def main() -> None:
     server_history: list[dict] = []
     poll_count = 0
 
+    # GPUs currently under a thermal power cap: index -> (restore_mw, capped_mw)
+    thermal_throttled: dict[int, tuple[int, int]] = {}
+    if THERMAL_CAP_ENABLED:
+        logger.info(
+            "thermal_powercap_enabled",
+            warn_c=THERMAL_WARN_TEMP_C, restore_c=THERMAL_RESTORE_TEMP_C, cap_pct=THERMAL_CAP_PCT,
+        )
+
     shutdown = asyncio.Event()
 
     def _signal_handler() -> None:
@@ -412,6 +488,10 @@ async def main() -> None:
                 gpu_history[i].append(state)
                 await r.setex(f"gpu:state:{i}", 5, json.dumps(state))
             await r.publish("gpu:stats", json.dumps(gpu_states))
+
+            # --- Thermal power-cap protection ---
+            if THERMAL_CAP_ENABLED:
+                await _apply_thermal_caps(r, gpu_states, thermal_throttled)
 
             # --- CPU polling ---
             cpu_power_w: float | None = None
