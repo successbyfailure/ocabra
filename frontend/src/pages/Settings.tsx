@@ -100,17 +100,18 @@ export function Settings() {
   useEffect(() => {
     let active = true
 
+    // Fast data (config + GPUs) gates the initial render. The local-model scan
+    // can take 15-25s (disk walk + GGUF header reads) so it must NOT block the
+    // page — load it separately and let its section populate when ready.
     const load = async () => {
       try {
-        const [configData, gpusData, localData] = await Promise.all([
+        const [configData, gpusData] = await Promise.all([
           api.config.get(),
           api.gpus.list(),
-          api.registry.listLocal(),
         ])
         if (!active) return
         setConfig(configData)
         setGpus(gpusData)
-        setLocalModels(localData)
       } catch (err) {
         if (active) toast.error(err instanceof Error ? err.message : "No se pudo cargar settings")
       } finally {
@@ -118,9 +119,22 @@ export function Settings() {
       }
     }
 
+    const loadLocalModels = async () => {
+      try {
+        const localData = await api.registry.listLocal()
+        if (active) setLocalModels(localData)
+      } catch {
+        /* non-blocking: the local-models section just stays empty */
+      }
+    }
+
     void load()
+    void loadLocalModels()
     const timer = window.setInterval(() => {
       void load()
+      // Local models change rarely; the backend serves a cached result
+      // (stale-while-revalidate) so this stays cheap.
+      void loadLocalModels()
     }, 30_000)
 
     return () => {

@@ -2,7 +2,7 @@ import type { GPUState } from "@/types"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
 import { PowerGauge } from "./PowerGauge"
 import { VramBar } from "./VramBar"
-import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts"
+import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from "recharts"
 
 interface GpuCardProps {
   gpu: GPUState
@@ -14,13 +14,23 @@ const CHART_COLORS = {
   power: { stroke: "#f59e0b", fill: "#f59e0b20" },
 }
 
-// Downsample to at most 120 points for rendering — keeps the chart fast
-// while the store holds the full 60-min ring buffer.
+// Keep the most recent `max` points with a stable stride. Sampling from the
+// tail (instead of across the whole growing buffer) means existing points keep
+// their x-position between renders, so the live lines slide smoothly instead of
+// jittering/realigning on every 2s update.
 function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
   if (pts.length <= max) return pts
-  const step = pts.length / max
-  return Array.from({ length: max }, (_, i) => pts[Math.round(i * step)])
+  const step = Math.ceil(pts.length / max)
+  const out: GpuHistoryPoint[] = []
+  for (let i = pts.length - 1; i >= 0; i -= step) out.push(pts[i])
+  return out.reverse()
 }
+
+const SERIES = [
+  { key: "util", label: "Util", color: CHART_COLORS.util.stroke },
+  { key: "vramPct", label: "VRAM", color: CHART_COLORS.vram.stroke },
+  { key: "powerPct", label: "Power", color: CHART_COLORS.power.stroke },
+] as const
 
 function MiniChart({ gpuIndex }: { gpuIndex: number }) {
   const raw = useGpuStore((s) => s.history[gpuIndex] ?? [])
@@ -30,22 +40,7 @@ function MiniChart({ gpuIndex }: { gpuIndex: number }) {
   return (
     <div className="mt-3 h-16 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={history} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id={`util-${gpuIndex}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%"  stopColor={CHART_COLORS.util.stroke} stopOpacity={0.3} />
-              <stop offset="95%" stopColor={CHART_COLORS.util.stroke} stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id={`vram-${gpuIndex}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%"  stopColor={CHART_COLORS.vram.stroke} stopOpacity={0.3} />
-              <stop offset="95%" stopColor={CHART_COLORS.vram.stroke} stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id={`power-${gpuIndex}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%"  stopColor={CHART_COLORS.power.stroke} stopOpacity={0.25} />
-              <stop offset="95%" stopColor={CHART_COLORS.power.stroke} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-
+        <LineChart data={history} margin={{ top: 4, right: 2, bottom: 0, left: 0 }}>
           <Tooltip
             contentStyle={{
               backgroundColor: "hsl(var(--card))",
@@ -56,40 +51,24 @@ function MiniChart({ gpuIndex }: { gpuIndex: number }) {
             }}
             labelFormatter={() => ""}
             formatter={(value: number, name: string) => {
-              const labels: Record<string, string> = { util: "Util", vram: "VRAM", power: "Power" }
+              const labels: Record<string, string> = { util: "Util", vramPct: "VRAM", powerPct: "Power" }
               return [`${value.toFixed(1)}%`, labels[name] ?? name]
             }}
           />
 
           <YAxis domain={[0, 100]} hide />
-          <Area
-            type="monotone"
-            dataKey="util"
-            stroke={CHART_COLORS.util.stroke}
-            fill={`url(#util-${gpuIndex})`}
-            strokeWidth={1.5}
-            dot={false}
-            isAnimationActive={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="vramPct"
-            stroke={CHART_COLORS.vram.stroke}
-            fill={`url(#vram-${gpuIndex})`}
-            strokeWidth={1.5}
-            dot={false}
-            isAnimationActive={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="powerPct"
-            stroke={CHART_COLORS.power.stroke}
-            fill={`url(#power-${gpuIndex})`}
-            strokeWidth={1.5}
-            dot={false}
-            isAnimationActive={false}
-          />
-        </AreaChart>
+          {SERIES.map((s) => (
+            <Line
+              key={s.key}
+              type="monotone"
+              dataKey={s.key}
+              stroke={s.color}
+              strokeWidth={s.key === "powerPct" ? 2 : 1.5}
+              dot={false}
+              isAnimationActive={false}
+            />
+          ))}
+        </LineChart>
       </ResponsiveContainer>
 
       <div className="mt-1 flex gap-3 text-[10px] text-muted-foreground">

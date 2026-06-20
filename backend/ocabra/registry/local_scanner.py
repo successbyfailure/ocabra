@@ -179,17 +179,37 @@ class LocalScanner:
     # so we cache the result for a short TTL and additionally memoise the GGUF
     # fingerprint by (path, mtime, size) to avoid re-reading headers that
     # haven't changed.
-    _SCAN_TTL_S = 30.0
+    # Walking 200+ dirs and reading GGUF headers takes 15-25s on this host, so
+    # the scan must never block a page render more than once. Within _SCAN_TTL_S
+    # the cache is "fresh"; once stale we serve the stale result immediately and
+    # refresh in the background (stale-while-revalidate), so only the very first
+    # call ever pays the full scan latency.
+    _SCAN_TTL_S = 120.0
 
     def __init__(self) -> None:
         self._scan_cache: tuple[float, tuple[str, str | None], list[LocalModel]] | None = None
         self._scan_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
         # (path, mtime_ns, size) -> (vocab_size, bos_id, eos_id)
         self._gguf_fingerprint_cache: dict[tuple[str, int, int], tuple[int | None, int | None, int | None]] = {}
 
     def invalidate(self) -> None:
         """Drop the cached scan result. Call after a download/delete."""
         self._scan_cache = None
+
+    def _schedule_refresh(
+        self, models_dir: Path, ollama_shared_dir: Path | None, cache_key: tuple[str, str | None]
+    ) -> None:
+        """Kick off a background re-scan if one isn't already running."""
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
+
+        async def _refresh() -> None:
+            async with self._scan_lock:
+                result = await asyncio.to_thread(self._scan_sync, models_dir, ollama_shared_dir)
+                self._scan_cache = (asyncio.get_event_loop().time(), cache_key, result)
+
+        self._refresh_task = asyncio.create_task(_refresh())
 
     async def scan(
         self, models_dir: Path, ollama_shared_dir: Path | None = None
@@ -198,17 +218,20 @@ class LocalScanner:
 
         # Fast path: serve from cache without acquiring the lock.
         cached = self._scan_cache
-        if cached is not None:
-            stamp, key, result = cached
-            if key == cache_key and (asyncio.get_event_loop().time() - stamp) < self._SCAN_TTL_S:
+        if cached is not None and cached[1] == cache_key:
+            stamp, _key, result = cached
+            if (asyncio.get_event_loop().time() - stamp) < self._SCAN_TTL_S:
                 return result
+            # Stale: serve immediately, refresh in the background.
+            self._schedule_refresh(models_dir, ollama_shared_dir, cache_key)
+            return result
 
-        # Slow path: lock so concurrent callers coalesce into one disk walk.
+        # Slow path (no usable cache): lock so concurrent callers coalesce.
         async with self._scan_lock:
             cached = self._scan_cache
-            if cached is not None:
-                stamp, key, result = cached
-                if key == cache_key and (asyncio.get_event_loop().time() - stamp) < self._SCAN_TTL_S:
+            if cached is not None and cached[1] == cache_key:
+                stamp, _key, result = cached
+                if (asyncio.get_event_loop().time() - stamp) < self._SCAN_TTL_S:
                     return result
 
             result = await asyncio.to_thread(self._scan_sync, models_dir, ollama_shared_dir)
