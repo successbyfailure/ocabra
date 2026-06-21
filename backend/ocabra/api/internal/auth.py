@@ -391,6 +391,35 @@ async def create_api_key(
 
 
 @router.delete(
+    "/auth/keys/revoked",
+    summary="Delete own revoked API keys",
+    description="Permanently remove all of the authenticated user's revoked API keys.",
+    responses={401: {"description": "Not authenticated"}},
+)
+async def purge_own_revoked_api_keys(
+    user: Annotated[UserContext, Depends(require_role("user"))],
+) -> dict:
+    """Hard-delete every revoked API key owned by the caller.
+
+    Returns:
+        ``{ deleted: int }`` — number of keys removed.
+    """
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.auth import ApiKey
+    from sqlalchemy import delete
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            delete(ApiKey).where(
+                ApiKey.user_id == user.user_id,
+                ApiKey.is_revoked.is_(True),
+            )
+        )
+        await session.commit()
+    return {"deleted": result.rowcount or 0}
+
+
+@router.delete(
     "/auth/keys/{key_id}",
     status_code=204,
     summary="Revoke API key",

@@ -448,6 +448,30 @@ async def list_all_api_keys(
     ]
 
 
+@router.delete("/api-keys/revoked")
+async def purge_revoked_api_keys(
+    caller: Annotated[UserContext, Depends(require_role("system_admin"))],
+) -> dict:
+    """Permanently delete every revoked API key across all users.
+
+    Requires: system_admin.
+
+    Returns:
+        ``{ deleted: int }`` — number of keys removed.
+    """
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.auth import ApiKey
+    from sqlalchemy import delete
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(delete(ApiKey).where(ApiKey.is_revoked.is_(True)))
+        await session.commit()
+
+    deleted = result.rowcount or 0
+    logger.info("api_keys_revoked_purged_by_admin", admin=caller.username, deleted=deleted)
+    return {"deleted": deleted}
+
+
 @router.post("/api-keys/reassign")
 async def reassign_api_keys(
     body: ReassignApiKeysRequest,
