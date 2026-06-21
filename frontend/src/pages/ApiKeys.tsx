@@ -1,6 +1,10 @@
 import { ApiKeyManager } from "@/components/auth/ApiKeyManager"
+import { AdminApiKeysManager } from "@/components/auth/AdminApiKeysManager"
+import { useIsAdmin } from "@/hooks/useAuth"
 
 export function ApiKeys() {
+  const isAdmin = useIsAdmin()
+
   return (
     <div className="space-y-6">
       <div>
@@ -11,6 +15,11 @@ export function ApiKeys() {
         </p>
       </div>
       <ApiKeyManager />
+      {isAdmin && (
+        <div className="border-t border-border pt-6">
+          <AdminApiKeysManager />
+        </div>
+      )}
     </div>
   )
 }

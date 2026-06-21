@@ -772,6 +772,12 @@ export interface ApiKey {
   groupId?: string | null
 }
 
+// An API key as seen by an admin in the "all keys" view, including its owner.
+export interface AdminApiKey extends ApiKey {
+  userId: string
+  username: string
+}
+
 export interface Group {
   id: string
   name: string
