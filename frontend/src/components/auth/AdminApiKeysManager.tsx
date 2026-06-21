@@ -95,6 +95,10 @@ export function AdminApiKeysManager() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [showReassign, setShowReassign] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [showPurge, setShowPurge] = useState(false)
+  const [purging, setPurging] = useState(false)
+
+  const revokedCount = keys.filter((k) => keyStatus(k) === "revoked").length
 
   const load = async () => {
     setLoading(true)
@@ -129,6 +133,21 @@ export function AdminApiKeysManager() {
 
   const usersById = useMemo(() => new Map(users.map((u) => [u.id, u])), [users])
 
+  const handlePurge = async () => {
+    setPurging(true)
+    try {
+      const res = await api.users.purgeRevokedKeys()
+      toast.success(`${res.deleted} key(s) revocada(s) eliminada(s)`)
+      setSelected(new Set())
+      setShowPurge(false)
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudieron limpiar las keys revocadas")
+    } finally {
+      setPurging(false)
+    }
+  }
+
   const handleReassign = async (targetUserId: string) => {
     const ids = [...selected]
     setSaving(true)
@@ -159,15 +178,26 @@ export function AdminApiKeysManager() {
             Selecciona varias keys para reasignarlas a otro usuario.
           </p>
         </div>
-        {selected.size > 0 && (
-          <button
-            type="button"
-            onClick={() => setShowReassign(true)}
-            className="shrink-0 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            Reasignar {selected.size} seleccionada{selected.size === 1 ? "" : "s"}
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {revokedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowPurge(true)}
+              className="rounded-md border border-destructive/40 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+            >
+              Limpiar revocadas ({revokedCount})
+            </button>
+          )}
+          {selected.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowReassign(true)}
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              Reasignar {selected.size} seleccionada{selected.size === 1 ? "" : "s"}
+            </button>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -236,6 +266,36 @@ export function AdminApiKeysManager() {
           onConfirm={(targetUserId) => void handleReassign(targetUserId)}
           onCancel={() => setShowReassign(false)}
         />
+      )}
+
+      {showPurge && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-lg">
+            <h2 className="mb-2 text-base font-semibold">Limpiar API keys revocadas</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              Se eliminarán permanentemente <strong>{revokedCount}</strong> key(s) revocada(s) de todos los
+              usuarios. Esta acción no se puede deshacer.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPurge(false)}
+                disabled={purging}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void handlePurge()}
+                disabled={purging}
+                className="rounded-md bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-60"
+              >
+                {purging ? "Limpiando…" : "Eliminar revocadas"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

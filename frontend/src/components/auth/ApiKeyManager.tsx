@@ -233,6 +233,10 @@ export function ApiKeyManager() {
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [revokingId, setRevokingId] = useState<string | null>(null)
   const [confirmRevokeKey, setConfirmRevokeKey] = useState<ApiKey | null>(null)
+  const [showPurge, setShowPurge] = useState(false)
+  const [purging, setPurging] = useState(false)
+
+  const revokedCount = keys.filter((k) => keyStatus(k) === "revoked").length
 
   const loadKeys = async () => {
     try {
@@ -253,6 +257,20 @@ export function ApiKeyManager() {
     setShowNewDialog(false)
     setKeys((prev) => [result, ...prev])
     setCreatedKey(result.key)
+  }
+
+  const handlePurge = async () => {
+    setPurging(true)
+    try {
+      const res = await api.auth.purgeRevokedKeys()
+      setKeys((prev) => prev.filter((k) => keyStatus(k) !== "revoked"))
+      toast.success(`${res.deleted} key(s) revocada(s) eliminada(s)`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudieron limpiar las keys revocadas")
+    } finally {
+      setPurging(false)
+      setShowPurge(false)
+    }
   }
 
   const handleRevoke = async () => {
@@ -276,13 +294,24 @@ export function ApiKeyManager() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-semibold">API Keys</h2>
-        <button
-          type="button"
-          onClick={() => setShowNewDialog(true)}
-          className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-        >
-          Crear nueva key
-        </button>
+        <div className="flex items-center gap-2">
+          {revokedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowPurge(true)}
+              className="rounded-md border border-destructive/40 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+            >
+              Limpiar revocadas ({revokedCount})
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowNewDialog(true)}
+            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Crear nueva key
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -363,6 +392,36 @@ export function ApiKeyManager() {
           onCancel={() => setConfirmRevokeKey(null)}
           revoking={revokingId === confirmRevokeKey.id}
         />
+      )}
+
+      {showPurge && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-lg">
+            <h2 className="mb-2 text-base font-semibold">Limpiar API keys revocadas</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              Se eliminarán permanentemente <strong>{revokedCount}</strong> key(s) revocada(s). Esta acción no
+              se puede deshacer.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPurge(false)}
+                disabled={purging}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void handlePurge()}
+                disabled={purging}
+                className="rounded-md bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-60"
+              >
+                {purging ? "Limpiando…" : "Eliminar revocadas"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

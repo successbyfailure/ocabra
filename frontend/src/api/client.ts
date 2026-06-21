@@ -1490,6 +1490,9 @@ export const api = {
 
     revokeKey: (keyId: string): Promise<void> =>
       request<void>("DELETE", `/ocabra/auth/keys/${encodeURIComponent(keyId)}`),
+
+    purgeRevokedKeys: (): Promise<{ deleted: number }> =>
+      request("DELETE", "/ocabra/auth/keys/revoked"),
   },
 
   users: {
@@ -1535,6 +1538,8 @@ export const api = {
       (await request<unknown[]>("GET", "/ocabra/api-keys")).map(toAdminApiKey),
     reassignKeys: (keyIds: string[], targetUserId: string): Promise<{ reassigned: number; skipped: number; failed: Array<{ id: string; error: string }> }> =>
       request("POST", "/ocabra/api-keys/reassign", { key_ids: keyIds, target_user_id: targetUserId }),
+    purgeRevokedKeys: (): Promise<{ deleted: number }> =>
+      request("DELETE", "/ocabra/api-keys/revoked"),
   },
 
   groups: {
