@@ -32,6 +32,7 @@ import type {
   ModelMemoryEstimate,
   AuthUser,
   ApiKey,
+  AdminApiKey,
   AdminUser,
   GroupMember,
   Group,
@@ -1015,6 +1016,15 @@ function toApiKey(raw: unknown): ApiKey {
   }
 }
 
+function toAdminApiKey(raw: unknown): AdminApiKey {
+  const d = isRecord(raw) ? raw : {}
+  return {
+    ...toApiKey(raw),
+    userId: String(d.user_id ?? d.userId ?? ""),
+    username: String(d.username ?? ""),
+  }
+}
+
 export const api = {
   gpus: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
@@ -1520,6 +1530,11 @@ export const api = {
         `/ocabra/users/${encodeURIComponent(userId)}/keys`,
         { name: payload.name, expires_in_days: payload.expiresInDays ?? null, group_id: payload.groupId ?? null }
       ),
+    // Admin "all keys" view + bulk reassignment.
+    listAllKeys: async (): Promise<AdminApiKey[]> =>
+      (await request<unknown[]>("GET", "/ocabra/api-keys")).map(toAdminApiKey),
+    reassignKeys: (keyIds: string[], targetUserId: string): Promise<{ reassigned: number; skipped: number; failed: Array<{ id: string; error: string }> }> =>
+      request("POST", "/ocabra/api-keys/reassign", { key_ids: keyIds, target_user_id: targetUserId }),
   },
 
   groups: {

@@ -37,6 +37,11 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+class ReassignApiKeysRequest(BaseModel):
+    key_ids: list[str]
+    target_user_id: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -400,6 +405,114 @@ async def list_user_api_keys(
         }
         for k in keys
     ]
+
+
+@router.get("/api-keys")
+async def list_all_api_keys(
+    caller: Annotated[UserContext, Depends(require_role("system_admin"))],
+) -> list[dict]:
+    """List every API key across all users, with owner info.
+
+    Requires: system_admin. Powers the admin "all keys" view with bulk
+    reassignment. Never returns the raw key value.
+
+    Returns:
+        List of ``{ id, name, key_prefix, expires_at, last_used_at, is_revoked,
+        created_at, user_id, username }``
+    """
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.auth import ApiKey, User
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ApiKey, User.username)
+            .join(User, User.id == ApiKey.user_id)
+            .order_by(ApiKey.created_at.desc())
+        )
+        rows = result.all()
+
+    return [
+        {
+            "id": str(k.id),
+            "name": k.name,
+            "key_prefix": k.key_prefix,
+            "expires_at": k.expires_at.isoformat() if k.expires_at else None,
+            "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+            "is_revoked": k.is_revoked,
+            "created_at": k.created_at.isoformat(),
+            "user_id": str(k.user_id),
+            "username": username,
+        }
+        for k, username in rows
+    ]
+
+
+@router.post("/api-keys/reassign")
+async def reassign_api_keys(
+    body: ReassignApiKeysRequest,
+    caller: Annotated[UserContext, Depends(require_role("system_admin"))],
+) -> dict:
+    """Reassign one or more API keys to a different owner (bulk action).
+
+    Requires: system_admin. Keys may belong to different source users; each is
+    moved to ``target_user_id``. Keys already owned by the target are skipped.
+    Partial failures (bad/unknown id) are reported per key rather than failing
+    the whole batch.
+
+    Returns:
+        ``{ reassigned: int, skipped: int, failed: [{ id, error }] }``
+    """
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.auth import ApiKey, User
+    from sqlalchemy import select
+
+    try:
+        target_uuid = uuid.UUID(body.target_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Target user not found") from exc
+
+    reassigned = 0
+    skipped = 0
+    failed: list[dict] = []
+
+    async with AsyncSessionLocal() as session:
+        target = (
+            await session.execute(select(User).where(User.id == target_uuid))
+        ).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(status_code=404, detail="Target user not found")
+
+        for raw_id in body.key_ids:
+            try:
+                key_uuid = uuid.UUID(raw_id)
+            except ValueError:
+                failed.append({"id": raw_id, "error": "invalid id"})
+                continue
+            key = (
+                await session.execute(select(ApiKey).where(ApiKey.id == key_uuid))
+            ).scalar_one_or_none()
+            if key is None:
+                failed.append({"id": raw_id, "error": "not found"})
+                continue
+            if key.user_id == target_uuid:
+                skipped += 1
+                continue
+            key.user_id = target_uuid
+            reassigned += 1
+
+        await session.commit()
+
+    logger.info(
+        "api_keys_reassigned_by_admin",
+        admin=caller.username,
+        target_user_id=str(target_uuid),
+        target_username=target.username,
+        reassigned=reassigned,
+        skipped=skipped,
+        failed=len(failed),
+    )
+    return {"reassigned": reassigned, "skipped": skipped, "failed": failed}
 
 
 @router.delete("/users/{user_id}/keys/{key_id}", status_code=204)
