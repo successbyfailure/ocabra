@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from "recharts"
 import {
   Activity,
   Boxes,
@@ -123,7 +124,75 @@ function tempColorClass(tempC: number): string {
   return "text-emerald-500"
 }
 
-function HostStatsCard({ stats, serverPower }: { stats: HostStats; serverPower?: ServerPower | null }) {
+interface HostHistoryPoint {
+  t: number
+  cpuPct: number
+  memPct: number
+  tempC: number | null
+  powerW: number | null
+}
+
+// Validated categorical + heat hue (dataviz skill).
+const HOST_COLORS = { cpu: "#2a78d6", ram: "#1baf7a", temp: "#eb6834" }
+
+function HostSparkline({
+  data,
+  series,
+  domain,
+  unit,
+}: {
+  data: HostHistoryPoint[]
+  series: { key: keyof HostHistoryPoint; label: string; color: string }[]
+  domain: [number, number] | ["auto", "auto"]
+  unit: string
+}) {
+  if (data.length < 2) return null
+  return (
+    <div className="h-12 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 4, right: 2, bottom: 0, left: 0 }}>
+          <Tooltip
+            contentStyle={{
+              backgroundColor: "hsl(var(--card))",
+              border: "1px solid hsl(var(--border))",
+              borderRadius: "6px",
+              fontSize: "11px",
+              padding: "4px 8px",
+            }}
+            labelFormatter={() => ""}
+            formatter={(value: number, name: string) => {
+              const s = series.find((x) => x.key === name)
+              return [`${value.toFixed(unit === "%" ? 0 : 1)}${unit}`, s?.label ?? name]
+            }}
+          />
+          <YAxis domain={domain} hide />
+          {series.map((s) => (
+            <Line
+              key={String(s.key)}
+              type="monotone"
+              dataKey={s.key as string}
+              stroke={s.color}
+              strokeWidth={1.75}
+              dot={false}
+              isAnimationActive={false}
+              connectNulls
+            />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function HostStatsCard({
+  stats,
+  serverPower,
+  history = [],
+}: {
+  stats: HostStats
+  serverPower?: ServerPower | null
+  history?: HostHistoryPoint[]
+}) {
   const cpuColor =
     stats.cpuPct > 90 ? "bg-red-500" : stats.cpuPct > 70 ? "bg-amber-500" : "bg-emerald-500"
   const memColor =
@@ -179,6 +248,49 @@ function HostStatsCard({ stats, serverPower }: { stats: HostStats; serverPower?:
             <span className="font-mono">{(stats.swapUsedMb / 1024).toFixed(1)} / {(stats.swapTotalMb / 1024).toFixed(1)} GB</span>
           </div>
           <MiniBar pct={stats.swapPct} color="bg-purple-500" />
+        </div>
+      )}
+
+      {history.length >= 2 && (
+        <div className="space-y-2 border-t border-border/60 pt-3">
+          <div>
+            <div className="mb-0.5 flex items-center gap-3 text-[10px] text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: HOST_COLORS.cpu }} />
+                CPU
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: HOST_COLORS.ram }} />
+                RAM
+              </span>
+              <span className="ml-auto">uso · 10 min</span>
+            </div>
+            <HostSparkline
+              data={history}
+              series={[
+                { key: "cpuPct", label: "CPU", color: HOST_COLORS.cpu },
+                { key: "memPct", label: "RAM", color: HOST_COLORS.ram },
+              ]}
+              domain={[0, 100]}
+              unit="%"
+            />
+          </div>
+
+          {history.some((p) => p.tempC != null) && (
+            <div>
+              <div className="mb-0.5 flex items-center gap-1 text-[10px] text-muted-foreground">
+                <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: HOST_COLORS.temp }} />
+                <span>Temp CPU</span>
+                <span className="ml-auto">°C · 10 min</span>
+              </div>
+              <HostSparkline
+                data={history}
+                series={[{ key: "tempC", label: "Temp", color: HOST_COLORS.temp }]}
+                domain={["auto", "auto"]}
+                unit="°C"
+              />
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -545,6 +657,7 @@ export function Dashboard() {
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
   const [hostStats, setHostStats] = useState<HostStats | null>(null)
   const [serverPower, setServerPower] = useState<ServerPower | null>(null)
+  const [hostHistory, setHostHistory] = useState<HostHistoryPoint[]>([])
 
   useWebSocket()
 
@@ -586,10 +699,23 @@ export function Dashboard() {
 
   useEffect(() => {
     async function pollHostStats() {
-      try { const stats = await api.host.stats(); setHostStats(stats) } catch { /* keep stale */ }
+      let stats: HostStats | null = null
+      let power: ServerPower | null = null
+      try { stats = await api.host.stats(); setHostStats(stats) } catch { /* keep stale */ }
       // CPU temperature/power comes from hw-monitor via server:power (k10temp),
       // not from the host psutil stats — fetch it alongside.
-      try { setServerPower(await api.stats.serverPower()) } catch { /* keep stale */ }
+      try { power = await api.stats.serverPower(); setServerPower(power) } catch { /* keep stale */ }
+      // Accumulate a ring buffer (~10 min at 5s) to feed the host sparklines.
+      if (stats) {
+        const point: HostHistoryPoint = {
+          t: Date.now(),
+          cpuPct: stats.cpuPct,
+          memPct: stats.memPct,
+          tempC: power?.cpuTempC ?? null,
+          powerW: power?.cpuPowerW ?? null,
+        }
+        setHostHistory((prev) => [...prev.slice(-119), point])
+      }
     }
     void pollHostStats()
     const timer = window.setInterval(() => void pollHostStats(), 5000)
@@ -650,7 +776,7 @@ export function Dashboard() {
           {gpus.map((gpu) => (
             <GpuCard key={gpu.index} gpu={gpu} />
           ))}
-          {hostStats && <HostStatsCard stats={hostStats} serverPower={serverPower} />}
+          {hostStats && <HostStatsCard stats={hostStats} serverPower={serverPower} history={hostHistory} />}
           {gpus.length === 0 && !hostStats && (
             <EmptyState title="Sin datos de GPU" description="No se detectaron GPUs o el servicio de monitoreo no esta disponible." />
           )}
