@@ -27,7 +27,7 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { FederationPeer, HostStats, RecentRequestsData, ServiceState } from "@/types"
+import type { FederationPeer, HostStats, RecentRequestsData, ServerPower, ServiceState } from "@/types"
 
 function formatLoadedAgo(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -114,7 +114,16 @@ function Section({ title, defaultOpen = true, children, badge }: {
 }
 
 /* ─── Host Stats ─── */
-function HostStatsCard({ stats }: { stats: HostStats }) {
+// Threshold color for a CPU/GPU temperature, using the validated status palette
+// (good / warning / critical). Threadripper Tctl runs hot under load, so the
+// warning point sits higher than a GPU's.
+function tempColorClass(tempC: number): string {
+  if (tempC >= 90) return "text-red-500"
+  if (tempC >= 80) return "text-amber-500"
+  return "text-emerald-500"
+}
+
+function HostStatsCard({ stats, serverPower }: { stats: HostStats; serverPower?: ServerPower | null }) {
   const cpuColor =
     stats.cpuPct > 90 ? "bg-red-500" : stats.cpuPct > 70 ? "bg-amber-500" : "bg-emerald-500"
   const memColor =
@@ -122,14 +131,29 @@ function HostStatsCard({ stats }: { stats: HostStats }) {
 
   const memUsedGb = (stats.memUsedMb / 1024).toFixed(1)
   const memTotalGb = (stats.memTotalMb / 1024).toFixed(1)
+  const cpuTemp = serverPower?.cpuTempC
+  const cpuPower = serverPower?.cpuPowerW
 
   return (
     <div className="rounded-lg border border-border bg-card px-4 py-4 space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium">Host · {stats.cpuCountPhysical}C/{stats.cpuCount}T</span>
-        <span className="text-xs text-muted-foreground">
-          load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
-        </span>
+        <div className="flex items-center gap-2">
+          {cpuTemp != null && (
+            <span className={`font-mono text-xs font-semibold ${tempColorClass(cpuTemp)}`} title="Temperatura CPU">
+              {cpuTemp.toFixed(0)}°C
+            </span>
+          )}
+          {cpuPower != null && (
+            <span className="font-mono text-xs text-muted-foreground" title="Consumo CPU">
+              {cpuPower.toFixed(0)} W
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="text-[11px] text-muted-foreground">
+        load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
       </div>
 
       <div className="space-y-1.5">
@@ -520,6 +544,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
   const [hostStats, setHostStats] = useState<HostStats | null>(null)
+  const [serverPower, setServerPower] = useState<ServerPower | null>(null)
 
   useWebSocket()
 
@@ -562,6 +587,9 @@ export function Dashboard() {
   useEffect(() => {
     async function pollHostStats() {
       try { const stats = await api.host.stats(); setHostStats(stats) } catch { /* keep stale */ }
+      // CPU temperature/power comes from hw-monitor via server:power (k10temp),
+      // not from the host psutil stats — fetch it alongside.
+      try { setServerPower(await api.stats.serverPower()) } catch { /* keep stale */ }
     }
     void pollHostStats()
     const timer = window.setInterval(() => void pollHostStats(), 5000)
@@ -622,7 +650,7 @@ export function Dashboard() {
           {gpus.map((gpu) => (
             <GpuCard key={gpu.index} gpu={gpu} />
           ))}
-          {hostStats && <HostStatsCard stats={hostStats} />}
+          {hostStats && <HostStatsCard stats={hostStats} serverPower={serverPower} />}
           {gpus.length === 0 && !hostStats && (
             <EmptyState title="Sin datos de GPU" description="No se detectaron GPUs o el servicio de monitoreo no esta disponible." />
           )}
