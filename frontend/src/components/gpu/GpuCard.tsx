@@ -8,10 +8,12 @@ interface GpuCardProps {
   gpu: GPUState
 }
 
+// Validated categorical palette (dataviz skill): fixed order blue / aqua / yellow.
+// CVD-safe (worst adjacent ΔE > 40) and contrast-checked against both surfaces.
 const CHART_COLORS = {
-  util:  { stroke: "#6366f1", fill: "#6366f130" },
-  vram:  { stroke: "#22d3ee", fill: "#22d3ee25" },
-  power: { stroke: "#f59e0b", fill: "#f59e0b20" },
+  util:  { stroke: "#2a78d6" },
+  vram:  { stroke: "#1baf7a" },
+  power: { stroke: "#eda100" },
 }
 
 // Keep the most recent `max` points with a stable stride. Sampling from the
@@ -89,6 +91,13 @@ function MiniChart({ gpuIndex }: { gpuIndex: number }) {
   )
 }
 
+// Status palette (dataviz skill): good / warning / critical by temperature.
+function tempColorClass(tempC: number): string {
+  if (tempC >= 90) return "text-red-500"
+  if (tempC >= 80) return "text-amber-500"
+  return "text-emerald-500"
+}
+
 export function GpuCard({ gpu }: GpuCardProps) {
   const highTemp = gpu.temperatureC > 80
   const highUtilization = gpu.utilizationPct > 80
@@ -119,7 +128,7 @@ export function GpuCard({ gpu }: GpuCardProps) {
 
         <div className="rounded-md bg-muted/50 px-3 py-2">
           <span className="text-muted-foreground">Temperature</span>
-          <p className={highTemp ? "font-semibold text-orange-400" : "font-semibold"}>
+          <p className={`font-semibold ${tempColorClass(gpu.temperatureC)}`}>
             {gpu.temperatureC.toFixed(1)}°C
           </p>
         </div>
