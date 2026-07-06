@@ -615,7 +615,7 @@ function RecentRequestsSection() {
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Tipo</th>
                 <th className="px-3 py-2 text-right font-medium text-muted-foreground">Duracion</th>
                 <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario / API key</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Estado</th>
               </tr>
             </thead>
@@ -637,7 +637,17 @@ function RecentRequestsSection() {
                       {req.inputTokens != null || req.outputTokens != null
                         ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}` : "—"}
                     </td>
-                    <td className="px-3 py-2 text-muted-foreground">{req.username ?? "—"}</td>
+                    <td className="px-3 py-2">
+                      <div className="text-muted-foreground">{req.username ?? "—"}</div>
+                      {req.apiKeyName && (
+                        <div
+                          className="max-w-[10rem] truncate font-mono text-[11px] text-muted-foreground/70"
+                          title={`API key: ${req.apiKeyName}`}
+                        >
+                          🔑 {req.apiKeyName}
+                        </div>
+                      )}
+                    </td>
                     <td className={`px-3 py-2 text-xs font-medium ${statusColor}`} title={req.error ?? undefined}>{statusLabel}</td>
                   </tr>
                 )
