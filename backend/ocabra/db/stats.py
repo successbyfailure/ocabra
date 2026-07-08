@@ -34,6 +34,10 @@ class RequestStat(Base):
     group_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True, index=True)
     # Name/label of the API key used; stored denormalized so it survives key deletion.
     api_key_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Client IP (real client behind Caddy via X-Forwarded-For) and user-agent —
+    # let anonymous (keyless) requests be traced back to their source.
+    client_addr: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # Node ID of the remote peer when the request was proxied via federation.
     remote_node_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # Agent that originated this request (NULL for non-agent traffic).

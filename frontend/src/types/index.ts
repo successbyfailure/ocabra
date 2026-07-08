@@ -580,6 +580,8 @@ export interface RecentRequest {
   groupId: string | null
   groupName: string | null
   apiKeyName: string | null
+  clientAddr: string | null
+  userAgent: string | null
 }
 
 export interface RecentRequestsData {

@@ -638,13 +638,23 @@ function RecentRequestsSection() {
                         ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}` : "—"}
                     </td>
                     <td className="px-3 py-2">
-                      <div className="text-muted-foreground">{req.username ?? "—"}</div>
+                      <div className={req.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>
+                        {req.username ?? "anónimo"}
+                      </div>
                       {req.apiKeyName && (
                         <div
-                          className="max-w-[10rem] truncate font-mono text-[11px] text-muted-foreground/70"
+                          className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/70"
                           title={`API key: ${req.apiKeyName}`}
                         >
                           🔑 {req.apiKeyName}
+                        </div>
+                      )}
+                      {!req.username && (req.clientAddr || req.userAgent) && (
+                        <div
+                          className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/50"
+                          title={req.userAgent ?? undefined}
+                        >
+                          {req.clientAddr ?? "?"}{req.userAgent ? ` · ${req.userAgent}` : ""}
                         </div>
                       )}
                     </td>

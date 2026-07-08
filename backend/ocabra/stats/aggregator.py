@@ -450,6 +450,8 @@ async def get_recent_requests(limit: int = 20) -> dict:
             "groupId": str(r.group_id) if r.group_id else None,
             "groupName": group_name_map.get(r.group_id) if r.group_id else None,
             "apiKeyName": getattr(r, "api_key_name", None),
+            "clientAddr": getattr(r, "client_addr", None),
+            "userAgent": getattr(r, "user_agent", None),
         })
     return {"requests": requests_out}
 

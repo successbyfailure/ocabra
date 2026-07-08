@@ -237,6 +237,19 @@ class StatsMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _client_addr(request: Request) -> str | None:
+    """Real client IP: X-Forwarded-For (first hop) / X-Real-IP behind Caddy,
+    falling back to the direct peer."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()[:64] or None
+    xri = request.headers.get("x-real-ip")
+    if xri:
+        return xri.strip()[:64] or None
+    client = request.client
+    return client.host if client else None
+
+
 def _should_track(path: str) -> bool:
     if path.startswith("/v1/"):
         return True
@@ -427,6 +440,11 @@ async def _record_stat(
 
         api_key_name = auth_user.api_key_name if auth_user else None
 
+        client_addr = _client_addr(request)
+        user_agent = request.headers.get("user-agent") or None
+        if user_agent and len(user_agent) > 512:
+            user_agent = user_agent[:512]
+
         # Federation: check if the request was proxied to a remote node.
         if remote_node_id is None:
             remote_node_id = getattr(request.state, "federation_remote_node_id", None)
@@ -459,6 +477,8 @@ async def _record_stat(
                 user_id=parsed_user_id,
                 group_id=parsed_group_id,
                 api_key_name=api_key_name,
+                client_addr=client_addr,
+                user_agent=user_agent,
                 remote_node_id=remote_node_id,
                 agent_id=agent_id_ctx,
             )
