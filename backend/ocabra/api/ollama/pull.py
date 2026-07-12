@@ -8,12 +8,15 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.api.internal.downloads import download_manager
 from ocabra.redis_client import subscribe
+
+from ._shared import get_ollama_user
 
 router = APIRouter()
 
@@ -24,7 +27,10 @@ class PullRequest(BaseModel):
 
 
 @router.post("/pull", summary="Pull a model")
-async def pull_model(body: PullRequest):
+async def pull_model(
+    body: PullRequest,
+    user: UserContext = Depends(get_ollama_user),
+):
     """
     Queue a model download and report pull progress in Ollama NDJSON format.
 
