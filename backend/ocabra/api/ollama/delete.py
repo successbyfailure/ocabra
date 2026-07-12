@@ -3,12 +3,14 @@ DELETE /api/delete — remove a model configuration.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 from ._mapper import resolve_model
+from ._shared import get_ollama_user
 
 router = APIRouter()
 _registry = OllamaRegistry()
@@ -19,7 +21,11 @@ class DeleteRequest(BaseModel):
 
 
 @router.delete("/delete", summary="Delete a model")
-async def delete_model(body: DeleteRequest, request: Request) -> dict:
+async def delete_model(
+    body: DeleteRequest,
+    request: Request,
+    user: UserContext = Depends(get_ollama_user),
+) -> dict:
     """
     Delete a model by Ollama name.
 
