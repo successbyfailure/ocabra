@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react"
-import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from "recharts"
+import { MetricGauge } from "@/components/gpu/MetricGauge"
+import { MemoryBars } from "@/components/gpu/MemoryBars"
+import { PowerBlock } from "@/components/gpu/PowerBlock"
+import { METRIC, tempColor } from "@/components/gpu/metrics"
 import {
   Activity,
   Boxes,
@@ -55,17 +58,6 @@ function loadedMeta(loadedAt: string | null, nowMs: number): { at: string; ago: 
   return { at, ago: formatLoadedAgo(seconds) }
 }
 
-function MiniBar({ pct, color }: { pct: number; color: string }) {
-  return (
-    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-      <div
-        className={`h-full rounded-full transition-all ${color}`}
-        style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-      />
-    </div>
-  )
-}
-
 /* ─── KPI Card ─── */
 function KpiCard({ icon: Icon, label, value, sub, color }: {
   icon: React.ElementType
@@ -115,73 +107,12 @@ function Section({ title, defaultOpen = true, children, badge }: {
 }
 
 /* ─── Host Stats ─── */
-// Threshold color for a CPU/GPU temperature, using the validated status palette
-// (good / warning / critical). Threadripper Tctl runs hot under load, so the
-// warning point sits higher than a GPU's.
-function tempColorClass(tempC: number): string {
-  if (tempC >= 90) return "text-red-500"
-  if (tempC >= 80) return "text-amber-500"
-  return "text-emerald-500"
-}
-
 interface HostHistoryPoint {
   t: number
   cpuPct: number
   memPct: number
   tempC: number | null
   powerW: number | null
-}
-
-// Validated categorical + heat hue (dataviz skill).
-const HOST_COLORS = { cpu: "#2a78d6", ram: "#1baf7a", temp: "#eb6834" }
-
-function HostSparkline({
-  data,
-  series,
-  domain,
-  unit,
-}: {
-  data: HostHistoryPoint[]
-  series: { key: keyof HostHistoryPoint; label: string; color: string }[]
-  domain: [number, number] | ["auto", "auto"]
-  unit: string
-}) {
-  if (data.length < 2) return null
-  return (
-    <div className="h-12 w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 4, right: 2, bottom: 0, left: 0 }}>
-          <Tooltip
-            contentStyle={{
-              backgroundColor: "hsl(var(--card))",
-              border: "1px solid hsl(var(--border))",
-              borderRadius: "6px",
-              fontSize: "11px",
-              padding: "4px 8px",
-            }}
-            labelFormatter={() => ""}
-            formatter={(value: number, name: string) => {
-              const s = series.find((x) => x.key === name)
-              return [`${value.toFixed(unit === "%" ? 0 : 1)}${unit}`, s?.label ?? name]
-            }}
-          />
-          <YAxis domain={domain} hide />
-          {series.map((s) => (
-            <Line
-              key={String(s.key)}
-              type="monotone"
-              dataKey={s.key as string}
-              stroke={s.color}
-              strokeWidth={1.75}
-              dot={false}
-              isAnimationActive={false}
-              connectNulls
-            />
-          ))}
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  )
 }
 
 function HostStatsCard({
@@ -193,107 +124,77 @@ function HostStatsCard({
   serverPower?: ServerPower | null
   history?: HostHistoryPoint[]
 }) {
-  const cpuColor =
-    stats.cpuPct > 90 ? "bg-red-500" : stats.cpuPct > 70 ? "bg-amber-500" : "bg-emerald-500"
-  const memColor =
-    stats.memPct > 90 ? "bg-red-500" : stats.memPct > 70 ? "bg-amber-500" : "bg-blue-500"
-
-  const memUsedGb = (stats.memUsedMb / 1024).toFixed(1)
-  const memTotalGb = (stats.memTotalMb / 1024).toFixed(1)
+  const gb = (mb: number) => (mb / 1024).toFixed(1)
   const cpuTemp = serverPower?.cpuTempC
   const cpuPower = serverPower?.cpuPowerW
+  const powerHistory = history.map((p) => p.powerW ?? 0)
 
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-4 space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium">Host · {stats.cpuCountPhysical}C/{stats.cpuCount}T</span>
-        <div className="flex items-center gap-2">
-          {cpuTemp != null && (
-            <span className={`font-mono text-xs font-semibold ${tempColorClass(cpuTemp)}`} title="Temperatura CPU">
-              {cpuTemp.toFixed(0)}°C
-            </span>
-          )}
-          {cpuPower != null && (
-            <span className="font-mono text-xs text-muted-foreground" title="Consumo CPU">
-              {cpuPower.toFixed(0)} W
-            </span>
-          )}
+    <article className="rounded-2xl border border-border bg-card p-[18px] shadow-sm">
+      <div className="mb-4 flex items-start justify-between gap-2.5">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Host</p>
+          <h3 className="truncate text-[15.5px] font-semibold tracking-tight text-foreground">
+            Threadripper · {stats.cpuCountPhysical}C/{stats.cpuCount}T
+          </h3>
         </div>
+        {cpuTemp != null && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-[12.5px] font-semibold tabular-nums">
+            <span className="h-[7px] w-[7px] rounded-full" style={{ background: tempColor(cpuTemp) }} />
+            {cpuTemp.toFixed(0)}°C
+          </span>
+        )}
       </div>
 
-      <div className="text-[11px] text-muted-foreground">
-        load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
+      <div className="grid grid-cols-[auto_1fr] items-center gap-[18px]">
+        <MetricGauge
+          pct={stats.cpuPct}
+          color={METRIC.util}
+          label="Carga CPU"
+          value={stats.cpuPct.toFixed(0)}
+          unit="%"
+          caption="Carga CPU"
+        />
+        <MemoryBars
+          name="RAM"
+          usedLabel={gb(stats.memUsedMb)}
+          totalLabel={gb(stats.memTotalMb)}
+          usedPct={stats.memPct}
+          secondaryName="swap"
+          secondaryPct={stats.swapTotalMb > 0 ? stats.swapPct : 0}
+        />
       </div>
 
-      <div className="space-y-1.5">
-        <div className="flex justify-between text-xs text-muted-foreground">
-          <span>CPU</span>
-          <span className="font-mono">{stats.cpuPct.toFixed(1)}%</span>
-        </div>
-        <MiniBar pct={stats.cpuPct} color={cpuColor} />
-      </div>
-
-      <div className="space-y-1.5">
-        <div className="flex justify-between text-xs text-muted-foreground">
-          <span>RAM</span>
-          <span className="font-mono">{memUsedGb} / {memTotalGb} GB</span>
-        </div>
-        <MiniBar pct={stats.memPct} color={memColor} />
-      </div>
-
-      {stats.swapTotalMb > 0 && (
-        <div className="space-y-1.5">
-          <div className="flex justify-between text-xs text-muted-foreground">
-            <span>Swap</span>
-            <span className="font-mono">{(stats.swapUsedMb / 1024).toFixed(1)} / {(stats.swapTotalMb / 1024).toFixed(1)} GB</span>
-          </div>
-          <MiniBar pct={stats.swapPct} color="bg-purple-500" />
+      {cpuPower != null ? (
+        <PowerBlock
+          label="Consumo CPU"
+          powerW={cpuPower}
+          history={powerHistory}
+          subtitle={`load ${stats.loadAvg1m} / ${stats.loadAvg5m} / ${stats.loadAvg15m} · últimos 10 min`}
+        />
+      ) : (
+        <div className="mt-[18px] border-t border-border pt-3 text-[11px] text-muted-foreground">
+          load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
         </div>
       )}
 
-      {history.length >= 2 && (
-        <div className="space-y-2 border-t border-border/60 pt-3">
-          <div>
-            <div className="mb-0.5 flex items-center gap-3 text-[10px] text-muted-foreground">
-              <span className="flex items-center gap-1">
-                <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: HOST_COLORS.cpu }} />
-                CPU
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: HOST_COLORS.ram }} />
-                RAM
-              </span>
-              <span className="ml-auto">uso · 10 min</span>
-            </div>
-            <HostSparkline
-              data={history}
-              series={[
-                { key: "cpuPct", label: "CPU", color: HOST_COLORS.cpu },
-                { key: "memPct", label: "RAM", color: HOST_COLORS.ram },
-              ]}
-              domain={[0, 100]}
-              unit="%"
-            />
+      <details className="group mt-[15px] border-t border-border">
+        <summary className="flex cursor-pointer list-none items-center justify-between pt-3 text-[11.5px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+          <span>Detalles</span>
+          <span className="text-muted-foreground/70 transition-transform group-open:rotate-180">▾</span>
+        </summary>
+        <div className="flex flex-col gap-1.5 pb-0.5 pt-2.5 text-[11.5px]">
+          <div className="flex items-center justify-between rounded-lg bg-muted/50 px-2.5 py-1.5">
+            <span className="text-muted-foreground">Swap</span>
+            <span className="tabular-nums">{gb(stats.swapUsedMb)} / {gb(stats.swapTotalMb)} GB</span>
           </div>
-
-          {history.some((p) => p.tempC != null) && (
-            <div>
-              <div className="mb-0.5 flex items-center gap-1 text-[10px] text-muted-foreground">
-                <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: HOST_COLORS.temp }} />
-                <span>Temp CPU</span>
-                <span className="ml-auto">°C · 10 min</span>
-              </div>
-              <HostSparkline
-                data={history}
-                series={[{ key: "tempC", label: "Temp", color: HOST_COLORS.temp }]}
-                domain={["auto", "auto"]}
-                unit="°C"
-              />
-            </div>
-          )}
+          <div className="flex items-center justify-between rounded-lg bg-muted/50 px-2.5 py-1.5">
+            <span className="text-muted-foreground">Load (1/5/15m)</span>
+            <span className="tabular-nums">{stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}</span>
+          </div>
         </div>
-      )}
-    </div>
+      </details>
+    </article>
   )
 }
 

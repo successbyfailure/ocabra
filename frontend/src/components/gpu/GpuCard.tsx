@@ -1,25 +1,16 @@
 import type { GPUState } from "@/types"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
-import { PowerGauge } from "./PowerGauge"
-import { VramBar } from "./VramBar"
-import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from "recharts"
+import { MetricGauge } from "./MetricGauge"
+import { MemoryBars } from "./MemoryBars"
+import { PowerBlock } from "./PowerBlock"
+import { METRIC, pct, tempColor } from "./metrics"
 
 interface GpuCardProps {
   gpu: GPUState
 }
 
-// Validated categorical palette (dataviz skill): fixed order blue / aqua / yellow.
-// CVD-safe (worst adjacent ΔE > 40) and contrast-checked against both surfaces.
-const CHART_COLORS = {
-  util:  { stroke: "#2a78d6" },
-  vram:  { stroke: "#1baf7a" },
-  power: { stroke: "#eda100" },
-}
-
-// Keep the most recent `max` points with a stable stride. Sampling from the
-// tail (instead of across the whole growing buffer) means existing points keep
-// their x-position between renders, so the live lines slide smoothly instead of
-// jittering/realigning on every 2s update.
+// Keep the most recent `max` points with a stable stride (tail sampling), so the
+// area slides smoothly instead of realigning on every update.
 function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
   if (pts.length <= max) return pts
   const step = Math.ceil(pts.length / max)
@@ -28,142 +19,82 @@ function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
   return out.reverse()
 }
 
-const SERIES = [
-  { key: "util", label: "Util", color: CHART_COLORS.util.stroke },
-  { key: "vramPct", label: "VRAM", color: CHART_COLORS.vram.stroke },
-  { key: "powerPct", label: "Power", color: CHART_COLORS.power.stroke },
-] as const
-
-function MiniChart({ gpuIndex }: { gpuIndex: number }) {
-  const raw = useGpuStore((s) => s.history[gpuIndex] ?? [])
-  const history = downsample(raw, 120)
-  if (history.length < 2) return null
-
-  return (
-    <div className="mt-3 h-16 w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={history} margin={{ top: 4, right: 2, bottom: 0, left: 0 }}>
-          <Tooltip
-            contentStyle={{
-              backgroundColor: "hsl(var(--card))",
-              border: "1px solid hsl(var(--border))",
-              borderRadius: "6px",
-              fontSize: "11px",
-              padding: "4px 8px",
-            }}
-            labelFormatter={() => ""}
-            formatter={(value: number, name: string) => {
-              const labels: Record<string, string> = { util: "Util", vramPct: "VRAM", powerPct: "Power" }
-              return [`${value.toFixed(1)}%`, labels[name] ?? name]
-            }}
-          />
-
-          <YAxis domain={[0, 100]} hide />
-          {SERIES.map((s) => (
-            <Line
-              key={s.key}
-              type="monotone"
-              dataKey={s.key}
-              stroke={s.color}
-              strokeWidth={s.key === "powerPct" ? 2 : 1.5}
-              dot={false}
-              isAnimationActive={false}
-            />
-          ))}
-        </LineChart>
-      </ResponsiveContainer>
-
-      <div className="mt-1 flex gap-3 text-[10px] text-muted-foreground">
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: CHART_COLORS.util.stroke }} />
-          Util
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: CHART_COLORS.vram.stroke }} />
-          VRAM
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-1.5 w-3 rounded-full" style={{ background: CHART_COLORS.power.stroke }} />
-          Power
-        </span>
-      </div>
-    </div>
-  )
-}
-
-// Status palette (dataviz skill): good / warning / critical by temperature.
-function tempColorClass(tempC: number): string {
-  if (tempC >= 90) return "text-red-500"
-  if (tempC >= 80) return "text-amber-500"
-  return "text-emerald-500"
-}
+const gb = (mb: number) => (mb / 1024).toFixed(1)
 
 export function GpuCard({ gpu }: GpuCardProps) {
-  const highTemp = gpu.temperatureC > 80
-  const highUtilization = gpu.utilizationPct > 80
+  const raw = useGpuStore((s) => s.history[gpu.index] ?? [])
+  const powerHistory = downsample(raw, 60).map((p) => p.powerPct)
+
+  const vramPct = pct(gpu.usedVramMb, gpu.totalVramMb)
+  const lockedPct = pct(gpu.lockedVramMb, gpu.totalVramMb)
+  const powPct = gpu.powerLimitW > 0 ? (gpu.powerDrawW / gpu.powerLimitW) * 100 : 0
+  const hot = gpu.temperatureC >= 78 || vramPct >= 90
 
   return (
-    <article
-      className={`rounded-lg border bg-card p-4 shadow-sm ${
-        highTemp || highUtilization ? "border-red-500/70" : "border-border"
-      }`}
-    >
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <p className="text-sm text-muted-foreground">GPU #{gpu.index}</p>
-          <h3 className="text-base font-semibold text-foreground">{gpu.name}</h3>
+    <article className={`rounded-2xl border bg-card p-[18px] shadow-sm ${hot ? "border-red-500/60" : "border-border"}`}>
+      <div className="mb-4 flex items-start justify-between gap-2.5">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">GPU #{gpu.index}</p>
+          <h3 className="truncate text-[15.5px] font-semibold tracking-tight text-foreground">{gpu.name}</h3>
         </div>
-        <PowerGauge powerDrawW={gpu.powerDrawW} powerLimitW={gpu.powerLimitW} />
+        <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-[12.5px] font-semibold tabular-nums">
+          <span className="h-[7px] w-[7px] rounded-full" style={{ background: tempColor(gpu.temperatureC) }} />
+          {gpu.temperatureC.toFixed(0)}°C
+        </span>
       </div>
 
-      <VramBar used={gpu.usedVramMb} total={gpu.totalVramMb} locked={gpu.lockedVramMb} />
-
-      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <div className="rounded-md bg-muted/50 px-3 py-2">
-          <span className="text-muted-foreground">Utilization</span>
-          <p className={highUtilization ? "animate-pulse font-semibold text-red-400" : "font-semibold"}>
-            {gpu.utilizationPct.toFixed(1)}%
-          </p>
-        </div>
-
-        <div className="rounded-md bg-muted/50 px-3 py-2">
-          <span className="text-muted-foreground">Temperature</span>
-          <p className={`font-semibold ${tempColorClass(gpu.temperatureC)}`}>
-            {gpu.temperatureC.toFixed(1)}°C
-          </p>
-        </div>
+      <div className="grid grid-cols-[auto_1fr] items-center gap-[18px]">
+        <MetricGauge
+          pct={gpu.utilizationPct}
+          color={METRIC.util}
+          label="Uso GPU"
+          value={gpu.utilizationPct.toFixed(0)}
+          unit="%"
+          caption="Uso GPU"
+        />
+        <MemoryBars
+          name="VRAM"
+          usedLabel={gb(gpu.usedVramMb)}
+          totalLabel={gb(gpu.totalVramMb)}
+          usedPct={vramPct}
+          secondaryName="bloqueada"
+          secondaryPct={lockedPct}
+        />
       </div>
 
-      <MiniChart gpuIndex={gpu.index} />
+      <PowerBlock
+        label="Consumo eléctrico"
+        powerW={gpu.powerDrawW}
+        powerLimitW={gpu.powerLimitW}
+        history={powerHistory}
+        subtitle={`${Math.round(powPct)}% del límite · últimos 10 min`}
+      />
 
-      <div className="mt-4 rounded-md border border-border/60 bg-background/40 p-3">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Processes (nvidia-smi)
-          </span>
-          <span className="text-xs text-muted-foreground">{gpu.processes.length}</span>
-        </div>
-
-        {gpu.processes.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No active GPU processes</p>
-        ) : (
-          <div className="space-y-1">
-            {gpu.processes.map((process) => (
+      <details className="group mt-[15px] border-t border-border">
+        <summary className="flex cursor-pointer list-none items-center justify-between pt-3 text-[11.5px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+          <span>Procesos ({gpu.processes.length})</span>
+          <span className="text-muted-foreground/70 transition-transform group-open:rotate-180">▾</span>
+        </summary>
+        <div className="flex flex-col gap-1.5 pb-0.5 pt-2.5">
+          {gpu.processes.length === 0 ? (
+            <p className="text-[11.5px] text-muted-foreground">Sin procesos activos en la GPU</p>
+          ) : (
+            gpu.processes.map((process) => (
               <div
                 key={`${process.processType}-${process.pid}`}
-                className="flex items-center justify-between gap-2 rounded bg-muted/40 px-2 py-1 text-xs"
+                className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-2.5 py-1.5 text-[11.5px]"
               >
                 <span className="min-w-0 truncate font-mono text-foreground/90">
                   {process.pid} · {process.processName ?? "unknown"}
                 </span>
-                <span className="shrink-0 text-muted-foreground">
+                <span className="shrink-0 tabular-nums text-muted-foreground">
                   {process.processType} · {process.usedVramMb.toLocaleString()} MB
                 </span>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            ))
+          )}
+        </div>
+      </details>
     </article>
   )
 }
