@@ -258,6 +258,40 @@ export interface ModelMemoryEstimate {
   notes: string[]
 }
 
+// Raw shape of GET /ocabra/models/{id}/capacity (snake_case, passed through).
+export interface ModelCapacity {
+  model_id: string
+  backend_type: string
+  applicable: boolean
+  weights_mb: number
+  overhead_mb: number
+  kv_dtype: string
+  target_gpu: number
+  gpus: { index: number; total_mb: number; free_mb: number }[]
+  note?: string
+  fits_free_now?: boolean
+  concurrency_label?: "slots" | "concurrency"
+  arch?: {
+    layers: number
+    n_kv_heads: number
+    key_length: number
+    value_length: number
+    native_context: number
+    kv_bytes_per_token: number
+    kv_mb_per_1k_tokens: number
+  }
+  capacity?: { slots: number; max_context: number; max_context_capped: number }[]
+  vram_curve?: { context: number; vram_mb: number }[]
+  validation?: {
+    requested_context: number | string
+    slots: number
+    effective_context: number
+    max_context: number
+    fits: boolean
+    warnings: string[]
+  }
+}
+
 export type BackendExtraConfig = Record<string, unknown> & {
   vllm?: VLLMConfig
   sglang?: SGLangConfig

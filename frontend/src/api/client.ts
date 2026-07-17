@@ -1038,6 +1038,19 @@ export const api = {
     storage: async () => toModelsStorageStats(await request<unknown>("GET", "/ocabra/models/storage")),
     get: async (modelId: string) =>
       toModelState(await request<unknown>("GET", `/ocabra/models/${encodeURIComponent(modelId)}`)),
+    capacity: (
+      modelId: string,
+      params?: { gpu?: number; slots?: string; kvDtype?: string; context?: string },
+    ) =>
+      request<import("@/types").ModelCapacity>(
+        "GET",
+        `/ocabra/models/${encodeURIComponent(modelId)}/capacity${buildQuery({
+          gpu: params?.gpu,
+          slots: params?.slots,
+          kv_dtype: params?.kvDtype,
+          context: params?.context,
+        })}`,
+      ),
     load: async (modelId: string) =>
       toModelState(await request<unknown>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/load`)),
     unload: (modelId: string) => request<void>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/unload`),

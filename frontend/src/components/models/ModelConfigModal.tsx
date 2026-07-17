@@ -16,6 +16,7 @@ import {
   getWritableExtraConfig,
 } from "@/lib/modelContext"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
+import { CapacityPanel } from "@/components/models/CapacityPanel"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useIsAdmin } from "@/hooks/useAuth"
 import type {
@@ -963,6 +964,19 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 auto reload tras eviction por presion
               </label>
             </FieldSection>
+
+            {model && ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(model.backendType) && (
+              <FieldSection
+                title="Planificador de contexto y VRAM"
+                description="Contexto máximo por slot/concurrencia y curva de VRAM; configura el caso de uso (contexto, paralelismo, KV cache) que se aplicará al cargar."
+              >
+                <CapacityPanel
+                  modelId={model.modelId}
+                  gpus={gpus}
+                  extraConfig={model.extraConfig}
+                />
+              </FieldSection>
+            )}
 
             {model && (
               <FieldSection
