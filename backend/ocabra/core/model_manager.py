@@ -695,11 +695,47 @@ class ModelManager:
                                 f"(vllm_gpu_memory_utilization={settings.vllm_gpu_memory_utilization})."
                             )
 
+                # Use-case resolution (opt-in): when extra_config has a "use_case"
+                # block, translate its target context/slots/kv_dtype into the
+                # concrete backend load flags, auto-picking the max context that
+                # fits when unset. Never blocks a load — falls back on any error.
+                effective_extra = state.extra_config
+                try:
+                    if gpu_managed and gpu_indices and self._gpu_manager:
+                        from ocabra.core.vram_capacity import (
+                            apply_use_case_flags,
+                            resolve_use_case,
+                        )
+
+                        gpu_states = await self._gpu_manager.get_all_states()
+                        tgt = next(
+                            (g for g in gpu_states if g.index == gpu_indices[0]), None
+                        )
+                        gpu_total = tgt.total_vram_mb if tgt else 0
+                        if gpu_total:
+                            plan = await resolve_use_case(state, gpu_total)
+                            if plan and plan.get("applied"):
+                                effective_extra = apply_use_case_flags(
+                                    state.extra_config, state.backend_type, plan
+                                )
+                                logger.info(
+                                    "use_case_applied",
+                                    model_id=model_id,
+                                    effective_context=plan.get("effective_context"),
+                                    slots=plan.get("slots"),
+                                    warnings=plan.get("warnings"),
+                                )
+                except Exception as exc:  # noqa: BLE001 — never block a load on planning
+                    logger.warning(
+                        "use_case_resolution_failed", model_id=model_id, error=str(exc)
+                    )
+                    effective_extra = state.extra_config
+
                 worker_info = await backend.load(
                     state.backend_model_id,
                     gpu_indices,
                     port=assigned_port,
-                    extra_config=state.extra_config,
+                    extra_config=effective_extra,
                     load_policy=state.load_policy.value,
                 )
                 backend_loaded = True

@@ -138,6 +138,36 @@ def test_capacity_rows_vllm_uses_concurrency():
     assert rows[0]["max_context"] > rows[1]["max_context"] > 0
 
 
+def test_plan_use_case_auto_picks_max():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=262144)
+    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context="max", slots=1)
+    assert plan["auto"] is True
+    assert plan["effective_context"] == plan["max_context"] > 0
+    assert plan["warnings"] == []
+
+
+def test_plan_use_case_clamps_to_fit():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=262144)
+    # ask for far more than fits → clamped to max with a warning
+    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context=500000, slots=1)
+    assert plan["effective_context"] == plan["max_context"]
+    assert plan["warnings"]
+
+
+def test_plan_use_case_caps_at_native():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=8192)
+    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context=32768, slots=1)
+    assert plan["effective_context"] == 8192
+    assert any("nativo" in w for w in plan["warnings"])
+
+
+def test_plan_use_case_fits_exactly_no_warning():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=262144)
+    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context=8192, slots=1)
+    assert plan["effective_context"] == 8192
+    assert plan["warnings"] == []
+
+
 def test_vram_curve_monotonic_and_capped():
     arch = vp.ModelArch(36, 8, 128, 128, context_length=32768)
     curve = vp.vram_curve(arch, 2400)

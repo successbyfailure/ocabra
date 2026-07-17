@@ -234,6 +234,7 @@ async def get_model_capacity(
     gpu: int | None = Query(default=None, description="Target GPU index (default: preferred/most-free)"),
     slots: str = Query(default="1,2,4", description="Comma list of slot/concurrency counts"),
     kv_dtype: str = Query(default="fp16", description="KV cache dtype: fp16|fp8|q4"),
+    context: str | None = Query(default=None, description="Validate a desired context (int or 'max') at slots[0]"),
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """VRAM capacity/planning report for a model on a given GPU."""
@@ -306,6 +307,23 @@ async def get_model_capacity(
         gpu_memory_utilization=gpu_mem_util, kv_dtype_bytes=kv_bytes,
     )
     report["vram_curve"] = vp.vram_curve(arch, res.weights_mb, kv_dtype_bytes=kv_bytes)
+
+    if context is not None:
+        requested: int | str = context if context.lower() in ("max", "auto") else int(context)
+        plan = vp.plan_use_case(
+            backend, arch, res.weights_mb,
+            gpu_total_mb=total_mb, requested_context=requested, slots=slot_counts[0],
+            gpu_memory_utilization=gpu_mem_util, kv_dtype_bytes=kv_bytes,
+        )
+        report["validation"] = {
+            "requested_context": requested,
+            "slots": slot_counts[0],
+            "effective_context": plan["effective_context"],
+            "max_context": plan["max_context"],
+            "fits": not plan["warnings"],
+            "warnings": plan["warnings"],
+        }
+
     return report
 
 

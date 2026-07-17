@@ -369,6 +369,62 @@ def capacity_rows(
     return rows
 
 
+def plan_use_case(
+    backend_type: str,
+    arch: ModelArch,
+    weights_mb: float,
+    *,
+    gpu_total_mb: float,
+    requested_context: int | str | None,
+    slots: int = 1,
+    gpu_memory_utilization: float = 0.85,
+    kv_dtype_bytes: float = 2.0,
+    overhead_mb: float = DEFAULT_OVERHEAD_MB,
+) -> dict:
+    """Resolve a use case (target context + parallelism) to an effective context.
+
+    ``requested_context`` may be an int, or None/"max"/"auto"/0 to mean "the most
+    that fits". Returns the effective context (clamped to what fits and to the
+    model's native context), the fitting maximum, and any clamp warnings.
+    """
+    native = arch.context_length or 0
+    if backend_type in _POOLED_BACKENDS:
+        max_ctx = vllm_max_model_len(
+            arch, weights_mb, gpu_total_mb,
+            gpu_memory_utilization=gpu_memory_utilization,
+            concurrency=slots, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+        )
+    else:
+        max_ctx = max_context_tokens(
+            gpu_total_mb, weights_mb, arch,
+            slots=slots, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+        )
+    max_ctx = _cap(max_ctx, native)
+
+    warnings: list[str] = []
+    auto = requested_context in (None, 0, "max", "auto")
+    if auto:
+        effective = max_ctx
+    else:
+        effective = int(requested_context)
+        if native and effective > native:
+            warnings.append(f"contexto {effective} > nativo {native}; capado a {native}")
+            effective = native
+        if effective > max_ctx:
+            warnings.append(
+                f"contexto {effective} no cabe con {slots} slots (máx {max_ctx}); reducido a {max_ctx}"
+            )
+            effective = max_ctx
+
+    return {
+        "effective_context": effective,
+        "max_context": max_ctx,
+        "slots": slots,
+        "auto": auto,
+        "warnings": warnings,
+    }
+
+
 def vram_curve(
     arch: ModelArch,
     weights_mb: float,
