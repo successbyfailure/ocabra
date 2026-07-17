@@ -19,6 +19,32 @@ class WorkerPool:
         self._disabled_backends: dict[str, str] = {}
         self._workers: dict[str, WorkerInfo] = {}
         self._used_ports: set[int] = set()
+        # Optional async callback (model_id) -> num_ctx cap | None, used to clamp
+        # Ollama requests to a model's configured use-case context (wired in main).
+        self._ollama_ctx_resolver: Any | None = None
+
+    def set_ollama_ctx_resolver(self, resolver: Any) -> None:
+        self._ollama_ctx_resolver = resolver
+
+    async def _clamp_ollama_ctx(self, model_id: str, path: str, body: dict) -> dict:
+        """Cap ``options.num_ctx`` on native Ollama requests to the model's
+        configured use-case context. Ollama reserves KV = num_ctx × slots up front,
+        so an unclamped client (OpenWebUI often sends 32k+) inflates VRAM for
+        everyone. Only touches ``/api/*`` bodies; a no-op without a resolver/cap.
+        """
+        if not (self._ollama_ctx_resolver and path.startswith("/api/")):
+            return body
+        try:
+            cap = await self._ollama_ctx_resolver(model_id)
+        except Exception as exc:  # noqa: BLE001 — never block a request on the clamp
+            logger.warning("ollama_ctx_clamp_failed", model_id=model_id, error=str(exc))
+            return body
+        if not cap:
+            return body
+        opts = dict(body.get("options") or {})
+        current = opts.get("num_ctx")
+        opts["num_ctx"] = min(int(current), cap) if isinstance(current, int) and current > 0 else cap
+        return {**body, "options": opts}
 
     def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
         self._backends[backend_type] = backend
@@ -70,6 +96,7 @@ class WorkerPool:
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
         if worker.backend_type == "ollama":
+            body = await self._clamp_ollama_ctx(model_id, path, body)
             base = settings.ollama_base_url.rstrip("/")
             url = f"{base}{path}"
         else:
@@ -105,6 +132,7 @@ class WorkerPool:
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
         if worker.backend_type == "ollama":
+            body = await self._clamp_ollama_ctx(model_id, path, body)
             base = settings.ollama_base_url.rstrip("/")
             url = f"{base}{path}"
         else:
