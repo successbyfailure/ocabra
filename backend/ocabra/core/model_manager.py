@@ -156,15 +156,32 @@ class ModelManager:
 
     def begin_request(self, model_id: str) -> str:
         """Mark one request as in-flight. Returns request_id."""
-        request_id = str(uuid.uuid4())
+        request_id = self.try_begin_request(model_id, max_inflight=0)
+        assert request_id is not None  # max_inflight<=0 never rejects
+        return request_id
+
+    def try_begin_request(self, model_id: str, max_inflight: int) -> str | None:
+        """Admission control: mark one request in-flight, or return None when the
+        model already has ``max_inflight`` requests running (so the caller can
+        reject with 429 instead of letting a flood pile up on one worker).
+        ``max_inflight <= 0`` disables the cap.
+        """
         with self._in_flight_lock:
-            self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
+            current = self._in_flight.get(model_id, 0)
+            if max_inflight > 0 and current >= max_inflight:
+                return None
+            request_id = str(uuid.uuid4())
+            self._in_flight[model_id] = current + 1
             self._active_requests[request_id] = ActiveRequest(
                 request_id=request_id,
                 model_id=model_id,
                 started_at=time.time(),
             )
         return request_id
+
+    def inflight_count(self, model_id: str) -> int:
+        with self._in_flight_lock:
+            return self._in_flight.get(model_id, 0)
 
     def end_request(self, model_id: str, request_id: str | None = None) -> None:
         """Mark one in-flight request as complete.

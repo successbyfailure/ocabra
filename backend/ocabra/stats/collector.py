@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
@@ -126,7 +126,27 @@ class StatsMiddleware(BaseHTTPMiddleware):
         except AttributeError:
             mm = None
         if mm and inflight_model_id:
-            inflight_request_id = mm.begin_request(inflight_model_id)
+            inflight_request_id = mm.try_begin_request(
+                inflight_model_id, settings.max_inflight_per_model
+            )
+            if inflight_request_id is None:
+                # Admission control: the worker is already at capacity. Reject
+                # rather than pile on so one client's burst can't starve others.
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "2"},
+                    content={
+                        "error": {
+                            "message": (
+                                f"Model '{inflight_model_id}' is at capacity "
+                                f"({settings.max_inflight_per_model} concurrent "
+                                "requests). Please retry shortly."
+                            ),
+                            "type": "rate_limit_error",
+                            "code": "model_at_capacity",
+                        }
+                    },
+                )
 
         try:
             response = await call_next(request)

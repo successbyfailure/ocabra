@@ -111,6 +111,13 @@ class WorkerPool:
             url = f"http://127.0.0.1:{worker.port}{path}"
 
         async def _raw_stream() -> AsyncIterator[bytes]:
+            # Cancellation contract: when the client disconnects, Starlette cancels
+            # the streaming task; the CancelledError unwinds through this generator
+            # and the `async with client.stream()` __aexit__ closes the upstream
+            # connection, which makes vLLM / llama.cpp / Ollama abort the in-flight
+            # generation and free the GPU. Keep the per-request client + `async with`
+            # here — a shared/persistent client or manual iteration would break this
+            # and leak orphaned generations on abandoned (e.g. agentic) requests.
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream("POST", url, json=body) as resp:
                     resp.raise_for_status()
