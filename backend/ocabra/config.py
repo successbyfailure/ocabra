@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     llama_cpp_mlock: bool = True
     llama_cpp_embeddings: bool = False
     llama_cpp_startup_timeout_s: int = 30
+    # Concurrency: with cont_batching, a llama.cpp worker serves parallel_slots
+    # requests at once (the KV cache / ctx_size is shared across slots, so each
+    # slot gets ctx_size/parallel_slots). Default 1 (full context, no extra VRAM);
+    # raise per-model (extra_config.llama_cpp.parallel_slots) where there's headroom.
+    llama_cpp_parallel_slots: int = 1
+    llama_cpp_cont_batching: bool = True
     # SGLang
     sglang_python_bin: str = "/opt/sglang-venv/bin/python"
     sglang_server_module: str = "sglang.launch_server"
