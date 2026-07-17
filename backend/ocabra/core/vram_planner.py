@@ -319,3 +319,78 @@ def vllm_max_model_len(
         return 0
     pool_tokens = pool_mb / per_token_mb
     return int(pool_tokens / max(1, concurrency))
+
+
+# ---------------------------------------------------------------------------
+# Capacity report (used by the /capacity endpoint and use-case planning)
+# ---------------------------------------------------------------------------
+
+# Backends whose KV footprint is a fixed pool carved from the GPU up front.
+_POOLED_BACKENDS = {"vllm", "sglang"}
+
+
+def _cap(value: int, native: int) -> int:
+    return min(value, native) if native else value
+
+
+def capacity_rows(
+    backend_type: str,
+    arch: ModelArch,
+    weights_mb: float,
+    *,
+    gpu_total_mb: float,
+    slots: tuple[int, ...] = (1, 2, 4),
+    gpu_memory_utilization: float = 0.85,
+    kv_dtype_bytes: float = 2.0,
+    overhead_mb: float = DEFAULT_OVERHEAD_MB,
+) -> list[dict]:
+    """Per-slot (or per-concurrency, for pooled backends) max context table.
+
+    Computed against the GPU's *total* VRAM — the planning question is "the most
+    context this model can serve if it owns this GPU" (oCabra evicts to make room
+    on load), not what happens to be free this instant. vLLM/SGLang additionally
+    apply gpu_memory_utilization to their fixed pool. Capped at native context.
+    """
+    native = arch.context_length or 0
+    rows: list[dict] = []
+    for s in slots:
+        if backend_type in _POOLED_BACKENDS:
+            ctx = vllm_max_model_len(
+                arch, weights_mb, gpu_total_mb,
+                gpu_memory_utilization=gpu_memory_utilization,
+                concurrency=s, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+            )
+        else:
+            ctx = max_context_tokens(
+                gpu_total_mb, weights_mb, arch,
+                slots=s, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+            )
+        rows.append({"slots": s, "max_context": ctx, "max_context_capped": _cap(ctx, native)})
+    return rows
+
+
+def vram_curve(
+    arch: ModelArch,
+    weights_mb: float,
+    *,
+    kv_dtype_bytes: float = 2.0,
+    overhead_mb: float = DEFAULT_OVERHEAD_MB,
+    points: tuple[int, ...] = (2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144),
+) -> list[dict]:
+    """Total VRAM (weights + KV + overhead) at a series of single-slot contexts,
+    truncated at the model's native context."""
+    native = arch.context_length or points[-1]
+    out: list[dict] = []
+    seen: set[int] = set()
+    for ctx in points:
+        c = min(ctx, native)
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append({
+            "context": c,
+            "vram_mb": estimate_total_vram_mb(
+                weights_mb, arch, c, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb
+            ),
+        })
+    return out

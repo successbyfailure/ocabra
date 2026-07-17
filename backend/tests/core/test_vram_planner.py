@@ -122,6 +122,31 @@ def test_arch_from_ollama_model_info():
     assert arch == QWEN3_4B
 
 
+def test_capacity_rows_scales_with_slots_and_caps_native():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=40000)
+    rows = vp.capacity_rows("ollama", arch, 2400, gpu_total_mb=24000, slots=(1, 2, 4))
+    assert [r["slots"] for r in rows] == [1, 2, 4]
+    # more slots → less context per slot
+    assert rows[0]["max_context"] > rows[1]["max_context"] > rows[2]["max_context"]
+    # capped at native context
+    assert all(r["max_context_capped"] <= 40000 for r in rows)
+
+
+def test_capacity_rows_vllm_uses_concurrency():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=131072)
+    rows = vp.capacity_rows("vllm", arch, 16000, gpu_total_mb=24576, slots=(1, 4))
+    assert rows[0]["max_context"] > rows[1]["max_context"] > 0
+
+
+def test_vram_curve_monotonic_and_capped():
+    arch = vp.ModelArch(36, 8, 128, 128, context_length=32768)
+    curve = vp.vram_curve(arch, 2400)
+    ctxs = [p["context"] for p in curve]
+    assert max(ctxs) <= 32768  # capped at native
+    vrams = [p["vram_mb"] for p in curve]
+    assert vrams == sorted(vrams)  # VRAM grows with context
+
+
 def test_arch_extractors_return_none_on_garbage():
     assert vp.arch_from_hf_config({}) is None
     assert vp.arch_from_ollama_model_info({}, "qwen3") is None

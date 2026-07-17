@@ -1,0 +1,144 @@
+"""Resolve a model's architecture + weight footprint from whatever metadata its
+backend exposes, so the capacity planner can size KV against the real model.
+
+I/O lives here (HTTP to Ollama, reading GGUF/config.json/safetensors off disk);
+the pure math is in :mod:`ocabra.core.vram_planner`.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+
+from ocabra.config import settings
+from ocabra.core.vram_planner import (
+    ModelArch,
+    arch_from_gguf,
+    arch_from_hf_config,
+    arch_from_ollama_model_info,
+)
+
+_MB = 1024 * 1024
+
+# Backends that don't have a context-scaling KV cache (encoders, diffusion, TTS).
+_NON_KV_BACKENDS = {"whisper", "diffusers", "tts", "chatterbox", "comfyui", "a1111"}
+
+
+class ArchResolution:
+    __slots__ = ("arch", "weights_mb", "note")
+
+    def __init__(self, arch: ModelArch | None, weights_mb: float, note: str):
+        self.arch = arch
+        self.weights_mb = weights_mb
+        self.note = note
+
+
+def _find_hf_model_dir(repo: str) -> Path | None:
+    """Locate a local HF model dir (config.json) for a repo id like ``Qwen/Qwen3-8B``."""
+    if not repo:
+        return None
+    base = Path(settings.models_dir) / "huggingface"
+    flat = repo.replace("/", "--")
+    candidates = [base / flat, base / repo]
+    for c in candidates:
+        if (c / "config.json").is_file():
+            return c
+    # HF cache layout: models--Qwen--Qwen3-8B/snapshots/<hash>/config.json
+    for snaps in list(base.glob(f"models--{flat}/snapshots/*")) + list(
+        base.glob(f"*{flat}*/snapshots/*")
+    ):
+        if (snaps / "config.json").is_file():
+            return snaps
+    return None
+
+
+def _sum_weight_files_mb(model_dir: Path) -> float:
+    total = 0
+    for pattern in ("*.safetensors", "*.bin"):
+        for f in model_dir.glob(pattern):
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return total / _MB
+
+
+async def _resolve_ollama(name: str) -> ArchResolution:
+    base = settings.ollama_base_url.rstrip("/")
+    arch: ModelArch | None = None
+    weights_mb = 0.0
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            show = (await client.post(f"{base}/api/show", json={"model": name})).json()
+            family = (show.get("details") or {}).get("family", "")
+            arch = arch_from_ollama_model_info(show.get("model_info") or {}, family)
+        except (httpx.HTTPError, ValueError, KeyError):
+            pass
+        try:
+            tags = (await client.get(f"{base}/api/tags")).json()
+            for m in tags.get("models", []):
+                if m.get("name") == name or m.get("model") == name:
+                    weights_mb = int(m.get("size", 0)) / _MB
+                    break
+        except (httpx.HTTPError, ValueError):
+            pass
+    note = "" if arch else "no se pudo leer la arquitectura de Ollama /api/show"
+    return ArchResolution(arch, weights_mb, note)
+
+
+def _resolve_llama_cpp(state) -> ArchResolution:
+    cfg = (state.extra_config or {}).get("llama_cpp", {}) if isinstance(state.extra_config, dict) else {}
+    model_path = cfg.get("model_path") or cfg.get("model_file")
+    if not model_path:
+        return ArchResolution(None, 0.0, "sin model_path del GGUF")
+    p = Path(str(model_path))
+    weights_mb = 0.0
+    try:
+        weights_mb = p.stat().st_size / _MB
+    except OSError:
+        pass
+    arch = arch_from_gguf(str(p))
+    note = "" if arch else "no se pudo leer el header del GGUF"
+    return ArchResolution(arch, weights_mb, note)
+
+
+def _resolve_hf(state) -> ArchResolution:
+    repo = state.backend_model_id or state.model_id
+    model_dir = _find_hf_model_dir(repo)
+    if model_dir is None:
+        return ArchResolution(None, 0.0, f"no se encontró config.json local para {repo}")
+    try:
+        cfg = json.loads((model_dir / "config.json").read_text())
+    except (OSError, ValueError):
+        return ArchResolution(None, 0.0, "config.json ilegible")
+    weights_mb = _sum_weight_files_mb(model_dir)
+    # Encoders (rerankers, embeddings, classifiers) process the whole sequence in
+    # one pass — no per-step KV cache that scales with context — so the planner
+    # doesn't apply to them even though they have transformer layers.
+    archs = cfg.get("architectures") or []
+    generative = any(
+        any(m in a for m in ("CausalLM", "ConditionalGeneration", "LMHeadModel"))
+        for a in archs
+    )
+    if archs and not generative:
+        return ArchResolution(None, weights_mb, "modelo encoder/embedding/rerank: sin KV generativo que escale con el contexto")
+    arch = arch_from_hf_config(cfg)
+    note = "" if arch else "config.json sin campos de arquitectura reconocibles"
+    return ArchResolution(arch, weights_mb, note)
+
+
+async def resolve_arch_and_weights(state) -> ArchResolution:
+    """Best-effort (arch, weights_mb) for a model state. arch is None when the
+    backend has no context-scaling KV cache or metadata can't be read."""
+    backend = (state.backend_type or "").lower()
+    if backend in _NON_KV_BACKENDS:
+        return ArchResolution(None, 0.0, f"backend '{backend}' sin KV que escale con el contexto")
+    if backend == "ollama":
+        return await _resolve_ollama(state.backend_model_id)
+    if backend in ("llama_cpp", "bitnet"):
+        return _resolve_llama_cpp(state)
+    if backend in ("vllm", "sglang"):
+        return _resolve_hf(state)
+    return ArchResolution(None, 0.0, f"backend '{backend}' no soportado por el planner")
