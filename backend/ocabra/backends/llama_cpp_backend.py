@@ -336,6 +336,31 @@ class LlamaCppBackend(BackendInterface):
         except Exception:
             return False
 
+    async def _template_supports_tools(self, model_id: str) -> bool | None:
+        """Whether the loaded model's chat template accepts ``tools``.
+
+        Authoritative source (a fine-tune's repo name is unreliable — e.g.
+        ``RavenX-CyberAgent`` is a Qwen3 tool-caller): llama-server's ``/props``
+        exposes the Jinja chat template; if it branches on ``tools`` / emits
+        ``tool_calls`` the model can do tool calling. Returns None when the
+        worker isn't queryable so the caller falls back to the name heuristic.
+        """
+        entry = self._processes.get(model_id)
+        if not entry:
+            return None
+        _, port = entry
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"http://127.0.0.1:{port}/props")
+            if resp.status_code != 200:
+                return None
+            template = (resp.json().get("chat_template") or "").lower()
+        except Exception:
+            return None
+        if not template:
+            return None
+        return any(marker in template for marker in ("tool_call", "tool_calls", "tools"))
+
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         options = self._model_configs.get(model_id, {})
         normalized = model_id.lower()
@@ -347,6 +372,10 @@ class LlamaCppBackend(BackendInterface):
         tools = not embeddings and any(
             token in normalized for token in ("llama", "mistral", "mixtral", "qwen", "tool")
         )
+        # Prefer the loaded model's actual chat template over the name heuristic.
+        template_tools = await self._template_supports_tools(model_id)
+        if template_tools is not None:
+            tools = template_tools and not embeddings
         return BackendCapabilities(
             chat=not embeddings,
             completion=True,
