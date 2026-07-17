@@ -74,16 +74,26 @@ class GPUScheduler:
                     )
                     return [gpu_idx]
 
-            tp_candidates = [i for i in candidates if _has_vllm_headroom(i)]
-            total_free = sum(free_per_gpu[i] for i in tp_candidates)
-            if total_free >= vram_needed_mb:
-                logger.info(
-                    "tensor_parallel_assigned",
-                    gpus=tp_candidates,
-                    vram_needed_mb=vram_needed_mb,
-                    total_free_mb=total_free,
-                )
-                return tp_candidates
+            # Tensor-parallel is a LAST resort — only for a model too big for any
+            # single GPU. If it fits on one GPU but none is currently free, don't
+            # split it: raise so the caller's eviction path frees a single capable
+            # GPU and retries. (Splitting would also make the pre-load eviction
+            # loop demand the full amount on every GPU, including ones too small
+            # to ever hold it — e.g. a 22 GB model wrongly assigned to a 12 GB card.)
+            fits_single_gpu = any(
+                state_by_gpu[i].total_vram_mb >= vram_needed_mb for i in candidates
+            )
+            if not fits_single_gpu:
+                tp_candidates = [i for i in candidates if _has_vllm_headroom(i)]
+                total_free = sum(free_per_gpu[i] for i in tp_candidates)
+                if total_free >= vram_needed_mb:
+                    logger.info(
+                        "tensor_parallel_assigned",
+                        gpus=tp_candidates,
+                        vram_needed_mb=vram_needed_mb,
+                        total_free_mb=total_free,
+                    )
+                    return tp_candidates
 
         raise InsufficientVRAMError(
             f"Need {vram_needed_mb} MB VRAM, only {total_free} MB available across all GPUs"
