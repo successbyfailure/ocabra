@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     # raise per-model (extra_config.llama_cpp.parallel_slots) where there's headroom.
     llama_cpp_parallel_slots: int = 1
     llama_cpp_cont_batching: bool = True
+    # Admission control: max concurrent in-flight requests per model. When a model
+    # is already serving this many requests, further requests get 429 instead of
+    # piling onto one worker (flood protection so one client can't starve others).
+    # 0 = unlimited. On this hardware a single model rarely needs >32 concurrent,
+    # so 32 only rejects genuine floods (runaway loops) while leaving real bursts
+    # (a couple of agentic users, batched embeddings) untouched.
+    max_inflight_per_model: int = 32
     # SGLang
     sglang_python_bin: str = "/opt/sglang-venv/bin/python"
     sglang_server_module: str = "sglang.launch_server"
