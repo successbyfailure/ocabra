@@ -96,5 +96,9 @@ def estimate_llama_cpp_vram_from_config(
         total_layers = max(1, int(resolve_llama_cpp_option(state, "total_layers", default_total_layers)))
     except (TypeError, ValueError):
         total_layers = default_total_layers
+    # GGUF weights dominate; the CUDA context + KV cache add only a modest
+    # overhead (observed ~1.00-1.05x file size for MoE at moderate ctx). 1.08
+    # leaves headroom to trigger eviction without over-reserving so much that a
+    # model that really fits gets bumped to tensor-parallel across a too-small GPU.
     fraction = min(gpu_layers, total_layers) / total_layers
-    return int(size_mb * fraction * 1.15)
+    return int(size_mb * fraction * 1.08)
