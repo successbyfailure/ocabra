@@ -19,9 +19,29 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
-from ocabra.core.backend_installer import read_backend_metadata
+from ocabra.core.backend_installer import read_backend_metadata, venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
+
+
+def _cuda_ld_library_path() -> str:
+    """CUDA runtime lib dirs for the natively-built llama-server binary.
+
+    Unlike the python backends, llama.cpp is compiled from source and has no
+    venv of its own, so it ships no CUDA runtime: on the slim image the binary
+    dies at startup with ``libcublas.so.12: cannot open shared object file``
+    (exit 127). The NVIDIA container runtime only injects the *driver* libs, so
+    reuse the CUDA runtime that pip already dropped into another backend's venv.
+    """
+    own = venv_nvidia_ld_library_path(settings.backends_dir, "llama_cpp")
+    if own:
+        return own
+    for donor in ("vllm", "sglang", "acestep", "diffusers"):
+        donated = venv_nvidia_ld_library_path(settings.backends_dir, donor)
+        if donated:
+            logger.info("llama_cpp_cuda_libs_borrowed", donor=donor)
+            return donated
+    return ""
 
 _DEFAULT_TOTAL_LAYERS = 32
 _DEFAULT_STARTUP_TIMEOUT_S = 30
@@ -259,6 +279,10 @@ class LlamaCppBackend(BackendInterface):
             if options["gpu_layers"] > 0
             else "",
         }
+        cuda_ld = _cuda_ld_library_path()
+        if cuda_ld:
+            existing = os.environ.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{cuda_ld}:{existing}".rstrip(":")
 
         logger.info(
             "llama_cpp_starting",
