@@ -80,3 +80,6 @@ secrets/
 # === Local workspaces ===
 Hunyuan3D-2.1/
 .claude/
+
+# El patrón models/ (dir de modelos IA) no debe ignorar componentes del frontend
+!frontend/src/components/models/
