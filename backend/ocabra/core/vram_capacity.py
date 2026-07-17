@@ -10,9 +10,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import copy
+
 import httpx
 
 from ocabra.config import settings
+from ocabra.core import vram_planner as vp
 from ocabra.core.vram_planner import (
     ModelArch,
     arch_from_gguf,
@@ -21,6 +24,15 @@ from ocabra.core.vram_planner import (
 )
 
 _MB = 1024 * 1024
+
+# kv_dtype label -> (bytes per KV element, vLLM kv_cache_dtype or None to leave default)
+KV_DTYPES: dict[str, tuple[float, str | None]] = {
+    "fp16": (2.0, None),
+    "bf16": (2.0, None),
+    "fp8": (1.0, "fp8"),
+    "q8": (1.0, None),
+    "q4": (0.5, None),
+}
 
 # Backends that don't have a context-scaling KV cache (encoders, diffusion, TTS).
 _NON_KV_BACKENDS = {"whisper", "diffusers", "tts", "chatterbox", "comfyui", "a1111"}
@@ -127,6 +139,77 @@ def _resolve_hf(state) -> ArchResolution:
     arch = arch_from_hf_config(cfg)
     note = "" if arch else "config.json sin campos de arquitectura reconocibles"
     return ArchResolution(arch, weights_mb, note)
+
+
+def _use_case_config(state) -> dict | None:
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    uc = extra.get("use_case")
+    return uc if isinstance(uc, dict) else None
+
+
+async def resolve_use_case(state, gpu_total_mb: float) -> dict | None:
+    """Resolve the ``use_case`` block (target context + slots + kv_dtype) against
+    the model's capacity on ``gpu_total_mb``. Returns the plan (effective context,
+    warnings, computed backend flags) or None when there's no use_case to apply.
+    """
+    uc = _use_case_config(state)
+    if uc is None:
+        return None
+    res = await resolve_arch_and_weights(state)
+    if res.arch is None:
+        return {"applied": False, "note": res.note or "arquitectura no disponible"}
+
+    backend = (state.backend_type or "").lower()
+    kv_label = str(uc.get("kv_dtype", "fp16")).lower()
+    kv_bytes, vllm_kv = KV_DTYPES.get(kv_label, (2.0, None))
+    slots = max(1, int(uc.get("slots", 1) or 1))
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    gpu_mem_util = float(
+        (extra.get("vllm") or {}).get("gpu_memory_utilization")
+        or settings.vllm_gpu_memory_utilization
+    )
+
+    plan = vp.plan_use_case(
+        backend, res.arch, res.weights_mb,
+        gpu_total_mb=gpu_total_mb,
+        requested_context=uc.get("context"),
+        slots=slots,
+        gpu_memory_utilization=gpu_mem_util,
+        kv_dtype_bytes=kv_bytes,
+    )
+    plan["applied"] = True
+    plan["kv_dtype"] = kv_label
+    plan["vllm_kv_cache_dtype"] = vllm_kv
+    return plan
+
+
+def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> dict:
+    """Return a copy of ``extra_config`` with the resolved use-case translated into
+    the concrete backend load flags. Only touches keys the use case owns; runtime
+    use (not persisted), so an explicit config in the DB is unchanged on disk.
+    """
+    backend = (backend_type or "").lower()
+    ctx = plan.get("effective_context")
+    slots = plan.get("slots", 1)
+    if not ctx or not plan.get("applied"):
+        return extra_config
+    merged = copy.deepcopy(extra_config) if isinstance(extra_config, dict) else {}
+
+    if backend in ("llama_cpp", "bitnet"):
+        sect = merged.setdefault("llama_cpp", {})
+        sect["ctx_size"] = ctx
+        sect["parallel_slots"] = slots
+    elif backend in ("vllm", "sglang"):
+        sect = merged.setdefault("vllm", {})
+        sect["max_model_len"] = ctx
+        if plan.get("vllm_kv_cache_dtype"):
+            sect["kv_cache_dtype"] = plan["vllm_kv_cache_dtype"]
+    elif backend == "ollama":
+        # Ollama takes num_ctx per request, not at load; stash for the request path.
+        sect = merged.setdefault("ollama", {})
+        sect["num_ctx"] = ctx
+        sect["num_parallel"] = slots
+    return merged
 
 
 async def resolve_arch_and_weights(state) -> ArchResolution:
