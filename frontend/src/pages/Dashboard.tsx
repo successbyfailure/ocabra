@@ -162,6 +162,7 @@ function HostStatsCard({
           usedPct={stats.memPct}
           secondaryName="swap"
           secondaryPct={stats.swapTotalMb > 0 ? stats.swapPct : 0}
+          secondaryMode="aside"
         />
       </div>
 
