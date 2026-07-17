@@ -17,8 +17,10 @@ from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
+    estimate_llama_cpp_vram_from_config,
     resolve_bitnet_gpu_layers,
     resolve_bitnet_option,
+    resolve_llama_cpp_gpu_layers,
 )
 from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
 from ocabra.db.model_config import ModelConfig
@@ -602,11 +604,29 @@ class ModelManager:
                 vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id)
                 if state.backend_type == "bitnet":
                     vram_needed = self._estimate_bitnet_vram_from_config(state)
+                elif state.backend_type == "llama_cpp":
+                    # The llama.cpp backend can only estimate VRAM after load
+                    # (its option cache is filled in load()); estimate from the
+                    # GGUF size + config so the scheduler sees the real need and
+                    # can evict/pick a GPU with room instead of blindly starting.
+                    est = estimate_llama_cpp_vram_from_config(
+                        state, default_gpu_layers=settings.llama_cpp_gpu_layers
+                    )
+                    if est > 0:
+                        vram_needed = est
 
                 bitnet_cpu_only = (
                     state.backend_type == "bitnet" and self._resolve_bitnet_gpu_layers(state) <= 0
                 )
-                gpu_managed = state.backend_type != "ollama" and not bitnet_cpu_only
+                llama_cpp_cpu_only = (
+                    state.backend_type == "llama_cpp"
+                    and resolve_llama_cpp_gpu_layers(state, settings.llama_cpp_gpu_layers) <= 0
+                )
+                gpu_managed = (
+                    state.backend_type != "ollama"
+                    and not bitnet_cpu_only
+                    and not llama_cpp_cpu_only
+                )
                 needs_port = state.backend_type != "ollama"
                 assigned_port = await self._worker_pool.assign_port() if needs_port else 0
                 backend_loaded = False
@@ -991,9 +1011,35 @@ class ModelManager:
         ]
 
     async def _wait_for_vram_released(self, released_vram_mb: int) -> None:
-        if not self._gpu_manager or released_vram_mb <= 0:
+        if not self._gpu_manager:
             return
-        await asyncio.sleep(2.5)
+
+        # Ollama-managed models report 0 VRAM to oCabra even though evicting them
+        # frees real memory, and the GPU-state source (hw-monitor) only refreshes
+        # on a ~2s cadence — so a plain ``released_vram_mb <= 0`` short-circuit let
+        # the scheduler re-check stale/occupied VRAM 150ms after eviction and fail
+        # with "insufficient_vram". Poll aggregate free VRAM until it actually
+        # rises (across refresh cycles), capped so a load never blocks forever.
+        async def _total_free_mb() -> int:
+            try:
+                states = await self._gpu_manager.get_all_states()
+                return sum(int(getattr(s, "free_vram_mb", 0)) for s in states)
+            except Exception:
+                return -1
+
+        baseline = await _total_free_mb()
+        if baseline < 0:
+            await asyncio.sleep(3.0)
+            return
+
+        # Expect at least the claimed amount back, or ~1 GB for the 0-report case.
+        target = baseline + (released_vram_mb if released_vram_mb > 0 else 1024)
+        deadline = asyncio.get_event_loop().time() + 12.0
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.75)
+            free = await _total_free_mb()
+            if free >= target:
+                return
 
     async def load(
         self, model_id: str, force_gpu: int | None = None

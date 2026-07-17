@@ -299,7 +299,13 @@ class DownloadManager:
 
             register_config = job.register_config or {}
             extra_config = register_config.get("extra_config") or {}
-            if job.source == "bitnet" and job.artifact:
+            # Single-file weights (BitNet / llama.cpp GGUF) are stored under
+            # ``huggingface/<repo-->--<artifact stem>/<artifact>``. Pin the exact
+            # path: the backends can't derive it from the ``repo::artifact``
+            # model_id (the '::' separator and dots in version names defeat the
+            # directory/stem heuristics), so without this the model registers
+            # fine but fails to load with "GGUF model not found".
+            if job.artifact and (job.source == "bitnet" or backend_type in ("bitnet", "llama_cpp")):
                 stem = Path(job.artifact).stem.replace("/", "_")
                 model_path = (
                     Path(settings.models_dir)
