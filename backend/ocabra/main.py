@@ -373,6 +373,7 @@ async def lifespan(app: FastAPI):
         )
     model_manager = ModelManager(worker_pool, gpu_manager, gpu_scheduler)
     gpu_scheduler.set_model_manager(model_manager)
+    worker_pool.set_ollama_ctx_resolver(model_manager.resolve_ollama_num_ctx_cap)
     app.state.worker_pool = worker_pool
     app.state.model_manager = model_manager
 

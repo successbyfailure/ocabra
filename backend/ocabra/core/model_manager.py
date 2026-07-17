@@ -153,6 +153,8 @@ class ModelManager:
         # Value is (cached_at_monotonic, seconds | None). TTL: 5 minutes.
         self._expected_load_cache: dict[str, tuple[float, int | None]] = {}
         self._expected_load_cache_ttl_s: float = 300.0
+        # model_id -> (resolved_at, num_ctx cap) for Ollama use-case clamping
+        self._ollama_ctx_cap_cache: dict[str, tuple[float, int | None]] = {}
 
     def begin_request(self, model_id: str) -> str:
         """Mark one request as in-flight. Returns request_id."""
@@ -182,6 +184,47 @@ class ModelManager:
     def inflight_count(self, model_id: str) -> int:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0)
+
+    async def resolve_ollama_num_ctx_cap(self, model_id: str) -> int | None:
+        """num_ctx cap for an Ollama model with a ``use_case`` block, else None
+        (no clamp). A concrete ``context`` is returned directly; ``max``/unset is
+        resolved to the largest context that fits on the target GPU and cached
+        briefly (the value is stable — it depends on GPU total, not live free)."""
+        state = self._states.get(model_id)
+        if not state or state.backend_type != "ollama":
+            return None
+        extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+        uc = extra.get("use_case")
+        if not isinstance(uc, dict):
+            return None
+        ctx = uc.get("context")
+        if isinstance(ctx, int) and ctx > 0:
+            return ctx
+
+        now = time.time()
+        cached = self._ollama_ctx_cap_cache.get(model_id)
+        if cached and now - cached[0] < 60.0:
+            return cached[1]
+        cap: int | None = None
+        try:
+            gpu_states = await self._gpu_manager.get_all_states() if self._gpu_manager else []
+            if gpu_states:
+                idx = (
+                    state.preferred_gpu
+                    if state.preferred_gpu is not None
+                    else max(gpu_states, key=lambda g: g.total_vram_mb).index
+                )
+                tgt = next((g for g in gpu_states if g.index == idx), None)
+                if tgt:
+                    from ocabra.core.vram_capacity import resolve_use_case
+
+                    plan = await resolve_use_case(state, tgt.total_vram_mb)
+                    if plan and plan.get("applied"):
+                        cap = plan.get("effective_context")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ollama_ctx_cap_resolve_failed", model_id=model_id, error=str(exc))
+        self._ollama_ctx_cap_cache[model_id] = (now, cap)
+        return cap
 
     def end_request(self, model_id: str, request_id: str | None = None) -> None:
         """Mark one in-flight request as complete.
