@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ocabra.core.vram_planner import arch_from_gguf, plan_llama_cpp_vram_mb
+
 
 def build_diarized_extra_config(base_extra_config: dict | None) -> dict:
     """Build extra_config with diarization enabled, used by profile creation."""
@@ -66,15 +68,21 @@ def estimate_llama_cpp_vram_from_config(
     state,
     *,
     default_gpu_layers: int,
+    default_ctx_size: int = 4096,
     default_total_layers: int = 32,
 ) -> int:
     """Pre-load VRAM estimate for a llama.cpp GGUF model.
 
     The backend itself can only estimate *after* load (its option cache is
     populated in ``load()``), so the scheduler would otherwise see 0 MB, never
-    check VRAM and never evict to make room. Estimate from the on-disk GGUF size
-    scaled by the fraction of layers offloaded to GPU, plus ~15% headroom for
-    the CUDA context + KV cache. Returns 0 for CPU-only (gpu_layers <= 0).
+    check VRAM and never evict to make room.
+
+    When the GGUF architecture is readable we compute weights + an *exact* KV
+    cache for the configured ctx_size (KV scales with context, which a flat
+    file-size multiplier misses entirely — e.g. a low-KV-head model over-reserves
+    and a large-context one under-reserves). Otherwise we fall back to the on-disk
+    GGUF size scaled by the offloaded-layer fraction plus a small overhead.
+    Returns 0 for CPU-only (gpu_layers <= 0).
     """
     gpu_layers = resolve_llama_cpp_gpu_layers(state, default_gpu_layers)
     if gpu_layers <= 0:
@@ -93,12 +101,23 @@ def estimate_llama_cpp_vram_from_config(
         return 0  # unknown size → let the backend/scheduler proceed as before
 
     try:
+        ctx_size = int(resolve_llama_cpp_option(state, "ctx_size", default_ctx_size))
+    except (TypeError, ValueError):
+        ctx_size = default_ctx_size
+
+    # KV-aware path: read the architecture straight from the GGUF header.
+    arch = arch_from_gguf(str(model_path)) if model_path else None
+    if arch is not None:
+        est = plan_llama_cpp_vram_mb(arch, size_mb, ctx_size, gpu_layers=gpu_layers)
+        if est > 0:
+            return est
+
+    # Fallback: weights-only heuristic (arch unreadable). ~1.08x leaves headroom
+    # to trigger eviction without over-reserving so much that a model that really
+    # fits gets bumped to tensor-parallel across a too-small GPU.
+    try:
         total_layers = max(1, int(resolve_llama_cpp_option(state, "total_layers", default_total_layers)))
     except (TypeError, ValueError):
         total_layers = default_total_layers
-    # GGUF weights dominate; the CUDA context + KV cache add only a modest
-    # overhead (observed ~1.00-1.05x file size for MoE at moderate ctx). 1.08
-    # leaves headroom to trigger eviction without over-reserving so much that a
-    # model that really fits gets bumped to tensor-parallel across a too-small GPU.
     fraction = min(gpu_layers, total_layers) / total_layers
     return int(size_mb * fraction * 1.08)

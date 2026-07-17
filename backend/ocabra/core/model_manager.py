@@ -627,7 +627,9 @@ class ModelManager:
                     # GGUF size + config so the scheduler sees the real need and
                     # can evict/pick a GPU with room instead of blindly starting.
                     est = estimate_llama_cpp_vram_from_config(
-                        state, default_gpu_layers=settings.llama_cpp_gpu_layers
+                        state,
+                        default_gpu_layers=settings.llama_cpp_gpu_layers,
+                        default_ctx_size=settings.llama_cpp_ctx_size,
                     )
                     if est > 0:
                         vram_needed = est
