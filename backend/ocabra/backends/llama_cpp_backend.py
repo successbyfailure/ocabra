@@ -496,10 +496,10 @@ class LlamaCppBackend(BackendInterface):
             "speculative": self._get_option(extra_config, "speculative", None),
             "runtime": self._get_option(extra_config, "runtime", None),
             "parallel_slots": self._to_int_or_none(
-                self._get_option(extra_config, "parallel_slots", None)
+                self._get_option(extra_config, "parallel_slots", settings.llama_cpp_parallel_slots)
             ),
             "cont_batching": self._to_bool_or_none(
-                self._get_option(extra_config, "cont_batching", None)
+                self._get_option(extra_config, "cont_batching", settings.llama_cpp_cont_batching)
             ),
             "keep_alive_seconds": self._to_int_or_none(
                 self._get_option(extra_config, "keep_alive_seconds", None)
