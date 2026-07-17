@@ -10,7 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
+from ocabra.core import vram_planner as vp
 from ocabra.core.model_ref import parse_model_ref
+from ocabra.core.vram_capacity import resolve_arch_and_weights
 from ocabra.db.model_config import (
     get_all_model_schedule_rows,
     get_model_schedule_rows,
@@ -210,6 +212,101 @@ async def get_models_storage(
         "used_bytes": used_bytes,
         "free_bytes": free_bytes,
     }
+
+
+_KV_DTYPE_BYTES = {"fp16": 2.0, "bf16": 2.0, "fp8": 1.0, "q8": 1.0, "q4": 0.5}
+
+
+@router.get(
+    "/models/{model_id:path}/capacity",
+    summary="Model VRAM capacity plan",
+    description=(
+        "Plan a model's VRAM as a function of context and parallelism: the max "
+        "context that fits per slot/concurrency on a GPU, plus the VRAM curve over "
+        "context. Applies to KV-cache backends (Ollama, llama.cpp, vLLM, SGLang); "
+        "non-LLM backends return applicable=false."
+    ),
+    responses={404: {"description": "Model not found"}},
+)
+async def get_model_capacity(
+    model_id: str,
+    request: Request,
+    gpu: int | None = Query(default=None, description="Target GPU index (default: preferred/most-free)"),
+    slots: str = Query(default="1,2,4", description="Comma list of slot/concurrency counts"),
+    kv_dtype: str = Query(default="fp16", description="KV cache dtype: fp16|fp8|q4"),
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """VRAM capacity/planning report for a model on a given GPU."""
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    backend = (state.backend_type or "").lower()
+    res = await resolve_arch_and_weights(state)
+
+    gpu_manager = request.app.state.gpu_manager
+    gpu_states = await gpu_manager.get_all_states()
+    gpus = [
+        {"index": g.index, "total_mb": g.total_vram_mb, "free_mb": g.free_vram_mb}
+        for g in gpu_states
+    ]
+
+    if gpu is not None:
+        target_gpu = gpu
+    elif state.preferred_gpu is not None:
+        target_gpu = state.preferred_gpu
+    elif gpu_states:
+        target_gpu = max(gpu_states, key=lambda g: g.free_vram_mb).index
+    else:
+        target_gpu = 0
+
+    kv_bytes = _KV_DTYPE_BYTES.get(kv_dtype.lower(), 2.0)
+    slot_counts = tuple(int(s) for s in slots.split(",") if s.strip().isdigit()) or (1, 2, 4)
+
+    report: dict = {
+        "model_id": model_id,
+        "backend_type": backend,
+        "applicable": res.arch is not None,
+        "weights_mb": round(res.weights_mb),
+        "overhead_mb": vp.DEFAULT_OVERHEAD_MB,
+        "kv_dtype": kv_dtype.lower(),
+        "target_gpu": target_gpu,
+        "gpus": gpus,
+        "note": res.note,
+    }
+    if res.arch is None:
+        return report
+
+    arch = res.arch
+    gsel = next((g for g in gpu_states if g.index == target_gpu), None)
+    total_mb = gsel.total_vram_mb if gsel else 0
+    free_mb = gsel.free_vram_mb if gsel else 0
+
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    gpu_mem_util = float(
+        (extra.get("vllm") or {}).get("gpu_memory_utilization")
+        or settings.vllm_gpu_memory_utilization
+    )
+
+    report["arch"] = {
+        "layers": arch.layers,
+        "n_kv_heads": arch.n_kv_heads,
+        "key_length": arch.key_length,
+        "value_length": arch.value_length,
+        "native_context": arch.context_length,
+        "kv_bytes_per_token": arch.kv_bytes_per_token(kv_bytes),
+        "kv_mb_per_1k_tokens": round(arch.kv_bytes_per_token(kv_bytes) * 1000 / (1024 * 1024), 1),
+    }
+    report["concurrency_label"] = "concurrency" if backend in vp._POOLED_BACKENDS else "slots"
+    report["fits_free_now"] = free_mb >= res.weights_mb + vp.DEFAULT_OVERHEAD_MB
+    report["capacity"] = vp.capacity_rows(
+        backend, arch, res.weights_mb,
+        gpu_total_mb=total_mb, slots=slot_counts,
+        gpu_memory_utilization=gpu_mem_util, kv_dtype_bytes=kv_bytes,
+    )
+    report["vram_curve"] = vp.vram_curve(arch, res.weights_mb, kv_dtype_bytes=kv_bytes)
+    return report
 
 
 @router.get(
