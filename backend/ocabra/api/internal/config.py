@@ -44,6 +44,7 @@ class ServerConfigPatch(BaseModel):
     )
     vram_buffer_mb: int | None = Field(default=None, alias="vramBufferMb")
     vram_pressure_threshold_pct: float | None = Field(default=None, alias="vramPressureThresholdPct")
+    max_inflight_per_model: int | None = Field(default=None, alias="maxInflightPerModel")
     openai_audio_max_part_size_mb: int | None = Field(default=None, alias="openaiAudioMaxPartSizeMb")
     whisper_startup_timeout_seconds: int | None = Field(default=None, alias="whisperStartupTimeoutSeconds")
     log_level: str | None = Field(default=None, alias="logLevel")
@@ -135,6 +136,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "pressureEvictionDrainTimeoutSeconds": settings.pressure_eviction_drain_timeout_s,
         "vramBufferMb": settings.vram_buffer_mb,
         "vramPressureThresholdPct": settings.vram_pressure_threshold_pct,
+        "maxInflightPerModel": settings.max_inflight_per_model,
         "openaiAudioMaxPartSizeMb": settings.openai_audio_max_part_size_mb,
         "whisperStartupTimeoutSeconds": settings.whisper_startup_timeout_s,
         "logLevel": settings.log_level,
@@ -279,6 +281,9 @@ async def patch_config(
     if "vram_pressure_threshold_pct" in payload:
         settings.vram_pressure_threshold_pct = float(payload["vram_pressure_threshold_pct"])
         await _persist("vram_pressure_threshold_pct", settings.vram_pressure_threshold_pct)
+    if "max_inflight_per_model" in payload:
+        settings.max_inflight_per_model = max(0, int(payload["max_inflight_per_model"]))
+        await _persist("max_inflight_per_model", settings.max_inflight_per_model)
     if "openai_audio_max_part_size_mb" in payload:
         settings.openai_audio_max_part_size_mb = int(payload["openai_audio_max_part_size_mb"])
         await _persist("openai_audio_max_part_size_mb", settings.openai_audio_max_part_size_mb)

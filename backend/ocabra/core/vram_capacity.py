@@ -25,13 +25,13 @@ from ocabra.core.vram_planner import (
 
 _MB = 1024 * 1024
 
-# kv_dtype label -> (bytes per KV element, vLLM kv_cache_dtype or None to leave default)
-KV_DTYPES: dict[str, tuple[float, str | None]] = {
-    "fp16": (2.0, None),
-    "bf16": (2.0, None),
-    "fp8": (1.0, "fp8"),
-    "q8": (1.0, None),
-    "q4": (0.5, None),
+# kv_dtype label -> (bytes/KV element, vLLM kv_cache_dtype | None, llama.cpp cache type)
+KV_DTYPES: dict[str, tuple[float, str | None, str]] = {
+    "fp16": (2.0, None, "f16"),
+    "bf16": (2.0, None, "f16"),
+    "fp8": (1.0, "fp8", "q8_0"),
+    "q8": (1.0, None, "q8_0"),
+    "q4": (0.5, None, "q4_0"),
 }
 
 # Backends that don't have a context-scaling KV cache (encoders, diffusion, TTS).
@@ -161,7 +161,7 @@ async def resolve_use_case(state, gpu_total_mb: float) -> dict | None:
 
     backend = (state.backend_type or "").lower()
     kv_label = str(uc.get("kv_dtype", "fp16")).lower()
-    kv_bytes, vllm_kv = KV_DTYPES.get(kv_label, (2.0, None))
+    kv_bytes, vllm_kv, llama_ct = KV_DTYPES.get(kv_label, (2.0, None, "f16"))
     slots = max(1, int(uc.get("slots", 1) or 1))
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
     gpu_mem_util = float(
@@ -180,6 +180,7 @@ async def resolve_use_case(state, gpu_total_mb: float) -> dict | None:
     plan["applied"] = True
     plan["kv_dtype"] = kv_label
     plan["vllm_kv_cache_dtype"] = vllm_kv
+    plan["llama_cache_type"] = llama_ct
     return plan
 
 
@@ -199,6 +200,12 @@ def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> d
         sect = merged.setdefault("llama_cpp", {})
         sect["ctx_size"] = ctx
         sect["parallel_slots"] = slots
+        ct = plan.get("llama_cache_type")
+        if ct and ct != "f16":
+            # Quantized KV cache; a quantized V cache needs flash attention.
+            sect["cache_type_k"] = ct
+            sect["cache_type_v"] = ct
+            sect["flash_attn"] = True
     elif backend in ("vllm", "sglang"):
         sect = merged.setdefault("vllm", {})
         sect["max_model_len"] = ctx
