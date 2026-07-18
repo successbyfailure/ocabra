@@ -119,6 +119,17 @@ function FieldSection({ title, description, children }: { title: string; descrip
   )
 }
 
+// Shown inside a backend runtime section when a use case owns context/parallelism/KV.
+function UseCaseManagedNotice({ fields }: { fields: string }) {
+  return (
+    <div className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">Gestionado por el caso de uso.</span>{" "}
+      {fields} se calculan en el <span className="font-medium">Planificador de contexto y VRAM</span> (arriba); los
+      campos de abajo quedan de solo lectura. Borra el caso de uso para editarlos a mano.
+    </div>
+  )
+}
+
 function clampIntegerInput(value: string, min: number) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return ""
@@ -232,6 +243,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
   const [preferredGpu, setPreferredGpu] = useState<number | null>(null)
   const [autoReload, setAutoReload] = useState(false)
   const [schedules, setSchedules] = useState<EvictionSchedule[]>([])
+  // When a use case is configured it becomes the source of truth for context /
+  // parallelism / KV — the matching raw runtime fields below are then read-only.
+  const [useCaseActive, setUseCaseActive] = useState(false)
   const [saving, setSaving] = useState(false)
 
   // Group assignment state (system_admin only)
@@ -348,6 +362,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setPreferredGpu(model.preferredGpu)
     setAutoReload(model.autoReload)
     setSchedules(model.schedules ?? [])
+    setUseCaseActive(Boolean((model.extraConfig as Record<string, unknown> | undefined)?.use_case))
 
     setModelImpl(vllm?.modelImpl == null ? "" : vllm.modelImpl)
     setRunner(vllm?.runner == null ? "" : vllm.runner)
@@ -967,21 +982,22 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
 
             {model && ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(model.backendType) && (
               <FieldSection
-                title="Planificador de contexto y VRAM"
-                description="Contexto máximo por slot/concurrencia y curva de VRAM; configura el caso de uso (contexto, paralelismo, KV cache) que se aplicará al cargar."
+                title="Memoria y contexto"
+                description="Contexto máximo por slot/concurrencia y curva de VRAM (predicción por arquitectura); configura el caso de uso (contexto, paralelismo, KV cache) que se aplica al cargar. La estimación por probe de runtime va justo debajo."
               >
                 <CapacityPanel
                   modelId={model.modelId}
                   gpus={gpus}
                   extraConfig={model.extraConfig}
+                  onUseCaseChange={setUseCaseActive}
                 />
               </FieldSection>
             )}
 
             {model && (
               <FieldSection
-                title="Prevision de memoria"
-                description="Estimación rápida de uso de memoria para la configuración actual, con validación real opcional en runtimes compatibles."
+                title="Estimación por probe (runtime)"
+                description="Medición real opcional del engine para la configuración actual; complementa la predicción por arquitectura de arriba."
               >
                 <div className="space-y-3 text-sm">
                   {(estimatingMemory || probingMemory) && (
@@ -1195,6 +1211,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   title="vLLM Runtime"
                   description="Solo knobs con impacto operativo directo: compatibilidad, contexto, memoria y concurrencia."
                 >
+                  {useCaseActive && <UseCaseManagedNotice fields="Max model len y KV cache" />}
                   {context && (
                     <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                       <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
@@ -1254,8 +1271,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         min="1"
                         value={maxModelLen}
                         onChange={(event) => setMaxModelLen(event.target.value)}
+                        disabled={useCaseActive}
                         placeholder="usar el del modelo"
-                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                       />
                       <FieldHint>Bajarlo ayuda a que un modelo quepa y reduce presion de KV cache.</FieldHint>
                     </label>
@@ -1482,6 +1500,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 title="llama.cpp Runtime"
                 description="Lo relevante aquí es cuánto sube a GPU, el contexto y si actúa como modelo de embeddings."
               >
+                {useCaseActive && <UseCaseManagedNotice fields="Context size, parallel slots y cache type K/V" />}
                 {context && (
                   <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                     <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
@@ -1508,8 +1527,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       min="1"
                       value={llamaCtxSize}
                       onChange={(event) => setLlamaCtxSize(event.target.value)}
+                      disabled={useCaseActive}
                       placeholder="global"
-                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                     />
                   </label>
                 </div>
@@ -1655,7 +1675,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       <select
                         value={llamaCacheTypeK}
                         onChange={(event) => setLlamaCacheTypeK(event.target.value)}
-                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                        disabled={useCaseActive}
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                         title="Tipo de cuantización de la cache K (keys)."
                       >
                         <option value="">auto (f16)</option>
@@ -1673,7 +1694,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         onChange={(event) => setLlamaCacheTypeV(event.target.value)}
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                         title="Tipo de cuantización de la cache V (values). Requiere flash attention si != f16."
-                        disabled={!llamaFlashAttn && llamaCacheTypeV !== "" && llamaCacheTypeV !== "f16"}
+                        disabled={useCaseActive || (!llamaFlashAttn && llamaCacheTypeV !== "" && llamaCacheTypeV !== "f16")}
                       >
                         <option value="">auto (f16)</option>
                         {LLAMA_KV_CACHE_TYPES.map((value) => (
@@ -2013,6 +2034,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 title="Concurrencia"
                 description="Slots paralelos y batching continuo para servir múltiples peticiones a la vez."
               >
+                {useCaseActive && <UseCaseManagedNotice fields="parallel_slots" />}
                 <div className="grid gap-4 md:grid-cols-3">
                   <label className="block text-sm">
                     <span className="mb-1 block text-muted-foreground">parallel_slots</span>
@@ -2021,8 +2043,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       min="1"
                       value={llamaParallelSlots}
                       onChange={(event) => setLlamaParallelSlots(event.target.value)}
+                      disabled={useCaseActive}
                       placeholder="1"
-                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                     />
                   </label>
                   <label className="block text-sm">
@@ -2058,6 +2081,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 title="BitNet Runtime"
                 description="BitNet comparte casi todos los knobs relevantes con los runtimes GGUF: capas en GPU y contexto."
               >
+                {useCaseActive && <UseCaseManagedNotice fields="Context size" />}
                 {context && (
                   <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                     <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
@@ -2083,8 +2107,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       min="1"
                       value={bitnetCtxSize}
                       onChange={(event) => setBitnetCtxSize(event.target.value)}
+                      disabled={useCaseActive}
                       placeholder="global"
-                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                     />
                   </label>
                 </div>

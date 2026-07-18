@@ -31,6 +31,7 @@ const EMPTY_CONFIG: ServerConfig = {
   pressureEvictionDrainTimeoutSeconds: 60,
   vramBufferMb: 512,
   vramPressureThresholdPct: 85,
+  maxInflightPerModel: 32,
   openaiAudioMaxPartSizeMb: 256,
   whisperStartupTimeoutSeconds: 300,
   logLevel: "info",

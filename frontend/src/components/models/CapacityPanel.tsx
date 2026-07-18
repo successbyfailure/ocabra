@@ -8,6 +8,7 @@ interface CapacityPanelProps {
   gpus: GPUState[]
   extraConfig?: BackendExtraConfig
   onSaved?: () => void
+  onUseCaseChange?: (active: boolean) => void
 }
 
 const KV_DTYPES = ["fp16", "fp8", "q4"] as const
@@ -39,8 +40,9 @@ function Chip({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function CapacityPanel({ modelId, gpus, extraConfig, onSaved }: CapacityPanelProps) {
+export function CapacityPanel({ modelId, gpus, extraConfig, onSaved, onUseCaseChange }: CapacityPanelProps) {
   const stored = useMemo(() => readUseCase(extraConfig), [extraConfig])
+  const [active, setActive] = useState<boolean>(Boolean((extraConfig as Record<string, unknown> | undefined)?.use_case))
   const [cap, setCap] = useState<ModelCapacity | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -102,9 +104,29 @@ export function CapacityPanel({ modelId, gpus, extraConfig, onSaved }: CapacityP
       }
       await api.models.patch(modelId, { extraConfig: nextExtra as BackendExtraConfig })
       setSavedMsg("Caso de uso aplicado. Se usará en la próxima carga del modelo.")
+      setActive(true)
+      onUseCaseChange?.(true)
       onSaved?.()
     } catch (e) {
       setSavedMsg(e instanceof Error ? e.message : "Error al guardar")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const clear = async () => {
+    setSaving(true)
+    setSavedMsg(null)
+    try {
+      const nextExtra: Record<string, unknown> = { ...(extraConfig ?? {}) }
+      delete nextExtra.use_case
+      await api.models.patch(modelId, { extraConfig: nextExtra as BackendExtraConfig })
+      setSavedMsg("Caso de uso eliminado. Vuelven a mandar los knobs manuales.")
+      setActive(false)
+      onUseCaseChange?.(false)
+      onSaved?.()
+    } catch (e) {
+      setSavedMsg(e instanceof Error ? e.message : "Error al quitar")
     } finally {
       setSaving(false)
     }
@@ -293,8 +315,18 @@ export function CapacityPanel({ modelId, gpus, extraConfig, onSaved }: CapacityP
                 disabled={saving}
                 className="rounded-md bg-primary px-3 py-1.5 text-[12px] font-semibold text-primary-foreground disabled:opacity-50"
               >
-                {saving ? "Guardando…" : "Aplicar caso de uso"}
+                {saving ? "Guardando…" : active ? "Actualizar caso de uso" : "Aplicar caso de uso"}
               </button>
+              {active && (
+                <button
+                  type="button"
+                  onClick={clear}
+                  disabled={saving}
+                  className="rounded-md border border-border px-3 py-1.5 text-[12px] font-medium text-muted-foreground disabled:opacity-50"
+                >
+                  Quitar
+                </button>
+              )}
               {savedMsg && <span className="text-[11.5px] text-muted-foreground">{savedMsg}</span>}
             </div>
           </div>

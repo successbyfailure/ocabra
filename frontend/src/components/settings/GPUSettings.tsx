@@ -187,6 +187,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
   const [vramBufferMb, setVramBufferMb] = useState(config.vramBufferMb)
   const [vramPressureThresholdPct, setVramPressureThresholdPct] = useState(config.vramPressureThresholdPct)
   const [maxTemperatureC, setMaxTemperatureC] = useState(config.maxTemperatureC)
+  const [maxInflightPerModel, setMaxInflightPerModel] = useState(config.maxInflightPerModel)
 
   useEffect(() => {
     setDefaultGpuIndex(config.defaultGpuIndex)
@@ -196,10 +197,12 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     setVramBufferMb(config.vramBufferMb)
     setVramPressureThresholdPct(config.vramPressureThresholdPct)
     setMaxTemperatureC(config.maxTemperatureC)
+    setMaxInflightPerModel(config.maxInflightPerModel)
   }, [
     config.defaultGpuIndex,
     config.idleEvictionCheckIntervalSeconds,
     config.maxTemperatureC,
+    config.maxInflightPerModel,
     config.modelLoadWaitTimeoutSeconds,
     config.pressureEvictionDrainTimeoutSeconds,
     config.vramBufferMb,
@@ -216,6 +219,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
         vramBufferMb,
         vramPressureThresholdPct,
         maxTemperatureC,
+        maxInflightPerModel,
       })
       toast.success("GPU settings guardadas")
     } catch {
@@ -282,6 +286,19 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
             onChange={(event) => setPressureEvictionDrainTimeoutSeconds(Number(event.target.value))}
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
+        </label>
+        <label className="text-sm text-muted-foreground">
+          Máx. peticiones concurrentes por modelo
+          <input
+            type="number"
+            min={0}
+            value={maxInflightPerModel}
+            onChange={(event) => setMaxInflightPerModel(Number(event.target.value))}
+            className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+          />
+          <span className="mt-1 block text-xs text-muted-foreground/80">
+            Control de admisión: al superarlo, un modelo devuelve 429 en vez de apilar la ráfaga. 0 = sin límite.
+          </span>
         </label>
       </div>
 

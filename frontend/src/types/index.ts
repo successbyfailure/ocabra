@@ -463,6 +463,7 @@ export interface ServerConfig {
   pressureEvictionDrainTimeoutSeconds: number
   vramBufferMb: number
   vramPressureThresholdPct: number
+  maxInflightPerModel: number
   openaiAudioMaxPartSizeMb: number
   whisperStartupTimeoutSeconds: number
   logLevel: string

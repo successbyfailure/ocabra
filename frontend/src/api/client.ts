@@ -682,6 +682,7 @@ function toServerConfig(raw: unknown): ServerConfig {
     ),
     vramBufferMb: Number(data.vramBufferMb ?? 0),
     vramPressureThresholdPct: Number(data.vramPressureThresholdPct ?? 0),
+    maxInflightPerModel: Number(data.maxInflightPerModel ?? 0),
     openaiAudioMaxPartSizeMb: Number(
       data.openaiAudioMaxPartSizeMb ?? data.openai_audio_max_part_size_mb ?? 256,
     ),
