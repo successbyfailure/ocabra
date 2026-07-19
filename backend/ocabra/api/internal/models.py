@@ -217,26 +217,62 @@ async def get_models_storage(
 @router.get(
     "/models/activity",
     summary="Per-model in-flight activity",
-    description="Return the current in-flight request count per loaded model (for live 'processing' indicators).",
+    description="In-flight request count and oldest-request age per loaded model, for live 'processing' and 'stuck' indicators.",
 )
 async def get_models_activity(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Live in-flight request counts keyed by model_id."""
+    """Live in-flight counts + oldest age keyed by model_id."""
     mm = request.app.state.model_manager
     snapshot = mm.inflight_snapshot()
+    ages = mm.active_request_ages()
     states = await mm.list_states()
-    activity: dict[str, int] = {}
+    activity: dict[str, dict] = {}
     for state in states:
         # begin_request may key by the canonical id or the raw backend model name.
-        count = max(
-            snapshot.get(state.model_id, 0),
-            snapshot.get(state.backend_model_id, 0),
-        )
+        keys = (state.model_id, state.backend_model_id)
+        count = max((snapshot.get(k, 0) for k in keys), default=0)
         if count > 0:
-            activity[state.model_id] = count
-    return {"inFlight": activity}
+            oldest = max((ages.get(k, 0.0) for k in keys), default=0.0)
+            activity[state.model_id] = {"inFlight": count, "oldestSeconds": round(oldest, 1)}
+    return {
+        "activity": activity,
+        "stuckThresholdSeconds": int(getattr(settings, "busy_timeout_seconds", 300)),
+    }
+
+
+@router.get(
+    "/models/ollama-runtime",
+    summary="Ollama runtime placement",
+    description="Per-loaded-Ollama-model VRAM and GPU/CPU split from /api/ps (Ollama manages placement itself, so oCabra can't record a GPU index).",
+)
+async def get_ollama_runtime(
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """CPU/GPU split + VRAM + context per loaded Ollama model."""
+    import httpx
+
+    base = settings.ollama_base_url.rstrip("/")
+    out: dict[str, dict] = {}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            data = (await client.get(f"{base}/api/ps")).json()
+        for m in data.get("models", []):
+            size = int(m.get("size", 0) or 0)
+            vram = int(m.get("size_vram", 0) or 0)
+            gpu_pct = round(vram / size * 100) if size else 0
+            out[str(m.get("name") or m.get("model"))] = {
+                "sizeMb": size // (1024 * 1024),
+                "sizeVramMb": vram // (1024 * 1024),
+                "gpuPct": gpu_pct,
+                "cpuPct": max(0, 100 - gpu_pct),
+                "contextLength": m.get("context_length"),
+            }
+    except (httpx.HTTPError, ValueError, KeyError):
+        pass
+    return {"models": out}
 
 
 _KV_DTYPE_BYTES = {"fp16": 2.0, "bf16": 2.0, "fp8": 1.0, "q8": 1.0, "q4": 0.5}

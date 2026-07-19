@@ -191,6 +191,18 @@ class ModelManager:
         with self._in_flight_lock:
             return {k: v for k, v in self._in_flight.items() if v > 0}
 
+    def active_request_ages(self) -> dict[str, float]:
+        """Age (seconds) of the oldest in-flight request per model key — feeds a
+        'stuck request' indicator (compared against busy_timeout_seconds)."""
+        now = time.time()
+        ages: dict[str, float] = {}
+        with self._in_flight_lock:
+            for req in self._active_requests.values():
+                age = now - req.started_at
+                if age > ages.get(req.model_id, -1.0):
+                    ages[req.model_id] = age
+        return ages
+
     async def resolve_ollama_num_ctx_cap(self, model_id: str) -> int | None:
         """num_ctx cap for an Ollama model with a ``use_case`` block, else None
         (no clamp). A concrete ``context`` is returned directly; ``max``/unset is

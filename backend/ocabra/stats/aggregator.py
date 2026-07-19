@@ -66,6 +66,7 @@ async def get_request_stats(
         return {
             "totalRequests": 0,
             "errorRate": 0.0,
+            "rejections": 0,
             "avgDurationMs": 0,
             "p50DurationMs": 0,
             "p95DurationMs": 0,
@@ -73,7 +74,14 @@ async def get_request_stats(
         }
 
     durations = sorted(max(0, int(r.duration_ms or 0)) for r in rows)
-    errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
+    # Admission rejections (429) are intentional back-pressure, not failures —
+    # count them separately and keep them out of the error rate.
+    rejections = sum(1 for r in rows if r.status_code == 429)
+    errors = sum(
+        1
+        for r in rows
+        if r.error or (r.status_code is not None and r.status_code >= 400 and r.status_code != 429)
+    )
     n = len(rows)
 
     per_minute: dict[datetime, int] = defaultdict(int)
@@ -89,6 +97,7 @@ async def get_request_stats(
     return {
         "totalRequests": n,
         "errorRate": round(errors / n, 4) if n else 0.0,
+        "rejections": rejections,
         "avgDurationMs": int(sum(durations) / n),
         "p50DurationMs": _percentile(durations, 50),
         "p95DurationMs": _percentile(durations, 95),

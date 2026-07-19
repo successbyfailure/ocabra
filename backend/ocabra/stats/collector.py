@@ -132,6 +132,20 @@ class StatsMiddleware(BaseHTTPMiddleware):
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
                 # rather than pile on so one client's burst can't starve others.
+                asyncio.create_task(
+                    _record_stat(
+                        request=request,
+                        model_id=inflight_model_id,
+                        started_at=started_at,
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        error_message="model_at_capacity",
+                        status_code=429,
+                        endpoint_path=path,
+                        request_kind=request_kind,
+                        input_tokens=None,
+                        output_tokens=None,
+                    )
+                )
                 return JSONResponse(
                     status_code=429,
                     headers={"Retry-After": "2"},
