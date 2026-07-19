@@ -1,12 +1,15 @@
-import type { GPUState } from "@/types"
+import type { GPUState, ModelState } from "@/types"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
 import { MetricGauge } from "./MetricGauge"
 import { MemoryBars } from "./MemoryBars"
 import { PowerBlock } from "./PowerBlock"
+import { LoadedModelList } from "./LoadedModelList"
 import { METRIC, pct, tempColor } from "./metrics"
 
 interface GpuCardProps {
   gpu: GPUState
+  models?: ModelState[]
+  activity?: Record<string, number>
 }
 
 // Keep the most recent `max` points with a stable stride (tail sampling), so the
@@ -21,9 +24,13 @@ function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
 
 const gb = (mb: number) => (mb / 1024).toFixed(1)
 
-export function GpuCard({ gpu }: GpuCardProps) {
+export function GpuCard({ gpu, models = [], activity = {} }: GpuCardProps) {
   const raw = useGpuStore((s) => s.history[gpu.index] ?? [])
   const powerHistory = downsample(raw, 60).map((p) => p.powerPct)
+
+  const gpuModels = models.filter(
+    (m) => m.status === "loaded" && (m.currentGpu ?? []).includes(gpu.index),
+  )
 
   const vramPct = pct(gpu.usedVramMb, gpu.totalVramMb)
   const lockedPct = pct(gpu.lockedVramMb, gpu.totalVramMb)
@@ -69,6 +76,13 @@ export function GpuCard({ gpu }: GpuCardProps) {
         history={powerHistory}
         subtitle={`${Math.round(powPct)}% del límite · últimos 10 min`}
       />
+
+      <div className="mt-[15px] border-t border-border pt-3">
+        <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Modelos ({gpuModels.length})
+        </p>
+        <LoadedModelList models={gpuModels} activity={activity} emptyLabel="Sin modelos gestionados en esta GPU" />
+      </div>
 
       <details className="group mt-[15px] border-t border-border">
         <summary className="flex cursor-pointer list-none items-center justify-between pt-3 text-[11.5px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">

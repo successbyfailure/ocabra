@@ -23,6 +23,7 @@ import type { AgentStatRow } from "@/types/agents"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { GpuCard } from "@/components/gpu/GpuCard"
+import { LoadedModelList } from "@/components/gpu/LoadedModelList"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import { useIsModelManager } from "@/hooks/useAuth"
@@ -31,7 +32,13 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { FederationPeer, HostStats, RecentRequestsData, ServerPower, ServiceState } from "@/types"
+import type { FederationPeer, HostStats, ModelState, RecentRequestsData, ServerPower, ServiceState, TokenStats } from "@/types"
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}k`
+  return String(n)
+}
 
 function formatLoadedAgo(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -119,10 +126,14 @@ function HostStatsCard({
   stats,
   serverPower,
   history = [],
+  models = [],
+  activity = {},
 }: {
   stats: HostStats
   serverPower?: ServerPower | null
   history?: HostHistoryPoint[]
+  models?: ModelState[]
+  activity?: Record<string, number>
 }) {
   const gb = (mb: number) => (mb / 1024).toFixed(1)
   const cpuTemp = serverPower?.cpuTempC
@@ -178,6 +189,13 @@ function HostStatsCard({
           load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
         </div>
       )}
+
+      <div className="mt-[15px] border-t border-border pt-3">
+        <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Modelos · Ollama / CPU ({models.length})
+        </p>
+        <LoadedModelList models={models} activity={activity} emptyLabel="Sin modelos gestionados fuera de las GPUs" />
+      </div>
 
       <details className="group mt-[15px] border-t border-border">
         <summary className="flex cursor-pointer list-none items-center justify-between pt-3 text-[11.5px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
@@ -580,6 +598,9 @@ export function Dashboard() {
   const [hostStats, setHostStats] = useState<HostStats | null>(null)
   const [serverPower, setServerPower] = useState<ServerPower | null>(null)
   const [hostHistory, setHostHistory] = useState<HostHistoryPoint[]>([])
+  const [tokens1h, setTokens1h] = useState<TokenStats | null>(null)
+  const [tokens24h, setTokens24h] = useState<TokenStats | null>(null)
+  const [activity, setActivity] = useState<Record<string, number>>({})
 
   useWebSocket()
 
@@ -599,6 +620,16 @@ export function Dashboard() {
   const activeModels = useMemo(
     () => Object.values(models).filter((model) => model.status === "loaded" || model.status === "loading"),
     [models],
+  )
+  const loadedModels = useMemo(
+    () => Object.values(models).filter((model) => model.status === "loaded"),
+    [models],
+  )
+  // Models loaded but not pinned to a tracked GPU (Ollama runs on GPU via its own
+  // daemon so oCabra doesn't record an index; CPU-only backends land here too).
+  const untrackedGpuModels = useMemo(
+    () => loadedModels.filter((m) => (m.currentGpu ?? []).length === 0),
+    [loadedModels],
   )
   const activeDownloads = useMemo(
     () => jobs.filter((job) => job.status === "queued" || job.status === "downloading"),
@@ -658,6 +689,52 @@ export function Dashboard() {
     void bootstrap()
   }, [setGpus, setJobs, setModels, setServices])
 
+  // Token throughput over the last hour / 24h (model_manager+ only).
+  useEffect(() => {
+    if (!isModelManager) return
+    let cancelled = false
+    async function pollTokens() {
+      const to = new Date().toISOString()
+      try {
+        const [h1, h24] = await Promise.all([
+          api.stats.tokens({ from: new Date(Date.now() - 3_600_000).toISOString(), to }),
+          api.stats.tokens({ from: new Date(Date.now() - 86_400_000).toISOString(), to }),
+        ])
+        if (!cancelled) {
+          setTokens1h(h1)
+          setTokens24h(h24)
+        }
+      } catch {
+        /* keep stale */
+      }
+    }
+    void pollTokens()
+    const id = window.setInterval(pollTokens, 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [isModelManager])
+
+  // Live per-model in-flight activity (fast poll for a "processing" indicator).
+  useEffect(() => {
+    let cancelled = false
+    async function pollActivity() {
+      try {
+        const map = await api.models.activity()
+        if (!cancelled) setActivity(map)
+      } catch {
+        /* keep stale */
+      }
+    }
+    void pollActivity()
+    const id = window.setInterval(pollActivity, 3_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
   return (
     <div className="space-y-6">
       {/* KPI Cards */}
@@ -692,13 +769,41 @@ export function Dashboard() {
         />
       </div>
 
+      {/* Token throughput */}
+      {isModelManager && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <KpiCard
+            icon={Zap}
+            label="Tokens · última hora"
+            value={tokens1h ? fmtTokens(tokens1h.totalInputTokens + tokens1h.totalOutputTokens) : "—"}
+            sub={tokens1h ? `entrada ${fmtTokens(tokens1h.totalInputTokens)} · salida ${fmtTokens(tokens1h.totalOutputTokens)}` : undefined}
+            color="bg-fuchsia-500/15 text-fuchsia-300"
+          />
+          <KpiCard
+            icon={Zap}
+            label="Tokens · últimas 24 h"
+            value={tokens24h ? fmtTokens(tokens24h.totalInputTokens + tokens24h.totalOutputTokens) : "—"}
+            sub={tokens24h ? `entrada ${fmtTokens(tokens24h.totalInputTokens)} · salida ${fmtTokens(tokens24h.totalOutputTokens)}` : undefined}
+            color="bg-fuchsia-500/15 text-fuchsia-300"
+          />
+        </div>
+      )}
+
       {/* GPUs + Host — 2 column grid */}
       <Section title="GPUs y host">
         <div className="grid gap-4 xl:grid-cols-2">
           {gpus.map((gpu) => (
-            <GpuCard key={gpu.index} gpu={gpu} />
+            <GpuCard key={gpu.index} gpu={gpu} models={loadedModels} activity={activity} />
           ))}
-          {hostStats && <HostStatsCard stats={hostStats} serverPower={serverPower} history={hostHistory} />}
+          {hostStats && (
+            <HostStatsCard
+              stats={hostStats}
+              serverPower={serverPower}
+              history={hostHistory}
+              models={untrackedGpuModels}
+              activity={activity}
+            />
+          )}
           {gpus.length === 0 && !hostStats && (
             <EmptyState title="Sin datos de GPU" description="No se detectaron GPUs o el servicio de monitoreo no esta disponible." />
           )}

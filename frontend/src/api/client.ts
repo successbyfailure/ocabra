@@ -1039,6 +1039,10 @@ export const api = {
     storage: async () => toModelsStorageStats(await request<unknown>("GET", "/ocabra/models/storage")),
     get: async (modelId: string) =>
       toModelState(await request<unknown>("GET", `/ocabra/models/${encodeURIComponent(modelId)}`)),
+    activity: async (): Promise<Record<string, number>> => {
+      const data = await request<{ inFlight?: Record<string, number> }>("GET", "/ocabra/models/activity")
+      return data.inFlight ?? {}
+    },
     capacity: (
       modelId: string,
       params?: { gpu?: number; slots?: string; kvDtype?: string; context?: string },
