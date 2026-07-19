@@ -355,16 +355,22 @@ async def keepalive_until_done(task: asyncio.Task, interval: float = SSE_KEEPALI
 
 
 def sse_ocabra_event(event: str, **fields: object) -> bytes:
-    """Encode an oCabra-specific named SSE event.
+    """Encode an oCabra load-status hint as an SSE *comment* frame.
 
-    Emits ``event: ocabra.<event>\\ndata: {...}\\n\\n`` to match the
-    convention already used for ``ocabra.tool_started`` /
-    ``ocabra.tool_result`` in :mod:`ocabra.agents.executor`. Clients that
-    don't recognise these named events ignore the frame; the standard
-    ``data:`` chunks remain valid OpenAI-compat output.
+    Previously emitted a named ``event: ocabra.<event>`` frame with a JSON
+    ``data:`` payload. Strict OpenAI clients don't filter by event name — they
+    parse every ``data:`` line as a ``ChatCompletionChunk`` and choke on the
+    non-chunk JSON. A comment line (starting with ``:``) is ignored by every
+    spec-compliant SSE parser (the OpenAI SDK included), so it can't be
+    mis-parsed, while still forcing a header flush and keeping the connection
+    alive during cold starts. oCabra-aware clients may read the JSON after the
+    ``:``; status is also available out-of-band via the ``X-Ocabra-*`` headers,
+    ``GET /v1/models/{id}`` (``ocabra`` extension) and
+    ``GET /ocabra/models/{id}/status``.
     """
-    encoded = json.dumps(fields, ensure_ascii=False, default=str)
-    return f"event: ocabra.{event}\ndata: {encoded}\n\n".encode()
+    payload = {"event": f"ocabra.{event}", **fields}
+    encoded = json.dumps(payload, ensure_ascii=False, default=str)
+    return f": {encoded}\n\n".encode()
 
 
 async def build_model_status_headers(

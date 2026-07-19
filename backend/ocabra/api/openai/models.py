@@ -273,6 +273,11 @@ async def get_model(
             status_code=404,
         ) from exc
 
+    status = state.status.value
+    expected_wait = None
+    if status != "loaded":
+        expected_wait = await model_manager.get_expected_load_seconds(state.model_id)
+
     return {
         "id": profile.profile_id,
         "object": "model",
@@ -280,7 +285,9 @@ async def get_model(
         "owned_by": "ocabra",
         "ocabra": {
             "category": profile.category,
-            "status": state.status.value,
+            "status": status,
+            "loaded": status == "loaded",
+            "expected_wait_seconds": expected_wait,
             "capabilities": state.capabilities.to_dict(),
             "display_name": profile.display_name or state.display_name,
             "base_model_id": profile.base_model_id,

@@ -275,6 +275,44 @@ async def get_ollama_runtime(
     return {"models": out}
 
 
+@router.get(
+    "/models/{model_id:path}/status",
+    summary="Model load status",
+    description=(
+        "Lightweight load-status channel for oCabra-aware clients: current status "
+        "and, when not loaded, the estimated wait to warm the model. Lets callers "
+        "check/await a cold start out-of-band instead of parsing status frames from "
+        "the OpenAI stream. OpenAI clients with an API key can read the same via "
+        "GET /v1/models/{id} (ocabra extension)."
+    ),
+    responses={404: {"description": "Model not found"}},
+)
+async def get_model_status(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Load status + expected wait for a model."""
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    status = state.status.value
+    expected_wait = None
+    if status != "loaded":
+        expected_wait = await mm.get_expected_load_seconds(state.model_id)
+    return {
+        "modelId": state.model_id,
+        "backendType": state.backend_type,
+        "status": status,
+        "loaded": status == "loaded",
+        "expectedWaitSeconds": expected_wait,
+        "gpu": state.current_gpu,
+        "vramUsedMb": state.vram_used_mb,
+        "errorMessage": state.error_message,
+    }
+
+
 _KV_DTYPE_BYTES = {"fp16": 2.0, "bf16": 2.0, "fp8": 1.0, "q8": 1.0, "q4": 0.5}
 
 
