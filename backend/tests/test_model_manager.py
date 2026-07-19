@@ -372,6 +372,67 @@ class _PortRequiredBackend(BackendInterface):
 
 
 @pytest.mark.asyncio
+async def test_vllm_load_uses_model_gpu_memory_utilization_for_headroom():
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    wp.register_backend("vllm", backend)
+
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(return_value=[0])
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram = AsyncMock(return_value=5000)
+    gpu_manager.get_state = AsyncMock(
+        return_value=GPUState(
+            index=0,
+            name="RTX 3060",
+            total_vram_mb=12000,
+            free_vram_mb=5000,
+            used_vram_mb=7000,
+            utilization_pct=0,
+            temperature_c=40,
+            power_draw_w=50,
+            power_limit_w=170,
+            locked_vram_mb=0,
+        )
+    )
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+
+    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
+         patch.object(mm, "_record_model_load_stat", new=AsyncMock()), \
+         patch("ocabra.core.model_manager.settings.vllm_gpu_memory_utilization", 0.9):
+        mm._states["vllm/BAAI/bge-reranker-v2-m3"] = ModelState(
+            model_id="vllm/BAAI/bge-reranker-v2-m3",
+            display_name="bge-reranker-v2-m3",
+            backend_type="vllm",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={"vllm": {"gpu_memory_utilization": 0.25}},
+        )
+        mm._load_locks["vllm/BAAI/bge-reranker-v2-m3"] = asyncio.Lock()
+
+        state = await mm.load("vllm/BAAI/bge-reranker-v2-m3")
+
+    assert state.status == ModelStatus.LOADED
+    scheduler.find_gpu_for_model.assert_awaited_once_with(
+        1024,
+        None,
+        enforce_vllm_headroom=True,
+        vllm_gpu_memory_utilization=0.25,
+    )
+    gpu_manager.lock_vram.assert_awaited_once_with(
+        0,
+        1024,
+        "vllm/BAAI/bge-reranker-v2-m3",
+    )
+
+
+@pytest.mark.asyncio
 async def test_load_assigns_port_for_backend_that_requires_it():
     wp = WorkerPool()
     backend = _PortRequiredBackend()
@@ -496,6 +557,7 @@ async def test_bitnet_gpu_layers_uses_extra_config_for_scheduling():
         200,
         None,
         enforce_vllm_headroom=False,
+        vllm_gpu_memory_utilization=None,
     )
 
 

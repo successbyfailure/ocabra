@@ -174,6 +174,47 @@ async def test_vllm_headroom_can_trigger_insufficient_even_if_raw_sum_fits():
 
 
 @pytest.mark.asyncio
+async def test_vllm_headroom_uses_effective_memory_utilization_override():
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 5000, 1: 4000},
+        total_by_gpu={0: 12000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+
+    with patch("ocabra.core.scheduler.settings.vllm_gpu_memory_utilization", 0.9):
+        result = await scheduler.find_gpu_for_model(
+            2599,
+            preferred_gpu=0,
+            enforce_vllm_headroom=True,
+            vllm_gpu_memory_utilization=0.25,
+        )
+
+    assert result == [0]
+
+
+@pytest.mark.asyncio
+async def test_insufficient_vram_error_reports_per_gpu_headroom():
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 2000, 1: 2400},
+        total_by_gpu={0: 12000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+
+    with pytest.raises(InsufficientVRAMError) as exc_info:
+        await scheduler.find_gpu_for_model(
+            2599,
+            preferred_gpu=0,
+            enforce_vllm_headroom=True,
+            vllm_gpu_memory_utilization=0.25,
+        )
+
+    message = str(exc_info.value)
+    assert "available by GPU" in message
+    assert "GPU 0: free 2000 MB, total 12000 MB" in message
+    assert "vLLM headroom 3000 MB" in message
+
+
+@pytest.mark.asyncio
 async def test_schedule_evictions_unload_due_warm_models():
     from types import SimpleNamespace
 

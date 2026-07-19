@@ -710,6 +710,11 @@ class ModelManager:
                 needs_port = state.backend_type != "ollama"
                 assigned_port = await self._worker_pool.assign_port() if needs_port else 0
                 backend_loaded = False
+                vllm_gpu_memory_utilization = (
+                    self._resolve_vllm_gpu_memory_utilization(state)
+                    if state.backend_type == "vllm"
+                    else None
+                )
 
                 if not gpu_managed:
                     gpu_indices = []
@@ -719,6 +724,7 @@ class ModelManager:
                         vram_needed=vram_needed,
                         preferred_gpu=force_gpu or state.preferred_gpu,
                         enforce_vllm_headroom=(state.backend_type == "vllm"),
+                        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                     )
                 else:
                     gpu_indices = [settings.default_gpu_index]
@@ -745,15 +751,21 @@ class ModelManager:
 
                     for gpu_idx in gpu_indices:
                         gpu_state = await self._gpu_manager.get_state(gpu_idx)
-                        required_free_mb = int(
-                            gpu_state.total_vram_mb * settings.vllm_gpu_memory_utilization
+                        effective_free_mb = await self._gpu_manager.get_free_vram(gpu_idx)
+                        utilization = (
+                            vllm_gpu_memory_utilization
+                            if vllm_gpu_memory_utilization is not None
+                            else float(settings.vllm_gpu_memory_utilization)
                         )
-                        if gpu_state.free_vram_mb < required_free_mb:
+                        required_free_mb = int(
+                            gpu_state.total_vram_mb * utilization
+                        )
+                        if effective_free_mb < required_free_mb:
                             raise InsufficientVRAMError(
                                 "GPU "
-                                f"{gpu_idx} has {gpu_state.free_vram_mb} MB free, "
+                                f"{gpu_idx} has {effective_free_mb} MB free, "
                                 f"vLLM requires at least {required_free_mb} MB free "
-                                f"(vllm_gpu_memory_utilization={settings.vllm_gpu_memory_utilization})."
+                                f"(gpu_memory_utilization={utilization:g})."
                             )
 
                 # Use-case resolution (opt-in): when extra_config has a "use_case"
@@ -1000,12 +1012,42 @@ class ModelManager:
     def _estimate_bitnet_vram_from_config(self, state: "ModelState") -> int:
         return estimate_bitnet_vram_from_config(state, default_gpu_layers=settings.bitnet_gpu_layers)
 
+    @staticmethod
+    def _get_vllm_option(state: "ModelState", key: str, default: object) -> object:
+        extra_config = state.extra_config if isinstance(state.extra_config, dict) else {}
+        camel_key = _to_camel_key(key)
+        vllm_config = extra_config.get("vllm")
+        if isinstance(vllm_config, dict):
+            if key in vllm_config:
+                return vllm_config[key]
+            if camel_key in vllm_config:
+                return vllm_config[camel_key]
+        if key in extra_config:
+            return extra_config[key]
+        if camel_key in extra_config:
+            return extra_config[camel_key]
+        return default
+
+    @staticmethod
+    def _resolve_vllm_gpu_memory_utilization(state: "ModelState") -> float:
+        raw = ModelManager._get_vllm_option(
+            state,
+            "gpu_memory_utilization",
+            settings.vllm_gpu_memory_utilization,
+        )
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float(settings.vllm_gpu_memory_utilization)
+        return max(0.0, min(1.0, value))
+
     async def _assign_gpus_for_load(
         self,
         model_id: str,
         vram_needed: int,
         preferred_gpu: int | None,
         enforce_vllm_headroom: bool,
+        vllm_gpu_memory_utilization: float | None = None,
     ) -> list[int]:
         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -1017,6 +1059,7 @@ class ModelManager:
                 vram_needed,
                 preferred_gpu,
                 enforce_vllm_headroom=enforce_vllm_headroom,
+                vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
             )
         except InsufficientVRAMError as initial_exc:
             last_exc = initial_exc
@@ -1046,6 +1089,7 @@ class ModelManager:
                             vram_needed,
                             preferred_gpu,
                             enforce_vllm_headroom=enforce_vllm_headroom,
+                            vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                         )
                     except InsufficientVRAMError as exc:
                         last_exc = exc
@@ -1092,11 +1136,12 @@ class ModelManager:
                         vram_needed,
                         preferred_gpu,
                         enforce_vllm_headroom=enforce_vllm_headroom,
+                        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                     )
                 except InsufficientVRAMError as exc:
                     last_exc = exc
                     continue
-            raise last_exc
+            raise last_exc from initial_exc
 
     def _get_pressure_eviction_candidates(self, requested_model_id: str) -> list[str]:
         policy_order = {

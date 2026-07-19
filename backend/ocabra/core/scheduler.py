@@ -16,6 +16,16 @@ class InsufficientVRAMError(Exception):
     pass
 
 
+def _resolve_vllm_gpu_memory_utilization(value: float | None = None) -> float:
+    if value is None:
+        value = settings.vllm_gpu_memory_utilization
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        resolved = float(settings.vllm_gpu_memory_utilization)
+    return max(0.0, min(1.0, resolved))
+
+
 class GPUScheduler:
     def __init__(self, gpu_manager, model_manager=None) -> None:
         self._gpu_manager = gpu_manager
@@ -30,6 +40,7 @@ class GPUScheduler:
         vram_needed_mb: int,
         preferred_gpu: int | None = None,
         enforce_vllm_headroom: bool = False,
+        vllm_gpu_memory_utilization: float | None = None,
     ) -> list[int]:
         preferred = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
         pressure_threshold_pct = max(0.0, min(100.0, float(settings.vram_pressure_threshold_pct)))
@@ -37,13 +48,16 @@ class GPUScheduler:
         gpu_indices = list(range(len(states)))
         free_per_gpu = {i: await self._gpu_manager.get_free_vram(i) for i in gpu_indices}
         state_by_gpu = {state.index: state for state in states}
+        vllm_utilization = _resolve_vllm_gpu_memory_utilization(
+            vllm_gpu_memory_utilization
+        )
 
         def _has_vllm_headroom(gpu_idx: int) -> bool:
             if not enforce_vllm_headroom:
                 return True
             state = state_by_gpu[gpu_idx]
-            required_free_mb = int(state.total_vram_mb * settings.vllm_gpu_memory_utilization)
-            return state.free_vram_mb >= required_free_mb
+            required_free_mb = int(state.total_vram_mb * vllm_utilization)
+            return free_per_gpu[gpu_idx] >= required_free_mb
 
         def _is_under_pressure(gpu_idx: int) -> bool:
             state = state_by_gpu[gpu_idx]
@@ -85,18 +99,34 @@ class GPUScheduler:
             )
             if not fits_single_gpu:
                 tp_candidates = [i for i in candidates if _has_vllm_headroom(i)]
-                total_free = sum(free_per_gpu[i] for i in tp_candidates)
-                if total_free >= vram_needed_mb:
+                tp_total_free = sum(free_per_gpu[i] for i in tp_candidates)
+                if tp_total_free >= vram_needed_mb:
                     logger.info(
                         "tensor_parallel_assigned",
                         gpus=tp_candidates,
                         vram_needed_mb=vram_needed_mb,
-                        total_free_mb=total_free,
+                        total_free_mb=tp_total_free,
                     )
                     return tp_candidates
 
+        details = []
+        for gpu_idx in gpu_indices:
+            state = state_by_gpu[gpu_idx]
+            detail = (
+                f"GPU {gpu_idx}: free {free_per_gpu[gpu_idx]} MB, "
+                f"total {state.total_vram_mb} MB"
+            )
+            if enforce_vllm_headroom:
+                required_free_mb = int(state.total_vram_mb * vllm_utilization)
+                detail += (
+                    f", vLLM headroom {required_free_mb} MB "
+                    f"(gpu_memory_utilization={vllm_utilization:g})"
+                )
+            details.append(detail)
+
         raise InsufficientVRAMError(
-            f"Need {vram_needed_mb} MB VRAM, only {total_free} MB available across all GPUs"
+            f"Need {vram_needed_mb} MB VRAM; available by GPU: "
+            f"{'; '.join(details)}; total free {total_free} MB"
         )
 
     async def get_eviction_candidates(
