@@ -735,6 +735,26 @@ export function Dashboard() {
     }
   }, [])
 
+  // Refresh the full model list periodically: WS pushes status changes but not
+  // currentGpu / vramUsedMb, which the per-GPU model lists need to place a model
+  // on the right card with its VRAM once it finishes loading.
+  useEffect(() => {
+    let cancelled = false
+    async function refreshModels() {
+      try {
+        const list = await api.models.list()
+        if (!cancelled) setModels(list)
+      } catch {
+        /* keep stale */
+      }
+    }
+    const id = window.setInterval(refreshModels, 10_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [setModels])
+
   return (
     <div className="space-y-6">
       {/* KPI Cards */}
