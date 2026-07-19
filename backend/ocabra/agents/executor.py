@@ -1018,9 +1018,17 @@ class AgentExecutor:
         per_request_allowed_tools: list[str] | None = None,
         caller_tools: list[dict[str, Any]] | None = None,
         require_approval_override: str | None = None,
+        emit_ocabra_events: bool = True,
         _agent_chain: tuple[uuid.UUID, ...] | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream the tool-loop as OpenAI SSE chunks plus ``ocabra.tool_result``.
+
+        ``emit_ocabra_events`` gates the non-standard ``event: ocabra.tool_*``
+        frames: strict OpenAI clients parse every ``data:`` as a chat chunk and
+        choke on them, so callers default this off for plain clients and set it
+        (via ``X-Ocabra-Stream-Events: true``) only for oCabra-aware consumers
+        like the Playground. The standard chat chunks (assistant content +
+        tool_calls) and ``: keepalive`` comments are emitted either way.
 
         The strategy is intentionally conservative:
 
@@ -1191,16 +1199,17 @@ class AgentExecutor:
 
                 # Tell the client which tools are about to run so the UI can show
                 # "in progress" cards before the (possibly long) execution finishes.
-                for tc in tool_calls:
-                    fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-                    yield _sse_event(
-                        "ocabra.tool_started",
-                        {
-                            "hop": hop,
-                            "tool_call_id": tc.get("id") if isinstance(tc, dict) else None,
-                            "name": fn.get("name") if isinstance(fn, dict) else None,
-                        },
-                    )
+                if emit_ocabra_events:
+                    for tc in tool_calls:
+                        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                        yield _sse_event(
+                            "ocabra.tool_started",
+                            {
+                                "hop": hop,
+                                "tool_call_id": tc.get("id") if isinstance(tc, dict) else None,
+                                "name": fn.get("name") if isinstance(fn, dict) else None,
+                            },
+                        )
 
                 sem = asyncio.Semaphore(self._max_concurrency)
                 tasks = [
@@ -1243,6 +1252,8 @@ class AgentExecutor:
                 for tool_msg, record in results:
                     loop_messages.append(tool_msg)
                     tc_id = tool_msg.get("tool_call_id") or ""
+                    if not emit_ocabra_events:
+                        continue
                     yield _sse_event(
                         "ocabra.tool_result",
                         {

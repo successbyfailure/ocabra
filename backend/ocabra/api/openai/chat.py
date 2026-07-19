@@ -461,6 +461,12 @@ async def _dispatch_agent(
     per_request_headers = extract_per_request_headers(request)
     per_request_allowed = parse_allowed_tools_header(request.headers.get("x-ocabra-allowed-tools"))
     require_approval_override = request.headers.get("x-ocabra-require-approval")
+    # oCabra tool-progress events (event: ocabra.tool_*) break strict OpenAI SSE
+    # parsers, so they're opt-in: only emitted when the client asks for them
+    # (the Playground sets this). Default off keeps the stream standards-clean.
+    emit_ocabra_events = str(
+        request.headers.get("x-ocabra-stream-events", "")
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     if stream:
         from fastapi.responses import StreamingResponse as _SR
@@ -475,6 +481,7 @@ async def _dispatch_agent(
             per_request_allowed_tools=per_request_allowed,
             caller_tools=caller_tools,
             require_approval_override=require_approval_override,
+            emit_ocabra_events=emit_ocabra_events,
         )
         return _SR(
             agen,

@@ -272,7 +272,10 @@ export function ChatInterface({
 
       const response = await fetch(useOllama ? "/api/chat" : "/v1/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // Opt into oCabra tool-progress SSE events (event: ocabra.tool_*) so the
+        // agent tool cards render. Plain OpenAI clients omit this and get a
+        // standards-clean stream.
+        headers: { "Content-Type": "application/json", "X-Ocabra-Stream-Events": "true" },
         body: requestBody,
       })
       if (!response.ok) {
