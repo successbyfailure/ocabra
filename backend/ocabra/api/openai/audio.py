@@ -66,6 +66,11 @@ async def transcriptions(
     prompt: str | None = form.get("prompt")
     temperature: float = float(form.get("temperature", 0.0))
     diarize: str | None = form.get("diarize")
+    # ASR hallucination-loop mitigations, forwarded to faster-whisper. Left unset
+    # here so the worker's defaults (vad_filter=true, condition_on_previous_text=
+    # false) apply unless the client overrides them.
+    vad_filter: str | None = form.get("vad_filter")
+    condition_on_previous_text: str | None = form.get("condition_on_previous_text")
     # OpenAI sends repeated `timestamp_granularities[]` fields; accept the
     # bracketed and plain spellings so word/segment timestamps reach the worker.
     granularities: list[str] = [
@@ -219,6 +224,10 @@ async def transcriptions(
                         form_data["diarize"] = diarize
                     if granularities:
                         form_data["timestamp_granularities"] = granularities
+                    if vad_filter is not None:
+                        form_data["vad_filter"] = vad_filter
+                    if condition_on_previous_text is not None:
+                        form_data["condition_on_previous_text"] = condition_on_previous_text
 
                     resp = await client.post(
                         url,

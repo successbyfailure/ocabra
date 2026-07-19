@@ -115,14 +115,25 @@ def create_app(
         temperature: float = Form(default=0.0),  # noqa: B008
         timestamp_granularities: list[str] = Form(default=["segment"]),  # noqa: B008
         diarize: str | None = Form(default=None),  # noqa: B008
+        vad_filter: str | None = Form(default=None),  # noqa: B008
+        condition_on_previous_text: str | None = Form(default=None),  # noqa: B008
     ):
         if runtime.model is None:
             raise HTTPException(status_code=503, detail=runtime.error or "Whisper model not loaded")
 
         try:
             diarize_request = _parse_optional_bool(diarize)
+            vad_request = _parse_optional_bool(vad_filter)
+            condition_request = _parse_optional_bool(condition_on_previous_text)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # Defaults chosen to prevent Whisper hallucination loops swallowing real
+        # speech: VAD drops non-speech, and NOT conditioning on previous text stops
+        # a degenerate loop from poisoning the context to the end of the file
+        # (same approach as WhisperX). Callers may override either.
+        vad_effective = True if vad_request is None else vad_request
+        condition_effective = False if condition_request is None else condition_request
 
         use_diarization = runtime.diarize_default if diarize_request is None else diarize_request
         if use_diarization and runtime.diarization_pipeline is None:
@@ -159,6 +170,8 @@ def create_app(
                     use_diarization,
                     runtime.diarization_pipeline,
                     timestamp_granularities,
+                    vad_filter=vad_effective,
+                    condition_on_previous_text=condition_effective,
                 )
             except Exception as exc:
                 if runtime.device == "cuda" and _is_missing_cudnn_error(exc):
@@ -512,6 +525,9 @@ def _run_transcription(
     diarize: bool,
     diarization_pipeline: Any,
     timestamp_granularities: Sequence[str] | None = None,
+    *,
+    vad_filter: bool = True,
+    condition_on_previous_text: bool = False,
 ) -> dict[str, Any]:
     granularities = list(timestamp_granularities or ["segment"])
     expose_words = "word" in granularities
@@ -528,7 +544,10 @@ def _run_transcription(
         word_timestamps=need_words,
         # VAD splits the audio on silences so faster-whisper emits per-utterance
         # segments instead of collapsing everything into one block.
-        vad_filter=True,
+        vad_filter=vad_filter,
+        # False stops a hallucination loop from propagating via the decoder
+        # context to the end of the file (see the /transcribe defaults).
+        condition_on_previous_text=condition_on_previous_text,
     )
 
     segment_list: list[dict[str, Any]] = []
