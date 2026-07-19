@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import { ConcentricGauge } from "@/components/gpu/ConcentricGauge"
 import { MemoryBars } from "@/components/gpu/MemoryBars"
 import { MiniTrends } from "@/components/gpu/MiniTrends"
@@ -779,6 +780,7 @@ export function Dashboard() {
   }, [setModels])
 
   return (
+    <Tooltip.Provider delayDuration={200}>
     <div className="space-y-6">
       {/* KPI Cards */}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -960,5 +962,6 @@ export function Dashboard() {
         <div className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
       )}
     </div>
+    </Tooltip.Provider>
   )
 }
