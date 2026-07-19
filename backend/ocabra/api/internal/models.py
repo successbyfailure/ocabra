@@ -214,6 +214,31 @@ async def get_models_storage(
     }
 
 
+@router.get(
+    "/models/activity",
+    summary="Per-model in-flight activity",
+    description="Return the current in-flight request count per loaded model (for live 'processing' indicators).",
+)
+async def get_models_activity(
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Live in-flight request counts keyed by model_id."""
+    mm = request.app.state.model_manager
+    snapshot = mm.inflight_snapshot()
+    states = await mm.list_states()
+    activity: dict[str, int] = {}
+    for state in states:
+        # begin_request may key by the canonical id or the raw backend model name.
+        count = max(
+            snapshot.get(state.model_id, 0),
+            snapshot.get(state.backend_model_id, 0),
+        )
+        if count > 0:
+            activity[state.model_id] = count
+    return {"inFlight": activity}
+
+
 _KV_DTYPE_BYTES = {"fp16": 2.0, "bf16": 2.0, "fp8": 1.0, "q8": 1.0, "q4": 0.5}
 
 

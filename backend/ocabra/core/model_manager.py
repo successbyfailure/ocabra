@@ -185,6 +185,12 @@ class ModelManager:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0)
 
+    def inflight_snapshot(self) -> dict[str, int]:
+        """Copy of the in-flight counters keyed by whatever id begin_request saw
+        (raw request model / worker key). Callers reconcile against model states."""
+        with self._in_flight_lock:
+            return {k: v for k, v in self._in_flight.items() if v > 0}
+
     async def resolve_ollama_num_ctx_cap(self, model_id: str) -> int | None:
         """num_ctx cap for an Ollama model with a ``use_case`` block, else None
         (no clamp). A concrete ``context`` is returned directly; ``max``/unset is
