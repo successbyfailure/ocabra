@@ -32,6 +32,7 @@ import type {
 const EMPTY_REQUESTS: RequestStats = {
   totalRequests: 0,
   errorRate: 0,
+  rejections: 0,
   avgDurationMs: 0,
   p50DurationMs: 0,
   p95DurationMs: 0,

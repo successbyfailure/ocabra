@@ -530,10 +530,29 @@ export interface StatsParams {
 export interface RequestStats {
   totalRequests: number
   errorRate: number
+  rejections: number
   avgDurationMs: number
   p50DurationMs: number
   p95DurationMs: number
   series: { timestamp: string; count: number }[]
+}
+
+export interface ModelActivity {
+  inFlight: number
+  oldestSeconds: number
+}
+
+export interface ModelActivityMap {
+  activity: Record<string, ModelActivity>
+  stuckThresholdSeconds: number
+}
+
+export interface OllamaRuntimeInfo {
+  sizeMb: number
+  sizeVramMb: number
+  gpuPct: number
+  cpuPct: number
+  contextLength: number | null
 }
 
 export interface EnergyStats {

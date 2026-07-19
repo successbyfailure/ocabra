@@ -1039,9 +1039,14 @@ export const api = {
     storage: async () => toModelsStorageStats(await request<unknown>("GET", "/ocabra/models/storage")),
     get: async (modelId: string) =>
       toModelState(await request<unknown>("GET", `/ocabra/models/${encodeURIComponent(modelId)}`)),
-    activity: async (): Promise<Record<string, number>> => {
-      const data = await request<{ inFlight?: Record<string, number> }>("GET", "/ocabra/models/activity")
-      return data.inFlight ?? {}
+    activity: () =>
+      request<import("@/types").ModelActivityMap>("GET", "/ocabra/models/activity"),
+    ollamaRuntime: async () => {
+      const data = await request<{ models?: Record<string, import("@/types").OllamaRuntimeInfo> }>(
+        "GET",
+        "/ocabra/models/ollama-runtime",
+      )
+      return data.models ?? {}
     },
     capacity: (
       modelId: string,

@@ -1,15 +1,16 @@
 import type { GPUState, ModelState } from "@/types"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
-import { MetricGauge } from "./MetricGauge"
+import { ConcentricGauge } from "./ConcentricGauge"
 import { MemoryBars } from "./MemoryBars"
-import { PowerBlock } from "./PowerBlock"
+import { MiniTrends } from "./MiniTrends"
 import { LoadedModelList } from "./LoadedModelList"
 import { METRIC, pct, tempColor } from "./metrics"
 
 interface GpuCardProps {
   gpu: GPUState
   models?: ModelState[]
-  activity?: Record<string, number>
+  activity?: Record<string, { inFlight: number; oldestSeconds: number }>
+  stuckThreshold?: number
 }
 
 // Keep the most recent `max` points with a stable stride (tail sampling), so the
@@ -24,18 +25,18 @@ function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
 
 const gb = (mb: number) => (mb / 1024).toFixed(1)
 
-export function GpuCard({ gpu, models = [], activity = {} }: GpuCardProps) {
+export function GpuCard({ gpu, models = [], activity = {}, stuckThreshold = 300 }: GpuCardProps) {
   const raw = useGpuStore((s) => s.history[gpu.index] ?? [])
-  const powerHistory = downsample(raw, 60).map((p) => p.powerPct)
-
-  const gpuModels = models.filter(
-    (m) => m.status === "loaded" && (m.currentGpu ?? []).includes(gpu.index),
-  )
+  const hist = downsample(raw, 40)
 
   const vramPct = pct(gpu.usedVramMb, gpu.totalVramMb)
   const lockedPct = pct(gpu.lockedVramMb, gpu.totalVramMb)
   const powPct = gpu.powerLimitW > 0 ? (gpu.powerDrawW / gpu.powerLimitW) * 100 : 0
   const hot = gpu.temperatureC >= 78 || vramPct >= 90
+
+  const gpuModels = models.filter(
+    (m) => m.status === "loaded" && (m.currentGpu ?? []).includes(gpu.index),
+  )
 
   return (
     <article className={`rounded-2xl border bg-card p-[18px] shadow-sm ${hot ? "border-red-500/60" : "border-border"}`}>
@@ -50,38 +51,45 @@ export function GpuCard({ gpu, models = [], activity = {} }: GpuCardProps) {
         </span>
       </div>
 
-      <div className="grid grid-cols-[auto_1fr] items-center gap-[18px]">
-        <MetricGauge
-          pct={gpu.utilizationPct}
-          color={METRIC.util}
-          label="Uso GPU"
-          value={gpu.utilizationPct.toFixed(0)}
-          unit="%"
-          caption="Uso GPU"
+      <div className="flex items-center gap-[18px]">
+        <ConcentricGauge
+          outer={{ value: gpu.utilizationPct, label: "Uso", color: METRIC.util }}
+          inner={{ value: powPct, label: "Potencia", color: METRIC.power }}
+          centerValue={gpu.utilizationPct.toFixed(0)}
+          centerUnit="%"
+          centerSub={`${Math.round(gpu.powerDrawW)} W`}
         />
-        <MemoryBars
-          name="VRAM"
-          usedLabel={gb(gpu.usedVramMb)}
-          totalLabel={gb(gpu.totalVramMb)}
-          usedPct={vramPct}
-          secondaryName="bloqueada"
-          secondaryPct={lockedPct}
-        />
+        <div className="min-w-0 flex-1">
+          <MemoryBars
+            name="VRAM"
+            usedLabel={gb(gpu.usedVramMb)}
+            totalLabel={gb(gpu.totalVramMb)}
+            usedPct={vramPct}
+            secondaryName="bloqueada"
+            secondaryPct={lockedPct}
+          />
+          <div className="mt-3">
+            <MiniTrends
+              metrics={[
+                { label: "Uso GPU", data: hist.map((p) => p.util), color: METRIC.util, value: `${gpu.utilizationPct.toFixed(0)}%` },
+                { label: "Potencia", data: hist.map((p) => p.powerPct), color: METRIC.power, value: `${Math.round(gpu.powerDrawW)}W` },
+                { label: "VRAM", data: hist.map((p) => p.vramPct), color: METRIC.mem, value: `${Math.round(vramPct)}%` },
+              ]}
+            />
+          </div>
+        </div>
       </div>
-
-      <PowerBlock
-        label="Consumo eléctrico"
-        powerW={gpu.powerDrawW}
-        powerLimitW={gpu.powerLimitW}
-        history={powerHistory}
-        subtitle={`${Math.round(powPct)}% del límite · últimos 10 min`}
-      />
 
       <div className="mt-[15px] border-t border-border pt-3">
         <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           Modelos ({gpuModels.length})
         </p>
-        <LoadedModelList models={gpuModels} activity={activity} emptyLabel="Sin modelos gestionados en esta GPU" />
+        <LoadedModelList
+          models={gpuModels}
+          activity={activity}
+          stuckThreshold={stuckThreshold}
+          emptyLabel="Sin modelos gestionados en esta GPU"
+        />
       </div>
 
       <details className="group mt-[15px] border-t border-border">

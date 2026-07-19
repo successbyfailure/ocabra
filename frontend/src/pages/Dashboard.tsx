@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
-import { MetricGauge } from "@/components/gpu/MetricGauge"
+import { ConcentricGauge } from "@/components/gpu/ConcentricGauge"
 import { MemoryBars } from "@/components/gpu/MemoryBars"
-import { PowerBlock } from "@/components/gpu/PowerBlock"
+import { MiniTrends } from "@/components/gpu/MiniTrends"
 import { METRIC, tempColor } from "@/components/gpu/metrics"
 import {
   Activity,
@@ -11,6 +11,7 @@ import {
   Cpu,
   Database,
   Download,
+  Gauge,
   Globe,
   Layers,
   MemoryStick,
@@ -32,7 +33,7 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { FederationPeer, HostStats, ModelState, RecentRequestsData, ServerPower, ServiceState, TokenStats } from "@/types"
+import type { EnergyStats, FederationPeer, HostStats, ModelActivity, ModelState, OllamaRuntimeInfo, RecentRequestsData, RequestStats, ServerPower, ServiceState, TokenStats } from "@/types"
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -128,17 +129,22 @@ function HostStatsCard({
   history = [],
   models = [],
   activity = {},
+  stuckThreshold = 300,
+  ollamaRuntime = {},
 }: {
   stats: HostStats
   serverPower?: ServerPower | null
   history?: HostHistoryPoint[]
   models?: ModelState[]
-  activity?: Record<string, number>
+  activity?: Record<string, ModelActivity>
+  stuckThreshold?: number
+  ollamaRuntime?: Record<string, OllamaRuntimeInfo>
 }) {
   const gb = (mb: number) => (mb / 1024).toFixed(1)
   const cpuTemp = serverPower?.cpuTempC
-  const cpuPower = serverPower?.cpuPowerW
+  const cpuPower = serverPower?.cpuPowerW ?? 0
   const powerHistory = history.map((p) => p.powerW ?? 0)
+  const peakPower = Math.max(cpuPower, ...powerHistory, 1)
 
   return (
     <article className="rounded-2xl border border-border bg-card p-[18px] shadow-sm">
@@ -157,44 +163,47 @@ function HostStatsCard({
         )}
       </div>
 
-      <div className="grid grid-cols-[auto_1fr] items-center gap-[18px]">
-        <MetricGauge
-          pct={stats.cpuPct}
-          color={METRIC.util}
-          label="Carga CPU"
-          value={stats.cpuPct.toFixed(0)}
-          unit="%"
-          caption="Carga CPU"
+      <div className="flex items-center gap-[18px]">
+        <ConcentricGauge
+          outer={{ value: stats.cpuPct, label: "CPU", color: METRIC.util }}
+          inner={{ value: (cpuPower / peakPower) * 100, label: "Potencia", color: METRIC.power }}
+          centerValue={stats.cpuPct.toFixed(0)}
+          centerUnit="%"
+          centerSub={cpuPower > 0 ? `${Math.round(cpuPower)} W` : undefined}
         />
-        <MemoryBars
-          name="RAM"
-          usedLabel={gb(stats.memUsedMb)}
-          totalLabel={gb(stats.memTotalMb)}
-          usedPct={stats.memPct}
-          secondaryName="swap"
-          secondaryPct={stats.swapTotalMb > 0 ? stats.swapPct : 0}
-          secondaryMode="aside"
-        />
-      </div>
-
-      {cpuPower != null ? (
-        <PowerBlock
-          label="Consumo CPU"
-          powerW={cpuPower}
-          history={powerHistory}
-          subtitle={`load ${stats.loadAvg1m} / ${stats.loadAvg5m} / ${stats.loadAvg15m} · últimos 10 min`}
-        />
-      ) : (
-        <div className="mt-[18px] border-t border-border pt-3 text-[11px] text-muted-foreground">
-          load {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
+        <div className="min-w-0 flex-1">
+          <MemoryBars
+            name="RAM"
+            usedLabel={gb(stats.memUsedMb)}
+            totalLabel={gb(stats.memTotalMb)}
+            usedPct={stats.memPct}
+            secondaryName="swap"
+            secondaryPct={stats.swapTotalMb > 0 ? stats.swapPct : 0}
+            secondaryMode="aside"
+          />
+          <div className="mt-3">
+            <MiniTrends
+              metrics={[
+                { label: "CPU", data: history.map((p) => p.cpuPct), color: METRIC.util, value: `${stats.cpuPct.toFixed(0)}%` },
+                { label: "Potencia", data: powerHistory.map((w) => (w / peakPower) * 100), color: METRIC.power, value: `${Math.round(cpuPower)}W` },
+                { label: "RAM", data: history.map((p) => p.memPct), color: METRIC.mem, value: `${Math.round(stats.memPct)}%` },
+              ]}
+            />
+          </div>
         </div>
-      )}
+      </div>
 
       <div className="mt-[15px] border-t border-border pt-3">
         <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           Modelos · Ollama / CPU ({models.length})
         </p>
-        <LoadedModelList models={models} activity={activity} emptyLabel="Sin modelos gestionados fuera de las GPUs" />
+        <LoadedModelList
+          models={models}
+          activity={activity}
+          stuckThreshold={stuckThreshold}
+          ollamaRuntime={ollamaRuntime}
+          emptyLabel="Sin modelos gestionados fuera de las GPUs"
+        />
       </div>
 
       <details className="group mt-[15px] border-t border-border">
@@ -600,7 +609,11 @@ export function Dashboard() {
   const [hostHistory, setHostHistory] = useState<HostHistoryPoint[]>([])
   const [tokens1h, setTokens1h] = useState<TokenStats | null>(null)
   const [tokens24h, setTokens24h] = useState<TokenStats | null>(null)
-  const [activity, setActivity] = useState<Record<string, number>>({})
+  const [reqStats, setReqStats] = useState<RequestStats | null>(null)
+  const [energy, setEnergy] = useState<EnergyStats | null>(null)
+  const [activity, setActivity] = useState<Record<string, ModelActivity>>({})
+  const [stuckThreshold, setStuckThreshold] = useState(300)
+  const [ollamaRuntime, setOllamaRuntime] = useState<Record<string, OllamaRuntimeInfo>>({})
 
   useWebSocket()
 
@@ -695,14 +708,20 @@ export function Dashboard() {
     let cancelled = false
     async function pollTokens() {
       const to = new Date().toISOString()
+      const from1h = new Date(Date.now() - 3_600_000).toISOString()
+      const from24h = new Date(Date.now() - 86_400_000).toISOString()
       try {
-        const [h1, h24] = await Promise.all([
-          api.stats.tokens({ from: new Date(Date.now() - 3_600_000).toISOString(), to }),
-          api.stats.tokens({ from: new Date(Date.now() - 86_400_000).toISOString(), to }),
+        const [h1, h24, req, en] = await Promise.all([
+          api.stats.tokens({ from: from1h, to }),
+          api.stats.tokens({ from: from24h, to }),
+          api.stats.requests({ from: from24h, to }),
+          api.stats.energy({ from: from24h, to }),
         ])
         if (!cancelled) {
           setTokens1h(h1)
           setTokens24h(h24)
+          setReqStats(req)
+          setEnergy(en)
         }
       } catch {
         /* keep stale */
@@ -721,8 +740,12 @@ export function Dashboard() {
     let cancelled = false
     async function pollActivity() {
       try {
-        const map = await api.models.activity()
-        if (!cancelled) setActivity(map)
+        const [act, ort] = await Promise.all([api.models.activity(), api.models.ollamaRuntime()])
+        if (!cancelled) {
+          setActivity(act.activity)
+          setStuckThreshold(act.stuckThresholdSeconds)
+          setOllamaRuntime(ort)
+        }
       } catch {
         /* keep stale */
       }
@@ -789,22 +812,36 @@ export function Dashboard() {
         />
       </div>
 
-      {/* Token throughput */}
+      {/* Actividad (24h) */}
       {isModelManager && (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             icon={Zap}
             label="Tokens · última hora"
             value={tokens1h ? fmtTokens(tokens1h.totalInputTokens + tokens1h.totalOutputTokens) : "—"}
-            sub={tokens1h ? `entrada ${fmtTokens(tokens1h.totalInputTokens)} · salida ${fmtTokens(tokens1h.totalOutputTokens)}` : undefined}
+            sub={tokens1h ? `${fmtTokens(tokens1h.totalInputTokens)} in · ${fmtTokens(tokens1h.totalOutputTokens)} out` : undefined}
             color="bg-fuchsia-500/15 text-fuchsia-300"
           />
           <KpiCard
             icon={Zap}
-            label="Tokens · últimas 24 h"
+            label="Tokens · 24 h"
             value={tokens24h ? fmtTokens(tokens24h.totalInputTokens + tokens24h.totalOutputTokens) : "—"}
-            sub={tokens24h ? `entrada ${fmtTokens(tokens24h.totalInputTokens)} · salida ${fmtTokens(tokens24h.totalOutputTokens)}` : undefined}
+            sub={tokens24h ? `${fmtTokens(tokens24h.totalInputTokens)} in · ${fmtTokens(tokens24h.totalOutputTokens)} out` : undefined}
             color="bg-fuchsia-500/15 text-fuchsia-300"
+          />
+          <KpiCard
+            icon={Activity}
+            label="Peticiones · 24 h"
+            value={reqStats ? reqStats.totalRequests.toLocaleString() : "—"}
+            sub={reqStats ? `${(reqStats.errorRate * 100).toFixed(1)}% error · ${reqStats.rejections} rechazos` : undefined}
+            color="bg-sky-500/15 text-sky-300"
+          />
+          <KpiCard
+            icon={Gauge}
+            label="Energía · 24 h"
+            value={energy ? `${(energy.estimatedCostEur).toFixed(2)} €` : "—"}
+            sub={energy?.totalServerKwh != null ? `${energy.totalServerKwh.toFixed(1)} kWh` : undefined}
+            color="bg-orange-500/15 text-orange-300"
           />
         </div>
       )}
@@ -813,7 +850,7 @@ export function Dashboard() {
       <Section title="GPUs y host">
         <div className="grid gap-4 xl:grid-cols-2">
           {gpus.map((gpu) => (
-            <GpuCard key={gpu.index} gpu={gpu} models={loadedModels} activity={activity} />
+            <GpuCard key={gpu.index} gpu={gpu} models={loadedModels} activity={activity} stuckThreshold={stuckThreshold} />
           ))}
           {hostStats && (
             <HostStatsCard
@@ -822,6 +859,8 @@ export function Dashboard() {
               history={hostHistory}
               models={untrackedGpuModels}
               activity={activity}
+              stuckThreshold={stuckThreshold}
+              ollamaRuntime={ollamaRuntime}
             />
           )}
           {gpus.length === 0 && !hostStats && (
