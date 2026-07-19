@@ -655,6 +655,29 @@ Consulta `GET /v1/models` para ver los modelos disponibles.
 ## Voces TTS
 
 Dependen del modelo. Usa `GET /v1/audio/voices?model=<profile_id>` para consultar las voces disponibles.
+
+## Carga en frío y estado del modelo
+
+Los modelos se cargan **bajo demanda**. Una petición a un modelo frío mantiene la conexión abierta mientras carga (puede tardar minutos en modelos grandes):
+
+- La respuesta incluye los headers `X-Ocabra-Model-Status`, `X-Ocabra-Model-Id` y, si aún no está cargado, `X-Ocabra-Expected-Wait-Seconds`.
+- Durante la carga, el stream SSE emite **comentarios** (`: {...}`) como keepalive y pista de estado. Las líneas SSE que empiezan por `:` son comentarios y las ignora todo parser conforme (el SDK de OpenAI incluido) — **no las parsees como chunks**.
+- Para consultar el estado sin lanzar la petición: `GET /v1/models/{id}` → el campo `ocabra` incluye `status`, `loaded` y `expected_wait_seconds`.
+
+## Transcripción (STT)
+
+`POST /v1/audio/transcriptions` acepta, además de los campos OpenAI, dos form-params de faster-whisper para mitigar los bucles de alucinación de Whisper:
+
+| Campo | Default | Efecto |
+|-------|---------|--------|
+| `vad_filter` | `true` | Descarta los tramos sin voz (VAD) antes de transcribir. |
+| `condition_on_previous_text` | `false` | Evita que un bucle de repetición se propague vía el contexto del decoder (como WhisperX). |
+
+Límite de subida: 256 MB por parte (configurable). Para audio largo, sube comprimido (`mp3`/`opus`/`flac`) en vez de WAV.
+
+## Modo agente
+
+Los modelos con id `agent/<slug>` ejecutan un bucle de herramientas en el servidor. Son compatibles con `/v1/chat/completions` (streaming y no-streaming). Para recibir el progreso de herramientas como eventos SSE de oCabra (`event: ocabra.tool_started` / `ocabra.tool_result`), envía la cabecera `X-Ocabra-Stream-Events: true`; sin ella el stream es **OpenAI-estándar** (solo chunks de chat).
 """
 
 app = FastAPI(
@@ -729,6 +752,35 @@ def _custom_openapi():
                             }
                         },
                     }
+
+    # Transcriptions is multipart/form-data (read via request.form), so its
+    # fields aren't auto-generated — describe them for the interactive docs.
+    tr_methods = schema.get("paths", {}).get("/v1/audio/transcriptions", {})
+    for method_info in tr_methods.values():
+        if isinstance(method_info, dict) and "summary" in method_info:
+            method_info["requestBody"] = {
+                "required": True,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["file", "model"],
+                            "properties": {
+                                "file": {"type": "string", "format": "binary", "description": "Audio (wav/mp3/m4a/ogg/flac/webm)."},
+                                "model": {"type": "string", "description": "Whisper profile_id."},
+                                "language": {"type": "string"},
+                                "prompt": {"type": "string"},
+                                "response_format": {"type": "string", "enum": ["json", "text", "srt", "vtt", "verbose_json"], "default": "json"},
+                                "temperature": {"type": "number", "default": 0.0},
+                                "timestamp_granularities[]": {"type": "array", "items": {"type": "string", "enum": ["segment", "word"]}},
+                                "diarize": {"type": "boolean", "description": "Diarización de hablantes (perfiles -diarized)."},
+                                "vad_filter": {"type": "boolean", "default": True, "description": "Descarta tramos sin voz (VAD) antes de transcribir."},
+                                "condition_on_previous_text": {"type": "boolean", "default": False, "description": "Evita que un bucle de alucinación se propague vía el contexto del decoder."},
+                            },
+                        }
+                    }
+                },
+            }
 
     # Add WebSocket endpoints (Swagger can't auto-generate these)
     paths = schema.setdefault("paths", {})
