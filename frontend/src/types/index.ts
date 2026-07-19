@@ -525,6 +525,8 @@ export interface StatsParams {
   from?: string
   to?: string
   modelId?: string
+  allTime?: boolean
+  includeSeries?: boolean
 }
 
 export interface RequestStats {
@@ -585,10 +587,17 @@ export interface PerformanceStats {
   }[]
 }
 
+export interface TokenGpuStats {
+  gpuIndex: number | null
+  inputTokens: number
+  outputTokens: number
+}
+
 export interface TokenStats {
   totalInputTokens: number
   totalOutputTokens: number
   byBackend: { backendType: string; inputTokens: number; outputTokens: number }[]
+  byGpu: TokenGpuStats[]
   series: { timestamp: string; inputTokens: number; outputTokens: number }[]
 }
 

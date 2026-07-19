@@ -4,6 +4,7 @@ GET /ocabra/stats/* — Statistics API endpoints.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
@@ -74,12 +75,29 @@ async def token_stats(
     to_dt: datetime | None = Query(None, alias="to"),
     model_id: str | None = Query(None, alias="model_id"),
     model_id_camel: str | None = Query(None, alias="modelId"),
+    all_time: Annotated[bool | None, Query(alias="all_time")] = None,
+    all_time_camel: Annotated[bool | None, Query(alias="allTime")] = None,
+    include_series: Annotated[bool | None, Query(alias="include_series")] = None,
+    include_series_camel: Annotated[bool | None, Query(alias="includeSeries")] = None,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Return token usage totals and timeline."""
     from ocabra.stats.aggregator import get_token_stats
 
-    return await get_token_stats(from_dt, to_dt, model_id or model_id_camel)
+    all_time_value = all_time if all_time is not None else bool(all_time_camel)
+    if include_series is not None:
+        include_series_value = include_series
+    elif include_series_camel is not None:
+        include_series_value = include_series_camel
+    else:
+        include_series_value = True
+    return await get_token_stats(
+        from_dt,
+        to_dt,
+        model_id or model_id_camel,
+        all_time=all_time_value,
+        include_series=include_series_value,
+    )
 
 
 @router.get(

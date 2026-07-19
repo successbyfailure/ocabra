@@ -34,7 +34,20 @@ import { useDownloadStore } from "@/stores/downloadStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useServiceStore } from "@/stores/serviceStore"
-import type { EnergyStats, FederationPeer, HostStats, ModelActivity, ModelState, OllamaRuntimeInfo, RecentRequestsData, RequestStats, ServerPower, ServiceState, TokenStats } from "@/types"
+import type {
+  EnergyStats,
+  FederationPeer,
+  HostStats,
+  ModelActivity,
+  ModelState,
+  OllamaRuntimeInfo,
+  RecentRequestsData,
+  RequestStats,
+  ServerPower,
+  ServiceState,
+  TokenGpuStats,
+  TokenStats,
+} from "@/types"
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -132,6 +145,7 @@ function HostStatsCard({
   activity = {},
   stuckThreshold = 300,
   ollamaRuntime = {},
+  tokenStats = null,
 }: {
   stats: HostStats
   serverPower?: ServerPower | null
@@ -140,12 +154,16 @@ function HostStatsCard({
   activity?: Record<string, ModelActivity>
   stuckThreshold?: number
   ollamaRuntime?: Record<string, OllamaRuntimeInfo>
+  tokenStats?: TokenGpuStats | null
 }) {
   const gb = (mb: number) => (mb / 1024).toFixed(1)
   const cpuTemp = serverPower?.cpuTempC
   const cpuPower = serverPower?.cpuPowerW ?? 0
   const powerHistory = history.map((p) => p.powerW ?? 0)
   const peakPower = Math.max(cpuPower, ...powerHistory, 1)
+  const inputTokens = tokenStats?.inputTokens ?? 0
+  const outputTokens = tokenStats?.outputTokens ?? 0
+  const totalTokens = inputTokens + outputTokens
 
   return (
     <article className="rounded-2xl border border-border bg-card p-[18px] shadow-sm">
@@ -191,6 +209,33 @@ function HostStatsCard({
               ]}
             />
           </div>
+        </div>
+      </div>
+
+      <div className="mt-[15px] grid grid-cols-3 gap-2 border-t border-border pt-3">
+        <div className="min-w-0 rounded-lg bg-muted/45 px-2.5 py-2">
+          <span className="block truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Tokens
+          </span>
+          <span className="block truncate text-[13px] font-semibold tabular-nums">
+            {fmtTokens(totalTokens)}
+          </span>
+        </div>
+        <div className="min-w-0 rounded-lg bg-muted/45 px-2.5 py-2">
+          <span className="block truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Entrada
+          </span>
+          <span className="block truncate text-[13px] font-semibold tabular-nums">
+            {fmtTokens(inputTokens)}
+          </span>
+        </div>
+        <div className="min-w-0 rounded-lg bg-muted/45 px-2.5 py-2">
+          <span className="block truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Salida
+          </span>
+          <span className="block truncate text-[13px] font-semibold tabular-nums">
+            {fmtTokens(outputTokens)}
+          </span>
         </div>
       </div>
 
@@ -610,6 +655,7 @@ export function Dashboard() {
   const [hostHistory, setHostHistory] = useState<HostHistoryPoint[]>([])
   const [tokens1h, setTokens1h] = useState<TokenStats | null>(null)
   const [tokens24h, setTokens24h] = useState<TokenStats | null>(null)
+  const [tokensAllTime, setTokensAllTime] = useState<TokenStats | null>(null)
   const [reqStats, setReqStats] = useState<RequestStats | null>(null)
   const [energy, setEnergy] = useState<EnergyStats | null>(null)
   const [activity, setActivity] = useState<Record<string, ModelActivity>>({})
@@ -654,6 +700,18 @@ export function Dashboard() {
     () => serviceList.filter((service) => !service.enabled && service.serviceAlive),
     [serviceList],
   )
+  const tokenStatsByDevice = useMemo(() => {
+    const byGpu = new Map<number, TokenGpuStats>()
+    let host: TokenGpuStats | null = null
+    for (const row of tokensAllTime?.byGpu ?? []) {
+      if (row.gpuIndex == null) {
+        host = row
+      } else {
+        byGpu.set(row.gpuIndex, row)
+      }
+    }
+    return { byGpu, host }
+  }, [tokensAllTime])
 
   // Total VRAM
   const totalVramMb = useMemo(() => gpus.reduce((acc, g) => acc + g.totalVramMb, 0), [gpus])
@@ -712,15 +770,17 @@ export function Dashboard() {
       const from1h = new Date(Date.now() - 3_600_000).toISOString()
       const from24h = new Date(Date.now() - 86_400_000).toISOString()
       try {
-        const [h1, h24, req, en] = await Promise.all([
+        const [h1, h24, allTime, req, en] = await Promise.all([
           api.stats.tokens({ from: from1h, to }),
           api.stats.tokens({ from: from24h, to }),
+          api.stats.tokens({ allTime: true, includeSeries: false }),
           api.stats.requests({ from: from24h, to }),
           api.stats.energy({ from: from24h, to }),
         ])
         if (!cancelled) {
           setTokens1h(h1)
           setTokens24h(h24)
+          setTokensAllTime(allTime)
           setReqStats(req)
           setEnergy(en)
         }
@@ -816,7 +876,7 @@ export function Dashboard() {
 
       {/* Actividad (24h) */}
       {isModelManager && (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <KpiCard
             icon={Zap}
             label="Tokens · última hora"
@@ -830,6 +890,13 @@ export function Dashboard() {
             value={tokens24h ? fmtTokens(tokens24h.totalInputTokens + tokens24h.totalOutputTokens) : "—"}
             sub={tokens24h ? `${fmtTokens(tokens24h.totalInputTokens)} in · ${fmtTokens(tokens24h.totalOutputTokens)} out` : undefined}
             color="bg-fuchsia-500/15 text-fuchsia-300"
+          />
+          <KpiCard
+            icon={Sparkles}
+            label="Tokens · historico"
+            value={tokensAllTime ? fmtTokens(tokensAllTime.totalInputTokens + tokensAllTime.totalOutputTokens) : "—"}
+            sub={tokensAllTime ? `${fmtTokens(tokensAllTime.totalInputTokens)} in · ${fmtTokens(tokensAllTime.totalOutputTokens)} out` : undefined}
+            color="bg-violet-500/15 text-violet-300"
           />
           <KpiCard
             icon={Activity}
@@ -852,7 +919,14 @@ export function Dashboard() {
       <Section title="GPUs y host">
         <div className="grid gap-4 xl:grid-cols-2">
           {gpus.map((gpu) => (
-            <GpuCard key={gpu.index} gpu={gpu} models={loadedModels} activity={activity} stuckThreshold={stuckThreshold} />
+            <GpuCard
+              key={gpu.index}
+              gpu={gpu}
+              models={loadedModels}
+              activity={activity}
+              stuckThreshold={stuckThreshold}
+              tokenStats={tokenStatsByDevice.byGpu.get(gpu.index)}
+            />
           ))}
           {hostStats && (
             <HostStatsCard
@@ -863,6 +937,7 @@ export function Dashboard() {
               activity={activity}
               stuckThreshold={stuckThreshold}
               ollamaRuntime={ollamaRuntime}
+              tokenStats={tokenStatsByDevice.host}
             />
           )}
           {gpus.length === 0 && !hostStats && (

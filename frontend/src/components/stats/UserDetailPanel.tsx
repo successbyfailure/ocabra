@@ -49,6 +49,7 @@ export function UserDetailPanel({ userId, username, params, onClose }: UserDetai
     totalInputTokens: data.totalInputTokens,
     totalOutputTokens: data.totalOutputTokens,
     byBackend: [],
+    byGpu: [],
     series: data.tokenSeries,
   }
 

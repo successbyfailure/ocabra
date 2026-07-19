@@ -43,6 +43,7 @@ const EMPTY_TOKENS: TokenStats = {
   totalInputTokens: 0,
   totalOutputTokens: 0,
   byBackend: [],
+  byGpu: [],
   series: [],
 }
 

@@ -298,7 +298,7 @@ GET /ocabra/registry/local                               → list[LocalModel]
 
 ```
 GET /ocabra/stats/requests?from=ISO&to=ISO&model_id=str   → RequestStats
-GET /ocabra/stats/tokens?from=ISO&to=ISO&model_id=str     → TokenStats
+GET /ocabra/stats/tokens?from=ISO&to=ISO&model_id=str&allTime=bool&includeSeries=bool → TokenStats
 GET /ocabra/stats/energy?from=ISO&to=ISO                  → EnergyStats
 GET /ocabra/stats/performance?from=ISO&to=ISO&model_id=str → PerformanceStats
 GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str   → OverviewStats
@@ -311,6 +311,7 @@ GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str   → OverviewStats
 `TokenStats`:
 - `totalInputTokens`, `totalOutputTokens`
 - `byBackend`: `[{ backendType, inputTokens, outputTokens }]`
+- `byGpu`: `[{ gpuIndex, inputTokens, outputTokens }]` (`gpuIndex = null` para requests sin GPU asociada)
 - `series`: `[{ timestamp, inputTokens, outputTokens }]`
 
 `EnergyStats`:

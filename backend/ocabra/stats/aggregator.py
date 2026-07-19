@@ -280,7 +280,6 @@ async def get_stats_by_user(
 ) -> dict:
     """Return request stats aggregated by user."""
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
-    import uuid as _uuid
     from ocabra.db.auth import User
 
     async with AsyncSessionLocal() as session:
@@ -642,51 +641,101 @@ async def get_token_stats(
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,
     model_id: str | None = None,
+    *,
+    all_time: bool = False,
+    include_series: bool = True,
 ) -> dict:
     """
     Return token usage totals and per-request time series.
     """
-    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    if not all_time:
+        from_dt, to_dt = _normalize_window(from_dt, to_dt)
+
+    filters = []
+    if from_dt is not None:
+        filters.append(RequestStat.started_at >= from_dt)
+    if to_dt is not None:
+        filters.append(RequestStat.started_at <= to_dt)
+    if model_id:
+        filters.append(RequestStat.model_id == model_id)
 
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
+        input_sum = sa.func.coalesce(sa.func.sum(RequestStat.input_tokens), 0)
+        output_sum = sa.func.coalesce(sa.func.sum(RequestStat.output_tokens), 0)
+
+        total_result = await session.execute(
+            sa.select(input_sum, output_sum).where(*filters)
         )
-        if model_id:
-            q = q.where(RequestStat.model_id == model_id)
-        q = q.order_by(RequestStat.started_at.asc())
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        total_input_raw, total_output_raw = total_result.one()
+        total_input = int(total_input_raw or 0)
+        total_output = int(total_output_raw or 0)
 
-    total_input = sum(max(0, int(r.input_tokens or 0)) for r in rows)
-    total_output = sum(max(0, int(r.output_tokens or 0)) for r in rows)
+        backend_expr = sa.func.coalesce(RequestStat.backend_type, "unknown")
+        backend_result = await session.execute(
+            sa.select(backend_expr, input_sum, output_sum)
+            .where(*filters)
+            .group_by(backend_expr)
+            .order_by(backend_expr)
+        )
+        by_backend = [
+            {
+                "backendType": str(backend or "unknown"),
+                "inputTokens": int(input_tokens or 0),
+                "outputTokens": int(output_tokens or 0),
+            }
+            for backend, input_tokens, output_tokens in backend_result.all()
+        ]
 
-    by_backend: dict[str, dict[str, int]] = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0})
-    for row in rows:
-        backend = row.backend_type or "unknown"
-        by_backend[backend]["inputTokens"] += max(0, int(row.input_tokens or 0))
-        by_backend[backend]["outputTokens"] += max(0, int(row.output_tokens or 0))
+        gpu_result = await session.execute(
+            sa.select(RequestStat.gpu_index, input_sum, output_sum)
+            .where(*filters)
+            .group_by(RequestStat.gpu_index)
+        )
+        by_gpu = [
+            {
+                "gpuIndex": gpu_index,
+                "inputTokens": int(input_tokens or 0),
+                "outputTokens": int(output_tokens or 0),
+            }
+            for gpu_index, input_tokens, output_tokens in gpu_result.all()
+        ]
 
-    per_minute: dict[datetime, dict[str, int]] = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0})
-    for row in rows:
-        if row.started_at:
-            bucket = _truncate_minute(row.started_at)
-            per_minute[bucket]["inputTokens"] += max(0, int(row.input_tokens or 0))
-            per_minute[bucket]["outputTokens"] += max(0, int(row.output_tokens or 0))
+        series = []
+        if include_series:
+            result = await session.execute(
+                sa.select(
+                    RequestStat.started_at,
+                    RequestStat.input_tokens,
+                    RequestStat.output_tokens,
+                )
+                .where(*filters)
+                .order_by(RequestStat.started_at.asc())
+            )
+            per_minute: dict[datetime, dict[str, int]] = defaultdict(
+                lambda: {"inputTokens": 0, "outputTokens": 0}
+            )
+            for started_at, input_tokens, output_tokens in result.all():
+                if started_at:
+                    bucket = _truncate_minute(started_at)
+                    per_minute[bucket]["inputTokens"] += max(0, int(input_tokens or 0))
+                    per_minute[bucket]["outputTokens"] += max(0, int(output_tokens or 0))
+            series = [
+                {"timestamp": ts.isoformat(), **counts}
+                for ts, counts in sorted(per_minute.items())
+            ]
 
-    series = [
-        {"timestamp": ts.isoformat(), **counts}
-        for ts, counts in sorted(per_minute.items())
-    ]
+    by_gpu.sort(
+        key=lambda row: (
+            row["gpuIndex"] is None,
+            row["gpuIndex"] if row["gpuIndex"] is not None else 0,
+        )
+    )
 
     return {
-        "totalInputTokens": int(total_input),
-        "totalOutputTokens": int(total_output),
-        "byBackend": [
-            {"backendType": backend, **values}
-            for backend, values in sorted(by_backend.items(), key=lambda item: item[0])
-        ],
+        "totalInputTokens": total_input,
+        "totalOutputTokens": total_output,
+        "byBackend": by_backend,
+        "byGpu": by_gpu,
         "series": series,
     }
 

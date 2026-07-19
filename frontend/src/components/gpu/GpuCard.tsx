@@ -1,4 +1,4 @@
-import type { GPUState, ModelState } from "@/types"
+import type { GPUState, ModelState, TokenGpuStats } from "@/types"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
 import { ConcentricGauge } from "./ConcentricGauge"
 import { MemoryBars } from "./MemoryBars"
@@ -11,6 +11,7 @@ interface GpuCardProps {
   models?: ModelState[]
   activity?: Record<string, { inFlight: number; oldestSeconds: number }>
   stuckThreshold?: number
+  tokenStats?: TokenGpuStats | null
 }
 
 // Keep the most recent `max` points with a stable stride (tail sampling), so the
@@ -24,9 +25,22 @@ function downsample(pts: GpuHistoryPoint[], max: number): GpuHistoryPoint[] {
 }
 
 const gb = (mb: number) => (mb / 1024).toFixed(1)
+const EMPTY_HISTORY: GpuHistoryPoint[] = []
 
-export function GpuCard({ gpu, models = [], activity = {}, stuckThreshold = 300 }: GpuCardProps) {
-  const raw = useGpuStore((s) => s.history[gpu.index] ?? [])
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}k`
+  return String(n)
+}
+
+export function GpuCard({
+  gpu,
+  models = [],
+  activity = {},
+  stuckThreshold = 300,
+  tokenStats = null,
+}: GpuCardProps) {
+  const raw = useGpuStore((s) => s.history[gpu.index] ?? EMPTY_HISTORY)
   const hist = downsample(raw, 40)
 
   const vramPct = pct(gpu.usedVramMb, gpu.totalVramMb)
@@ -37,6 +51,9 @@ export function GpuCard({ gpu, models = [], activity = {}, stuckThreshold = 300 
   const gpuModels = models.filter(
     (m) => m.status === "loaded" && (m.currentGpu ?? []).includes(gpu.index),
   )
+  const inputTokens = tokenStats?.inputTokens ?? 0
+  const outputTokens = tokenStats?.outputTokens ?? 0
+  const totalTokens = inputTokens + outputTokens
 
   return (
     <article className={`rounded-2xl border bg-card p-[18px] shadow-sm ${hot ? "border-red-500/60" : "border-border"}`}>
@@ -77,6 +94,33 @@ export function GpuCard({ gpu, models = [], activity = {}, stuckThreshold = 300 
               ]}
             />
           </div>
+        </div>
+      </div>
+
+      <div className="mt-[15px] grid grid-cols-3 gap-2 border-t border-border pt-3">
+        <div className="min-w-0 rounded-lg bg-muted/45 px-2.5 py-2">
+          <span className="block truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Tokens
+          </span>
+          <span className="block truncate text-[13px] font-semibold tabular-nums">
+            {fmtTokens(totalTokens)}
+          </span>
+        </div>
+        <div className="min-w-0 rounded-lg bg-muted/45 px-2.5 py-2">
+          <span className="block truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Entrada
+          </span>
+          <span className="block truncate text-[13px] font-semibold tabular-nums">
+            {fmtTokens(inputTokens)}
+          </span>
+        </div>
+        <div className="min-w-0 rounded-lg bg-muted/45 px-2.5 py-2">
+          <span className="block truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Salida
+          </span>
+          <span className="block truncate text-[13px] font-semibold tabular-nums">
+            {fmtTokens(outputTokens)}
+          </span>
         </div>
       </div>
 

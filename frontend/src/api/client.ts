@@ -842,7 +842,7 @@ async function request<T>(
   return res.json() as Promise<T>
 }
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
   const search = new URLSearchParams()
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== "") {
@@ -1269,7 +1269,13 @@ export const api = {
       return request<EnergyStats>("GET", `/ocabra/stats/energy${query}`)
     },
     tokens: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
+      const query = buildQuery({
+        from: params.from,
+        to: params.to,
+        model_id: params.modelId,
+        allTime: params.allTime,
+        includeSeries: params.includeSeries,
+      })
       return request<TokenStats>("GET", `/ocabra/stats/tokens${query}`)
     },
     performance: (params: StatsParams) => {

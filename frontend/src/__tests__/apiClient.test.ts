@@ -94,6 +94,30 @@ describe("api client mappings", () => {
     expect(constructedUrls[0]).toBe("/ocabra/downloads/job%20id%2Fwith%20spaces/stream")
   })
 
+  it("serializes token stats all-time flags", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          byBackend: [],
+          byGpu: [],
+          series: [],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    )
+
+    await api.stats.tokens({ allTime: true, includeSeries: false })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/ocabra/stats/tokens?allTime=true&includeSeries=false",
+    )
+  })
+
   it("maps snake_case estimate payloads to the camelCase shape used by the UI", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(

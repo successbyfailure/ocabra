@@ -32,6 +32,12 @@ export function TokensChart({ data }: TokensChartProps) {
             {row.backendType}: in {row.inputTokens} / out {row.outputTokens}
           </span>
         ))}
+        {data.byGpu.map((row) => (
+          <span key={row.gpuIndex ?? "host"}>
+            {row.gpuIndex == null ? "Sin GPU" : `GPU ${row.gpuIndex}`}: in {row.inputTokens} / out{" "}
+            {row.outputTokens}
+          </span>
+        ))}
       </div>
     </div>
   )

@@ -1,6 +1,7 @@
 import uuid
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -36,6 +37,7 @@ def test_tokens_endpoint_exists():
         "totalInputTokens": 10,
         "totalOutputTokens": 20,
         "byBackend": [],
+        "byGpu": [],
         "series": [],
     }
 
@@ -46,6 +48,43 @@ def test_tokens_endpoint_exists():
 
     assert resp.status_code == 200
     assert resp.json() == fake_payload
+
+
+@pytest.mark.asyncio
+async def test_tokens_endpoint_accepts_all_time_and_series_flags():
+    fake_payload = {
+        "totalInputTokens": 10,
+        "totalOutputTokens": 20,
+        "byBackend": [],
+        "byGpu": [{"gpuIndex": 0, "inputTokens": 4, "outputTokens": 6}],
+        "series": [],
+    }
+
+    with patch(
+        "ocabra.stats.aggregator.get_token_stats", new=AsyncMock(return_value=fake_payload)
+    ) as mock_get:
+        from ocabra.api.internal.stats import token_stats
+
+        payload = await token_stats(
+            from_dt=None,
+            to_dt=None,
+            model_id=None,
+            model_id_camel=None,
+            all_time_camel=True,
+            include_series_camel=False,
+            _user=UserContext(
+                user_id=str(uuid.uuid4()),
+                username="test-model-manager",
+                role="model_manager",
+                group_ids=[],
+                accessible_model_ids=set(),
+                is_anonymous=False,
+            ),
+        )
+
+    assert payload == fake_payload
+    assert mock_get.await_args.kwargs["all_time"] is True
+    assert mock_get.await_args.kwargs["include_series"] is False
 
 
 def test_requests_endpoint_accepts_model_id_snake_case():

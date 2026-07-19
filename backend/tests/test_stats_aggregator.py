@@ -45,12 +45,18 @@ async def test_energy_stats_use_sample_intervals(monkeypatch: pytest.MonkeyPatch
             return self._rows
 
     class _FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def execute(self, _query):
-            return _FakeResult(rows)
+            self.calls += 1
+            return _FakeResult(rows if self.calls == 1 else [])
+
+    fake_session = _FakeSession()
 
     class _FakeSessionFactory:
         async def __aenter__(self) -> _FakeSession:
-            return _FakeSession()
+            return fake_session
 
         async def __aexit__(self, exc_type, exc, tb) -> None:
             return None
@@ -63,3 +69,58 @@ async def test_energy_stats_use_sample_intervals(monkeypatch: pytest.MonkeyPatch
     assert payload["totalKwh"] == pytest.approx(0.1667, rel=1e-4)
     assert payload["estimatedCostEur"] == pytest.approx(0.0333, rel=1e-4)
     assert payload["byGpu"][0]["powerDrawW"] == pytest.approx(166.7, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_token_stats_all_time_can_skip_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResult:
+        def __init__(self, rows: list[tuple]) -> None:
+            self._rows = rows
+
+        def one(self) -> tuple:
+            return self._rows[0]
+
+        def all(self) -> list[tuple]:
+            return self._rows
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.results = [
+                [(1500, 2500)],
+                [("llama_cpp", 500, 700), ("vllm", 1000, 1800)],
+                [(1, 1000, 1800), (None, 500, 700)],
+            ]
+
+        async def execute(self, _query):
+            result = _FakeResult(self.results[self.calls])
+            self.calls += 1
+            return result
+
+    fake_session = _FakeSession()
+
+    class _FakeSessionFactory:
+        async def __aenter__(self) -> _FakeSession:
+            return fake_session
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
+
+    payload = await aggregator.get_token_stats(all_time=True, include_series=False)
+
+    assert payload == {
+        "totalInputTokens": 1500,
+        "totalOutputTokens": 2500,
+        "byBackend": [
+            {"backendType": "llama_cpp", "inputTokens": 500, "outputTokens": 700},
+            {"backendType": "vllm", "inputTokens": 1000, "outputTokens": 1800},
+        ],
+        "byGpu": [
+            {"gpuIndex": 1, "inputTokens": 1000, "outputTokens": 1800},
+            {"gpuIndex": None, "inputTokens": 500, "outputTokens": 700},
+        ],
+        "series": [],
+    }
+    assert fake_session.calls == 3

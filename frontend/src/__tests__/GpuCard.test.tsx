@@ -26,15 +26,21 @@ const gpu: GPUState = {
 }
 
 describe("GpuCard", () => {
-  it("renders high temperature/utilization alert state", () => {
-    const { container } = render(<GpuCard gpu={gpu} />)
+  it("renders high temperature and token stats", () => {
+    render(
+      <GpuCard
+        gpu={gpu}
+        tokenStats={{ gpuIndex: 0, inputTokens: 1_000_000, outputTokens: 500_000 }}
+      />,
+    )
 
     expect(screen.getByText("RTX 3090")).toBeTruthy()
-    expect(screen.getByText("92.0%").className).toContain("animate-pulse")
-    expect(screen.getByText("84.0°C").className).toContain("text-orange-400")
-    expect(screen.getByText("Processes (nvidia-smi)")).toBeTruthy()
+    expect(screen.getByText("84°C")).toBeTruthy()
+    expect(screen.getByText("1.5M")).toBeTruthy()
+    expect(screen.getByText("1.0M")).toBeTruthy()
+    expect(screen.getByText("500k")).toBeTruthy()
+    expect(screen.getByText("Procesos (1)")).toBeTruthy()
     expect(screen.getByText("1234 · python")).toBeTruthy()
-    expect(screen.getByText("compute · 1024 MB")).toBeTruthy()
-    expect(container.firstChild).toMatchSnapshot()
+    expect(screen.getByText("compute · 1,024 MB")).toBeTruthy()
   })
 })
