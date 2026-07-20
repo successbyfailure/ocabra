@@ -76,10 +76,98 @@ def _apply_token_kind_defaults(
     elif request_kind == "audio_transcription":
         if in_tok is None:
             in_tok = 0  # audio input carries no text tokens
-    elif request_kind == "rerank":
+    elif request_kind in ("rerank", "ollama_embedding"):
+        if out_tok is None:
+            out_tok = 0
+    elif request_kind == "image_generation":
+        if in_tok is None and isinstance(request_payload, dict):
+            in_tok = _approx_text_tokens(request_payload.get("prompt"))
         if out_tok is None:
             out_tok = 0
     return in_tok, out_tok
+
+
+# Kinds that generate text output (so a stream/content fallback makes sense when
+# the backend doesn't return a usage payload).
+_TEXT_GEN_KINDS = {"chat", "completion", "ollama_chat", "ollama_generate"}
+
+
+def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int | None:
+    """Approx input tokens (~word count) from the request, for text-gen kinds whose
+    streamed response lacked a usage payload."""
+    if not isinstance(request_payload, dict):
+        return None
+    if request_kind in ("chat", "ollama_chat"):
+        total = 0
+        for m in request_payload.get("messages") or []:
+            if not isinstance(m, dict):
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                total += len(content.split())
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        total += len(part["text"].split())
+        return total or None
+    if request_kind in ("completion", "ollama_generate"):
+        return _approx_text_tokens(request_payload.get("prompt"))
+    return None
+
+
+def _stream_output_tokens(body: bytes, content_type: str) -> int | None:
+    """Approx output tokens (~word count) from the streamed content deltas, used when
+    a streaming response carried no usage payload."""
+    if not body:
+        return None
+    text = body.decode("utf-8", errors="ignore")
+    words = 0
+    found = False
+    if "event-stream" in content_type:
+        for line in text.splitlines():
+            if not line.startswith("data: "):
+                continue
+            data = line[6:].strip()
+            if data == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data)
+            except Exception:
+                continue
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") if isinstance(choice, dict) else None
+                content = delta.get("content") if isinstance(delta, dict) else None
+                if isinstance(content, str) and content:
+                    words += len(content.split())
+                    found = True
+    elif "ndjson" in content_type:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except Exception:
+                continue
+            msg = chunk.get("message") if isinstance(chunk, dict) else None
+            content = (msg or {}).get("content") if isinstance(msg, dict) else None
+            if not content and isinstance(chunk, dict):
+                content = chunk.get("response")
+            if isinstance(content, str) and content:
+                words += len(content.split())
+                found = True
+    return words if found else None
+
+
+def _strip_subtitle_markup(text: str) -> str:
+    """Drop SRT/VTT indices and timestamp lines so a word count reflects speech."""
+    kept = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.isdigit() or "-->" in s or s.upper().startswith("WEBVTT"):
+            continue
+        kept.append(s)
+    return " ".join(kept)
 
 
 def _extract_usage_tokens(
@@ -253,6 +341,14 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         all_body = b"".join(chunks)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
                         in_tok, out_tok = _extract_usage_tokens(last_payload, request_kind, request_payload)
+                        # Streaming without a usage payload (e.g. no stream_options.
+                        # include_usage): approximate from the streamed content and
+                        # the request so the row isn't left as "—".
+                        if request_kind in _TEXT_GEN_KINDS:
+                            if out_tok is None:
+                                out_tok = _stream_output_tokens(all_body, content_type)
+                            if in_tok is None:
+                                in_tok = _count_input_tokens(request_payload, request_kind)
                         asyncio.create_task(
                             _record_stat(
                                 request=request,
@@ -284,6 +380,16 @@ class StatsMiddleware(BaseHTTPMiddleware):
         model_id = _extract_model_id(request=request, body=request_payload)
         if model_id:
             in_tok, out_tok = _extract_usage_tokens(response_payload, request_kind=request_kind, request_payload=request_payload)
+            # Transcription output: JSON formats are proxied above; for non-JSON
+            # (srt/vtt/text) count words from the raw body. Empty/silence → 0
+            # (not "—") so the row is consistent.
+            if request_kind == "audio_transcription" and out_tok is None:
+                if response_payload is None:
+                    raw_body = getattr(response, "body", b"") or b""
+                    out_tok = _approx_text_tokens(
+                        _strip_subtitle_markup(raw_body.decode("utf-8", errors="ignore"))
+                    )
+                out_tok = out_tok or 0
             asyncio.create_task(
                 _record_stat(
                     request=request,
