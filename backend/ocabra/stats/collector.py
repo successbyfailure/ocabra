@@ -39,6 +39,7 @@ def _classify_request_kind(path: str) -> str:
         "/v1/images/edits": "image_generation",
         "/v1/audio/transcriptions": "audio_transcription",
         "/v1/audio/speech": "tts",
+        "/v1/rerank": "rerank",
         "/api/chat": "ollama_chat",
         "/api/generate": "ollama_generate",
         "/api/embeddings": "ollama_embedding",
@@ -47,12 +48,47 @@ def _classify_request_kind(path: str) -> str:
     return mapping.get(path, "other")
 
 
+def _approx_text_tokens(text: object) -> int | None:
+    """Rough token estimate (~word count) for endpoints without a usage payload."""
+    if isinstance(text, str) and text.strip():
+        return len(text.split())
+    return None
+
+
+def _apply_token_kind_defaults(
+    in_tok: int | None,
+    out_tok: int | None,
+    request_kind: str,
+    request_payload: dict | None,
+) -> tuple[int | None, int | None]:
+    """Fill in the axis that a request kind structurally can't have, so stats are
+    consistent instead of a mix of null (rendered "—") and 0. Embeddings/TTS/rerank
+    generate no output tokens; transcription has no text input; TTS input is counted
+    from the request text (no usage payload since the response is audio)."""
+    if request_kind == "embedding":
+        if out_tok is None:
+            out_tok = 0
+    elif request_kind == "tts":
+        if in_tok is None and isinstance(request_payload, dict):
+            in_tok = _approx_text_tokens(request_payload.get("input"))
+        if out_tok is None:
+            out_tok = 0
+    elif request_kind == "audio_transcription":
+        if in_tok is None:
+            in_tok = 0  # audio input carries no text tokens
+    elif request_kind == "rerank":
+        if out_tok is None:
+            out_tok = 0
+    return in_tok, out_tok
+
+
 def _extract_usage_tokens(
     payload: dict | None,
     request_kind: str = "",
+    request_payload: dict | None = None,
 ) -> tuple[int | None, int | None]:
-    if not payload:
-        return None, None
+    in_tok: int | None = None
+    out_tok: int | None = None
 
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if isinstance(usage, dict):
@@ -65,32 +101,27 @@ def _extract_usage_tokens(
             output_tokens = usage.get("output_tokens")
 
         try:
-            return (
-                int(input_tokens) if input_tokens is not None else None,
-                int(output_tokens) if output_tokens is not None else None,
-            )
+            in_tok = int(input_tokens) if input_tokens is not None else None
+            out_tok = int(output_tokens) if output_tokens is not None else None
         except (TypeError, ValueError):
-            pass
+            in_tok, out_tok = None, None
 
     # Ollama-style normalized responses.
-    prompt_eval_count = payload.get("prompt_eval_count")
-    eval_count = payload.get("eval_count")
-    if prompt_eval_count is not None or eval_count is not None:
-        try:
-            return (
-                int(prompt_eval_count) if prompt_eval_count is not None else None,
-                int(eval_count) if eval_count is not None else None,
-            )
-        except (TypeError, ValueError):
-            return None, None
+    if in_tok is None and out_tok is None and isinstance(payload, dict):
+        prompt_eval_count = payload.get("prompt_eval_count")
+        eval_count = payload.get("eval_count")
+        if prompt_eval_count is not None or eval_count is not None:
+            try:
+                in_tok = int(prompt_eval_count) if prompt_eval_count is not None else None
+                out_tok = int(eval_count) if eval_count is not None else None
+            except (TypeError, ValueError):
+                in_tok, out_tok = None, None
 
-    # Whisper-style: {"text": "..."}  — use word count as output proxy.
-    if request_kind == "audio_transcription":
-        text = payload.get("text")
-        if isinstance(text, str) and text.strip():
-            return None, len(text.split())
+    # Whisper-style: {"text": "..."} — use word count as output proxy.
+    if request_kind == "audio_transcription" and out_tok is None and isinstance(payload, dict):
+        out_tok = _approx_text_tokens(payload.get("text"))
 
-    return None, None
+    return _apply_token_kind_defaults(in_tok, out_tok, request_kind, request_payload)
 
 
 class StatsMiddleware(BaseHTTPMiddleware):
@@ -221,7 +252,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     if model_id:
                         all_body = b"".join(chunks)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
-                        in_tok, out_tok = _extract_usage_tokens(last_payload, request_kind)
+                        in_tok, out_tok = _extract_usage_tokens(last_payload, request_kind, request_payload)
                         asyncio.create_task(
                             _record_stat(
                                 request=request,
@@ -252,7 +283,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         model_id = _extract_model_id(request=request, body=request_payload)
         if model_id:
-            in_tok, out_tok = _extract_usage_tokens(response_payload, request_kind=request_kind)
+            in_tok, out_tok = _extract_usage_tokens(response_payload, request_kind=request_kind, request_payload=request_payload)
             asyncio.create_task(
                 _record_stat(
                     request=request,
