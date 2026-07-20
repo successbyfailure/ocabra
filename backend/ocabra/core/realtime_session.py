@@ -55,6 +55,18 @@ def _common_prefix(a: list[str], b: list[str]) -> list[str]:
             break
         out.append(x)
     return out
+
+
+# Cosine similarity above which two speaker embeddings are treated as the same
+# person across segments (pyannote 3.1 embeddings; tune per deployment).
+_SPEAKER_SIM_THRESHOLD = 0.60
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
 _CHANNELS = 1
 _SAMPLE_WIDTH = 2  # 16-bit
 
@@ -130,6 +142,12 @@ class RealtimeSession:
         # Optional STT language/prompt hints (input_audio_transcription.language).
         self._stt_language: str | None = None
         self._stt_prompt: str | None = None
+        # Diarization on the final transcript (input_audio_transcription.diarize).
+        self._stt_diarize: bool = False
+        # Session-wide speaker registry for consistent diarization across segments:
+        # each entry {id, centroid (embedding), count}. Local pyannote labels
+        # (SPEAKER_00…) are matched to a global "speaker_N" by cosine similarity.
+        self._speaker_registry: list[dict[str, Any]] = []
         # Apply server-configured defaults for STT/TTS models
         self.stt_model_id: str | None = (
             model_id if transcription_only else (settings.realtime_default_stt_model or None)
@@ -381,6 +399,8 @@ class RealtimeSession:
                 self._stt_language = str(iat["language"])
             if iat.get("prompt"):
                 self._stt_prompt = str(iat["prompt"])
+            if "diarize" in iat:
+                self._stt_diarize = bool(iat["diarize"])
 
         # TTS model (extension: not in official API, but useful for oCabra)
         if "tts_model" in session_cfg:
@@ -593,6 +613,18 @@ class RealtimeSession:
         offset = self._audio_offset_s
         result = await self._transcribe_verbose(pcm_data)
         self._audio_offset_s += len(pcm_data) / 2 / _INPUT_SAMPLE_RATE
+
+        # Consistent diarization across segments: remap this segment's local
+        # pyannote speaker labels to session-global ids via the embedding registry.
+        mapping = self._reconcile_speakers(result.get("speaker_embeddings") or {})
+        if mapping:
+            for seg in result["segments"]:
+                if seg.get("speaker") in mapping:
+                    seg["speaker"] = mapping[seg["speaker"]]
+            for wd in result["words"]:
+                if wd.get("speaker") in mapping:
+                    wd["speaker"] = mapping[wd["speaker"]]
+            result["speakers"] = [mapping.get(s, s) for s in result["speakers"]]
 
         def _abs(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out = []
@@ -970,7 +1002,7 @@ class RealtimeSession:
     async def _transcribe_verbose(self, pcm_data: bytes) -> dict[str, Any]:
         """Transcribe with segment/word timestamps (and speakers if the profile
         diarizes). Returns ``{text, segments, words, speakers}``; empty on error."""
-        empty = {"text": "", "segments": [], "words": [], "speakers": []}
+        empty = {"text": "", "segments": [], "words": [], "speakers": [], "speaker_embeddings": {}}
         if not self.stt_model_id:
             return empty
         worker = self._worker_pool.get_worker(self.stt_model_id)
@@ -987,6 +1019,7 @@ class RealtimeSession:
                         "response_format": "verbose_json",
                         "temperature": "0.0",
                         "timestamp_granularities": ["segment", "word"],
+                        **({"diarize": "true"} if self._stt_diarize else {}),
                     }),
                 )
                 resp.raise_for_status()
@@ -996,10 +1029,40 @@ class RealtimeSession:
                     "segments": r.get("segments") or [],
                     "words": r.get("words") or [],
                     "speakers": r.get("speakers") or [],
+                    "speaker_embeddings": r.get("speaker_embeddings") or {},
                 }
         except Exception as exc:
             logger.warning("realtime_stt_verbose_error", error=str(exc))
             return empty
+
+    def _reconcile_speakers(self, local_embeddings: dict[str, list[float]]) -> dict[str, str]:
+        """Map a segment's local pyannote labels (SPEAKER_00…) to session-global
+        ``speaker_N`` ids by matching embeddings against the running registry (or
+        registering a new global speaker). Keeps diarization consistent across the
+        independently-diarized streaming segments."""
+        mapping: dict[str, str] = {}
+        for local_label, emb in local_embeddings.items():
+            if not emb:
+                continue
+            best_id: str | None = None
+            best_sim = -1.0
+            for entry in self._speaker_registry:
+                sim = _cosine(emb, entry["centroid"])
+                if sim > best_sim:
+                    best_sim, best_id = sim, entry["id"]
+            if best_id is not None and best_sim >= _SPEAKER_SIM_THRESHOLD:
+                entry = next(e for e in self._speaker_registry if e["id"] == best_id)
+                n = entry["count"]
+                entry["centroid"] = [
+                    (c * n + e2) / (n + 1) for c, e2 in zip(entry["centroid"], emb)
+                ]
+                entry["count"] = n + 1
+                mapping[local_label] = best_id
+            else:
+                new_id = f"speaker_{len(self._speaker_registry) + 1}"
+                self._speaker_registry.append({"id": new_id, "centroid": list(emb), "count": 1})
+                mapping[local_label] = new_id
+        return mapping
 
     def _start_partial(self) -> None:
         """Begin emitting partial hypotheses for the current (uncommitted) segment."""

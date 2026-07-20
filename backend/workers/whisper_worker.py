@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import logging
 import os
 import tempfile
 from collections.abc import Sequence
@@ -27,6 +28,7 @@ class WhisperRuntime:
         self.diarization_model_id: str = DEFAULT_DIARIZATION_MODEL_ID
         self.diarization_pipeline: Any = None
         self.diarization_error: str | None = None
+        self.embedding_inference: Any = None  # pyannote speaker-embedding model (lazy)
 
 
 runtime = WhisperRuntime()
@@ -224,6 +226,8 @@ def create_app(
             if result.get("diarization") is not None:
                 payload["diarization"] = result["diarization"]
                 payload["speakers"] = result.get("speakers", [])
+                if result.get("speaker_embeddings"):
+                    payload["speaker_embeddings"] = result["speaker_embeddings"]
             return JSONResponse(payload)
 
         return JSONResponse({"text": text})
@@ -576,6 +580,7 @@ def _run_transcription(
 
     diarization_turns: list[dict[str, Any]] | None = None
     speakers: list[str] = []
+    speaker_embeddings: dict[str, list[float]] = {}
     if diarizing:
         # pyannote ≥4.0 uses torchcodec (requires FFmpeg shared libs) for
         # audio I/O. Since torchcodec may not be available, load the audio
@@ -605,6 +610,24 @@ def _run_transcription(
         # not just the ones that happened to win a segment.
         speakers = sorted({turn["speaker"] for turn in diarization_turns})
 
+        # Per-speaker embeddings (for session-wide speaker matching / consistent
+        # diarization across streaming segments). Computed over each speaker's
+        # longest turn with the pipeline's own embedding model. Optional — on any
+        # failure callers fall back to per-segment labels.
+        if diarization_turns:
+            _by_spk: dict[str, list[dict[str, Any]]] = {}
+            for _turn in diarization_turns:
+                _by_spk.setdefault(_turn["speaker"], []).append(_turn)
+            for _spk, _turns in _by_spk.items():
+                _lg = max(_turns, key=lambda t: t["end"] - t["start"])
+                _a = int(float(_lg["start"]) * _sr_target)
+                _b = int(float(_lg["end"]) * _sr_target)
+                if _b - _a < int(_sr_target * 0.3):  # need ≥0.3 s for a stable embedding
+                    continue
+                _vec = _embed_waveform(diarization_pipeline, _waveform[:, _a:_b], _sr_target)
+                if _vec:
+                    speaker_embeddings[str(_spk)] = _vec
+
     # Drop the internal word data unless the caller asked for word granularity.
     if not expose_words:
         for segment in segment_list:
@@ -627,6 +650,8 @@ def _run_transcription(
     if diarization_turns is not None:
         payload["diarization"] = diarization_turns
         payload["speakers"] = speakers
+        if speaker_embeddings:
+            payload["speaker_embeddings"] = speaker_embeddings
     return payload
 
 
@@ -672,6 +697,43 @@ def _patch_torchaudio_compat() -> None:
             )
 
         torchaudio.info = _compat_info
+
+
+logger = logging.getLogger("ocabra.whisper_worker")
+
+
+def _embed_waveform(pipeline: Any, waveform: Any, sample_rate: int) -> list[float] | None:
+    """Compute a single speaker embedding for a mono 16 kHz waveform crop, reusing
+    the diarization pipeline's OWN (already-loaded) ``PretrainedSpeakerEmbedding``
+    — avoids a second gated download and matches how the pipeline clusters speakers.
+    Its call signature is ``embedder(batch=(B, channels, samples)) -> (B, dim)``.
+    Returns a plain float list, or None if unavailable."""
+    import numpy as _np
+
+    emb = getattr(pipeline, "_embedding", None)
+    if emb is None:
+        return None
+    try:
+        wf = waveform
+        if hasattr(wf, "dim"):
+            if wf.dim() == 1:
+                wf = wf.unsqueeze(0)  # (samples,) -> (1, samples)
+            batch = wf.unsqueeze(0)  # (channels, samples) -> (1, channels, samples)
+        else:
+            import torch as _torch
+
+            batch = _torch.as_tensor(wf, dtype=_torch.float32).reshape(1, 1, -1)
+        out = emb(batch)  # ndarray (1, dim)
+        arr = _np.asarray(getattr(out, "data", out), dtype=float)
+        if arr.ndim > 1:
+            arr = arr.reshape(-1, arr.shape[-1]).mean(axis=0)
+        arr = arr.ravel()
+        if arr.size == 0 or bool(_np.any(_np.isnan(arr))):
+            return None
+        return [float(x) for x in arr.tolist()]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("whisper_embedding_extract_failed: %s", exc)
+        return None
 
 
 def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None) -> Any:
