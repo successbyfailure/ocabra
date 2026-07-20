@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { LogOut, Menu, Search, X } from "lucide-react"
 import { useAuthStore } from "@/stores/authStore"
@@ -24,6 +25,7 @@ const PAGE_TITLES: Record<string, string> = {
 }
 
 export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps) {
+  const [searchQuery, setSearchQuery] = useState("")
   const location = useLocation()
   const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
@@ -56,15 +58,22 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
         <h1 className="text-lg font-semibold text-foreground hidden sm:block">{pageTitle}</h1>
       </div>
 
-      {/* Center: search placeholder (desktop only) */}
+      {/* Center: search field (desktop only) */}
       <div className="hidden md:flex flex-1 max-w-md mx-4">
         <div className="relative w-full">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setSearchQuery("")
+                event.currentTarget.blur()
+              }
+            }}
             placeholder="Buscar modelos, logs..."
             className="w-full rounded-md border border-border bg-background pl-9 pr-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/50"
-            readOnly
           />
         </div>
       </div>
