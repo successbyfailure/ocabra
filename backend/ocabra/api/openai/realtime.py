@@ -156,9 +156,11 @@ async def realtime_ws(
             error=str(exc),
         )
     finally:
-        # Cancel any in-progress response
+        # Cancel any in-progress response and partial-transcription loop
         if session._response_task and not session._response_task.done():
             session._response_task.cancel()
+        if session._partial_task and not session._partial_task.done():
+            session._partial_task.cancel()
         logger.info(
             "realtime_session_ended",
             session_id=session._session_id,

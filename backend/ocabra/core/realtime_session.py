@@ -17,6 +17,7 @@ import re
 import time
 import uuid
 import wave
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -40,6 +41,20 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?\n])\s+")
 # Default audio parameters
 _SAMPLE_RATE = 24000  # TTS output sample rate
 _INPUT_SAMPLE_RATE = 16000  # Input audio sample rate (PCM16 from client)
+# Transcription-only streaming: how often to re-transcribe the growing buffer for
+# partial hypotheses, and the minimum audio before we bother.
+_PARTIAL_INTERVAL_S = 0.6
+_PARTIAL_MIN_BYTES = int(_INPUT_SAMPLE_RATE * 2 * 0.5)  # 0.5 s of PCM16
+
+
+def _common_prefix(a: list[str], b: list[str]) -> list[str]:
+    """Longest common leading run of two word lists (LocalAgreement-2 stable prefix)."""
+    out: list[str] = []
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        out.append(x)
+    return out
 _CHANNELS = 1
 _SAMPLE_WIDTH = 2  # 16-bit
 
@@ -105,6 +120,16 @@ class RealtimeSession:
         # ?intent=transcription): audio -> VAD -> Whisper -> transcript events,
         # no LLM/TTS and no response generation. ``model`` is the STT model.
         self.transcription_only = transcription_only
+        # Streaming partial-hypothesis state (transcription-only mode).
+        self._partial_task: asyncio.Task[None] | None = None
+        self._partial_item_id: str | None = None
+        self._partial_prev_words: list[str] = []
+        self._partial_emitted: list[str] = []
+        # Cumulative committed audio seconds, to make segment timestamps absolute.
+        self._audio_offset_s: float = 0.0
+        # Optional STT language/prompt hints (input_audio_transcription.language).
+        self._stt_language: str | None = None
+        self._stt_prompt: str | None = None
         # Apply server-configured defaults for STT/TTS models
         self.stt_model_id: str | None = (
             model_id if transcription_only else (settings.realtime_default_stt_model or None)
@@ -347,10 +372,15 @@ class RealtimeSession:
         if "output_audio_format" in session_cfg:
             self.output_audio_format = session_cfg["output_audio_format"]
 
-        # STT model from input_audio_transcription (OpenAI standard)
+        # STT model / language / prompt from input_audio_transcription (OpenAI standard)
         iat = session_cfg.get("input_audio_transcription")
-        if isinstance(iat, dict) and "model" in iat:
-            self.stt_model_id = iat["model"]
+        if isinstance(iat, dict):
+            if "model" in iat:
+                self.stt_model_id = iat["model"]
+            if iat.get("language"):
+                self._stt_language = str(iat["language"])
+            if iat.get("prompt"):
+                self._stt_prompt = str(iat["prompt"])
 
         # TTS model (extension: not in official API, but useful for oCabra)
         if "tts_model" in session_cfg:
@@ -436,6 +466,8 @@ class RealtimeSession:
                     "input_audio_buffer.speech_started",
                     audio_start_ms=self._buffer_duration_ms(),
                 )
+                # Stream partial hypotheses for this segment as it's spoken.
+                self._start_partial()
             elif vad_event == VadEvent.SPEECH_STOPPED:
                 await self._send_event(
                     "input_audio_buffer.speech_stopped",
@@ -539,6 +571,54 @@ class RealtimeSession:
         if not self.transcription_only:
             await self._generate_response()
 
+    async def _commit_transcription(self) -> None:
+        """Transcription-only commit: finalize the current segment with timestamps
+        (and speakers if diarized), reusing the partial segment's item_id so the
+        client can reconcile ``.delta`` partials with this ``.completed``."""
+        await self._stop_partial()
+        item_id = self._partial_item_id or _new_item_id()
+        self._partial_item_id = None
+        self._partial_prev_words = []
+        self._partial_emitted = []
+
+        if not self.audio_buffer:
+            await self._send_event("input_audio_buffer.committed", item_id=item_id)
+            return
+
+        pcm_data = bytes(self.audio_buffer)
+        self.audio_buffer.clear()
+        self._vad.reset()
+        await self._send_event("input_audio_buffer.committed", item_id=item_id)
+
+        offset = self._audio_offset_s
+        result = await self._transcribe_verbose(pcm_data)
+        self._audio_offset_s += len(pcm_data) / 2 / _INPUT_SAMPLE_RATE
+
+        def _abs(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            out = []
+            for e in entries:
+                e2 = dict(e)
+                for k in ("start", "end"):
+                    v = e2.get(k)
+                    if isinstance(v, (int, float)):
+                        e2[k] = round(float(v) + offset, 3)
+                out.append(e2)
+            return out
+
+        transcript = result["text"]
+        if transcript:
+            self.conversation.append({"role": "user", "content": transcript})
+        await self._send_event(
+            "conversation.item.input_audio_transcription.completed",
+            item_id=item_id,
+            content_index=0,
+            transcript=transcript,
+            # oCabra extensions (standard clients ignore unknown fields):
+            segments=_abs(result["segments"]),
+            words=_abs(result["words"]),
+            speakers=result["speakers"],
+        )
+
     async def _commit_audio_only(self) -> None:
         """Commit the audio buffer.
 
@@ -548,6 +628,10 @@ class RealtimeSession:
         - everything else → send to Whisper as before, store the transcript
           as a plain text user message.
         """
+        if self.transcription_only:
+            await self._commit_transcription()
+            return
+
         if not self.audio_buffer:
             await self._send_event("input_audio_buffer.committed", item_id=_new_item_id())
             return
@@ -616,23 +700,6 @@ class RealtimeSession:
                         }
                     ],
                 },
-            )
-            # Standard OpenAI Realtime transcription event — what transcription
-            # clients (and Escriba's live indexer) listen for per committed segment.
-            if self.transcription_only:
-                await self._send_event(
-                    "conversation.item.input_audio_transcription.completed",
-                    item_id=item_id,
-                    content_index=0,
-                    transcript=transcript,
-                )
-        elif self.transcription_only:
-            # Emit an empty completed event so the client sees the segment closed.
-            await self._send_event(
-                "conversation.item.input_audio_transcription.completed",
-                item_id=item_id,
-                content_index=0,
-                transcript="",
             )
 
     async def _generate_response(
@@ -857,6 +924,14 @@ class RealtimeSession:
 
     # ── STT (Whisper) ───────────────────────────────────────────────────
 
+    def _stt_data(self, base: dict[str, Any]) -> dict[str, Any]:
+        """Add the session's language/prompt hints to a Whisper request body."""
+        if self._stt_language:
+            base["language"] = self._stt_language
+        if self._stt_prompt:
+            base["prompt"] = self._stt_prompt
+        return base
+
     async def _transcribe(self, pcm_data: bytes) -> str:
         """Send PCM16 audio to Whisper worker for transcription."""
         if not self.stt_model_id:
@@ -883,7 +958,7 @@ class RealtimeSession:
                 resp = await client.post(
                     url,
                     files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data={"response_format": "json", "temperature": "0.0"},
+                    data=self._stt_data({"response_format": "json", "temperature": "0.0"}),
                 )
                 resp.raise_for_status()
                 result = resp.json()
@@ -891,6 +966,89 @@ class RealtimeSession:
         except Exception as exc:
             logger.warning("realtime_stt_error", error=str(exc))
             return ""
+
+    async def _transcribe_verbose(self, pcm_data: bytes) -> dict[str, Any]:
+        """Transcribe with segment/word timestamps (and speakers if the profile
+        diarizes). Returns ``{text, segments, words, speakers}``; empty on error."""
+        empty = {"text": "", "segments": [], "words": [], "speakers": []}
+        if not self.stt_model_id:
+            return empty
+        worker = self._worker_pool.get_worker(self.stt_model_id)
+        if not worker:
+            return empty
+        wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
+        url = f"http://127.0.0.1:{worker.port}/transcribe"
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    url,
+                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                    data=self._stt_data({
+                        "response_format": "verbose_json",
+                        "temperature": "0.0",
+                        "timestamp_granularities": ["segment", "word"],
+                    }),
+                )
+                resp.raise_for_status()
+                r = resp.json()
+                return {
+                    "text": (r.get("text") or "").strip(),
+                    "segments": r.get("segments") or [],
+                    "words": r.get("words") or [],
+                    "speakers": r.get("speakers") or [],
+                }
+        except Exception as exc:
+            logger.warning("realtime_stt_verbose_error", error=str(exc))
+            return empty
+
+    def _start_partial(self) -> None:
+        """Begin emitting partial hypotheses for the current (uncommitted) segment."""
+        if not self.transcription_only or self._partial_task is not None:
+            return
+        self._partial_item_id = _new_item_id()
+        self._partial_prev_words = []
+        self._partial_emitted = []
+        self._partial_task = asyncio.create_task(
+            self._partial_loop(self._partial_item_id), name="realtime-partial-stt"
+        )
+
+    async def _stop_partial(self) -> None:
+        task = self._partial_task
+        self._partial_task = None
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _partial_loop(self, item_id: str) -> None:
+        """Re-transcribe the growing buffer on an interval and emit the newly
+        stable word-prefix as ``input_audio_transcription.delta`` (LocalAgreement-2:
+        a word is committed once two consecutive hypotheses agree on it)."""
+        try:
+            while True:
+                await asyncio.sleep(_PARTIAL_INTERVAL_S)
+                buf = bytes(self.audio_buffer)
+                if len(buf) < _PARTIAL_MIN_BYTES:
+                    continue
+                text = await self._transcribe(buf)
+                words = text.split()
+                if not words:
+                    continue
+                stable = _common_prefix(self._partial_prev_words, words)
+                self._partial_prev_words = words
+                if len(stable) > len(self._partial_emitted):
+                    delta_words = stable[len(self._partial_emitted):]
+                    self._partial_emitted = stable
+                    await self._send_event(
+                        "conversation.item.input_audio_transcription.delta",
+                        item_id=item_id,
+                        content_index=0,
+                        delta=" ".join(delta_words) + " ",
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — partials must never kill the session
+            logger.warning("realtime_partial_error", error=str(exc))
 
     # ── LLM streaming ───────────────────────────────────────────────────
 

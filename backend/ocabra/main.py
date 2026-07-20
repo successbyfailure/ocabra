@@ -679,7 +679,11 @@ Límite de subida: 256 MB por parte (configurable). Para audio largo, sube compr
 
 Dos formas de transcribir en vivo:
 
-- **WebSocket transcription-only** (recomendado): `GET /v1/realtime?model=<whisper>&intent=transcription`. Envía audio PCM16 con `input_audio_buffer.append`; el servidor segmenta por VAD y emite `conversation.item.input_audio_transcription.completed` por segmento. Sin LLM ni TTS. Compatible con clientes de la Realtime Transcription API de OpenAI.
+- **WebSocket transcription-only** (recomendado): `GET /v1/realtime?model=<whisper>&intent=transcription`. Envía audio PCM16 (16 kHz mono) con `input_audio_buffer.append`; el servidor segmenta por VAD y emite:
+  - `conversation.item.input_audio_transcription.delta` — hipótesis **parciales** mientras se habla (prefijo estable, LocalAgreement), para baja latencia al primer token.
+  - `conversation.item.input_audio_transcription.completed` — transcript **final** del segmento, con extensiones oCabra: `segments` y `words` (timestamps absolutos de sesión) y `speakers` (con perfiles `*-diarized`).
+
+  Configurable por `session.update`: `{ "input_audio_transcription": { "language": "es", "prompt": "..." }, "turn_detection": {...} }`. Sin LLM ni TTS. Compatible con clientes de la Realtime Transcription API de OpenAI.
 - **Batch sobre modelo caliente**: con el perfil whisper en `load_policy: pin`, `POST /v1/audio/transcriptions` sobre clips de 2–5 s responde en ~200 ms (modelo `base`); sirve para emular streaming con ventanas solapadas.
 
 ## Modo agente
