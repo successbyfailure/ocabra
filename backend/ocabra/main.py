@@ -683,7 +683,7 @@ Dos formas de transcribir en vivo:
   - `conversation.item.input_audio_transcription.delta` — hipótesis **parciales** mientras se habla (prefijo estable, LocalAgreement), para baja latencia al primer token.
   - `conversation.item.input_audio_transcription.completed` — transcript **final** del segmento, con extensiones oCabra: `segments` y `words` (timestamps absolutos de sesión) y `speakers` (con perfiles `*-diarized`).
 
-  Configurable por `session.update`: `{ "input_audio_transcription": { "language": "es", "prompt": "...", "diarize": true }, "turn_detection": {...} }`. Con `diarize:true` cada segmento lleva `speaker`, y los ids (`speaker_1`, `speaker_2`, …) son **consistentes entre segmentos de la sesión** (emparejamiento por embeddings, no las etiquetas locales de pyannote). Sin LLM ni TTS. Compatible con clientes de la Realtime Transcription API de OpenAI.
+  Configurable por `session.update`: `{ "input_audio_transcription": { "language": "es", "prompt": "...", "diarize": true }, "turn_detection": {...} }`. Con `diarize:true` cada segmento lleva `speaker`, y los ids (`speaker_1`, `speaker_2`, …) son **consistentes entre segmentos de la sesión** (emparejamiento por embeddings, no las etiquetas locales de pyannote). La sesión sirve `session.created` de inmediato: puedes empezar a enviar audio al momento, y el audio capturado **durante el cold-start del modelo se bufferiza y se transcribe al cargar** (no se pierde). Sin LLM ni TTS. Compatible con clientes de la Realtime Transcription API de OpenAI.
 - **Batch sobre modelo caliente**: con el perfil whisper en `load_policy: pin`, `POST /v1/audio/transcriptions` sobre clips de 2–5 s responde en ~200 ms (modelo `base`); sirve para emular streaming con ventanas solapadas.
 
 ## Modo agente

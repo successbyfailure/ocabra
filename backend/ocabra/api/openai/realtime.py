@@ -161,6 +161,8 @@ async def realtime_ws(
             session._response_task.cancel()
         if session._partial_task and not session._partial_task.done():
             session._partial_task.cancel()
+        if session._background_load_task and not session._background_load_task.done():
+            session._background_load_task.cancel()
         logger.info(
             "realtime_session_ended",
             session_id=session._session_id,

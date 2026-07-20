@@ -177,6 +177,9 @@ class RealtimeSession:
         self._background_load_task: asyncio.Task[None] | None = None
         self._llm_ready = asyncio.Event()
         self._tts_ready = asyncio.Event()
+        # Set once the STT model is loaded (transcription-only mode loads it in the
+        # background so live audio can be buffered from the first byte).
+        self._stt_ready = asyncio.Event()
         # Cached capability flag — populated lazily on first turn from the
         # selected LLM's ``ModelState.capabilities.audio_input``.
         # ``None`` = not resolved yet; ``True``/``False`` = decision known.
@@ -218,9 +221,17 @@ class RealtimeSession:
         if self.transcription_only:
             self._llm_ready.set()
             self._tts_ready.set()
-            if self.stt_model_id:
-                await self._load_model_with_progress("stt", self.stt_model_id)
+            # Serve the session immediately so a LIVE source can start streaming
+            # from the first byte; load STT in the background and buffer incoming
+            # audio meanwhile. Commits/partials wait for ``_stt_ready`` so nothing
+            # captured during the cold start is lost.
             await self._send_session_created()
+            if self.stt_model_id:
+                self._background_load_task = asyncio.create_task(
+                    self._load_stt_then_ready(), name="realtime-transcription-stt-load"
+                )
+            else:
+                self._stt_ready.set()
             try:
                 while True:
                     raw = await self.ws.receive_text()
@@ -610,6 +621,11 @@ class RealtimeSession:
         self._vad.reset()
         await self._send_event("input_audio_buffer.committed", item_id=item_id)
 
+        # If the model is still cold-loading, wait — the audio is already captured
+        # in ``pcm_data`` so a commit during the cold start is transcribed once
+        # ready rather than lost.
+        await self._stt_ready.wait()
+
         offset = self._audio_offset_s
         result = await self._transcribe_verbose(pcm_data)
         self._audio_offset_s += len(pcm_data) / 2 / _INPUT_SAMPLE_RATE
@@ -956,6 +972,16 @@ class RealtimeSession:
 
     # ── STT (Whisper) ───────────────────────────────────────────────────
 
+    async def _load_stt_then_ready(self) -> None:
+        """Background STT load for transcription-only mode. Sets ``_stt_ready`` when
+        done (or on failure, so buffered commits stop waiting and degrade cleanly)."""
+        try:
+            await self._load_model_with_progress("stt", self.stt_model_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("realtime_stt_bg_load_failed", error=str(exc))
+        finally:
+            self._stt_ready.set()
+
     def _stt_data(self, base: dict[str, Any]) -> dict[str, Any]:
         """Add the session's language/prompt hints to a Whisper request body."""
         if self._stt_language:
@@ -1090,6 +1116,8 @@ class RealtimeSession:
         try:
             while True:
                 await asyncio.sleep(_PARTIAL_INTERVAL_S)
+                if not self._stt_ready.is_set():
+                    continue  # no partials until the model finishes cold-loading
                 buf = bytes(self.audio_buffer)
                 if len(buf) < _PARTIAL_MIN_BYTES:
                     continue
