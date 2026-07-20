@@ -136,6 +136,19 @@ async def realtime_ws(
         transcription_only=(intent.strip().lower() == "transcription"),
     )
 
+    # Auto-enable diarization when a transcription session is opened with a diarized
+    # whisper profile (matches the batch endpoint behaviour); the client can still
+    # override via session.update input_audio_transcription.diarize.
+    if session.transcription_only:
+        try:
+            from ocabra.backends.whisper_backend import _should_enable_diarization
+
+            overrides = (profile.load_overrides if profile else None) or {}
+            if _should_enable_diarization(model, overrides):
+                session._stt_diarize = True  # noqa: SLF001
+        except Exception:  # noqa: BLE001 — never block the session on this
+            pass
+
     logger.info(
         "realtime_session_started",
         model=model,
