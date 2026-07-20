@@ -58,8 +58,16 @@ def _common_prefix(a: list[str], b: list[str]) -> list[str]:
 
 
 # Cosine similarity above which two speaker embeddings are treated as the same
-# person across segments (pyannote 3.1 embeddings; tune per deployment).
-_SPEAKER_SIM_THRESHOLD = 0.60
+# person across segments (wespeaker/pyannote embeddings: same-speaker ~0.5-0.9,
+# different ~0.0-0.3). Lower than the first cut to reduce spurious new speakers.
+_SPEAKER_SIM_THRESHOLD = 0.50
+# Exemplar embeddings kept per speaker; matching uses the best of the exemplars
+# (more robust to intra-speaker variation than a drifting running-mean centroid).
+_MAX_EXEMPLARS = 12
+# Cross-session speaker registries (keyed by conversation_id) so a reconnecting
+# Realtime session resumes the same speaker namespace. Pruned by TTL.
+_REGISTRY_STORE: dict[str, dict[str, Any]] = {}
+_REGISTRY_TTL_S = 2 * 3600.0
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -67,6 +75,12 @@ def _cosine(a: list[float], b: list[float]) -> float:
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
+
+
+def _prune_registry_store(now: float) -> None:
+    stale = [k for k, v in _REGISTRY_STORE.items() if now - v.get("ts", 0.0) > _REGISTRY_TTL_S]
+    for k in stale:
+        _REGISTRY_STORE.pop(k, None)
 _CHANNELS = 1
 _SAMPLE_WIDTH = 2  # 16-bit
 
@@ -145,9 +159,17 @@ class RealtimeSession:
         # Diarization on the final transcript (input_audio_transcription.diarize).
         self._stt_diarize: bool = False
         # Session-wide speaker registry for consistent diarization across segments:
-        # each entry {id, centroid (embedding), count}. Local pyannote labels
+        # each entry {id, centroid, count, exemplars}. Local pyannote labels
         # (SPEAKER_00…) are matched to a global "speaker_N" by cosine similarity.
         self._speaker_registry: list[dict[str, Any]] = []
+        # Cap on distinct speakers (session.update input_audio_transcription.
+        # num_speakers). At the cap we never mint a new speaker — the strongest
+        # guard against id drift in long sessions.
+        self._max_speakers: int = 0
+        # Optional id to persist/resume the speaker namespace across reconnections.
+        self._conversation_id: str | None = None
+        # Last assigned global speaker, used for short/embedding-less segments.
+        self._last_speaker: str | None = None
         # Apply server-configured defaults for STT/TTS models
         self.stt_model_id: str | None = (
             model_id if transcription_only else (settings.realtime_default_stt_model or None)
@@ -412,6 +434,15 @@ class RealtimeSession:
                 self._stt_prompt = str(iat["prompt"])
             if "diarize" in iat:
                 self._stt_diarize = bool(iat["diarize"])
+            _nspk = iat.get("num_speakers", iat.get("max_speakers"))
+            if _nspk is not None:
+                try:
+                    self._max_speakers = max(0, int(_nspk))
+                except (TypeError, ValueError):
+                    pass
+            if iat.get("conversation_id"):
+                self._conversation_id = str(iat["conversation_id"])
+                self._load_registry()
 
         # TTS model (extension: not in official API, but useful for oCabra)
         if "tts_model" in session_cfg:
@@ -631,16 +662,30 @@ class RealtimeSession:
         self._audio_offset_s += len(pcm_data) / 2 / _INPUT_SAMPLE_RATE
 
         # Consistent diarization across segments: remap this segment's local
-        # pyannote speaker labels to session-global ids via the embedding registry.
-        mapping = self._reconcile_speakers(result.get("speaker_embeddings") or {})
-        if mapping:
+        # pyannote labels to session-global ids via the embedding registry. Labels
+        # without an embedding this segment (very short turns) inherit the last
+        # global speaker for continuity instead of leaking a raw ``SPEAKER_XX``.
+        embeddings = result.get("speaker_embeddings") or {}
+        if embeddings or result["speakers"]:
+            mapping = self._reconcile_speakers(embeddings)
+
+            def _global(local: Any) -> str | None:
+                if local is None:
+                    return self._last_speaker
+                if local in mapping:
+                    return mapping[local]
+                return self._last_speaker  # unmapped local label → continuity
+
             for seg in result["segments"]:
-                if seg.get("speaker") in mapping:
-                    seg["speaker"] = mapping[seg["speaker"]]
+                if seg.get("speaker") is not None:
+                    seg["speaker"] = _global(seg["speaker"])
             for wd in result["words"]:
-                if wd.get("speaker") in mapping:
-                    wd["speaker"] = mapping[wd["speaker"]]
-            result["speakers"] = [mapping.get(s, s) for s in result["speakers"]]
+                if wd.get("speaker") is not None:
+                    wd["speaker"] = _global(wd["speaker"])
+            result["speakers"] = sorted(
+                {g for s in result["speakers"] if (g := _global(s))}
+            )
+            self._save_registry()
 
         def _abs(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out = []
@@ -1063,9 +1108,10 @@ class RealtimeSession:
 
     def _reconcile_speakers(self, local_embeddings: dict[str, list[float]]) -> dict[str, str]:
         """Map a segment's local pyannote labels (SPEAKER_00…) to session-global
-        ``speaker_N`` ids by matching embeddings against the running registry (or
-        registering a new global speaker). Keeps diarization consistent across the
-        independently-diarized streaming segments."""
+        ``speaker_N`` ids by matching embeddings against the registry. Matching uses
+        the best similarity over each speaker's exemplars (robust to intra-speaker
+        variation), respects a ``num_speakers`` cap (no new speaker once reached —
+        the main anti-drift guard), and only mints a new speaker above threshold."""
         mapping: dict[str, str] = {}
         for local_label, emb in local_embeddings.items():
             if not emb:
@@ -1073,22 +1119,58 @@ class RealtimeSession:
             best_id: str | None = None
             best_sim = -1.0
             for entry in self._speaker_registry:
-                sim = _cosine(emb, entry["centroid"])
+                sim = max(
+                    (_cosine(emb, ex) for ex in entry["exemplars"]),
+                    default=_cosine(emb, entry["centroid"]),
+                )
                 if sim > best_sim:
                     best_sim, best_id = sim, entry["id"]
-            if best_id is not None and best_sim >= _SPEAKER_SIM_THRESHOLD:
+            at_cap = self._max_speakers > 0 and len(self._speaker_registry) >= self._max_speakers
+            if best_id is not None and (best_sim >= _SPEAKER_SIM_THRESHOLD or at_cap):
                 entry = next(e for e in self._speaker_registry if e["id"] == best_id)
                 n = entry["count"]
                 entry["centroid"] = [
                     (c * n + e2) / (n + 1) for c, e2 in zip(entry["centroid"], emb)
                 ]
                 entry["count"] = n + 1
+                entry["exemplars"].append(list(emb))
+                if len(entry["exemplars"]) > _MAX_EXEMPLARS:
+                    entry["exemplars"].pop(0)
                 mapping[local_label] = best_id
             else:
                 new_id = f"speaker_{len(self._speaker_registry) + 1}"
-                self._speaker_registry.append({"id": new_id, "centroid": list(emb), "count": 1})
+                self._speaker_registry.append(
+                    {"id": new_id, "centroid": list(emb), "count": 1, "exemplars": [list(emb)]}
+                )
                 mapping[local_label] = new_id
+            self._last_speaker = mapping[local_label]
         return mapping
+
+    def _save_registry(self) -> None:
+        """Persist the speaker registry so a reconnecting session with the same
+        conversation_id resumes the same speaker ids."""
+        if not self._conversation_id:
+            return
+        _REGISTRY_STORE[self._conversation_id] = {
+            "registry": self._speaker_registry,
+            "last": self._last_speaker,
+            "ts": time.time(),
+        }
+
+    def _load_registry(self) -> None:
+        if not self._conversation_id:
+            return
+        now = time.time()
+        _prune_registry_store(now)
+        stored = _REGISTRY_STORE.get(self._conversation_id)
+        if stored and now - stored.get("ts", 0.0) <= _REGISTRY_TTL_S:
+            self._speaker_registry = stored["registry"]
+            self._last_speaker = stored.get("last")
+            logger.info(
+                "realtime_speaker_registry_resumed",
+                conversation_id=self._conversation_id,
+                speakers=len(self._speaker_registry),
+            )
 
     def _start_partial(self) -> None:
         """Begin emitting partial hypotheses for the current (uncommitted) segment."""

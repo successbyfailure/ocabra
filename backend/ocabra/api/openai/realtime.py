@@ -78,6 +78,8 @@ async def realtime_ws(
     websocket: WebSocket,
     model: str = Query(..., description="Model ID: the LLM for the session, or the Whisper STT model when intent=transcription"),
     intent: str = Query(default="", description="Set to 'transcription' for a transcription-only session (audio -> transcript events, no LLM/TTS)."),
+    conversation_id: str = Query(default="", description="Resume the speaker namespace of a prior transcription session (reconnections) — stable speaker ids across sessions of the same audio."),
+    num_speakers: int = Query(default=0, description="Expected distinct speakers; caps the diarization namespace to avoid id drift in long sessions (0 = unbounded)."),
 ) -> None:
     """OpenAI Realtime API WebSocket endpoint.
 
@@ -148,6 +150,11 @@ async def realtime_ws(
                 session._stt_diarize = True  # noqa: SLF001
         except Exception:  # noqa: BLE001 — never block the session on this
             pass
+        if num_speakers and num_speakers > 0:
+            session._max_speakers = num_speakers  # noqa: SLF001
+        if conversation_id.strip():
+            session._conversation_id = conversation_id.strip()  # noqa: SLF001
+            session._load_registry()  # noqa: SLF001
 
     logger.info(
         "realtime_session_started",
