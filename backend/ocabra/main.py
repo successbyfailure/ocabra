@@ -675,6 +675,13 @@ Los modelos se cargan **bajo demanda**. Una petición a un modelo frío mantiene
 
 Límite de subida: 256 MB por parte (configurable). Para audio largo, sube comprimido (`mp3`/`opus`/`flac`) en vez de WAV.
 
+### Transcripción en streaming (baja latencia)
+
+Dos formas de transcribir en vivo:
+
+- **WebSocket transcription-only** (recomendado): `GET /v1/realtime?model=<whisper>&intent=transcription`. Envía audio PCM16 con `input_audio_buffer.append`; el servidor segmenta por VAD y emite `conversation.item.input_audio_transcription.completed` por segmento. Sin LLM ni TTS. Compatible con clientes de la Realtime Transcription API de OpenAI.
+- **Batch sobre modelo caliente**: con el perfil whisper en `load_policy: pin`, `POST /v1/audio/transcriptions` sobre clips de 2–5 s responde en ~200 ms (modelo `base`); sirve para emular streaming con ventanas solapadas.
+
 ## Modo agente
 
 Los modelos con id `agent/<slug>` ejecutan un bucle de herramientas en el servidor. Son compatibles con `/v1/chat/completions` (streaming y no-streaming). Para recibir el progreso de herramientas como eventos SSE de oCabra (`event: ocabra.tool_started` / `ocabra.tool_result`), envía la cabecera `X-Ocabra-Stream-Events: true`; sin ella el stream es **OpenAI-estándar** (solo chunks de chat).

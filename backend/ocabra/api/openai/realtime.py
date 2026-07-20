@@ -76,7 +76,8 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
 @router.websocket("/realtime")
 async def realtime_ws(
     websocket: WebSocket,
-    model: str = Query(..., description="LLM model ID for the session"),
+    model: str = Query(..., description="Model ID: the LLM for the session, or the Whisper STT model when intent=transcription"),
+    intent: str = Query(default="", description="Set to 'transcription' for a transcription-only session (audio -> transcript events, no LLM/TTS)."),
 ) -> None:
     """OpenAI Realtime API WebSocket endpoint.
 
@@ -132,6 +133,7 @@ async def realtime_ws(
         model_id=resolved_model_id,
         worker_pool=worker_pool,
         model_manager=model_manager,
+        transcription_only=(intent.strip().lower() == "transcription"),
     )
 
     logger.info(

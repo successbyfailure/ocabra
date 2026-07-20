@@ -95,14 +95,23 @@ class RealtimeSession:
         worker_pool: WorkerPool,
         model_manager: ModelManager,
         user: UserContext | None = None,
+        transcription_only: bool = False,
     ) -> None:
         from ocabra.config import settings
 
         self.ws = ws
         self.llm_model_id = model_id
+        # Transcription-only mode (OpenAI Realtime transcription session,
+        # ?intent=transcription): audio -> VAD -> Whisper -> transcript events,
+        # no LLM/TTS and no response generation. ``model`` is the STT model.
+        self.transcription_only = transcription_only
         # Apply server-configured defaults for STT/TTS models
-        self.stt_model_id: str | None = settings.realtime_default_stt_model or None
-        self.tts_model_id: str | None = settings.realtime_default_tts_model or None
+        self.stt_model_id: str | None = (
+            model_id if transcription_only else (settings.realtime_default_stt_model or None)
+        )
+        self.tts_model_id: str | None = (
+            None if transcription_only else (settings.realtime_default_tts_model or None)
+        )
         self.voice = "alloy"
         self.instructions = ""
         self.audio_buffer = bytearray()
@@ -162,6 +171,26 @@ class RealtimeSession:
         still available eventually), or is skipped entirely when it's
         false. The session is usable from the first byte.
         """
+        # Transcription-only: only STT matters — load it, then serve. No LLM/TTS.
+        if self.transcription_only:
+            self._llm_ready.set()
+            self._tts_ready.set()
+            if self.stt_model_id:
+                await self._load_model_with_progress("stt", self.stt_model_id)
+            await self._send_session_created()
+            try:
+                while True:
+                    raw = await self.ws.receive_text()
+                    try:
+                        message = json.loads(raw)
+                    except json.JSONDecodeError:
+                        await self._send_error("Invalid JSON", "invalid_json")
+                        continue
+                    await self._dispatch(message.get("type", ""), message)
+            except Exception:
+                raise
+            return
+
         # Mark models that are already loaded as ready
         if self._worker_pool.get_worker(self.llm_model_id):
             self._llm_ready.set()
@@ -427,6 +456,16 @@ class RealtimeSession:
 
     async def _handle_response_create(self, message: dict[str, Any]) -> None:
         """Handle response.create — generate a response (optionally from text)."""
+        if self.transcription_only:
+            # No LLM in a transcription session; flush any buffered audio so its
+            # transcript is emitted, but don't generate a response.
+            if self.audio_buffer:
+                await self._commit_audio_only()
+            await self._send_error(
+                "response.create is not available in a transcription-only session.",
+                "unsupported_in_transcription_mode",
+            )
+            return
         # If there is buffered audio, commit it first
         if self.audio_buffer:
             await self._commit_audio_only()
@@ -492,9 +531,13 @@ class RealtimeSession:
         return self._native_audio_output
 
     async def _commit_and_respond(self) -> None:
-        """Commit the audio buffer and trigger the full pipeline."""
+        """Commit the audio buffer and trigger the full pipeline.
+
+        In transcription-only mode we stop after the transcript: no LLM response.
+        """
         await self._commit_audio_only()
-        await self._generate_response()
+        if not self.transcription_only:
+            await self._generate_response()
 
     async def _commit_audio_only(self) -> None:
         """Commit the audio buffer.
@@ -516,7 +559,7 @@ class RealtimeSession:
         item_id = _new_item_id()
         await self._send_event("input_audio_buffer.committed", item_id=item_id)
 
-        if await self._should_use_native_audio():
+        if not self.transcription_only and await self._should_use_native_audio():
             wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
             audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
             self.conversation.append(
@@ -573,6 +616,23 @@ class RealtimeSession:
                         }
                     ],
                 },
+            )
+            # Standard OpenAI Realtime transcription event — what transcription
+            # clients (and Escriba's live indexer) listen for per committed segment.
+            if self.transcription_only:
+                await self._send_event(
+                    "conversation.item.input_audio_transcription.completed",
+                    item_id=item_id,
+                    content_index=0,
+                    transcript=transcript,
+                )
+        elif self.transcription_only:
+            # Emit an empty completed event so the client sees the segment closed.
+            await self._send_event(
+                "conversation.item.input_audio_transcription.completed",
+                item_id=item_id,
+                content_index=0,
+                transcript="",
             )
 
     async def _generate_response(
