@@ -564,6 +564,10 @@ def _run_transcription(
             "start": float(segment.start),
             "end": float(segment.end),
             "text": segment.text.strip(),
+            # Confidence signals used to drop hallucinations over silence/noise
+            # (Whisper invents "Gracias/Adiós/…" fillers on non-speech).
+            "no_speech_prob": float(getattr(segment, "no_speech_prob", 0.0) or 0.0),
+            "avg_logprob": float(getattr(segment, "avg_logprob", 0.0) or 0.0),
         }
         seg_words = getattr(segment, "words", None)
         if need_words and seg_words:

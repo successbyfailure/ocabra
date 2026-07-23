@@ -77,6 +77,44 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+# Whisper hallucinates "YouTube subtitle" fillers over silence/low noise; the
+# streaming path (short VAD-committed clips) is especially prone. Drop a segment
+# when the model itself flags it as likely non-speech, or when its whole text is a
+# known filler on a short/low-confidence segment.
+_NO_SPEECH_DROP = 0.6
+_HALLUCINATION_PHRASES = {
+    "gracias", "muchas gracias", "gracias por ver el video", "gracias por ver",
+    "adios", "hasta luego", "hasta la proxima", "nos vemos", "chau",
+    "subtitulos realizados por la comunidad de amara org", "subtitulos por la comunidad de amara org",
+    "subtitulado por la comunidad de amara org", "amara org",
+    "thanks for watching", "thank you", "thank you for watching", "bye", "goodbye",
+    "you", "the", "si", "no", "a", "fue", "eh", "ah", "mmm",
+}
+
+
+def _normalize_phrase(text: str) -> str:
+    return re.sub(r"[^\w\sáéíóúñü]", "", text.lower(), flags=re.UNICODE).strip()
+
+
+def _is_hallucinated_segment(seg: dict[str, Any]) -> bool:
+    text = str(seg.get("text") or "").strip()
+    norm = _normalize_phrase(text)
+    if not norm:
+        return True
+    nsp = float(seg.get("no_speech_prob") or 0.0)
+    dur = float(seg.get("end") or 0.0) - float(seg.get("start") or 0.0)
+    # The model itself thinks this is (mostly) non-speech.
+    if nsp >= _NO_SPEECH_DROP:
+        return True
+    # A known filler as the *entire* segment, on a short or low-confidence clip.
+    if norm in _HALLUCINATION_PHRASES and (dur < 2.0 or nsp >= 0.25):
+        return True
+    # A single very short token on a short clip with some non-speech signal.
+    if len(norm) <= 3 and dur < 1.0 and nsp >= 0.2:
+        return True
+    return False
+
+
 def _prune_registry_store(now: float) -> None:
     stale = [k for k, v in _REGISTRY_STORE.items() if now - v.get("ts", 0.0) > _REGISTRY_TTL_S]
     for k in stale:
@@ -158,6 +196,8 @@ class RealtimeSession:
         self._stt_prompt: str | None = None
         # Diarization on the final transcript (input_audio_transcription.diarize).
         self._stt_diarize: bool = False
+        # Drop Whisper hallucinations over silence in streaming (default on).
+        self._suppress_hallucinations: bool = True
         # Session-wide speaker registry for consistent diarization across segments:
         # each entry {id, centroid, count, exemplars}. Local pyannote labels
         # (SPEAKER_00…) are matched to a global "speaker_N" by cosine similarity.
@@ -434,6 +474,8 @@ class RealtimeSession:
                 self._stt_prompt = str(iat["prompt"])
             if "diarize" in iat:
                 self._stt_diarize = bool(iat["diarize"])
+            if "suppress_hallucinations" in iat:
+                self._suppress_hallucinations = bool(iat["suppress_hallucinations"])
             _nspk = iat.get("num_speakers", iat.get("max_speakers"))
             if _nspk is not None:
                 try:
@@ -660,6 +702,10 @@ class RealtimeSession:
         offset = self._audio_offset_s
         result = await self._transcribe_verbose(pcm_data)
         self._audio_offset_s += len(pcm_data) / 2 / _INPUT_SAMPLE_RATE
+
+        # Drop Whisper hallucinations over silence before anything else.
+        if self._suppress_hallucinations:
+            self._filter_hallucinations(result)
 
         # Consistent diarization across segments: remap this segment's local
         # pyannote labels to session-global ids via the embedding registry. Labels
@@ -1106,6 +1152,22 @@ class RealtimeSession:
             logger.warning("realtime_stt_verbose_error", error=str(exc))
             return empty
 
+    def _filter_hallucinations(self, result: dict[str, Any]) -> None:
+        """Drop hallucinated-over-silence segments from a transcription result
+        (streaming only), recomputing text/words to match. Mutates ``result``."""
+        segments = result.get("segments") or []
+        kept = [s for s in segments if not _is_hallucinated_segment(s)]
+        if len(kept) == len(segments):
+            return
+        keep_ranges = [(float(s.get("start") or 0.0), float(s.get("end") or 0.0)) for s in kept]
+        result["segments"] = kept
+        result["text"] = " ".join(str(s.get("text") or "").strip() for s in kept).strip()
+        result["words"] = [
+            w
+            for w in (result.get("words") or [])
+            if any(a <= float(w.get("start") or 0.0) <= b for a, b in keep_ranges)
+        ]
+
     def _reconcile_speakers(self, local_embeddings: dict[str, list[float]]) -> dict[str, str]:
         """Map a segment's local pyannote labels (SPEAKER_00…) to session-global
         ``speaker_N`` ids by matching embeddings against the registry. Matching uses
@@ -1206,6 +1268,10 @@ class RealtimeSession:
                 text = await self._transcribe(buf)
                 words = text.split()
                 if not words:
+                    continue
+                # Skip partials that are just a known filler (Whisper silence
+                # hallucination) so the live preview doesn't flicker "Gracias/Adiós".
+                if self._suppress_hallucinations and _normalize_phrase(text) in _HALLUCINATION_PHRASES:
                     continue
                 stable = _common_prefix(self._partial_prev_words, words)
                 self._partial_prev_words = words
