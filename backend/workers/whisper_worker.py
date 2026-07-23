@@ -265,11 +265,14 @@ class _NemoModelAdapter:
         temperature: float = 0.0,
         word_timestamps: bool = False,
         vad_filter: bool = False,
+        condition_on_previous_text: bool = False,
+        **_kwargs: Any,
     ) -> tuple[list[Any], Any]:
         # NeMo checkpoints here produce a single transcript without word-level
-        # timestamps; accept (and ignore) the faster-whisper-only options so the
-        # shared call site can pass them uniformly.
-        _ = initial_prompt, temperature, word_timestamps, vad_filter
+        # timestamps; accept (and ignore) the faster-whisper-only options — the
+        # ``**_kwargs`` catch-all keeps the shared call site from breaking NeMo
+        # when new Whisper-only knobs are added.
+        _ = initial_prompt, temperature, word_timestamps, vad_filter, condition_on_previous_text
         text = _nemo_transcribe_text(self._model, audio_path=audio_path, language=language)
         segment = SimpleNamespace(start=0.0, end=0.0, text=text)
         info = SimpleNamespace(language=language or "unknown")
