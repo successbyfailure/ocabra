@@ -764,21 +764,36 @@ async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
     import asyncio
 
     if backend_type == "ollama":
-        # Ollama manages its own storage — use ollama rm
+        # Ollama manages its own storage in a separate service, so we must call
+        # its HTTP API — the ``ollama`` CLI is NOT installed in the api
+        # container (a previous ``ollama rm`` subprocess silently no-op'd and
+        # the model reappeared on the next inventory sync).
+        import httpx
+
+        parts = model_id.split("/", 1)
+        ollama_name = parts[1] if len(parts) == 2 else model_id
         try:
-            parts = model_id.split("/", 1)
-            ollama_name = parts[1] if len(parts) == 2 else model_id
-            proc = await asyncio.create_subprocess_exec(
-                "ollama",
-                "rm",
-                ollama_name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.request(
+                    "DELETE",
+                    f"{settings.ollama_base_url}/api/delete",
+                    json={"name": ollama_name},
+                )
+        except Exception as exc:  # noqa: BLE001 — surface connectivity failures
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not reach Ollama to delete '{ollama_name}': {exc}",
+            ) from exc
+        # 404 = already gone; treat as success. Anything else is a real error.
+        if resp.status_code not in (200, 404):
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Ollama refused to delete '{ollama_name}': "
+                    f"{resp.status_code} {resp.text[:200]}"
+                ),
             )
-            await proc.wait()
-        except Exception:
-            pass
-        return None
+        return f"ollama:{ollama_name}"
 
     # HuggingFace-backed models (vllm, diffusers, whisper, transformers, tensorrt_llm…)
     parts = model_id.split("/", 1)
