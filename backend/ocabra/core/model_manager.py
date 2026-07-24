@@ -1716,7 +1716,7 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
     elif backend_type in {"chatterbox", "tts", "voxtral"}:
         caps.tts = True
         caps.streaming = True
-    elif backend_type == "diffusers":
+    elif backend_type in {"diffusers", "mage"}:
         caps.image_generation = True
     elif backend_type == "acestep":
         caps.music_generation = True

@@ -352,6 +352,17 @@ class LocalScanner:
         if model_type == "whisper":
             return "whisper"
 
+        # Mage-Flow ships a diffusers-style tree but a custom pipeline class,
+        # so it needs its own backend (checked before the generic diffusers
+        # rule below, which any model_index.json would otherwise match).
+        model_index = path / "model_index.json"
+        if model_index.exists():
+            try:
+                if str(json.loads(model_index.read_text()).get("_class_name", "")) == "MageFlowPipeline":
+                    return "mage"
+            except Exception:
+                pass
+
         # Diffusion models (e.g., Stable Diffusion, SDXL, Flux)
         if model_type in {"stable-diffusion", "sdxl"} or (path / "model_index.json").exists():
             return "diffusers"

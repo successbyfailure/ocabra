@@ -8,6 +8,7 @@ KNOWN_BACKEND_TYPES = {
     "tensorrt_llm",
     "bitnet",
     "diffusers",
+    "mage",
     "whisper",
     "tts",
     "chatterbox",

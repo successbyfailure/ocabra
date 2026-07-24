@@ -336,6 +336,7 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.bitnet_backend import BitnetBackend
     from ocabra.backends.chatterbox_backend import ChatterboxBackend
     from ocabra.backends.diffusers_backend import DiffusersBackend
+    from ocabra.backends.mageflow_backend import MageFlowBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.ollama_backend import OllamaBackend
     from ocabra.backends.sglang_backend import SGLangBackend
@@ -348,6 +349,7 @@ async def lifespan(app: FastAPI):
     worker_pool = WorkerPool()
     worker_pool.register_backend("acestep", AceStepBackend())
     worker_pool.register_backend("diffusers", DiffusersBackend())
+    worker_pool.register_backend("mage", MageFlowBackend())
     worker_pool.register_backend("bitnet", BitnetBackend())
     worker_pool.register_backend("llama_cpp", LlamaCppBackend())
     worker_pool.register_backend("ollama", OllamaBackend())
