@@ -8,7 +8,6 @@ helpers used by all ``/v1/*`` endpoint modules.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 from datetime import UTC, datetime
@@ -19,6 +18,7 @@ import structlog
 from fastapi import Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, get_current_user
+from ocabra.core.model_manager_helpers import compute_worker_key
 
 if TYPE_CHECKING:
     from ocabra.core.model_manager import ModelManager, ModelState
@@ -123,24 +123,6 @@ async def resolve_model(
             return resolved_id, None
 
     return resolved_id, resolved_state
-
-
-# ── Worker key helpers ───────────────────────────────────────────
-
-
-def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:
-    """Derive a worker key from a base model id and optional load overrides.
-
-    When *load_overrides* is empty or ``None`` the key equals *base_model_id*
-    (shared worker). Otherwise a short hash is appended so that different
-    override combinations get separate workers.
-    """
-    if not load_overrides:
-        return base_model_id
-    # Deterministic JSON → hash
-    canonical = json.dumps(load_overrides, sort_keys=True, separators=(",", ":"))
-    short_hash = hashlib.sha256(canonical.encode()).hexdigest()[:12]
-    return f"{base_model_id}::{short_hash}"
 
 
 # ── Profile resolution ───────────────────────────────────────────
@@ -300,11 +282,11 @@ STREAMING_LOAD_RESPONSE_DOC: dict = {
             "below before triggering any model load, and interleaves two "
             "named SSE events carrying load progress (same convention as "
             "``ocabra.tool_started`` / ``ocabra.tool_result``):\n\n"
-            "``event: ocabra.model_loading\\ndata: {\"model_id\": ..., "
-            "\"worker_key\": ..., \"status\": ..., "
-            "\"expected_wait_seconds\": ...}\\n\\n`` on stream open, and "
-            "``event: ocabra.model_ready\\ndata: {\"model_id\": ..., "
-            "\"load_duration_ms\": ..., \"was_cold_start\": ...}\\n\\n`` "
+            '``event: ocabra.model_loading\\ndata: {"model_id": ..., '
+            '"worker_key": ..., "status": ..., '
+            '"expected_wait_seconds": ...}\\n\\n`` on stream open, and '
+            '``event: ocabra.model_ready\\ndata: {"model_id": ..., '
+            '"load_duration_ms": ..., "was_cold_start": ...}\\n\\n`` '
             "once the model is ready. Clients that don't recognise these "
             "named events ignore them; the rest of the stream is plain "
             "OpenAI-format ``data: {...}`` chunks."
@@ -486,9 +468,7 @@ async def ensure_worker_loaded(
     Exposed for streaming endpoints that pre-flush headers and trigger the
     actual load from inside the SSE generator.
     """
-    return await _ensure_worker_loaded(
-        model_manager, base_model_id, worker_key, load_overrides
-    )
+    return await _ensure_worker_loaded(model_manager, base_model_id, worker_key, load_overrides)
 
 
 async def _ensure_worker_loaded(

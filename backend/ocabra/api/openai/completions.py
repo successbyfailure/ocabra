@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.worker_pool import InferenceTimeoutError
 
 from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
@@ -107,17 +108,13 @@ async def completions(
             profile = None
 
         if profile is not None:
-            worker_key = compute_worker_key(
-                profile.base_model_id, profile.load_overrides
-            )
+            worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
             headers = {
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
             }
             headers.update(
-                await build_model_status_headers(
-                    model_manager, worker_key, profile.base_model_id
-                )
+                await build_model_status_headers(model_manager, worker_key, profile.base_model_id)
             )
             return StreamingResponse(
                 _stream_completions_with_load(
@@ -161,9 +158,7 @@ async def completions(
 
 
 def _sse_error(message: str, code: str) -> bytes:
-    payload = json.dumps(
-        {"error": {"message": message, "type": "server_error", "code": code}}
-    )
+    payload = json.dumps({"error": {"message": message, "type": "server_error", "code": code}})
     return f"data: {payload}\n\n".encode() + b"data: [DONE]\n\n"
 
 
@@ -172,8 +167,9 @@ async def _stream_completions(worker_pool, model_id: str, body: dict):
         async for chunk in worker_pool.forward_stream(model_id, "/v1/completions", body):
             yield chunk
     except Exception as e:
+        code = "generation_timeout" if isinstance(e, InferenceTimeoutError) else "stream_error"
         error_payload = json.dumps(
-            {"error": {"message": str(e), "type": "server_error", "code": "stream_error"}}
+            {"error": {"message": str(e), "type": "server_error", "code": code}}
         )
         yield f"data: {error_payload}\n\n".encode()
         yield b"data: [DONE]\n\n"
@@ -196,9 +192,7 @@ async def _stream_completions_with_load(
     if pre_status != "loaded":
         expected_wait = await model_manager.get_expected_load_seconds(worker_key)
         if expected_wait is None and worker_key != profile.base_model_id:
-            expected_wait = await model_manager.get_expected_load_seconds(
-                profile.base_model_id
-            )
+            expected_wait = await model_manager.get_expected_load_seconds(profile.base_model_id)
 
     yield sse_ocabra_event(
         "model_loading",
@@ -254,9 +248,7 @@ async def _stream_completions_with_load(
     merged_body = merge_profile_defaults(profile, body)
     backend_body = to_backend_body(state, merged_body)
     try:
-        async for chunk in worker_pool.forward_stream(
-            worker_key, "/v1/completions", backend_body
-        ):
+        async for chunk in worker_pool.forward_stream(worker_key, "/v1/completions", backend_body):
             yield chunk
     except Exception as exc:
         yield _sse_error(str(exc), "stream_error")

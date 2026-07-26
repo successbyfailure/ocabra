@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 from ocabra.core.vram_planner import arch_from_gguf, plan_llama_cpp_vram_mb
+
+
+def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:
+    """Derive the stable worker key for a model profile."""
+    if not load_overrides:
+        return base_model_id
+    canonical = json.dumps(load_overrides, sort_keys=True, separators=(",", ":"))
+    short_hash = hashlib.sha256(canonical.encode()).hexdigest()[:12]
+    return f"{base_model_id}::{short_hash}"
 
 
 def build_diarized_extra_config(base_extra_config: dict | None) -> dict:
@@ -117,10 +128,17 @@ def estimate_llama_cpp_vram_from_config(
             or "f16"
         ).lower()
         kv_dtype_bytes = {
-            "f16": 2.0, "fp16": 2.0, "bf16": 2.0,
-            "q8_0": 1.0, "q8": 1.0,
-            "q5_0": 0.65, "q5_1": 0.65,
-            "q4_0": 0.5, "q4_1": 0.5, "q4": 0.5, "iq4_nl": 0.5,
+            "f16": 2.0,
+            "fp16": 2.0,
+            "bf16": 2.0,
+            "q8_0": 1.0,
+            "q8": 1.0,
+            "q5_0": 0.65,
+            "q5_1": 0.65,
+            "q4_0": 0.5,
+            "q4_1": 0.5,
+            "q4": 0.5,
+            "iq4_nl": 0.5,
         }.get(cache_type, 2.0)
         est = plan_llama_cpp_vram_mb(
             arch, size_mb, ctx_size, gpu_layers=gpu_layers, kv_dtype_bytes=kv_dtype_bytes
@@ -132,7 +150,9 @@ def estimate_llama_cpp_vram_from_config(
     # to trigger eviction without over-reserving so much that a model that really
     # fits gets bumped to tensor-parallel across a too-small GPU.
     try:
-        total_layers = max(1, int(resolve_llama_cpp_option(state, "total_layers", default_total_layers)))
+        total_layers = max(
+            1, int(resolve_llama_cpp_option(state, "total_layers", default_total_layers))
+        )
     except (TypeError, ValueError):
         total_layers = default_total_layers
     fraction = min(gpu_layers, total_layers) / total_layers

@@ -3,14 +3,16 @@ and request forwarding error handling.
 
 Extends test_worker_pool.py with additional lifecycle and error path coverage.
 """
-from unittest.mock import AsyncMock, patch
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 import pytest
 
 from ocabra import config
 from ocabra.backends._mock import MockBackend
 from ocabra.backends.base import WorkerInfo
-from ocabra.core.worker_pool import WorkerPool
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerPool
 
 
 @pytest.fixture
@@ -27,8 +29,10 @@ class TestPortLifecycle:
     @pytest.mark.asyncio
     async def test_ports_are_sequential_from_range_start(self):
         pool = WorkerPool()
-        with patch.object(config.settings, "worker_port_range_start", 20000), \
-             patch.object(config.settings, "worker_port_range_end", 20010):
+        with (
+            patch.object(config.settings, "worker_port_range_start", 20000),
+            patch.object(config.settings, "worker_port_range_end", 20010),
+        ):
             p1 = await pool.assign_port()
             assert p1 == 20000
             p2 = await pool.assign_port()
@@ -37,10 +41,12 @@ class TestPortLifecycle:
     @pytest.mark.asyncio
     async def test_released_port_is_reused_before_next(self):
         pool = WorkerPool()
-        with patch.object(config.settings, "worker_port_range_start", 20000), \
-             patch.object(config.settings, "worker_port_range_end", 20010):
+        with (
+            patch.object(config.settings, "worker_port_range_start", 20000),
+            patch.object(config.settings, "worker_port_range_end", 20010),
+        ):
             p1 = await pool.assign_port()
-            p2 = await pool.assign_port()
+            _p2 = await pool.assign_port()
             pool.release_port(p1)
             p3 = await pool.assign_port()
             assert p3 == p1  # reuses the released port
@@ -48,8 +54,12 @@ class TestPortLifecycle:
     @pytest.mark.asyncio
     async def test_set_worker_reserves_port(self, pool):
         info = WorkerInfo(
-            backend_type="mock", model_id="a/b", gpu_indices=[0],
-            port=18500, pid=100, vram_used_mb=1024,
+            backend_type="mock",
+            model_id="a/b",
+            gpu_indices=[0],
+            port=18500,
+            pid=100,
+            vram_used_mb=1024,
         )
         pool.set_worker("a/b", info)
         assert 18500 in pool._used_ports
@@ -57,8 +67,12 @@ class TestPortLifecycle:
     @pytest.mark.asyncio
     async def test_remove_worker_releases_port(self, pool):
         info = WorkerInfo(
-            backend_type="mock", model_id="a/b", gpu_indices=[0],
-            port=18500, pid=100, vram_used_mb=1024,
+            backend_type="mock",
+            model_id="a/b",
+            gpu_indices=[0],
+            port=18500,
+            pid=100,
+            vram_used_mb=1024,
         )
         pool.set_worker("a/b", info)
         pool.remove_worker("a/b")
@@ -77,20 +91,32 @@ class TestPortLifecycle:
 class TestWorkerRegistration:
     def test_set_and_get_worker(self, pool):
         info = WorkerInfo(
-            backend_type="mock", model_id="test/m", gpu_indices=[1],
-            port=18100, pid=42, vram_used_mb=2048,
+            backend_type="mock",
+            model_id="test/m",
+            gpu_indices=[1],
+            port=18100,
+            pid=42,
+            vram_used_mb=2048,
         )
         pool.set_worker("test/m", info)
         assert pool.get_worker("test/m") is info
 
     def test_overwrite_worker(self, pool):
         info1 = WorkerInfo(
-            backend_type="mock", model_id="test/m", gpu_indices=[0],
-            port=18100, pid=42, vram_used_mb=1024,
+            backend_type="mock",
+            model_id="test/m",
+            gpu_indices=[0],
+            port=18100,
+            pid=42,
+            vram_used_mb=1024,
         )
         info2 = WorkerInfo(
-            backend_type="mock", model_id="test/m", gpu_indices=[1],
-            port=18200, pid=43, vram_used_mb=2048,
+            backend_type="mock",
+            model_id="test/m",
+            gpu_indices=[1],
+            port=18200,
+            pid=43,
+            vram_used_mb=2048,
         )
         pool.set_worker("test/m", info1)
         pool.set_worker("test/m", info2)
@@ -119,6 +145,37 @@ class TestForwardRequestErrors:
         with pytest.raises(KeyError, match="No worker found"):
             async for _ in pool.forward_stream("unloaded/model", "/v1/chat/completions", {}):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_forward_request_translates_upstream_timeout(self, pool):
+        info = WorkerInfo(
+            backend_type="mock",
+            model_id="test/m",
+            gpu_indices=[0],
+            port=18100,
+            pid=42,
+            vram_used_mb=1024,
+        )
+        pool.set_worker("test/m", info)
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.post = AsyncMock(side_effect=httpx.ReadTimeout("slow upstream"))
+
+        with (
+            patch("ocabra.core.worker_pool.httpx.AsyncClient", return_value=client),
+            patch.object(config.settings, "inference_request_timeout_seconds", 45),
+        ):
+            with pytest.raises(InferenceTimeoutError) as exc_info:
+                await pool.forward_request(
+                    "test/m",
+                    "/v1/chat/completions",
+                    {},
+                )
+
+        assert exc_info.value.timeout_s == 45
+        assert exc_info.value.model_id == "test/m"
 
 
 # ── Backend registration ─────────────────────────────────────────

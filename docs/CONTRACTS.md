@@ -194,11 +194,25 @@ class WorkerPool:
         """Libera un puerto."""
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        """Reenvía una petición HTTP al worker."""
+        """Reenvía una petición HTTP al worker.
+
+        Lanza InferenceTimeoutError cuando el upstream no responde dentro de
+        settings.inference_request_timeout_seconds. La capa API traduce ese
+        error a HTTP 504 y cierra la conexión upstream para cancelar el trabajo.
+        """
 
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        """Reenvía una petición streaming al worker."""
+        """Reenvía una petición streaming al worker.
+
+        Puede lanzar InferenceTimeoutError si el upstream deja de producir
+        datos durante el timeout de inferencia configurado.
+        """
 ```
+
+Las peticiones se contabilizan contra la clave real del worker, derivada de
+`profile.base_model_id + profile.load_overrides`, aunque el cliente use un
+`profile_id`. El alias público se conserva por separado para estadísticas.
+Esto impide eviction y admisión incoherentes entre alias y modelo canónico.
 
 ---
 

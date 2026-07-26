@@ -338,11 +338,15 @@ class BatchProcessor:
             headers["X-Internal-Key-Name"] = api_key_name
 
         transport = httpx.ASGITransport(app=self._app)
+        dispatch_timeout_s = max(
+            int(settings.batch_request_timeout_seconds),
+            int(settings.inference_request_timeout_seconds) + 30,
+        )
         try:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://batch-processor.local",
-                timeout=settings.batch_request_timeout_seconds,
+                timeout=dispatch_timeout_s,
             ) as client:
                 response = await client.post(endpoint, json=body, headers=headers)
         except Exception as exc:

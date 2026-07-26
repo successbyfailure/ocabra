@@ -31,6 +31,7 @@ from ocabra.agents.executor import AgentExecutor
 from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
 from ocabra.agents.resolver import is_agent_model, resolve_agent
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.worker_pool import InferenceTimeoutError
 from ocabra.database import AsyncSessionLocal
 
 from ._deps import (
@@ -39,11 +40,11 @@ from ._deps import (
     check_capability,
     compute_worker_key,
     ensure_worker_loaded,
-    keepalive_until_done,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
     get_profile_registry,
+    keepalive_until_done,
     lookup_profile,
     merge_profile_defaults,
     raise_upstream_http_error,
@@ -165,9 +166,7 @@ async def chat_completions(
     # Diagnostic: tells us when a request lands on the legacy path with a
     # model_id that doesn't have the agent/ prefix. Helps catch stale frontend
     # bundles that send the bare slug or the base model id.
-    if isinstance(model_id, str) and (
-        model_id.startswith("task-") or "agent" in model_id.lower()
-    ):
+    if isinstance(model_id, str) and (model_id.startswith("task-") or "agent" in model_id.lower()):
         logger.warning(
             "agent_dispatch_skipped_no_prefix",
             model_id=model_id,
@@ -190,17 +189,13 @@ async def chat_completions(
             profile = None
 
         if profile is not None:
-            worker_key = compute_worker_key(
-                profile.base_model_id, profile.load_overrides
-            )
+            worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
             headers = {
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
             }
             headers.update(
-                await build_model_status_headers(
-                    model_manager, worker_key, profile.base_model_id
-                )
+                await build_model_status_headers(model_manager, worker_key, profile.base_model_id)
             )
             return StreamingResponse(
                 _stream_chat_with_load(
@@ -258,9 +253,7 @@ async def chat_completions(
 
 
 def _sse_error(message: str, code: str) -> bytes:
-    payload = json.dumps(
-        {"error": {"message": message, "type": "server_error", "code": code}}
-    )
+    payload = json.dumps({"error": {"message": message, "type": "server_error", "code": code}})
     return f"data: {payload}\n\n".encode() + b"data: [DONE]\n\n"
 
 
@@ -270,8 +263,9 @@ async def _stream_chat(worker_pool, model_id: str, body: dict):
         async for chunk in worker_pool.forward_stream(model_id, "/v1/chat/completions", body):
             yield chunk
     except Exception as e:
+        code = "generation_timeout" if isinstance(e, InferenceTimeoutError) else "stream_error"
         error_payload = json.dumps(
-            {"error": {"message": str(e), "type": "server_error", "code": "stream_error"}}
+            {"error": {"message": str(e), "type": "server_error", "code": code}}
         )
         yield f"data: {error_payload}\n\n".encode()
         yield b"data: [DONE]\n\n"
@@ -302,9 +296,7 @@ async def _stream_chat_with_load(
     if pre_status != "loaded":
         expected_wait = await model_manager.get_expected_load_seconds(worker_key)
         if expected_wait is None and worker_key != profile.base_model_id:
-            expected_wait = await model_manager.get_expected_load_seconds(
-                profile.base_model_id
-            )
+            expected_wait = await model_manager.get_expected_load_seconds(profile.base_model_id)
 
     # First frame: comment-only SSE event with status. Forces header flush and
     # gives clients an immediate, parseable load hint.
@@ -378,7 +370,8 @@ async def _stream_chat_with_load(
         ):
             yield chunk
     except Exception as exc:
-        yield _sse_error(str(exc), "stream_error")
+        code = "generation_timeout" if isinstance(exc, InferenceTimeoutError) else "stream_error"
+        yield _sse_error(str(exc), code)
 
 
 async def _dispatch_agent(
@@ -464,9 +457,12 @@ async def _dispatch_agent(
     # oCabra tool-progress events (event: ocabra.tool_*) break strict OpenAI SSE
     # parsers, so they're opt-in: only emitted when the client asks for them
     # (the Playground sets this). Default off keeps the stream standards-clean.
-    emit_ocabra_events = str(
-        request.headers.get("x-ocabra-stream-events", "")
-    ).strip().lower() in ("1", "true", "yes", "on")
+    emit_ocabra_events = str(request.headers.get("x-ocabra-stream-events", "")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
     if stream:
         from fastapi.responses import StreamingResponse as _SR

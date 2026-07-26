@@ -19,6 +19,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from ocabra.config import settings
+from ocabra.core.model_manager_helpers import compute_worker_key
+from ocabra.core.worker_pool import InferenceTimeoutError
 
 logger = structlog.get_logger(__name__)
 
@@ -238,7 +240,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         # Track in-flight requests so the pressure eviction loop can avoid
         # evicting models that are currently serving a request.
-        inflight_model_id = _extract_model_id(request=request, body=request_payload)
+        requested_model_id = _extract_model_id(request=request, body=request_payload)
+        inflight_model_id = await _resolve_inflight_model_id(request, requested_model_id)
         inflight_request_id: str | None = None
         try:
             mm = request.app.state.model_manager
@@ -283,6 +286,40 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         try:
             response = await call_next(request)
+        except InferenceTimeoutError as exc:
+            if mm and inflight_model_id:
+                mm.end_request(inflight_model_id, inflight_request_id)
+            model_id = _extract_model_id(request=request, body=request_payload)
+            if model_id:
+                asyncio.create_task(
+                    _record_stat(
+                        request=request,
+                        model_id=model_id,
+                        started_at=started_at,
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        error_message=str(exc),
+                        status_code=504,
+                        endpoint_path=path,
+                        request_kind=request_kind,
+                        input_tokens=None,
+                        output_tokens=None,
+                    )
+                )
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    status_code=504,
+                    content={"error": str(exc)},
+                )
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": {
+                        "message": str(exc),
+                        "type": "server_error",
+                        "code": "generation_timeout",
+                    }
+                },
+            )
         except Exception as exc:
             if mm and inflight_model_id:
                 mm.end_request(inflight_model_id, inflight_request_id)
@@ -340,7 +377,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     if model_id:
                         all_body = b"".join(chunks)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
-                        in_tok, out_tok = _extract_usage_tokens(last_payload, request_kind, request_payload)
+                        in_tok, out_tok = _extract_usage_tokens(
+                            last_payload, request_kind, request_payload
+                        )
                         # Streaming without a usage payload (e.g. no stream_options.
                         # include_usage): approximate from the streamed content and
                         # the request so the row isn't left as "—".
@@ -379,7 +418,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         model_id = _extract_model_id(request=request, body=request_payload)
         if model_id:
-            in_tok, out_tok = _extract_usage_tokens(response_payload, request_kind=request_kind, request_payload=request_payload)
+            in_tok, out_tok = _extract_usage_tokens(
+                response_payload, request_kind=request_kind, request_payload=request_payload
+            )
             # Transcription output: JSON formats are proxied above; for non-JSON
             # (srt/vtt/text) count words from the raw body. Empty/silence → 0
             # (not "—") so the row is consistent.
@@ -447,6 +488,55 @@ def _extract_model_id(request: Request, body: dict | None) -> str | None:
         return str(model_id_from_state)
 
     return None
+
+
+async def _resolve_inflight_model_id(request: Request, requested: str | None) -> str | None:
+    """Resolve a public profile/model id to the worker key used by ModelManager.
+
+    Statistics retain the public id from the request body. Only lifecycle and
+    admission tracking use this resolved key.
+    """
+    if not requested:
+        return None
+
+    registry = getattr(request.app.state, "profile_registry", None)
+    if registry is not None:
+        try:
+            profile = await registry.get(requested)
+            if profile is not None and profile.enabled:
+                return compute_worker_key(profile.base_model_id, profile.load_overrides)
+
+            # Legacy canonical model ids resolve through their default profile.
+            if "/" in requested:
+                profiles = await registry.list_by_model(requested)
+                profile = next(
+                    (item for item in profiles if item.enabled and item.is_default),
+                    None,
+                )
+                if profile is None:
+                    profile = next((item for item in profiles if item.enabled), None)
+                if profile is not None:
+                    return compute_worker_key(
+                        profile.base_model_id,
+                        profile.load_overrides,
+                    )
+        except Exception as exc:  # noqa: BLE001 - tracking must not block inference
+            logger.warning(
+                "inflight_model_resolution_failed",
+                requested_model_id=requested,
+                error=str(exc),
+            )
+
+    model_manager = getattr(request.app.state, "model_manager", None)
+    if model_manager is not None:
+        try:
+            state = await model_manager.get_state(requested)
+            if state is not None:
+                return state.model_id
+        except Exception:  # noqa: BLE001 - fall back to the public id
+            pass
+
+    return requested
 
 
 def _extract_last_payload_from_stream(body: bytes, content_type: str) -> dict | None:

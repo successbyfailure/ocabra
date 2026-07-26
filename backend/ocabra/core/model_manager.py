@@ -273,7 +273,15 @@ class ModelManager:
         while True:
             try:
                 await asyncio.sleep(10)
-                timeout_s = max(30, int(getattr(settings, "busy_timeout_seconds", 300)))
+                inference_timeout_s = max(
+                    30,
+                    int(getattr(settings, "inference_request_timeout_seconds", 900)),
+                )
+                timeout_s = max(
+                    30,
+                    int(getattr(settings, "busy_timeout_seconds", 300)),
+                    inference_timeout_s + 30,
+                )
                 now = time.time()
                 with self._in_flight_lock:
                     snapshot = list(self._active_requests.values())

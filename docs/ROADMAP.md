@@ -183,6 +183,12 @@ Plan en `docs/tasks/backend-resilience-plan.md`.
 - `ActiveRequest` dataclass, `begin_request()` retorna request_id
 - `_busy_watchdog()` loop, `_timeout_counts` metrics
 - `busy_timeout_seconds` y `busy_timeout_action` configurables. 10 tests
+- Alias/perfiles se resuelven a la clave canónica del worker antes de contabilizar
+  peticiones activas; idle/pressure eviction ya no puede descargar un modelo que
+  sigue atendiendo una petición.
+- `inference_request_timeout_seconds` separa el timeout HTTP del watchdog:
+  cancela el upstream y devuelve `504 generation_timeout` (también en batches);
+  el timeout efectivo del watchdog y del batch processor siempre queda por encima.
 
 ---
 
@@ -217,7 +223,7 @@ Implementado:
 Implementado:
 - **OpenAI Files API** (`/v1/files` · `POST`/`GET`/`DELETE`, `GET /v1/files/{id}/content`) con almacenamiento en disco (`/data/openai_files`, volumen `./data/openai_files`). Tabla `openai_files`.
 - **OpenAI Batches API** (`/v1/batches` · `POST`/`GET`/`cancel`) con tabla `openai_batches` y migración `0016`. Soporta `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
-- **BatchProcessor** (`backend/ocabra/core/batch_processor.py`): loop en background, dispatch in-process vía `httpx.ASGITransport`, impersonación del owner con `X-Gateway-Token` + `X-Internal-User-Id` (añadido soporte en `_deps_auth.py`). Concurrencia configurable (`batch_max_concurrency=4`), poll cada `batch_poll_interval_seconds=5`, timeout por petición `batch_request_timeout_seconds=600`.
+- **BatchProcessor** (`backend/ocabra/core/batch_processor.py`): loop en background, dispatch in-process vía `httpx.ASGITransport`, impersonación del owner con `X-Gateway-Token` + `X-Internal-User-Id` (añadido soporte en `_deps_auth.py`). Concurrencia configurable (`batch_max_concurrency=4`), poll cada `batch_poll_interval_seconds=5`; el timeout efectivo por petición es `max(batch_request_timeout_seconds, inference_request_timeout_seconds + 30)`.
 - **Fix ACL `/ocabra/models`**: ahora filtra por `accessible_model_ids` para usuarios no-admin (igual que `/v1/models`). Verificado con usuario de grupo limitado: 1 modelo visible vs. todos antes.
 - Smoke test e2e: upload JSONL → create batch → procesado completo con output JSONL descargable vía Files API.
 

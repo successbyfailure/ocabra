@@ -2,6 +2,7 @@
 GET/PATCH /ocabra/config — Server configuration API.
 POST /ocabra/config/litellm/sync — Manual LiteLLM sync trigger.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,7 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.model_config import global_schedule_rows_to_payload, get_global_schedule_rows, replace_global_schedules
+from ocabra.db.model_config import (
+    get_global_schedule_rows,
+    global_schedule_rows_to_payload,
+    replace_global_schedules,
+)
 from ocabra.db.server_config import save_override
 
 logger = structlog.get_logger(__name__)
@@ -38,15 +43,28 @@ class ServerConfigPatch(BaseModel):
     idle_eviction_check_interval_seconds: int | None = Field(
         default=None, alias="idleEvictionCheckIntervalSeconds"
     )
-    model_load_wait_timeout_seconds: int | None = Field(default=None, alias="modelLoadWaitTimeoutSeconds")
+    model_load_wait_timeout_seconds: int | None = Field(
+        default=None, alias="modelLoadWaitTimeoutSeconds"
+    )
     pressure_eviction_drain_timeout_seconds: int | None = Field(
         default=None, alias="pressureEvictionDrainTimeoutSeconds"
     )
     vram_buffer_mb: int | None = Field(default=None, alias="vramBufferMb")
-    vram_pressure_threshold_pct: float | None = Field(default=None, alias="vramPressureThresholdPct")
+    vram_pressure_threshold_pct: float | None = Field(
+        default=None, alias="vramPressureThresholdPct"
+    )
     max_inflight_per_model: int | None = Field(default=None, alias="maxInflightPerModel")
-    openai_audio_max_part_size_mb: int | None = Field(default=None, alias="openaiAudioMaxPartSizeMb")
-    whisper_startup_timeout_seconds: int | None = Field(default=None, alias="whisperStartupTimeoutSeconds")
+    inference_request_timeout_seconds: int | None = Field(
+        default=None,
+        ge=30,
+        alias="inferenceRequestTimeoutSeconds",
+    )
+    openai_audio_max_part_size_mb: int | None = Field(
+        default=None, alias="openaiAudioMaxPartSizeMb"
+    )
+    whisper_startup_timeout_seconds: int | None = Field(
+        default=None, alias="whisperStartupTimeoutSeconds"
+    )
     log_level: str | None = Field(default=None, alias="logLevel")
     litellm_base_url: str | None = Field(default=None, alias="litellmBaseUrl")
     litellm_admin_key: str | None = Field(default=None, alias="litellmAdminKey")
@@ -55,7 +73,9 @@ class ServerConfigPatch(BaseModel):
     models_dir: str | None = Field(default=None, alias="modelsDir")
     download_dir: str | None = Field(default=None, alias="downloadDir")
     max_temperature_c: int | None = Field(default=None, alias="maxTemperatureC")
-    vllm_gpu_memory_utilization: float | None = Field(default=None, alias="vllmGpuMemoryUtilization")
+    vllm_gpu_memory_utilization: float | None = Field(
+        default=None, alias="vllmGpuMemoryUtilization"
+    )
     vllm_max_num_seqs: int | None = Field(default=None, alias="vllmMaxNumSeqs")
     vllm_max_num_batched_tokens: int | None = Field(default=None, alias="vllmMaxNumBatchedTokens")
     vllm_enable_prefix_caching: bool | None = Field(default=None, alias="vllmEnablePrefixCaching")
@@ -71,51 +91,70 @@ class ServerConfigPatch(BaseModel):
     bitnet_flash_attn: bool | None = Field(default=None, alias="bitnetFlashAttn")
     diffusers_torch_dtype: str | None = Field(default=None, alias="diffusersTorchDtype")
     diffusers_offload_mode: str | None = Field(default=None, alias="diffusersOffloadMode")
-    diffusers_enable_torch_compile: bool | None = Field(default=None, alias="diffusersEnableTorchCompile")
+    diffusers_enable_torch_compile: bool | None = Field(
+        default=None, alias="diffusersEnableTorchCompile"
+    )
     diffusers_enable_xformers: bool | None = Field(default=None, alias="diffusersEnableXformers")
     diffusers_allow_tf32: bool | None = Field(default=None, alias="diffusersAllowTf32")
     tensorrt_llm_enabled: bool | None = Field(default=None, alias="tensorrtLlmEnabled")
     tensorrt_llm_max_batch_size: int | None = Field(default=None, alias="tensorrtLlmMaxBatchSize")
     tensorrt_llm_context_length: int | None = Field(default=None, alias="tensorrtLlmContextLength")
-    global_schedules: list[EvictionSchedulePayload] | None = Field(default=None, alias="globalSchedules")
+    global_schedules: list[EvictionSchedulePayload] | None = Field(
+        default=None, alias="globalSchedules"
+    )
     require_api_key_openai: bool | None = Field(default=None, alias="requireApiKeyOpenai")
     require_api_key_ollama: bool | None = Field(default=None, alias="requireApiKeyOllama")
     realtime_default_stt_model: str | None = Field(
-        default=None, alias="realtimeDefaultSttModel",
+        default=None,
+        alias="realtimeDefaultSttModel",
         description="Default STT model for Realtime API sessions (profile_id or model_id)",
     )
     realtime_default_tts_model: str | None = Field(
-        default=None, alias="realtimeDefaultTtsModel",
+        default=None,
+        alias="realtimeDefaultTtsModel",
         description="Default TTS model for Realtime API sessions (profile_id or model_id)",
     )
     federation_enabled: bool | None = Field(
-        default=None, alias="federationEnabled",
+        default=None,
+        alias="federationEnabled",
         description="Enable/disable federation mode for multi-node inference (hot toggle)",
     )
     federation_node_name: str | None = Field(
-        default=None, alias="federationNodeName",
+        default=None,
+        alias="federationNodeName",
         description="Human-readable name for this node in the federation",
     )
 
     # ── Generation services (Hunyuan, ComfyUI, A1111, ACE-Step, Unsloth) ───
     # Hot config: idle unload, generation grace, preferred GPU.
     hunyuan_idle_unload_seconds: int | None = Field(default=None, alias="hunyuanIdleUnloadSeconds")
-    hunyuan_generation_grace_period_s: int | None = Field(default=None, alias="hunyuanGenerationGracePeriodS")
+    hunyuan_generation_grace_period_s: int | None = Field(
+        default=None, alias="hunyuanGenerationGracePeriodS"
+    )
     hunyuan_preferred_gpu: int | None = Field(default=None, alias="hunyuanPreferredGpu")
     comfyui_idle_unload_seconds: int | None = Field(default=None, alias="comfyuiIdleUnloadSeconds")
-    comfyui_generation_grace_period_s: int | None = Field(default=None, alias="comfyuiGenerationGracePeriodS")
+    comfyui_generation_grace_period_s: int | None = Field(
+        default=None, alias="comfyuiGenerationGracePeriodS"
+    )
     comfyui_preferred_gpu: int | None = Field(default=None, alias="comfyuiPreferredGpu")
     a1111_idle_unload_seconds: int | None = Field(default=None, alias="a1111IdleUnloadSeconds")
-    a1111_generation_grace_period_s: int | None = Field(default=None, alias="a1111GenerationGracePeriodS")
+    a1111_generation_grace_period_s: int | None = Field(
+        default=None, alias="a1111GenerationGracePeriodS"
+    )
     a1111_preferred_gpu: int | None = Field(default=None, alias="a1111PreferredGpu")
     acestep_idle_unload_seconds: int | None = Field(default=None, alias="acestepIdleUnloadSeconds")
-    acestep_generation_grace_period_s: int | None = Field(default=None, alias="acestepGenerationGracePeriodS")
+    acestep_generation_grace_period_s: int | None = Field(
+        default=None, alias="acestepGenerationGracePeriodS"
+    )
     acestep_preferred_gpu: int | None = Field(default=None, alias="acestepPreferredGpu")
     unsloth_idle_unload_seconds: int | None = Field(default=None, alias="unslothIdleUnloadSeconds")
-    unsloth_generation_grace_period_s: int | None = Field(default=None, alias="unslothGenerationGracePeriodS")
+    unsloth_generation_grace_period_s: int | None = Field(
+        default=None, alias="unslothGenerationGracePeriodS"
+    )
     unsloth_preferred_gpu: int | None = Field(default=None, alias="unslothPreferredGpu")
     generation_gpu_util_threshold_pct: int | None = Field(
-        default=None, alias="generationGpuUtilThresholdPct",
+        default=None,
+        alias="generationGpuUtilThresholdPct",
         description="GPU utilisation %% above which services without a dedicated generation-status endpoint are considered busy (Hunyuan, ACE-Step, Unsloth).",
     )
 
@@ -125,9 +164,7 @@ def _masked_admin_key(value: str) -> str:
 
 
 def _build_config_response(request: Request) -> dict[str, Any]:
-    effective_download_dir = (
-        settings.download_dir or f"{settings.models_dir.rstrip('/')}/downloads"
-    )
+    effective_download_dir = settings.download_dir or f"{settings.models_dir.rstrip('/')}/downloads"
     return {
         "defaultGpuIndex": settings.default_gpu_index,
         "idleTimeoutSeconds": settings.idle_timeout_seconds,
@@ -137,6 +174,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "vramBufferMb": settings.vram_buffer_mb,
         "vramPressureThresholdPct": settings.vram_pressure_threshold_pct,
         "maxInflightPerModel": settings.max_inflight_per_model,
+        "inferenceRequestTimeoutSeconds": settings.inference_request_timeout_seconds,
         "openaiAudioMaxPartSizeMb": settings.openai_audio_max_part_size_mb,
         "whisperStartupTimeoutSeconds": settings.whisper_startup_timeout_s,
         "logLevel": settings.log_level,
@@ -267,14 +305,22 @@ async def patch_config(
         settings.idle_timeout_seconds = int(payload["idle_timeout_seconds"])
         await _persist("idle_timeout_seconds", settings.idle_timeout_seconds)
     if "idle_eviction_check_interval_seconds" in payload:
-        settings.idle_eviction_check_interval_seconds = int(payload["idle_eviction_check_interval_seconds"])
-        await _persist("idle_eviction_check_interval_seconds", settings.idle_eviction_check_interval_seconds)
+        settings.idle_eviction_check_interval_seconds = int(
+            payload["idle_eviction_check_interval_seconds"]
+        )
+        await _persist(
+            "idle_eviction_check_interval_seconds", settings.idle_eviction_check_interval_seconds
+        )
     if "model_load_wait_timeout_seconds" in payload:
         settings.model_load_wait_timeout_s = int(payload["model_load_wait_timeout_seconds"])
         await _persist("model_load_wait_timeout_s", settings.model_load_wait_timeout_s)
     if "pressure_eviction_drain_timeout_seconds" in payload:
-        settings.pressure_eviction_drain_timeout_s = int(payload["pressure_eviction_drain_timeout_seconds"])
-        await _persist("pressure_eviction_drain_timeout_s", settings.pressure_eviction_drain_timeout_s)
+        settings.pressure_eviction_drain_timeout_s = int(
+            payload["pressure_eviction_drain_timeout_seconds"]
+        )
+        await _persist(
+            "pressure_eviction_drain_timeout_s", settings.pressure_eviction_drain_timeout_s
+        )
     if "vram_buffer_mb" in payload:
         settings.vram_buffer_mb = int(payload["vram_buffer_mb"])
         await _persist("vram_buffer_mb", settings.vram_buffer_mb)
@@ -284,6 +330,15 @@ async def patch_config(
     if "max_inflight_per_model" in payload:
         settings.max_inflight_per_model = max(0, int(payload["max_inflight_per_model"]))
         await _persist("max_inflight_per_model", settings.max_inflight_per_model)
+    if "inference_request_timeout_seconds" in payload:
+        settings.inference_request_timeout_seconds = max(
+            30,
+            int(payload["inference_request_timeout_seconds"]),
+        )
+        await _persist(
+            "inference_request_timeout_seconds",
+            settings.inference_request_timeout_seconds,
+        )
     if "openai_audio_max_part_size_mb" in payload:
         settings.openai_audio_max_part_size_mb = int(payload["openai_audio_max_part_size_mb"])
         await _persist("openai_audio_max_part_size_mb", settings.openai_audio_max_part_size_mb)
@@ -336,7 +391,9 @@ async def patch_config(
         await _persist("sglang_mem_fraction_static", settings.sglang_mem_fraction_static)
     if "sglang_context_length" in payload:
         settings.sglang_context_length = (
-            int(payload["sglang_context_length"]) if payload["sglang_context_length"] is not None else None
+            int(payload["sglang_context_length"])
+            if payload["sglang_context_length"] is not None
+            else None
         )
         await _persist("sglang_context_length", settings.sglang_context_length)
     if "sglang_disable_radix_cache" in payload:
@@ -447,7 +504,7 @@ async def patch_config(
     _SERVICE_PREFIXES = (
         ("hunyuan", "hunyuan"),
         ("comfyui", "comfyui"),
-        ("a1111",   "a1111"),
+        ("a1111", "a1111"),
         ("acestep", "acestep"),
         ("unsloth", "unsloth"),
     )
@@ -455,9 +512,9 @@ async def patch_config(
     for service_id, prefix in _SERVICE_PREFIXES:
         live: dict[str, int] = {}
         for short, suffix, kw in (
-            ("idle",  "idle_unload_seconds",        "idle_unload_after_seconds"),
-            ("grace", "generation_grace_period_s",  "generation_grace_period_s"),
-            ("gpu",   "preferred_gpu",              "preferred_gpu"),
+            ("idle", "idle_unload_seconds", "idle_unload_after_seconds"),
+            ("grace", "generation_grace_period_s", "generation_grace_period_s"),
+            ("gpu", "preferred_gpu", "preferred_gpu"),
         ):
             key = f"{prefix}_{suffix}"
             if key in payload:
@@ -473,7 +530,9 @@ async def patch_config(
                 logger.warning("service_runtime_config_missing", service_id=service_id)
 
     if "generation_gpu_util_threshold_pct" in payload:
-        settings.generation_gpu_util_threshold_pct = int(payload["generation_gpu_util_threshold_pct"])
+        settings.generation_gpu_util_threshold_pct = int(
+            payload["generation_gpu_util_threshold_pct"]
+        )
         await _persist(
             "generation_gpu_util_threshold_pct",
             settings.generation_gpu_util_threshold_pct,
@@ -504,7 +563,9 @@ async def sync_litellm(
     syncer = LiteLLMSync(model_manager)
     result = await syncer.sync_all()
 
-    return JSONResponse({
-        "synced_models": result.synced,
-        "errors": result.errors,
-    })
+    return JSONResponse(
+        {
+            "synced_models": result.synced,
+            "errors": result.errors,
+        }
+    )

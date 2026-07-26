@@ -13,6 +13,16 @@ from ocabra.config import settings
 logger = structlog.get_logger(__name__)
 
 
+class InferenceTimeoutError(TimeoutError):
+    """An inference worker exceeded the configured upstream timeout."""
+
+    def __init__(self, model_id: str, path: str, timeout_s: int) -> None:
+        self.model_id = model_id
+        self.path = path
+        self.timeout_s = timeout_s
+        super().__init__(f"Inference for model '{model_id}' timed out after {timeout_s}s")
+
+
 class WorkerPool:
     def __init__(self) -> None:
         self._backends: dict[str, BackendInterface] = {}
@@ -43,7 +53,9 @@ class WorkerPool:
             return body
         opts = dict(body.get("options") or {})
         current = opts.get("num_ctx")
-        opts["num_ctx"] = min(int(current), cap) if isinstance(current, int) and current > 0 else cap
+        opts["num_ctx"] = (
+            min(int(current), cap) if isinstance(current, int) and current > 0 else cap
+        )
         return {**body, "options": opts}
 
     def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
@@ -102,10 +114,22 @@ class WorkerPool:
         else:
             url = f"http://127.0.0.1:{worker.port}{path}"
         start = time.monotonic()
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(url, json=body)
-            resp.raise_for_status()
-            result = resp.json()
+        timeout_s = max(30, int(settings.inference_request_timeout_seconds))
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(float(timeout_s), connect=30.0)
+            ) as client:
+                resp = await client.post(url, json=body)
+                resp.raise_for_status()
+                result = resp.json()
+        except httpx.TimeoutException as exc:
+            logger.warning(
+                "inference_upstream_timeout",
+                model_id=model_id,
+                path=path,
+                timeout_s=timeout_s,
+            )
+            raise InferenceTimeoutError(model_id, path, timeout_s) from exc
         # Normalize reasoning → reasoning_content for chat completions
         if "/chat/completions" in path:
             for choice in result.get("choices", []):
@@ -146,11 +170,23 @@ class WorkerPool:
             # generation and free the GPU. Keep the per-request client + `async with`
             # here — a shared/persistent client or manual iteration would break this
             # and leak orphaned generations on abandoned (e.g. agentic) requests.
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                async with client.stream("POST", url, json=body) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
+            timeout_s = max(30, int(settings.inference_request_timeout_seconds))
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(float(timeout_s), connect=30.0)
+                ) as client:
+                    async with client.stream("POST", url, json=body) as resp:
+                        resp.raise_for_status()
+                        async for chunk in resp.aiter_bytes():
+                            yield chunk
+            except httpx.TimeoutException as exc:
+                logger.warning(
+                    "inference_upstream_stream_timeout",
+                    model_id=model_id,
+                    path=path,
+                    timeout_s=timeout_s,
+                )
+                raise InferenceTimeoutError(model_id, path, timeout_s) from exc
 
         # Normalize reasoning → reasoning_content for chat completions
         is_chat = "/chat/completions" in path
@@ -210,9 +246,13 @@ class WorkerPool:
                                 delta["reasoning_content"] = delta.pop("reasoning")
                                 changed = True
                         if changed:
-                            line = b"data: " + _json.dumps(
-                                payload, ensure_ascii=False,
-                            ).encode()
+                            line = (
+                                b"data: "
+                                + _json.dumps(
+                                    payload,
+                                    ensure_ascii=False,
+                                ).encode()
+                            )
                     except (_json.JSONDecodeError, KeyError, TypeError):
                         pass  # forward as-is
 
@@ -234,8 +274,7 @@ class WorkerPool:
         return [
             name
             for name, backend in self._backends.items()
-            if name not in self._disabled_backends
-            and modality in backend.supported_modalities()
+            if name not in self._disabled_backends and modality in backend.supported_modalities()
         ]
 
     def supports_modality(self, backend_name: str, modality: ModalityType) -> bool:

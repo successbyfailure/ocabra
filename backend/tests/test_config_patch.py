@@ -24,11 +24,13 @@ class TestServerConfigPatchSchema:
         """Known mutable fields are accepted."""
         patch = ServerConfigPatch.model_validate({
             "idleTimeoutSeconds": 300,
+            "inferenceRequestTimeoutSeconds": 900,
             "logLevel": "DEBUG",
             "vllmGpuMemoryUtilization": 0.85,
             "defaultGpuIndex": 0,
         })
         assert patch.idle_timeout_seconds == 300
+        assert patch.inference_request_timeout_seconds == 900
         assert patch.log_level == "DEBUG"
         assert patch.vllm_gpu_memory_utilization == 0.85
 
@@ -113,6 +115,24 @@ class TestPatchConfigRuntime:
             assert settings.log_level == "WARNING"
         finally:
             settings.log_level = previous
+
+    @pytest.mark.asyncio
+    async def test_inference_timeout_applied(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        previous = settings.inference_request_timeout_seconds
+
+        try:
+            patch = ServerConfigPatch.model_validate({
+                "inferenceRequestTimeoutSeconds": 1200,
+            })
+
+            with patch_db_and_schedules():
+                result = await config_api.patch_config(patch, request)
+
+            assert result["inferenceRequestTimeoutSeconds"] == 1200
+            assert settings.inference_request_timeout_seconds == 1200
+        finally:
+            settings.inference_request_timeout_seconds = previous
 
     @pytest.mark.asyncio
     async def test_litellm_admin_key_masked_not_overwritten(self):

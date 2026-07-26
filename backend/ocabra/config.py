@@ -215,10 +215,21 @@ class Settings(BaseSettings):
     realtime_default_tts_model: str = ""
 
     # 11.4: Busy timeout for individual requests
+    inference_request_timeout_seconds: int = Field(
+        default=900,
+        ge=30,
+        description=(
+            "Max seconds to wait for an inference upstream before cancelling "
+            "the connection and returning HTTP 504."
+        ),
+    )
     busy_timeout_seconds: int = Field(
         default=300,
         ge=30,
-        description="Max seconds for a single request before the model is marked ERROR.",
+        description=(
+            "Watchdog threshold for a busy request. The effective value is never "
+            "shorter than inference_request_timeout_seconds plus a safety margin."
+        ),
     )
     busy_timeout_action: str = Field(
         default="mark_error",
@@ -371,7 +382,12 @@ class Settings(BaseSettings):
         default=4, ge=1, description="Max concurrent requests dispatched per batch."
     )
     batch_request_timeout_seconds: int = Field(
-        default=600, ge=10, description="Per-request timeout when dispatching batch lines."
+        default=960,
+        ge=10,
+        description=(
+            "Per-request timeout when dispatching batch lines. The effective "
+            "value is kept above the upstream inference timeout."
+        ),
     )
     batch_poll_interval_seconds: int = Field(
         default=5, ge=2, description="How often the batch processor polls for pending batches."
