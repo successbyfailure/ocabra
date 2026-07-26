@@ -74,7 +74,10 @@ def main() -> None:
     if args.threads is not None:
         cmd.extend(["--threads", str(args.threads)])
     if args.flash_attn:
-        cmd.append("--flash-attn")
+        # Newer llama-server takes a value: --flash-attn on|off|auto (a bare
+        # flag consumes the next arg as its value and aborts). Older builds
+        # accepted the bare form; "on" is understood by both.
+        cmd.extend(["--flash-attn", "on"])
     if args.mlock:
         cmd.append("--mlock")
     if args.embedding:

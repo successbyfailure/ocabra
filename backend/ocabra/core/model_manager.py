@@ -731,19 +731,48 @@ class ModelManager:
 
                 # Pre-load: try to evict LRU models if VRAM is insufficient
                 if gpu_managed and self._gpu_manager and gpu_indices:
-                    for gpu_idx in gpu_indices:
-                        available = await self._gpu_manager.get_free_vram(gpu_idx)
-                        if vram_needed > available:
-                            freed = await self._evict_for_space(
-                                gpu_idx, vram_needed - available
-                            )
-                            if freed < (vram_needed - available):
+                    if len(gpu_indices) > 1:
+                        # Tensor-parallel: llama.cpp --tensor-split / vLLM TP shard
+                        # the model across GPUs (proportional to VRAM), so no single
+                        # GPU holds the whole model. The scheduler already admitted
+                        # this split against the COMBINED free VRAM, so verify (and
+                        # evict toward) the total across the assigned GPUs — checking
+                        # the full ``vram_needed`` against each GPU would wrongly
+                        # reject on the smallest card.
+                        available_total = 0
+                        for gpu_idx in gpu_indices:
+                            available_total += await self._gpu_manager.get_free_vram(gpu_idx)
+                        if vram_needed > available_total:
+                            deficit = vram_needed - available_total
+                            freed_total = 0
+                            for gpu_idx in gpu_indices:
+                                if freed_total >= deficit:
+                                    break
+                                freed_total += await self._evict_for_space(
+                                    gpu_idx, deficit - freed_total
+                                )
+                            if freed_total < deficit:
                                 from ocabra.core.scheduler import InsufficientVRAMError
 
                                 raise InsufficientVRAMError(
-                                    f"GPU {gpu_idx}: need {vram_needed} MB, "
-                                    f"only {available + freed} MB available after eviction"
+                                    f"Tensor-parallel across GPUs {gpu_indices}: need "
+                                    f"{vram_needed} MB, only {available_total + freed_total} MB "
+                                    "free combined after eviction"
                                 )
+                    else:
+                        for gpu_idx in gpu_indices:
+                            available = await self._gpu_manager.get_free_vram(gpu_idx)
+                            if vram_needed > available:
+                                freed = await self._evict_for_space(
+                                    gpu_idx, vram_needed - available
+                                )
+                                if freed < (vram_needed - available):
+                                    from ocabra.core.scheduler import InsufficientVRAMError
+
+                                    raise InsufficientVRAMError(
+                                        f"GPU {gpu_idx}: need {vram_needed} MB, "
+                                        f"only {available + freed} MB available after eviction"
+                                    )
 
                 # vLLM checks against a fraction of total VRAM, not only model weights.
                 if state.backend_type == "vllm" and self._gpu_manager:

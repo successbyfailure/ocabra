@@ -108,7 +108,23 @@ def estimate_llama_cpp_vram_from_config(
     # KV-aware path: read the architecture straight from the GGUF header.
     arch = arch_from_gguf(str(model_path)) if model_path else None
     if arch is not None:
-        est = plan_llama_cpp_vram_mb(arch, size_mb, ctx_size, gpu_layers=gpu_layers)
+        # Size the KV cache to the configured cache_type (quantized KV halves/
+        # quarters the footprint). Without this the estimate always assumes f16
+        # and over-reserves ~2x, wrongly rejecting q8 long-context loads.
+        cache_type = str(
+            resolve_llama_cpp_option(state, "cache_type_k", None)
+            or resolve_llama_cpp_option(state, "cache_type_v", None)
+            or "f16"
+        ).lower()
+        kv_dtype_bytes = {
+            "f16": 2.0, "fp16": 2.0, "bf16": 2.0,
+            "q8_0": 1.0, "q8": 1.0,
+            "q5_0": 0.65, "q5_1": 0.65,
+            "q4_0": 0.5, "q4_1": 0.5, "q4": 0.5, "iq4_nl": 0.5,
+        }.get(cache_type, 2.0)
+        est = plan_llama_cpp_vram_mb(
+            arch, size_mb, ctx_size, gpu_layers=gpu_layers, kv_dtype_bytes=kv_dtype_bytes
+        )
         if est > 0:
             return est
 
