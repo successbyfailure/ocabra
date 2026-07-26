@@ -120,12 +120,33 @@ class OllamaBackend(BackendInterface):
                             tools = family.lower() in _tool_families
                         if "vl" in family or "vision" in family or "llava" in family:
                             vision = True
-                    # Extract context length from model_info or parameters
+                    # Report the EFFECTIVE served context, not the native one.
+                    # Native comes from model_info; the actual window is the
+                    # Modelfile ``num_ctx`` PARAMETER when baked (e.g. our
+                    # ``-ctx*`` variants), else Ollama's default
+                    # (OLLAMA_CONTEXT_LENGTH), capped at native. Reporting native
+                    # here made clients send more context than the model serves
+                    # → silent truncation (the whole -ctx-variant saga).
                     model_info = data.get("model_info", {})
+                    native_ctx = 0
                     for key, val in model_info.items():
                         if "context_length" in key and isinstance(val, (int, float)):
-                            context_length = int(val)
+                            native_ctx = int(val)
                             break
+                    baked_ctx = None
+                    params = data.get("parameters", "")
+                    if isinstance(params, str):
+                        for line in params.splitlines():
+                            parts = line.split()
+                            if len(parts) >= 2 and parts[0] == "num_ctx":
+                                try:
+                                    baked_ctx = int(parts[1])
+                                except ValueError:
+                                    pass
+                    effective_ctx = baked_ctx or settings.ollama_default_num_ctx
+                    if native_ctx > 0:
+                        effective_ctx = min(effective_ctx, native_ctx)
+                    context_length = effective_ctx
         except Exception as exc:
             logger.debug("ollama_show_failed", model_id=model_id, error=str(exc))
 

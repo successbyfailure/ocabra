@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
     ollama_keep_alive: str = "30m"
     ollama_inventory_sync_interval_seconds: int = 15
+    # Ollama's default context window (OLLAMA_CONTEXT_LENGTH on the ollama
+    # container). Used to report the EFFECTIVE served context for models that
+    # don't bake a ``num_ctx`` PARAMETER in their Modelfile. Keep in sync with
+    # the value set on the ollama service in docker-compose.yml.
+    ollama_default_num_ctx: int = 65536
     # When set, the local scanner reads Ollama's manifest/blob store
     # (typically mounted at /data/ollama_models when ./data/ollama_models
     # maps to the host's Ollama models dir) and surfaces each pulled model

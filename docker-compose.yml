@@ -170,6 +170,15 @@ services:
       # model balloons past VRAM and spills to CPU (measured: qwen3:4b 0.95s→8s).
       # Raising this only pays off alongside a much smaller per-model num_ctx.
       OLLAMA_NUM_PARALLEL: "1"
+      # KV cache en q8_0 (mitad de VRAM de KV, ~sin pérdida de calidad) para
+      # servir contexto largo (256K) en modelos coder. La cuantización del KV
+      # en llama.cpp REQUIERE flash attention activado.
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: "q8_0"
+      # Default context para modelos SIN num_ctx horneado (antes 32k por
+      # defecto de Ollama). oCabra lo refleja vía settings.ollama_default_num_ctx
+      # para reportar el context_length efectivo correcto en /v1/models.
+      OLLAMA_CONTEXT_LENGTH: "65536"
     volumes:
       - /docker/ai-models/ollama:/root/.ollama
     ports:
