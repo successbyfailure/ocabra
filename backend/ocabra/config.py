@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     cuda_device_order: str = "PCI_BUS_ID"
     # Runtime-stability knobs for vLLM on mixed consumer GPUs.
     vllm_enforce_eager: bool = True
+    # FlashInfer's sampler is optional. Keep it disabled by default because
+    # its runtime CUDA JIT is more fragile than vLLM's native sampler in the
+    # modular, wheel-based CUDA environment.
+    vllm_use_flashinfer_sampler: bool = False
+    # Persist AOT graphs and startup plans across API container recreation.
+    vllm_cache_root: str = "/data/backends/vllm/cache"
     # Leave unset by default; vLLM will auto-pick a backend supported by runtime.
     vllm_attention_backend: str | None = None
     # Reuse KV cache for repeated prompt prefixes and shared system prompts.
@@ -77,6 +83,7 @@ class Settings(BaseSettings):
     vllm_max_num_seqs: int | None = 16
     vllm_max_num_batched_tokens: int | None = 8192
     vllm_tensor_parallel_size: int | None = None
+    vllm_pipeline_parallel_size: int | None = None
     vllm_max_model_len: int | None = None
     vllm_model_impl: str | None = None
     vllm_runner: str | None = None
@@ -386,9 +393,7 @@ class Settings(BaseSettings):
     federation_node_id: str = Field(
         default="", description="Unique identifier for this node (auto-generated if empty)"
     )
-    federation_node_name: str = Field(
-        default="", description="Human-readable name for this node"
-    )
+    federation_node_name: str = Field(default="", description="Human-readable name for this node")
     federation_heartbeat_interval: int = Field(
         default=30, ge=5, description="Seconds between heartbeat polls to peers"
     )

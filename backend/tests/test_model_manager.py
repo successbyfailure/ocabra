@@ -32,6 +32,7 @@ def model_manager(worker_pool):
 async def add_test_model(mm, model_id="test/model", load_policy="on_demand"):
     """Helper: add a model bypassing DB."""
     from ocabra.core.model_manager import ModelState
+
     mm._states[model_id] = ModelState(
         model_id=model_id,
         display_name=model_id,
@@ -45,8 +46,10 @@ async def add_test_model(mm, model_id="test/model", load_policy="on_demand"):
 @pytest.mark.asyncio
 async def test_load_model_full_cycle(model_manager):
     """CONFIGURED → LOADED → UNLOADED cycle."""
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         await add_test_model(model_manager)
 
         state = await model_manager.load("test/model")
@@ -63,8 +66,10 @@ async def test_load_model_full_cycle(model_manager):
 
 @pytest.mark.asyncio
 async def test_load_records_model_load_stat(model_manager):
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         await add_test_model(model_manager)
 
         state = await model_manager.load("test/model")
@@ -86,9 +91,11 @@ async def test_pin_policy_loads_on_start(worker_pool):
     """Models with load_policy=pin are loaded automatically on start()."""
     mm = ModelManager(worker_pool)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
-         patch.object(mm, "_load_configs_from_db", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_load_configs_from_db", new=AsyncMock()),
+    ):
         await add_test_model(mm, load_policy="pin")
         await mm.start()
         await asyncio.sleep(0.1)  # let the task run
@@ -98,11 +105,31 @@ async def test_pin_policy_loads_on_start(worker_pool):
 
 
 @pytest.mark.asyncio
+async def test_warm_policy_stays_lazy_on_start(worker_pool):
+    """Warm models load on demand; only pin preloads during start()."""
+    mm = ModelManager(worker_pool)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_load_configs_from_db", new=AsyncMock()),
+    ):
+        await add_test_model(mm, load_policy="warm")
+        await mm.start()
+        await asyncio.sleep(0.1)
+
+        state = await mm.get_state("test/model")
+        assert state.status == ModelStatus.CONFIGURED
+
+
+@pytest.mark.asyncio
 async def test_idle_eviction(model_manager):
     """on_demand model idle > timeout is evicted."""
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
-         patch.object(model_manager._worker_pool._backends["mock"], "unload", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(model_manager._worker_pool._backends["mock"], "unload", new=AsyncMock()),
+    ):
         state = await add_test_model(model_manager, load_policy="on_demand")
         state.status = ModelStatus.LOADED
         state.last_request_at = datetime.now(timezone.utc) - timedelta(seconds=999)
@@ -129,8 +156,10 @@ async def test_concurrent_load_only_loads_once(model_manager):
 
     model_manager._worker_pool._backends["mock"].load = counting_load
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         await add_test_model(model_manager)
         await asyncio.gather(
             model_manager.load("test/model"),
@@ -184,8 +213,10 @@ async def test_background_task_failure_is_logged(model_manager, monkeypatch):
 async def test_touch_last_request_at_persists_timestamp(model_manager):
     now = datetime.now(timezone.utc)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()) as set_key_mock:
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()) as set_key_mock,
+    ):
         state = await add_test_model(model_manager)
         await model_manager.touch_last_request_at("test/model", now)
 
@@ -203,7 +234,10 @@ async def test_hydrate_last_request_at_from_redis_restores_timestamp(model_manag
     state = await add_test_model(model_manager)
     state.last_request_at = None
 
-    with patch("ocabra.core.model_manager.get_key", new=AsyncMock(return_value={"last_request_at": now.isoformat()})):
+    with patch(
+        "ocabra.core.model_manager.get_key",
+        new=AsyncMock(return_value={"last_request_at": now.isoformat()}),
+    ):
         await model_manager._hydrate_last_request_at_from_redis()
 
     assert state.last_request_at == now
@@ -226,8 +260,10 @@ async def test_load_passes_model_extra_config_to_backend():
     wp.register_backend("portreq", backend)
     mm = ModelManager(wp)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         from ocabra.core.model_manager import ModelState
 
         mm._states["test/overrides"] = ModelState(
@@ -248,9 +284,11 @@ async def test_load_passes_model_extra_config_to_backend():
 async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
     mm = ModelManager(worker_pool, gpu_scheduler=AsyncMock())
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
-         patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "unload", new=AsyncMock()) as unload_mock,
+    ):
         requested = await add_test_model(mm, model_id="test/requested")
         candidate = await add_test_model(mm, model_id="test/candidate", load_policy="on_demand")
         candidate.status = ModelStatus.LOADED
@@ -403,10 +441,12 @@ async def test_vllm_load_uses_model_gpu_memory_utilization_for_headroom():
 
     mm = ModelManager(wp, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()), \
-         patch.object(mm, "_record_model_load_stat", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.settings.vllm_gpu_memory_utilization", 0.9):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+        patch("ocabra.core.model_manager.settings.vllm_gpu_memory_utilization", 0.9),
+    ):
         mm._states["vllm/BAAI/bge-reranker-v2-m3"] = ModelState(
             model_id="vllm/BAAI/bge-reranker-v2-m3",
             display_name="bge-reranker-v2-m3",
@@ -439,8 +479,10 @@ async def test_load_assigns_port_for_backend_that_requires_it():
     wp.register_backend("portreq", backend)
     mm = ModelManager(wp)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         from ocabra.core.model_manager import ModelState
 
         mm._states["test/port-required"] = ModelState(
@@ -458,6 +500,7 @@ async def test_load_assigns_port_for_backend_that_requires_it():
     worker = wp.get_worker("test/port-required")
     assert worker is not None
     assert worker.port == backend.received_port
+
 
 class _BitnetPortBackend(BackendInterface):
     def __init__(self) -> None:
@@ -506,8 +549,10 @@ async def test_bitnet_cpu_only_skips_gpu_assignment_but_keeps_port():
     scheduler.find_gpu_for_model = AsyncMock(return_value=[1])
     mm = ModelManager(wp, gpu_scheduler=scheduler)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         from ocabra.core.model_manager import ModelState
 
         mm._states["test/bitnet-cpu"] = ModelState(
@@ -536,8 +581,10 @@ async def test_bitnet_gpu_layers_uses_extra_config_for_scheduling():
     scheduler.find_gpu_for_model = AsyncMock(return_value=[1])
     mm = ModelManager(wp, gpu_scheduler=scheduler)
 
-    with patch("ocabra.core.model_manager.publish", new=AsyncMock()), \
-         patch("ocabra.core.model_manager.set_key", new=AsyncMock()):
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
         from ocabra.core.model_manager import ModelState
 
         mm._states["test/bitnet-gpu"] = ModelState(

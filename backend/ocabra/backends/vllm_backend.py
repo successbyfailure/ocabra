@@ -29,7 +29,6 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
-from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
 
@@ -61,14 +60,41 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
     "Gemma3ForCausalLM": {"chat": True, "tools": True},
     "Gemma3ForConditionalGeneration": {"chat": True, "tools": True, "vision": True},
     "Gemma3nForCausalLM": {"chat": True, "tools": True},
-    "Gemma3nForConditionalGeneration": {"chat": True, "tools": True, "vision": True, "audio_input": True},
+    "Gemma3nForConditionalGeneration": {
+        "chat": True,
+        "tools": True,
+        "vision": True,
+        "audio_input": True,
+    },
     "Gemma4ForCausalLM": {"chat": True, "tools": True, "reasoning": True},
     "Gemma4ForConditionalGeneration": {
-        "chat": True, "tools": True, "reasoning": True, "vision": True, "audio_input": True
+        "chat": True,
+        "tools": True,
+        "reasoning": True,
+        "vision": True,
+        "audio_input": True,
+    },
+    "Gemma4UnifiedForConditionalGeneration": {
+        "chat": True,
+        "tools": True,
+        "reasoning": True,
+        "vision": True,
+        "audio_input": True,
     },
     "NemotronHForCausalLM": {"chat": True, "tools": True, "reasoning": True},
     "Qwen3_5MoeForConditionalGeneration": {
-        "chat": True, "tools": True, "reasoning": True, "vision": True, "video_input": True
+        "chat": True,
+        "tools": True,
+        "reasoning": True,
+        "vision": True,
+        "video_input": True,
+    },
+    "Qwen3_5ForConditionalGeneration": {
+        "chat": True,
+        "tools": True,
+        "reasoning": True,
+        "vision": True,
+        "video_input": True,
     },
     "Qwen2ForCausalLM": {"chat": True, "tools": True},
     "Qwen2MoeForCausalLM": {"chat": True, "tools": True},
@@ -122,18 +148,16 @@ class VLLMBackend(BackendInterface):
                 "g++",
             ],
             pip_packages=[
-                "vllm==0.19.1",
-                "torch>=2.5",
-                # transformers 5.7 is required to recognise model_type "gemma4";
-                # ships with tokenizers 0.23.0rc0 which can read the new
-                # tokenizer.json layout used by Gemma 4 / Qwen3.6 repos.
-                "transformers>=5.7",
+                "vllm==0.26.0",
+                # vLLM 0.26 uses CUDA 13.0 wheels. Without this pin pip selects
+                # mismatched compiler components that emit a newer PTX ISA.
+                "nvidia-cuda-nvcc==13.0.88",
+                "nvidia-nvvm==13.0.88",
+                "nvidia-cuda-crt==13.0.88",
                 "sentencepiece>=0.2",
             ],
-            pip_extra_index_urls=[
-                "https://download.pytorch.org/whl/cu124",
-            ],
-            estimated_size_mb=9500,
+            pip_extra_index_urls=[],
+            estimated_size_mb=11000,
             display_name="vLLM",
             description="High-throughput LLM inference engine with PagedAttention",
             tags=["LLM", "GPU", "CUDA"],
@@ -273,8 +297,7 @@ class VLLMBackend(BackendInterface):
 
     def _get_vllm_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
         camel_key = "".join(
-            part.capitalize() if index else part
-            for index, part in enumerate(key.split("_"))
+            part.capitalize() if index else part for index, part in enumerate(key.split("_"))
         )
         vllm_config = extra_config.get("vllm")
         if isinstance(vllm_config, dict):
@@ -475,26 +498,87 @@ class VLLMBackend(BackendInterface):
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "HF_HOME": settings.hf_cache_dir,
         }
+        # Long chunked prefills can otherwise fail despite sufficient total
+        # free VRAM because PyTorch holds the needed block in a fragmented
+        # reserved segment. Respect an explicit operator override.
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         if settings.hf_token:
             env["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
 
         # Slim image has no CUDA toolkit; the loader needs the bundled CUDA
         # libs (libcublas/libcudart/...) on LD_LIBRARY_PATH (Deuda D14).
-        nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "vllm")
+        python_bin = self._resolve_python_bin()
+        site_packages = self._venv_site_packages(python_bin)
+        nvidia_ld = self._nvidia_ld_library_path(site_packages)
         if nvidia_ld:
             existing = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
-        # vLLM 0.19+ pulls flashinfer for prefill on hybrid models (NemotronH,
-        # Qwen3.5MoE). flashinfer JIT-compiles kernels at runtime via nvcc.
-        # If the slim image has cuda-nvcc-12-4 installed, expose it.
-        cuda_home = "/usr/local/cuda"
-        if Path(cuda_home).exists() and Path(f"{cuda_home}/bin/nvcc").exists():
+        # vLLM 0.26 ships a unified CUDA 13 toolkit under nvidia/cu13. Resolve
+        # it from the selected interpreter rather than the stable backend
+        # directory so an atomically promoted candidate environment works.
+        cuda_home = self._cuda_home(site_packages)
+        if cuda_home:
             env["CUDA_HOME"] = cuda_home
             existing_path = env.get("PATH", os.environ.get("PATH", ""))
             env["PATH"] = f"{cuda_home}/bin:{existing_path}"
 
+        use_flashinfer_sampler = self._get_vllm_option(
+            extra_config,
+            "use_flashinfer_sampler",
+            self._get_setting("vllm_use_flashinfer_sampler"),
+        )
+        env["VLLM_USE_FLASHINFER_SAMPLER"] = "1" if use_flashinfer_sampler else "0"
+        cache_root = self._get_setting("vllm_cache_root")
+        if cache_root:
+            env["VLLM_CACHE_ROOT"] = str(cache_root)
+
         return cmd, env, cuda_devices
+
+    @staticmethod
+    def _venv_site_packages(python_bin: str) -> Path | None:
+        """Locate site-packages without resolving the venv's Python symlink."""
+
+        venv_root = Path(python_bin).parent.parent
+        matches = sorted((venv_root / "lib").glob("python*/site-packages"))
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _nvidia_ld_library_path(site_packages: Path | None) -> str:
+        if site_packages is None:
+            return ""
+        nvidia_root = site_packages / "nvidia"
+        if not nvidia_root.is_dir():
+            return ""
+        paths = sorted(str(path) for path in nvidia_root.glob("*/lib") if path.is_dir())
+        return ":".join(paths)
+
+    @staticmethod
+    def _cuda_home(site_packages: Path | None) -> str | None:
+        if site_packages is not None:
+            bundled = site_packages / "nvidia" / "cu13"
+            if (bundled / "bin" / "nvcc").is_file() and (bundled / "include").is_dir():
+                # CUDA 13 wheels use ``lib/`` and only ship the versioned
+                # libcudart soname. FlashInfer's JIT expects the traditional
+                # toolkit layout (``lib64/libcudart.so``).
+                lib_dir = bundled / "lib"
+                try:
+                    lib64 = bundled / "lib64"
+                    if lib_dir.is_dir() and not lib64.exists():
+                        lib64.symlink_to("lib", target_is_directory=True)
+                    libcudart = lib_dir / "libcudart.so"
+                    versioned = sorted(lib_dir.glob("libcudart.so.*"))
+                    if not libcudart.exists() and versioned:
+                        libcudart.symlink_to(versioned[-1].name)
+                except OSError:
+                    # Return the detected toolkit and let the JIT report any
+                    # read-only or incomplete installation explicitly.
+                    pass
+                return str(bundled)
+        system = Path("/usr/local/cuda")
+        if (system / "bin" / "nvcc").is_file():
+            return str(system)
+        return None
 
     def _encode_vllm_json_option(self, value: Any) -> str:
         if isinstance(value, str):
@@ -649,9 +733,11 @@ class VLLMBackend(BackendInterface):
         # the backend-stripped id (e.g. "palmfuture/Qwen3.6-..."); the DB row
         # is stored with the "vllm/" prefix.
         try:
-            from ocabra.db.model_config import ModelConfig
-            from ocabra.database import AsyncSessionLocal
             import sqlalchemy as sa
+
+            from ocabra.database import AsyncSessionLocal
+            from ocabra.db.model_config import ModelConfig
+
             async with AsyncSessionLocal() as session:
                 row = await session.execute(
                     sa.select(ModelConfig).where(ModelConfig.model_id == f"vllm/{model_id}")
@@ -782,7 +868,7 @@ class VLLMBackend(BackendInterface):
             return
         try:
             await asyncio.wait_for(proc.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 if pgid is not None:
                     os.killpg(pgid, signal.SIGKILL)
@@ -828,8 +914,12 @@ class VLLMBackend(BackendInterface):
         )
         maximum_concurrency = float(concurrency_match.group(2)) if concurrency_match else None
         return {
-            "model_loading_memory_mb": int(model_loading_gib * 1024) if model_loading_gib is not None else None,
-            "available_kv_cache_mb": int(available_kv_gib * 1024) if available_kv_gib is not None else None,
+            "model_loading_memory_mb": int(model_loading_gib * 1024)
+            if model_loading_gib is not None
+            else None,
+            "available_kv_cache_mb": int(available_kv_gib * 1024)
+            if available_kv_gib is not None
+            else None,
             "gpu_kv_cache_tokens": gpu_kv_tokens,
             "estimated_max_model_len": max_context,
             "requested_context_length": requested_context,

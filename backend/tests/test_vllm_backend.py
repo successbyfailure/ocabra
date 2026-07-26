@@ -98,6 +98,54 @@ class TestGetCapabilities:
         assert caps.chat is True
 
     @pytest.mark.asyncio
+    async def test_gemma4_unified_capabilities(self, tmp_model_dir: Path):
+        _make_model(
+            tmp_model_dir,
+            "mattbucci/gemma-4-12B-AWQ",
+            {
+                "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+                "max_position_embeddings": 262144,
+            },
+        )
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("mattbucci/gemma-4-12B-AWQ")
+
+        assert caps.chat is True
+        assert caps.tools is True
+        assert caps.reasoning is True
+        assert caps.vision is True
+        assert caps.context_length == 262144
+
+    @pytest.mark.asyncio
+    async def test_qwen35_capabilities(self, tmp_model_dir: Path):
+        _make_model(
+            tmp_model_dir,
+            "cyankiwi/Qwen3.5-27B-AWQ-4bit",
+            {
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "max_position_embeddings": 262144,
+            },
+        )
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("cyankiwi/Qwen3.5-27B-AWQ-4bit")
+
+        assert caps.chat is True
+        assert caps.tools is True
+        assert caps.reasoning is True
+        assert caps.vision is True
+        assert caps.context_length == 262144
+
+    @pytest.mark.asyncio
     async def test_embedding_model(self, tmp_model_dir: Path):
         _make_model(
             tmp_model_dir,
@@ -372,6 +420,8 @@ class TestLoadUnload:
             mock_settings.vllm_enable_chunked_prefill = None
             mock_settings.vllm_kv_cache_dtype = "fp8"
             mock_settings.vllm_enforce_eager = False
+            mock_settings.vllm_use_flashinfer_sampler = False
+            mock_settings.vllm_cache_root = "/data/backends/vllm/cache"
             mock_settings.vllm_attention_backend = None
             backend = VLLMBackend()
             await backend.load("test-llm", gpu_indices=[1], port=18001)
@@ -388,6 +438,10 @@ class TestLoadUnload:
         assert "--kv-cache-dtype" in cmd
         assert "fp8" in cmd
         assert "--enforce-eager" not in cmd
+        env = create_subprocess.await_args.kwargs["env"]
+        assert env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
+        assert env["VLLM_CACHE_ROOT"] == "/data/backends/vllm/cache"
+        assert env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
 
     @pytest.mark.asyncio
     async def test_load_prefers_model_vllm_overrides(self, tmp_model_dir: Path):
@@ -416,6 +470,8 @@ class TestLoadUnload:
             mock_settings.vllm_enable_chunked_prefill = None
             mock_settings.vllm_kv_cache_dtype = "fp8"
             mock_settings.vllm_enforce_eager = False
+            mock_settings.vllm_use_flashinfer_sampler = False
+            mock_settings.vllm_cache_root = "/data/backends/vllm/cache"
             mock_settings.vllm_attention_backend = None
             backend = VLLMBackend()
             await backend.load(
@@ -675,6 +731,28 @@ class TestHealthCheck:
         backend = VLLMBackend()
         result = await backend.health_check("ghost-model")
         assert result is False
+
+
+def test_cuda_home_prepares_flashinfer_compatible_layout(tmp_path: Path):
+    from ocabra.backends.vllm_backend import VLLMBackend
+
+    site_packages = tmp_path / "site-packages"
+    cuda_home = site_packages / "nvidia" / "cu13"
+    (cuda_home / "bin").mkdir(parents=True)
+    (cuda_home / "include").mkdir()
+    (cuda_home / "lib").mkdir()
+    (cuda_home / "bin" / "nvcc").touch()
+    (cuda_home / "lib" / "libcudart.so.13").touch()
+
+    resolved = VLLMBackend._cuda_home(site_packages)
+
+    assert resolved == str(cuda_home)
+    assert (cuda_home / "lib64").is_symlink()
+    assert (cuda_home / "lib64").resolve() == (cuda_home / "lib").resolve()
+    assert (cuda_home / "lib" / "libcudart.so").is_symlink()
+    assert (cuda_home / "lib" / "libcudart.so").resolve() == (
+        cuda_home / "lib" / "libcudart.so.13"
+    ).resolve()
 
 
 class TestModelPathResolution:

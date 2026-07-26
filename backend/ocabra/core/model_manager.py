@@ -470,10 +470,9 @@ class ModelManager:
         await self._hydrate_last_request_at_from_redis()
         for model_id, state in self._states.items():
             # PIN: always preload, never evictable.
-            # WARM: preload at boot so the first request doesn't pay cold-start.
-            #       Still evictable under VRAM pressure (auto_reload brings it
-            #       back). ON_DEMAND stays lazy.
-            if state.load_policy in (LoadPolicy.PIN, LoadPolicy.WARM):
+            # WARM: load on first request and then keep resident until VRAM
+            # pressure requires eviction. ON_DEMAND also stays lazy.
+            if state.load_policy == LoadPolicy.PIN:
                 logger.info(
                     "auto_loading_managed_model",
                     model_id=model_id,

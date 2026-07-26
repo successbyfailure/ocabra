@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-04-25
+Última actualización: 2026-07-26
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -360,6 +360,44 @@ cb3f61b, 727987a).
 
 ---
 
+## 🔬 Investigación pendiente — vLLM sleep mode
+
+Evaluar cómo integrar `--enable-sleep-mode` de vLLM con el ciclo de vida de
+oCabra para reducir la latencia de reactivación sin mantener toda la VRAM
+ocupada.
+
+- Definir estados y transiciones `loaded → sleeping → loaded`, diferenciándolos
+  de `unloaded`; actualizar contratos, API interna, eventos WebSocket y UI si se
+  adopta un estado nuevo.
+- Comparar sleep level 1 (pesos en RAM, KV descartada) y level 2 (memoria GPU
+  descartada) frente a descarga/carga completa.
+- Integrarlo con políticas `warm`, `on_demand`, evicción por presión, watchdog,
+  health checks, auto-reload y workers compartidos por perfil.
+- Medir VRAM/RAM liberada, tiempo de sleep/wake, primera respuesta tras wake y
+  comportamiento con peticiones en curso.
+- Validar que los endpoints sleep/wake del servidor vLLM 0.26.0 sean estables y
+  restringirlos a llamadas internas.
+- Criterio de decisión: adoptar sleep mode solo si libera VRAM suficiente para
+  otro modelo y reduce claramente el tiempo de reactivación respecto a la carga
+  en frío, sin introducir pérdida de peticiones ni estados inconsistentes.
+
+---
+
+## 🔬 Investigación pendiente — speculative en Nemotron-H híbrido
+
+Revalidar speculative decoding para Nemotron 3 Nano cuando vLLM publique una
+corrección para el estado Mamba con tokens especulativos:
+
+- `ngram_gpu` de vLLM 0.26.0 carga, pero la primera inferencia termina el engine
+  con una aserción en `mamba_mixer2.py`.
+- `nemotron_h_mtp` requiere un checkpoint con pesos MTP; el Nano AWQ desplegado
+  no contiene `mtp_num_layers` ni `num_nextn_predict_layers`.
+- Mantener `speculative_config` disponible en el backend para modelos
+  compatibles, pero no activarlo en esta receta hasta superar inferencia,
+  calidad y benchmark sostenido.
+
+---
+
 ## Orden de ejecución
 
 ```
@@ -379,6 +417,8 @@ cb3f61b, 727987a).
 [🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
 [🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
 [✅ Hecho]    Bloque 17 — llama.cpp loader parity (4 sprints; pendiente wiring scanner→DB del tokenizer fingerprint)
+[Pendiente]   Investigación e integración de vLLM sleep mode
+[Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
