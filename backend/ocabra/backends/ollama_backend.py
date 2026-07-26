@@ -158,6 +158,14 @@ class OllamaBackend(BackendInterface):
         except Exception as exc:
             logger.debug("ollama_show_failed", model_id=model_id, error=str(exc))
 
+        # Embedding models never chat/tool-call/reason — the family heuristic
+        # (e.g. qwen3-embedding matching the qwen3 tool family) would otherwise
+        # advertise tools=True on a pure embedder.
+        if embeds:
+            tools = False
+            reasoning = False
+            vision = False
+
         caps = BackendCapabilities(
             chat=not embeds,
             completion=not embeds,
