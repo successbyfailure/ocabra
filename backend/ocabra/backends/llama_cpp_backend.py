@@ -336,14 +336,15 @@ class LlamaCppBackend(BackendInterface):
         except Exception:
             return False
 
-    async def _template_supports_tools(self, model_id: str) -> bool | None:
-        """Whether the loaded model's chat template accepts ``tools``.
+    async def _template_caps(self, model_id: str) -> dict | None:
+        """Read tool + reasoning support from the loaded model's chat template.
 
         Authoritative source (a fine-tune's repo name is unreliable — e.g.
-        ``RavenX-CyberAgent`` is a Qwen3 tool-caller): llama-server's ``/props``
-        exposes the Jinja chat template; if it branches on ``tools`` / emits
-        ``tool_calls`` the model can do tool calling. Returns None when the
-        worker isn't queryable so the caller falls back to the name heuristic.
+        ``RavenX-CyberAgent`` is a Qwen3 reasoning tool-caller): llama-server's
+        ``/props`` exposes the Jinja chat template. Tool calling shows up as
+        ``tool_calls`` branches; reasoning models emit ``<think>`` blocks.
+        Returns None when the worker isn't queryable so the caller falls back to
+        the name heuristic.
         """
         entry = self._processes.get(model_id)
         if not entry:
@@ -359,7 +360,12 @@ class LlamaCppBackend(BackendInterface):
             return None
         if not template:
             return None
-        return any(marker in template for marker in ("tool_call", "tool_calls", "tools"))
+        return {
+            "tools": any(m in template for m in ("tool_call", "tool_calls", "tools")),
+            "reasoning": any(
+                m in template for m in ("<think>", "</think>", "reasoning_content")
+            ),
+        }
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         options = self._model_configs.get(model_id, {})
@@ -368,14 +374,21 @@ class LlamaCppBackend(BackendInterface):
             token in normalized for token in ("embed", "embedding", "bge", "e5")
         )
         vision = any(token in normalized for token in ("llava", "vision", "minicpmv", "vl"))
-        reasoning = any(token in normalized for token in ("deepseek-r1", "qwen3", "reason"))
+        reasoning = any(
+            token in normalized
+            for token in (
+                "deepseek-r1", "deepseek-v3", "qwen3", "qwq", "-r1", "reason",
+                "cyberagent", "nemotron", "magistral", "cogito", "thinking",
+            )
+        )
         tools = not embeddings and any(
             token in normalized for token in ("llama", "mistral", "mixtral", "qwen", "tool")
         )
         # Prefer the loaded model's actual chat template over the name heuristic.
-        template_tools = await self._template_supports_tools(model_id)
-        if template_tools is not None:
-            tools = template_tools and not embeddings
+        tcaps = await self._template_caps(model_id)
+        if tcaps is not None:
+            tools = tcaps["tools"] and not embeddings
+            reasoning = tcaps["reasoning"]
         return BackendCapabilities(
             chat=not embeddings,
             completion=True,

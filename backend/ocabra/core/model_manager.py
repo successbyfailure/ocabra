@@ -1740,6 +1740,16 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
             caps.streaming = True
             if any(hint in name for hint in ("-vl", "vl-", "vision", "llava", "omni")):
                 caps.vision = True
+            if any(hint in name for hint in (
+                "deepseek-r1", "deepseek-v3", "qwen3", "qwq", "-r1", "reason",
+                "cyberagent", "nemotron", "magistral", "cogito", "thinking",
+            )):
+                caps.reasoning = True
+            if any(hint in name for hint in (
+                "llama", "mistral", "mixtral", "qwen", "gemma", "nemotron",
+                "command-r", "devstral", "ministral", "phi", "tool",
+            )):
+                caps.tools = True
     elif backend_type == "whisper":
         caps.audio_transcription = True
     elif backend_type in {"chatterbox", "tts", "voxtral"}:

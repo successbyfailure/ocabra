@@ -120,6 +120,14 @@ class OllamaBackend(BackendInterface):
                             tools = family.lower() in _tool_families
                         if "vl" in family or "vision" in family or "llava" in family:
                             vision = True
+                    # Reasoning fallback: some models emit <think> blocks without
+                    # advertising a "thinking" capability. The chat template is
+                    # the authoritative signal (matches the llama_cpp path).
+                    if not reasoning:
+                        tmpl_l = str(data.get("template", "")).lower()
+                        if any(m in tmpl_l for m in ("<think>", "reasoning_content")):
+                            reasoning = True
+
                     # Report the EFFECTIVE served context, not the native one.
                     # Native comes from model_info; the actual window is the
                     # Modelfile ``num_ctx`` PARAMETER when baked (e.g. our
