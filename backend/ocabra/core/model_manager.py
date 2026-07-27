@@ -722,6 +722,10 @@ class ModelManager:
                     if state.backend_type == "vllm"
                     else None
                 )
+                enforce_vllm_headroom = (
+                    state.backend_type == "vllm"
+                    and not self._has_explicit_vllm_kv_cache(state)
+                )
 
                 if not gpu_managed:
                     gpu_indices = []
@@ -730,7 +734,7 @@ class ModelManager:
                         model_id=model_id,
                         vram_needed=vram_needed,
                         preferred_gpu=force_gpu or state.preferred_gpu,
-                        enforce_vllm_headroom=(state.backend_type == "vllm"),
+                        enforce_vllm_headroom=enforce_vllm_headroom,
                         vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                     )
                 else:
@@ -782,7 +786,7 @@ class ModelManager:
                                     )
 
                 # vLLM checks against a fraction of total VRAM, not only model weights.
-                if state.backend_type == "vllm" and self._gpu_manager:
+                if enforce_vllm_headroom and self._gpu_manager:
                     from ocabra.core.scheduler import InsufficientVRAMError
 
                     for gpu_idx in gpu_indices:
@@ -1076,6 +1080,26 @@ class ModelManager:
         except (TypeError, ValueError):
             value = float(settings.vllm_gpu_memory_utilization)
         return max(0.0, min(1.0, value))
+
+    @staticmethod
+    def _has_explicit_vllm_kv_cache(state: "ModelState") -> bool:
+        """Return whether vLLM has a fixed per-GPU KV cache allocation."""
+        direct_value = ModelManager._get_vllm_option(
+            state,
+            "kv_cache_memory_bytes",
+            None,
+        )
+        if direct_value not in (None, "", 0, "0"):
+            return True
+
+        extra_args = ModelManager._get_vllm_option(state, "extra_args", [])
+        if not isinstance(extra_args, (list, tuple)):
+            return False
+        return any(
+            str(arg) == "--kv-cache-memory-bytes"
+            or str(arg).startswith("--kv-cache-memory-bytes=")
+            for arg in extra_args
+        )
 
     async def _assign_gpus_for_load(
         self,

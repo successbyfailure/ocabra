@@ -951,6 +951,40 @@ class TestPoolingEndpoints:
         assert r.status_code == 409
         assert r.json()["detail"]["error"]["code"] == "insufficient_vram"
 
+    def test_streaming_load_failure_returns_sse_error(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+        from ocabra.core.scheduler import InsufficientVRAMError
+
+        configured_state = ModelState(
+            model_id="lazy-model",
+            display_name="Lazy",
+            backend_type="vllm",
+            status=ModelStatus.CONFIGURED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+        )
+        app = _make_app(model_state=configured_state)
+        app.state.model_manager.get_state = AsyncMock(return_value=configured_state)
+        app.state.model_manager.get_expected_load_seconds = AsyncMock(return_value=None)
+        app.state.model_manager.load = AsyncMock(
+            side_effect=InsufficientVRAMError("GPU 1 has low free memory")
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "lazy-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200
+        assert '"code": "insufficient_vram"' in response.text
+        assert "data: [DONE]" in response.text
+
     def test_on_demand_load_generic_failure_returns_503(self):
         from ocabra.backends.base import BackendCapabilities
         from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus

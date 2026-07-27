@@ -12,8 +12,10 @@ from ocabra.stats.collector import (
     _classify_request_kind,
     _extract_last_payload_from_stream,
     _extract_response_payload_and_rebuild,
+    _extract_stream_error,
     _extract_usage_tokens,
     _resolve_inflight_model_id,
+    _stream_error_status,
 )
 
 
@@ -60,6 +62,21 @@ def test_extract_last_payload_from_ndjson_stream_uses_done_chunk() -> None:
     payload = _extract_last_payload_from_stream(body, "application/x-ndjson")
 
     assert payload == {"prompt_eval_count": 7, "eval_count": 11, "done": True}
+
+
+def test_extract_stream_error_from_sse() -> None:
+    body = (
+        b'data: {"error":{"message":"not enough memory","type":"server_error",'
+        b'"code":"insufficient_vram"}}\n\ndata: [DONE]\n\n'
+    )
+
+    assert _extract_stream_error(body, "text/event-stream") == (
+        "not enough memory",
+        "insufficient_vram",
+    )
+    assert _stream_error_status("insufficient_vram") == 409
+    assert _stream_error_status("model_load_timeout") == 503
+    assert _stream_error_status("unknown_error") == 500
 
 
 @pytest.mark.asyncio
@@ -148,3 +165,35 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
         "ollama/gemma:12b",
         "request-id",
     )
+
+
+def test_stats_middleware_records_in_band_sse_error_status() -> None:
+    app = FastAPI()
+    app.state.profile_registry = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        list_by_model=AsyncMock(return_value=[]),
+    )
+    app.state.model_manager = None
+
+    @app.post("/v1/chat/completions")
+    async def _stream_error() -> StreamingResponse:
+        async def _body():
+            yield (
+                b'data: {"error":{"message":"not enough memory",'
+                b'"code":"insufficient_vram"}}\n\ndata: [DONE]\n\n'
+            )
+
+        return StreamingResponse(_body(), media_type="text/event-stream")
+
+    app.add_middleware(StatsMiddleware)
+    record_stat = AsyncMock()
+
+    with patch("ocabra.stats.collector._record_stat", new=record_stat):
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "vllm/test-model", "messages": []},
+        )
+
+    assert response.status_code == 200
+    assert record_stat.await_args.kwargs["status_code"] == 409
+    assert record_stat.await_args.kwargs["error_message"] == "not enough memory"

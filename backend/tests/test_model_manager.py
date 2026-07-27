@@ -473,6 +473,69 @@ async def test_vllm_load_uses_model_gpu_memory_utilization_for_headroom():
 
 
 @pytest.mark.asyncio
+async def test_vllm_load_with_fixed_kv_uses_estimated_vram_instead_of_fraction():
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    wp.register_backend("vllm", backend)
+
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(return_value=[0])
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram = AsyncMock(return_value=1500)
+    gpu_manager.get_state = AsyncMock(
+        return_value=GPUState(
+            index=0,
+            name="RTX 3060",
+            total_vram_mb=12000,
+            free_vram_mb=1500,
+            used_vram_mb=10500,
+            utilization_pct=0,
+            temperature_c=40,
+            power_draw_w=50,
+            power_limit_w=170,
+            locked_vram_mb=0,
+        )
+    )
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+    model_id = "vllm/fixed-kv-model"
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+    ):
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name="fixed-kv-model",
+            backend_type="vllm",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={
+                "vllm": {
+                    "gpu_memory_utilization": 0.98,
+                    "extra_args": ["--kv-cache-memory-bytes", "536870912"],
+                }
+            },
+        )
+        mm._load_locks[model_id] = asyncio.Lock()
+
+        state = await mm.load(model_id)
+
+    assert state.status == ModelStatus.LOADED
+    scheduler.find_gpu_for_model.assert_awaited_once_with(
+        1024,
+        None,
+        enforce_vllm_headroom=False,
+        vllm_gpu_memory_utilization=0.98,
+    )
+
+
+@pytest.mark.asyncio
 async def test_load_assigns_port_for_backend_that_requires_it():
     wp = WorkerPool()
     backend = _PortRequiredBackend()

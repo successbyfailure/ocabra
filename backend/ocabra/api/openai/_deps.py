@@ -334,6 +334,11 @@ async def keepalive_until_done(task: asyncio.Task, interval: float = SSE_KEEPALI
             await asyncio.wait_for(asyncio.shield(task), timeout=interval)
         except TimeoutError:
             yield b": keepalive\n\n"
+        except Exception:
+            # The caller owns error serialization.  Do not let a failed load
+            # escape from the keepalive iterator after the SSE response has
+            # already started; leave it to inspect task.exception().
+            return
 
 
 def sse_ocabra_event(event: str, **fields: object) -> bytes:
@@ -601,12 +606,15 @@ async def _do_ensure_loaded(
             if state and state.status == ModelStatus.LOADED:
                 await _touch(model_id, datetime.now(UTC))
                 return state
-        raise _openai_error(
-            f"Model '{model_id}' did not finish loading in time.",
-            "server_error",
-            code="model_load_timeout",
-            status_code=503,
-        )
+            if state is None or state.status != ModelStatus.LOADING:
+                break
+        if state and state.status == ModelStatus.LOADING:
+            raise _openai_error(
+                f"Model '{model_id}' did not finish loading in time.",
+                "server_error",
+                code="model_load_timeout",
+                status_code=503,
+            )
 
     detail_suffix = ""
     if state and state.error_message:

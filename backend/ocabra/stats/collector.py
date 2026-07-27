@@ -376,6 +376,13 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         mm.end_request(inflight_model_id, inflight_request_id)
                     if model_id:
                         all_body = b"".join(chunks)
+                        stream_error = _extract_stream_error(all_body, content_type)
+                        recorded_status = status_code
+                        if error_msg:
+                            recorded_status = 500
+                        elif stream_error is not None:
+                            error_msg, error_code = stream_error
+                            recorded_status = _stream_error_status(error_code)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
                         in_tok, out_tok = _extract_usage_tokens(
                             last_payload, request_kind, request_payload
@@ -395,8 +402,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 started_at=started_at,
                                 duration_ms=duration_ms,
                                 error_message=error_msg
-                                or (f"HTTP {status_code}" if status_code >= 400 else None),
-                                status_code=status_code,
+                                or (f"HTTP {recorded_status}" if recorded_status >= 400 else None),
+                                status_code=recorded_status,
                                 endpoint_path=path,
                                 request_kind=request_kind,
                                 input_tokens=in_tok,
@@ -580,6 +587,43 @@ def _extract_last_payload_from_stream(body: bytes, content_type: str) -> dict | 
                 pass
 
     return None
+
+
+def _extract_stream_error(body: bytes, content_type: str) -> tuple[str, str | None] | None:
+    """Extract an error envelope emitted after streaming headers were sent."""
+    if not body:
+        return None
+    text = body.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    if "event-stream" in content_type:
+        lines = [line[6:].strip() for line in lines if line.startswith("data: ")]
+
+    for line in reversed(lines):
+        if not line or line == "[DONE]":
+            continue
+        try:
+            payload = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or "error" not in payload:
+            continue
+        error = payload["error"]
+        if isinstance(error, dict):
+            return str(error.get("message") or "Streaming inference failed"), error.get("code")
+        return str(error), None
+    return None
+
+
+def _stream_error_status(code: str | None) -> int:
+    """Map an in-band streaming error to the status recorded in request stats."""
+    return {
+        "insufficient_vram": 409,
+        "model_at_capacity": 429,
+        "model_load_failed": 503,
+        "model_load_timeout": 503,
+        "generation_timeout": 504,
+        "stream_error": 502,
+    }.get(code, 500)
 
 
 async def _extract_response_payload_and_rebuild(response: Response) -> tuple[dict | None, Response]:
