@@ -193,6 +193,27 @@ async def test_vllm_headroom_uses_effective_memory_utilization_override():
 
 
 @pytest.mark.asyncio
+async def test_vllm_headroom_does_not_double_count_generic_vram_buffer():
+    """The physical vLLM budget may fit even when generic usable VRAM is lower."""
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 24116},
+        total_by_gpu={0: 24576},
+    )
+    # Simulate GPUManager.get_free_vram() after its generic 512 MB buffer.
+    gm.get_free_vram = AsyncMock(return_value=23604)
+    scheduler = GPUScheduler(gm)
+
+    result = await scheduler.find_gpu_for_model(
+        20707,
+        preferred_gpu=0,
+        enforce_vllm_headroom=True,
+        vllm_gpu_memory_utilization=0.98,
+    )
+
+    assert result == [0]
+
+
+@pytest.mark.asyncio
 async def test_insufficient_vram_error_reports_per_gpu_headroom():
     gm = make_gpu_manager_with_totals(
         free_by_gpu={0: 2000, 1: 2400},
@@ -211,6 +232,7 @@ async def test_insufficient_vram_error_reports_per_gpu_headroom():
     message = str(exc_info.value)
     assert "available by GPU" in message
     assert "GPU 0: free 2000 MB, total 12000 MB" in message
+    assert "physical free 2000 MB" in message
     assert "vLLM headroom 3000 MB" in message
 
 

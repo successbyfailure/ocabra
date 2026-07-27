@@ -422,7 +422,9 @@ async def test_vllm_load_uses_model_gpu_memory_utilization_for_headroom():
     scheduler.find_gpu_for_model = AsyncMock(return_value=[0])
 
     gpu_manager = AsyncMock()
-    gpu_manager.get_free_vram = AsyncMock(return_value=5000)
+    # Generic usable VRAM is below the vLLM fraction, while physical free VRAM
+    # still satisfies it. The generic buffer must not be counted twice.
+    gpu_manager.get_free_vram = AsyncMock(return_value=2500)
     gpu_manager.get_state = AsyncMock(
         return_value=GPUState(
             index=0,

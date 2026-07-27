@@ -57,7 +57,12 @@ class GPUScheduler:
                 return True
             state = state_by_gpu[gpu_idx]
             required_free_mb = int(state.total_vram_mb * vllm_utilization)
-            return free_per_gpu[gpu_idx] >= required_free_mb
+            # ``get_free_vram`` subtracts oCabra's generic VRAM buffer.  vLLM's
+            # ``gpu_memory_utilization`` already leaves its own share of the GPU
+            # unused, so applying the generic buffer to this second check would
+            # count the safety margin twice.  Compare vLLM's budget with the
+            # physical free memory reported by NVML instead.
+            return state.free_vram_mb >= required_free_mb
 
         def _is_under_pressure(gpu_idx: int) -> bool:
             state = state_by_gpu[gpu_idx]
@@ -119,7 +124,8 @@ class GPUScheduler:
             if enforce_vllm_headroom:
                 required_free_mb = int(state.total_vram_mb * vllm_utilization)
                 detail += (
-                    f", vLLM headroom {required_free_mb} MB "
+                    f", physical free {state.free_vram_mb} MB, "
+                    f"vLLM headroom {required_free_mb} MB "
                     f"(gpu_memory_utilization={vllm_utilization:g})"
                 )
             details.append(detail)

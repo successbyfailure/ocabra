@@ -2,6 +2,13 @@
 
 Fecha: 2026-07-26
 
+> **Corrección 2026-07-27:** el resultado de Qwen3-Coder queda invalidado.
+> `stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ` produce texto corrupto con
+> vLLM 0.26.0, y el checkpoint de reemplazo también se corrompe al activar KV
+> FP8 con escalas calculadas. El perfil vigente usa un AWQ distinto, KV BF16 y
+> contexto 56k. Véase
+> `docs/benchmarks/vllm_026_qwen3_coder_replacement.md`.
+
 ## Resultado
 
 Se evaluó KV FP8 E4M3 con escalas dinámicas sobre los demás modelos de la

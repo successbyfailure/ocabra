@@ -791,7 +791,11 @@ class ModelManager:
 
                     for gpu_idx in gpu_indices:
                         gpu_state = await self._gpu_manager.get_state(gpu_idx)
-                        effective_free_mb = await self._gpu_manager.get_free_vram(gpu_idx)
+                        # vLLM's utilization limit already reserves the remaining
+                        # GPU fraction.  ``get_free_vram`` additionally subtracts
+                        # oCabra's generic buffer, which would double-count the
+                        # safety margin and reject valid near-capacity profiles.
+                        physical_free_mb = gpu_state.free_vram_mb
                         utilization = (
                             vllm_gpu_memory_utilization
                             if vllm_gpu_memory_utilization is not None
@@ -800,10 +804,10 @@ class ModelManager:
                         required_free_mb = int(
                             gpu_state.total_vram_mb * utilization
                         )
-                        if effective_free_mb < required_free_mb:
+                        if physical_free_mb < required_free_mb:
                             raise InsufficientVRAMError(
                                 "GPU "
-                                f"{gpu_idx} has {effective_free_mb} MB free, "
+                                f"{gpu_idx} has {physical_free_mb} MB physically free, "
                                 f"vLLM requires at least {required_free_mb} MB free "
                                 f"(gpu_memory_utilization={utilization:g})."
                             )
