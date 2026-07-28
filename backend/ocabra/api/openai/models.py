@@ -47,6 +47,29 @@ def _build_federation_nodes_metadata(
     ]
 
 
+def _ollama_cap_list(caps: dict) -> list[str]:
+    """Convert an oCabra capabilities dict to an Ollama-style capability array.
+
+    e.g. ``["completion", "vision", "tools", "thinking", "embedding"]``. Exposed
+    at the top level of each /v1/models entry so clients that look for a
+    ``capabilities`` list (rather than our nested ``ocabra.capabilities``) can
+    still detect vision/tool support on models served through the OpenAI path.
+    """
+    caps = caps or {}
+    out: list[str] = []
+    if caps.get("completion") or caps.get("chat"):
+        out.append("completion")
+    if caps.get("embeddings"):
+        out.append("embedding")
+    if caps.get("vision"):
+        out.append("vision")
+    if caps.get("tools"):
+        out.append("tools")
+    if caps.get("reasoning"):
+        out.append("thinking")
+    return out
+
+
 @router.get("/models", summary="List models")
 async def list_models(
     request: Request,
@@ -111,6 +134,12 @@ async def list_models(
             "object": "model",
             "created": now_ts,
             "owned_by": "ocabra",
+            # Top-level Ollama-style capabilities array (["vision","tools",...]).
+            # OpenAI has no standard capability field, so clients (OpenWebUI)
+            # can't read our nested ``ocabra.capabilities``. Mirroring the
+            # Ollama array here at the top level gives parsers that look for a
+            # ``capabilities`` list a chance to auto-detect vision/tools.
+            "capabilities": _ollama_cap_list(capabilities),
             "ocabra": {
                 "category": profile.category,
                 "status": base_state.status.value,
