@@ -6,8 +6,10 @@ All tests mock subprocess creation — no real vLLM or GPU required.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import signal
+from collections import deque
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -46,6 +48,29 @@ def _fake_proc(returncode: int | None = None) -> MagicMock:
     proc.kill = MagicMock()
     proc.wait = AsyncMock(return_value=0)
     return proc
+
+
+@pytest.mark.asyncio
+async def test_worker_log_reader_is_bounded_and_truncates_long_lines():
+    from ocabra.backends.vllm_backend import (
+        _WORKER_LOG_LINE_MAX_CHARS,
+        _WORKER_LOG_MAX_LINES,
+        VLLMBackend,
+    )
+
+    reader = asyncio.StreamReader()
+    for index in range(_WORKER_LOG_MAX_LINES + 5):
+        reader.feed_data(f"line-{index}\n".encode())
+    reader.feed_data(("x" * (_WORKER_LOG_LINE_MAX_CHARS + 100) + "\n").encode())
+    reader.feed_eof()
+    sink: deque[str] = deque(maxlen=_WORKER_LOG_MAX_LINES)
+
+    await VLLMBackend()._consume_stream(reader, sink)
+
+    assert len(sink) == _WORKER_LOG_MAX_LINES
+    assert sink[0] == "line-6"
+    assert sink[-1].startswith("...[truncated]...")
+    assert len(sink[-1]) <= _WORKER_LOG_LINE_MAX_CHARS + len("...[truncated]...")
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import re
 import signal
 import socket
 import sys
+from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -117,6 +118,8 @@ _ARCH_CAPS: dict[str, dict[str, Any]] = {
 _STARTUP_TIMEOUT_S = 600
 _SHUTDOWN_TIMEOUT_S = 30
 _MIN_VLLM_VRAM_MB = 2048
+_WORKER_LOG_MAX_LINES = 200
+_WORKER_LOG_LINE_MAX_CHARS = 4000
 
 
 class VLLMBackend(BackendInterface):
@@ -183,6 +186,9 @@ class VLLMBackend(BackendInterface):
     def __init__(self) -> None:
         # model_id → (process, port)
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
+        self._log_tasks: dict[str, list[asyncio.Task[None]]] = {}
+        self._stdout_tails: dict[str, deque[str]] = {}
+        self._stderr_tails: dict[str, deque[str]] = {}
 
     # ------------------------------------------------------------------
     # BackendInterface
@@ -230,11 +236,25 @@ class VLLMBackend(BackendInterface):
         )
 
         self._processes[model_id] = (proc, port)
+        stdout_tail: deque[str] = deque(maxlen=_WORKER_LOG_MAX_LINES)
+        stderr_tail: deque[str] = deque(maxlen=_WORKER_LOG_MAX_LINES)
+        self._stdout_tails[model_id] = stdout_tail
+        self._stderr_tails[model_id] = stderr_tail
+        self._log_tasks[model_id] = [
+            asyncio.create_task(
+                self._consume_stream(proc.stdout, stdout_tail),
+                name=f"vllm-stdout:{model_id}",
+            ),
+            asyncio.create_task(
+                self._consume_stream(proc.stderr, stderr_tail),
+                name=f"vllm-stderr:{model_id}",
+            ),
+        ]
 
         # Wait until the server is healthy or times out
         try:
             await self._wait_for_startup(model_id, port)
-        except TimeoutError:
+        except Exception:
             await self._kill_process(model_id)
             raise
 
@@ -803,7 +823,7 @@ class VLLMBackend(BackendInterface):
             entry = self._processes.get(model_id)
             if entry and entry[0].returncode is not None:
                 rc = entry[0].returncode
-                stderr_tail = await self._read_stderr_tail(entry[0])
+                stderr_tail = await self._get_stderr_tail(model_id, entry[0])
                 err_suffix = f" stderr={stderr_tail}" if stderr_tail else ""
                 if rc == -signal.SIGKILL or rc == 137:
                     raise MemoryError(
@@ -881,15 +901,21 @@ class VLLMBackend(BackendInterface):
     async def _consume_stream(
         self,
         stream: asyncio.StreamReader | None,
-        sink: list[str],
+        sink: list[str] | deque[str],
     ) -> None:
         if stream is None:
             return
         while True:
-            chunk = await stream.readline()
+            try:
+                chunk = await stream.readline()
+            except Exception:
+                return
             if not chunk:
                 return
-            sink.append(chunk.decode("utf-8", errors="replace").rstrip())
+            line = chunk.decode("utf-8", errors="replace").rstrip()
+            if len(line) > _WORKER_LOG_LINE_MAX_CHARS:
+                line = "...[truncated]..." + line[-_WORKER_LOG_LINE_MAX_CHARS:]
+            sink.append(line)
 
     def _parse_memory_profile_logs(self, logs: str) -> dict[str, Any]:
         def _extract_float(pattern: str) -> float | None:
@@ -936,9 +962,11 @@ class VLLMBackend(BackendInterface):
     async def _kill_process(self, model_id: str, graceful: bool = False) -> None:
         entry = self._processes.pop(model_id, None)
         if not entry:
+            await self._stop_log_readers(model_id)
             return
         proc, _ = entry
         if proc.returncode is not None:
+            await self._stop_log_readers(model_id)
             return
 
         pgid: int | None = None
@@ -954,6 +982,7 @@ class VLLMBackend(BackendInterface):
                 else:
                     proc.terminate()  # SIGTERM
                 await asyncio.wait_for(proc.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
+                await self._stop_log_readers(model_id)
                 return
             except (TimeoutError, ProcessLookupError):
                 logger.warning("vllm_sigterm_timeout", model_id=model_id)
@@ -966,6 +995,30 @@ class VLLMBackend(BackendInterface):
             await proc.wait()
         except ProcessLookupError:
             pass
+        finally:
+            await self._stop_log_readers(model_id)
+
+    async def _stop_log_readers(self, model_id: str) -> None:
+        tasks = self._log_tasks.pop(model_id, [])
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=0.5)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        self._stdout_tails.pop(model_id, None)
+        self._stderr_tails.pop(model_id, None)
+
+    async def _get_stderr_tail(
+        self,
+        model_id: str,
+        proc: asyncio.subprocess.Process,
+        limit: int = 16000,
+    ) -> str:
+        buffered = "\n".join(self._stderr_tails.get(model_id, ())).strip()
+        if buffered:
+            return self._truncate_log_text(buffered, limit)
+        return await self._read_stderr_tail(proc, limit=limit)
 
     async def _read_stderr_tail(self, proc: asyncio.subprocess.Process, limit: int = 16000) -> str:
         if proc.stderr is None:
@@ -977,6 +1030,10 @@ class VLLMBackend(BackendInterface):
         if not stderr_data:
             return ""
         text = stderr_data.decode("utf-8", errors="replace").strip()
+        return self._truncate_log_text(text, limit)
+
+    @staticmethod
+    def _truncate_log_text(text: str, limit: int) -> str:
         if len(text) <= limit:
             return text
         head = text[: limit // 2]
