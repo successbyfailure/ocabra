@@ -299,6 +299,24 @@ async def lifespan(app: FastAPI):
     await init_redis()
     logger.info("redis_connected")
 
+    # Apply persisted settings before starting any background loop or backend.
+    # Otherwise startup logs and the first maintenance iteration can observe
+    # stale .env values before DB overrides take effect.
+    from ocabra.database import AsyncSessionLocal as _ASL
+    from ocabra.db.server_config import (
+        apply_overrides_to_settings,
+        load_overrides,
+        save_override,
+    )
+
+    async with _ASL() as _session:
+        _overrides = await load_overrides(_session)
+    if _overrides:
+        apply_overrides_to_settings(settings, _overrides)
+        logger.info("config_overrides_loaded", count=len(_overrides))
+    else:
+        logger.info("config_overrides_none")
+
     # Stream 1-A: GPU Manager + Scheduler
     from ocabra.core.gpu_manager import GPUManager
     from ocabra.core.scheduler import GPUScheduler
@@ -476,7 +494,6 @@ async def lifespan(app: FastAPI):
     from ocabra.core.profile_registry import ProfileRegistry
 
     profile_registry = ProfileRegistry()
-    from ocabra.database import AsyncSessionLocal as _ASL
 
     async with _ASL() as _session:
         await profile_registry.load_all(_session)
@@ -503,21 +520,6 @@ async def lifespan(app: FastAPI):
     async with _ASL() as _session:
         await seed_first_admin(_session)
     logger.info("auth_seed_done")
-
-    # Load persisted config overrides from DB (applied on top of .env values)
-    from ocabra.db.server_config import (
-        apply_overrides_to_settings,
-        load_overrides,
-        save_override,
-    )
-
-    async with _ASL() as _session:
-        _overrides = await load_overrides(_session)
-    if _overrides:
-        apply_overrides_to_settings(settings, _overrides)
-        logger.info("config_overrides_loaded", count=len(_overrides))
-    else:
-        logger.info("config_overrides_none")
 
     # Persist JWT secret in DB so sessions survive restarts
     if "jwt_secret" not in _overrides:
@@ -591,6 +593,11 @@ async def lifespan(app: FastAPI):
     image_outputs_cleanup_task.cancel()
     with suppress(asyncio.CancelledError):
         await image_outputs_cleanup_task
+
+    if not gpu_power_reapply_task.done():
+        gpu_power_reapply_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await gpu_power_reapply_task
 
     if getattr(app.state, "batch_processor", None) is not None:
         await app.state.batch_processor.stop()

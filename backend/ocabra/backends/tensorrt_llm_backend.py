@@ -509,7 +509,9 @@ class TensorRTLLMBackend(BackendInterface):
         await self._run_host_helper("sh", "-lc", script)
 
     async def _run_host_helper(self, entrypoint: str, *args: str) -> str:
-        helper_image = str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api"
+        helper_image = (
+            str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api:slim"
+        )
         docker_bin = str(settings.tensorrt_llm_docker_bin).strip() or "docker"
         process = await asyncio.create_subprocess_exec(
             docker_bin,
