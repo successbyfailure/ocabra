@@ -606,6 +606,47 @@ class TestModelLookupAliases:
         assert r.status_code == 400
         assert r.json()["detail"]["error"]["message"] == "chat template missing"
 
+    def test_streaming_upstream_400_preserves_error_body(self):
+        app = _make_app()
+        req = httpx.Request("POST", "http://127.0.0.1:18000/v1/chat/completions")
+        resp = httpx.Response(
+            400,
+            request=req,
+            json={
+                "error": {
+                    "message": "assistant message has an invalid tool_calls sequence",
+                    "type": "BadRequestError",
+                    "code": 400,
+                }
+            },
+        )
+        upstream_error = httpx.HTTPStatusError(
+            "Client error '400 Bad Request'",
+            request=req,
+            response=resp,
+        )
+
+        async def _failing_stream(*_args, **_kwargs):
+            raise upstream_error
+            yield b""  # pragma: no cover
+
+        app.state.worker_pool.forward_stream = _failing_stream
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200
+        assert "assistant message has an invalid tool_calls sequence" in response.text
+        assert '"code": "upstream_invalid_request"' in response.text
+        assert "data: [DONE]" in response.text
+
 
 class TestPoolingEndpoints:
     def test_pooling_forwards_request(self):

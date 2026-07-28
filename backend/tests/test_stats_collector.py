@@ -76,6 +76,9 @@ def test_extract_stream_error_from_sse() -> None:
     )
     assert _stream_error_status("insufficient_vram") == 409
     assert _stream_error_status("model_load_timeout") == 503
+    assert _stream_error_status("upstream_invalid_request") == 400
+    assert _stream_error_status("upstream_rate_limited") == 429
+    assert _stream_error_status("upstream_server_error") == 502
     assert _stream_error_status("unknown_error") == 500
 
 

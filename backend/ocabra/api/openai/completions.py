@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
-from ocabra.core.worker_pool import InferenceTimeoutError
 
 from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
@@ -33,6 +32,7 @@ from ._deps import (
     raise_upstream_http_error,
     resolve_profile,
     sse_ocabra_event,
+    stream_error_details,
     to_backend_body,
 )
 
@@ -167,9 +167,9 @@ async def _stream_completions(worker_pool, model_id: str, body: dict):
         async for chunk in worker_pool.forward_stream(model_id, "/v1/completions", body):
             yield chunk
     except Exception as e:
-        code = "generation_timeout" if isinstance(e, InferenceTimeoutError) else "stream_error"
+        message, code = stream_error_details(e)
         error_payload = json.dumps(
-            {"error": {"message": str(e), "type": "server_error", "code": code}}
+            {"error": {"message": message, "type": "server_error", "code": code}}
         )
         yield f"data: {error_payload}\n\n".encode()
         yield b"data: [DONE]\n\n"
@@ -251,4 +251,5 @@ async def _stream_completions_with_load(
         async for chunk in worker_pool.forward_stream(worker_key, "/v1/completions", backend_body):
             yield chunk
     except Exception as exc:
-        yield _sse_error(str(exc), "stream_error")
+        message, code = stream_error_details(exc)
+        yield _sse_error(message, code)

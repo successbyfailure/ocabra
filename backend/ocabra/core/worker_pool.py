@@ -176,6 +176,11 @@ class WorkerPool:
                     timeout=httpx.Timeout(float(timeout_s), connect=30.0)
                 ) as client:
                     async with client.stream("POST", url, json=body) as resp:
+                        # httpx does not buffer streaming responses. Read an
+                        # error body while the response is still open so the
+                        # API layer can preserve its validation detail.
+                        if resp.is_error:
+                            await resp.aread()
                         resp.raise_for_status()
                         async for chunk in resp.aiter_bytes():
                             yield chunk

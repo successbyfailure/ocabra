@@ -81,15 +81,26 @@ async def test_get_backend_disabled_reason():
 async def test_forward_stream_raises_on_http_error(pool, monkeypatch):
     class _ErrorResponse:
         status_code = 503
+        is_error = True
 
         def __init__(self, url: str) -> None:
             self.request = httpx.Request("POST", url)
+            self.was_read = False
+
+        async def aread(self) -> bytes:
+            self.was_read = True
+            return b'{"error":{"message":"Service unavailable"}}'
 
         def raise_for_status(self) -> None:
+            assert self.was_read
             raise httpx.HTTPStatusError(
                 "Service unavailable",
                 request=self.request,
-                response=httpx.Response(self.status_code, request=self.request),
+                response=httpx.Response(
+                    self.status_code,
+                    request=self.request,
+                    content=b'{"error":{"message":"Service unavailable"}}',
+                ),
             )
 
         async def aiter_bytes(self):

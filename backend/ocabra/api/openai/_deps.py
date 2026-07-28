@@ -861,3 +861,59 @@ def raise_upstream_http_error(exc: httpx.HTTPStatusError) -> None:
         "invalid_request_error" if 400 <= status_code < 500 else "server_error",
         status_code=status_code,
     )
+
+
+def stream_error_details(exc: Exception) -> tuple[str, str]:
+    """Return a client-safe message and stable code for an in-band SSE error.
+
+    Streaming response headers have already been sent when worker forwarding
+    fails, so the upstream HTTP status cannot be returned directly. Preserve
+    the worker's JSON error message in the SSE envelope and encode its status
+    class in a stable oCabra code for request statistics.
+    """
+    from ocabra.core.worker_pool import InferenceTimeoutError
+
+    if isinstance(exc, InferenceTimeoutError):
+        return str(exc), "generation_timeout"
+
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return str(exc), "stream_error"
+
+    status_code = exc.response.status_code
+    body_text = exc.response.text
+    message = ""
+    try:
+        parsed = json.loads(body_text) if body_text else None
+    except (TypeError, ValueError):
+        parsed = None
+
+    if isinstance(parsed, dict):
+        detail = parsed.get("detail")
+        error = parsed.get("error")
+        if isinstance(detail, str):
+            message = detail
+        elif isinstance(detail, dict):
+            message = str(detail.get("message") or "")
+        if not message and isinstance(error, str):
+            message = error
+        elif not message and isinstance(error, dict):
+            message = str(error.get("message") or "")
+
+    if not message:
+        message = body_text.strip() if body_text else str(exc)
+
+    if status_code == 429:
+        code = "upstream_rate_limited"
+    elif 400 <= status_code < 500:
+        code = "upstream_invalid_request"
+    else:
+        code = "upstream_server_error"
+
+    logger.warning(
+        "worker_stream_http_error",
+        upstream_status=status_code,
+        upstream_code=code,
+        error_message=message[:1000],
+        worker_url=str(exc.request.url),
+    )
+    return message, code

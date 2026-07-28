@@ -622,6 +622,9 @@ def _stream_error_status(code: str | None) -> int:
         "model_load_failed": 503,
         "model_load_timeout": 503,
         "generation_timeout": 504,
+        "upstream_invalid_request": 400,
+        "upstream_rate_limited": 429,
+        "upstream_server_error": 502,
         "stream_error": 502,
     }.get(code, 500)
 
