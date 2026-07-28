@@ -44,11 +44,31 @@ async def show_model(
     ollama_name = state.backend_model_id if state.backend_type == "ollama" else _mapper.to_ollama(state.model_id)
     family = ollama_name.split(":", 1)[0]
 
+    # Ollama exposes a top-level ``capabilities`` array (e.g.
+    # ["completion", "vision", "tools", "thinking", "embedding"]) that clients
+    # like OpenWebUI read to enable vision uploads, tool calling, etc. Build it
+    # from oCabra's resolved capabilities so those features light up through the
+    # Ollama-compat path too (otherwise a multimodal model like gemma4 shows up
+    # as text-only).
+    caps = state.capabilities
+    capabilities: list[str] = []
+    if getattr(caps, "completion", False) or getattr(caps, "chat", False):
+        capabilities.append("completion")
+    if getattr(caps, "embeddings", False):
+        capabilities.append("embedding")
+    if getattr(caps, "vision", False):
+        capabilities.append("vision")
+    if getattr(caps, "tools", False):
+        capabilities.append("tools")
+    if getattr(caps, "reasoning", False):
+        capabilities.append("thinking")
+
     return {
         "license": "",
         "modelfile": f"FROM {ollama_name}\n",
         "parameters": "",
         "template": "{{ .Prompt }}",
+        "capabilities": capabilities,
         "details": {
             "parent_model": "",
             "format": "safetensors",
