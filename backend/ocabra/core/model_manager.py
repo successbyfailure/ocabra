@@ -283,6 +283,78 @@ class ModelManager:
                 return state
         return None
 
+    async def _infer_ollama_gpu_map(
+        self, loaded_vram_map: dict[str, int]
+    ) -> dict[str, list[int]]:
+        """Map each loaded Ollama model → the GPU indices it occupies.
+
+        oCabra doesn't place Ollama models (Ollama does), so their ``current_gpu``
+        was always ``[]`` — which made them invisible to per-GPU eviction: a vLLM
+        load could never evict a squatting Ollama model to reclaim a GPU. We
+        recover the placement from NVML: Ollama runs one ``llama-server`` process
+        per loaded model, so we group GPU compute processes by PID, drop PIDs that
+        belong to our own (non-Ollama) workers, and greedily match each Ollama
+        model to the external PID whose total resident VRAM is closest to the
+        model's reported ``size_vram``. Models with no confident match stay ``[]``
+        (non-evictable — the safe default).
+        """
+        result: dict[str, list[int]] = {}
+        gm = self._gpu_manager
+        if gm is None or not loaded_vram_map:
+            return result
+        try:
+            gpu_states = await gm.get_all_states()
+        except Exception:
+            return result
+
+        pid_gpus: dict[int, dict[int, int]] = {}
+        for gs in gpu_states:
+            for proc in getattr(gs, "processes", []) or []:
+                pid = int(getattr(proc, "pid", 0) or 0)
+                vram = int(getattr(proc, "used_vram_mb", 0) or 0)
+                if pid <= 0 or vram < 256:
+                    continue
+                slot = pid_gpus.setdefault(pid, {})
+                slot[gs.index] = slot.get(gs.index, 0) + vram
+
+        # Exclude PIDs of workers we launched ourselves (vLLM/llama.cpp/…), so we
+        # only match against Ollama's (and other external) processes.
+        worker_pids: set[int] = set()
+        for st in self._states.values():
+            wi = getattr(st, "worker_info", None)
+            if wi is not None and st.backend_type != "ollama":
+                p = int(getattr(wi, "pid", 0) or 0)
+                if p > 0:
+                    worker_pids.add(p)
+
+        pid_total = {
+            pid: sum(g.values())
+            for pid, g in pid_gpus.items()
+            if pid not in worker_pids
+        }
+        used_pids: set[int] = set()
+        # Largest models first so a big model claims its big process before a
+        # smaller one can mis-match to it.
+        for name in sorted(
+            loaded_vram_map, key=lambda n: loaded_vram_map[n], reverse=True
+        ):
+            target = int(loaded_vram_map[name])
+            if target <= 0:
+                continue
+            best_pid: int | None = None
+            best_diff: int | None = None
+            tolerance = max(2048, int(target * 0.30))
+            for pid, total in pid_total.items():
+                if pid in used_pids:
+                    continue
+                diff = abs(total - target)
+                if diff <= tolerance and (best_diff is None or diff < best_diff):
+                    best_pid, best_diff = pid, diff
+            if best_pid is not None:
+                used_pids.add(best_pid)
+                result[name] = sorted(pid_gpus[best_pid].keys())
+        return result
+
     async def _busy_watchdog(self) -> None:
         """Loop every 10s checking for requests that exceed busy_timeout_seconds."""
         while True:
@@ -1532,6 +1604,11 @@ class ModelManager:
         except Exception:
             ollama_backend = None
 
+        # Recover which GPU(s) each loaded Ollama model actually sits on, so the
+        # per-GPU eviction logic can treat them as candidates (they used to be
+        # ``current_gpu=[]`` and thus never evictable cross-backend).
+        gpu_map = await self._infer_ollama_gpu_map(loaded_vram_map)
+
         for model_id, state in self._states.items():
             if state.backend_type != "ollama":
                 continue
@@ -1543,6 +1620,7 @@ class ModelManager:
 
             if backend_model_id in loaded_set:
                 loaded_vram = max(0, int(loaded_vram_map.get(backend_model_id, 0)))
+                inferred_gpus = gpu_map.get(backend_model_id, [])
                 if state.status != ModelStatus.LOADED:
                     state.status = ModelStatus.LOADED
                     state.loaded_at = state.loaded_at or datetime.now(UTC)
@@ -1555,12 +1633,12 @@ class ModelManager:
                     # ``idle_eviction`` log lines for the same model.
                     state.last_request_at = datetime.now(UTC)
                     state.error_message = None
-                    state.current_gpu = []
+                    state.current_gpu = inferred_gpus
                     state.vram_used_mb = loaded_vram
                     state.worker_info = WorkerInfo(
                         backend_type="ollama",
                         model_id=backend_model_id,
-                        gpu_indices=[],
+                        gpu_indices=inferred_gpus,
                         port=ollama_port,
                         pid=0,
                         vram_used_mb=loaded_vram,
@@ -1569,8 +1647,15 @@ class ModelManager:
                     changed.append(model_id)
                 else:
                     state.vram_used_mb = loaded_vram
+                    # Keep placement fresh (Ollama can re-place on reload); only
+                    # overwrite when we have a confident inference, so a transient
+                    # NVML read miss doesn't wipe a known placement.
+                    if inferred_gpus:
+                        state.current_gpu = inferred_gpus
                     if state.worker_info is not None:
                         state.worker_info.vram_used_mb = loaded_vram
+                        if inferred_gpus:
+                            state.worker_info.gpu_indices = inferred_gpus
                 continue
 
             if state.status in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}:

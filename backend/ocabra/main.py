@@ -166,8 +166,17 @@ async def _ollama_inventory_loop(
     while not stop_event.is_set():
         try:
             installed = await registry.list_installed()
-            loaded = await registry.list_loaded()
-            added = await model_manager.sync_ollama_inventory(installed, loaded)
+            loaded_details = await registry.list_loaded_details()
+            loaded = [d["name"] for d in loaded_details]
+            # size_vram (bytes) → MB so the scheduler can size Ollama models for
+            # eviction and attribute them to their GPU(s).
+            loaded_vram_mb = {
+                d["name"]: max(0, int(d.get("size_vram", 0)) // (1024 * 1024))
+                for d in loaded_details
+            }
+            added = await model_manager.sync_ollama_inventory(
+                installed, loaded, loaded_vram_mb
+            )
             # Auto-create default profiles for newly discovered models
             if added and profile_registry:
                 from ocabra.database import AsyncSessionLocal as _ASL
