@@ -83,6 +83,78 @@ async def _schedule_maintenance_loop(gpu_scheduler, stop_event: asyncio.Event) -
     logger.info("schedule_maintenance_loop_stopped")
 
 
+_spill_reload_last: dict[str, float] = {}
+
+
+async def _reload_spilled_ollama(model_manager, registry) -> None:
+    """Reload WARM/PIN Ollama models that spilled to CPU once VRAM frees up.
+
+    Ollama places a model at load time and never re-balances it: if a big model
+    was resident when Ollama loaded it, part of the model stays on CPU forever
+    (slow) even after the GPU pressure that caused the spill is gone. This
+    monitor detects that (``size_vram < size`` on ``/api/ps``) and, when enough
+    VRAM has since freed to hold the model fully, stops + reloads it so Ollama
+    re-places it 100% on GPU. Scoped to resident-policy (warm/pinned) models
+    that aren't serving a request, with a per-model cooldown.
+    """
+    if not settings.ollama_reload_spilled:
+        return
+    gm = getattr(model_manager, "_gpu_manager", None)
+    if gm is None:
+        return
+    from ocabra.core.model_manager import LoadPolicy
+
+    try:
+        details = await registry.list_loaded_details()
+        gpu_states = await gm.get_all_states()
+    except Exception as exc:
+        logger.warning("ollama_spill_reload_probe_error", error=str(exc))
+        return
+
+    free_total_mb = sum(max(0, int(getattr(s, "free_vram_mb", 0))) for s in gpu_states)
+    margin = max(0, int(settings.ollama_reload_spilled_margin_mb))
+    cooldown = max(30, int(settings.ollama_reload_spilled_cooldown_seconds))
+    now = time.time()
+
+    for d in details:
+        size_total = int(d.get("size_total") or 0)
+        size_vram = int(d.get("size_vram") or 0)
+        if size_total <= 0:
+            continue
+        spilled_mb = max(0, size_total - size_vram) // (1024 * 1024)
+        if spilled_mb < 256:  # effectively fully resident on GPU already
+            continue
+        name = d.get("name") or ""
+        state = model_manager.get_ollama_state_by_name(name)
+        if state is None or state.load_policy not in (LoadPolicy.WARM, LoadPolicy.PIN):
+            continue
+        if model_manager.is_busy(state.model_id):
+            continue
+        if now - _spill_reload_last.get(name, 0.0) < cooldown:
+            continue
+        # Unloading frees the model's current GPU slice too, so the reload has
+        # ``free_total + size_vram`` to work with — require the spilled slice to
+        # fit in the currently-free VRAM (plus a safety margin).
+        if free_total_mb < spilled_mb + margin:
+            continue
+        logger.info(
+            "ollama_spill_reload_start",
+            model=name,
+            spilled_mb=spilled_mb,
+            free_total_mb=free_total_mb,
+        )
+        _spill_reload_last[name] = now
+        try:
+            await registry.unload(name)
+            await asyncio.sleep(2)
+            await registry.load(name, keep_alive=-1)
+            logger.info("ollama_spill_reload_done", model=name)
+        except Exception as exc:
+            logger.warning("ollama_spill_reload_failed", model=name, error=str(exc))
+        # One reload per pass: the VRAM figures above are now stale.
+        return
+
+
 async def _ollama_inventory_loop(
     model_manager, stop_event: asyncio.Event, profile_registry=None
 ) -> None:
@@ -104,6 +176,11 @@ async def _ollama_inventory_loop(
                     await profile_registry.ensure_default_profiles(_session)
         except Exception as exc:
             logger.warning("ollama_inventory_loop_error", error=str(exc))
+
+        try:
+            await _reload_spilled_ollama(model_manager, registry)
+        except Exception as exc:
+            logger.warning("ollama_spill_reload_loop_error", error=str(exc))
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)

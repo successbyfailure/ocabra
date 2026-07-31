@@ -268,6 +268,21 @@ class ModelManager:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0) > 0
 
+    def get_ollama_state_by_name(self, ollama_name: str):
+        """Return the model state whose Ollama backend name matches, or None.
+
+        Used by the spill-reload monitor to map an Ollama ``/api/ps`` entry back
+        to its oCabra state (to read load_policy and check in-flight requests).
+        """
+        for state in self._states.values():
+            if state.backend_type != "ollama":
+                continue
+            if state.backend_model_id == ollama_name or state.model_id.endswith(
+                f"/{ollama_name}"
+            ):
+                return state
+        return None
+
     async def _busy_watchdog(self) -> None:
         """Loop every 10s checking for requests that exceed busy_timeout_seconds."""
         while True:

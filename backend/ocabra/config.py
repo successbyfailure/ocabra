@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
     ollama_keep_alive: str = "30m"
     ollama_inventory_sync_interval_seconds: int = 15
+    # Spill-reload monitor: when a WARM/PIN Ollama model has partially spilled to
+    # CPU (size_vram < size) and enough GPU VRAM has since freed up to hold it
+    # fully, stop + reload it so Ollama re-places it 100% on GPU. Only acts on
+    # resident-policy (warm/pinned) models that are not currently serving a
+    # request, with a per-model cooldown to avoid reload storms.
+    ollama_reload_spilled: bool = True
+    ollama_reload_spilled_margin_mb: int = 512
+    ollama_reload_spilled_cooldown_seconds: int = 300
     # Ollama's default context window (OLLAMA_CONTEXT_LENGTH on the ollama
     # container). Used to report the EFFECTIVE served context for models that
     # don't bake a ``num_ctx`` PARAMETER in their Modelfile. Keep in sync with

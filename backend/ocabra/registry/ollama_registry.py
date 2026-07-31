@@ -264,11 +264,16 @@ class OllamaRegistry:
             if not name:
                 continue
             vram_bytes = int(item.get("size_vram") or item.get("vram") or item.get("size") or 0)
+            # ``size`` is the model's total footprint; ``size_vram`` is the part
+            # actually resident on GPU. When size_vram < size the model spilled
+            # to CPU (partial offload) — the spill-reload monitor uses this gap.
+            total_bytes = int(item.get("size") or vram_bytes)
             details.append(
                 {
                     "name": name,
                     "model": str(item.get("model") or name),
                     "size_vram": vram_bytes,
+                    "size_total": total_bytes,
                     "digest": str(item.get("digest") or ""),
                 }
             )
