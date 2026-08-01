@@ -1885,7 +1885,7 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
                 "command-r", "devstral", "ministral", "phi", "tool",
             )):
                 caps.tools = True
-    elif backend_type == "whisper":
+    elif backend_type in {"whisper", "vibeasr"}:
         caps.audio_transcription = True
     elif backend_type in {"chatterbox", "tts", "voxtral"}:
         caps.tts = True

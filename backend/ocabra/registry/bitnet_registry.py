@@ -10,19 +10,31 @@ from huggingface_hub import list_models, model_info
 from ocabra.config import settings
 from ocabra.schemas.registry import HFModelCard, HFModelVariant
 
+# Repo / filename markers for ternary (1.58-bit) GGUFs the bitnet backend serves.
+# Covers Microsoft BitNet (i2_s), Falcon-Edge (1.58bit) and Bonsai/PrismML
+# (bonsai / q1_0, served via the PrismML llama.cpp fork).
+_TERNARY_MARKERS = ("bitnet", "1.58bit", "bonsai", "ternary")
+_TERNARY_FILE_MARKERS = ("bitnet", "i2_s", "1.58bit", "bonsai", "q1_0")
+
 
 class BitnetRegistry:
     def _is_bitnet_repo(self, repo_id: str, tags: list[str] | None = None) -> bool:
         low_repo = repo_id.lower()
-        if "bitnet" in low_repo or "1.58bit" in low_repo:
+        if any(marker in low_repo for marker in _TERNARY_MARKERS):
             return True
-        return any("bitnet" in str(tag).lower() or "1.58bit" in str(tag).lower() for tag in (tags or []))
+        return any(
+            any(marker in str(tag).lower() for marker in _TERNARY_MARKERS) for tag in (tags or [])
+        )
 
     def _is_bitnet_file(self, filename: str) -> bool:
         low = filename.lower()
         if not low.endswith(".gguf"):
             return False
-        return "bitnet" in low or "i2_s" in low or "1.58bit" in low
+        # dspark files are speculative-decoding drafters and mmproj files are
+        # vision projectors — neither is a servable stand-alone LM.
+        if "dspark" in low or "mmproj" in low:
+            return False
+        return any(marker in low for marker in _TERNARY_FILE_MARKERS)
 
     def _extract_quant(self, filename: str) -> str | None:
         low = filename.lower()
@@ -36,7 +48,11 @@ class BitnetRegistry:
 
         def _run() -> list[Any]:
             # Broad query, then strict bitnet filtering.
-            return list(list_models(search=q or "bitnet", limit=max(limit * 4, 40), token=settings.hf_token or None))
+            return list(
+                list_models(
+                    search=q or "bitnet", limit=max(limit * 4, 40), token=settings.hf_token or None
+                )
+            )
 
         models = await asyncio.to_thread(_run)
         cards: list[HFModelCard] = []
@@ -53,7 +69,8 @@ class BitnetRegistry:
             size_bytes = sum(
                 int(getattr(s, "size", 0) or 0)
                 for s in siblings
-                if str(getattr(s, "rfilename", "")).lower() in {name.lower() for name in bitnet_gguf}
+                if str(getattr(s, "rfilename", "")).lower()
+                in {name.lower() for name in bitnet_gguf}
             )
 
             cards.append(
@@ -79,7 +96,9 @@ class BitnetRegistry:
 
     async def get_variants(self, repo_id: str) -> list[HFModelVariant]:
         info = await asyncio.to_thread(
-            lambda: model_info(repo_id=repo_id, files_metadata=True, token=settings.hf_token or None)
+            lambda: model_info(
+                repo_id=repo_id, files_metadata=True, token=settings.hf_token or None
+            )
         )
 
         siblings = list(info.siblings or [])

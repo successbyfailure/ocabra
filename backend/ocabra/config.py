@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     # Voxtral TTS (vllm-omni)
     voxtral_python_bin: str = "/opt/voxtral-venv/bin/python"
     voxtral_startup_timeout_s: int = 300
+    # VibeASR (microsoft/VibeVoice-ASR-BitNet) — STT via the native
+    # asr_stream_server wrapped by workers/vibeasr_worker.py. CPU-first.
+    vibeasr_python_bin: str = "/opt/vibeasr-venv/bin/python"
+    vibeasr_stream_server_bin: str = "/usr/local/bin/asr_stream_server"
+    vibeasr_threads: int = 8
+    vibeasr_startup_timeout_s: int = 300
     # TensorRT-LLM
     tensorrt_llm_enabled: bool = False
     tensorrt_llm_launch_mode: str = "binary"
@@ -172,6 +178,10 @@ class Settings(BaseSettings):
     tensorrt_llm_startup_timeout_s: int = 120
     # BitNet / bitnet.cpp (llama-server compatible)
     bitnet_server_bin: str = "/usr/local/bin/bitnet-server"
+    # PrismML llama.cpp fork server for Bonsai 27B (Q1_0_g128 kernels). The
+    # backend prefers the modular install path (prismml/bonsai-server) and only
+    # falls back to this when set. GPU-first (CUDA/Metal).
+    bitnet_prismml_server_bin: str = "/usr/local/bin/bonsai-server"
     bitnet_gpu_layers: int = 0
     bitnet_ctx_size: int = 4096
     bitnet_threads: int | None = None
@@ -180,6 +190,12 @@ class Settings(BaseSettings):
     bitnet_parallel: int = 1
     bitnet_flash_attn: bool = False
     bitnet_mlock: bool = True
+    # KV cache quantization (e.g. "q8_0", "q4_0"); None → f16. Quantising the KV
+    # cache roughly halves (q8_0) or quarters (q4_0) KV VRAM, extending the
+    # usable context — forces flash-attention on. Applies to the PrismML/Bonsai
+    # and Microsoft builds alike (both are llama.cpp servers).
+    bitnet_cache_type_k: str | None = None
+    bitnet_cache_type_v: str | None = None
     bitnet_startup_timeout_s: int = 30
     # Diffusers worker tuning.
     # bfloat16 is the right default for modern image models: FLUX.2, SD3.5

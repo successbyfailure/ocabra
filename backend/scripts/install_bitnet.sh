@@ -82,5 +82,59 @@ chmod +x "${BIN_DIR}/bitnet-server"
 find build -type f \( -name "libllama.so*" -o -name "libggml*.so*" \) \
     -exec cp -a {} "${BIN_DIR}/" \;
 
+# ---------------------------------------------------------------------------
+# Optional: PrismML llama.cpp fork for Bonsai 27B (Q1_0_g128 hybrid-attention
+# kernels). Produces ${BIN_DIR}/prismml/bonsai-server with its own libggml/
+# libllama copied alongside (kept in a subdir to avoid ABI clashes with the
+# Microsoft build above). GPU-first: the custom kernels target CUDA/Metal, so a
+# CPU-only host builds fine but Bonsai inference still needs a GPU. Disable with
+# BITNET_BUILD_PRISMML=false.
+# ---------------------------------------------------------------------------
+BITNET_BUILD_PRISMML="${BITNET_BUILD_PRISMML:-true}"
+if [[ "${BITNET_BUILD_PRISMML}" == "true" ]]; then
+    PRISMML_SRC="${BACKEND_DIR}/src-prismml"
+    PRISMML_BIN_DIR="${BIN_DIR}/prismml"
+    if [[ ! -d "${PRISMML_SRC}/.git" ]]; then
+        echo "[install_bitnet] cloning PrismML llama.cpp fork"
+        git clone --depth 1 https://github.com/PrismML-Eng/llama.cpp.git "${PRISMML_SRC}"
+    fi
+    cd "${PRISMML_SRC}"
+    echo "[install_bitnet] cmake build PrismML fork (CUDA=${GGML_CUDA_FLAG}, jobs=${BITNET_BUILD_JOBS})"
+    cmake -B build \
+        -DGGML_CUDA="${GGML_CUDA_FLAG}" \
+        -DGGML_AVX2=ON \
+        -DGGML_F16C=ON \
+        -DGGML_FMA=ON \
+        -DCMAKE_BUILD_TYPE=Release
+    cmake --build build --target llama-server -j"${BITNET_BUILD_JOBS}"
+
+    mkdir -p "${PRISMML_BIN_DIR}"
+    if [[ -f build/bin/llama-server ]]; then
+        cp build/bin/llama-server "${PRISMML_BIN_DIR}/bonsai-server"
+    elif [[ -f build/bin/server ]]; then
+        cp build/bin/server "${PRISMML_BIN_DIR}/bonsai-server"
+    else
+        echo "[install_bitnet] PrismML llama-server binary not found after build" >&2
+        exit 1
+    fi
+    chmod +x "${PRISMML_BIN_DIR}/bonsai-server"
+    # Copy build/bin/*.so* directly so the soname symlinks (libggml.so.0 ->
+    # libggml.so.0.x) are preserved — `find -type f` drops them and the loader
+    # then fails to resolve the soname. The fork emits libggml-cuda/-base/-cpu,
+    # libllama and libllama-server-impl.
+    cp -a "${PRISMML_SRC}"/build/bin/*.so* "${PRISMML_BIN_DIR}/" 2>/dev/null || true
+    # For a CUDA build, bundle the CUDA runtime libs next to the binary: the
+    # target container provides only the driver (libcuda.so.1) via the NVIDIA
+    # runtime, not cuBLAS/cudart/NCCL, which ggml-cuda links against.
+    if [[ "${GGML_CUDA_FLAG}" == "ON" ]]; then
+        for pat in "libcublas.so.*" "libcublasLt.so.*" "libcudart.so.*"; do
+            find /usr/local/cuda/lib64 -maxdepth 1 -name "${pat}" -exec cp -a {} "${PRISMML_BIN_DIR}/" \; 2>/dev/null || true
+        done
+        nccl="$(find / -name 'libnccl.so.2*' 2>/dev/null | head -1)"
+        [[ -n "${nccl}" ]] && cp -a "${nccl}" "${PRISMML_BIN_DIR}/" || true
+    fi
+    echo "[install_bitnet] PrismML fork built → ${PRISMML_BIN_DIR}/bonsai-server"
+fi
+
 echo "[install_bitnet] done. Produced:"
 ls -la "${BIN_DIR}"

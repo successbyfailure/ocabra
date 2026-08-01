@@ -35,7 +35,7 @@ KV_DTYPES: dict[str, tuple[float, str | None, str]] = {
 }
 
 # Backends that don't have a context-scaling KV cache (encoders, diffusion, TTS).
-_NON_KV_BACKENDS = {"whisper", "diffusers", "tts", "chatterbox", "comfyui", "a1111"}
+_NON_KV_BACKENDS = {"whisper", "vibeasr", "diffusers", "tts", "chatterbox", "comfyui", "a1111"}
 
 
 class ArchResolution:

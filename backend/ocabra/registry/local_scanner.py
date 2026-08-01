@@ -191,7 +191,9 @@ class LocalScanner:
         self._scan_lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
         # (path, mtime_ns, size) -> (vocab_size, bos_id, eos_id)
-        self._gguf_fingerprint_cache: dict[tuple[str, int, int], tuple[int | None, int | None, int | None]] = {}
+        self._gguf_fingerprint_cache: dict[
+            tuple[str, int, int], tuple[int | None, int | None, int | None]
+        ] = {}
 
     def invalidate(self) -> None:
         """Drop the cached scan result. Call after a download/delete."""
@@ -342,6 +344,11 @@ class LocalScanner:
         if "whisper" in name_lower:
             return "whisper"
 
+        # VibeASR (microsoft/VibeVoice-ASR-BitNet) — ternary STT served by the
+        # native asr_stream_server, distinct from faster-whisper.
+        if "vibeasr" in name_lower or "vibevoice-asr" in name_lower:
+            return "vibeasr"
+
         try:
             config = json.loads((path / "config.json").read_text())
         except Exception:
@@ -352,13 +359,19 @@ class LocalScanner:
         if model_type == "whisper":
             return "whisper"
 
+        if model_type in {"vibeasr", "vibevoice_asr", "vibe_voice_asr"}:
+            return "vibeasr"
+
         # Mage-Flow ships a diffusers-style tree but a custom pipeline class,
         # so it needs its own backend (checked before the generic diffusers
         # rule below, which any model_index.json would otherwise match).
         model_index = path / "model_index.json"
         if model_index.exists():
             try:
-                if str(json.loads(model_index.read_text()).get("_class_name", "")) == "MageFlowPipeline":
+                if (
+                    str(json.loads(model_index.read_text()).get("_class_name", ""))
+                    == "MageFlowPipeline"
+                ):
                     return "mage"
             except Exception:
                 pass
@@ -375,7 +388,12 @@ class LocalScanner:
 
     def _is_bitnet_gguf(self, path: Path) -> bool:
         name = path.name.lower()
-        if "bitnet" in name or "i2_s" in name:
+        # dspark files are speculative-decoding drafters and mmproj files are
+        # vision projectors — neither is a servable stand-alone LM.
+        if "dspark" in name or "mmproj" in name:
+            return False
+        # bonsai / q1_0 → Bonsai (PrismML llama.cpp fork); i2_s → Microsoft BitNet.
+        if any(marker in name for marker in ("bitnet", "i2_s", "bonsai", "q1_0")):
             return True
 
         # Best-effort header probe: avoid full file scan.
@@ -384,7 +402,7 @@ class LocalScanner:
                 head = file.read(32768).lower()
         except OSError:
             return False
-        return b"bitnet" in head or b"i2_s" in head
+        return b"bitnet" in head or b"i2_s" in head or b"bonsai" in head
 
     def _scan_ollama_shared(self, root: Path) -> list[LocalModel]:
         """Surface Ollama-pulled models as additional ``llama_cpp`` candidates.

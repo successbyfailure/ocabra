@@ -10,6 +10,7 @@
 # Build args        : BITNET_PRETUNED_MODEL (default bitnet_b1_58-3B)
 #                     BITNET_KERNEL_FLAVOR  (default tl2)
 #                     BITNET_ENABLE_CUDA    (default false)
+#                     BITNET_BUILD_PRISMML  (default true — Bonsai 27B fork)
 # Runtime entry     : /backend/bin/bitnet-server  (invoked by bitnet backend,
 #                     which runs in the ocabra main venv)
 # Notes             : Reuses backend/scripts/build_bitnet.sh (same script used
@@ -22,6 +23,7 @@ ARG BITNET_PRETUNED_MODEL=bitnet_b1_58-3B
 ARG BITNET_KERNEL_FLAVOR=tl2
 ARG BITNET_BUILD_JOBS=8
 ARG BITNET_ENABLE_CUDA=false
+ARG BITNET_BUILD_PRISMML=true
 
 FROM ${BASE_IMAGE} AS builder
 
@@ -30,24 +32,29 @@ ARG BITNET_PRETUNED_MODEL
 ARG BITNET_KERNEL_FLAVOR
 ARG BITNET_BUILD_JOBS
 ARG BITNET_ENABLE_CUDA
+ARG BITNET_BUILD_PRISMML
 
 ENV DEBIAN_FRONTEND=noninteractive \
     BITNET_COMMIT=${BITNET_COMMIT} \
     BITNET_PRETUNED_MODEL=${BITNET_PRETUNED_MODEL} \
     BITNET_KERNEL_FLAVOR=${BITNET_KERNEL_FLAVOR} \
     BITNET_BUILD_JOBS=${BITNET_BUILD_JOBS} \
-    BITNET_ENABLE_CUDA=${BITNET_ENABLE_CUDA}
+    BITNET_ENABLE_CUDA=${BITNET_ENABLE_CUDA} \
+    BITNET_BUILD_PRISMML=${BITNET_BUILD_PRISMML}
 
 WORKDIR /build
 COPY backend/scripts/build_bitnet.sh /tmp/build_bitnet.sh
 RUN chmod +x /tmp/build_bitnet.sh && /tmp/build_bitnet.sh
 
-# Reshape /out into the /backend/ layout expected by BackendInstaller.
+# Reshape /out into the /backend/ layout expected by BackendInstaller. The
+# PrismML fork (Bonsai) lands in /backend/bin/prismml/ so the backend resolves
+# it as the sibling of bitnet-server.
 RUN mkdir -p /backend/bin /backend/lib /backend/workers \
     && cp /out/bitnet-server /backend/bin/bitnet-server \
     && (cp -a /out/lib/. /backend/lib/ 2>/dev/null || true) \
     && chmod +x /backend/bin/bitnet-server \
-    && echo "{\"backend_type\": \"bitnet\", \"python_bin\": null, \"extra_bins\": {\"bitnet_server\": \"/backend/bin/bitnet-server\"}}" \
+    && ( [ -d /out/prismml ] && cp -a /out/prismml /backend/bin/prismml && chmod +x /backend/bin/prismml/bonsai-server || true ) \
+    && echo "{\"backend_type\": \"bitnet\", \"python_bin\": null, \"extra_bins\": {\"server\": \"/backend/bin/bitnet-server\", \"prismml_server\": \"/backend/bin/prismml/bonsai-server\"}}" \
         > /backend/metadata.template.json
 
 FROM scratch

@@ -52,6 +52,8 @@ async def test_load_success(tmp_path: Path) -> None:
         mock_settings.bitnet_parallel = 1
         mock_settings.bitnet_flash_attn = False
         mock_settings.bitnet_mlock = True
+        mock_settings.bitnet_cache_type_k = None
+        mock_settings.bitnet_cache_type_v = None
         mock_settings.bitnet_startup_timeout_s = 30
         mock_settings.cuda_device_order = "PCI_BUS_ID"
 
@@ -85,3 +87,104 @@ async def test_capabilities_use_context_from_settings() -> None:
     assert caps.completion is True
     assert caps.streaming is True
     assert caps.context_length == 8192
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("Bonsai-27B-Q1_0.gguf", True),
+        ("Ternary-Bonsai-27B-Q1_0.gguf", True),
+        ("ggml-model-i2_s.gguf", False),
+        ("falcon3-1b-instruct-1.58bit-gguf-i2_s.gguf", False),
+    ],
+)
+def test_is_prismml_model(filename: str, expected: bool) -> None:
+    assert BitnetBackend._is_prismml_model(Path(filename)) is expected
+
+
+def test_select_server_bin_prefers_prismml_for_bonsai() -> None:
+    backend = BitnetBackend()
+    with (
+        patch.object(
+            BitnetBackend, "_resolve_prismml_bin", return_value="/bin/prismml/bonsai-server"
+        ),
+        patch.object(BitnetBackend, "_resolve_microsoft_bin", return_value="/bin/bitnet-server"),
+    ):
+        assert (
+            backend._select_server_bin(Path("Bonsai-27B-Q1_0.gguf")) == "/bin/prismml/bonsai-server"
+        )
+        assert backend._select_server_bin(Path("ggml-model-i2_s.gguf")) == "/bin/bitnet-server"
+
+
+def test_select_server_bin_raises_when_prismml_missing() -> None:
+    backend = BitnetBackend()
+    with patch.object(BitnetBackend, "_resolve_prismml_bin", return_value=None):
+        with pytest.raises(FileNotFoundError, match="PrismML llama.cpp fork"):
+            backend._select_server_bin(Path("Bonsai-27B-Q1_0.gguf"))
+
+
+def test_build_options_defaults_gpu_layers_for_prismml() -> None:
+    backend = BitnetBackend()
+    with patch("ocabra.backends.bitnet_backend.settings") as mock_settings:
+        mock_settings.bitnet_gpu_layers = 0
+        mock_settings.bitnet_ctx_size = 4096
+        mock_settings.bitnet_threads = None
+        mock_settings.bitnet_batch_size = 512
+        mock_settings.bitnet_ubatch_size = 128
+        mock_settings.bitnet_parallel = 1
+        mock_settings.bitnet_flash_attn = False
+        mock_settings.bitnet_mlock = True
+        mock_settings.bitnet_cache_type_k = None
+        mock_settings.bitnet_cache_type_v = None
+
+        micro = backend._build_options({}, is_prismml=False)
+        bonsai = backend._build_options({}, is_prismml=True)
+        # Explicit override still wins over the GPU-first Bonsai default.
+        overridden = backend._build_options({"gpu_layers": 10}, is_prismml=True)
+
+    assert micro["gpu_layers"] == 0
+    assert bonsai["gpu_layers"] == 99
+    assert overridden["gpu_layers"] == 10
+
+
+@pytest.mark.asyncio
+async def test_quantised_kv_cache_forces_flash_attn(tmp_path: Path) -> None:
+    gguf = tmp_path / "Bonsai-27B-Q1_0.gguf"
+    gguf.write_bytes(b"GGUF")
+
+    proc = _fake_proc(returncode=None)
+    sub = AsyncMock(return_value=proc)
+    backend = BitnetBackend()
+    with (
+        patch("ocabra.backends.bitnet_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=sub),
+        patch.object(BitnetBackend, "_wait_for_startup", new=AsyncMock()),
+        patch.object(
+            BitnetBackend, "_resolve_prismml_bin", return_value="/bin/prismml/bonsai-server"
+        ),
+    ):
+        mock_settings.models_dir = str(tmp_path)
+        mock_settings.bitnet_gpu_layers = 0
+        mock_settings.bitnet_ctx_size = 4096
+        mock_settings.bitnet_threads = None
+        mock_settings.bitnet_batch_size = 512
+        mock_settings.bitnet_ubatch_size = 128
+        mock_settings.bitnet_parallel = 1
+        mock_settings.bitnet_flash_attn = False
+        mock_settings.bitnet_mlock = False
+        mock_settings.bitnet_cache_type_k = None
+        mock_settings.bitnet_cache_type_v = None
+        mock_settings.bitnet_startup_timeout_s = 30
+        mock_settings.cuda_device_order = "PCI_BUS_ID"
+
+        await backend.load(
+            "Bonsai-27B-Q1_0", [0], port=18022, extra_config={"cache_type_k": "q8_0"}
+        )
+
+    cmd = list(sub.call_args.args)
+    assert "--cache-type-k" in cmd
+    assert cmd[cmd.index("--cache-type-k") + 1] == "q8_0"
+    # A non-f16 KV cache requires flash-attention even though it was disabled.
+    # The PrismML fork needs the explicit value form `--flash-attn on`.
+    assert "--flash-attn" in cmd
+    assert cmd[cmd.index("--flash-attn") + 1] == "on"

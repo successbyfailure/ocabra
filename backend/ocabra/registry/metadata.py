@@ -105,7 +105,7 @@ async def fetch_registry_metadata(
         return await fetch_ollama_metadata(raw)
 
     repo_id = raw.split("::", 1)[0]
-    if backend_type in {"vllm", "sglang", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "transformers", "bitnet", "llama_cpp"}:
+    if backend_type in {"vllm", "sglang", "diffusers", "whisper", "vibeasr", "tts", "chatterbox", "voxtral", "transformers", "bitnet", "llama_cpp"}:
         if "/" not in repo_id:
             return None
         return await fetch_huggingface_metadata(repo_id)

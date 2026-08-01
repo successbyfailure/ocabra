@@ -67,7 +67,7 @@ def _build_update_request(state) -> tuple[DownloadCreateRequest | None, str | No
             None,
         )
 
-    if backend_type in {"vllm", "sglang", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "transformers"}:
+    if backend_type in {"vllm", "sglang", "diffusers", "whisper", "vibeasr", "tts", "chatterbox", "voxtral", "transformers"}:
         return (
             DownloadCreateRequest(source="huggingface", model_ref=repo_id, artifact=artifact),
             None,

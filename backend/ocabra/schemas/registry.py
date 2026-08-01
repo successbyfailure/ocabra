@@ -93,7 +93,7 @@ class HFModelVariant(BaseModel):
     size_gb: float | None
     format: str
     quantization: str | None
-    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "ollama"]
+    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "vibeasr", "ollama"]
     is_default: bool = False
     installable: bool = True
     compatibility: str = "unknown"
@@ -124,7 +124,7 @@ class LocalModel(BaseModel):
     model_ref: str
     path: str
     source: Literal["huggingface", "gguf", "ollama", "ollama-shared"]
-    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "ollama"]
+    backend_type: Literal["vllm", "acestep", "llama_cpp", "sglang", "tensorrt_llm", "bitnet", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "vibeasr", "ollama"]
     size_gb: float | None
     # GGUF tokenizer fingerprint (Sprint 17.4) — used to validate speculative
     # decoding draft compatibility. Only populated for ``source="gguf"`` entries

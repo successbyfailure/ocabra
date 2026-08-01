@@ -25,10 +25,13 @@ logger = structlog.get_logger(__name__)
 _SHUTDOWN_TIMEOUT_S = 20
 _DEFAULT_MODEL_MB = 400
 _DEFAULT_TOTAL_LAYERS = 32
+# Bonsai/PrismML models ship GPU-first (Q1_0_g128 hybrid-attention kernels for
+# CUDA/Metal), so default to offloading every layer instead of the CPU-first
+# default used by Microsoft's pretuned LUT kernels.
+_PRISMML_DEFAULT_GPU_LAYERS = 99
 
 
 class BitnetBackend(BackendInterface):
-
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION}
@@ -72,19 +75,66 @@ class BitnetBackend(BackendInterface):
         self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
 
-    def _resolve_server_bin(self) -> str:
-        """Pick the ``bitnet-server`` binary path.
+    @staticmethod
+    def _is_prismml_model(model_file: Path) -> bool:
+        """True for Bonsai/PrismML GGUFs (need the PrismML llama.cpp fork).
+
+        Microsoft's BitNet GGUFs use ``i2_s`` (TL1/TL2 kernels); Bonsai ships
+        the ``Q1_0_g128`` hybrid-attention kernels only available in the
+        ``PrismML-Eng/llama.cpp`` fork.
+        """
+        name = model_file.name.lower()
+        return "bonsai" in name or "q1_0" in name or "prismml" in name
+
+    def _metadata_extra_bins(self) -> dict[str, Any]:
+        meta = read_backend_metadata(settings.backends_dir, "bitnet")
+        if isinstance(meta, dict):
+            extra = meta.get("extra_bins")
+            if isinstance(extra, dict):
+                return extra
+        return {}
+
+    def _resolve_microsoft_bin(self) -> str:
+        """Pick the Microsoft ``bitnet-server`` binary path.
 
         Priority: modular install metadata → ``settings.bitnet_server_bin``.
         """
-        meta = read_backend_metadata(settings.backends_dir, "bitnet")
-        if meta is not None:
-            extra = meta.get("extra_bins") if isinstance(meta, dict) else None
-            if isinstance(extra, dict):
-                bin_path = extra.get("server")
-                if bin_path and Path(bin_path).is_file():
-                    return str(bin_path)
+        bin_path = self._metadata_extra_bins().get("server")
+        if bin_path and Path(bin_path).is_file():
+            return str(bin_path)
         return settings.bitnet_server_bin
+
+    def _resolve_prismml_bin(self) -> str | None:
+        """Pick the PrismML ``bonsai-server`` binary, or ``None`` if absent.
+
+        Priority: modular install metadata (``prismml_server``) → the
+        ``prismml/bonsai-server`` sibling next to ``bitnet-server`` (produced by
+        ``install_bitnet.sh``) → ``settings.bitnet_prismml_server_bin``.
+        """
+        bin_path = self._metadata_extra_bins().get("prismml_server")
+        if bin_path and Path(bin_path).is_file():
+            return str(bin_path)
+        sibling = Path(self._resolve_microsoft_bin()).parent / "prismml" / "bonsai-server"
+        if sibling.is_file():
+            return str(sibling)
+        configured = settings.bitnet_prismml_server_bin
+        if configured and Path(configured).is_file():
+            return str(configured)
+        return None
+
+    def _select_server_bin(self, model_file: Path) -> str:
+        """Choose the server binary for a resolved model file."""
+        if self._is_prismml_model(model_file):
+            prismml = self._resolve_prismml_bin()
+            if prismml is None:
+                raise FileNotFoundError(
+                    "Bonsai/PrismML GGUF needs the PrismML llama.cpp fork "
+                    "(bonsai-server), which is not installed. Rebuild the bitnet "
+                    "backend with BITNET_BUILD_PRISMML=true, or set "
+                    "settings.bitnet_prismml_server_bin to a bonsai-server binary."
+                )
+            return prismml
+        return self._resolve_microsoft_bin()
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
@@ -93,11 +143,14 @@ class BitnetBackend(BackendInterface):
 
         extra_config = kwargs.get("extra_config") or {}
         model_file = self._resolve_model_file(model_id, extra_config)
-        options = self._build_options(extra_config)
+        is_prismml = self._is_prismml_model(model_file)
+        server_bin = self._select_server_bin(model_file)
+        options = self._build_options(extra_config, is_prismml=is_prismml)
+        options["is_prismml"] = is_prismml
         self._model_configs[model_id] = options
 
         cmd = [
-            self._resolve_server_bin(),
+            server_bin,
             "--model",
             str(model_file),
             "--host",
@@ -119,8 +172,24 @@ class BitnetBackend(BackendInterface):
         ]
         if options["threads"] is not None:
             cmd.extend(["--threads", str(options["threads"])])
-        if options["flash_attn"]:
-            cmd.append("--flash-attn")
+        # A quantised KV cache (e.g. q8_0) roughly halves KV VRAM — letting Bonsai
+        # reach its full 262K context in ~12 GB instead of ~20 GB — but llama.cpp
+        # requires flash-attention for a non-f16 KV cache, so force it on.
+        cache_k = options["cache_type_k"]
+        cache_v = options["cache_type_v"]
+        needs_fa = options["flash_attn"] or bool(cache_k) or bool(cache_v)
+        if needs_fa:
+            # The PrismML fork tracks a recent llama.cpp where --flash-attn takes
+            # an explicit value (on/off/auto); the older Microsoft build treats
+            # it as a bare boolean flag.
+            if is_prismml:
+                cmd.extend(["--flash-attn", "on"])
+            else:
+                cmd.append("--flash-attn")
+        if cache_k:
+            cmd.extend(["--cache-type-k", str(cache_k)])
+        if cache_v:
+            cmd.extend(["--cache-type-v", str(cache_v)])
         if options["mlock"]:
             cmd.append("--mlock")
 
@@ -134,9 +203,11 @@ class BitnetBackend(BackendInterface):
             "CUDA_VISIBLE_DEVICES": visible,
         }
         current_ld_path = env.get("LD_LIBRARY_PATH", "")
-        # Modular install drops bitnet-server + libggml/libllama in the same
-        # bin/ dir, so include that path first; legacy fat-image paths follow.
-        modular_bin_dir = str(Path(self._resolve_server_bin()).parent)
+        # Each server binary ships its own libggml/libllama next to it (the
+        # PrismML fork lives in a prismml/ subdir to avoid ABI clashes with the
+        # Microsoft build), so include the chosen binary's dir first; legacy
+        # fat-image paths follow.
+        modular_bin_dir = str(Path(server_bin).parent)
         preferred_paths = [
             modular_bin_dir,
             "/usr/local/lib/bitnet",
@@ -145,7 +216,13 @@ class BitnetBackend(BackendInterface):
         ld_parts = preferred_paths + ([current_ld_path] if current_ld_path else [])
         env["LD_LIBRARY_PATH"] = ":".join(part for part in ld_parts if part)
 
-        logger.info("bitnet_starting", model_id=model_id, port=port, gpu_layers=options["gpu_layers"])
+        logger.info(
+            "bitnet_starting",
+            model_id=model_id,
+            port=port,
+            gpu_layers=options["gpu_layers"],
+            runtime="prismml" if is_prismml else "microsoft",
+        )
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
@@ -155,7 +232,9 @@ class BitnetBackend(BackendInterface):
         self._processes[model_id] = (proc, port)
 
         try:
-            await self._wait_for_startup(model_id, port, timeout_s=settings.bitnet_startup_timeout_s)
+            await self._wait_for_startup(
+                model_id, port, timeout_s=settings.bitnet_startup_timeout_s
+            )
         except Exception:
             await self._kill_process(model_id)
             raise
@@ -190,13 +269,18 @@ class BitnetBackend(BackendInterface):
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         options = self._model_configs.get(model_id, {})
+        is_prismml = bool(options.get("is_prismml", False))
         context_length = int(options.get("ctx_size", settings.bitnet_ctx_size))
         return BackendCapabilities(
             chat=True,
             completion=True,
-            tools=False,
+            # Bonsai/PrismML ships an agentic reasoning model with tool calling;
+            # Microsoft BitNet b1.58 is a plain chat model. Vision (Bonsai's
+            # multimodal tower) is not wired yet — tracked as a debt.
+            tools=is_prismml,
             vision=False,
             embeddings=False,
+            reasoning=is_prismml,
             streaming=True,
             context_length=context_length,
         )
@@ -233,10 +317,15 @@ class BitnetBackend(BackendInterface):
                 async for chunk in response.aiter_bytes():
                     yield chunk
 
-    def _build_options(self, extra_config: dict[str, Any]) -> dict[str, Any]:
+    def _build_options(
+        self, extra_config: dict[str, Any], is_prismml: bool = False
+    ) -> dict[str, Any]:
+        default_gpu_layers = (
+            _PRISMML_DEFAULT_GPU_LAYERS if is_prismml else settings.bitnet_gpu_layers
+        )
         return {
             "gpu_layers": int(
-                self._get_bitnet_option(extra_config, "gpu_layers", settings.bitnet_gpu_layers)
+                self._get_bitnet_option(extra_config, "gpu_layers", default_gpu_layers)
             ),
             "ctx_size": int(
                 self._get_bitnet_option(extra_config, "ctx_size", settings.bitnet_ctx_size)
@@ -257,6 +346,12 @@ class BitnetBackend(BackendInterface):
                 self._get_bitnet_option(extra_config, "flash_attn", settings.bitnet_flash_attn)
             ),
             "mlock": bool(self._get_bitnet_option(extra_config, "mlock", settings.bitnet_mlock)),
+            "cache_type_k": self._get_bitnet_option(
+                extra_config, "cache_type_k", settings.bitnet_cache_type_k
+            ),
+            "cache_type_v": self._get_bitnet_option(
+                extra_config, "cache_type_v", settings.bitnet_cache_type_v
+            ),
             "total_layers": int(
                 self._get_bitnet_option(extra_config, "total_layers", _DEFAULT_TOTAL_LAYERS)
             ),
@@ -271,8 +366,12 @@ class BitnetBackend(BackendInterface):
             return bitnet_config[key]
         return extra_config.get(key, default)
 
-    def _resolve_model_file(self, model_id: str, extra_config: dict[str, Any] | None = None) -> Path:
-        model_path = (extra_config or {}).get("model_path") if isinstance(extra_config, dict) else None
+    def _resolve_model_file(
+        self, model_id: str, extra_config: dict[str, Any] | None = None
+    ) -> Path:
+        model_path = (
+            (extra_config or {}).get("model_path") if isinstance(extra_config, dict) else None
+        )
         if model_path:
             explicit = Path(str(model_path))
             if explicit.is_file():
@@ -312,7 +411,9 @@ class BitnetBackend(BackendInterface):
                 stderr_tail = await self._read_stderr_tail(entry[0])
                 suffix = f" stderr={stderr_tail}" if stderr_tail else ""
                 if rc == -signal.SIGKILL or rc == 137:
-                    raise MemoryError(f"BitNet process for '{model_id}' OOM-killed (rc={rc}).{suffix}")
+                    raise MemoryError(
+                        f"BitNet process for '{model_id}' OOM-killed (rc={rc}).{suffix}"
+                    )
                 raise RuntimeError(f"BitNet process for '{model_id}' exited with rc={rc}.{suffix}")
 
             try:
@@ -324,7 +425,9 @@ class BitnetBackend(BackendInterface):
                 pass
             await asyncio.sleep(0.5)
 
-        raise TimeoutError(f"BitNet worker for '{model_id}' did not become healthy within {timeout_s}s")
+        raise TimeoutError(
+            f"BitNet worker for '{model_id}' did not become healthy within {timeout_s}s"
+        )
 
     async def _kill_process(self, model_id: str, graceful: bool = False) -> None:
         entry = self._processes.pop(model_id, None)
