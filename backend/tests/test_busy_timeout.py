@@ -44,6 +44,18 @@ def test_begin_request_returns_id():
     assert len(request_id) == 36  # UUID format
 
 
+def test_begin_request_tracks_activity_source():
+    mm = _make_mm()
+    request_id = mm.begin_request("test/model", source="realtime_stt")
+
+    assert mm.activity_sources() == {
+        "test/model": {"realtime_stt": 1},
+    }
+
+    mm.end_request("test/model", request_id)
+    assert mm.activity_sources() == {}
+
+
 def test_end_request_clears_active():
     mm = _make_mm()
     rid = mm.begin_request("test/model")

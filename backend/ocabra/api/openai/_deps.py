@@ -54,6 +54,41 @@ def _openai_error(
     )
 
 
+async def _wait_for_unloading_transition(
+    model_manager: ModelManager,
+    model_id: str,
+    state: ModelState,
+) -> ModelState:
+    """Wait for an in-progress unload before attempting a new load.
+
+    An unload is a transient state, not a terminal model failure.  Treating it
+    as unavailable makes requests race with idle/manual eviction and produces a
+    needless 503 even though the model can be loaded again immediately after.
+    """
+    from ocabra.core.model_manager import ModelStatus
+
+    if state.status != ModelStatus.UNLOADING:
+        return state
+
+    deadline = asyncio.get_running_loop().time() + _ensure_load_timeout_s()
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.1)
+        current = await model_manager.get_state(model_id)
+        if current is None:
+            break
+        if current.status != ModelStatus.UNLOADING:
+            return current
+
+    exc = _openai_error(
+        f"Model '{model_id}' did not finish unloading in time.",
+        "server_error",
+        code="model_transition_timeout",
+        status_code=503,
+    )
+    exc.headers = {"Retry-After": "2"}
+    raise exc
+
+
 def get_model_manager(request: Request) -> ModelManager:
     return request.app.state.model_manager
 
@@ -561,6 +596,8 @@ async def _do_ensure_loaded(
             status_code=404,
         )
 
+    state = await _wait_for_unloading_transition(model_manager, model_id, state)
+
     async def _touch(resolved_id: str, request_at: datetime) -> None:
         state.last_request_at = request_at
         touch = getattr(model_manager, "touch_last_request_at", None)
@@ -691,6 +728,12 @@ async def ensure_loaded(
             code="model_not_found",
             status_code=404,
         )
+
+    state = await _wait_for_unloading_transition(
+        model_manager,
+        resolved_model_id,
+        state,
+    )
 
     if state.status == ModelStatus.LOADED:
         request_at = datetime.now(UTC)

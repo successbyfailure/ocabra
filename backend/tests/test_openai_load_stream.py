@@ -48,3 +48,38 @@ async def test_concurrent_load_wait_stops_when_model_enters_error() -> None:
     assert exc_info.value.status_code == 503
     assert "insufficient VRAM" in exc_info.value.detail["error"]["message"]
     sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_request_waits_for_unload_then_reloads_model() -> None:
+    unloading = ModelState(
+        model_id="vllm/test-model",
+        display_name="test-model",
+        backend_type="vllm",
+        status=ModelStatus.UNLOADING,
+        load_policy=LoadPolicy.ON_DEMAND,
+    )
+    unloaded = ModelState(
+        model_id="vllm/test-model",
+        display_name="test-model",
+        backend_type="vllm",
+        status=ModelStatus.UNLOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+    )
+    loaded = ModelState(
+        model_id="vllm/test-model",
+        display_name="test-model",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+    )
+    model_manager = AsyncMock()
+    model_manager.get_state = AsyncMock(side_effect=[unloading, unloaded, loaded])
+    model_manager.load = AsyncMock()
+
+    with patch("ocabra.api.openai._deps.asyncio.sleep", new=AsyncMock()) as sleep:
+        result = await _do_ensure_loaded(model_manager, "vllm/test-model")
+
+    assert result is loaded
+    model_manager.load.assert_awaited_once_with("vllm/test-model")
+    sleep.assert_awaited_once_with(0.1)

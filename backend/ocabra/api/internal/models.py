@@ -227,6 +227,7 @@ async def get_models_activity(
     mm = request.app.state.model_manager
     snapshot = mm.inflight_snapshot()
     ages = mm.active_request_ages()
+    sources = mm.activity_sources()
     states = await mm.list_states()
     activity: dict[str, dict] = {}
     for state in states:
@@ -235,7 +236,17 @@ async def get_models_activity(
         count = max((snapshot.get(k, 0) for k in keys), default=0)
         if count > 0:
             oldest = max((ages.get(k, 0.0) for k in keys), default=0.0)
-            activity[state.model_id] = {"inFlight": count, "oldestSeconds": round(oldest, 1)}
+            source_counts: dict[str, int] = {}
+            for key in keys:
+                for source, source_count in sources.get(key, {}).items():
+                    source_counts[source] = max(
+                        source_counts.get(source, 0), source_count
+                    )
+            activity[state.model_id] = {
+                "inFlight": count,
+                "oldestSeconds": round(oldest, 1),
+                "sources": source_counts,
+            }
     return {
         "activity": activity,
         "stuckThresholdSeconds": int(getattr(settings, "busy_timeout_seconds", 300)),

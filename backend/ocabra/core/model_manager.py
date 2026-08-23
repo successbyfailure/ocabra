@@ -129,6 +129,7 @@ class ActiveRequest:
     request_id: str
     model_id: str
     started_at: float  # time.time()
+    source: str = "api"
 
 
 class ModelManager:
@@ -156,13 +157,19 @@ class ModelManager:
         # model_id -> (resolved_at, num_ctx cap) for Ollama use-case clamping
         self._ollama_ctx_cap_cache: dict[str, tuple[float, int | None]] = {}
 
-    def begin_request(self, model_id: str) -> str:
+    def begin_request(self, model_id: str, *, source: str = "api") -> str:
         """Mark one request as in-flight. Returns request_id."""
-        request_id = self.try_begin_request(model_id, max_inflight=0)
+        request_id = self.try_begin_request(model_id, max_inflight=0, source=source)
         assert request_id is not None  # max_inflight<=0 never rejects
         return request_id
 
-    def try_begin_request(self, model_id: str, max_inflight: int) -> str | None:
+    def try_begin_request(
+        self,
+        model_id: str,
+        max_inflight: int,
+        *,
+        source: str = "api",
+    ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
         reject with 429 instead of letting a flood pile up on one worker).
@@ -178,6 +185,7 @@ class ModelManager:
                 request_id=request_id,
                 model_id=model_id,
                 started_at=time.time(),
+                source=source,
             )
         return request_id
 
@@ -202,6 +210,15 @@ class ModelManager:
                 if age > ages.get(req.model_id, -1.0):
                     ages[req.model_id] = age
         return ages
+
+    def activity_sources(self) -> dict[str, dict[str, int]]:
+        """Count active requests per model and origin."""
+        sources: dict[str, dict[str, int]] = {}
+        with self._in_flight_lock:
+            for request in self._active_requests.values():
+                by_source = sources.setdefault(request.model_id, {})
+                by_source[request.source] = by_source.get(request.source, 0) + 1
+        return sources
 
     async def resolve_ollama_num_ctx_cap(self, model_id: str) -> int | None:
         """num_ctx cap for an Ollama model with a ``use_case`` block, else None

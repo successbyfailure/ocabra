@@ -1087,22 +1087,16 @@ class RealtimeSession:
             logger.warning("realtime_no_stt_model", session_id=self._session_id)
             return ""
 
-        wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
-
-        worker = self._worker_pool.get_worker(self.stt_model_id)
-        if not worker:
-            try:
-                await self._model_manager.load(self.stt_model_id)
-                worker = self._worker_pool.get_worker(self.stt_model_id)
-            except Exception:
-                pass
+        request_id = self._model_manager.begin_request(
+            self.stt_model_id, source="realtime_stt"
+        )
+        try:
+            worker = await self._ensure_stt_worker()
             if not worker:
                 logger.warning("realtime_stt_worker_missing", model_id=self.stt_model_id)
                 return ""
-
-        url = f"http://127.0.0.1:{worker.port}/transcribe"
-
-        try:
+            wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
+            url = f"http://127.0.0.1:{worker.port}/transcribe"
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     url,
@@ -1113,8 +1107,15 @@ class RealtimeSession:
                 result = resp.json()
                 return result.get("text", "").strip()
         except Exception as exc:
-            logger.warning("realtime_stt_error", error=str(exc))
+            logger.warning(
+                "realtime_stt_error",
+                session_id=self._session_id,
+                model_id=self.stt_model_id,
+                error=str(exc),
+            )
             return ""
+        finally:
+            self._model_manager.end_request(self.stt_model_id, request_id)
 
     async def _transcribe_verbose(self, pcm_data: bytes) -> dict[str, Any]:
         """Transcribe with segment/word timestamps (and speakers if the profile
@@ -1122,12 +1123,15 @@ class RealtimeSession:
         empty = {"text": "", "segments": [], "words": [], "speakers": [], "speaker_embeddings": {}}
         if not self.stt_model_id:
             return empty
-        worker = self._worker_pool.get_worker(self.stt_model_id)
-        if not worker:
-            return empty
-        wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
-        url = f"http://127.0.0.1:{worker.port}/transcribe"
+        request_id = self._model_manager.begin_request(
+            self.stt_model_id, source="realtime_stt"
+        )
         try:
+            worker = await self._ensure_stt_worker()
+            if not worker:
+                return empty
+            wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
+            url = f"http://127.0.0.1:{worker.port}/transcribe"
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     url,
@@ -1149,8 +1153,54 @@ class RealtimeSession:
                     "speaker_embeddings": r.get("speaker_embeddings") or {},
                 }
         except Exception as exc:
-            logger.warning("realtime_stt_verbose_error", error=str(exc))
+            logger.warning(
+                "realtime_stt_verbose_error",
+                session_id=self._session_id,
+                model_id=self.stt_model_id,
+                error=str(exc),
+            )
             return empty
+        finally:
+            self._model_manager.end_request(self.stt_model_id, request_id)
+
+    async def _ensure_stt_worker(self):
+        """Return a stable STT worker, waiting through an active unload."""
+        if not self.stt_model_id:
+            return None
+
+        from ocabra.config import settings
+        from ocabra.core.model_manager import ModelStatus
+
+        deadline = time.monotonic() + max(1, int(settings.model_load_wait_timeout_s))
+        while time.monotonic() < deadline:
+            state = await self._model_manager.get_state(self.stt_model_id)
+            if state is not None and state.status == ModelStatus.UNLOADING:
+                await asyncio.sleep(0.1)
+                continue
+
+            worker = self._worker_pool.get_worker(self.stt_model_id)
+            if worker is not None and (
+                state is None or state.status == ModelStatus.LOADED
+            ):
+                return worker
+
+            try:
+                await self._model_manager.load(self.stt_model_id)
+            except Exception as exc:  # noqa: BLE001 - retry until bounded deadline
+                logger.info(
+                    "realtime_stt_load_wait",
+                    session_id=self._session_id,
+                    model_id=self.stt_model_id,
+                    error=str(exc),
+                )
+                await asyncio.sleep(0.1)
+                continue
+
+            worker = self._worker_pool.get_worker(self.stt_model_id)
+            if worker is not None:
+                return worker
+
+        return None
 
     def _filter_hallucinations(self, result: dict[str, Any]) -> None:
         """Drop hallucinated-over-silence segments from a transcription result

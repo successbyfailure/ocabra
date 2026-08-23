@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ocabra.backends.base import BackendCapabilities
+from ocabra.core.model_manager import ModelStatus
 from ocabra.core.realtime_session import RealtimeSession
 
 
@@ -159,3 +160,57 @@ async def test_should_use_native_audio_output_reads_capability() -> None:
     )
 
     assert await session._should_use_native_audio_output() is True
+
+
+@pytest.mark.asyncio
+async def test_transcribe_holds_realtime_activity_lease(monkeypatch) -> None:
+    session = _make_session(audio_input_capable=False)
+    session.stt_model_id = "whisper/faster-whisper-small"
+    worker = SimpleNamespace(port=12345)
+    session._ensure_stt_worker = AsyncMock(return_value=worker)
+    session._model_manager.begin_request.return_value = "request-1"
+
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json.return_value = {"text": "hola"}
+    client = AsyncMock()
+    client.post.return_value = response
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "ocabra.core.realtime_session.httpx.AsyncClient",
+        MagicMock(return_value=context),
+    )
+
+    assert await session._transcribe(b"\x00\x01" * 100) == "hola"
+    session._model_manager.begin_request.assert_called_once_with(
+        session.stt_model_id,
+        source="realtime_stt",
+    )
+    session._model_manager.end_request.assert_called_once_with(
+        session.stt_model_id,
+        "request-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_stt_worker_waits_for_unload_transition(monkeypatch) -> None:
+    session = _make_session(audio_input_capable=False)
+    session.stt_model_id = "whisper/faster-whisper-small"
+    worker = SimpleNamespace(port=12345)
+    session._model_manager.get_state = AsyncMock(
+        side_effect=[
+            SimpleNamespace(status=ModelStatus.UNLOADING),
+            SimpleNamespace(status=ModelStatus.UNLOADED),
+        ]
+    )
+    session._model_manager.load = AsyncMock()
+    session._worker_pool.get_worker = MagicMock(side_effect=[None, worker])
+    monkeypatch.setattr(
+        "ocabra.config.settings.model_load_wait_timeout_s",
+        2,
+    )
+
+    assert await session._ensure_stt_worker() is worker
+    session._model_manager.load.assert_awaited_once_with(session.stt_model_id)
