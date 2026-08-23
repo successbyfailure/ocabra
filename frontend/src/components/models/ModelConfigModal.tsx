@@ -487,7 +487,10 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setWhisperDiarizationModelId(
       whisper?.diarizationModelId == null ? "" : String(whisper.diarizationModelId),
     )
-  }, [bitnet, llamaCpp, model, sglang, tensorrt, vllm, whisper, gpus])
+    // Re-hidratar si cambia el modelo o aparece/desaparece una GPU. Depender de
+    // la referencia completa `gpus` reiniciaba el formulario cada ~2s con los
+    // broadcasts; ignorarla del todo dejaba un split erróneo si llegaba tarde.
+  }, [model, gpus.length])
 
   // Sprint 17.4 — fetch speculative candidates + installed llama.cpp runtimes
   // when the modal opens for a llama.cpp model.
