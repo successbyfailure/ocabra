@@ -366,7 +366,7 @@ cb3f61b, 727987a).
 
 ---
 
-## 🚧 Bloque 18 — Fiabilidad de peticiones y backends ternarios
+## ✅ Bloque 18 — Fiabilidad de peticiones y backends ternarios
 
 Abierto el 2026-08-23 tras revisar las peticiones reales de producción y los
 cambios recientes de Bonsai/VibeASR. El objetivo es reducir fallos visibles al
@@ -374,13 +374,13 @@ cliente sin reabrir todavía la estrategia global de scheduling.
 
 ### 18.1 — Realtime STT y ciclo de vida
 
-- [ ] Contabilizar las transcripciones internas de Realtime como actividad del
+- [x] Contabilizar las transcripciones internas de Realtime como actividad del
   modelo mediante `begin_request`/`end_request`.
-- [ ] Actualizar `last_request_at` y exponer el origen `realtime_stt` en
+- [x] Actualizar `last_request_at` y exponer el origen `realtime_stt` en
   `/ocabra/models/activity`.
-- [ ] Esperar de forma acotada si el worker STT está en `loading` o `unloading`,
+- [x] Esperar de forma acotada si el worker STT está en `loading` o `unloading`,
   en vez de intentar conectar a un puerto que está desapareciendo.
-- [ ] Añadir tests que impidan eviction idle/pressure mientras una transcripción
+- [x] Añadir tests que impidan eviction idle/pressure mientras una transcripción
   Realtime está activa.
 
 Motivo operativo: una sesión Realtime activa no aparecía en `request_stats` ni
@@ -389,22 +389,22 @@ siguiente fragmento, compitiendo con RavenX por VRAM.
 
 ### 18.2 — Transiciones de carga/descarga
 
-- [ ] Las peticiones que llegan durante `UNLOADING` deben esperar a que termine
+- [x] Las peticiones que llegan durante `UNLOADING` deben esperar a que termine
   la descarga y activar la recarga bajo demanda.
-- [ ] Mantener el timeout acotado y devolver `503` con un código estable si la
+- [x] Mantener el timeout acotado y devolver `503` con un código estable si la
   transición no converge; nunca convertir este estado transitorio en `500`.
-- [ ] Cubrir concurrencia entre eviction por presión y una nueva petición.
+- [x] Cubrir concurrencia entre eviction por presión y una nueva petición.
 
 ### 18.3 — IDs, perfiles y errores accionables
 
-- [ ] Aceptar siempre un `model_id` canónico registrado y resolverlo al perfil
+- [x] Aceptar siempre un `model_id` canónico registrado y resolverlo al perfil
   enabled/default correspondiente, conservando `profile_id` como ID público
   recomendado.
-- [ ] Generar un slug estable alternativo cuando dos perfiles por defecto
+- [x] Generar un slug estable alternativo cuando dos perfiles por defecto
   colisionen, en vez de dejar el segundo modelo invisible.
-- [ ] Conservar en estadísticas el detalle estructurado de errores HTTP locales
+- [x] Conservar en estadísticas el detalle estructurado de errores HTTP locales
   y upstream, no solo `HTTP 404`.
-- [ ] Completar `backend_type` cuando la petición utiliza un `profile_id`.
+- [x] Completar `backend_type` cuando la petición utiliza un `profile_id`.
 
 Motivo operativo: 12 peticiones de imagen usaron
 `diffusers/flux2-klein-4b` mientras el perfil público era `flux2-klein`; las 12
@@ -413,16 +413,20 @@ federación o worker.
 
 ### 18.4 — Correcciones Bonsai, VibeASR y calidad
 
-- [ ] Unificar la resolución de `gpu_layers` de Bonsai entre scheduler y backend;
+- [x] Unificar la resolución de `gpu_layers` de Bonsai entre scheduler y backend;
   el scheduler no puede tratarlo como CPU-only mientras PrismML usa 99 capas.
-- [ ] Estimar VRAM de Bonsai desde el GGUF, contexto y KV cuantizado, eliminando
+- [x] Estimar VRAM de Bonsai desde el GGUF, contexto y KV cuantizado, eliminando
   el fallback fijo de 400 MB para este modelo.
-- [ ] Resolver VibeASR desde el layout real
+- [x] Resolver VibeASR desde el layout real
   `models/huggingface/<repo-aplanado>` y garantizar que VAE+LM proceden del mismo
   directorio.
-- [ ] Convertir los pesos ficticios de tests a ficheros sparse/mocks; la suite
+- [x] Convertir los pesos ficticios de tests a ficheros sparse/mocks; la suite
   actual puede ocupar ~45 GiB de `/tmp`.
-- [ ] Corregir aserciones inertes, variables ausentes en `.env.example` y lint.
+- [x] Corregir aserciones inertes, variables ausentes en `.env.example` y lint.
+
+Correcciones adicionales entregadas: limpieza del sufijo interno de worker al
+resolver repositorios vLLM, override explícito de `chat_template` en llama.cpp y
+rehidratación estable del formulario de modelos ante broadcasts de GPU.
 
 ### Decisiones aplazadas
 
@@ -493,7 +497,7 @@ corrección para el estado Mamba con tokens especulativos:
 [🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
 [🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
 [✅ Hecho]    Bloque 17 — llama.cpp loader parity (4 sprints; pendiente wiring scanner→DB del tokenizer fingerprint)
-[🚧 En curso] Bloque 18 — Fiabilidad de peticiones y backends ternarios
+[✅ Hecho]    Bloque 18 — Fiabilidad de peticiones y backends ternarios
 [Pendiente]   Investigación e integración de vLLM sleep mode
 [Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción

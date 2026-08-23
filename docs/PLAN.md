@@ -41,7 +41,7 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 
 ## Estado actual (2026-08-23)
 
-**Fases 0–8 completadas e implementadas. Bloques 1–17 entregados; Bloque 18 en curso.**
+**Fases 0–8 completadas e implementadas. Bloques 1–18 entregados.**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
 El trabajo restante está en `docs/ROADMAP.md`.
@@ -80,11 +80,11 @@ El trabajo restante está en `docs/ROADMAP.md`.
 - **OpenAI Batches + Files API + ACL de modelos (Bloque 14)**: Files API (`/v1/files` — upload/retrieve/delete/content) y Batches API (`/v1/batches` — create/retrieve/list/cancel) con migración `0016`. `BatchProcessor` en background despacha in-process vía `ASGITransport` impersonando al owner con `X-Gateway-Token` + `X-Internal-User-Id`. Endpoints soportados dentro de batches: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. `/ocabra/models` ahora filtra por `accessible_model_ids` para no-admin (igual que `/v1/models`).
 - **Tests**: 586+ tests cubriendo path traversal, config, model manager, worker lifecycle, Langfuse, profiles, modalities, eviction, busy timeout, process manager, y federación (54 tests).
 - **Backends ternarios recientes**: Bonsai 27B mediante el fork PrismML del
-  backend BitNet y VibeASR como backend STT CPU-first. Su hardening de
-  planificación, resolución de artefactos y tests forma parte del Bloque 18.
-- **Incidencia operativa abierta**: las transcripciones internas de Realtime no
-  se reflejan todavía como actividad del modelo. Esto permite eviction de
-  Whisper durante una sesión y puede provocar recargas/competencia de VRAM.
+  backend BitNet y VibeASR como backend STT CPU-first, con planificación y
+  resolución de artefactos endurecidas en el Bloque 18.
+- **Fiabilidad de peticiones (Bloque 18)**: Realtime STT participa en el ciclo
+  de actividad, las peticiones esperan transiciones `UNLOADING`, los IDs
+  canónicos resuelven perfiles habilitados y stats conserva errores/backend.
 
 ### Validaciones end-to-end confirmadas
 
@@ -101,10 +101,9 @@ El trabajo restante está en `docs/ROADMAP.md`.
 
 ### Próximas fases
 
-- **Bloque 18 — Fiabilidad de peticiones y backends ternarios (EN CURSO,
-  2026-08-23)**: actividad Realtime STT, espera durante transiciones,
-  resolución canónica de perfiles, errores accionables y correcciones
-  Bonsai/VibeASR. Fuente de verdad: `docs/ROADMAP.md`.
+- **Revisión futura de fiabilidad global**: evaluar conjuntamente estrategias
+  de recursos, concurrencia, admission control y timeouts. También queda
+  aplazada la decisión sobre OpenAI Responses API. Fuente: `docs/ROADMAP.md`.
 - **Bloque 15 — Backends Modulares (EN CURSO, 2026-04-24)**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`. Equipo de agentes paralelos trabajando en Fase 1 (infra), Fase 3 (Dockerfiles) y Fase 5 (frontend).
 - **Fine-tuning de voz**: Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
 - **UI de Batches**: Listado y descarga de batches del usuario desde el dashboard (backend ya expuesto, falta la vista).

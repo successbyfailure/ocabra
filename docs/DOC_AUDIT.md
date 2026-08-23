@@ -38,7 +38,7 @@ Documentación ya alineada con el código:
 
 ## Backlog residual real
 
-- Bloque 18 de fiabilidad: actividad Realtime STT, transiciones
+- Bloque 18 de fiabilidad entregado: actividad Realtime STT, transiciones
   `loading/unloading`, resolución canónica de perfiles, errores accionables y
   hardening Bonsai/VibeASR.
 - Validación backend completa con `pytest` en CI o contenedor con dependencias completas.
