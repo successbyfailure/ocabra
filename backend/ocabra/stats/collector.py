@@ -830,3 +830,51 @@ async def _record_stat(
             await session.commit()
     except Exception as exc:
         logger.warning("stats_write_failed", error=str(exc))
+
+
+async def record_realtime_request(
+    websocket: object,
+    *,
+    session_id: str,
+    model_id: str,
+    started_at: datetime,
+    duration_ms: float,
+    request_kind: str,
+    status_code: int,
+    error_message: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> None:
+    """Persist one Realtime session/backend operation and emit its audit log.
+
+    A Starlette WebSocket exposes the same app/state/headers/client attributes
+    consumed by ``_record_stat``. Keeping this adapter here makes Realtime use
+    the same attribution, energy and Prometheus paths as ordinary HTTP calls.
+    """
+    await _record_stat(
+        request=websocket,  # type: ignore[arg-type]
+        model_id=model_id,
+        started_at=started_at,
+        duration_ms=duration_ms,
+        error_message=error_message,
+        status_code=status_code,
+        endpoint_path="/v1/realtime",
+        request_kind=request_kind,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+    state = getattr(websocket, "state", None)
+    auth_user = getattr(state, "auth_user", None)
+    logger.info(
+        "realtime_request_recorded",
+        session_id=session_id,
+        model_id=model_id,
+        request_kind=request_kind,
+        status_code=status_code,
+        duration_ms=int(duration_ms),
+        username=getattr(auth_user, "username", None),
+        api_key_name=getattr(auth_user, "api_key_name", None),
+        client_addr=_client_addr(websocket),  # type: ignore[arg-type]
+        error=error_message,
+    )

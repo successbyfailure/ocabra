@@ -13,11 +13,16 @@ or allows anonymous access when ``require_api_key_openai`` is disabled.
 
 from __future__ import annotations
 
+import asyncio
+import time
+from datetime import UTC, datetime
+
 import structlog
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.core.realtime_session import RealtimeSession
+from ocabra.stats.collector import record_realtime_request
 
 logger = structlog.get_logger(__name__)
 
@@ -133,6 +138,17 @@ async def realtime_ws(
         if match:
             resolved_model_id = match.model_id
 
+    async def _record_realtime(**kwargs: object) -> None:
+        try:
+            await record_realtime_request(websocket, **kwargs)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001 - stats must not break Realtime
+            logger.warning(
+                "realtime_stats_record_failed",
+                model_id=resolved_model_id,
+                request_kind=kwargs.get("request_kind"),
+                error=str(exc),
+            )
+
     session = RealtimeSession(
         ws=websocket,
         model_id=resolved_model_id,
@@ -140,6 +156,7 @@ async def realtime_ws(
         model_manager=model_manager,
         user=user,
         transcription_only=(intent.strip().lower() == "transcription"),
+        request_recorder=_record_realtime,
     )
 
     # Auto-enable diarization when a transcription session is opened with a diarized
@@ -171,6 +188,10 @@ async def realtime_ws(
         intent="transcription" if session.transcription_only else "conversation",
     )
 
+    session_started_at = datetime.now(UTC)
+    session_started_monotonic = time.monotonic()
+    session_status = 101
+    session_error: str | None = None
     try:
         await session.run()
     except WebSocketDisconnect:
@@ -180,7 +201,13 @@ async def realtime_ws(
             username=user.username,
             api_key_name=user.api_key_name,
         )
+    except asyncio.CancelledError:
+        session_status = 499
+        session_error = "Realtime session cancelled"
+        raise
     except Exception as exc:
+        session_status = 500
+        session_error = str(exc)
         logger.warning(
             "realtime_session_error",
             session_id=session._session_id,
@@ -196,6 +223,17 @@ async def realtime_ws(
             session._partial_task.cancel()
         if session._background_load_task and not session._background_load_task.done():
             session._background_load_task.cancel()
+        await _record_realtime(
+            session_id=session._session_id,
+            model_id=resolved_model_id,
+            started_at=session_started_at,
+            duration_ms=(time.monotonic() - session_started_monotonic) * 1000,
+            request_kind="realtime_session",
+            status_code=session_status,
+            error_message=session_error,
+            input_tokens=None,
+            output_tokens=None,
+        )
         logger.info(
             "realtime_session_ended",
             session_id=session._session_id,

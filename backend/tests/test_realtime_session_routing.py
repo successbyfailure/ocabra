@@ -165,6 +165,7 @@ async def test_should_use_native_audio_output_reads_capability() -> None:
 @pytest.mark.asyncio
 async def test_transcribe_holds_realtime_activity_lease(monkeypatch) -> None:
     session = _make_session(audio_input_capable=False)
+    session._request_recorder = AsyncMock()
     session.stt_model_id = "whisper/faster-whisper-small"
     worker = SimpleNamespace(port=12345)
     session._ensure_stt_worker = AsyncMock(return_value=worker)
@@ -192,6 +193,64 @@ async def test_transcribe_holds_realtime_activity_lease(monkeypatch) -> None:
         session.stt_model_id,
         "request-1",
     )
+    assert session._request_recorder.await_args.kwargs["request_kind"] == (
+        "realtime_transcription"
+    )
+    assert session._request_recorder.await_args.kwargs["status_code"] == 200
+    assert session._request_recorder.await_args.kwargs["output_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_llm_records_realtime_chat_operation() -> None:
+    session = _make_session(audio_input_capable=False)
+    session._request_recorder = AsyncMock()
+    session._worker_pool.get_worker.return_value = SimpleNamespace(port=12345)
+
+    async def _stream(*args, **kwargs):
+        yield b'data: {"choices":[{"delta":{"content":"hola mundo"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    session._worker_pool.forward_stream = _stream
+    chunks = [chunk async for chunk in session._stream_llm(
+        [{"role": "user", "content": "di hola"}]
+    )]
+
+    assert chunks == ["hola mundo"]
+    recorded = session._request_recorder.await_args.kwargs
+    assert recorded["request_kind"] == "realtime_chat"
+    assert recorded["status_code"] == 200
+    assert recorded["input_tokens"] == 2
+    assert recorded["output_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_synthesize_records_realtime_tts_operation(monkeypatch) -> None:
+    session = _make_session(audio_input_capable=False)
+    session.tts_model_id = "tts/kokoro"
+    session._tts_ready.set()
+    session._request_recorder = AsyncMock()
+    session._worker_pool.get_worker.return_value = SimpleNamespace(port=12345)
+    session._send_event = AsyncMock()
+
+    response = MagicMock(content=b"audio")
+    response.raise_for_status = MagicMock()
+    client = AsyncMock()
+    client.post.return_value = response
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "ocabra.core.realtime_session.httpx.AsyncClient",
+        MagicMock(return_value=context),
+    )
+
+    await session._synthesize_and_send("hola mundo", "resp_1", "item_1")
+
+    recorded = session._request_recorder.await_args.kwargs
+    assert recorded["request_kind"] == "realtime_tts"
+    assert recorded["status_code"] == 200
+    assert recorded["input_tokens"] == 2
+    assert recorded["output_tokens"] == 0
 
 
 @pytest.mark.asyncio

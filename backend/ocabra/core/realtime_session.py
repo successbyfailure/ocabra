@@ -17,7 +17,9 @@ import re
 import time
 import uuid
 import wave
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -152,6 +154,20 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _message_word_count(messages: list[dict[str, Any]]) -> int:
+    """Approximate text input tokens without inspecting embedded audio payloads."""
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content.split())
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total += len(part["text"].split())
+    return total
+
+
 class RealtimeSession:
     """Manages a single Realtime API WebSocket session.
 
@@ -175,6 +191,7 @@ class RealtimeSession:
         model_manager: ModelManager,
         user: UserContext | None = None,
         transcription_only: bool = False,
+        request_recorder: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         from ocabra.config import settings
 
@@ -232,6 +249,7 @@ class RealtimeSession:
         self._worker_pool = worker_pool
         self._model_manager = model_manager
         self._user = user
+        self._request_recorder = request_recorder
         self._vad = SimpleVAD()
         self._session_id = f"sess_{uuid.uuid4().hex[:24]}"
         self._cancel_event = asyncio.Event()
@@ -261,6 +279,42 @@ class RealtimeSession:
         # this true, but the hook is in place for Qwen2.5-Omni / GPT-4o-realtime
         # style models that emit audio directly without a separate TTS step.
         self._native_audio_output: bool | None = None
+
+    async def _record_request(
+        self,
+        *,
+        model_id: str,
+        request_kind: str,
+        started_at: datetime,
+        started_monotonic: float,
+        status_code: int,
+        error_message: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        """Record a Realtime backend operation without disrupting the session."""
+        if self._request_recorder is None:
+            return
+        try:
+            await self._request_recorder(
+                session_id=self._session_id,
+                model_id=model_id,
+                started_at=started_at,
+                duration_ms=(time.monotonic() - started_monotonic) * 1000,
+                request_kind=request_kind,
+                status_code=status_code,
+                error_message=error_message,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001 - stats must not break Realtime
+            logger.warning(
+                "realtime_stats_record_failed",
+                session_id=self._session_id,
+                model_id=model_id,
+                request_kind=request_kind,
+                error=str(exc),
+            )
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -1087,12 +1141,19 @@ class RealtimeSession:
             logger.warning("realtime_no_stt_model", session_id=self._session_id)
             return ""
 
+        started_at = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        status_code = 200
+        error_message: str | None = None
+        output_tokens = 0
         request_id = self._model_manager.begin_request(
             self.stt_model_id, source="realtime_stt"
         )
         try:
             worker = await self._ensure_stt_worker()
             if not worker:
+                status_code = 503
+                error_message = "STT worker unavailable"
                 logger.warning("realtime_stt_worker_missing", model_id=self.stt_model_id)
                 return ""
             wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
@@ -1105,17 +1166,45 @@ class RealtimeSession:
                 )
                 resp.raise_for_status()
                 result = resp.json()
-                return result.get("text", "").strip()
-        except Exception as exc:
+                text = result.get("text", "").strip()
+                output_tokens = len(text.split())
+                return text
+        except asyncio.CancelledError:
+            status_code = 499
+            error_message = "Realtime request cancelled"
+            raise
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            error_message = str(exc)
             logger.warning(
                 "realtime_stt_error",
                 session_id=self._session_id,
                 model_id=self.stt_model_id,
-                error=str(exc),
+                error=error_message,
+            )
+            return ""
+        except Exception as exc:
+            status_code = 502
+            error_message = str(exc)
+            logger.warning(
+                "realtime_stt_error",
+                session_id=self._session_id,
+                model_id=self.stt_model_id,
+                error=error_message,
             )
             return ""
         finally:
             self._model_manager.end_request(self.stt_model_id, request_id)
+            await self._record_request(
+                model_id=self.stt_model_id,
+                request_kind="realtime_transcription",
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                status_code=status_code,
+                error_message=error_message,
+                input_tokens=0,
+                output_tokens=output_tokens,
+            )
 
     async def _transcribe_verbose(self, pcm_data: bytes) -> dict[str, Any]:
         """Transcribe with segment/word timestamps (and speakers if the profile
@@ -1123,12 +1212,19 @@ class RealtimeSession:
         empty = {"text": "", "segments": [], "words": [], "speakers": [], "speaker_embeddings": {}}
         if not self.stt_model_id:
             return empty
+        started_at = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        status_code = 200
+        error_message: str | None = None
+        output_tokens = 0
         request_id = self._model_manager.begin_request(
             self.stt_model_id, source="realtime_stt"
         )
         try:
             worker = await self._ensure_stt_worker()
             if not worker:
+                status_code = 503
+                error_message = "STT worker unavailable"
                 return empty
             wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
             url = f"http://127.0.0.1:{worker.port}/transcribe"
@@ -1145,23 +1241,51 @@ class RealtimeSession:
                 )
                 resp.raise_for_status()
                 r = resp.json()
+                text = (r.get("text") or "").strip()
+                output_tokens = len(text.split())
                 return {
-                    "text": (r.get("text") or "").strip(),
+                    "text": text,
                     "segments": r.get("segments") or [],
                     "words": r.get("words") or [],
                     "speakers": r.get("speakers") or [],
                     "speaker_embeddings": r.get("speaker_embeddings") or {},
                 }
-        except Exception as exc:
+        except asyncio.CancelledError:
+            status_code = 499
+            error_message = "Realtime request cancelled"
+            raise
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            error_message = str(exc)
             logger.warning(
                 "realtime_stt_verbose_error",
                 session_id=self._session_id,
                 model_id=self.stt_model_id,
-                error=str(exc),
+                error=error_message,
+            )
+            return empty
+        except Exception as exc:
+            status_code = 502
+            error_message = str(exc)
+            logger.warning(
+                "realtime_stt_verbose_error",
+                session_id=self._session_id,
+                model_id=self.stt_model_id,
+                error=error_message,
             )
             return empty
         finally:
             self._model_manager.end_request(self.stt_model_id, request_id)
+            await self._record_request(
+                model_id=self.stt_model_id,
+                request_kind="realtime_transcription",
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                status_code=status_code,
+                error_message=error_message,
+                input_tokens=0,
+                output_tokens=output_tokens,
+            )
 
     async def _ensure_stt_worker(self):
         """Return a stable STT worker, waiting through an active unload."""
@@ -1351,39 +1475,53 @@ class RealtimeSession:
 
         Yields text content deltas.
         """
-        worker = self._worker_pool.get_worker(self.llm_model_id)
-        if not worker:
-            # Try on-demand load as fallback
-            try:
-                await self._model_manager.load(self.llm_model_id)
-                worker = self._worker_pool.get_worker(self.llm_model_id)
-            except Exception as exc:
-                logger.warning(
-                    "realtime_llm_load_failed", model_id=self.llm_model_id, error=str(exc)
-                )
-            if not worker:
-                logger.warning("realtime_llm_worker_missing", model_id=self.llm_model_id)
-                return
-
-        state = await self._model_manager.get_state(self.llm_model_id)
-        if not state:
-            logger.warning("realtime_llm_state_missing", model_id=self.llm_model_id)
-            return
-
-        backend_model_id = state.backend_model_id or self.llm_model_id
-
-        body = {
-            "model": backend_model_id,
-            "messages": messages,
-            "stream": True,
-        }
-
+        started_at = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        status_code = 200
+        error_message: str | None = None
+        input_tokens = _message_word_count(messages)
+        output_tokens = 0
         line_buf = b""
         try:
+            worker = self._worker_pool.get_worker(self.llm_model_id)
+            if not worker:
+                try:
+                    await self._model_manager.load(self.llm_model_id)
+                    worker = self._worker_pool.get_worker(self.llm_model_id)
+                except Exception as exc:
+                    status_code = 503
+                    error_message = str(exc)
+                    logger.warning(
+                        "realtime_llm_load_failed",
+                        model_id=self.llm_model_id,
+                        error=error_message,
+                    )
+                if not worker:
+                    status_code = 503
+                    error_message = error_message or "LLM worker unavailable"
+                    logger.warning("realtime_llm_worker_missing", model_id=self.llm_model_id)
+                    return
+
+            state = await self._model_manager.get_state(self.llm_model_id)
+            if not state:
+                status_code = 503
+                error_message = "LLM state unavailable"
+                logger.warning("realtime_llm_state_missing", model_id=self.llm_model_id)
+                return
+
+            backend_model_id = state.backend_model_id or self.llm_model_id
+            body = {
+                "model": backend_model_id,
+                "messages": messages,
+                "stream": True,
+            }
+
             async for chunk in self._worker_pool.forward_stream(
                 self.llm_model_id, "/v1/chat/completions", body
             ):
                 if self._cancel_event.is_set():
+                    status_code = 499
+                    error_message = "Realtime response cancelled"
                     break
                 line_buf += chunk
                 while b"\n" in line_buf:
@@ -1404,11 +1542,31 @@ class RealtimeSession:
                     delta = choices[0].get("delta", {})
                     content = delta.get("content")
                     if content:
+                        output_tokens += len(content.split())
                         yield content
+        except asyncio.CancelledError:
+            status_code = 499
+            error_message = "Realtime request cancelled"
+            raise
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            error_message = str(exc)
             logger.warning("realtime_llm_http_error", status=exc.response.status_code)
         except Exception as exc:
-            logger.warning("realtime_llm_stream_error", error=str(exc))
+            status_code = 502
+            error_message = str(exc)
+            logger.warning("realtime_llm_stream_error", error=error_message)
+        finally:
+            await self._record_request(
+                model_id=self.llm_model_id,
+                request_kind="realtime_chat",
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                status_code=status_code,
+                error_message=error_message,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
 
     # ── TTS ─────────────────────────────────────────────────────────────
 
@@ -1422,35 +1580,34 @@ class RealtimeSession:
         if not self.tts_model_id:
             return
 
-        # Wait for TTS to be ready (may still be loading)
-        if not self._tts_ready.is_set():
-            try:
+        started_at = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        status_code = 200
+        error_message: str | None = None
+        try:
+            # Wait for TTS to be ready (may still be loading)
+            if not self._tts_ready.is_set():
                 await asyncio.wait_for(self._tts_ready.wait(), timeout=60)
-            except TimeoutError:
-                logger.warning("realtime_tts_load_timeout", model_id=self.tts_model_id)
-                return  # Skip audio, text transcript was already sent
 
-        worker = self._worker_pool.get_worker(self.tts_model_id)
-        if not worker:
-            try:
+            worker = self._worker_pool.get_worker(self.tts_model_id)
+            if not worker:
                 await self._model_manager.load(self.tts_model_id)
                 worker = self._worker_pool.get_worker(self.tts_model_id)
-            except Exception:
-                pass
             if not worker:
+                status_code = 503
+                error_message = "TTS worker unavailable"
                 logger.warning("realtime_tts_worker_missing", model_id=self.tts_model_id)
                 return
 
-        url = f"http://127.0.0.1:{worker.port}/synthesize"
+            url = f"http://127.0.0.1:{worker.port}/synthesize"
 
-        payload = {
-            "input": text,
-            "voice": self.voice,
-            "response_format": "pcm",
-            "speed": 1.0,
-        }
+            payload = {
+                "input": text,
+                "voice": self.voice,
+                "response_format": "pcm",
+                "speed": 1.0,
+            }
 
-        try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
@@ -1474,8 +1631,33 @@ class RealtimeSession:
                     delta=b64_chunk,
                 )
 
+        except TimeoutError:
+            status_code = 503
+            error_message = "TTS model load timeout"
+            logger.warning("realtime_tts_load_timeout", model_id=self.tts_model_id)
+        except asyncio.CancelledError:
+            status_code = 499
+            error_message = "Realtime request cancelled"
+            raise
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            error_message = str(exc)
+            logger.warning("realtime_tts_error", error=error_message)
         except Exception as exc:
-            logger.warning("realtime_tts_error", error=str(exc), text=text[:80])
+            status_code = 502
+            error_message = str(exc)
+            logger.warning("realtime_tts_error", error=error_message)
+        finally:
+            await self._record_request(
+                model_id=self.tts_model_id,
+                request_kind="realtime_tts",
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                status_code=status_code,
+                error_message=error_message,
+                input_tokens=len(text.split()),
+                output_tokens=0,
+            )
 
     # ── Message helpers ─────────────────────────────────────────────────
 

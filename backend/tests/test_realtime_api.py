@@ -6,9 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import WebSocketDisconnect
 
 from ocabra.api._deps_auth import UserContext
-from ocabra.api.openai.realtime import _authenticate_ws
+from ocabra.api.openai.realtime import _authenticate_ws, realtime_ws
 
 
 def _context(**overrides) -> UserContext:
@@ -99,3 +100,57 @@ async def test_authenticate_ws_builds_anonymous_identity_when_allowed() -> None:
 async def test_authenticate_ws_rejects_missing_credentials_when_required() -> None:
     with patch("ocabra.config.settings.require_api_key_openai", True):
         assert await _authenticate_ws(_websocket()) is None
+
+
+@pytest.mark.asyncio
+async def test_realtime_ws_records_completed_session() -> None:
+    user = _context()
+    websocket = SimpleNamespace(
+        state=SimpleNamespace(),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                worker_pool=object(),
+                model_manager=object(),
+                profile_registry=SimpleNamespace(get=AsyncMock(return_value=None)),
+            )
+        ),
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        accept=AsyncMock(),
+    )
+
+    class FakeRealtimeSession:
+        def __init__(self, **kwargs) -> None:
+            self._session_id = "sess_test"
+            self.transcription_only = False
+            self._response_task = None
+            self._partial_task = None
+            self._background_load_task = None
+
+        async def run(self) -> None:
+            raise WebSocketDisconnect(code=1000)
+
+    recorder = AsyncMock()
+    with (
+        patch(
+            "ocabra.api.openai.realtime._authenticate_ws",
+            new=AsyncMock(return_value=user),
+        ),
+        patch("ocabra.api.openai.realtime.RealtimeSession", FakeRealtimeSession),
+        patch("ocabra.api.openai.realtime.record_realtime_request", new=recorder),
+    ):
+        await realtime_ws(
+            websocket,
+            model="vllm/test-model",
+            intent="",
+            conversation_id="",
+            num_speakers=0,
+        )
+
+    websocket.accept.assert_awaited_once()
+    assert websocket.state.auth_user is user
+    recorded = recorder.await_args.kwargs
+    assert recorded["session_id"] == "sess_test"
+    assert recorded["request_kind"] == "realtime_session"
+    assert recorded["status_code"] == 101
+    assert recorded["model_id"] == "vllm/test-model"

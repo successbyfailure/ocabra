@@ -17,6 +17,7 @@ from ocabra.stats.collector import (
     _extract_usage_tokens,
     _resolve_inflight_model_id,
     _stream_error_status,
+    record_realtime_request,
 )
 
 
@@ -137,6 +138,36 @@ async def test_resolve_inflight_model_id_maps_profile_to_worker_key() -> None:
     resolved = await _resolve_inflight_model_id(request, "gemma-public")
 
     assert resolved == "ollama/gemma:12b::13a8ca1bf587"
+
+
+@pytest.mark.asyncio
+async def test_record_realtime_request_reuses_attributed_stats_path() -> None:
+    auth_user = SimpleNamespace(username="makespace", api_key_name="voice-client")
+    websocket = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace()),
+        state=SimpleNamespace(auth_user=auth_user),
+        headers={"user-agent": "test-client"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    record_stat = AsyncMock()
+
+    with patch("ocabra.stats.collector._record_stat", new=record_stat):
+        await record_realtime_request(
+            websocket,
+            session_id="sess_test",
+            model_id="whisper/faster-whisper-small",
+            started_at=SimpleNamespace(),
+            duration_ms=42.8,
+            request_kind="realtime_transcription",
+            status_code=200,
+            input_tokens=0,
+            output_tokens=3,
+        )
+
+    assert record_stat.await_args.kwargs["request"] is websocket
+    assert record_stat.await_args.kwargs["endpoint_path"] == "/v1/realtime"
+    assert record_stat.await_args.kwargs["request_kind"] == "realtime_transcription"
+    assert record_stat.await_args.kwargs["output_tokens"] == 3
 
 
 def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
