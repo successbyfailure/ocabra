@@ -345,6 +345,72 @@ class TestGetVramEstimate:
         assert estimate >= 2048
 
 
+class TestWorkerKeySuffixStripping:
+    """Profile worker_keys carry a ``::<hash>`` suffix (see
+    ``compute_worker_key``). The backend must strip that suffix before
+    resolving on-disk snapshots and before falling back to passing the id
+    to vLLM/transformers — otherwise transformers rejects the raw string
+    with ``HFValidationError`` and the whole load crashes at engine init.
+
+    Regression: 2026-08-12 — the ctx256k profile refused to start with
+    ``Repo id must use alphanumeric chars, '-', '_' or '.': 'mattbucci/…::ca327621814f'``.
+    """
+
+    def test_strip_returns_base_id_when_no_suffix(self):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        assert VLLMBackend._strip_worker_key_suffix("Qwen/Qwen3-8B") == "Qwen/Qwen3-8B"
+
+    def test_strip_removes_hash_suffix(self):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        assert (
+            VLLMBackend._strip_worker_key_suffix(
+                "mattbucci/gemma-4-12B-AWQ::ca327621814f"
+            )
+            == "mattbucci/gemma-4-12B-AWQ"
+        )
+
+    def test_resolve_local_dir_finds_snapshot_from_worker_key(
+        self, tmp_model_dir: Path
+    ):
+        """The worker_key form has to resolve the same directory as the
+        underlying repo id — otherwise ``_resolve_model_target`` falls
+        through to the raw id, vLLM gets the ``::hash`` variant, and the
+        engine dies before touching the GPU.
+        """
+        model_path = tmp_model_dir / "huggingface" / "org--repo"
+        model_path.mkdir(parents=True)
+        (model_path / "config.json").write_text("{}")
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = ""
+            backend = VLLMBackend()
+            resolved_bare = backend._resolve_local_model_dir("org/repo")
+            resolved_worker = backend._resolve_local_model_dir(
+                "org/repo::deadbeef1234"
+            )
+
+        assert resolved_bare == model_path
+        assert resolved_worker == model_path
+
+    def test_resolve_target_falls_back_to_clean_id(self, tmp_model_dir: Path):
+        """When nothing is on disk, fall back to the *clean* id — the raw
+        worker_key would violate HF's repo-id validator inside vLLM.
+        """
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_cache_dir = ""
+            backend = VLLMBackend()
+            target = backend._resolve_model_target("org/repo::deadbeef1234")
+        assert target == "org/repo"
+
+
 class TestMemoryProfileParsing:
     def test_parse_memory_profile_logs_extracts_kv_cache_and_context(self):
         from ocabra.backends.vllm_backend import VLLMBackend

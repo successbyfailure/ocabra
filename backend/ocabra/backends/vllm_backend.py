@@ -1040,17 +1040,29 @@ class VLLMBackend(BackendInterface):
         tail = text[-(limit // 2) :]
         return f"{head}\n...[truncated]...\n{tail}"
 
+    @staticmethod
+    def _strip_worker_key_suffix(model_id: str) -> str:
+        """Strip the ``::<hash>`` suffix that ``compute_worker_key`` appends
+        for profiles with ``load_overrides``. The suffix identifies a virtual
+        worker inside oCabra but is not part of any real HF repo id or on-disk
+        path — leaving it in place makes every ``config.json``/snapshot lookup
+        miss, and then vLLM/transformers rejects the raw string with
+        ``HFValidationError: Repo id must use alphanumeric chars, '-', '_' or '.'``.
+        """
+        return model_id.split("::", 1)[0] if "::" in model_id else model_id
+
     def _resolve_local_model_dir(self, model_id: str) -> Path | None:
+        clean_id = self._strip_worker_key_suffix(model_id)
         base = Path(settings.models_dir)
-        direct = base / model_id
+        direct = base / clean_id
         if direct.exists() and direct.is_dir():
             return direct
 
-        hf_layout = base / "huggingface" / model_id.replace("/", "--")
+        hf_layout = base / "huggingface" / clean_id.replace("/", "--")
         if hf_layout.exists() and hf_layout.is_dir():
             return hf_layout
 
-        cached = self._resolve_hf_cache_snapshot_dir(model_id)
+        cached = self._resolve_hf_cache_snapshot_dir(clean_id)
         if cached is not None:
             return cached
 
@@ -1096,8 +1108,13 @@ class VLLMBackend(BackendInterface):
         1. Local legacy layout: <models_dir>/<model_id>
         2. Local HF layout: <models_dir>/huggingface/<repo-with--separators>
         3. Fallback to raw model_id (remote repo resolution by vLLM/HF)
+
+        When the caller passes a profile worker_key (``base::<hash>``) instead
+        of the underlying repo id, we drop the suffix on the fallback path so
+        the string vLLM ends up seeing is a valid HF repo id, not
+        ``mattbucci/gemma-4-12B-AWQ::ca327621814f`` which transformers rejects.
         """
         local_dir = self._resolve_local_model_dir(model_id)
         if local_dir:
             return str(local_dir)
-        return model_id
+        return self._strip_worker_key_suffix(model_id)
