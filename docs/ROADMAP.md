@@ -440,6 +440,19 @@ rehidratación estable del formulario de modelos ante broadcasts de GPU.
 
 ---
 
+## 🚧 Bloque 19 — Observabilidad atribuible de OpenAI Realtime
+
+- [ ] Resolver y conservar `UserContext` completo durante el handshake
+  WebSocket, sin registrar tokens ni cookies.
+- [ ] Registrar apertura/cierre de sesión y cada operación STT, LLM y TTS en
+  `request_stats`, diferenciadas mediante `request_kind`.
+- [ ] Añadir logs estructurados con `session_id`, usuario, etiqueta de API key,
+  IP, modelo, duración, estado y error.
+- [ ] Cubrir autenticación por API key, cookie y anonymous, así como estadísticas
+  de éxito/error sin persistir contenido de audio o conversación.
+
+---
+
 ## 🔬 Investigación pendiente — vLLM sleep mode
 
 Evaluar cómo integrar `--enable-sleep-mode` de vLLM con el ciclo de vida de

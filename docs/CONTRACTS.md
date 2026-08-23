@@ -340,6 +340,25 @@ GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str   → OverviewStats
 - `byBackend`: `[{ backendType, totalRequests, errorRate, avgLatencyMs, p95LatencyMs }]`
 - `byRequestKind`: `[{ requestKind, totalRequests, errorRate, avgLatencyMs, p95LatencyMs }]`
 
+#### Estadísticas de OpenAI Realtime
+
+Las conexiones `GET /v1/realtime` conservan el `UserContext` resuelto durante
+el handshake y escriben en la tabla existente `request_stats`; no se persiste
+audio, texto de conversación ni credenciales.
+
+| `request_kind` | Unidad registrada | `model_id` |
+|---|---|---|
+| `realtime_session` | Una fila por WebSocket abierto, al cerrarse | Modelo solicitado/resuelto |
+| `realtime_transcription` | Cada llamada STT, incluidas hipótesis parciales | Modelo Whisper/STT |
+| `realtime_chat` | Cada generación LLM iniciada por la sesión | Modelo LLM |
+| `realtime_tts` | Cada síntesis de audio | Modelo TTS |
+
+Todas usan `endpoint_path=/v1/realtime`, guardan duración, estado/error,
+`user_id`, `group_id`, `api_key_name`, IP y user-agent. Una sesión cerrada
+normalmente usa `status_code=101`; las operaciones internas usan `200` en éxito
+y un estado 4xx/5xx representativo en error. Los logs estructurados incluyen
+`session_id`, identidad no secreta, modelo, tipo, duración y estado.
+
 ### 5.6 Config
 
 ```
@@ -595,7 +614,12 @@ request_stats (
   input_tokens    INTEGER,
   output_tokens   INTEGER,
   energy_wh       FLOAT,        -- vatios-hora estimados
-  error           TEXT
+  error           TEXT,
+  user_id         UUID,         -- NULL para anonymous
+  group_id        UUID,
+  api_key_name    TEXT,         -- etiqueta, nunca la key real
+  client_addr     TEXT,
+  user_agent      TEXT
 )
 
 -- Stats de GPU (serie temporal, agregada por minuto)
