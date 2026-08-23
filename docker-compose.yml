@@ -171,6 +171,14 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # Sin esto CUDA ordena GPUs por "fastest first": CUDA0=3090, CUDA1=3060.
+      # oCabra usa NVML (PCI order): GPU 0=3060, GPU 1=3090. Ollama por defecto
+      # elige main_gpu=0 (para él la 3090) para todo modelo — incluso pequeños,
+      # aunque quepan sobrados en la 3060 — colisionando con lo que vLLM tenga
+      # residente en la 3090. Con PCI_BUS_ID Ollama y oCabra hablan de la misma
+      # GPU al decir "0" o "1", y los modelos pequeños caen en la 3060 por
+      # defecto sin invadir el territorio de vLLM.
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
       OLLAMA_HOST: 0.0.0.0:11434
       # Keep at 1 on this VRAM-constrained box: Ollama allocates KV cache =
       # num_ctx × NUM_PARALLEL, and with the 32k default context even a small
