@@ -39,9 +39,9 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 | Frontend serve | Nginx |
 | Reverse proxy | Caddy |
 
-## Estado actual (2026-04-24)
+## Estado actual (2026-08-23)
 
-**Fases 0–8 completadas e implementadas. Bloques 1–14 completados. Versión: 0.6.0**
+**Fases 0–8 completadas e implementadas. Bloques 1–17 entregados; Bloque 18 en curso.**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
 El trabajo restante está en `docs/ROADMAP.md`.
@@ -79,6 +79,12 @@ El trabajo restante está en `docs/ROADMAP.md`.
 - **Observabilidad de potencia + stats ampliadas (Bloque 13)**: Contenedor `hw-monitor` (RAPL CPU + NVML GPU → Redis + tabla `server_stats` vía migración `0015`). `cost_calculator.py` y endpoints `/ocabra/stats/by-api-key`, `/server-power`, `/federation`, detalle por usuario. Paneles frontend: `ApiKeyPanel`, `CostSavingsCard`, `FederationPanel`, `UserDetailPanel`, `EnergyPanel` rediseñado, layout renovado. Benchmark harness en `benchmark/`.
 - **OpenAI Batches + Files API + ACL de modelos (Bloque 14)**: Files API (`/v1/files` — upload/retrieve/delete/content) y Batches API (`/v1/batches` — create/retrieve/list/cancel) con migración `0016`. `BatchProcessor` en background despacha in-process vía `ASGITransport` impersonando al owner con `X-Gateway-Token` + `X-Internal-User-Id`. Endpoints soportados dentro de batches: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. `/ocabra/models` ahora filtra por `accessible_model_ids` para no-admin (igual que `/v1/models`).
 - **Tests**: 586+ tests cubriendo path traversal, config, model manager, worker lifecycle, Langfuse, profiles, modalities, eviction, busy timeout, process manager, y federación (54 tests).
+- **Backends ternarios recientes**: Bonsai 27B mediante el fork PrismML del
+  backend BitNet y VibeASR como backend STT CPU-first. Su hardening de
+  planificación, resolución de artefactos y tests forma parte del Bloque 18.
+- **Incidencia operativa abierta**: las transcripciones internas de Realtime no
+  se reflejan todavía como actividad del modelo. Esto permite eviction de
+  Whisper durante una sesión y puede provocar recargas/competencia de VRAM.
 
 ### Validaciones end-to-end confirmadas
 
@@ -95,6 +101,10 @@ El trabajo restante está en `docs/ROADMAP.md`.
 
 ### Próximas fases
 
+- **Bloque 18 — Fiabilidad de peticiones y backends ternarios (EN CURSO,
+  2026-08-23)**: actividad Realtime STT, espera durante transiciones,
+  resolución canónica de perfiles, errores accionables y correcciones
+  Bonsai/VibeASR. Fuente de verdad: `docs/ROADMAP.md`.
 - **Bloque 15 — Backends Modulares (EN CURSO, 2026-04-24)**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`. Equipo de agentes paralelos trabajando en Fase 1 (infra), Fase 3 (Dockerfiles) y Fase 5 (frontend).
 - **Fine-tuning de voz**: Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
 - **UI de Batches**: Listado y descarga de batches del usuario desde el dashboard (backend ya expuesto, falta la vista).
@@ -102,6 +112,8 @@ El trabajo restante está en `docs/ROADMAP.md`.
 ### Pendiente menor
 
 Ver `docs/ROADMAP.md`:
+- Decisión futura sobre estrategia global de recursos/concurrencia/timeouts.
+- Decisión futura sobre soporte de OpenAI Responses API (`/v1/responses`).
 - Validación TRT-LLM multi-engine en producción (requiere prueba manual)
 - Tests e2e: flujos load/unload por backend, TRT-LLM compile mock
 - Limpiar `tensorrt_llm/Qwen3-32B-AWQ-fp16` del inventario

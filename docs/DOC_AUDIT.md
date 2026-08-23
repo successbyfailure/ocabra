@@ -1,6 +1,6 @@
 # Auditoría de Documentación vs. Código — oCabra
 
-Generado: 2026-04-02
+Actualizado: 2026-08-23
 
 Este documento resume la desalineación residual entre documentación y código.
 No intenta conservar planes antiguos ni snapshots históricos completos: el estado
@@ -38,13 +38,15 @@ Documentación ya alineada con el código:
 
 ## Backlog residual real
 
-- Autenticación administrativa en `/ocabra/*`.
+- Bloque 18 de fiabilidad: actividad Realtime STT, transiciones
+  `loading/unloading`, resolución canónica de perfiles, errores accionables y
+  hardening Bonsai/VibeASR.
 - Validación backend completa con `pytest` en CI o contenedor con dependencias completas.
 - Validación productiva final de `TensorRT-LLM` con más de un engine y toolchain CUDA/NVIDIA objetivo.
 - Limpieza del inventario persistido de entradas `tensorrt_llm/*` con `engine_dir` inexistente.
 - Mejoras opcionales futuras:
-  - compilación de engines TRT-LLM desde la UI
-  - integración opcional con Langfuse
+  - revisión conjunta de estrategias de recursos, concurrencia y timeouts
+  - decisión de soporte para OpenAI Responses API
   - más cobertura e2e de ciclos completos por backend
 
 ## Documentos que se consideran fuente de verdad
