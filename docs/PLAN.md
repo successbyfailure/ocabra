@@ -41,7 +41,7 @@ LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rat
 
 ## Estado actual (2026-08-23)
 
-**Fases 0–8 completadas e implementadas. Bloques 1–18 entregados.**
+**Fases 0–8 completadas e implementadas. Bloques 1–19 entregados.**
 
 El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
 El trabajo restante está en `docs/ROADMAP.md`.
@@ -85,6 +85,9 @@ El trabajo restante está en `docs/ROADMAP.md`.
 - **Fiabilidad de peticiones (Bloque 18)**: Realtime STT participa en el ciclo
   de actividad, las peticiones esperan transiciones `UNLOADING`, los IDs
   canónicos resuelven perfiles habilitados y stats conserva errores/backend.
+- **Observabilidad Realtime (Bloque 19)**: el WebSocket conserva la identidad
+  autenticada y registra sesión, STT, chat y TTS en `request_stats` y logs
+  estructurados, sin persistir audio, conversación ni credenciales.
 
 ### Validaciones end-to-end confirmadas
 

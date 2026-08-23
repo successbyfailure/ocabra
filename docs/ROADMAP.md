@@ -440,16 +440,20 @@ rehidratación estable del formulario de modelos ante broadcasts de GPU.
 
 ---
 
-## 🚧 Bloque 19 — Observabilidad atribuible de OpenAI Realtime
+## ✅ Bloque 19 — Observabilidad atribuible de OpenAI Realtime (COMPLETADO)
 
-- [ ] Resolver y conservar `UserContext` completo durante el handshake
+- [x] Resolver y conservar `UserContext` completo durante el handshake
   WebSocket, sin registrar tokens ni cookies.
-- [ ] Registrar apertura/cierre de sesión y cada operación STT, LLM y TTS en
+- [x] Registrar apertura/cierre de sesión y cada operación STT, LLM y TTS en
   `request_stats`, diferenciadas mediante `request_kind`.
-- [ ] Añadir logs estructurados con `session_id`, usuario, etiqueta de API key,
+- [x] Añadir logs estructurados con `session_id`, usuario, etiqueta de API key,
   IP, modelo, duración, estado y error.
-- [ ] Cubrir autenticación por API key, cookie y anonymous, así como estadísticas
+- [x] Cubrir autenticación por API key, cookie y anonymous, así como estadísticas
   de éxito/error sin persistir contenido de audio o conversación.
+
+Validación dirigida: 30 tests de Realtime y del colector de estadísticas en
+verde. La suite backend global sigue requiriendo el entorno completo descrito en
+`docs/DOC_AUDIT.md`.
 
 ---
 

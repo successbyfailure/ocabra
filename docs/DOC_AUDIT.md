@@ -41,7 +41,15 @@ Documentación ya alineada con el código:
 - Bloque 18 de fiabilidad entregado: actividad Realtime STT, transiciones
   `loading/unloading`, resolución canónica de perfiles, errores accionables y
   hardening Bonsai/VibeASR.
-- Validación backend completa con `pytest` en CI o contenedor con dependencias completas.
+- Bloque 19 de observabilidad Realtime entregado: identidad atribuible y filas
+  diferenciadas para sesión, STT, chat y TTS en `request_stats`, con logs
+  estructurados sin contenido ni credenciales.
+- Validación dirigida del Bloque 19: 30 tests en verde. La ejecución local
+  amplia (omitiendo `test_whisper_worker.py`, que requiere `numpy`) deja 972
+  tests en verde, 2 omitidos y 14 fallos no relacionados: dependencias de
+  servicios PostgreSQL/Ollama y expectativas antiguas de backends/GPU.
+- Validación backend completa con `pytest` en CI o contenedor con dependencias
+  y servicios completos.
 - Validación productiva final de `TensorRT-LLM` con más de un engine y toolchain CUDA/NVIDIA objetivo.
 - Limpieza del inventario persistido de entradas `tensorrt_llm/*` con `engine_dir` inexistente.
 - Mejoras opcionales futuras:
