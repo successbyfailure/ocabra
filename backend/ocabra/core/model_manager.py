@@ -1161,6 +1161,7 @@ class ModelManager:
         return estimate_bitnet_vram_from_config(
             state,
             default_gpu_layers=settings.bitnet_gpu_layers,
+            default_ctx_size=settings.bitnet_ctx_size,
             models_dir=settings.models_dir,
         )
 

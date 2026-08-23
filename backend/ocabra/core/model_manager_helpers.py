@@ -71,6 +71,7 @@ def estimate_bitnet_vram_from_config(
     default_gpu_layers: int,
     default_total_layers: int = 32,
     default_model_vram_mb: int = 400,
+    default_ctx_size: int = 4096,
     models_dir: str | Path | None = None,
 ) -> int:
     gpu_layers = resolve_bitnet_gpu_layers(state, default_gpu_layers)
@@ -81,6 +82,8 @@ def estimate_bitnet_vram_from_config(
     nested = extra.get("bitnet") if isinstance(extra.get("bitnet"), dict) else {}
     has_explicit_estimate = "model_vram_mb" in extra or "model_vram_mb" in nested
     model_vram_mb = max(1, resolve_bitnet_option(state, "model_vram_mb", default_model_vram_mb))
+    model_file: Path | None = None
+    file_size_mb = 0.0
     if not has_explicit_estimate:
         configured_path = nested.get("model_path") or extra.get("model_path")
         candidates = [Path(str(configured_path))] if configured_path else []
@@ -96,10 +99,41 @@ def estimate_bitnet_vram_from_config(
             )
         model_file = next((path for path in candidates if path.is_file()), None)
         if model_file is not None:
+            file_size_mb = model_file.stat().st_size / (1024 * 1024)
             model_vram_mb = max(
                 model_vram_mb,
-                int(model_file.stat().st_size / (1024 * 1024) * 1.08),
+                int(file_size_mb * 1.08),
             )
+    if model_file is not None and file_size_mb > 0:
+        arch = arch_from_gguf(model_file)
+        if arch is not None:
+            try:
+                ctx_size = int(nested.get("ctx_size", extra.get("ctx_size", default_ctx_size)))
+            except (TypeError, ValueError):
+                ctx_size = default_ctx_size
+            cache_type = str(
+                nested.get("cache_type_k")
+                or extra.get("cache_type_k")
+                or nested.get("cache_type_v")
+                or extra.get("cache_type_v")
+                or "f16"
+            ).lower()
+            kv_dtype_bytes = {
+                "q8_0": 1.0,
+                "q8": 1.0,
+                "q4_0": 0.5,
+                "q4_1": 0.5,
+                "q4": 0.5,
+            }.get(cache_type, 2.0)
+            estimate = plan_llama_cpp_vram_mb(
+                arch,
+                file_size_mb,
+                ctx_size,
+                gpu_layers=gpu_layers,
+                kv_dtype_bytes=kv_dtype_bytes,
+            )
+            if estimate > 0:
+                return estimate
     return int(model_vram_mb * min(gpu_layers, total_layers) / total_layers)
 
 
