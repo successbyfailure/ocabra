@@ -465,6 +465,17 @@ async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
     assert "--cont-batching" in args
 
 
+@pytest.mark.asyncio
+async def test_load_passes_chat_template_override(tmp_path: Path) -> None:
+    args = await _capture_load_cmd(
+        tmp_path,
+        {"llama_cpp": {"chat_template": "llama3"}},
+    )
+
+    assert "--chat-template" in args
+    assert args[args.index("--chat-template") + 1] == "llama3"
+
+
 def test_get_binary_path_default_uses_resolve_server_bin(tmp_path: Path) -> None:
     backend = LlamaCppBackend()
     with patch.object(backend, "_resolve_server_bin", return_value="/opt/cuda/llama-server"):

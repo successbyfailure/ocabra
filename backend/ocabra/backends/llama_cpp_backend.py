@@ -271,6 +271,8 @@ class LlamaCppBackend(BackendInterface):
             cmd.extend(["--parallel", str(int(options["parallel_slots"]))])
         if options.get("cont_batching"):
             cmd.append("--cont-batching")
+        if options.get("chat_template"):
+            cmd.extend(["--chat-template", str(options["chat_template"])])
 
         env = {
             **os.environ,
@@ -516,6 +518,16 @@ class LlamaCppBackend(BackendInterface):
             ),
             "keep_alive_seconds": self._to_int_or_none(
                 self._get_option(extra_config, "keep_alive_seconds", None)
+            ),
+            # Chat template override. Some GGUFs (e.g. Llama 3.x community
+            # finetunes) ship without ``tokenizer.chat_template`` metadata; the
+            # llama-server heuristic then falls back to ChatML markers that the
+            # tokenizer doesn't own, and the model emits ``<|im_start|>`` /
+            # ``<|im_end|>`` as literal text with no stop condition. Accept the
+            # llama.cpp built-in names ("llama3", "llama2", "chatml", …) or a
+            # full Jinja string; passed as ``--chat-template <value>``.
+            "chat_template": self._normalize_str(
+                self._get_option(extra_config, "chat_template", None)
             ),
         }
         # Sprint 17.2 — quantized V cache requires flash attention.

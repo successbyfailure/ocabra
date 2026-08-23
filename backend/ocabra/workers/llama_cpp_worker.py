@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draft-p-min", type=float, default=None)
     parser.add_argument("--parallel", type=int, default=None)
     parser.add_argument("--cont-batching", action="store_true")
+    # Chat template override forwarded to llama-server. Accepts built-in names
+    # (llama3, llama2, chatml, mistral, gemma, …) or a full Jinja string. Needed
+    # for GGUFs that ship without a baked ``tokenizer.chat_template`` — see the
+    # backend's option docstring for context.
+    parser.add_argument("--chat-template", default=None)
     return parser.parse_args()
 
 
@@ -123,6 +128,8 @@ def main() -> None:
         cmd.extend(["--parallel", str(args.parallel)])
     if args.cont_batching:
         cmd.append("--cont-batching")
+    if args.chat_template:
+        cmd.extend(["--chat-template", args.chat_template])
 
     os.execvpe(args.server_bin, cmd, os.environ.copy())
 
