@@ -16,6 +16,7 @@ from __future__ import annotations
 import structlog
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.core.realtime_session import RealtimeSession
 
 logger = structlog.get_logger(__name__)
@@ -23,7 +24,7 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["OpenAI Realtime"])
 
 
-async def _authenticate_ws(websocket: WebSocket) -> bool:
+async def _authenticate_ws(websocket: WebSocket) -> UserContext | None:
     """Authenticate a WebSocket connection.
 
     Checks, in order:
@@ -31,7 +32,8 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     2. ``ocabra_session`` cookie (JWT)
     3. Anonymous access if ``require_api_key_openai`` is disabled
 
-    Returns True if the connection is authorized, False otherwise.
+    Returns the resolved identity when authorized, otherwise ``None``. Raw
+    credentials are never retained on the WebSocket or written to logs.
     """
     from ocabra.config import settings
 
@@ -50,27 +52,26 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
         from ocabra.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
-            ctx = await _resolve_api_key(bearer_token, session)
-            if ctx is not None:
-                return True
-        return False
+            return await _resolve_api_key(bearer_token, session)
 
     # 2. JWT cookie
     cookie_token = websocket.cookies.get("ocabra_session")
     if cookie_token:
-        from ocabra.core.auth_manager import AuthError, decode_access_token
+        from ocabra.api._deps_auth import _resolve_jwt_cookie
+        from ocabra.database import AsyncSessionLocal
 
-        try:
-            decode_access_token(cookie_token)
-            return True
-        except AuthError:
-            return False
+        async with AsyncSessionLocal() as session:
+            return await _resolve_jwt_cookie(cookie_token, session)
 
     # 3. Anonymous access
     if not settings.require_api_key_openai:
-        return True
+        from ocabra.api._deps_auth import _build_anonymous_context
+        from ocabra.database import AsyncSessionLocal
 
-    return False
+        async with AsyncSessionLocal() as session:
+            return await _build_anonymous_context(session)
+
+    return None
 
 
 @router.websocket("/realtime")
@@ -105,10 +106,12 @@ async def realtime_ws(
         fields in session.update are accepted but ignored.
     """
     # Authenticate before accepting the WebSocket
-    if not await _authenticate_ws(websocket):
+    user = await _authenticate_ws(websocket)
+    if user is None:
         await websocket.close(code=1008, reason="Authentication required")
         return
 
+    websocket.state.auth_user = user
     await websocket.accept()
 
     worker_pool = websocket.app.state.worker_pool
@@ -135,6 +138,7 @@ async def realtime_ws(
         model_id=resolved_model_id,
         worker_pool=worker_pool,
         model_manager=model_manager,
+        user=user,
         transcription_only=(intent.strip().lower() == "transcription"),
     )
 
@@ -159,7 +163,12 @@ async def realtime_ws(
     logger.info(
         "realtime_session_started",
         model=model,
+        resolved_model_id=resolved_model_id,
         session_id=session._session_id,
+        username=user.username,
+        api_key_name=user.api_key_name,
+        client_addr=websocket.client.host if websocket.client else None,
+        intent="transcription" if session.transcription_only else "conversation",
     )
 
     try:
@@ -168,11 +177,15 @@ async def realtime_ws(
         logger.info(
             "realtime_session_disconnected",
             session_id=session._session_id,
+            username=user.username,
+            api_key_name=user.api_key_name,
         )
     except Exception as exc:
         logger.warning(
             "realtime_session_error",
             session_id=session._session_id,
+            username=user.username,
+            api_key_name=user.api_key_name,
             error=str(exc),
         )
     finally:
@@ -186,4 +199,6 @@ async def realtime_ws(
         logger.info(
             "realtime_session_ended",
             session_id=session._session_id,
+            username=user.username,
+            api_key_name=user.api_key_name,
         )
