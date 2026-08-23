@@ -107,11 +107,40 @@ class VibeAsrBackend(BackendInterface):
             return str(vae), str(lm)
 
         root = Path(settings.models_dir)
-        candidates = [root / model_id, root / model_id.replace("/", "--"), Path(model_id)]
-        model_dir = next((c for c in candidates if c.is_dir()), None)
+        flat_id = model_id.replace("/", "--")
+        candidates = [
+            Path(str(vae)).parent if vae else None,
+            Path(str(lm)).parent if lm else None,
+            root / model_id,
+            root / flat_id,
+            root / "huggingface" / flat_id,
+            Path(model_id),
+        ]
+        model_dir = next((c for c in candidates if c is not None and c.is_dir()), None)
         if model_dir is None:
-            # Fall back to a recursive search for the two GGUFs by fingerprint.
-            model_dir = root
+            # Locate a directory containing the complete pair. Never combine a
+            # VAE from one downloaded model with an LM from another.
+            parents = sorted({path.parent for path in root.rglob("*.gguf")})
+            model_dir = next(
+                (
+                    parent
+                    for parent in parents
+                    if any(
+                        "i8_s" in path.name.lower() or "vae" in path.name.lower()
+                        for path in parent.glob("*.gguf")
+                    )
+                    and any(
+                        "i2_s" in path.name.lower() or "lm" in path.name.lower()
+                        for path in parent.glob("*.gguf")
+                    )
+                ),
+                None,
+            )
+            if model_dir is None:
+                raise FileNotFoundError(
+                    "VibeASR needs a co-located VAE (i8_s) and LM (i2_s) "
+                    f"GGUF pair under '{root}'."
+                )
 
         ggufs = list(model_dir.rglob("*.gguf"))
         if vae is None:

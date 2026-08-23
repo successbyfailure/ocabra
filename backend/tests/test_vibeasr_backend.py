@@ -46,6 +46,37 @@ def test_resolve_models_finds_vae_and_lm(tmp_path: Path) -> None:
     assert resolved_lm == str(lm)
 
 
+def test_resolve_models_finds_huggingface_flat_layout(tmp_path: Path) -> None:
+    model_dir = tmp_path / "huggingface" / "microsoft--VibeVoice-ASR-BitNet"
+    model_dir.mkdir(parents=True)
+    vae = model_dir / "vibeasr-vae-encoder-i8_s.gguf"
+    lm = model_dir / "vibeasr-lm-i2_s-embed-q6_k.gguf"
+    vae.write_bytes(b"GGUF")
+    lm.write_bytes(b"GGUF")
+
+    backend = VibeAsrBackend()
+    with patch("ocabra.backends.vibeasr_backend.settings") as mock_settings:
+        mock_settings.models_dir = str(tmp_path)
+        resolved = backend._resolve_models("microsoft/VibeVoice-ASR-BitNet", {})
+
+    assert resolved == (str(vae), str(lm))
+
+
+def test_resolve_models_does_not_mix_incomplete_directories(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "vibeasr-vae-i8_s.gguf").write_bytes(b"GGUF")
+    (second / "vibeasr-lm-i2_s.gguf").write_bytes(b"GGUF")
+
+    backend = VibeAsrBackend()
+    with patch("ocabra.backends.vibeasr_backend.settings") as mock_settings:
+        mock_settings.models_dir = str(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            backend._resolve_models("missing/model", {})
+
+
 def test_resolve_models_explicit_config_wins(tmp_path: Path) -> None:
     backend = VibeAsrBackend()
     cfg = {"vae_model": "/models/vae.gguf", "lm_model": "/models/lm.gguf"}

@@ -8,6 +8,8 @@ from pathlib import Path
 
 from ocabra.core.vram_planner import arch_from_gguf, plan_llama_cpp_vram_mb
 
+PRISMML_DEFAULT_GPU_LAYERS = 99
+
 
 def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:
     """Derive the stable worker key for a model profile."""
@@ -37,8 +39,30 @@ def resolve_bitnet_option(state, key: str, default: int) -> int:
     return int(default)
 
 
+def is_prismml_bitnet_state(state) -> bool:
+    """Detect Bonsai/PrismML before load from ids or configured GGUF path."""
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    nested = extra.get("bitnet") if isinstance(extra.get("bitnet"), dict) else {}
+    markers = (
+        getattr(state, "model_id", ""),
+        getattr(state, "backend_model_id", ""),
+        extra.get("model_path", ""),
+        nested.get("model_path", ""),
+    )
+    text = " ".join(str(value).lower() for value in markers if value)
+    return "bonsai" in text or "q1_0" in text or "prismml" in text
+
+
 def resolve_bitnet_gpu_layers(state, default_gpu_layers: int) -> int:
-    return resolve_bitnet_option(state, "gpu_layers", default_gpu_layers)
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    nested = extra.get("bitnet") if isinstance(extra.get("bitnet"), dict) else None
+    if nested and "gpu_layers" in nested:
+        return int(nested["gpu_layers"])
+    if "gpu_layers" in extra:
+        return int(extra["gpu_layers"])
+    if is_prismml_bitnet_state(state):
+        return PRISMML_DEFAULT_GPU_LAYERS
+    return int(default_gpu_layers)
 
 
 def estimate_bitnet_vram_from_config(
@@ -47,12 +71,35 @@ def estimate_bitnet_vram_from_config(
     default_gpu_layers: int,
     default_total_layers: int = 32,
     default_model_vram_mb: int = 400,
+    models_dir: str | Path | None = None,
 ) -> int:
     gpu_layers = resolve_bitnet_gpu_layers(state, default_gpu_layers)
     if gpu_layers <= 0:
         return 0
     total_layers = max(1, resolve_bitnet_option(state, "total_layers", default_total_layers))
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    nested = extra.get("bitnet") if isinstance(extra.get("bitnet"), dict) else {}
+    has_explicit_estimate = "model_vram_mb" in extra or "model_vram_mb" in nested
     model_vram_mb = max(1, resolve_bitnet_option(state, "model_vram_mb", default_model_vram_mb))
+    if not has_explicit_estimate:
+        configured_path = nested.get("model_path") or extra.get("model_path")
+        candidates = [Path(str(configured_path))] if configured_path else []
+        backend_id = str(getattr(state, "backend_model_id", "") or "")
+        if models_dir and backend_id:
+            root = Path(models_dir)
+            candidates.extend(
+                [
+                    root / backend_id,
+                    root / f"{backend_id}.gguf",
+                    root / "huggingface" / backend_id.replace("/", "--"),
+                ]
+            )
+        model_file = next((path for path in candidates if path.is_file()), None)
+        if model_file is not None:
+            model_vram_mb = max(
+                model_vram_mb,
+                int(model_file.stat().st_size / (1024 * 1024) * 1.08),
+            )
     return int(model_vram_mb * min(gpu_layers, total_layers) / total_layers)
 
 

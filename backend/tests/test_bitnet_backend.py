@@ -6,6 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ocabra.backends.bitnet_backend import BitnetBackend
+from ocabra.core.model_manager import ModelState
+from ocabra.core.model_manager_helpers import (
+    estimate_bitnet_vram_from_config,
+    resolve_bitnet_gpu_layers,
+)
 
 
 def _fake_proc(returncode: int | None = None) -> MagicMock:
@@ -145,6 +150,37 @@ def test_build_options_defaults_gpu_layers_for_prismml() -> None:
     assert micro["gpu_layers"] == 0
     assert bonsai["gpu_layers"] == 99
     assert overridden["gpu_layers"] == 10
+
+
+def test_scheduler_defaults_prismml_to_gpu_and_uses_gguf_size(tmp_path: Path) -> None:
+    gguf = tmp_path / "Bonsai-27B-Q1_0.gguf"
+    with gguf.open("wb") as handle:
+        handle.truncate(600 * 1024 * 1024)
+    state = ModelState(
+        model_id="bitnet/prism-ml/Bonsai-27B-gguf",
+        backend_model_id="prism-ml/Bonsai-27B-gguf",
+        display_name="Bonsai 27B",
+        backend_type="bitnet",
+        extra_config={"model_path": str(gguf)},
+    )
+
+    assert resolve_bitnet_gpu_layers(state, 0) == 99
+    assert estimate_bitnet_vram_from_config(
+        state,
+        default_gpu_layers=0,
+        models_dir=tmp_path,
+    ) >= 648
+
+
+def test_scheduler_respects_explicit_prismml_cpu_override() -> None:
+    state = ModelState(
+        model_id="bitnet/prism-ml/Bonsai-27B-gguf",
+        display_name="Bonsai 27B",
+        backend_type="bitnet",
+        extra_config={"gpu_layers": 0},
+    )
+
+    assert resolve_bitnet_gpu_layers(state, 0) == 0
 
 
 @pytest.mark.asyncio

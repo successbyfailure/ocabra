@@ -1158,7 +1158,11 @@ class ModelManager:
         return resolve_bitnet_gpu_layers(state, settings.bitnet_gpu_layers)
 
     def _estimate_bitnet_vram_from_config(self, state: "ModelState") -> int:
-        return estimate_bitnet_vram_from_config(state, default_gpu_layers=settings.bitnet_gpu_layers)
+        return estimate_bitnet_vram_from_config(
+            state,
+            default_gpu_layers=settings.bitnet_gpu_layers,
+            models_dir=settings.models_dir,
+        )
 
     @staticmethod
     def _get_vllm_option(state: "ModelState", key: str, default: object) -> object:

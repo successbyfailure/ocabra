@@ -19,6 +19,7 @@ from ocabra.backends.base import (
 )
 from ocabra.config import settings
 from ocabra.core.backend_installer import read_backend_metadata
+from ocabra.core.model_manager_helpers import PRISMML_DEFAULT_GPU_LAYERS
 
 logger = structlog.get_logger(__name__)
 
@@ -28,7 +29,6 @@ _DEFAULT_TOTAL_LAYERS = 32
 # Bonsai/PrismML models ship GPU-first (Q1_0_g128 hybrid-attention kernels for
 # CUDA/Metal), so default to offloading every layer instead of the CPU-first
 # default used by Microsoft's pretuned LUT kernels.
-_PRISMML_DEFAULT_GPU_LAYERS = 99
 
 
 class BitnetBackend(BackendInterface):
@@ -146,6 +146,15 @@ class BitnetBackend(BackendInterface):
         is_prismml = self._is_prismml_model(model_file)
         server_bin = self._select_server_bin(model_file)
         options = self._build_options(extra_config, is_prismml=is_prismml)
+        bitnet_cfg = extra_config.get("bitnet") if isinstance(extra_config, dict) else None
+        has_vram_override = "model_vram_mb" in extra_config or (
+            isinstance(bitnet_cfg, dict) and "model_vram_mb" in bitnet_cfg
+        )
+        if not has_vram_override:
+            options["model_vram_mb"] = max(
+                options["model_vram_mb"],
+                int(model_file.stat().st_size / (1024 * 1024) * 1.08),
+            )
         options["is_prismml"] = is_prismml
         self._model_configs[model_id] = options
 
@@ -321,7 +330,7 @@ class BitnetBackend(BackendInterface):
         self, extra_config: dict[str, Any], is_prismml: bool = False
     ) -> dict[str, Any]:
         default_gpu_layers = (
-            _PRISMML_DEFAULT_GPU_LAYERS if is_prismml else settings.bitnet_gpu_layers
+            PRISMML_DEFAULT_GPU_LAYERS if is_prismml else settings.bitnet_gpu_layers
         )
         return {
             "gpu_layers": int(
