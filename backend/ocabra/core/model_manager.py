@@ -18,6 +18,7 @@ from ocabra.config import settings
 from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
     estimate_llama_cpp_vram_from_config,
+    estimate_vllm_vram_from_config,
     resolve_bitnet_gpu_layers,
     resolve_bitnet_option,
     resolve_llama_cpp_gpu_layers,
@@ -802,6 +803,24 @@ class ModelManager:
                         state,
                         default_gpu_layers=settings.llama_cpp_gpu_layers,
                         default_ctx_size=settings.llama_cpp_ctx_size,
+                    )
+                    if est > 0:
+                        vram_needed = est
+                elif state.backend_type == "vllm":
+                    # vLLM's own get_vram_estimate_mb is weights-only. Long-context
+                    # loads then pass the eviction filter (weights fit) but crash
+                    # inside vLLM when the paged KV pool can't hold one sequence
+                    # at max_model_len — no eviction was ever going to fix that
+                    # because oCabra never asked for the KV reserve. Estimate the
+                    # honest weights + KV(max_model_len × 1) + overhead so the
+                    # eviction path frees the right amount.
+                    est = estimate_vllm_vram_from_config(
+                        state,
+                        models_dir=settings.models_dir,
+                        default_gpu_memory_utilization=float(
+                            settings.vllm_gpu_memory_utilization
+                        ),
+                        hf_cache_dir=getattr(settings, "hf_cache_dir", None),
                     )
                     if est > 0:
                         vram_needed = est
