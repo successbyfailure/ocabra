@@ -239,20 +239,37 @@ async def test_resolve_nonexistent_profile_404(model_manager):
 
 
 # ---------------------------------------------------------------------------
-# Legacy fallback
+# Canonical model-id fallback
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_legacy_fallback_enabled(model_manager, enabled_profile):
-    """Con LEGACY_MODEL_ID_FALLBACK=true, un model_id canónico con '/' debe resolverse
-    al perfil default del modelo correspondiente."""
+async def test_canonical_model_id_resolves_default_profile(model_manager, enabled_profile):
+    """Un model_id canónico debe resolver su perfil default habilitado."""
+    from ocabra.api.openai._deps import resolve_profile
+
+    registry = _FakeProfileRegistry([enabled_profile])
+
+    profile, state = await resolve_profile(
+        "vllm/Qwen/Qwen3-8B",
+        model_manager,
+        registry,
+    )
+    assert profile.profile_id == "chat"
+    assert state.model_id == "vllm/Qwen/Qwen3-8B"
+
+
+@pytest.mark.asyncio
+async def test_canonical_model_id_ignores_legacy_alias_switch(
+    model_manager, enabled_profile
+):
+    """Desactivar alias legacy no debe romper el identificador canónico estable."""
     from ocabra.api.openai._deps import resolve_profile
 
     registry = _FakeProfileRegistry([enabled_profile])
 
     with patch("ocabra.config.settings") as mock_settings:
-        mock_settings.legacy_model_id_fallback = True
+        mock_settings.legacy_model_id_fallback = False
         profile, state = await resolve_profile(
             "vllm/Qwen/Qwen3-8B",
             model_manager,
@@ -260,21 +277,6 @@ async def test_legacy_fallback_enabled(model_manager, enabled_profile):
         )
     assert profile.profile_id == "chat"
     assert state.model_id == "vllm/Qwen/Qwen3-8B"
-
-
-@pytest.mark.asyncio
-async def test_legacy_fallback_disabled(model_manager, enabled_profile):
-    """Con LEGACY_MODEL_ID_FALLBACK=false, un model_id canónico con '/' debe retornar 404
-    directamente, sin intentar buscar perfiles."""
-    from ocabra.api.openai._deps import resolve_profile
-
-    registry = _FakeProfileRegistry([enabled_profile])
-
-    with patch("ocabra.config.settings") as mock_settings:
-        mock_settings.legacy_model_id_fallback = False
-        with pytest.raises(HTTPException) as exc_info:
-            await resolve_profile("vllm/Qwen/Qwen3-8B", model_manager, registry)
-        assert exc_info.value.status_code == 404
 
 
 # ---------------------------------------------------------------------------

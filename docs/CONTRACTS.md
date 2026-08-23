@@ -706,9 +706,11 @@ Validaciones:
 async def resolve_profile(profile_id: str) -> tuple[ModelProfile, ModelState]:
     """
     1. Buscar profile_id en ProfileRegistry (cache + BD)
-    2. Si no existe o disabled → HTTPException 404
-    3. ensure_loaded(base_model_id, load_overrides=profile.load_overrides)
-    4. Retornar (profile, state)
+    2. Si coincide con un model_id canónico (backend/modelo), resolver su
+       perfil default habilitado; si no hay default, el primer perfil habilitado
+    3. Si no existe, está disabled o no tiene perfil habilitado → HTTPException 404
+    4. ensure_loaded(base_model_id, load_overrides=profile.load_overrides)
+    5. Retornar (profile, state)
     """
 
 async def forward_with_profile(
@@ -774,17 +776,19 @@ Contratos de seguridad:
 
 ```
 /v1/models                          → solo lista perfiles habilitados (profile_id como "id")
-/v1/models/{id}                     → solo acepta profile_id
-/v1/chat/completions, /v1/audio/speech, etc. → model= es profile_id
+/v1/models/{id}                     → profile_id (identificador público anunciado)
+/v1/chat/completions, /v1/audio/speech, etc. → model= acepta profile_id o model_id canónico
 /ocabra/models                      → lista modelos internos con profiles[] anidado (admin only)
 ```
 
-Legacy fallback (configurable `LEGACY_MODEL_ID_FALLBACK`, default `true` en v0.6, `false` en v0.7):
-- Si `model=` contiene `/` y coincide con un `model_id` canónico:
+Resolución de identificadores:
+- Si `model=` coincide exactamente con un `model_id` canónico:
   1. Buscar perfil default del modelo.
-  2. Si existe → usar ese perfil + emitir deprecation warning en logs.
-  3. Si no hay perfil default → 404.
-- Si `LEGACY_MODEL_ID_FALLBACK=false` → 404 directamente para IDs con `/`.
+  2. Si no existe default, usar el primer perfil habilitado.
+  3. Si no hay perfiles habilitados → 404 `profile_not_configured`.
+- Esta compatibilidad no depende de `LEGACY_MODEL_ID_FALLBACK`: el ID canónico
+  es estable y lo usa la API interna. La opción legacy queda reservada para
+  alias históricos no canónicos y podrá retirarse en una migración posterior.
 
 ### 8.7 Endpoints REST de perfiles
 

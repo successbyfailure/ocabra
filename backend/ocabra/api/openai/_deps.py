@@ -189,18 +189,15 @@ async def resolve_profile(
 
     1. Exact match in :class:`ProfileRegistry` by *profile_id*. The profile
        must be enabled.
-    2. **Legacy fallback** (when ``settings.legacy_model_id_fallback`` is
-       ``True``): if *profile_id* contains ``/`` it looks like a canonical
-       ``model_id``; find the model and its default profile, log a
-       deprecation warning.
+    2. Canonical ``model_id`` fallback: find the model and its default enabled
+       profile (or the first enabled profile). Canonical ids are stable public
+       identifiers even when legacy alias fallback is disabled.
     3. If nothing matches, raise HTTP 404.
 
     Access control: when *user* is provided and the resolved profile id is
     not in the user's ``accessible_model_ids`` set the profile is treated as
     not found (404) to avoid leaking existence.
     """
-    from ocabra.config import settings
-
     requested = str(profile_id or "").strip()
     if not requested:
         raise _openai_error(
@@ -247,55 +244,48 @@ async def resolve_profile(
         )
         return profile, state
 
-    # 2. Legacy fallback: canonical model_id with '/'
-    if "/" in requested and settings.legacy_model_id_fallback:
-        logger.warning(
-            "legacy_model_id_fallback",
-            requested=requested,
-            hint="Clients should migrate to profile_id. "
-            "Set LEGACY_MODEL_ID_FALLBACK=false to disable.",
+    # 2. Canonical model id fallback.  This is not a legacy alias: internal
+    # APIs and persisted configuration advertise this stable identifier.
+    model_state = await model_manager.get_state(requested)
+    if model_state is not None:
+        if (
+            user is not None
+            and not user.is_admin
+            and requested not in user.accessible_model_ids
+        ):
+            raise _openai_error(
+                f"The model '{requested}' does not exist.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                status_code=404,
+            )
+        profiles = await profile_registry.list_by_model(requested)
+        selected = next((p for p in profiles if p.is_default and p.enabled), None)
+        if selected is None:
+            selected = next((p for p in profiles if p.enabled), None)
+        if selected is None:
+            raise _openai_error(
+                f"The model '{requested}' has no enabled profile.",
+                "invalid_request_error",
+                param="model",
+                code="profile_not_configured",
+                status_code=404,
+            )
+        worker_key = compute_worker_key(selected.base_model_id, selected.load_overrides)
+        state = await _ensure_worker_loaded(
+            model_manager,
+            selected.base_model_id,
+            worker_key,
+            selected.load_overrides,
         )
-        # Find the model
-        model_state = await model_manager.get_state(requested)
-        if model_state is not None:
-            # Access control on model_id
-            if (
-                user is not None
-                and not user.is_admin
-                and requested not in user.accessible_model_ids
-            ):
-                raise _openai_error(
-                    f"The model '{requested}' does not exist.",
-                    "invalid_request_error",
-                    param="model",
-                    code="model_not_found",
-                    status_code=404,
-                )
-            # Find default profile for this model
-            profiles = await profile_registry.list_by_model(requested)
-            default_profile = next((p for p in profiles if p.is_default and p.enabled), None)
-            if default_profile is None:
-                # Try any enabled profile
-                default_profile = next((p for p in profiles if p.enabled), None)
-            if default_profile is not None:
-                worker_key = compute_worker_key(
-                    default_profile.base_model_id,
-                    default_profile.load_overrides,
-                )
-                state = await _ensure_worker_loaded(
-                    model_manager,
-                    default_profile.base_model_id,
-                    worker_key,
-                    default_profile.load_overrides,
-                )
-                return default_profile, state
+        return selected, state
 
     # 3. Nothing matched → 404
     logger.warning(
         "resolve_profile_not_found",
         requested=requested,
         has_slash="/" in requested,
-        legacy_fallback=settings.legacy_model_id_fallback if "/" in requested else None,
     )
     raise _openai_error(
         f"The model '{requested}' does not exist.",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 import structlog
@@ -296,56 +297,119 @@ class ProfileRegistry:
 
         Returns the number of profiles created.
         """
-        import re
-
         result = await session.execute(select(ModelConfig))
         all_models = result.scalars().all()
 
-        # Models that already have at least one profile
-        models_with_profiles = {p.base_model_id for p in self._profiles.values()}
-
         created = 0
         for model in all_models:
-            if model.model_id in models_with_profiles:
-                continue
-            if "::" in model.model_id and model.backend_type not in ("bitnet", "llama_cpp"):
-                continue  # skip legacy diarized variants (but not GGUF models that use :: as file separator)
-
-            # Derive slug
-            raw_name = model.display_name or model.model_id
-            if "/" in model.model_id:
-                parts = model.model_id.split("/", 1)
-                if parts[0] in self._BACKEND_CATEGORY:
-                    raw_name = model.display_name or parts[1]
-            slug = re.sub(r"[^a-z0-9\-.:]", "", raw_name.lower().replace("/", "-").replace("_", "-").replace(" ", "-"))
-            slug = re.sub(r"-{2,}", "-", slug).strip("-")
-            if not slug:
-                slug = re.sub(r"[^a-z0-9\-.:]", "", model.model_id.lower().replace("/", "-"))
-                slug = re.sub(r"-{2,}", "-", slug).strip("-")
-            if not slug or slug in self._profiles:
-                continue
-
-            category = self._BACKEND_CATEGORY.get(model.backend_type or "", "llm")
-            try:
-                await self.create(
-                    session,
-                    profile_id=slug,
-                    base_model_id=model.model_id,
-                    display_name=model.display_name or raw_name,
-                    category=category,
-                    enabled=True,
-                    is_default=True,
-                )
+            if await self._ensure_default_profile_for(session, model) is not None:
                 created += 1
-                logger.info("default_profile_auto_created", profile_id=slug, base_model_id=model.model_id)
-            except Exception as exc:
-                logger.warning(
-                    "default_profile_auto_create_failed",
-                    profile_id=slug,
-                    base_model_id=model.model_id,
-                    error=str(exc),
-                )
         return created
+
+    async def _ensure_default_profile_for(
+        self, session: AsyncSession, model: ModelConfig
+    ) -> str | None:
+        """Create a default profile for ``model`` if it has none.
+
+        Returns the created profile_id (or ``None`` when a profile already
+        exists, the model kind is skipped, or slug derivation fails). Errors
+        during creation are logged and swallowed — the model is still
+        registered, it just won't be visible under a friendly profile_id
+        until the next reconciliation.
+        """
+        import re
+
+        # A model already has a profile? Nothing to do.
+        if any(p.base_model_id == model.model_id for p in self._profiles.values()):
+            return None
+        # Skip legacy diarized variants (but not GGUF models that use :: as file separator).
+        if "::" in model.model_id and model.backend_type not in ("bitnet", "llama_cpp"):
+            return None
+
+        raw_name = model.display_name or model.model_id
+        if "/" in model.model_id:
+            parts = model.model_id.split("/", 1)
+            if parts[0] in self._BACKEND_CATEGORY:
+                raw_name = model.display_name or parts[1]
+        slug = re.sub(
+            r"[^a-z0-9\-.:]",
+            "",
+            raw_name.lower().replace("/", "-").replace("_", "-").replace(" ", "-"),
+        )
+        slug = re.sub(r"-{2,}", "-", slug).strip("-")
+        if not slug:
+            slug = re.sub(r"[^a-z0-9\-.:]", "", model.model_id.lower().replace("/", "-"))
+            slug = re.sub(r"-{2,}", "-", slug).strip("-")
+        if not slug:
+            return None
+
+        if slug in self._profiles:
+            # Display names are not unique ("Flux", "Whisper", …).  Skipping
+            # here silently leaves the newly registered model invisible to the
+            # public API, so derive a deterministic collision-safe id instead.
+            suffix = hashlib.sha256(model.model_id.encode()).hexdigest()[:8]
+            stem = slug[: _MAX_PROFILE_ID_LEN - len(suffix) - 1].rstrip("-.: ")
+            slug = f"{stem or 'model'}-{suffix}"
+            if slug in self._profiles:
+                return None
+
+        category = self._BACKEND_CATEGORY.get(model.backend_type or "", "llm")
+        try:
+            await self.create(
+                session,
+                profile_id=slug,
+                base_model_id=model.model_id,
+                display_name=model.display_name or raw_name,
+                category=category,
+                enabled=True,
+                is_default=True,
+            )
+            logger.info(
+                "default_profile_auto_created",
+                profile_id=slug,
+                base_model_id=model.model_id,
+            )
+            return slug
+        except Exception as exc:
+            logger.warning(
+                "default_profile_auto_create_failed",
+                profile_id=slug,
+                base_model_id=model.model_id,
+                error=str(exc),
+            )
+            return None
+
+    async def on_model_added(self, model_id: str) -> str | None:
+        """Post-registration hook: create a default profile for ``model_id``.
+
+        Meant to be called from every ``add_model`` call site (POST /models,
+        the download completion path, TRT-LLM engine registration, …).
+        Previously ``ensure_default_profiles`` only ran on startup and after
+        the Ollama inventory loop, so models added at runtime by other paths
+        stayed invisible in /v1/models until the next restart. Opens its own
+        DB session so callers don't need to thread one through. Failures are
+        logged and swallowed to keep the registration path atomic.
+        """
+        from ocabra.database import AsyncSessionLocal
+
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(ModelConfig).where(ModelConfig.model_id == model_id)
+                )
+                model = result.scalar_one_or_none()
+                if model is None:
+                    return None
+                created = await self._ensure_default_profile_for(session, model)
+                await session.commit()
+                return created
+        except Exception as exc:
+            logger.warning(
+                "on_model_added_failed",
+                model_id=model_id,
+                error=str(exc),
+            )
+            return None
 
     # ── Helpers ───────────────────────────────────────────────
 

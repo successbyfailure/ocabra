@@ -330,6 +330,12 @@ class DownloadManager:
                 preferred_gpu=register_config.get("preferred_gpu"),
                 extra_config=extra_config or None,
             )
+            # Playground / /v1/models look up by profile_id; without a default
+            # profile the freshly downloaded model can't be selected until the
+            # next restart (only startup and the Ollama loop trigger a sweep).
+            profile_registry = getattr(self._app.state, "profile_registry", None)
+            if profile_registry is not None:
+                await profile_registry.on_model_added(model_id)
         except Exception:
             pass  # Non-fatal: model can be registered manually
 

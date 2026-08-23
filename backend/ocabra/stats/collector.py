@@ -214,6 +214,34 @@ def _extract_usage_tokens(
     return _apply_token_kind_defaults(in_tok, out_tok, request_kind, request_payload)
 
 
+def _extract_error_message(payload: dict | None, status_code: int) -> str | None:
+    """Preserve the structured API error instead of reducing it to ``HTTP 5xx``."""
+    if status_code < 400:
+        return None
+    if not isinstance(payload, dict):
+        return f"HTTP {status_code}"
+
+    error: object = payload.get("error")
+    if error is None and isinstance(payload.get("detail"), dict):
+        error = payload["detail"].get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "").strip()
+        code = str(error.get("code") or "").strip()
+        if message and code and code not in message:
+            return f"{message} [{code}]"
+        if message:
+            return message
+        if code:
+            return code
+    elif isinstance(error, str) and error.strip():
+        return error.strip()
+
+    detail = payload.get("detail")
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    return f"HTTP {status_code}"
+
+
 class StatsMiddleware(BaseHTTPMiddleware):
     """
     FastAPI middleware that records usage statistics for /v1/* and /api/* requests.
@@ -419,9 +447,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
             mm.end_request(inflight_model_id, inflight_request_id)
 
         duration_ms = (time.monotonic() - start) * 1000
-        error_message = f"HTTP {response.status_code}" if response.status_code >= 400 else None
-
         response_payload, response = await _extract_response_payload_and_rebuild(response)
+        error_message = _extract_error_message(response_payload, response.status_code)
 
         model_id = _extract_model_id(request=request, body=request_payload)
         if model_id:
@@ -680,11 +707,20 @@ async def _record_stat(
         energy_wh: float | None = None
         try:
             mm = request.app.state.model_manager
-            state = await mm.get_state(model_id)
+            resolved_model_id = await _resolve_inflight_model_id(request, model_id)
+            state = await mm.get_state(resolved_model_id or model_id)
             if state is None:
                 # Fallback: resolve by backend_model_id alias (e.g. "mistral:7b" → "ollama/mistral:7b")
                 states = await mm.list_states()
-                state = next((s for s in states if s.backend_model_id == model_id), None)
+                state = next(
+                    (
+                        s
+                        for s in states
+                        if s.model_id == resolved_model_id
+                        or s.backend_model_id == model_id
+                    ),
+                    None,
+                )
             if state:
                 backend_type = state.backend_type
                 if state.current_gpu:

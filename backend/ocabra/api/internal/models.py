@@ -482,6 +482,13 @@ async def add_model(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Without this hook a manually registered model would remain invisible in
+    # ``/v1/models`` (clients resolve by profile_id, not by canonical model_id)
+    # until the next restart, when ``ensure_default_profiles`` sweeps again.
+    profile_registry = getattr(request.app.state, "profile_registry", None)
+    if profile_registry is not None:
+        await profile_registry.on_model_added(state.model_id)
     return state.to_dict()
 
 

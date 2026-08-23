@@ -271,6 +271,179 @@ class TestProfileRegistryCRUD:
             await registry.delete(session, "nonexistent")
 
 
+# ── Auto default-profile creation on model registration ─────
+
+
+class TestOnModelAddedHook:
+    """Regression against the ``llama-eus-8b`` incident (2026-08-18): a
+    llama.cpp model was registered via the downloads path but no default
+    profile was created — the OpenAI-shaped endpoints look up by
+    ``profile_id``, not by canonical ``model_id``, so the model stayed
+    invisible in ``/v1/models`` and ``model_not_found`` in the playground.
+
+    Before the fix ``ensure_default_profiles`` only ran on startup and after
+    the Ollama inventory loop; runtime add_model paths (POST /models,
+    downloads, trtllm compile) had no post-hook.
+    """
+
+    @staticmethod
+    def _model(model_id: str, backend_type: str = "llama_cpp", display_name: str | None = None):
+        return SimpleNamespace(
+            model_id=model_id,
+            backend_type=backend_type,
+            display_name=display_name,
+        )
+
+    @pytest.mark.asyncio
+    async def test_creates_default_profile_when_missing(self):
+        registry = ProfileRegistry()
+        session = _make_session(model_exists=True)
+        created = await registry._ensure_default_profile_for(
+            session,
+            self._model(
+                "llama_cpp/mradermacher/Llama-eus-8B-GGUF::Llama-eus-8B.Q4_K_M",
+                display_name="Llama-eus-8B (Q4_K_M)",
+            ),
+        )
+        assert created is not None, "expected a profile to be created"
+        assert created in registry._profiles
+        # Slug should collapse repo/artifact into a friendly form.
+        assert "/" not in created and "::" not in created
+        prof = registry._profiles[created]
+        assert prof.is_default is True
+        assert prof.base_model_id == (
+            "llama_cpp/mradermacher/Llama-eus-8B-GGUF::Llama-eus-8B.Q4_K_M"
+        )
+
+    @pytest.mark.asyncio
+    async def test_noop_when_profile_already_exists(self):
+        """A model that already has a profile must not get a duplicate default.
+
+        Otherwise every restart (which re-runs the sweep) would spam duplicate
+        slugs or clobber the operator's manually-picked ``is_default``.
+        """
+        registry = ProfileRegistry()
+        existing = _make_profile(profile_id="already-there")
+        existing.base_model_id = "vllm/existing-model"
+        registry._profiles["already-there"] = existing
+        session = _make_session()
+        created = await registry._ensure_default_profile_for(
+            session,
+            self._model("vllm/existing-model", backend_type="vllm"),
+        )
+        assert created is None
+        assert list(registry._profiles.keys()) == ["already-there"]
+
+    @pytest.mark.asyncio
+    async def test_slug_collision_gets_deterministic_suffix(self):
+        registry = ProfileRegistry()
+        registry._profiles["flux"] = _make_profile(
+            profile_id="flux",
+            base_model_id="diffusers/old-flux",
+        )
+        session = _make_session(model_exists=True)
+        model = self._model(
+            "diffusers/new-flux",
+            backend_type="diffusers",
+            display_name="Flux",
+        )
+
+        created = await registry._ensure_default_profile_for(session, model)
+
+        assert created is not None
+        assert created.startswith("flux-")
+        assert registry._profiles[created].base_model_id == model.model_id
+
+    @pytest.mark.asyncio
+    async def test_skips_diarized_variants_but_not_gguf(self):
+        """Guardrail matching the existing ``ensure_default_profiles`` behaviour:
+        the ``::`` suffix on whisper diarized variants is a legacy internal marker
+        and must not get a profile of its own; on llama.cpp/bitnet GGUF models
+        the ``::`` is the artifact separator (repo::file) and IS legitimate.
+        """
+        registry = ProfileRegistry()
+        session = _make_session(model_exists=True)
+
+        # Whisper diarized-suffix: skipped.
+        skipped = await registry._ensure_default_profile_for(
+            session,
+            self._model(
+                "whisper/openai/whisper-large-v3::81443edb3742",
+                backend_type="whisper",
+            ),
+        )
+        assert skipped is None
+
+        # llama.cpp with :: artifact: NOT skipped.
+        created = await registry._ensure_default_profile_for(
+            session,
+            self._model(
+                "llama_cpp/some-org/some-repo::model.Q4_K_M.gguf",
+                backend_type="llama_cpp",
+                display_name="Some GGUF",
+            ),
+        )
+        assert created is not None
+        assert created in registry._profiles
+
+    @pytest.mark.asyncio
+    async def test_on_model_added_opens_own_session(self, monkeypatch):
+        """The public hook manages its own DB session so call sites in the
+        API layer don't need to thread one through. Failures inside the hook
+        must not propagate — the model registration is atomic on its own.
+        """
+        from contextlib import asynccontextmanager
+
+        registry = ProfileRegistry()
+
+        target = self._model("vllm/hooked-model", backend_type="vllm", display_name="Hooked")
+        session = _make_session(model_exists=True)
+
+        # Second call in _make_session flow: mimic the direct lookup by model_id
+        # inside on_model_added, then fall through to the create path.
+        call_seq = {"n": 0}
+
+        async def _execute(stmt):
+            call_seq["n"] += 1
+            if call_seq["n"] == 1:
+                # Fetch of the ModelConfig row.
+                return _FakeResult(item=target)
+            # Subsequent internal check by `create` for base-model existence.
+            return _FakeResult(item=target)
+
+        session.execute = _execute
+
+        @asynccontextmanager
+        async def _fake_asl():
+            yield session
+
+        monkeypatch.setattr(
+            "ocabra.database.AsyncSessionLocal",
+            _fake_asl,
+        )
+
+        slug = await registry.on_model_added("vllm/hooked-model")
+        assert slug is not None
+        assert slug in registry._profiles
+
+    @pytest.mark.asyncio
+    async def test_on_model_added_swallows_errors(self, monkeypatch):
+        """If the DB is unhappy the hook must not blow up the caller."""
+        from contextlib import asynccontextmanager
+
+        registry = ProfileRegistry()
+
+        @asynccontextmanager
+        async def _boom():
+            raise RuntimeError("db is down")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr("ocabra.database.AsyncSessionLocal", _boom)
+        # Should not raise.
+        result = await registry.on_model_added("vllm/anything")
+        assert result is None
+
+
 # ── Asset path traversal tests ───────────────────────────────
 
 

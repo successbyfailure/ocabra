@@ -10,6 +10,7 @@ from ocabra.core.worker_pool import InferenceTimeoutError
 from ocabra.stats.collector import (
     StatsMiddleware,
     _classify_request_kind,
+    _extract_error_message,
     _extract_last_payload_from_stream,
     _extract_response_payload_and_rebuild,
     _extract_stream_error,
@@ -44,8 +45,24 @@ def test_extract_usage_tokens_audio_transcription_payload() -> None:
         {"text": "hola mundo desde whisper"},
         request_kind="audio_transcription",
     )
-    assert input_tokens is None
+    assert input_tokens == 0
     assert output_tokens == 4
+
+
+def test_extract_error_message_preserves_openai_detail() -> None:
+    payload = {
+        "detail": {
+            "error": {
+                "message": "Failed to load Raven: cudaMalloc failed",
+                "code": "model_load_failed",
+            }
+        }
+    }
+
+    assert _extract_error_message(payload, 503) == (
+        "Failed to load Raven: cudaMalloc failed [model_load_failed]"
+    )
+    assert _extract_error_message(None, 502) == "HTTP 502"
 
 
 def test_extract_last_payload_from_sse_stream_uses_usage_chunk() -> None:

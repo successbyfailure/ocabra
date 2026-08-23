@@ -89,17 +89,27 @@ class TrtllmCompileManager:
         await manager.stop()
     """
 
-    def __init__(self, model_manager: Any = None) -> None:
+    def __init__(
+        self,
+        model_manager: Any = None,
+        profile_registry: Any = None,
+    ) -> None:
         self._queue: asyncio.Queue[CompileJobState] = asyncio.Queue()
         self._active: CompileJobState | None = None
         self._history: dict[str, CompileJobState] = {}
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
         self._model_manager = model_manager
+        self._profile_registry = profile_registry
 
     def set_model_manager(self, model_manager: Any) -> None:
         """Inject model manager for auto-registration after compile."""
         self._model_manager = model_manager
+
+    def set_profile_registry(self, profile_registry: Any) -> None:
+        """Inject profile registry so newly registered engines get a default
+        profile immediately (matching the other add_model call sites)."""
+        self._profile_registry = profile_registry
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -556,6 +566,8 @@ class TrtllmCompileManager:
                 preferred_gpu=state.gpu_indices[0] if state.gpu_indices else None,
                 extra_config=extra_config,
             )
+            if self._profile_registry is not None:
+                await self._profile_registry.on_model_added(model_id)
             logger.info("trtllm_engine_registered", model_id=model_id)
         except Exception as exc:
             logger.warning("trtllm_engine_registration_failed", model_id=model_id, error=str(exc))

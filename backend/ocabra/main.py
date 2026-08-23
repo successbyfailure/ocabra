@@ -594,6 +594,10 @@ async def lifespan(app: FastAPI):
         if diarized_count:
             logger.info("diarized_profiles_seeded", count=diarized_count)
     app.state.profile_registry = profile_registry
+    # Late-bind profile_registry into the compile manager (created earlier so
+    # it can start recovering stale jobs) so completed engines get a default
+    # profile alongside their model_config registration.
+    trtllm_compile_manager.set_profile_registry(profile_registry)
     logger.info("profile_registry_ready")
 
     # Start ollama inventory loop now that profile_registry is available
