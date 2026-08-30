@@ -56,6 +56,15 @@ class Settings(BaseSettings):
     ollama_reload_spilled: bool = True
     ollama_reload_spilled_margin_mb: int = 512
     ollama_reload_spilled_cooldown_seconds: int = 300
+    # Grace window (seconds) during which the Ollama inventory sync will NOT
+    # demote a freshly LOADED model to UNLOADED just because it hasn't yet
+    # appeared in ``/api/ps``. Ollama's runner readiness latency (accepting
+    # a load POST vs the model actually being resident enough to be listed)
+    # is several seconds for a large cold start; without this grace the
+    # 15s inventory loop steamrolls the model right after ``_load_model``
+    # marks it LOADED, and clients see ``Model 'ollama/…' is not available
+    # (status: unloaded)`` mid-flight (regression: 2026-08-30).
+    ollama_inventory_loaded_grace_s: int = 60
     # Ollama's default context window (OLLAMA_CONTEXT_LENGTH on the ollama
     # container). Used to report the EFFECTIVE served context for models that
     # don't bake a ``num_ctx`` PARAMETER in their Modelfile. Keep in sync with

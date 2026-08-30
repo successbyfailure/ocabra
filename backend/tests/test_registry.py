@@ -1002,12 +1002,162 @@ async def test_model_manager_syncs_ollama_loaded_runtime_state() -> None:
     assert state.worker_info is not None
     assert state.vram_used_mb == 6144
 
+    # Simulate elapsed time past the "just loaded" grace window: without this
+    # the demote-when-not-in-/api/ps branch skips (correctly — see
+    # ``test_sync_ollama_inventory_respects_loaded_grace``). The test's intent
+    # here is the steady-state reconciliation: Ollama forgot about the model
+    # long after load, oCabra should reflect UNLOADED.
+    from datetime import UTC, datetime, timedelta
+
+    state.loaded_at = datetime.now(UTC) - timedelta(seconds=3600)
+
     await manager.sync_ollama_inventory(["qwen3:32b"], [])
     state = await manager.get_state("ollama/qwen3:32b")
 
     assert state is not None
     assert state.status.value == "unloaded"
     assert state.worker_info is None
+
+
+# ── Race regression: mid-load and just-loaded inventory sync ──
+
+
+def _dummy_manager():
+    """Minimal ModelManager for the sync race tests — reuses the DummyWorkerPool
+    shape from ``test_model_manager_syncs_ollama_loaded_runtime_state``.
+    """
+    class DummyWorkerPool:
+        def __init__(self) -> None:
+            self.workers: dict[str, object] = {}
+
+        def set_worker(self, model_id: str, worker_info) -> None:
+            self.workers[model_id] = worker_info
+
+        def remove_worker(self, model_id: str) -> None:
+            self.workers.pop(model_id, None)
+
+    manager = ModelManager(worker_pool=DummyWorkerPool())
+    manager._publish_event = lambda *args, **kwargs: asyncio.sleep(0)  # type: ignore[method-assign]
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_sync_ollama_inventory_skips_demotion_while_loading() -> None:
+    """Regression against ``Model 'ollama/…' is not available (status: unloaded)``
+    reported by clients (2026-08-30).
+
+    ``_load_model`` marks state=LOADING before calling the ollama backend to
+    load; if the 15s inventory tick fires in that window and Ollama has not
+    yet shown the model in ``/api/ps``, the sync must NOT flip LOADING back
+    to UNLOADED — the load path owns the transition. Otherwise the next
+    ``_ensure_loaded`` from a client observes ``UNLOADED`` post-load and
+    raises ``model_unavailable``.
+    """
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    manager = _dummy_manager()
+    manager._states["ollama/gemma4:26b"] = ModelState(
+        model_id="ollama/gemma4:26b",
+        backend_model_id="gemma4:26b",
+        backend_type="ollama",
+        display_name="gemma4:26b",
+        load_policy=LoadPolicy.ON_DEMAND,
+        status=ModelStatus.LOADING,
+    )
+
+    await manager.sync_ollama_inventory(
+        installed_model_ids=["gemma4:26b"],
+        loaded_model_ids=[],  # Ollama says "not loaded yet" — mid-cold-start
+    )
+
+    state = await manager.get_state("ollama/gemma4:26b")
+    assert state is not None
+    assert state.status == ModelStatus.LOADING, (
+        f"Inventory sync must respect an in-flight load; got {state.status}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_ollama_inventory_respects_loaded_grace() -> None:
+    """LOADED state within the grace window (freshly loaded, Ollama runner
+    ready but ``/api/ps`` visibility lags) must not be demoted. Same
+    regression signature as ``…_skips_demotion_while_loading`` but the
+    LOADED → UNLOADED race, which is what the client actually saw.
+    """
+    from datetime import UTC, datetime
+
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus, WorkerInfo
+
+    manager = _dummy_manager()
+    manager._states["ollama/gemma4:26b"] = ModelState(
+        model_id="ollama/gemma4:26b",
+        backend_model_id="gemma4:26b",
+        backend_type="ollama",
+        display_name="gemma4:26b",
+        load_policy=LoadPolicy.ON_DEMAND,
+        status=ModelStatus.LOADED,
+        loaded_at=datetime.now(UTC),  # just now — inside grace
+        worker_info=WorkerInfo(
+            backend_type="ollama",
+            model_id="gemma4:26b",
+            gpu_indices=[],
+            port=11434,
+            pid=0,
+            vram_used_mb=0,
+        ),
+    )
+
+    await manager.sync_ollama_inventory(
+        installed_model_ids=["gemma4:26b"],
+        loaded_model_ids=[],
+    )
+
+    state = await manager.get_state("ollama/gemma4:26b")
+    assert state is not None
+    assert state.status == ModelStatus.LOADED, (
+        "Freshly loaded model within grace window must not be demoted "
+        "just because /api/ps hasn't caught up yet"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_ollama_inventory_demotes_after_grace_expires() -> None:
+    """Complement of the previous test: past the grace window a LOADED model
+    that Ollama no longer holds must be reflected as UNLOADED — that's the
+    normal reconciliation for legitimate drift (Ollama daemon evicted the
+    model on its own keep_alive, or crashed and restarted).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus, WorkerInfo
+
+    manager = _dummy_manager()
+    manager._states["ollama/gemma4:26b"] = ModelState(
+        model_id="ollama/gemma4:26b",
+        backend_model_id="gemma4:26b",
+        backend_type="ollama",
+        display_name="gemma4:26b",
+        load_policy=LoadPolicy.ON_DEMAND,
+        status=ModelStatus.LOADED,
+        loaded_at=datetime.now(UTC) - timedelta(seconds=3600),  # well past grace
+        worker_info=WorkerInfo(
+            backend_type="ollama",
+            model_id="gemma4:26b",
+            gpu_indices=[],
+            port=11434,
+            pid=0,
+            vram_used_mb=0,
+        ),
+    )
+
+    await manager.sync_ollama_inventory(
+        installed_model_ids=["gemma4:26b"],
+        loaded_model_ids=[],
+    )
+
+    state = await manager.get_state("ollama/gemma4:26b")
+    assert state is not None
+    assert state.status == ModelStatus.UNLOADED
 
 
 @pytest.mark.asyncio

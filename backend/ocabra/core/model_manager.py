@@ -1700,6 +1700,25 @@ class ModelManager:
                 continue
 
             if state.status in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}:
+                # Don't race ``_load_model``:
+                #   1. LOADING is a mid-flight load — respect it and let the
+                #      load path drive the transition (LOADED or ERROR).
+                #   2. LOADED with a very recent ``loaded_at`` may just be
+                #      waiting on Ollama's ``/api/ps`` visibility to catch up
+                #      (runner readiness latency is several seconds after
+                #      ``/api/generate`` accepts the load); demoting now
+                #      surfaces as ``is not available (status: unloaded)`` at
+                #      the very next client request.
+                if state.status == ModelStatus.LOADING:
+                    continue
+                if state.status == ModelStatus.LOADED and state.loaded_at is not None:
+                    grace_s = max(
+                        0,
+                        int(getattr(settings, "ollama_inventory_loaded_grace_s", 60)),
+                    )
+                    age_s = (datetime.now(UTC) - state.loaded_at).total_seconds()
+                    if age_s < grace_s:
+                        continue
                 state.status = ModelStatus.UNLOADED
                 state.current_gpu = []
                 state.vram_used_mb = 0
