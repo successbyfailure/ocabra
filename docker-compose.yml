@@ -82,6 +82,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
+      # Custom Dockerfile referenced as build context by the `ollama` service.
+      # Required for the in-app updater — it runs `docker compose build --pull
+      # ollama` from inside this container to refresh the base ollama image
+      # AND rebuild the ffmpeg layer, and needs the Dockerfile at the same
+      # relative path the compose file declares.
+      - ./Dockerfile.ollama:/opt/ocabra/Dockerfile.ollama:ro
       # service_manager runs `docker compose up -d <name>` from inside this
       # container; the compose file references ./services/* as build contexts
       # so they need to resolve at the same relative path. Read-only is fine
@@ -166,7 +172,12 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:latest
+    # Imagen custom: layer ffmpeg sobre ollama/ollama:latest para el path
+    # multimodal (libmtmd.so lo requiere en 0.32+ incluso para JPEG/PNG).
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    image: ocabra-ollama:latest
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all

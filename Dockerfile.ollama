@@ -1,0 +1,11 @@
+# Ollama 0.32+ unifica el pipeline multimodal detrás de libmtmd.so, que invoca
+# ffprobe/ffmpeg incluso para JPEG/PNG normales. La imagen upstream
+# `ollama/ollama:latest` NO trae ffmpeg → toda request de vision devuelve
+# HTTP 400 "Failed to load image or audio file" con el fallo interno
+# "mtmd_helper_bitmap_init_from_buf: failed to decode buffer as either
+# image/audio/video".
+FROM ollama/ollama:latest
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
