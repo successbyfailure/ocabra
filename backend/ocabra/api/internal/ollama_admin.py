@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import UTC, datetime
 from typing import Literal
@@ -149,12 +150,37 @@ async def _run_server_update() -> None:
                 "--env-file", f"{compose_dir}/.env",
             )
 
-            code, stdout, stderr = await _run_compose(*compose_args_base, "pull", "ollama")
+            # Services that layer a local Dockerfile over ``ollama/ollama``
+            # (e.g. adding ffmpeg for the 0.32+ multimodal path) can't be
+            # updated with ``compose pull`` — the target ``ocabra-ollama``
+            # image isn't in any registry, so the pull fails with
+            # "pull access denied" but with exit code 0 (compose swallows
+            # the individual-service failure), and force-recreate then just
+            # rebrings the stale local image. Detect ``build:`` and switch
+            # to ``compose build --pull`` which refreshes the base image
+            # and rebuilds the layer.
+            uses_build = await _service_uses_build_key(compose_args_base, "ollama")
+            if uses_build:
+                code, stdout, stderr = await _run_compose(
+                    *compose_args_base, "build", "--pull", "ollama"
+                )
+                fail_verb = "build"
+            else:
+                code, stdout, stderr = await _run_compose(
+                    *compose_args_base, "pull", "ollama"
+                )
+                fail_verb = "pull"
             if code != 0:
                 _update_state.status = "error"
-                _update_state.detail = (stderr or stdout or f"docker compose pull exit_code={code}")[:1000]
+                _update_state.detail = (
+                    stderr or stdout or f"docker compose {fail_verb} exit_code={code}"
+                )[:1000]
                 _update_state.finished_at = datetime.now(UTC)
-                logger.warning("ollama_update_pull_failed", error=_update_state.detail)
+                logger.warning(
+                    "ollama_update_pull_failed",
+                    step=fail_verb,
+                    error=_update_state.detail,
+                )
                 return
 
             _update_state.status = "restarting"
@@ -191,6 +217,26 @@ async def _run_server_update() -> None:
             _update_state.detail = str(exc)[:1000]
             _update_state.finished_at = datetime.now(UTC)
             logger.exception("ollama_update_unexpected_error")
+
+
+async def _service_uses_build_key(compose_args: tuple[str, ...], service: str) -> bool:
+    """Return whether ``service`` in the resolved compose config has a
+    ``build:`` key (as opposed to only ``image:``).
+
+    Used by the Ollama updater to decide between ``compose pull`` (upstream
+    image) and ``compose build --pull`` (local Dockerfile that layers on top
+    of an upstream base). Returns ``False`` on any parse/exec error — the
+    caller falls back to plain pull, which matches the previous behaviour.
+    """
+    code, stdout, _ = await _run_compose(*compose_args, "config", "--format=json")
+    if code != 0 or not stdout:
+        return False
+    try:
+        cfg = json.loads(stdout)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    svc = (cfg.get("services") or {}).get(service) or {}
+    return "build" in svc
 
 
 async def _run_compose(*args: str) -> tuple[int, str, str]:
