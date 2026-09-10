@@ -699,6 +699,8 @@ async def _record_stat(
     input_tokens: int | None,
     output_tokens: int | None,
     remote_node_id: str | None = None,
+    work_size_meta: dict | None = None,
+    via_router_profile_id: str | None = None,
 ) -> None:
     """Write a RequestStat row to the database and update Prometheus counters."""
     try:
@@ -825,6 +827,9 @@ async def _record_stat(
                 user_agent=user_agent,
                 remote_node_id=remote_node_id,
                 agent_id=agent_id_ctx,
+                # Bloque 20 — Duration estimator + Router audit.
+                work_size_meta=work_size_meta,
+                via_router_profile_id=via_router_profile_id,
             )
             session.add(stat)
             await session.commit()
