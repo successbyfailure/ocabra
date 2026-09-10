@@ -78,6 +78,8 @@ NVCC_THREADS=4 \
     "${PYTHON_BIN}" setup.py install
 
 echo "[install_flashvsr] comprobando que el módulo carga"
-"${PYTHON_BIN}" -c "import block_sparse_attn; print('block_sparse_attn OK')"
+# torch primero: la extensión enlaza contra libc10.so y sin importar torch
+# antes el import falla con "libc10.so: cannot open shared object file".
+"${PYTHON_BIN}" -c "import torch; import block_sparse_attn; print('block_sparse_attn OK')"
 
 echo "[install_flashvsr] hecho"
