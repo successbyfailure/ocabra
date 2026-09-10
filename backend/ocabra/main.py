@@ -616,6 +616,17 @@ async def lifespan(app: FastAPI):
     app.state.duration_estimator = duration_estimator
     logger.info("duration_estimator_ready")
 
+    # Bloque 20 — SessionRegistry tracks live Realtime sessions holding
+    # worker models. Consumers today: pressure_eviction (veto), router
+    # (avoid stealing a reserved worker), Sessions admin UI.
+    from ocabra.core.session_registry import SessionRegistry
+
+    session_registry = SessionRegistry()
+    await session_registry.start()
+    app.state.session_registry = session_registry
+    model_manager.set_session_registry(session_registry)
+    logger.info("session_registry_ready")
+
     # Start ollama inventory loop now that profile_registry is available
     ollama_inventory_task = asyncio.create_task(
         _ollama_inventory_loop(model_manager, ollama_inventory_stop, profile_registry),
@@ -721,6 +732,8 @@ async def lifespan(app: FastAPI):
     await trtllm_compile_manager.stop()
     if getattr(app.state, "duration_estimator", None) is not None:
         await app.state.duration_estimator.stop()
+    if getattr(app.state, "session_registry", None) is not None:
+        await app.state.session_registry.stop()
     await gpu_manager.stop()
 
     if settings.langfuse_enabled:
@@ -1077,6 +1090,7 @@ from ocabra.api.internal.users import router as users_router  # noqa: E402
 from ocabra.api.internal.groups import router as groups_router  # noqa: E402
 from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
 from ocabra.api.internal.estimate import router as estimate_router  # noqa: E402
+from ocabra.api.internal.sessions import router as sessions_router  # noqa: E402
 
 app.include_router(metrics_router)
 app.include_router(config_router, prefix="/ocabra", include_in_schema=False)
@@ -1086,6 +1100,7 @@ app.include_router(auth_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(users_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(groups_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(estimate_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(sessions_router, prefix="/ocabra", include_in_schema=False)
 
 app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
 

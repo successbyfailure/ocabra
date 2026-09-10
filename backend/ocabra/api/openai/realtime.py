@@ -158,6 +158,12 @@ async def realtime_ws(
         transcription_only=(intent.strip().lower() == "transcription"),
         request_recorder=_record_realtime,
     )
+    # Bloque 20 — wire the SessionRegistry so the scheduler and router know
+    # this session is holding its workers. Missing registry means the app
+    # started before Etapa 4 shipped — session still runs, just no veto.
+    session_registry = getattr(websocket.app.state, "session_registry", None)
+    if session_registry is not None:
+        session.set_session_registry(session_registry)
 
     # Auto-enable diarization when a transcription session is opened with a diarized
     # whisper profile (matches the batch endpoint behaviour); the client can still

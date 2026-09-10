@@ -252,6 +252,11 @@ class RealtimeSession:
         self._request_recorder = request_recorder
         self._vad = SimpleVAD()
         self._session_id = f"sess_{uuid.uuid4().hex[:24]}"
+        # Bloque 20 — SessionRegistry. Injected lazily so this module doesn't
+        # add a hard dependency on the registry for callers that don't need
+        # it (tests, in-process embedding); ``ocabra.api.openai.realtime``
+        # sets it right after construction.
+        self._session_registry: Any | None = None
         self._cancel_event = asyncio.Event()
         self._response_task: asyncio.Task[None] | None = None
         self._background_load_task: asyncio.Task[None] | None = None
@@ -279,6 +284,68 @@ class RealtimeSession:
         # this true, but the hook is in place for Qwen2.5-Omni / GPT-4o-realtime
         # style models that emit audio directly without a separate TTS step.
         self._native_audio_output: bool | None = None
+
+    def set_session_registry(self, registry: Any) -> None:
+        """Late-bind the SessionRegistry so evict/router know this session's
+        workers are held. Called by the WebSocket entrypoint before ``run``.
+        """
+        self._session_registry = registry
+
+    async def _register_workers(self) -> None:
+        """Notify the SessionRegistry which workers this session pins.
+
+        Best-effort — a failure here must never break the WebSocket. The
+        workers list depends on the routing decisions made during ``run``
+        so we call this once STT/LLM/TTS ids are known.
+        """
+        if self._session_registry is None:
+            return
+        workers: list[str] = []
+        for worker_id in (self.stt_model_id, self.llm_model_id, self.tts_model_id):
+            if worker_id and worker_id not in workers:
+                workers.append(worker_id)
+        if not workers:
+            return
+        try:
+            user_id = None
+            api_key_name = None
+            if self._user is not None and not self._user.is_anonymous:
+                user_id = self._user.user_id
+                api_key_name = getattr(self._user, "api_key_name", None)
+            await self._session_registry.register(
+                self._session_id,
+                workers_held=workers,
+                user_id=user_id,
+                api_key_name=api_key_name,
+            )
+        except Exception as exc:  # noqa: BLE001 — must not break Realtime
+            logger.warning(
+                "session_registry_register_failed",
+                session_id=self._session_id,
+                error=str(exc),
+            )
+
+    async def _heartbeat_session(self) -> None:
+        """Refresh the session's last_activity in the registry. Called from
+        the dispatch loop on every meaningful event."""
+        if self._session_registry is None:
+            return
+        try:
+            await self._session_registry.heartbeat(self._session_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _unregister_workers(self, *, reason: str = "closed") -> None:
+        if self._session_registry is None:
+            return
+        try:
+            await self._session_registry.unregister(self._session_id, reason=reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "session_registry_unregister_failed",
+                session_id=self._session_id,
+                error=str(exc),
+            )
 
     async def _record_request(
         self,
@@ -342,6 +409,9 @@ class RealtimeSession:
             # audio meanwhile. Commits/partials wait for ``_stt_ready`` so nothing
             # captured during the cold start is lost.
             await self._send_session_created()
+            # Bloque 20 — register the worker (STT-only in this mode) so
+            # the scheduler doesn't evict it mid-transcription.
+            await self._register_workers()
             if self.stt_model_id:
                 self._background_load_task = asyncio.create_task(
                     self._load_stt_then_ready(), name="realtime-transcription-stt-load"
@@ -356,9 +426,12 @@ class RealtimeSession:
                     except json.JSONDecodeError:
                         await self._send_error("Invalid JSON", "invalid_json")
                         continue
+                    await self._heartbeat_session()
                     await self._dispatch(message.get("type", ""), message)
             except Exception:
                 raise
+            finally:
+                await self._unregister_workers()
             return
 
         # Mark models that are already loaded as ready
@@ -381,6 +454,12 @@ class RealtimeSession:
 
         # Phase 2: Session is usable — send created, client can start talking
         await self._send_session_created()
+
+        # Bloque 20 — with the routing decisions frozen (Phase 0) we know
+        # which workers this session actually holds. Register them BEFORE
+        # yielding to the client loop so the scheduler can't evict them
+        # between now and the first heartbeat.
+        await self._register_workers()
 
         # Phase 3: Load LLM + TTS (+ optional STT for native flow) in background
         stt_bg = stt_needed and will_use_native
@@ -405,10 +484,13 @@ class RealtimeSession:
                     continue
 
                 event_type = message.get("type", "")
+                await self._heartbeat_session()
                 await self._dispatch(event_type, message)
         except Exception:
             # WebSocketDisconnect or other connection errors — handled by caller
             raise
+        finally:
+            await self._unregister_workers()
 
     async def _load_model_with_progress(self, role: str, model_id: str | None) -> bool:
         """Load a single model, sending progress events. Returns True if ready.

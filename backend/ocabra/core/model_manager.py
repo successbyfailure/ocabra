@@ -446,11 +446,32 @@ class ModelManager:
     # 11.1 — LRU eviction + VRAM watchdog
     # ------------------------------------------------------------------
 
+    def _is_reserved_by_realtime_session(self, model_id: str) -> bool:
+        """Bloque 20 — never evict a worker that a live Realtime session
+        is holding. The session registry is injected by main.py; when
+        absent (tests, degraded startup) we fall through as if no session
+        held the worker, matching pre-Bloque 20 behaviour.
+        """
+        registry = getattr(self, "_session_registry", None)
+        if registry is None:
+            return False
+        try:
+            return bool(registry.has_active_session_holding(model_id))
+        except Exception:  # noqa: BLE001 — never break the scheduler
+            return False
+
+    def set_session_registry(self, registry) -> None:
+        """Late-bind the SessionRegistry so ``main.py`` can wire it after
+        construction. Making it an attribute rather than a constructor arg
+        avoids a hard dependency for tests that don't need it."""
+        self._session_registry = registry
+
     def _get_eviction_candidates(self, gpu_index: int) -> list[str]:
         """Return model_ids loaded on gpu_index, ordered by LRU (oldest first).
 
         Only includes WARM or ON_DEMAND models (never PIN).
         Excludes models with in-flight requests.
+        Excludes models held by live Realtime sessions (Bloque 20 veto).
         """
         fallback_time = datetime.min.replace(tzinfo=UTC)
         candidates = []
@@ -462,6 +483,8 @@ class ModelManager:
             if gpu_index not in (state.current_gpu or []):
                 continue
             if self.is_busy(model_id):
+                continue
+            if self._is_reserved_by_realtime_session(model_id):
                 continue
             candidates.append(state)
         candidates.sort(
@@ -1348,6 +1371,10 @@ class ModelManager:
             for state in self._states.values()
             if state.model_id != requested_model_id
             and state.status == ModelStatus.LOADED
+            # Bloque 20 — a Realtime session's LLM/STT/TTS workers are
+            # invisible to pressure eviction. Ripping them out mid-turn
+            # kills the WebSocket in a way the client can't recover from.
+            and not self._is_reserved_by_realtime_session(state.model_id)
         ]
         candidates.sort(
             key=lambda state: (
@@ -1360,7 +1387,9 @@ class ModelManager:
         return [
             model_id
             for model_id, worker in self._worker_pool._workers.items()
-            if model_id != requested_model_id and worker.backend_type != "ollama"
+            if model_id != requested_model_id
+            and worker.backend_type != "ollama"
+            and not self._is_reserved_by_realtime_session(model_id)
         ]
 
     async def _wait_for_vram_released(self, released_vram_mb: int) -> None:
