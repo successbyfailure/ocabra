@@ -56,6 +56,63 @@ class Settings(BaseSettings):
     ollama_reload_spilled: bool = True
     ollama_reload_spilled_margin_mb: int = 512
     ollama_reload_spilled_cooldown_seconds: int = 300
+
+    # ── Bloque 20 — Router profiles, duration estimator, session registry ──
+
+    # Feature flag: kill switch for the routing subsystem. When False, router
+    # profiles behave as if they had no routing_targets (fall back to the
+    # profile's own base_model_id — same as before Bloque 20).
+    routing_enabled: bool = True
+
+    # Duration estimator (see ocabra.core.duration_estimator).
+    #
+    # ``router_confidence_floor`` is the point below which the estimator's
+    # answer is treated as "don't know" by the router / grace-drain — consumers
+    # fall back to conservative defaults (p95, family_default, etc.). 0.3
+    # corresponds roughly to sigmoid(sample_count=15), i.e. "seen ~15 similar
+    # requests recently". Higher = pickier, lower = trust noisy data.
+    router_confidence_floor: float = 0.3
+
+    # ``router_fallback_delay_ms`` is inserted between failed target attempts
+    # inside the router — a tiny sleep that lets a concurrent load complete
+    # instead of piling up parallel loads on the same model. 200ms is enough
+    # for the model_manager to publish LOADED after ``_load_model`` returns.
+    router_fallback_delay_ms: int = 200
+
+    # Hard cap on any single drain wait (pressure_eviction). Even if the
+    # estimator says "80 minutes remaining", we never wait more than this.
+    max_drain_timeout_s: int = 900
+
+    # How often the estimator refreshes its per-model calibration from
+    # request_stats. Longer = less DB load, more staleness. 30 min is
+    # comfortable for a few thousand requests/hour.
+    estimator_refresh_interval_s: int = 1800
+
+    # In-memory TTL for a single (model_id, work_size_bucket) estimate — keeps
+    # /estimate hot without going back to the calibration cache on every hit.
+    estimator_cache_ttl_s: int = 30
+
+    # Sanity clamp: no matter what the model says, an estimate returned to a
+    # consumer is capped at this many seconds. Protects against runaway
+    # regression coefficients on cold-start data.
+    estimator_max_estimate_s: int = 7200
+
+    # SessionRegistry — Realtime session tracking.
+    #
+    # ``session_pause_threshold_s`` is the silence after which we consider a
+    # Realtime session paused enough that its workers can be shared by
+    # concurrent requests (but never evicted). 2 minutes = mid-turn user
+    # thinking is fine; longer = user genuinely paused.
+    session_pause_threshold_s: int = 120
+
+    # After this much silence a session is considered abandoned and workers
+    # are released automatically. 15 minutes covers "user closed laptop
+    # without disconnecting" without punishing genuine long pauses.
+    session_max_idle_s: int = 900
+
+    # Redis TTL for session heartbeats so a fresh api container can rehydrate
+    # active sessions from the last minutes if it restarts mid-flight.
+    session_heartbeat_ttl_s: int = 300
     # Grace window (seconds) during which the Ollama inventory sync will NOT
     # demote a freshly LOADED model to UNLOADED just because it hasn't yet
     # appeared in ``/api/ps``. Ollama's runner readiness latency (accepting
