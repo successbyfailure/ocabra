@@ -59,6 +59,8 @@ class FlashVSRBackend(BackendInterface):
             pip_packages=[
                 "torch==2.6.0",
                 "torchvision==0.21.0",
+                # diffsynth lo exige con la etiqueta +cu124 exacta.
+                "torchaudio==2.6.0",
                 "numpy<2",
             ],
             pip_extra_index_urls=[

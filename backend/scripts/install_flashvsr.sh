@@ -32,14 +32,22 @@ set -euo pipefail
 : "${PYTHON_BIN:?PYTHON_BIN is required}"
 
 FLASHVSR_BUILD_JOBS="${FLASHVSR_BUILD_JOBS:-2}"
+# diffsynth fija torch*==2.6.0+cu124, que solo existe en el índice de
+# PyTorch: sin este extra-index pip no encuentra torchaudio y aborta.
+TORCH_INDEX="https://download.pytorch.org/whl/cu124"
 BSA_DIR="${BACKEND_DIR}/block-sparse-attention"
 
 cd "${SRC_DIR}"
 
 echo "[install_flashvsr] instalando FlashVSR y dependencias"
+# El setup.py de FlashVSR importa pkg_resources, que ya no viene de serie. Hacen
+# falta las dos cosas: setuptools<81 en el venv (que aún trae pkg_resources) y
+# --no-build-isolation, porque si no pip monta un entorno de compilación aparte
+# con un setuptools moderno donde pkg_resources ya no existe.
+"${PYTHON_BIN}" -m pip install "setuptools<81" wheel
 grep -vE '^(torch|torchvision|torchaudio)==' requirements.txt > requirements.ocabra.txt
-"${PYTHON_BIN}" -m pip install -r requirements.ocabra.txt
-"${PYTHON_BIN}" -m pip install -e .
+"${PYTHON_BIN}" -m pip install --extra-index-url "${TORCH_INDEX}" -r requirements.ocabra.txt
+"${PYTHON_BIN}" -m pip install --extra-index-url "${TORCH_INDEX}" -e . --no-build-isolation
 # diffsynth importa modelscope en su downloader y no está en requirements.
 "${PYTHON_BIN}" -m pip install modelscope
 
@@ -49,6 +57,18 @@ if [[ ! -d "${BSA_DIR}" ]]; then
 fi
 
 cd "${BSA_DIR}"
+
+# El /usr/local/cuda de la imagen trae nvcc pero no todas las cabeceras: la
+# compilación muere con "fatal error: cusparse.h: No such file or directory".
+# Las cabeceras que faltan sí vienen en las ruedas de NVIDIA que instala torch,
+# así que se añaden al CPATH en vez de meter el toolkit completo por apt.
+NVIDIA_DIR="$("${PYTHON_BIN}" -c 'import os, nvidia; print(os.path.dirname(nvidia.__file__))')"
+for inc in "${NVIDIA_DIR}"/*/include; do
+    [[ -d "${inc}" ]] && CPATH="${inc}${CPATH:+:${CPATH}}"
+done
+export CPATH
+echo "[install_flashvsr] CPATH con cabeceras de NVIDIA: ${CPATH}"
+
 echo "[install_flashvsr] compilando Block-Sparse-Attention (jobs=${FLASHVSR_BUILD_JOBS})"
 echo "[install_flashvsr] esto tarda ~45 min: 25 unidades CUDA"
 "${PYTHON_BIN}" -m pip install packaging ninja
