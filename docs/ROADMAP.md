@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-08-23
+Última actualización: 2026-09-10
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -457,6 +457,110 @@ verde. La suite backend global sigue requiriendo el entorno completo descrito en
 
 ---
 
+## 🚧 Bloque 20 — Router profiles, duration estimator y session registry
+
+Objetivo: que oCabra decida automáticamente qué modelo sirve mejor una petición
+según disponibilidad de GPU, ETA estimada, sesiones interactivas activas y
+fallback por familia. Etiquetas virtuales tipo `gemma4:26b` que resuelven a
+vLLM primary → 12B fallback → Ollama, con transparencia total en UI.
+
+### Diseño consensuado
+
+Cuatro componentes acoplados pero independientes:
+
+- **DurationEstimator** — predice segundos totales y restantes por request; se
+  calibra en vivo con `request_stats`. Percentiles como baseline, regresión
+  lineal para LLM/chat, fórmulas específicas por familia (whisper, diffusers,
+  flashvsr, tts, acestep, upscaler). Confidence 0..1 con `router_confidence_
+  floor = 0.3`.
+- **SessionRegistry** — registry en memoria + Redis (TTL 5 min heartbeat) de
+  sesiones Realtime activas y qué workers reservan. Veta evict/router; auto-
+  kill de zombies tras `session_max_idle_s = 900`.
+- **RouterResolver** — un `profile_id` puede tener `routing_targets` (lista
+  ordenada de perfiles). Elige el primero disponible según session veto,
+  loaded state, evict impact y ETA comparada. Loops detectados.
+- **Grace dinámico en `pressure_eviction`** — `drain_timeout` calculado por
+  `estimator.in_flight_remaining()` + margen, con techo `max_drain_timeout_s
+  = 900`. Session veto lo cortocircuita a -1 (nunca evict).
+
+### Cambios de datos
+
+- `model_profiles.routing_targets` (jsonb, nullable) — lista ordenada de
+  profile_ids.
+- `request_stats.work_size_meta` (jsonb, nullable) — tamaño de trabajo por
+  familia (audio_seconds, frames, steps, etc.) para estimadores no-LLM.
+- `request_stats.via_router_profile_id` (varchar 512, nullable, indexed) —
+  qué router redirigió la petición, para audit y Stats/Routing.
+
+### Endpoints nuevos
+
+- `POST /ocabra/estimate` — devuelve `{expected_s, p50, p95, confidence,
+  source, sample_count, cold_start_s}`. Rol `user`.
+- `GET /ocabra/sessions` — sesiones Realtime activas. Rol `system_admin`.
+- `POST /ocabra/sessions/{id}/kill` — matar sesión zombie. Rol `system_admin`.
+- `GET /ocabra/stats/routing` — decisiones por router. Rol `user`.
+- `PATCH /ocabra/profiles/{id}` — acepta `routing_targets` en el body.
+
+### UI
+
+- **Models page**: columna `Kind` (Model/Router), sub-fila expandible con
+  targets ordenados y estado en vivo, chip `RESERVED-BY-SESSION`.
+- **ModelConfigModal**: toggle "This profile is a Router" con drag&drop de
+  targets y preview de decisión en vivo.
+- **Playground**: chip ETA antes de enviar (con confidence), banner de
+  attribution cuando el router redirige, barra de progreso vs ETA.
+- **Sessions (nueva página)**: tabla de sesiones activas con botón Kill.
+- **Stats/Routing (nueva vista)**: distribución por router → target con
+  ratios y latencia media.
+- **Settings**: sección Routing & Sessions con umbrales editables.
+
+### Casos de uso cubiertos
+
+1. Chat a `gemma4:26b` con 3090 libre y vLLM cargado → primary_loaded.
+2. vLLM ocupado corto (~15s restantes) → espera con estimator.
+3. vLLM ocupado largo (100k tokens, 5 min) → fallback a Ollama en 3060.
+4. Sesión Realtime sobre vLLM → veto absoluto → fallback.
+5. FlashVSR intenta 3090 con sesión Realtime activa → 409 con Retry-After.
+6. Sesión Realtime idle 3 min → workers compartibles temporalmente.
+7. Primary en ERROR → salta al siguiente sin ruido.
+8. Loop de routers → detectado con `visited_set`, 500 claro.
+9. Target ausente → skip silencioso + warning.
+10. `ollama/gemma4:26b` con `/` → legacy fallback, no entra al router.
+
+### Etapas (~11 días)
+
+| Etapa | Contenido | Días |
+|---|---|---:|
+| 0 | Alembic: routing_targets + work_size_meta + via_router_profile_id | 0.5 |
+| 1 | DurationEstimator Nivel 1 (percentiles) + endpoint + Playground ETA | 1.5 |
+| 2 | Regresión LLM en estimator | 0.5 |
+| 3 | Handlers rellenan work_size_meta | 0.5 |
+| 4 | SessionRegistry + hooks Realtime + veto en scheduler + Sessions UI | 2 |
+| 5 | Estimadores específicos por familia + ETA no-LLM en Playground | 2 |
+| 6 | RouterResolver + resolve_profile + modo Router en ModelConfigModal | 2 |
+| 7 | Grace dinámico en pressure_eviction | 0.5 |
+| 8 | Vista Stats/Routing + settings section | 1.5 |
+
+### Remap concreto planificado para Etapa 6
+
+- Convertir `gemma4:26b` (2 536 reqs/30d, 9 clientes) en router con targets
+  `[gemma4:26b-vllm-ctx64k, gemma4:12b-vllm-ctx128k, gemma4:26b-ollama]`
+  para transición transparente.
+- Considerar el mismo patrón para `gemma4:12b-vllm-ctx128k` cuando el cliente
+  único lo valide.
+
+### Decisiones cerradas
+
+- Persistencia sesiones: Redis + memoria, no Postgres.
+- UI router: toggle dentro de `ModelConfigModal`, no flujo separado.
+- Retry-After en 409 por session veto: sí, calculado con p95 - elapsed.
+- `/ocabra/estimate` público con auth `user`.
+- Warmup del estimator sin datos: percentiles + `family_default`, sin
+  benchmarks manuales.
+- Feature flag `routing_enabled` (default `true`) por si hay que apagarlo.
+
+---
+
 ## 🔬 Investigación pendiente — vLLM sleep mode
 
 Evaluar cómo integrar `--enable-sleep-mode` de vLLM con el ciclo de vida de
@@ -515,6 +619,8 @@ corrección para el estado Mamba con tokens especulativos:
 [🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
 [✅ Hecho]    Bloque 17 — llama.cpp loader parity (4 sprints; pendiente wiring scanner→DB del tokenizer fingerprint)
 [✅ Hecho]    Bloque 18 — Fiabilidad de peticiones y backends ternarios
+[✅ Hecho]    Bloque 19 — Observabilidad atribuible de OpenAI Realtime
+[🚧 En curso] Bloque 20 — Router profiles, duration estimator y session registry
 [Pendiente]   Investigación e integración de vLLM sleep mode
 [Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción

@@ -56,6 +56,18 @@ class RequestStat(Base):
         nullable=True,
         index=True,
     )
+    # Bloque 20 — Duration estimator + router.
+    # Per-family work descriptor used by the estimator to fit per-model
+    # regressions (e.g. ``{"audio_seconds": 42.7}`` for whisper). Chat/
+    # completion families can leave this NULL since input/output tokens
+    # are already columns of their own.
+    work_size_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # When a router profile redirected this request to a different target,
+    # this records the router's profile_id. NULL means the request went
+    # directly to ``model_id`` without going through a router.
+    via_router_profile_id: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, index=True
+    )
 
 
 class GpuStat(Base):

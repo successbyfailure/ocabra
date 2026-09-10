@@ -60,6 +60,11 @@ class ModelProfile(Base):
     load_overrides: Mapped[dict | None] = mapped_column(JSONB)
     request_defaults: Mapped[dict | None] = mapped_column(JSONB)
     assets: Mapped[dict | None] = mapped_column(JSONB)
+    # Bloque 20 — Router profiles.
+    # When non-null, this profile is a router that delegates to the listed
+    # target profile_ids in order. Its own ``load_overrides`` /
+    # ``base_model_id`` remain as a final fallback if no target is available.
+    routing_targets: Mapped[list | None] = mapped_column(JSONB)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
