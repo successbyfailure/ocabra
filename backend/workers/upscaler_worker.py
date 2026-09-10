@@ -23,7 +23,7 @@ import tempfile
 import time
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile
@@ -171,18 +171,73 @@ class RRDBNet(nn.Module):
         return self.conv_last(self.lrelu(self.conv_hr(feat)))
 
 
-def build_model(state_dict: dict) -> nn.Module:
-    """Elige la arquitectura mirando las claves del ``state_dict``.
+def _is_legacy_esrgan(state_dict: dict) -> bool:
+    return any(k.startswith("model.1.sub.") and ".RDB" in k for k in state_dict)
 
-    Detectar en vez de configurar evita que un cambio de pesos exija tocar la
-    configuración del modelo en oCabra: los dos formatos son inconfundibles.
+
+def translate_legacy_esrgan(state_dict: dict) -> dict:
+    """Traduce el nombrado ESRGAN antiguo al de RRDBNet.
+
+    Casi todo el catálogo de la comunidad (UltraSharp, Remacri, Siax,
+    NMKD-Superscale...) se publicó con el nombrado original de ESRGAN
+    (``model.1.sub.0.RDB1.conv1.0.weight``) en vez del de Real-ESRGAN
+    (``body.0.rdb1.conv1.weight``). Son la misma red: sin esta traducción esos
+    pesos no cargan y el catálogo entero queda inaccesible.
     """
+    mapping = {
+        "model.0": "conv_first",
+        "model.3": "conv_up1",
+        "model.6": "conv_up2",
+        "model.8": "conv_hr",
+        "model.10": "conv_last",
+    }
+    # El último sub-bloque no es un RRDB, es la convolución del cuerpo.
+    sub_indices = [
+        int(part)
+        for k in state_dict
+        if k.startswith("model.1.sub.")
+        for part in [k.split(".")[3]]
+        if part.isdigit()
+    ]
+    body_conv_index = max(sub_indices) if sub_indices else None
+
+    out: dict = {}
+    for key, value in state_dict.items():
+        if key.startswith("model.1.sub."):
+            pieces = key.split(".")
+            index = pieces[3]
+            if index.isdigit() and int(index) == body_conv_index and ".RDB" not in key:
+                out[f"conv_body.{pieces[-1]}"] = value
+                continue
+            # model.1.sub.{i}.RDB{n}.conv{m}.0.{weight|bias}
+            rdb = pieces[4].replace("RDB", "rdb").lower()
+            conv = pieces[5]
+            out[f"body.{index}.{rdb}.{conv}.{pieces[-1]}"] = value
+            continue
+        prefix = ".".join(key.split(".")[:2])
+        if prefix in mapping:
+            out[f"{mapping[prefix]}.{key.split('.')[-1]}"] = value
+        else:
+            out[key] = value
+    return out
+
+
+def build_model(state_dict: dict) -> Tuple[nn.Module, dict]:
+    """Elige la arquitectura por las claves y devuelve (modelo, state_dict listo).
+
+    Detectar en vez de configurar evita que cambiar de pesos obligue a tocar la
+    configuración del modelo en oCabra: los tres formatos son inconfundibles.
+    """
+    if _is_legacy_esrgan(state_dict):
+        state_dict = translate_legacy_esrgan(state_dict)
     if any(k.startswith("body.") and ".rdb" in k for k in state_dict):
         num_block = 1 + max(
-            int(k.split(".")[1]) for k in state_dict if k.startswith("body.")
+            int(k.split(".")[1])
+            for k in state_dict
+            if k.startswith("body.") and k.split(".")[1].isdigit()
         )
-        return RRDBNet(num_block=num_block)
-    return SRVGGNetCompact()
+        return RRDBNet(num_block=num_block), state_dict
+    return SRVGGNetCompact(), state_dict
 
 
 class WorkerState:
@@ -203,7 +258,8 @@ def load_model(state: WorkerState) -> None:
 
     raw = torch.load(weights, map_location="cpu", weights_only=True)
     sd = raw.get("params") or raw.get("params_ema") or raw
-    model = build_model(sd).eval().half().cuda()
+    model, sd = build_model(sd)
+    model = model.eval().half().cuda()
     result = model.load_state_dict(sd, strict=False)
     if result.missing_keys:
         # No se aborta: pesos con nombres ligeramente distintos siguen siendo
