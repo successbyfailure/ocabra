@@ -112,9 +112,32 @@ async def estimate_request(
     if backend_type is None and state is not None:
         backend_type = state.backend_type
 
+    # Try to pull the chat-shape signals out of the body: ``max_tokens`` is
+    # taken as-is; ``input_tokens`` is estimated from ``messages`` via a
+    # 4-char-per-token heuristic if not provided explicitly. Cheap and good
+    # enough — clients that care about precision can pass ``input_tokens``
+    # directly.
+    input_tokens = body.body.get("input_tokens")
+    if input_tokens is None:
+        messages = body.body.get("messages")
+        if isinstance(messages, list):
+            char_count = 0
+            for msg in messages:
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if isinstance(content, str):
+                    char_count += len(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            char_count += len(part["text"])
+            input_tokens = max(1, char_count // 4)
+    max_tokens = body.body.get("max_tokens")
+
     result = await estimator.estimate(
         stats_key,
         backend_type=backend_type,
         currently_loaded=currently_loaded,
+        input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else None,
+        max_tokens=int(max_tokens) if isinstance(max_tokens, (int, float)) else None,
     )
     return EstimateResponse(**result.as_dict())

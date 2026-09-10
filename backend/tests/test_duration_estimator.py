@@ -27,6 +27,8 @@ import pytest
 from ocabra.core.duration_estimator import (
     FAMILY_DEFAULT_S,
     DurationEstimator,
+    _ChatRegression,
+    _fit_chat_regression,
     _ModelCalibration,
 )
 
@@ -178,3 +180,102 @@ class TestInFlightRemaining:
         fake_now[0] = 600.0  # 100s elapsed, way past 10s p95
         remaining = estimator.in_flight_remaining("worker-a", model_id="worker-a")
         assert remaining == 0.0
+
+
+# ── Etapa 2: chat/completion regression ──────────────────────
+
+
+def _synthetic_chat_points(
+    a: float, b: float, c: float, n: int = 200, noise_ms: float = 500.0
+) -> list[tuple[float, float, float]]:
+    """Generate a synthetic dataset that follows ``duration_ms ≈ a·in + b·out + c``
+    with Gaussian noise, so the fitter has a known ground truth to recover."""
+    import random
+
+    random.seed(42)
+    points: list[tuple[float, float, float]] = []
+    for _ in range(n):
+        in_tokens = float(random.randint(50, 20_000))
+        out_tokens = float(random.randint(50, 4_000))
+        dur = a * in_tokens + b * out_tokens + c + random.gauss(0, noise_ms)
+        points.append((in_tokens, out_tokens, max(1.0, dur)))
+    return points
+
+
+class TestChatRegressionFit:
+    def test_recovers_known_coefficients(self):
+        """Give the fitter a known linear signal — recovered coefficients
+        should land within a few % of ground truth. Regression not worth
+        anything if it can't reproduce toy data."""
+        # duration_ms = 0.5 ms/in + 30 ms/out + 200 ms overhead
+        points = _synthetic_chat_points(0.5, 30.0, 200.0, n=300, noise_ms=100.0)
+        fit = _fit_chat_regression(points)
+        assert fit is not None
+        assert 0.4 < fit.a_in < 0.6
+        assert 25.0 < fit.b_out < 35.0
+        assert fit.residual_std_s < 1.0  # 100ms noise → < 1s residual
+
+    def test_rejects_too_few_samples(self):
+        """Below the sample threshold the fit is unreliable — the fitter
+        must decline instead of returning garbage the router would trust."""
+        points = _synthetic_chat_points(0.5, 30.0, 200.0, n=10)
+        assert _fit_chat_regression(points) is None
+
+    def test_rejects_wildly_varying_data(self):
+        """Data where the residual dwarfs the prediction is not a linear
+        signal — better to fall back to raw percentiles than pretend a fit."""
+        # Ground truth would give predictions around 15-30 s; adding 200 s
+        # of Gaussian noise wipes out the signal so residual_std / mean_pred
+        # blows past ``_MAX_RESIDUAL_RATIO_FOR_FIT``.
+        points = _synthetic_chat_points(0.5, 30.0, 200.0, n=200, noise_ms=200_000.0)
+        assert _fit_chat_regression(points) is None
+
+
+class TestRegressionEstimatePath:
+    @pytest.mark.asyncio
+    async def test_regression_used_when_input_tokens_passed(self):
+        """With a fitted calibration AND concrete input_tokens, we return
+        the sharp regression prediction, not the raw p50."""
+        estimator = DurationEstimator()
+        _put(estimator, "vllm/chat-a", p50_s=8.0, p95_s=40.0, sample_count=500)
+        estimator._calibrations["vllm/chat-a"].chat_regression = _ChatRegression(
+            a_in=0.5, b_out=30.0, c=200.0, residual_std_s=0.5, p95_s=42.0,
+        )
+        # 1000 in + 500 out = 500 + 15000 + 200 = 15700 ms ≈ 15.7s
+        result = await estimator.estimate(
+            "vllm/chat-a",
+            input_tokens=1000,
+            max_tokens=500,
+        )
+        assert result.source == "regression"
+        assert 15.0 < result.p50_s < 16.5
+        # p95 = pred + 1.645·residual_std_s → 15.7 + 0.8 ≈ 16.5
+        assert 16.0 < result.p95_s < 17.5
+
+    @pytest.mark.asyncio
+    async def test_regression_bypassed_without_input_tokens(self):
+        """No input hint → we can't project the linear model → fall back
+        to the raw percentile with no attempt to guess the axes."""
+        estimator = DurationEstimator()
+        _put(estimator, "vllm/chat-b", p50_s=8.0, p95_s=40.0, sample_count=500)
+        estimator._calibrations["vllm/chat-b"].chat_regression = _ChatRegression(
+            a_in=0.5, b_out=30.0, c=200.0, residual_std_s=0.5, p95_s=42.0,
+        )
+        result = await estimator.estimate("vllm/chat-b")  # no tokens passed
+        assert result.source == "percentile"
+
+    @pytest.mark.asyncio
+    async def test_regression_confidence_is_higher_than_percentile(self):
+        """Same model, same call otherwise — the regression path must give
+        strictly more confidence than the raw percentile when its residuals
+        are tight. Otherwise there's no incentive for consumers to prefer it."""
+        estimator = DurationEstimator()
+        _put(estimator, "vllm/chat-c", p50_s=8.0, p95_s=40.0, sample_count=500)
+        # tight fit — residual small relative to prediction
+        estimator._calibrations["vllm/chat-c"].chat_regression = _ChatRegression(
+            a_in=0.5, b_out=30.0, c=200.0, residual_std_s=0.3, p95_s=42.0,
+        )
+        reg = await estimator.estimate("vllm/chat-c", input_tokens=1000, max_tokens=500)
+        # Force the percentile path by asking the same model without hints.
+        pct = await estimator.estimate("vllm/chat-c")
+        assert reg.confidence > pct.confidence

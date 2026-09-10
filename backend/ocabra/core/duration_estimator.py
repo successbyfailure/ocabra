@@ -117,6 +117,30 @@ class Estimate:
 
 
 @dataclass
+class _ChatRegression:
+    """Fitted ``duration_ms ≈ a·input_tokens + b·output_tokens + c`` model.
+
+    Only populated for chat/completion families where we have both
+    ``input_tokens`` and ``output_tokens`` on enough historical rows to fit
+    a line. When absent, callers fall back to the raw percentiles.
+    """
+
+    a_in: float   # ms per input token
+    b_out: float  # ms per output token
+    c: float      # fixed overhead in ms
+    residual_std_s: float  # 1-sigma residual in seconds, drives confidence
+    p95_s: float           # unconditional p95 fallback (safety net)
+
+
+# Chat-shaped backends whose durations are well described by
+# a·input_tokens + b·output_tokens + c. Everything else stays on the
+# percentile path in Etapa 1 / gets its own family estimator in Etapa 5.
+_CHAT_FAMILIES = frozenset(
+    {"vllm", "sglang", "tensorrt_llm", "llama_cpp", "bitnet", "ollama"}
+)
+
+
+@dataclass
 class _ModelCalibration:
     """Per-model cached calibration filled by the refresh loop."""
 
@@ -125,8 +149,9 @@ class _ModelCalibration:
     p50_s: float
     p95_s: float
     sample_count: int
-    residual_ratio: float       # relative spread, drives confidence
+    residual_ratio: float       # relative spread, drives percentile confidence
     cold_start_p95_s: float     # from model_load_stats, 0 if unknown
+    chat_regression: _ChatRegression | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def confidence(self) -> float:
@@ -148,6 +173,114 @@ class _ModelCalibration:
         # ~0.5; of 3+ -> ~0.
         spread_factor = 1.0 / (1.0 + spread)
         return max(0.0, min(1.0, n_factor * spread_factor))
+
+
+_MIN_REGRESSION_SAMPLES = 30
+# If the residual standard deviation is larger than the mean prediction,
+# the "line" is basically noise — no better than the raw percentile with
+# its own confidence. 1.0 says "one sigma of noise is comparable to the
+# average signal we're trying to predict"; anything above that has no
+# business being reported as source=regression.
+_MAX_RESIDUAL_RATIO_FOR_FIT = 1.0
+
+
+def _fit_chat_regression(
+    points: list[tuple[float, float, float]],
+) -> _ChatRegression | None:
+    """Fit ``duration_ms ≈ a·input + b·output + c`` by ordinary least
+    squares with the closed-form normal equations. Returns ``None`` when
+    the fit is unreliable — too few points, singular design matrix, or the
+    residual is so wild that the raw percentile is a better tool.
+
+    We stay inside stdlib to avoid a numpy dependency in the hot loop —
+    the design matrix is 3×3 so a hand-rolled solve costs nothing.
+    """
+    if len(points) < _MIN_REGRESSION_SAMPLES:
+        return None
+
+    # Winsorize durations at 1%/99% to keep a single 900s hanger from
+    # dominating the fit.
+    durs = sorted(p[2] for p in points)
+    lo = durs[max(0, int(len(durs) * 0.01))]
+    hi = durs[min(len(durs) - 1, int(len(durs) * 0.99))]
+
+    # Build the sums of the normal equations for the 3×3 system:
+    #   [Σx²   Σxy   Σx ] [a]   [Σxd]
+    #   [Σxy   Σy²   Σy ] [b] = [Σyd]
+    #   [Σx    Σy    n  ] [c]   [Σd ]
+    n = 0
+    sx = sy = sd = 0.0
+    sxx = syy = sxy = 0.0
+    sxd = syd = 0.0
+    for x, y, d in points:
+        if d < lo or d > hi:
+            continue
+        n += 1
+        sx += x; sy += y; sd += d
+        sxx += x * x; syy += y * y; sxy += x * y
+        sxd += x * d; syd += y * d
+    if n < _MIN_REGRESSION_SAMPLES:
+        return None
+
+    # Solve by Cramer's rule (3×3 — small determinants, no numpy needed).
+    def _det3(m: list[list[float]]) -> float:
+        return (
+            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        )
+
+    A = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, float(n)]]
+    rhs = [sxd, syd, sd]
+    det = _det3(A)
+    if abs(det) < 1e-6:
+        return None  # near-singular — inputs all clustered
+
+    def _with_col(col: int) -> list[list[float]]:
+        return [
+            [rhs[i] if j == col else A[i][j] for j in range(3)]
+            for i in range(3)
+        ]
+
+    a = _det3(_with_col(0)) / det
+    b = _det3(_with_col(1)) / det
+    c = _det3(_with_col(2)) / det
+
+    # Residual std of prediction (ms).
+    sse = 0.0
+    used = 0
+    mean_pred_ms = 0.0
+    for x, y, d in points:
+        if d < lo or d > hi:
+            continue
+        pred = a * x + b * y + c
+        sse += (d - pred) ** 2
+        mean_pred_ms += pred
+        used += 1
+    if used <= 3:
+        return None
+    residual_std_ms = math.sqrt(sse / max(1, used - 3))
+    mean_pred_ms /= used
+    if mean_pred_ms <= 0:
+        return None
+    # If the residual is larger than a couple of prediction means, the fit
+    # is basically noise — the raw percentile with its own confidence is a
+    # more useful tool for the router.
+    if residual_std_ms / max(mean_pred_ms, 1.0) > _MAX_RESIDUAL_RATIO_FOR_FIT:
+        return None
+
+    # Also derive an unconditional p95 in seconds as a safety net when the
+    # regression prediction ends up negative on adversarial inputs.
+    all_durs_s = sorted(d / 1000.0 for _, _, d in points if lo <= d <= hi)
+    p95_s = all_durs_s[min(len(all_durs_s) - 1, int(len(all_durs_s) * 0.95))]
+
+    return _ChatRegression(
+        a_in=a,
+        b_out=b,
+        c=c,
+        residual_std_s=residual_std_ms / 1000.0,
+        p95_s=p95_s,
+    )
 
 
 class DurationEstimator:
@@ -176,6 +309,8 @@ class DurationEstimator:
         *,
         backend_type: str | None = None,
         currently_loaded: bool = True,
+        input_tokens: int | None = None,
+        max_tokens: int | None = None,
     ) -> Estimate:
         """Return an estimate for ``model_id``.
 
@@ -187,6 +322,12 @@ class DurationEstimator:
         ``currently_loaded=False`` adds the cold-start estimate to
         ``expected_s`` — consumers use this to compare fair "time to first
         token" between a warm primary and a cold fallback.
+
+        ``input_tokens`` and ``max_tokens`` enable the regression path for
+        chat-shaped families: when the model has a fitted
+        ``a·input + b·output + c`` calibration and the caller provides at
+        least ``input_tokens``, the returned estimate uses the regression
+        prediction with much higher confidence than the raw percentile.
         """
         cal = self._calibrations.get(model_id)
         cold_start = 0.0
@@ -207,6 +348,53 @@ class DurationEstimator:
                 confidence=0.0,
                 source="family_default",
                 sample_count=0,
+                cold_start_s=cold_start,
+            )
+
+        # Regression path: available only when the model has a fitted
+        # chat_regression AND the caller passed a concrete input size. The
+        # per-request prediction is much sharper than the raw p50 because
+        # it splits the huge duration variance (chat 500-tok vs chat 200k-tok
+        # on the same model) into two separate axes.
+        if (
+            cal.chat_regression is not None
+            and input_tokens is not None
+            and input_tokens >= 0
+        ):
+            reg = cal.chat_regression
+            # Assume the client uses the full max_tokens budget by default —
+            # gives a pessimistic but useful upper bound. If max_tokens isn't
+            # given, fall back to the historical average output size, proxied
+            # by (p50 - c - a·input) / b.
+            if max_tokens is not None and max_tokens > 0:
+                out_tokens = float(max_tokens)
+            else:
+                out_tokens = max(
+                    1.0,
+                    (cal.p50_s * 1000.0 - reg.c - reg.a_in * input_tokens) / max(reg.b_out, 0.001),
+                )
+            pred_ms = reg.a_in * input_tokens + reg.b_out * out_tokens + reg.c
+            pred_s = max(0.0, pred_ms / 1000.0)
+            # p95 = prediction + 1.645·residual_std (one-sided normal
+            # approximation — good enough for a bound, not for a distribution
+            # tail).
+            p95 = max(pred_s + 1.645 * reg.residual_std_s, cal.p50_s)
+            expected = min(settings.estimator_max_estimate_s, pred_s + cold_start)
+            return Estimate(
+                expected_s=expected,
+                p50_s=pred_s,
+                p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start),
+                # Regression confidence is the base cal.confidence() scaled up
+                # by how tight the residuals are relative to the prediction.
+                # Tight residuals + enough samples ≈ 1.0.
+                confidence=min(
+                    1.0,
+                    cal.confidence() * (
+                        1.0 / (1.0 + reg.residual_std_s / max(pred_s, 1.0))
+                    ) * 2.0,
+                ),
+                source="regression",
+                sample_count=cal.sample_count,
                 cold_start_s=cold_start,
             )
 
@@ -306,6 +494,46 @@ class DurationEstimator:
 
             cold_by_model: dict[str, float] = {row.model_id: float(row.p95_s or 0.0) for row in loads}
 
+            # Regression path — only chat-shaped families and only for
+            # models with enough rows carrying BOTH input_tokens and
+            # output_tokens. Kept as a separate query so we don't drag the
+            # token columns through the percentile aggregation.
+            chat_families_tuple = tuple(_CHAT_FAMILIES)
+            fit_by_model: dict[str, _ChatRegression] = {}
+            async with AsyncSessionLocal() as session:
+                fit_rows = (await session.execute(
+                    sa.text(
+                        """
+                        SELECT model_id,
+                               input_tokens,
+                               output_tokens,
+                               duration_ms::float AS duration_ms
+                        FROM request_stats
+                        WHERE started_at > :cutoff
+                          AND status_code < 400
+                          AND error IS NULL
+                          AND duration_ms IS NOT NULL
+                          AND input_tokens IS NOT NULL
+                          AND output_tokens IS NOT NULL
+                          AND backend_type = ANY(:families)
+                        """
+                    ),
+                    {"cutoff": cutoff, "families": list(chat_families_tuple)},
+                )).all()
+
+            # Group by model_id in Python (a lot cheaper than shipping
+            # OLS/ridge to Postgres, and the volumes are modest — thousands
+            # of rows per model at most).
+            by_model: dict[str, list[tuple[float, float, float]]] = {}
+            for row in fit_rows:
+                by_model.setdefault(row.model_id, []).append(
+                    (float(row.input_tokens), float(row.output_tokens), float(row.duration_ms))
+                )
+            for model_id, points in by_model.items():
+                fit = _fit_chat_regression(points)
+                if fit is not None:
+                    fit_by_model[model_id] = fit
+
             new_map: dict[str, _ModelCalibration] = {}
             for row in rows:
                 p50 = float(row.p50_s or 0.0)
@@ -320,12 +548,17 @@ class DurationEstimator:
                     sample_count=int(row.n),
                     residual_ratio=residual,
                     cold_start_p95_s=cold_by_model.get(row.model_id, 0.0),
+                    chat_regression=fit_by_model.get(row.model_id),
                 )
 
             # Atomic swap — a concurrent reader sees either the old map or
             # the new one in full, never a torn state.
             self._calibrations = new_map
-            logger.info("duration_estimator_refreshed", models=len(new_map))
+            logger.info(
+                "duration_estimator_refreshed",
+                models=len(new_map),
+                with_regression=sum(1 for c in new_map.values() if c.chat_regression),
+            )
             return len(new_map)
 
     async def start(self) -> None:
