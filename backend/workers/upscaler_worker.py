@@ -245,7 +245,28 @@ class WorkerState:
         self.model_id = model_id
         self.model_path = model_path
         self.model: Any = None
+        self.scale: int = NATIVE_SCALE
+        self.half: bool = True
         self.load_error: str | None = None
+
+
+def _load_with_spandrel(weights: Path):
+    """Carga con spandrel, que reconoce 42 arquitecturas y detecta la correcta.
+
+    Se prefiere a la implementación propia de más abajo por una razón de
+    ingeniería: mantener a mano dos arquitecturas era razonable, pero DAT, SPAN,
+    PLKSR, ATD o DRCT son transformers de cientos de líneas y reimplementarlos
+    significa arriesgarse a errores sutiles que degradan la salida sin avisar.
+    spandrel está mantenida, tiene licencia permisiva y es la que usa chaiNNer.
+    """
+    from spandrel import ImageModelDescriptor, ModelLoader
+
+    descriptor = ModelLoader().load_from_file(str(weights))
+    if not isinstance(descriptor, ImageModelDescriptor):
+        raise ValueError(
+            f"El fichero no es un modelo de imagen utilizable: {type(descriptor).__name__}"
+        )
+    return descriptor
 
 
 def load_model(state: WorkerState) -> None:
@@ -256,23 +277,47 @@ def load_model(state: WorkerState) -> None:
             raise FileNotFoundError(f"No weights found under {weights}")
         weights = candidates[0]
 
-    raw = torch.load(weights, map_location="cpu", weights_only=True)
-    sd = raw.get("params") or raw.get("params_ema") or raw
-    model, sd = build_model(sd)
-    model = model.eval().half().cuda()
-    result = model.load_state_dict(sd, strict=False)
-    if result.missing_keys:
-        # No se aborta: pesos con nombres ligeramente distintos siguen siendo
-        # utilizables, pero conviene que quede en el log.
-        _log(
-            "upscaler_state_dict_partial",
-            level=logging.WARNING,
-            missing=len(result.missing_keys),
-            unexpected=len(result.unexpected_keys),
-        )
-    state.model = model
-    _log("upscaler_model_loaded", model_id=state.model_id,
-         arch=type(model).__name__, weights=str(weights))
+    try:
+        descriptor = _load_with_spandrel(weights)
+    except ImportError:
+        # Respaldo para instalaciones anteriores del backend, sin spandrel:
+        # cubre Compact y RRDBNet, que es lo que había antes.
+        _log("upscaler_spandrel_ausente", level=logging.WARNING, weights=str(weights))
+        raw = torch.load(weights, map_location="cpu", weights_only=True)
+        sd = raw.get("params") or raw.get("params_ema") or raw
+        model, sd = build_model(sd)
+        model = model.eval().half().cuda()
+        result = model.load_state_dict(sd, strict=False)
+        if result.missing_keys:
+            _log(
+                "upscaler_state_dict_partial",
+                level=logging.WARNING,
+                missing=len(result.missing_keys),
+                unexpected=len(result.unexpected_keys),
+            )
+        state.model = model
+        state.scale = NATIVE_SCALE
+        _log("upscaler_model_loaded", model_id=state.model_id,
+             arch=type(model).__name__, scale=state.scale, weights=str(weights))
+        return
+
+    # half() no vale para todas: algunas arquitecturas solo soportan fp32 y
+    # spandrel lo declara, así que se respeta en vez de forzar y romper.
+    if descriptor.supports_half:
+        descriptor.model.half()
+    descriptor.model.eval().cuda()
+    state.model = descriptor.model
+    state.half = descriptor.supports_half
+    # La escala la declara el modelo: dejar de asumir 4x permite usar pesos 2x.
+    state.scale = int(descriptor.scale)
+    _log(
+        "upscaler_model_loaded",
+        model_id=state.model_id,
+        arch=descriptor.architecture.name,
+        scale=state.scale,
+        half=state.half,
+        weights=str(weights),
+    )
 
 
 def _rgb_to_yuv420p(y: Any) -> bytes:
@@ -370,7 +415,8 @@ def upscale_sync(
     crf: int,
 ) -> dict:
     width, height, fps = probe_video(src)
-    out_w, out_h = width * NATIVE_SCALE, height * NATIVE_SCALE
+    scale = state.scale
+    out_w, out_h = width * scale, height * scale
 
     decoder = subprocess.Popen(
         [FFMPEG, "-v", "error", "-i", str(src), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
@@ -415,7 +461,8 @@ def upscale_sync(
                 arr = np.frombuffer(chunk[: n * frame_bytes], np.uint8).reshape(
                     n, height, width, 3
                 )
-                x = torch.from_numpy(arr.copy()).cuda().permute(0, 3, 1, 2).half().div_(255)
+                x = torch.from_numpy(arr.copy()).cuda().permute(0, 3, 1, 2)
+                x = (x.half() if state.half else x.float()).div_(255)
                 y = state.model(x).clamp_(0, 1)
                 if YUV_FAST_PATH:
                     encoder.stdin.write(_rgb_to_yuv420p(y))
@@ -501,7 +548,7 @@ def create_app(state: WorkerState) -> FastAPI:
         vram = 0
         if torch is not None and torch.cuda.is_available():
             vram = int(torch.cuda.memory_allocated(0) / (1024 * 1024))
-        return {"model_id": state.model_id, "scale": NATIVE_SCALE, "vram_used_mb": vram}
+        return {"model_id": state.model_id, "scale": state.scale, "vram_used_mb": vram}
 
     return app
 

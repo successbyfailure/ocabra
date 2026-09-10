@@ -52,6 +52,11 @@ class UpscalerBackend(BackendInterface):
             pip_packages=[
                 "torch>=2.5",
                 "numpy",
+                # 42 arquitecturas de super-resolución con detección automática
+                # (DAT, SPAN, PLKSR, ATD, DRCT, HAT...). Mantenida y con
+                # licencia permisiva; reimplementar transformers a mano es
+                # arriesgarse a errores sutiles que degradan la salida.
+                "spandrel>=0.4",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
