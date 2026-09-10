@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from functools import lru_cache, partial
@@ -104,6 +105,86 @@ class SRVGGNetCompact(nn.Module):
         return out + F.interpolate(x, scale_factor=self.upscale, mode="nearest")
 
 
+class ResidualDenseBlock(nn.Module):
+    """Bloque denso residual de RRDBNet (Real-ESRGAN x4plus)."""
+
+    def __init__(self, num_feat: int = 64, num_grow_ch: int = 32) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(num_feat, num_grow_ch, 3, 1, 1)
+        self.conv2 = nn.Conv2d(num_feat + num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv3 = nn.Conv2d(num_feat + 2 * num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv4 = nn.Conv2d(num_feat + 3 * num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv5 = nn.Conv2d(num_feat + 4 * num_grow_ch, num_feat, 3, 1, 1)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        return x5 * 0.2 + x
+
+
+class RRDB(nn.Module):
+    def __init__(self, num_feat: int, num_grow_ch: int = 32) -> None:
+        super().__init__()
+        self.rdb1 = ResidualDenseBlock(num_feat, num_grow_ch)
+        self.rdb2 = ResidualDenseBlock(num_feat, num_grow_ch)
+        self.rdb3 = ResidualDenseBlock(num_feat, num_grow_ch)
+
+    def forward(self, x):
+        return self.rdb3(self.rdb2(self.rdb1(x))) * 0.2 + x
+
+
+class RRDBNet(nn.Module):
+    """Real-ESRGAN x4plus: ~16,7M parámetros frente a los ~1,2M de Compact.
+
+    Es el nivel intermedio: bastante mejor detalle que Compact y mucho más
+    rápido que los modelos de difusión. Se implementa aquí por lo mismo que
+    Compact: ``basicsr`` está sin mantener y rompe con torchvision moderno.
+    """
+
+    def __init__(
+        self,
+        num_in_ch: int = 3,
+        num_out_ch: int = 3,
+        num_feat: int = 64,
+        num_block: int = 23,
+        num_grow_ch: int = 32,
+    ) -> None:
+        super().__init__()
+        self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
+        self.body = nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
+        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        feat = self.conv_first(x)
+        feat = feat + self.conv_body(self.body(feat))
+        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        return self.conv_last(self.lrelu(self.conv_hr(feat)))
+
+
+def build_model(state_dict: dict) -> nn.Module:
+    """Elige la arquitectura mirando las claves del ``state_dict``.
+
+    Detectar en vez de configurar evita que un cambio de pesos exija tocar la
+    configuración del modelo en oCabra: los dos formatos son inconfundibles.
+    """
+    if any(k.startswith("body.") and ".rdb" in k for k in state_dict):
+        num_block = 1 + max(
+            int(k.split(".")[1]) for k in state_dict if k.startswith("body.")
+        )
+        return RRDBNet(num_block=num_block)
+    return SRVGGNetCompact()
+
+
 class WorkerState:
     def __init__(self, model_id: str, model_path: Path) -> None:
         self.model_id = model_id
@@ -120,9 +201,9 @@ def load_model(state: WorkerState) -> None:
             raise FileNotFoundError(f"No weights found under {weights}")
         weights = candidates[0]
 
-    model = SRVGGNetCompact().eval().half().cuda()
     raw = torch.load(weights, map_location="cpu", weights_only=True)
     sd = raw.get("params") or raw.get("params_ema") or raw
+    model = build_model(sd).eval().half().cuda()
     result = model.load_state_dict(sd, strict=False)
     if result.missing_keys:
         # No se aborta: pesos con nombres ligeramente distintos siguen siendo
@@ -134,7 +215,8 @@ def load_model(state: WorkerState) -> None:
             unexpected=len(result.unexpected_keys),
         )
     state.model = model
-    _log("upscaler_model_loaded", model_id=state.model_id, weights=str(weights))
+    _log("upscaler_model_loaded", model_id=state.model_id,
+         arch=type(model).__name__, weights=str(weights))
 
 
 def _rgb_to_yuv420p(y: Any) -> bytes:
@@ -381,6 +463,13 @@ def main() -> None:
     if torch is None or np is None:
         raise RuntimeError("torch and numpy are required to run upscaler_worker")
 
+    # Sin configurar logging, Python descarta los INFO de este módulo y el
+    # worker se queda mudo: se pierden fps, VRAM y avisos como el de NVENC.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     args = parse_args()
     state = WorkerState(model_id=args.model_id, model_path=Path(args.model_path))
     try:

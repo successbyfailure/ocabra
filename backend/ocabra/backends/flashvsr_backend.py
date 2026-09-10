@@ -196,7 +196,10 @@ class FlashVSRBackend(BackendInterface):
     ) -> AsyncIterator[bytes]:
         raise RuntimeError("FlashVSR backend does not support streaming")
 
-    async def upscale_video(self, model_id: str, video: bytes, **kwargs: Any) -> bytes:
+    async def upscale_video(
+        self, model_id: str, video: bytes, **kwargs: Any
+    ) -> tuple[bytes, dict[str, str]]:
+        """Devuelve (bytes del segmento, cabeceras de estadísticas del worker)."""
         worker = self._workers.get(model_id)
         if worker is None:
             raise KeyError(f"No worker found for model '{model_id}'")
@@ -209,7 +212,11 @@ class FlashVSRBackend(BackendInterface):
                 url, params=params, files={"file": ("segment.mp4", video, "video/mp4")}
             )
             response.raise_for_status()
-            return response.content
+            stats = {
+                k: v for k, v in response.headers.items()
+                if k.lower().startswith("x-ocabra-")
+            }
+            return response.content, stats
 
     async def _wait_until_healthy(
         self, *, port: int, process: asyncio.subprocess.Process, timeout_s: int

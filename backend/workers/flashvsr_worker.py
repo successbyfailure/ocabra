@@ -260,6 +260,13 @@ def main() -> None:
     if torch is None or np is None:
         raise RuntimeError("torch and numpy are required to run flashvsr_worker")
 
+    # Sin configurar logging, Python descarta los INFO de este módulo y el
+    # worker se queda mudo: se pierden fps, VRAM y avisos como el de NVENC.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     args = parse_args()
     state = WorkerState(
         model_id=args.model_id,

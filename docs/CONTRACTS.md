@@ -83,8 +83,10 @@ class BackendInterface(ABC):
 Los backends de escalado (`upscaler`, `flashvsr`) implementan además:
 
 ```python
-async def upscale_video(self, model_id: str, video: bytes, **kwargs) -> bytes:
-    """Escala un segmento de vídeo. Devuelve el segmento codificado."""
+async def upscale_video(
+    self, model_id: str, video: bytes, **kwargs
+) -> tuple[bytes, dict[str, str]]:
+    """Escala un segmento. Devuelve (bytes, cabeceras `x-ocabra-*` de stats)."""
 ```
 
 Contrato deliberadamente pobre: **entra un segmento autocontenido sin audio y

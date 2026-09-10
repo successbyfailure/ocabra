@@ -85,7 +85,7 @@ async def upscale_video(
                 )
 
             try:
-                body = await backend.upscale_video(
+                body, stats = await backend.upscale_video(
                     state.backend_model_id,
                     payload,
                     target_height=target_height,
@@ -116,4 +116,6 @@ async def upscale_video(
     finally:
         model_manager.end_request(worker_key, inflight_request_id)
 
-    return Response(content=body, media_type="video/mp4")
+    # Las estadísticas del worker (fps, VRAM, resolución) se reenvían: son lo
+    # único que permite a un cliente saber qué le costó de verdad su segmento.
+    return Response(content=body, media_type="video/mp4", headers=stats)
