@@ -1194,6 +1194,7 @@ async def _resolve_capabilities_payload(
                 "audio_transcription",
                 "audio_input",
                 "video_input",
+                "video_upscaling",
                 "tts",
                 "music_generation",
                 "image_generation",

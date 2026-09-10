@@ -440,12 +440,14 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.bitnet_backend import BitnetBackend
     from ocabra.backends.chatterbox_backend import ChatterboxBackend
     from ocabra.backends.diffusers_backend import DiffusersBackend
+    from ocabra.backends.flashvsr_backend import FlashVSRBackend
     from ocabra.backends.mageflow_backend import MageFlowBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.ollama_backend import OllamaBackend
     from ocabra.backends.sglang_backend import SGLangBackend
     from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
+    from ocabra.backends.upscaler_backend import UpscalerBackend
     from ocabra.backends.vllm_backend import VLLMBackend
     from ocabra.backends.vibeasr_backend import VibeAsrBackend
     from ocabra.backends.voxtral_backend import VoxtralBackend
@@ -463,6 +465,8 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("vibeasr", VibeAsrBackend())
     worker_pool.register_backend("tts", TTSBackend())
     worker_pool.register_backend("chatterbox", ChatterboxBackend())
+    worker_pool.register_backend("upscaler", UpscalerBackend())
+    worker_pool.register_backend("flashvsr", FlashVSRBackend())
     worker_pool.register_backend("voxtral", VoxtralBackend())
     worker_pool.register_backend("vllm", VLLMBackend())
     tensorrt_llm_backend = TensorRTLLMBackend()
@@ -1010,6 +1014,7 @@ app.include_router(health_router)
 
 # ── Internal routers (hidden from /docs — admin dashboard only) ──
 from ocabra.api.internal.gpus import router as gpus_router
+from ocabra.api.internal.video import router as video_router  # noqa: E402
 from ocabra.api.internal.models import router as models_router
 from ocabra.api.internal.ws import router as ws_router
 from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
@@ -1020,6 +1025,7 @@ from ocabra.api.internal.ollama_admin import router as ollama_admin_router  # no
 from ocabra.api.internal.models_update import router as models_update_router  # noqa: E402
 
 app.include_router(gpus_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(video_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(ws_router, prefix="/ocabra", include_in_schema=False)

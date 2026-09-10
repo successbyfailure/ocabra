@@ -78,6 +78,30 @@ class BackendInterface(ABC):
 
 ---
 
+### 1.1 Escalado de vídeo (VIDEO_UPSCALING)
+
+Los backends de escalado (`upscaler`, `flashvsr`) implementan además:
+
+```python
+async def upscale_video(self, model_id: str, video: bytes, **kwargs) -> bytes:
+    """Escala un segmento de vídeo. Devuelve el segmento codificado."""
+```
+
+Contrato deliberadamente pobre: **entra un segmento autocontenido sin audio y
+sale el segmento escalado**, sin estado entre peticiones. Así el planificador
+sigue siendo libre de expulsar el modelo entre segmentos según la política del
+administrador, en vez de que el trabajo imponga un `pin`.
+
+Quien trocea, remezcla el audio y reensambla es el cliente (VHS), que ya tiene
+ffmpeg y NVENC. Expuesto en `POST /ocabra/video/upscale` (multipart: `file`,
+`model`, `target_height`, `crf`) — va en la API interna y no en `/v1/*` porque
+no existe endpoint OpenAI estándar para esto.
+
+Capacidad: `video_upscaling`. No confundir con `video_input`, que significa
+aceptar partes `video_url` dentro de un chat.
+
+---
+
 ## 2. GPUManager — Contrato de estado de GPU
 
 ```python

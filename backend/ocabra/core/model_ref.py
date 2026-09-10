@@ -15,6 +15,8 @@ KNOWN_BACKEND_TYPES = {
     "chatterbox",
     "voxtral",
     "ollama",
+    "upscaler",
+    "flashvsr",
 }
 
 

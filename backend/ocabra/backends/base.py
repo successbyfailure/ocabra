@@ -80,6 +80,7 @@ class ModalityType(StrEnum):
     AUDIO_TRANSCRIPTION = "audio_transcription"
     AUDIO_SPEECH = "audio_speech"
     RERANKING = "reranking"
+    VIDEO_UPSCALING = "video_upscaling"
 
 
 @dataclass
@@ -108,6 +109,10 @@ class BackendCapabilities:
     audio_input: bool = False
     video_input: bool = False
     audio_output: bool = False
+    # Dedicated video super-resolution endpoint (/ocabra/video/upscale).
+    # Distinct from ``video_input``, which is about consuming video *inside*
+    # chat: a model can restore video without being able to talk about it.
+    video_upscaling: bool = False
     streaming: bool = False
     context_length: int = 0
 
@@ -240,4 +245,17 @@ class BackendInterface(ABC):
         """Rerank documents by relevance to the query."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support reranking"
+        )
+
+    async def upscale_video(
+        self, model_id: str, video: bytes, **kwargs: Any
+    ) -> bytes:
+        """Upscale/restore a video segment. Returns the encoded segment bytes.
+
+        Callers send one self-contained segment without audio and get the
+        upscaled segment back; the backend keeps no state between calls so the
+        scheduler stays free to evict the model in between.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support video upscaling"
         )
