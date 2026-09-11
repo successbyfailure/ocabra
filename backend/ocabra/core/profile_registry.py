@@ -74,6 +74,7 @@ class ProfileRegistry:
         assets: dict | None = None,
         enabled: bool = True,
         is_default: bool = False,
+        routing_targets: list[str] | None = None,
     ) -> ModelProfile:
         """Create a new profile, validate constraints, persist, and update cache."""
         if not _is_valid_slug(profile_id):
@@ -109,6 +110,7 @@ class ProfileRegistry:
             assets=assets,
             enabled=enabled,
             is_default=is_default,
+            routing_targets=routing_targets,
         )
         session.add(profile)
         await session.commit()
@@ -145,6 +147,7 @@ class ProfileRegistry:
             "assets",
             "enabled",
             "is_default",
+            "routing_targets",
         }
         for key, value in patch.items():
             if key not in allowed_keys:

@@ -627,6 +627,20 @@ async def lifespan(app: FastAPI):
     model_manager.set_session_registry(session_registry)
     logger.info("session_registry_ready")
 
+    # Bloque 20 — RouterResolver walks routing_targets to pick the best
+    # candidate for router profiles. Wired now that both estimator and
+    # session registry are up.
+    from ocabra.core.router_resolver import RouterResolver
+
+    router_resolver = RouterResolver(
+        profile_registry=profile_registry,
+        model_manager=model_manager,
+        duration_estimator=duration_estimator,
+        session_registry=session_registry,
+    )
+    app.state.router_resolver = router_resolver
+    logger.info("router_resolver_ready")
+
     # Start ollama inventory loop now that profile_registry is available
     ollama_inventory_task = asyncio.create_task(
         _ollama_inventory_loop(model_manager, ollama_inventory_stop, profile_registry),

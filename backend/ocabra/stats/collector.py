@@ -544,6 +544,12 @@ class StatsMiddleware(BaseHTTPMiddleware):
             work_size_meta = _extract_work_size_meta(
                 request_kind, request_payload, response_payload
             )
+            # Bloque 20 — router attribution. ``resolve_profile`` stashes
+            # the router profile_id on ``request.state`` (BaseHTTPMiddleware
+            # breaks contextvar propagation across ``call_next``, but
+            # request.state is shared). NULL when the request didn't go
+            # through a router — most direct calls.
+            via_router = getattr(request.state, "via_router_profile_id", None)
             asyncio.create_task(
                 _record_stat(
                     request=request,
@@ -557,6 +563,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     input_tokens=in_tok,
                     output_tokens=out_tok,
                     work_size_meta=work_size_meta,
+                    via_router_profile_id=via_router,
                 )
             )
 

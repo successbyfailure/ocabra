@@ -182,6 +182,9 @@ async def resolve_profile(
     profile_registry: ProfileRegistry,
     *,
     user: UserContext | None = None,
+    request_body: dict | None = None,
+    router_resolver: object | None = None,
+    request_state: object | None = None,
 ) -> tuple[ModelProfile, ModelState]:
     """Resolve a *profile_id* to its ``(ModelProfile, ModelState)`` pair.
 
@@ -235,6 +238,38 @@ async def resolve_profile(
                 code="model_not_found",
                 status_code=404,
             )
+        # Bloque 20 — Router profiles: if this profile declares routing_targets
+        # delegate to the RouterResolver, which returns the best target under
+        # current conditions (loaded / loadable / session veto / estimator).
+        # The router's own attribution flows via ``via_router_profile_id`` on
+        # the eventual request_stat row so ``/stats/routing`` can aggregate it.
+        if router_resolver is not None and router_resolver.is_router(profile):
+            resolved = await router_resolver.pick(profile, request_body=request_body)
+            target = await profile_registry.get(resolved.target_profile_id)
+            if target is not None:
+                worker_key = compute_worker_key(target.base_model_id, target.load_overrides)
+                state = await _ensure_worker_loaded(
+                    model_manager,
+                    target.base_model_id,
+                    worker_key,
+                    target.load_overrides,
+                )
+                # Router attribution — StatsMiddleware (BaseHTTPMiddleware)
+                # doesn't propagate contextvars set by the handler back to
+                # itself after ``call_next`` (async-boundary in Starlette),
+                # so we hang the value on ``request.state``: shared object,
+                # accessible from both sides of the boundary, no reliance on
+                # asyncio.copy_context semantics.
+                if request_state is not None:
+                    try:
+                        request_state.via_router_profile_id = profile.profile_id
+                    except Exception:  # noqa: BLE001 — never break resolution
+                        pass
+                return target, state
+            # Router failed to resolve any target (shouldn't happen — pick
+            # always returns something), fall through to plain path so the
+            # request still gets served with the router's own base_model_id.
+
         worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
         state = await _ensure_worker_loaded(
             model_manager,

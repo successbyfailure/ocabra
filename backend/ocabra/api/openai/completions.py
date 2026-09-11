@@ -133,6 +133,9 @@ async def completions(
         model_manager,
         profile_registry,
         user=user,
+        request_body=body,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
+        request_state=request.state,
     )
     check_capability(state, "completion", "text completions")
 

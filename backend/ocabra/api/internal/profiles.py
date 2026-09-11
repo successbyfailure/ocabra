@@ -102,6 +102,7 @@ async def create_model_profile(
                 request_defaults=body.request_defaults,
                 enabled=body.enabled,
                 is_default=body.is_default,
+                routing_targets=body.routing_targets,
             )
         except ValueError as exc:
             msg = str(exc)

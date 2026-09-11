@@ -19,6 +19,10 @@ class ProfileCreate(BaseModel):
     request_defaults: dict[str, Any] | None = None
     enabled: bool = True
     is_default: bool = False
+    # Bloque 20 — Router profiles. Ordered list of target profile_ids the
+    # RouterResolver walks when this profile is requested. Non-null makes
+    # the profile a router; null keeps it a plain profile.
+    routing_targets: list[str] | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -31,6 +35,7 @@ class ProfileUpdate(BaseModel):
     request_defaults: dict[str, Any] | None = None
     enabled: bool | None = None
     is_default: bool | None = None
+    routing_targets: list[str] | None = None
 
 
 class ProfileOut(BaseModel):
@@ -46,5 +51,6 @@ class ProfileOut(BaseModel):
     assets: dict[str, Any] | None = None
     enabled: bool
     is_default: bool
+    routing_targets: list[str] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
