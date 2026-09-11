@@ -326,6 +326,90 @@ async def federation_stats(
 
 
 @router.get(
+    "/stats/routing",
+    summary="Router redirect distribution",
+    description=(
+        "For every router profile that fired in the window, break down the "
+        "requests it served by the target profile that actually handled them. "
+        "Used by the Stats/Routing UI card and by operators tuning "
+        "``routing_targets`` orders."
+    ),
+)
+async def routing_stats(
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Bloque 20 — Etapa 8: routing decisions view.
+
+    Returns:
+        ``{"routers": [{"router_profile_id": ..., "total": N,
+                        "targets": [{"model_id": ..., "count": M,
+                                     "avg_duration_ms": ..., "share": 0.42}]}]}``
+
+    Empty ``targets`` means the router hasn't served anything in the
+    window — still returns the router row so the UI can show it as
+    "idle". Rows without ``via_router_profile_id`` are ignored (they
+    went through the plain profile path).
+    """
+    import sqlalchemy as sa
+
+    from ocabra.database import AsyncSessionLocal
+
+    where_clauses = ["via_router_profile_id IS NOT NULL"]
+    params: dict = {}
+    if from_dt is not None:
+        where_clauses.append("started_at >= :from_dt")
+        params["from_dt"] = from_dt
+    if to_dt is not None:
+        where_clauses.append("started_at <= :to_dt")
+        params["to_dt"] = to_dt
+    where_sql = " AND ".join(where_clauses)
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            sa.text(
+                f"""
+                SELECT via_router_profile_id AS router,
+                       model_id             AS target_model_id,
+                       COUNT(*)             AS n,
+                       AVG(duration_ms)     AS avg_duration_ms,
+                       SUM(CASE WHEN status_code < 400 THEN 1 ELSE 0 END) AS ok_count
+                FROM request_stats
+                WHERE {where_sql}
+                GROUP BY via_router_profile_id, model_id
+                ORDER BY via_router_profile_id, n DESC
+                """
+            ),
+            params,
+        )).all()
+
+    # Group by router. Total per router is the sum of its target counts, so
+    # ``share`` sums to 1.0 within each router (used by the UI to draw
+    # proportion bars).
+    by_router: dict[str, dict] = {}
+    for row in rows:
+        entry = by_router.setdefault(
+            row.router,
+            {"router_profile_id": row.router, "total": 0, "targets": []},
+        )
+        entry["total"] += int(row.n)
+        entry["targets"].append(
+            {
+                "model_id": row.target_model_id,
+                "count": int(row.n),
+                "ok_count": int(row.ok_count or 0),
+                "avg_duration_ms": float(row.avg_duration_ms or 0),
+            }
+        )
+    for entry in by_router.values():
+        total = max(1, entry["total"])
+        for t in entry["targets"]:
+            t["share"] = t["count"] / total
+    return {"routers": list(by_router.values())}
+
+
+@router.get(
     "/stats/server-power",
     summary="Current server power readings",
     description="Return the latest server power snapshot from Redis.",

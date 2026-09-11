@@ -527,6 +527,13 @@ class StatsMiddleware(BaseHTTPMiddleware):
         error_message = _extract_error_message(response_payload, response.status_code)
 
         model_id = _extract_model_id(request=request, body=request_payload)
+        # Bloque 20 — when a router redirected the request, use the target
+        # profile that actually served the traffic as ``model_id``. That
+        # way ``request_stats.model_id`` reflects reality and the
+        # /stats/routing view breaks down redirects by real target.
+        resolved_model_id = getattr(request.state, "resolved_model_id", None)
+        if resolved_model_id:
+            model_id = resolved_model_id
         if model_id:
             in_tok, out_tok = _extract_usage_tokens(
                 response_payload, request_kind=request_kind, request_payload=request_payload

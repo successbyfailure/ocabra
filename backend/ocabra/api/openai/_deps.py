@@ -263,6 +263,11 @@ async def resolve_profile(
                 if request_state is not None:
                     try:
                         request_state.via_router_profile_id = profile.profile_id
+                        # Also record the resolved target profile_id so the
+                        # stats collector can group routing decisions by the
+                        # profile that actually served the request (vs the
+                        # target's canonical model_id).
+                        request_state.resolved_model_id = target.profile_id
                     except Exception:  # noqa: BLE001 — never break resolution
                         pass
                 return target, state
