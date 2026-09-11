@@ -28,8 +28,11 @@ from ocabra.core.duration_estimator import (
     FAMILY_DEFAULT_S,
     DurationEstimator,
     _ChatRegression,
+    _FamilyRegression,
     _fit_chat_regression,
+    _fit_family_regression,
     _ModelCalibration,
+    extract_work_units,
 )
 
 
@@ -279,3 +282,146 @@ class TestRegressionEstimatePath:
         # Force the percentile path by asking the same model without hints.
         pct = await estimator.estimate("vllm/chat-c")
         assert reg.confidence > pct.confidence
+
+
+# ── Etapa 5: family-specific regression ──────────────────────
+
+
+class TestWorkUnitsExtraction:
+    def test_whisper_extracts_audio_seconds(self):
+        assert extract_work_units("whisper", {"audio_seconds": 42.5}) == 42.5
+
+    def test_diffusers_computes_mp_steps(self):
+        # 20 steps × (1024·1024 / 1e6) ≈ 20.97
+        units = extract_work_units(
+            "diffusers", {"steps": 20, "resolution_w": 1024, "resolution_h": 1024}
+        )
+        assert units is not None and 20 < units < 22
+
+    def test_diffusers_uses_default_resolution_when_missing(self):
+        """A caller that only records ``steps`` shouldn't crash the fit —
+        we fall back to a 1024² default that matches most presets."""
+        units = extract_work_units("diffusers", {"steps": 20})
+        assert units is not None and 20 < units < 22
+
+    def test_tts_extracts_text_chars(self):
+        assert extract_work_units("tts", {"text_chars": 512}) == 512.0
+
+    def test_flashvsr_extracts_frames(self):
+        assert extract_work_units("flashvsr", {"input_frames": 3600}) == 3600.0
+
+    def test_upscaler_computes_mp_frames(self):
+        # 500 frames × (1920·1080 / 1e6) ≈ 1036.8
+        units = extract_work_units(
+            "upscaler", {"input_frames": 500, "output_w": 1920, "output_h": 1080}
+        )
+        assert units is not None and 1030 < units < 1040
+
+    def test_unknown_backend_returns_none(self):
+        assert extract_work_units("mystery-backend", {"anything": 1}) is None
+
+    def test_missing_meta_returns_none(self):
+        assert extract_work_units("whisper", None) is None
+        assert extract_work_units("whisper", {}) is None
+
+    def test_zero_or_negative_ignored(self):
+        """A ``0`` value would collapse the regression to y-intercept only.
+        Better to skip than pretend we have a signal."""
+        assert extract_work_units("whisper", {"audio_seconds": 0}) is None
+        assert extract_work_units("whisper", {"audio_seconds": -3}) is None
+
+
+class TestFamilyRegressionFit:
+    @staticmethod
+    def _synth(k: float, c: float, n: int = 200, noise_ms: float = 200.0):
+        import random
+
+        random.seed(7)
+        points = []
+        for _ in range(n):
+            work = float(random.randint(1, 3600))  # seconds of audio, say
+            dur = k * work + c + random.gauss(0, noise_ms)
+            points.append((work, max(1.0, dur)))
+        return points
+
+    def test_recovers_slope_and_intercept(self):
+        # 250 ms per audio_second + 400 ms overhead ≈ real-time × 0.25.
+        points = self._synth(250.0, 400.0)
+        fit = _fit_family_regression(points, unit_label="audio_seconds")
+        assert fit is not None
+        assert 200 < fit.k < 300
+        # Overhead is small relative to the signal — sanity, not a tight bound.
+        assert fit.residual_std_s < 1.0
+
+    def test_rejects_flat_x_axis(self):
+        """If every request had the same input size, we can't fit a slope
+        and the fit should decline instead of returning garbage."""
+        points = [(10.0, 1000.0 + i) for i in range(50)]
+        assert _fit_family_regression(points, unit_label="audio_seconds") is None
+
+
+class TestFamilyRegressionEstimatePath:
+    @pytest.mark.asyncio
+    async def test_family_regression_scales_with_work_units(self):
+        """A 60-second whisper request must estimate roughly 6× the cost of
+        a 10-second one for the same model."""
+        estimator = DurationEstimator()
+        _put(estimator, "whisper/x", p50_s=15.0, p95_s=60.0, sample_count=500,
+             backend_type="whisper")
+        estimator._calibrations["whisper/x"].family_regression = _FamilyRegression(
+            k=250.0, c=400.0, residual_std_s=0.4, p95_s=25.0, unit_label="audio_seconds",
+        )
+        short = await estimator.estimate(
+            "whisper/x",
+            backend_type="whisper",
+            work_size_meta={"audio_seconds": 10},
+        )
+        long = await estimator.estimate(
+            "whisper/x",
+            backend_type="whisper",
+            work_size_meta={"audio_seconds": 60},
+        )
+        assert short.source == "regression"
+        assert long.source == "regression"
+        # Ratio should reflect the 6× audio input (with small overhead).
+        assert 4.5 < (long.p50_s / max(short.p50_s, 0.01)) < 6.5
+
+    @pytest.mark.asyncio
+    async def test_family_regression_falls_back_without_meta(self):
+        """No work_size_meta on the call → we can't project the fit → the
+        estimator falls back to the raw percentile with its own confidence."""
+        estimator = DurationEstimator()
+        _put(estimator, "whisper/x", p50_s=15.0, p95_s=60.0, sample_count=500,
+             backend_type="whisper")
+        estimator._calibrations["whisper/x"].family_regression = _FamilyRegression(
+            k=250.0, c=400.0, residual_std_s=0.4, p95_s=25.0, unit_label="audio_seconds",
+        )
+        result = await estimator.estimate("whisper/x", backend_type="whisper")
+        assert result.source == "percentile"
+
+    @pytest.mark.asyncio
+    async def test_family_regression_takes_precedence_over_chat(self):
+        """Both fits populated is a nonsense case in practice, but make sure
+        we deterministically pick the family regression for a family-typed
+        backend so a mismatched heuristic can't accidentally answer."""
+        estimator = DurationEstimator()
+        _put(estimator, "whisper/x", p50_s=15.0, p95_s=60.0, sample_count=500,
+             backend_type="whisper")
+        cal = estimator._calibrations["whisper/x"]
+        cal.family_regression = _FamilyRegression(
+            k=250.0, c=400.0, residual_std_s=0.4, p95_s=25.0, unit_label="audio_seconds",
+        )
+        cal.chat_regression = _ChatRegression(
+            a_in=0.5, b_out=30.0, c=200.0, residual_std_s=0.5, p95_s=42.0,
+        )
+        result = await estimator.estimate(
+            "whisper/x",
+            backend_type="whisper",
+            work_size_meta={"audio_seconds": 30},
+            input_tokens=1000,
+            max_tokens=200,
+        )
+        assert result.source == "regression"
+        # 30 s of audio at k=250ms/s → ~7.9 s, comfortably below the chat
+        # regression's prediction for 1000 in + 200 out with the same c/b.
+        assert 7.0 < result.p50_s < 9.0

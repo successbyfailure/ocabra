@@ -117,6 +117,13 @@ async def estimate_request(
     # 4-char-per-token heuristic if not provided explicitly. Cheap and good
     # enough — clients that care about precision can pass ``input_tokens``
     # directly.
+    # Callers can hand-craft ``work_size_meta`` for family estimators
+    # (whisper: {"audio_seconds": ...}, flashvsr: {"input_frames": ...}, etc.)
+    # or let the endpoint fall through — the estimator ignores None gracefully.
+    work_size_meta = body.body.get("work_size_meta")
+    if not isinstance(work_size_meta, dict):
+        work_size_meta = None
+
     input_tokens = body.body.get("input_tokens")
     if input_tokens is None:
         messages = body.body.get("messages")
@@ -139,5 +146,6 @@ async def estimate_request(
         currently_loaded=currently_loaded,
         input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else None,
         max_tokens=int(max_tokens) if isinstance(max_tokens, (int, float)) else None,
+        work_size_meta=work_size_meta,
     )
     return EstimateResponse(**result.as_dict())

@@ -57,6 +57,82 @@ def _approx_text_tokens(text: object) -> int | None:
     return None
 
 
+def _extract_work_size_meta(
+    request_kind: str,
+    request_payload: dict | None,
+    response_payload: dict | None,
+) -> dict | None:
+    """Build the ``work_size_meta`` for the family-specific estimator.
+
+    Called once per completed request at stat write time. Returns a dict
+    with the axis a given family's regression consumes:
+
+      * TTS              → ``text_chars``
+      * Image generation → ``steps``, ``resolution_w``, ``resolution_h``
+      * Transcription    → ``audio_seconds`` (from response when the
+                            backend surfaces it — Whisper does).
+      * ACE-Step         → ``duration_seconds`` (target output length)
+
+    Returns None when nothing useful can be extracted — the row still
+    lands with NULL and future refreshes just skip it.
+    """
+    if not isinstance(request_payload, dict):
+        request_payload = None
+    if not isinstance(response_payload, dict):
+        response_payload = None
+
+    if request_kind == "tts":
+        text = request_payload.get("input") if request_payload else None
+        if isinstance(text, str) and text:
+            return {"text_chars": len(text)}
+        return None
+
+    if request_kind == "image_generation":
+        if request_payload is None:
+            return None
+        meta: dict[str, int] = {}
+        steps = request_payload.get("num_inference_steps") or request_payload.get("steps")
+        if isinstance(steps, (int, float)) and steps > 0:
+            meta["steps"] = int(steps)
+        # OpenAI: ``size`` is "1024x1024". Diffusers-native: ``width``/``height``.
+        size = request_payload.get("size")
+        if isinstance(size, str) and "x" in size:
+            try:
+                w_s, h_s = size.lower().split("x", 1)
+                meta["resolution_w"] = int(w_s)
+                meta["resolution_h"] = int(h_s)
+            except ValueError:
+                pass
+        for k, dest in (("width", "resolution_w"), ("height", "resolution_h")):
+            v = request_payload.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                meta[dest] = int(v)
+        return meta or None
+
+    if request_kind == "audio_transcription":
+        # Whisper surfaces ``duration`` (seconds of decoded audio) on the
+        # verbose_json response. Faster-whisper and Nvidia backends do the
+        # same. When absent, we leave it blank; a follow-up server-side
+        # probe would be more effort than it's worth for now.
+        if response_payload is None:
+            return None
+        for k in ("duration", "audio_seconds"):
+            v = response_payload.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                return {"audio_seconds": float(v)}
+        return None
+
+    # ACE-Step music generation lands under the openai /v1/audio/speech
+    # path with a ``duration_seconds`` field; other TTS callers only care
+    # about text_chars (above).
+    if request_kind == "tts" and request_payload:
+        dur = request_payload.get("duration_seconds") or request_payload.get("duration")
+        if isinstance(dur, (int, float)) and dur > 0:
+            return {"duration_seconds": float(dur)}
+
+    return None
+
+
 def _apply_token_kind_defaults(
     in_tok: int | None,
     out_tok: int | None,
@@ -465,6 +541,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         _strip_subtitle_markup(raw_body.decode("utf-8", errors="ignore"))
                     )
                 out_tok = out_tok or 0
+            work_size_meta = _extract_work_size_meta(
+                request_kind, request_payload, response_payload
+            )
             asyncio.create_task(
                 _record_stat(
                     request=request,
@@ -477,6 +556,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     request_kind=request_kind,
                     input_tokens=in_tok,
                     output_tokens=out_tok,
+                    work_size_meta=work_size_meta,
                 )
             )
 

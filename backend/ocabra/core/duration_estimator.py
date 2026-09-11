@@ -117,6 +117,25 @@ class Estimate:
 
 
 @dataclass
+class _FamilyRegression:
+    """Fitted ``duration_ms ≈ k·work_units + c`` for non-chat families.
+
+    ``work_units`` is a family-specific scalar extracted from the stored
+    ``work_size_meta`` (audio seconds for whisper, megapixel-steps for
+    diffusers, frames for flashvsr, characters for TTS, etc). Each family
+    picks the axis that best explains its duration variance, and the fit
+    stays linear because these workloads are almost mechanically linear
+    in that axis on a single GPU.
+    """
+
+    k: float          # ms per work_unit
+    c: float          # fixed overhead in ms
+    residual_std_s: float
+    p95_s: float
+    unit_label: str   # for logs — "audio_seconds", "frames", ...
+
+
+@dataclass
 class _ChatRegression:
     """Fitted ``duration_ms ≈ a·input_tokens + b·output_tokens + c`` model.
 
@@ -140,6 +159,96 @@ _CHAT_FAMILIES = frozenset(
 )
 
 
+# Per-family work-unit extraction. Each function takes the ``work_size_meta``
+# dict (populated at record time by the collector) and returns a single
+# positive float — the "amount of work" that best explains this family's
+# duration on a single GPU. Missing/invalid data returns None so the caller
+# falls back to the percentile path.
+#
+# The unit choice is deliberate: the family's regression fits
+# ``duration ≈ k·work_units + c``, so we want the axis where variance in
+# work_units accounts for most of the variance in duration.
+_WORK_UNIT_EXTRACTORS: dict[str, tuple[str, "callable[[dict], float | None]"]] = {
+    # Whisper/faster-whisper/vibeasr/voxtral/parakeet all scale ~linearly
+    # with input audio duration on a single GPU.
+    "whisper":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
+    "vibeasr":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
+    "voxtral":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
+    # TTS: characters synthesised. Simple, robust, and works whether the
+    # backend counts phonemes or graphemes internally.
+    "tts":        ("text_chars",      lambda m: _pos_float(m.get("text_chars"))),
+    "chatterbox": ("text_chars",      lambda m: _pos_float(m.get("text_chars"))),
+    # Diffusion image gen: megapixel-steps (steps × output MP). Single-image
+    # diffusion is roughly a constant time per denoising step per megapixel.
+    "diffusers":  ("mp_steps",        lambda m: _mp_steps(m)),
+    "mage":       ("mp_steps",        lambda m: _mp_steps(m)),
+    # ACE-Step: outputs ``duration_seconds`` seconds of audio. Roughly a
+    # constant multiplier over real-time for a given model.
+    "acestep":    ("output_seconds",  lambda m: _pos_float(m.get("duration_seconds"))),
+    # Video upscale (Real-ESRGAN): frames × megapixels. Constant fps per
+    # output resolution for a given backend.
+    "upscaler":   ("mp_frames",       lambda m: _mp_frames(m)),
+    # FlashVSR: pure frame count divided by a fitted fps.
+    "flashvsr":   ("input_frames",    lambda m: _pos_float(m.get("input_frames"))),
+}
+
+
+def _pos_float(v: object) -> float | None:
+    """Coerce to a strictly positive float or return None. Used so the
+    extractors don't accidentally feed a ``0`` — which would collapse the
+    regression matrix — into the fitter."""
+    try:
+        f = float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def _mp_steps(meta: dict) -> float | None:
+    """Megapixel-steps for diffusion image generation.
+
+    ``mp_steps = steps × (width × height) / 1e6``. When width/height are
+    missing (very old records), fall back to the common 1024² default that
+    matches ``diffusers_backend`` and ``mage`` presets.
+    """
+    steps = _pos_float(meta.get("steps"))
+    if steps is None:
+        return None
+    w = _pos_float(meta.get("resolution_w")) or 1024.0
+    h = _pos_float(meta.get("resolution_h")) or 1024.0
+    return steps * w * h / 1_000_000.0
+
+
+def _mp_frames(meta: dict) -> float | None:
+    """Megapixel-frames for video upscaling — frames × output megapixels."""
+    frames = _pos_float(meta.get("input_frames"))
+    if frames is None:
+        return None
+    w = _pos_float(meta.get("output_w")) or 1920.0
+    h = _pos_float(meta.get("output_h")) or 1080.0
+    return frames * w * h / 1_000_000.0
+
+
+def extract_work_units(backend_type: str | None, meta: dict | None) -> float | None:
+    """Public helper: extract the scalar ``work_units`` for a family.
+
+    Used both by the calibration loop (bulk-extract for the fit) and by
+    the estimate path (per-request extraction for the prediction). Kept as
+    a module function so callers can invoke it without holding a
+    DurationEstimator instance.
+    """
+    if not isinstance(meta, dict) or not backend_type:
+        return None
+    entry = _WORK_UNIT_EXTRACTORS.get(backend_type)
+    if entry is None:
+        return None
+    _, extractor = entry
+    try:
+        return extractor(meta)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
 @dataclass
 class _ModelCalibration:
     """Per-model cached calibration filled by the refresh loop."""
@@ -152,6 +261,7 @@ class _ModelCalibration:
     residual_ratio: float       # relative spread, drives percentile confidence
     cold_start_p95_s: float     # from model_load_stats, 0 if unknown
     chat_regression: _ChatRegression | None = None
+    family_regression: _FamilyRegression | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def confidence(self) -> float:
@@ -283,6 +393,72 @@ def _fit_chat_regression(
     )
 
 
+def _fit_family_regression(
+    points: list[tuple[float, float]], *, unit_label: str
+) -> _FamilyRegression | None:
+    """Fit ``duration_ms ≈ k·work_units + c`` by 1D OLS.
+
+    Mirrors ``_fit_chat_regression`` (winsorization, sample threshold,
+    residual sanity check) so the two paths behave predictably from the
+    consumer's perspective.
+    """
+    if len(points) < _MIN_REGRESSION_SAMPLES:
+        return None
+
+    durs = sorted(p[1] for p in points)
+    lo = durs[max(0, int(len(durs) * 0.01))]
+    hi = durs[min(len(durs) - 1, int(len(durs) * 0.99))]
+
+    n = 0
+    sx = sy = sxx = sxy = 0.0
+    for x, y in points:
+        if y < lo or y > hi:
+            continue
+        n += 1
+        sx += x; sy += y
+        sxx += x * x; sxy += x * y
+    if n < _MIN_REGRESSION_SAMPLES:
+        return None
+
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-6:
+        return None  # all x collapsed to a single value
+
+    k = (n * sxy - sx * sy) / denom
+    c = (sy - k * sx) / n
+
+    # Residual std + mean prediction for the rejection heuristic.
+    sse = 0.0
+    used = 0
+    mean_pred = 0.0
+    for x, y in points:
+        if y < lo or y > hi:
+            continue
+        pred = k * x + c
+        sse += (y - pred) ** 2
+        mean_pred += pred
+        used += 1
+    if used <= 2:
+        return None
+    residual_std_ms = math.sqrt(sse / max(1, used - 2))
+    mean_pred /= used
+    if mean_pred <= 0:
+        return None
+    if residual_std_ms / max(mean_pred, 1.0) > _MAX_RESIDUAL_RATIO_FOR_FIT:
+        return None
+
+    all_durs_s = sorted(y / 1000.0 for _, y in points if lo <= y <= hi)
+    p95_s = all_durs_s[min(len(all_durs_s) - 1, int(len(all_durs_s) * 0.95))]
+
+    return _FamilyRegression(
+        k=k,
+        c=c,
+        residual_std_s=residual_std_ms / 1000.0,
+        p95_s=p95_s,
+        unit_label=unit_label,
+    )
+
+
 class DurationEstimator:
     """Baseline percentile-based estimator (Nivel 1)."""
 
@@ -311,6 +487,7 @@ class DurationEstimator:
         currently_loaded: bool = True,
         input_tokens: int | None = None,
         max_tokens: int | None = None,
+        work_size_meta: dict | None = None,
     ) -> Estimate:
         """Return an estimate for ``model_id``.
 
@@ -351,7 +528,37 @@ class DurationEstimator:
                 cold_start_s=cold_start,
             )
 
-        # Regression path: available only when the model has a fitted
+        # Family regression path — non-chat backends whose duration scales
+        # linearly with a single work-unit axis (audio_seconds for whisper,
+        # frames for flashvsr, ...). Takes precedence over the raw
+        # percentile because the linear fit is much tighter for these
+        # workloads: a 10-second whisper request and a 10-minute one
+        # differ by 60× in cost, and lumping them together makes the
+        # percentile useless.
+        if cal.family_regression is not None:
+            work_units = extract_work_units(cal.backend_type, work_size_meta)
+            if work_units is not None:
+                reg = cal.family_regression
+                pred_ms = reg.k * work_units + reg.c
+                pred_s = max(0.0, pred_ms / 1000.0)
+                p95 = max(pred_s + 1.645 * reg.residual_std_s, cal.p50_s)
+                expected = min(settings.estimator_max_estimate_s, pred_s + cold_start)
+                return Estimate(
+                    expected_s=expected,
+                    p50_s=pred_s,
+                    p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start),
+                    confidence=min(
+                        1.0,
+                        cal.confidence() * (
+                            1.0 / (1.0 + reg.residual_std_s / max(pred_s, 1.0))
+                        ) * 2.0,
+                    ),
+                    source="regression",
+                    sample_count=cal.sample_count,
+                    cold_start_s=cold_start,
+                )
+
+        # Chat regression path: available only when the model has a fitted
         # chat_regression AND the caller passed a concrete input size. The
         # per-request prediction is much sharper than the raw p50 because
         # it splits the huge duration variance (chat 500-tok vs chat 200k-tok
@@ -534,6 +741,47 @@ class DurationEstimator:
                 if fit is not None:
                     fit_by_model[model_id] = fit
 
+            # Family regression path — non-chat backends. Uses work_size_meta,
+            # which only started populating in Etapa 5, so a model with no
+            # rows carrying meta yet simply gets no family_regression and
+            # stays on the raw percentile path (still an improvement over
+            # a single bucket for the whole family).
+            family_families = list(_WORK_UNIT_EXTRACTORS.keys())
+            fam_fit_by_model: dict[str, _FamilyRegression] = {}
+            async with AsyncSessionLocal() as session:
+                fam_rows = (await session.execute(
+                    sa.text(
+                        """
+                        SELECT model_id,
+                               backend_type,
+                               work_size_meta,
+                               duration_ms::float AS duration_ms
+                        FROM request_stats
+                        WHERE started_at > :cutoff
+                          AND status_code < 400
+                          AND error IS NULL
+                          AND duration_ms IS NOT NULL
+                          AND work_size_meta IS NOT NULL
+                          AND backend_type = ANY(:families)
+                        """
+                    ),
+                    {"cutoff": cutoff, "families": family_families},
+                )).all()
+
+            fam_points: dict[str, tuple[str, list[tuple[float, float]]]] = {}
+            # value: (unit_label, [(work_units, duration_ms), ...])
+            for row in fam_rows:
+                units = extract_work_units(row.backend_type, row.work_size_meta)
+                if units is None:
+                    continue
+                unit_label = _WORK_UNIT_EXTRACTORS[row.backend_type][0]
+                bucket = fam_points.setdefault(row.model_id, (unit_label, []))
+                bucket[1].append((units, float(row.duration_ms)))
+            for model_id, (unit_label, points) in fam_points.items():
+                fit = _fit_family_regression(points, unit_label=unit_label)
+                if fit is not None:
+                    fam_fit_by_model[model_id] = fit
+
             new_map: dict[str, _ModelCalibration] = {}
             for row in rows:
                 p50 = float(row.p50_s or 0.0)
@@ -549,6 +797,7 @@ class DurationEstimator:
                     residual_ratio=residual,
                     cold_start_p95_s=cold_by_model.get(row.model_id, 0.0),
                     chat_regression=fit_by_model.get(row.model_id),
+                    family_regression=fam_fit_by_model.get(row.model_id),
                 )
 
             # Atomic swap — a concurrent reader sees either the old map or
@@ -557,7 +806,8 @@ class DurationEstimator:
             logger.info(
                 "duration_estimator_refreshed",
                 models=len(new_map),
-                with_regression=sum(1 for c in new_map.values() if c.chat_regression),
+                with_chat_regression=sum(1 for c in new_map.values() if c.chat_regression),
+                with_family_regression=sum(1 for c in new_map.values() if c.family_regression),
             )
             return len(new_map)
 
