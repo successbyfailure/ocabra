@@ -151,9 +151,12 @@ class VLLMBackend(BackendInterface):
                 "g++",
             ],
             pip_packages=[
-                "vllm==0.26.0",
-                # vLLM 0.26 uses CUDA 13.0 wheels. Without this pin pip selects
-                # mismatched compiler components that emit a newer PTX ISA.
+                # 0.29.0 (2026-09-09) — added Qwen3.8-Flash-Next, Model Runner V2
+                # as default, FP8 KV cache officially supported, prefix caching
+                # optimised for Mamba/DeltaNet hybrid architectures.
+                "vllm==0.29.0",
+                # vLLM 0.29 keeps CUDA 13.0 wheels as default. Pin the nvcc
+                # components so pip doesn't pull mismatched PTX ISA.
                 "nvidia-cuda-nvcc==13.0.88",
                 "nvidia-nvvm==13.0.88",
                 "nvidia-cuda-crt==13.0.88",
