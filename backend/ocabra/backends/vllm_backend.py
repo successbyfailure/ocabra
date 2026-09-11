@@ -161,6 +161,12 @@ class VLLMBackend(BackendInterface):
                 "nvidia-nvvm==13.0.88",
                 "nvidia-cuda-crt==13.0.88",
                 "sentencepiece>=0.2",
+                # vLLM 0.29.0 has an insufficient pin on openai; imports
+                # ``NamespaceTool`` from ``openai.types.responses`` which
+                # only exists in openai>=2.25.0. See vllm issue #49103.
+                # Without this override pip resolves openai==2.24.0 and
+                # every worker boot fails with ImportError at start.
+                "openai>=2.25.0",
             ],
             pip_extra_index_urls=[],
             estimated_size_mb=11000,
@@ -552,6 +558,11 @@ class VLLMBackend(BackendInterface):
             self._get_setting("vllm_use_flashinfer_sampler"),
         )
         env["VLLM_USE_FLASHINFER_SAMPLER"] = "1" if use_flashinfer_sampler else "0"
+        # vLLM 0.29.x pins flashinfer-python==0.6.18 but only publishes
+        # flashinfer-cubin up to 0.6.13. The version check refuses to
+        # start unless we disable it. Once upstream ships matching
+        # cubin wheels this env var can be dropped.
+        env.setdefault("FLASHINFER_DISABLE_VERSION_CHECK", "1")
         cache_root = self._get_setting("vllm_cache_root")
         if cache_root:
             env["VLLM_CACHE_ROOT"] = str(cache_root)
