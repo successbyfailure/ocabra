@@ -158,6 +158,44 @@ class ServerConfigPatch(BaseModel):
         description="GPU utilisation %% above which services without a dedicated generation-status endpoint are considered busy (Hunyuan, ACE-Step, Unsloth).",
     )
 
+    # Bloque 20 — routing + estimator + sessions
+    routing_enabled: bool | None = Field(
+        default=None,
+        alias="routingEnabled",
+        description="Kill switch for the Router-profile resolver. When false, routing_targets are ignored and profiles resolve to themselves.",
+    )
+    router_confidence_floor: float | None = Field(
+        default=None,
+        alias="routerConfidenceFloor",
+        description="Minimum estimator confidence required to trust an in-flight remaining estimate when deciding to skip a busy target.",
+        ge=0.0,
+        le=1.0,
+    )
+    router_fallback_delay_ms: int | None = Field(
+        default=None,
+        alias="routerFallbackDelayMs",
+        description="How long the router waits on a busy-but-nearly-free target before falling through to the next one, in milliseconds.",
+        ge=0,
+    )
+    max_drain_timeout_s: int | None = Field(
+        default=None,
+        alias="maxDrainTimeoutS",
+        description="Hard cap on the dynamic drain grace used by pressure_eviction. Protects against runaway estimator numbers.",
+        ge=1,
+    )
+    session_pause_threshold_s: int | None = Field(
+        default=None,
+        alias="sessionPauseThresholdS",
+        description="Idle seconds after which a Realtime session is marked as paused (workers can be reused).",
+        ge=1,
+    )
+    session_max_idle_s: int | None = Field(
+        default=None,
+        alias="sessionMaxIdleS",
+        description="Idle seconds after which the zombie sweeper drops a Realtime session and releases its workers.",
+        ge=1,
+    )
+
 
 def _masked_admin_key(value: str) -> str:
     return "***" if value else ""
@@ -230,6 +268,12 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "unslothGenerationGracePeriodS": settings.unsloth_generation_grace_period_s,
         "unslothPreferredGpu": settings.unsloth_preferred_gpu,
         "generationGpuUtilThresholdPct": settings.generation_gpu_util_threshold_pct,
+        "routingEnabled": settings.routing_enabled,
+        "routerConfidenceFloor": settings.router_confidence_floor,
+        "routerFallbackDelayMs": settings.router_fallback_delay_ms,
+        "maxDrainTimeoutS": settings.max_drain_timeout_s,
+        "sessionPauseThresholdS": settings.session_pause_threshold_s,
+        "sessionMaxIdleS": settings.session_max_idle_s,
     }
 
 
@@ -537,6 +581,27 @@ async def patch_config(
             "generation_gpu_util_threshold_pct",
             settings.generation_gpu_util_threshold_pct,
         )
+
+    # Bloque 20 — routing/estimator/sessions runtime knobs. All are hot-reloadable
+    # (read at request time by resolver/manager) so no restart is needed.
+    if "routing_enabled" in payload:
+        settings.routing_enabled = bool(payload["routing_enabled"])
+        await _persist("routing_enabled", settings.routing_enabled)
+    if "router_confidence_floor" in payload:
+        settings.router_confidence_floor = float(payload["router_confidence_floor"])
+        await _persist("router_confidence_floor", settings.router_confidence_floor)
+    if "router_fallback_delay_ms" in payload:
+        settings.router_fallback_delay_ms = int(payload["router_fallback_delay_ms"])
+        await _persist("router_fallback_delay_ms", settings.router_fallback_delay_ms)
+    if "max_drain_timeout_s" in payload:
+        settings.max_drain_timeout_s = int(payload["max_drain_timeout_s"])
+        await _persist("max_drain_timeout_s", settings.max_drain_timeout_s)
+    if "session_pause_threshold_s" in payload:
+        settings.session_pause_threshold_s = int(payload["session_pause_threshold_s"])
+        await _persist("session_pause_threshold_s", settings.session_pause_threshold_s)
+    if "session_max_idle_s" in payload:
+        settings.session_max_idle_s = int(payload["session_max_idle_s"])
+        await _persist("session_max_idle_s", settings.session_max_idle_s)
 
     response = _build_config_response(request)
     response["globalSchedules"] = await _load_global_schedules()

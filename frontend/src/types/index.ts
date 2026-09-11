@@ -519,6 +519,13 @@ export interface ServerConfig {
   unslothGenerationGracePeriodS: number
   unslothPreferredGpu: number
   generationGpuUtilThresholdPct: number
+  // Bloque 20 — routing/estimator/sessions
+  routingEnabled?: boolean
+  routerConfidenceFloor?: number
+  routerFallbackDelayMs?: number
+  maxDrainTimeoutS?: number
+  sessionPauseThresholdS?: number
+  sessionMaxIdleS?: number
 }
 
 export interface StatsParams {
@@ -906,6 +913,10 @@ export interface ModelProfile {
   assets: Record<string, unknown> | null
   enabled: boolean
   isDefault: boolean
+  // Bloque 20 — when non-empty, this profile is a Router: resolve()
+  // walks these profile IDs in order and returns the first available
+  // one. An empty/null array means "regular profile".
+  routingTargets: string[] | null
   createdAt: string | null
   updatedAt: string | null
 }
@@ -919,6 +930,7 @@ export interface ProfileCreate {
   requestDefaults?: Record<string, unknown>
   enabled?: boolean
   isDefault?: boolean
+  routingTargets?: string[] | null
 }
 
 export interface ProfileUpdate {
@@ -929,6 +941,7 @@ export interface ProfileUpdate {
   requestDefaults?: Record<string, unknown>
   enabled?: boolean
   isDefault?: boolean
+  routingTargets?: string[] | null
 }
 
 // Federation types

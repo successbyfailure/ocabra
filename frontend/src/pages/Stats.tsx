@@ -14,6 +14,7 @@ import { UserDetailPanel } from "@/components/stats/UserDetailPanel"
 import { ApiKeyPanel } from "@/components/stats/ApiKeyPanel"
 import { FederationPanel } from "@/components/stats/FederationPanel"
 import { AgentsPanel } from "@/components/stats/AgentsPanel"
+import { RoutingPanel } from "@/components/stats/RoutingPanel"
 import type {
   ByApiKeyStats,
   ByGroupStats,
@@ -565,6 +566,11 @@ export function Stats() {
               </Tabs.Trigger>
             )}
             {isManagerOrAdmin && (
+              <Tabs.Trigger value="routing" className={tabTriggerClass("routing")}>
+                Routing
+              </Tabs.Trigger>
+            )}
+            {isManagerOrAdmin && (
               <Tabs.Trigger value="agents" className={tabTriggerClass("agents")}>
                 Agents
               </Tabs.Trigger>
@@ -633,6 +639,12 @@ export function Stats() {
             {isManagerOrAdmin && hasFederation && (
               <Tabs.Content value="federation">
                 <FederationPanel data={federationStats} />
+              </Tabs.Content>
+            )}
+
+            {isManagerOrAdmin && (
+              <Tabs.Content value="routing">
+                <RoutingPanel from={params.from} to={params.to} />
               </Tabs.Content>
             )}
 

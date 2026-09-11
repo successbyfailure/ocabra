@@ -8,6 +8,7 @@ import {
   Link,
   Network,
   Sparkles,
+  GitBranch,
 } from "lucide-react"
 import { toast } from "sonner"
 import { SkeletonList } from "@/components/common/Skeleton"
@@ -20,6 +21,7 @@ import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
 import { LiteLLMSettings } from "@/components/settings/LiteLLMSettings"
+import { RoutingSettings } from "@/components/settings/RoutingSettings"
 import { StorageSettings } from "@/components/settings/StorageSettings"
 import type { GPUState, LocalModel, ServerConfig } from "@/types"
 
@@ -190,6 +192,10 @@ export function Settings() {
               <Sparkles size={14} />
               Generación
             </Tabs.Trigger>
+            <Tabs.Trigger value="routing" className={TAB_TRIGGER}>
+              <GitBranch size={14} />
+              Routing & Sessions
+            </Tabs.Trigger>
             <Tabs.Trigger value="federation" className={TAB_TRIGGER}>
               <Network size={14} />
               Federation
@@ -231,6 +237,12 @@ export function Settings() {
           <Tabs.Content value="generation">
             <div className="grid gap-4">
               <GenerationServicesSettings config={config} gpus={gpus} onSave={savePatch} />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="routing">
+            <div className="grid gap-4">
+              <RoutingSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
 

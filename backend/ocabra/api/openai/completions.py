@@ -116,6 +116,10 @@ async def completions(
             headers.update(
                 await build_model_status_headers(model_manager, worker_key, profile.base_model_id)
             )
+            via_router = getattr(request.state, "via_router_profile_id", None)
+            if via_router:
+                headers["X-Ocabra-Router"] = str(via_router)
+                headers["X-Ocabra-Router-Target"] = profile.profile_id
             return StreamingResponse(
                 _stream_completions_with_load(
                     model_manager=model_manager,

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { AudioLines, Copy, ImagePlus, Loader2, Mic, Send, X } from "lucide-react"
+import { AudioLines, Clock, Copy, ImagePlus, Loader2, Mic, Send, X } from "lucide-react"
 import { toast } from "sonner"
+import { api, type DurationEstimateResult } from "@/api/client"
 import {
   MessageBubble,
   type ChatAudioAttachment,
@@ -123,6 +124,39 @@ export function ChatInterface({
     }, 3000)
     return () => window.clearTimeout(handle)
   }, [sending])
+
+  // Attribution shown when the last request went through a Router.
+  const [lastRouterInfo, setLastRouterInfo] = useState<{ router: string; target: string } | null>(null)
+
+  // Duration estimate. Fires 400 ms after the last change to the outgoing
+  // request so we don't hammer the estimator with a call per keystroke.
+  const [estimate, setEstimate] = useState<DurationEstimateResult | null>(null)
+  const [estimateLoading, setEstimateLoading] = useState(false)
+  useEffect(() => {
+    if (!modelId) {
+      setEstimate(null)
+      return
+    }
+    if (sending) return  // frozen while the request is in flight
+    const previewMessages = buildOpenAIMessages(input || "Hola")
+    const body: Record<string, unknown> = {
+      model: modelId,
+      messages: previewMessages,
+      max_tokens: params.maxTokens,
+    }
+    const handle = window.setTimeout(async () => {
+      setEstimateLoading(true)
+      try {
+        const result = await api.estimate.predict(modelId, body)
+        setEstimate(result)
+      } catch {
+        setEstimate(null)
+      } finally {
+        setEstimateLoading(false)
+      }
+    }, 400)
+    return () => window.clearTimeout(handle)
+  }, [modelId, input, params.maxTokens, params.systemPrompt, messages.length, dragImage, audioAttachment, sending])
 
   const buildOpenAIMessages = (userText: string): ChatRequestMessage[] => {
     const history: ChatRequestMessage[] = messages.map((msg) => {
@@ -287,6 +321,17 @@ export function ChatInterface({
           err?.message ??
           `HTTP ${response.status}`
         throw new Error(typeof message === "string" ? message : JSON.stringify(message))
+      }
+
+      // Bloque 20 — surface router redirects. When the request resolved a
+      // Router profile, the backend echoes X-Ocabra-Router (the router
+      // profile_id) and X-Ocabra-Router-Target (the actual worker profile).
+      const routerId = response.headers.get("X-Ocabra-Router")
+      const routerTarget = response.headers.get("X-Ocabra-Router-Target")
+      if (routerId && routerTarget && routerTarget !== routerId) {
+        setLastRouterInfo({ router: routerId, target: routerTarget })
+      } else {
+        setLastRouterInfo(null)
       }
 
       const onPatch = (patch: AssistantPatch) => {
@@ -465,6 +510,20 @@ export function ChatInterface({
             </span>
           </div>
         )}
+        {lastRouterInfo && (
+          <div
+            role="status"
+            className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary"
+          >
+            <span className="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">
+              router
+            </span>
+            <span>
+              <code className="font-mono">{lastRouterInfo.router}</code> reenvió a{" "}
+              <code className="font-mono">{lastRouterInfo.target}</code>
+            </span>
+          </div>
+        )}
       </div>
 
       {(dragImage || audioAttachment) && (
@@ -572,16 +631,21 @@ export function ChatInterface({
               Copy as OpenAI API call
             </button>
           </div>
-          <button
-            type="button"
-            onClick={() => void sendMessage()}
-            disabled={sending || !modelId}
-            className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-          >
-            <Send size={14} />
-            {sending ? "Enviando..." : "Enviar"}
-            <span className="ml-0.5 text-xs text-primary-foreground/50">⌘↵</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {modelId && !sending && (estimate || estimateLoading) && (
+              <EtaBadge estimate={estimate} loading={estimateLoading} />
+            )}
+            <button
+              type="button"
+              onClick={() => void sendMessage()}
+              disabled={sending || !modelId}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              <Send size={14} />
+              {sending ? "Enviando..." : "Enviar"}
+              <span className="ml-0.5 text-xs text-primary-foreground/50">⌘↵</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1149,6 +1213,65 @@ function formatDurationLabel(seconds: number): string {
   const m = Math.floor(total / 60)
   const s = total % 60
   return `${m}:${s.toString().padStart(2, "0")}`
+}
+
+function formatEtaSeconds(seconds: number): string {
+  if (seconds < 1) return "<1s"
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds - m * 60)
+  return s === 0 ? `${m}m` : `${m}m${s.toString().padStart(2, "0")}s`
+}
+
+function EtaBadge({
+  estimate,
+  loading,
+}: {
+  estimate: DurationEstimateResult | null
+  loading: boolean
+}) {
+  if (loading && !estimate) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground"
+        title="Estimando duración..."
+      >
+        <Loader2 size={12} className="animate-spin" />
+        Estimando
+      </span>
+    )
+  }
+  if (!estimate) return null
+  const eta = formatEtaSeconds(estimate.expectedSeconds)
+  const p95 = formatEtaSeconds(estimate.p95Seconds)
+  const confidencePct = Math.round(estimate.confidence * 100)
+  // Only show provenance when it's meaningful — a family-default with no
+  // samples is basically a wild guess, so we flag it.
+  const isWeak = estimate.source === "family_default" || estimate.confidence < 0.3
+  const tone = isWeak
+    ? "border-border text-muted-foreground"
+    : "border-primary/40 text-primary"
+  const title = [
+    `Estimación: ${eta} (p95 ${p95})`,
+    `Confianza: ${confidencePct}%`,
+    `Fuente: ${estimate.source}`,
+    estimate.sampleCount > 0 ? `${estimate.sampleCount} muestras previas` : null,
+    estimate.coldStartSeconds > 0
+      ? `Añade ~${formatEtaSeconds(estimate.coldStartSeconds)} si el modelo está frío`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ")
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs ${tone}`}
+      title={title}
+    >
+      <Clock size={12} />
+      ~{eta}
+      {isWeak && <span className="opacity-60">?</span>}
+    </span>
+  )
 }
 
 export {

@@ -479,6 +479,9 @@ function toModelProfile(raw: unknown): ModelProfile {
     assets: isRecord(data.assets) ? (data.assets as Record<string, unknown>) : null,
     enabled: Boolean(data.enabled ?? true),
     isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
+    routingTargets: Array.isArray(data.routing_targets ?? data.routingTargets)
+      ? ((data.routing_targets ?? data.routingTargets) as unknown[]).map(String)
+      : null,
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
   }
@@ -767,6 +770,12 @@ function toServerConfig(raw: unknown): ServerConfig {
     unslothGenerationGracePeriodS: Number(data.unslothGenerationGracePeriodS ?? data.unsloth_generation_grace_period_s ?? -1),
     unslothPreferredGpu: Number(data.unslothPreferredGpu ?? data.unsloth_preferred_gpu ?? 1),
     generationGpuUtilThresholdPct: Number(data.generationGpuUtilThresholdPct ?? data.generation_gpu_util_threshold_pct ?? 50),
+    routingEnabled: data.routingEnabled == null ? undefined : Boolean(data.routingEnabled),
+    routerConfidenceFloor: data.routerConfidenceFloor == null ? undefined : Number(data.routerConfidenceFloor),
+    routerFallbackDelayMs: data.routerFallbackDelayMs == null ? undefined : Number(data.routerFallbackDelayMs),
+    maxDrainTimeoutS: data.maxDrainTimeoutS == null ? undefined : Number(data.maxDrainTimeoutS),
+    sessionPauseThresholdS: data.sessionPauseThresholdS == null ? undefined : Number(data.sessionPauseThresholdS),
+    sessionMaxIdleS: data.sessionMaxIdleS == null ? undefined : Number(data.sessionMaxIdleS),
   }
 }
 
@@ -1026,12 +1035,124 @@ function toAdminApiKey(raw: unknown): AdminApiKey {
   }
 }
 
+export type DurationEstimateResult = {
+  expectedSeconds: number
+  p50Seconds: number
+  p95Seconds: number
+  confidence: number
+  source: "regression" | "percentile" | "family_default"
+  sampleCount: number
+  coldStartSeconds: number
+}
+
+export type RealtimeSessionInfo = {
+  sessionId: string
+  userId: string | null
+  apiKeyName: string | null
+  workersHeld: string[]
+  startedAt: string
+  lastActivityAt: string
+  isPaused: boolean
+  isZombie: boolean
+}
+
+export type RoutingDecisionsResponse = {
+  routers: {
+    routerProfileId: string
+    total: number
+    targets: {
+      modelId: string
+      count: number
+      okCount: number
+      avgDurationMs: number
+      share: number
+    }[]
+  }[]
+}
+
+function toDurationEstimate(raw: unknown): DurationEstimateResult {
+  const d = (raw ?? {}) as Record<string, unknown>
+  return {
+    expectedSeconds: Number(d.expected_seconds ?? 0),
+    p50Seconds: Number(d.p50_seconds ?? 0),
+    p95Seconds: Number(d.p95_seconds ?? 0),
+    confidence: Number(d.confidence ?? 0),
+    source: String(d.source ?? "family_default") as DurationEstimateResult["source"],
+    sampleCount: Number(d.sample_count ?? 0),
+    coldStartSeconds: Number(d.cold_start_seconds ?? 0),
+  }
+}
+
+function toRealtimeSession(raw: unknown): RealtimeSessionInfo {
+  const d = (raw ?? {}) as Record<string, unknown>
+  return {
+    sessionId: String(d.session_id ?? ""),
+    userId: d.user_id == null ? null : String(d.user_id),
+    apiKeyName: d.api_key_name == null ? null : String(d.api_key_name),
+    workersHeld: Array.isArray(d.workers_held) ? d.workers_held.map(String) : [],
+    startedAt: String(d.started_at ?? ""),
+    lastActivityAt: String(d.last_activity_at ?? ""),
+    isPaused: Boolean(d.is_paused),
+    isZombie: Boolean(d.is_zombie),
+  }
+}
+
+function toRoutingDecisions(raw: unknown): RoutingDecisionsResponse {
+  const d = (raw ?? {}) as Record<string, unknown>
+  const routers = Array.isArray(d.routers) ? d.routers : []
+  return {
+    routers: routers.map((r) => {
+      const rd = (r ?? {}) as Record<string, unknown>
+      const targets = Array.isArray(rd.targets) ? rd.targets : []
+      return {
+        routerProfileId: String(rd.router_profile_id ?? ""),
+        total: Number(rd.total ?? 0),
+        targets: targets.map((t) => {
+          const td = (t ?? {}) as Record<string, unknown>
+          return {
+            modelId: String(td.model_id ?? ""),
+            count: Number(td.count ?? 0),
+            okCount: Number(td.ok_count ?? 0),
+            avgDurationMs: Number(td.avg_duration_ms ?? 0),
+            share: Number(td.share ?? 0),
+          }
+        }),
+      }
+    }),
+  }
+}
+
 export const api = {
   gpus: {
     list: async () => (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
     get: async (index: number) => toGpuState(await request<unknown>("GET", `/ocabra/gpus/${index}`)),
     stats: (index: number, window = "5m") =>
       request<GPUStatHistory>("GET", `/ocabra/gpus/${index}/stats${buildQuery({ window })}`),
+  },
+  estimate: {
+    // Bloque 20 — DurationEstimator entrypoint. Returns expected duration
+    // plus confidence for the given model + request body. Callers that get
+    // ``confidence < 0.3`` should treat the number as a rough hint and
+    // prefer ``p95Seconds`` for any deadline-driven UI.
+    predict: async (model: string, body: Record<string, unknown>) =>
+      toDurationEstimate(
+        await request<unknown>("POST", "/ocabra/estimate", { model, body }),
+      ),
+  },
+  sessions: {
+    // Live Realtime sessions holding worker models. Feeds the Sessions
+    // admin page and any "who's using this model?" tooltips.
+    list: async () =>
+      (await request<unknown[]>("GET", "/ocabra/sessions")).map(toRealtimeSession),
+    kill: (sessionId: string) =>
+      request<{ session_id: string; killed: boolean }>(
+        "POST",
+        `/ocabra/sessions/${encodeURIComponent(sessionId)}/kill`,
+      ),
+  },
+  routingStats: (params: StatsParams) => {
+    const query = buildQuery({ from: params.from, to: params.to })
+    return request<unknown>("GET", `/ocabra/stats/routing${query}`).then(toRoutingDecisions)
   },
 
   models: {
@@ -1156,6 +1277,7 @@ export const api = {
           request_defaults: data.requestDefaults,
           enabled: data.enabled,
           is_default: data.isDefault,
+          ...(data.routingTargets !== undefined && { routing_targets: data.routingTargets }),
         }),
       ),
 
@@ -1172,6 +1294,7 @@ export const api = {
           ...(data.requestDefaults !== undefined && { request_defaults: data.requestDefaults }),
           ...(data.enabled !== undefined && { enabled: data.enabled }),
           ...(data.isDefault !== undefined && { is_default: data.isDefault }),
+          ...(data.routingTargets !== undefined && { routing_targets: data.routingTargets }),
         }),
       ),
 

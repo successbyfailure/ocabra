@@ -17,6 +17,7 @@ import {
   Package,
   Sparkles,
   Plug,
+  Radio,
 } from "lucide-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { clsx } from "clsx"
@@ -60,6 +61,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: "/backends", label: "Backends", icon: Package,     minRole: "system_admin" },
+  { to: "/sessions", label: "Sesiones", icon: Radio,       minRole: "system_admin" },
   { to: "/users",    label: "Usuarios", icon: Users,       minRole: "system_admin" },
   { to: "/groups",   label: "Grupos",   icon: UsersRound,  minRole: "system_admin" },
 ]

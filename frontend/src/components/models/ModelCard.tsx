@@ -338,7 +338,34 @@ export function ModelCard({
         return (
           <tr key={profile.profileId} className="border-b border-border/30 border-l-2 border-l-primary/30 bg-muted/10 text-sm">
             <td className="py-2 pl-12 pr-3">
-              <div className="font-mono text-xs">{profile.profileId}</div>
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono text-xs">{profile.profileId}</span>
+                {profile.routingTargets && profile.routingTargets.length > 0 && (
+                  <Tooltip.Provider delayDuration={200}>
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <span className="inline-flex cursor-help items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-primary">
+                          router
+                        </span>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content
+                          className="z-[60] max-w-xs rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md"
+                          sideOffset={4}
+                        >
+                          Reenvía a los siguientes perfiles en orden:
+                          <ol className="mt-1 list-decimal pl-4 font-mono text-[11px]">
+                            {profile.routingTargets.map((t) => (
+                              <li key={t}>{t}</li>
+                            ))}
+                          </ol>
+                          <Tooltip.Arrow className="fill-border" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </Tooltip.Provider>
+                )}
+              </div>
             </td>
             <td className="px-3 py-2">
               <span className="text-xs text-muted-foreground">

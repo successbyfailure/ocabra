@@ -529,17 +529,29 @@ Cuatro componentes acoplados pero independientes:
 
 ### Etapas (~11 días)
 
-| Etapa | Contenido | Días |
-|---|---|---:|
-| 0 | Alembic: routing_targets + work_size_meta + via_router_profile_id | 0.5 |
-| 1 | DurationEstimator Nivel 1 (percentiles) + endpoint + Playground ETA | 1.5 |
-| 2 | Regresión LLM en estimator | 0.5 |
-| 3 | Handlers rellenan work_size_meta | 0.5 |
-| 4 | SessionRegistry + hooks Realtime + veto en scheduler + Sessions UI | 2 |
-| 5 | Estimadores específicos por familia + ETA no-LLM en Playground | 2 |
-| 6 | RouterResolver + resolve_profile + modo Router en ModelConfigModal | 2 |
-| 7 | Grace dinámico en pressure_eviction | 0.5 |
-| 8 | Vista Stats/Routing + settings section | 1.5 |
+| Etapa | Contenido | Días | Estado |
+|---|---|---:|---|
+| 0 | Alembic: routing_targets + work_size_meta + via_router_profile_id | 0.5 | ✅ |
+| 1 | DurationEstimator Nivel 1 (percentiles) + endpoint + Playground ETA | 1.5 | ✅ backend + UI |
+| 2 | Regresión LLM en estimator | 0.5 | ✅ |
+| 3 | Handlers rellenan work_size_meta | 0.5 | ✅ |
+| 4 | SessionRegistry + hooks Realtime + veto en scheduler + Sessions UI | 2 | ✅ backend + UI |
+| 5 | Estimadores específicos por familia + ETA no-LLM en Playground | 2 | ✅ backend (ETA reutiliza chip existente) |
+| 6 | RouterResolver + resolve_profile + modo Router en ModelConfigModal | 2 | ✅ backend + UI |
+| 7 | Grace dinámico en pressure_eviction | 0.5 | ✅ |
+| 8 | Vista Stats/Routing + settings section | 1.5 | ✅ backend + UI |
+
+Etapas UI extras completadas:
+
+- Chip ETA con confianza en el playground (ChatInterface).
+- Página `/sessions` (admin) con Kill + estado activa/pausada/zombie.
+- Badge `ROUTER` + tooltip con la cadena de fallback en la lista de perfiles.
+- Toggle "Este perfil es un Router" con textarea de targets en ModelConfigModal.
+- Banner de attribution al recibir respuesta del router (headers
+  `X-Ocabra-Router` / `X-Ocabra-Router-Target`).
+- Tab `Routing` en Stats con desglose por router → target (peticiones, cuota,
+  errores, duración media).
+- Tab `Routing & Sessions` en Settings con los seis knobs hot-reloadables.
 
 ### Remap concreto planificado para Etapa 6
 

@@ -352,6 +352,11 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
   const [requestDefaultsRaw, setRequestDefaultsRaw] = useState("")
   const [enabled, setEnabled] = useState(true)
   const [isDefault, setIsDefault] = useState(false)
+  // Bloque 20 — a "Router" profile has no backend of its own; instead its
+  // routing_targets array points to other profile IDs. resolve() walks
+  // the list at request time and returns the first available one.
+  const [isRouter, setIsRouter] = useState(false)
+  const [routingTargetsText, setRoutingTargetsText] = useState("")
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -387,6 +392,9 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
       setEnabled(profile.enabled)
       setIsDefault(profile.isDefault)
       setAssets(profile.assets ?? {})
+      const targets = profile.routingTargets ?? []
+      setIsRouter(targets.length > 0)
+      setRoutingTargetsText(targets.join("\n"))
     } else {
       setProfileId("")
       setDisplayName("")
@@ -398,6 +406,8 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
       setEnabled(true)
       setIsDefault(false)
       setAssets({})
+      setIsRouter(false)
+      setRoutingTargetsText("")
     }
   }, [open, profile, model])
 
@@ -442,6 +452,25 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
       defaults = requestDefaults
     }
 
+    const targetsList = isRouter
+      ? routingTargetsText
+          .split(/[\n,]/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : []
+    if (isRouter && targetsList.length === 0) {
+      toast.error("Un Router necesita al menos un profile_id destino")
+      return
+    }
+    // Prevent self-reference — a Router that lists its own profile would loop.
+    if (isRouter && targetsList.includes(profileId)) {
+      toast.error("Un Router no puede referenciarse a sí mismo")
+      return
+    }
+    // The routing_targets value we send: null when disabled (empty out on
+    // update), the ordered list when enabled.
+    const routingTargets: string[] | null = isRouter ? targetsList : null
+
     setSaving(true)
     try {
       if (isEdit) {
@@ -453,6 +482,7 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
           requestDefaults: Object.keys(defaults).length > 0 ? defaults : undefined,
           enabled,
           isDefault,
+          routingTargets,
         })
         toast.success("Perfil actualizado")
       } else {
@@ -465,6 +495,7 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
           requestDefaults: Object.keys(defaults).length > 0 ? defaults : undefined,
           enabled,
           isDefault,
+          routingTargets,
         })
         toast.success("Perfil creado")
       }
@@ -609,6 +640,54 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
                 rows={2}
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
               />
+            </div>
+
+            {/* ── Router mode ─────────────────────────────────────── */}
+            <div className="rounded-md border border-border/60 bg-muted/10 p-3 space-y-2">
+              <label className="flex items-center gap-2 text-sm">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isRouter}
+                  onClick={() => setIsRouter(!isRouter)}
+                  className={`relative h-5 w-9 rounded-full transition-colors ${
+                    isRouter ? "bg-primary" : "bg-muted"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 block h-4 w-4 rounded-full bg-white transition-transform ${
+                      isRouter ? "translate-x-4" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+                <span className="font-medium">Este perfil es un Router</span>
+              </label>
+              <p className="text-[11px] text-muted-foreground">
+                Un Router no carga modelo propio. Al recibir una petición reenvía al
+                primer destino disponible de la lista (fallback en cascada).
+                Útil para poner una etiqueta estable (ej. <code>gemma4:26b</code>)
+                delante de un vLLM rápido con backup en Ollama.
+              </p>
+              {isRouter && (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                    Destinos (uno por línea, orden = prioridad)
+                  </label>
+                  <textarea
+                    value={routingTargetsText}
+                    onChange={(e) => setRoutingTargetsText(e.target.value)}
+                    placeholder={"vllm/gemma4:26b\nollama/gemma4:26b\nvllm/gemma4:12b"}
+                    rows={4}
+                    spellCheck={false}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
+                  />
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    El resolver intenta cada profile_id en orden. Salta el que esté
+                    ocupado (según <code>router_confidence_floor</code>) y espera
+                    hasta <code>router_fallback_delay_ms</code> antes de degradar.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* ── Request Defaults (category-specific UI) ────────── */}
