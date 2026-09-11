@@ -362,12 +362,24 @@ class VLLMBackend(BackendInterface):
             self._get_setting("vllm_pipeline_parallel_size"),
         )
 
-        cmd = [
-            self._resolve_python_bin(),
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
-            model_target,
+        # `python -m vllm.entrypoints.openai.api_server` was deprecated in
+        # vLLM 0.29 in favour of `vllm serve` (same subprocess, cleaner CLI).
+        # The vllm CLI lives next to the venv's python; if we can't find it
+        # (older backend install), fall back to the deprecated -m form so
+        # nothing breaks.
+        python_bin = self._resolve_python_bin()
+        vllm_bin = str(Path(python_bin).parent / "vllm")
+        if Path(vllm_bin).is_file():
+            cmd = [vllm_bin, "serve", model_target]
+        else:
+            cmd = [
+                python_bin,
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                model_target,
+            ]
+        cmd += [
             "--tensor-parallel-size",
             str(tensor_parallel),
             "--gpu-memory-utilization",

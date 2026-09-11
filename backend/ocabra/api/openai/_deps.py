@@ -260,7 +260,14 @@ async def resolve_profile(
                 # so we hang the value on ``request.state``: shared object,
                 # accessible from both sides of the boundary, no reliance on
                 # asyncio.copy_context semantics.
-                if request_state is not None:
+                #
+                # Skip attribution when the router resolved to itself (the
+                # "no_immediate_winner" fallback in RouterResolver.pick).
+                # Otherwise ``/stats/routing`` shows self-loops (router → same
+                # router) that carry no useful information — the request was
+                # served by the router's own base_model_id, no different from
+                # a plain profile call.
+                if request_state is not None and target.profile_id != profile.profile_id:
                     try:
                         request_state.via_router_profile_id = profile.profile_id
                         # Also record the resolved target profile_id so the

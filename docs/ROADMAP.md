@@ -638,3 +638,31 @@ corrección para el estado Mamba con tokens especulativos:
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción
 [Pendiente]   UI para listar/descargar batches del usuario
 ```
+
+---
+
+## 🛠️ Deuda técnica upstream — vLLM 0.29.x
+
+Fixes que quedaron pineados hasta que resolvan aguas arriba. Retirar cuando
+el ecosistema se estabilice.
+
+### Pin `openai>=2.25.0` en `install_spec` de vLLM
+
+- **Síntoma:** al arrancar un worker, `ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses'`.
+- **Causa:** vLLM 0.29.0 importa `NamespaceTool` de `openai>=2.25.0` pero el wheel no pin explícito. Pip resuelve `openai==2.24.0` por dependencias transitivas.
+- **Upstream:** [vllm-project/vllm#49103](https://github.com/vllm-project/vllm/issues/49103).
+- **Fix aplicado:** `openai>=2.25.0` añadido a `pip_packages` en `backend/ocabra/backends/vllm_backend.py`.
+- **Cuándo retirar:** cuando `vllm==0.29.x` publique con pin correcto o cuando subamos a la siguiente minor.
+
+### `FLASHINFER_DISABLE_VERSION_CHECK=1` en el entorno del worker
+
+- **Síntoma:** `RuntimeError: flashinfer-cubin version (0.6.6) does not match flashinfer version (0.6.18)` en el arranque del EngineCore.
+- **Causa:** vLLM 0.29 arrastra `flashinfer-python==0.6.18` pero el último `flashinfer-cubin` publicado es `0.6.13`. Wheels desalineados en pypi.
+- **Fix aplicado:** env var `FLASHINFER_DISABLE_VERSION_CHECK=1` inyectada por defecto desde `vllm_backend._build_cmd()`.
+- **Cuándo retirar:** cuando `flashinfer-cubin==0.6.18` (o la versión que vLLM vaya pineando) aparezca en pypi.
+
+### Migración `python -m vllm.entrypoints.openai.api_server` → `vllm serve`
+
+- **Estado:** vLLM 0.29 emite `DeprecationWarning` en el arranque; el subproceso sigue funcionando.
+- **Fix aplicado:** `_build_cmd()` intenta usar `<venv>/bin/vllm serve` cuando existe, con fallback al comando `-m` deprecado.
+- **Cuándo retirar el fallback:** cuando `vllm serve` sea el único path (probablemente 0.30+) y no queden venvs de 0.26.x activos.
