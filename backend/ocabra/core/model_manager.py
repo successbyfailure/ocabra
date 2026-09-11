@@ -188,6 +188,13 @@ class ModelManager:
                 started_at=time.time(),
                 source=source,
             )
+        # Bloque 20 — track start on the estimator so
+        # ``in_flight_remaining`` returns useful numbers for the dynamic
+        # drain grace in pressure_eviction. Only the FIRST concurrent
+        # request per model triggers a fresh timer; nested requests reuse
+        # it since the estimator's ``mark_start`` overwrites.
+        if current == 0:
+            self.mark_request_start(model_id)
         return request_id
 
     def inflight_count(self, model_id: str) -> int:
@@ -274,12 +281,19 @@ class ModelManager:
             count = self._in_flight.get(model_id, 0)
             if count <= 1:
                 self._in_flight.pop(model_id, None)
+                went_idle = True
             else:
                 self._in_flight[model_id] = count - 1
+                went_idle = False
         # Update last_request_at in memory for LRU eviction ordering
         state = self._states.get(model_id)
         if state:
             state.last_request_at = datetime.now(UTC)
+        # Bloque 20 — release the estimator's in-flight timer only when
+        # the model truly went idle. Overlapping requests share one timer
+        # (the estimator can't tell them apart yet).
+        if went_idle:
+            self.mark_request_end(model_id)
 
     def is_busy(self, model_id: str) -> bool:
         """Return True if there are in-flight requests for this model."""
@@ -465,6 +479,33 @@ class ModelManager:
         construction. Making it an attribute rather than a constructor arg
         avoids a hard dependency for tests that don't need it."""
         self._session_registry = registry
+
+    def set_duration_estimator(self, estimator) -> None:
+        """Late-bind the DurationEstimator for dynamic drain grace in
+        pressure eviction (Bloque 20, Etapa 7). Missing estimator falls
+        back to the static pressure_eviction_drain_timeout_s — matches
+        pre-B20 behaviour for tests and degraded startup."""
+        self._duration_estimator = estimator
+
+    def mark_request_start(self, worker_key: str) -> None:
+        """Bridge for the worker_pool: notify the estimator when a request
+        starts on ``worker_key`` so ``in_flight_remaining`` returns useful
+        numbers. Delegated here so the pool doesn't need a direct estimator
+        handle."""
+        estimator = getattr(self, "_duration_estimator", None)
+        if estimator is not None:
+            try:
+                estimator.mark_start(worker_key)
+            except Exception:  # noqa: BLE001 — never break the pool
+                pass
+
+    def mark_request_end(self, worker_key: str) -> None:
+        estimator = getattr(self, "_duration_estimator", None)
+        if estimator is not None:
+            try:
+                estimator.mark_end(worker_key)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _get_eviction_candidates(self, gpu_index: int) -> list[str]:
         """Return model_ids loaded on gpu_index, ordered by LRU (oldest first).
@@ -1317,10 +1358,38 @@ class ModelManager:
                 requested_model_id=model_id,
                 candidates=candidates,
             )
-            drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
+            static_drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
+            max_drain_timeout_s = max(
+                static_drain_timeout_s, int(settings.max_drain_timeout_s)
+            )
             for candidate_id in candidates:
-                # Wait for any in-flight requests to drain before evicting
+                # Wait for any in-flight requests to drain before evicting.
+                # Bloque 20 — grace dinámico: the estimator can predict how
+                # long the candidate's live request has left, so we bound
+                # the wait by remaining+margin instead of a global constant.
+                # Cases:
+                #   * No estimator or no in-flight data → static default
+                #     (pressure_eviction_drain_timeout_s), matches pre-B20.
+                #   * Estimator remaining=X → wait X + 15s margin, capped
+                #     at max_drain_timeout_s so a runaway estimate never
+                #     freezes the load path.
+                # Session-held candidates were already filtered by
+                # _get_pressure_eviction_candidates (Etapa 4 veto).
                 if self.is_busy(candidate_id):
+                    drain_timeout_s = static_drain_timeout_s
+                    estimator = getattr(self, "_duration_estimator", None)
+                    if estimator is not None:
+                        try:
+                            remaining = estimator.in_flight_remaining(
+                                candidate_id, model_id=candidate_id
+                            )
+                        except Exception:  # noqa: BLE001
+                            remaining = None
+                        if remaining is not None and remaining > 0:
+                            drain_timeout_s = min(
+                                max_drain_timeout_s,
+                                int(remaining) + 15,
+                            )
                     logger.info(
                         "pressure_eviction_drain_wait",
                         requested_model_id=model_id,

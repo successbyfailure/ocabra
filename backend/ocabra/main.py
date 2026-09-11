@@ -614,6 +614,7 @@ async def lifespan(app: FastAPI):
     duration_estimator = DurationEstimator()
     await duration_estimator.start()
     app.state.duration_estimator = duration_estimator
+    model_manager.set_duration_estimator(duration_estimator)
     logger.info("duration_estimator_ready")
 
     # Bloque 20 — SessionRegistry tracks live Realtime sessions holding
