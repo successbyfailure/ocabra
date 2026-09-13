@@ -176,6 +176,11 @@ class Settings(BaseSettings):
     vllm_tool_parser_plugin: str | None = None
     vllm_reasoning_parser: str | None = None
     vllm_language_model_only: bool | None = None
+    # Global default for --limit-mm-per-prompt. vLLM 0.29 refuses images
+    # unless this is set (default is 0 for every modality), so provide a
+    # sensible fallback for multimodal profiles. Individual profiles can
+    # still override with load_overrides.vllm.limit_mm_per_prompt.
+    vllm_limit_mm_per_prompt_image: int = 4
     vllm_enable_chunked_prefill: bool | None = None
     # Quantized KV cache can increase effective context capacity on Ampere/Ada/Hopper.
     # Leave unset to keep the runtime default.

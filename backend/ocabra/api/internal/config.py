@@ -80,6 +80,17 @@ class ServerConfigPatch(BaseModel):
     vllm_max_num_batched_tokens: int | None = Field(default=None, alias="vllmMaxNumBatchedTokens")
     vllm_enable_prefix_caching: bool | None = Field(default=None, alias="vllmEnablePrefixCaching")
     vllm_enforce_eager: bool | None = Field(default=None, alias="vllmEnforceEager")
+    vllm_limit_mm_per_prompt_image: int | None = Field(
+        default=None,
+        alias="vllmLimitMmPerPromptImage",
+        description=(
+            "Default image count per prompt passed as --limit-mm-per-prompt to "
+            "every vLLM worker (perfiles pueden sobreescribirlo). vLLM 0.29+ "
+            "rejects images unless this is >0. Counts total images across all "
+            "messages in a single /v1/chat/completions request."
+        ),
+        ge=0,
+    )
     sglang_mem_fraction_static: float | None = Field(default=None, alias="sglangMemFractionStatic")
     sglang_context_length: int | None = Field(default=None, alias="sglangContextLength")
     sglang_disable_radix_cache: bool | None = Field(default=None, alias="sglangDisableRadixCache")
@@ -228,6 +239,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "vllmMaxNumBatchedTokens": settings.vllm_max_num_batched_tokens,
         "vllmEnablePrefixCaching": settings.vllm_enable_prefix_caching,
         "vllmEnforceEager": settings.vllm_enforce_eager,
+        "vllmLimitMmPerPromptImage": settings.vllm_limit_mm_per_prompt_image,
         "sglangMemFractionStatic": settings.sglang_mem_fraction_static,
         "sglangContextLength": settings.sglang_context_length,
         "sglangDisableRadixCache": settings.sglang_disable_radix_cache,
@@ -430,6 +442,13 @@ async def patch_config(
     if "vllm_enforce_eager" in payload:
         settings.vllm_enforce_eager = bool(payload["vllm_enforce_eager"])
         await _persist("vllm_enforce_eager", settings.vllm_enforce_eager)
+    if "vllm_limit_mm_per_prompt_image" in payload:
+        settings.vllm_limit_mm_per_prompt_image = max(
+            0, int(payload["vllm_limit_mm_per_prompt_image"])
+        )
+        await _persist(
+            "vllm_limit_mm_per_prompt_image", settings.vllm_limit_mm_per_prompt_image
+        )
     if "sglang_mem_fraction_static" in payload:
         settings.sglang_mem_fraction_static = float(payload["sglang_mem_fraction_static"])
         await _persist("sglang_mem_fraction_static", settings.sglang_mem_fraction_static)

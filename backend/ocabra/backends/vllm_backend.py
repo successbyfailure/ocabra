@@ -521,9 +521,18 @@ class VLLMBackend(BackendInterface):
         speculative_config = self._get_vllm_option(extra_config, "speculative_config", None)
         if speculative_config:
             cmd.extend(["--speculative-config", self._encode_vllm_json_option(speculative_config)])
+        # Priority:
+        #   1. per-profile override {"image": N, "video": M, ...}
+        #   2. global int setting ``vllm_limit_mm_per_prompt_image`` → {"image": N}
+        # A profile that opts out of images entirely can pass
+        # ``limit_mm_per_prompt: {"image": 0}`` in its load_overrides.
         limit_mm_per_prompt = self._get_vllm_option(
-            extra_config, "limit_mm_per_prompt", self._get_setting("vllm_limit_mm_per_prompt")
+            extra_config, "limit_mm_per_prompt", None
         )
+        if limit_mm_per_prompt is None:
+            image_default = self._get_setting("vllm_limit_mm_per_prompt_image") or 0
+            if image_default and int(image_default) > 0:
+                limit_mm_per_prompt = {"image": int(image_default)}
         if limit_mm_per_prompt:
             cmd.extend(
                 ["--limit-mm-per-prompt", self._encode_vllm_json_option(limit_mm_per_prompt)]
