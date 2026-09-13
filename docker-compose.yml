@@ -191,11 +191,15 @@ services:
       # defecto sin invadir el territorio de vLLM.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       OLLAMA_HOST: 0.0.0.0:11434
-      # Keep at 1 on this VRAM-constrained box: Ollama allocates KV cache =
-      # num_ctx × NUM_PARALLEL, and with the 32k default context even a small
-      # model balloons past VRAM and spills to CPU (measured: qwen3:4b 0.95s→8s).
-      # Raising this only pays off alongside a much smaller per-model num_ctx.
-      OLLAMA_NUM_PARALLEL: "1"
+      # 2 slots concurrentes: compromiso entre concurrencia y contexto.
+      # Medido con gemma4:26b Q4_K_M + Q8_0 KV + Flash Attention:
+      #   np=1 → hasta ~200k ctx (21.5 GB en 3090)
+      #   np=2 → hasta ~128k ctx (est. 21 GB)
+      #   np=4 → 128k ctx (22.3 GB, sin margen)
+      # np=2 permite servir 2 peticiones concurrentes de contextos largos
+      # (transcripciones, VLM con historial) sin spill a CPU. Modelos con
+      # num_ctx grande horneado (ctx160k, ctx256k) todavía caben.
+      OLLAMA_NUM_PARALLEL: "2"
       # KV cache en q8_0 (mitad de VRAM de KV, ~sin pérdida de calidad) para
       # servir contexto largo (256K) en modelos coder. La cuantización del KV
       # en llama.cpp REQUIERE flash attention activado.
