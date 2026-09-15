@@ -207,6 +207,32 @@ async def realtime_ws(
             username=user.username,
             api_key_name=user.api_key_name,
         )
+    except RuntimeError as exc:
+        # Starlette raises ``RuntimeError('WebSocket is not connected. Need
+        # to call "accept" first.')`` when the client closes the socket
+        # before we get a chance to receive/send on it (race between our
+        # accept and the client's premature close, or an aborted upgrade
+        # handshake). It's semantically a disconnect, not a server bug —
+        # record it as such and log at INFO instead of polluting stats
+        # with a 500 that misleads the debug session.
+        if "not connected" in str(exc).lower():
+            logger.info(
+                "realtime_session_disconnected_early",
+                session_id=session._session_id,
+                username=user.username,
+                api_key_name=user.api_key_name,
+                detail=str(exc),
+            )
+        else:
+            session_status = 500
+            session_error = str(exc)
+            logger.warning(
+                "realtime_session_error",
+                session_id=session._session_id,
+                username=user.username,
+                api_key_name=user.api_key_name,
+                error=str(exc),
+            )
     except asyncio.CancelledError:
         session_status = 499
         session_error = "Realtime session cancelled"
