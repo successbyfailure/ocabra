@@ -2,18 +2,25 @@
 
 Bloque 20, Etapa 6.
 
-Verifies the resolver's decision walk under the ten enumerated cases:
+Verifies the resolver's decision walk under the enumerated cases:
 
-    1. primary_loaded
-    2. loadable_no_disruption
+    1. primary_loaded (loaded always wins, in-flight count irrelevant)
+    2. loadable_no_disruption (unloaded, no busy neighbours → load here)
     3. session_veto → next
-    4. is_busy → next when estimator says slow, otherwise stay
-    5. loop detected → skip
-    6. missing / disabled target → skip
-    7. nested router → delegates
-    8. routing_enabled=False → skipped entirely (plain profile)
-    9. no target survives → falls back to router's own base
-    10. router honors first-loadable ordering
+    4. loaded but busy → still stay (queueing beats cold-start fallback)
+    5. unloaded target + neighbour busy → skip (would disrupt)
+    6. loop detected → skip
+    7. missing / disabled target → skip
+    8. nested router → delegates
+    9. routing_enabled=False → skipped entirely (plain profile)
+   10. no target survives → falls back to router's own base
+   11. router honors first-loadable ordering
+
+Updated 2026-09-15: previously the resolver skipped LOADED-but-busy
+targets when the estimator predicted a long remaining wait. That heuristic
+caused a production ping-pong (Ollama serving + router picks vLLM 26b →
+pressure-eviction fails → worker stuck in error). The rule now is:
+loaded wins, period.
 
 The resolver has three collaborators (ProfileRegistry, ModelManager,
 optional DurationEstimator + SessionRegistry). All are mocked with tiny
@@ -83,6 +90,9 @@ class _FakeModelManager:
 
     def is_busy(self, model_id: str) -> bool:
         return model_id in self.busy
+
+    def any_busy_worker_except(self, target_id: str) -> bool:
+        return any(m != target_id for m in self.busy)
 
 
 def _make_resolver(*profiles, **kwargs) -> tuple[RouterResolver, _FakeProfileRegistry, _FakeModelManager]:
@@ -168,43 +178,62 @@ class TestSessionVeto:
 
 class TestBusyHandling:
     @pytest.mark.asyncio
-    async def test_busy_but_short_remaining_stays(self):
-        """When the estimator says the neighbour will be done soon we
-        prefer to wait for the hot cache instead of cold-starting elsewhere."""
+    async def test_loaded_target_wins_even_when_busy(self):
+        """Loaded targets always win regardless of in-flight load. Queueing
+        against a hot worker is strictly cheaper than a cold start on the
+        fallback, and the router's ``fallback`` list is for the case
+        ``primary can't load``, not ``primary is loaded but slow``."""
         router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
-        estimator = MagicMock()
-        # 20s left — cheaper than a cold start.
-        estimator.in_flight_remaining = lambda k, model_id=None: 20.0
-        resolver, _, _ = _make_resolver(
-            router, t1, t2,
-            states={"vllm/a": _FakeState(_Status.LOADED)},
-            busy={"vllm/a"},
-            estimator=estimator,
-        )
-        result = await resolver.pick(router)
-        assert result.target_profile_id == "t1"
-
-    @pytest.mark.asyncio
-    async def test_busy_and_long_remaining_falls_back(self):
-        """Long remaining → skip the busy neighbour and try next candidate."""
-        router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
-        t1 = _FakeProfile("t1", "vllm/a")
-        t2 = _FakeProfile("t2", "vllm/b")
-        estimator = MagicMock()
-        estimator.in_flight_remaining = lambda k, model_id=None: 300.0
         resolver, _, _ = _make_resolver(
             router, t1, t2,
             states={
                 "vllm/a": _FakeState(_Status.LOADED),
                 "vllm/b": _FakeState(_Status.LOADED),
             },
-            busy={"vllm/a"},
-            estimator=estimator,
+            busy={"vllm/a"},  # even 100 concurrent requests would not skip
         )
         result = await resolver.pick(router)
-        assert result.target_profile_id == "t2"
+        assert result.target_profile_id == "t1"
+        assert result.reason == "primary_loaded"
+
+    @pytest.mark.asyncio
+    async def test_unloaded_target_skipped_when_neighbour_busy(self):
+        """Primary is UNLOADED, another worker is currently serving. Loading
+        the primary here would likely need to evict the busy neighbour — the
+        safer choice is to skip to the next candidate."""
+        router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "vllm/a")
+        t2 = _FakeProfile("t2", "vllm/b")
+        resolver, _, _ = _make_resolver(
+            router, t1, t2,
+            states={
+                "vllm/a": _FakeState(_Status.UNLOADED),
+                "vllm/b": _FakeState(_Status.UNLOADED),
+            },
+            busy={"vllm/other-model"},  # unrelated but currently busy
+        )
+        result = await resolver.pick(router)
+        # Both t1 and t2 got skipped as "load_would_disrupt_busy"; nothing
+        # survived, so we fall back to the router's own base.
+        assert result.reason == "no_immediate_winner"
+
+    @pytest.mark.asyncio
+    async def test_unloaded_target_accepted_when_no_neighbour_busy(self):
+        """Primary UNLOADED, GPU quiet elsewhere → load it. This is the
+        common cold-start case for the router's first target."""
+        router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "vllm/a")
+        t2 = _FakeProfile("t2", "vllm/b")
+        resolver, _, _ = _make_resolver(
+            router, t1, t2,
+            states={"vllm/a": _FakeState(_Status.UNLOADED)},
+            busy=set(),
+        )
+        result = await resolver.pick(router)
+        assert result.target_profile_id == "t1"
+        assert result.reason == "loadable_no_disruption"
 
 
 class TestLoopAndMissing:

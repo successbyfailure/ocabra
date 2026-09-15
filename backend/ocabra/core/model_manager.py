@@ -300,6 +300,20 @@ class ModelManager:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0) > 0
 
+    def any_busy_worker_except(self, target_id: str) -> bool:
+        """Return True if any *other* loaded worker is currently serving.
+
+        Used by the router to decide whether choosing an unloaded target would
+        likely disrupt something in flight. Conservative heuristic: if any
+        neighbour is busy, we assume loading here might need to evict it.
+        Cheap: only reads the in-flight counter dict.
+        """
+        with self._in_flight_lock:
+            for mid, count in self._in_flight.items():
+                if count > 0 and mid != target_id:
+                    return True
+        return False
+
     def get_ollama_state_by_name(self, ollama_name: str):
         """Return the model state whose Ollama backend name matches, or None.
 

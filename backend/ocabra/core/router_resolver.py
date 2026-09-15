@@ -123,11 +123,19 @@ class RouterResolver:
     ) -> ResolvedTarget:
         """Walk the router's ``routing_targets`` and pick the best one now.
 
-        ``request_body`` is used to feed the estimator (input_tokens,
-        work_size_meta) so cost comparisons between candidates account for
-        actual request size. Missing/malformed body → the estimator falls
-        back to the raw percentile with its own confidence.
+        The rule is simple and predictable:
+          1. A LOADED target always wins (session veto aside). Adding this
+             request to its queue is strictly cheaper than paying a cold
+             start on a fallback + potentially evicting the primary.
+          2. An UNLOADED/CONFIGURED/ERROR target is accepted only if
+             loading it here would not disrupt a busy neighbour — that is
+             the only case the fallback list is meant to handle.
+
+        ``request_body`` is currently unused but kept in the signature so
+        future estimator-driven heuristics can slot in without changing
+        every call site.
         """
+        del request_body  # noqa: F841 — reserved for future heuristics
         from ocabra.core.model_manager import ModelStatus
 
         audit: list[CandidateAudit] = []
@@ -142,14 +150,6 @@ class RouterResolver:
         # We wrap it as a virtual candidate: the caller looks it up via the
         # profile itself (no separate profile lookup needed).
         last_resort: ResolvedTarget | None = None
-
-        input_tokens = None
-        max_tokens = None
-        work_size_meta = None
-        if isinstance(request_body, dict):
-            input_tokens = request_body.get("input_tokens")
-            max_tokens = request_body.get("max_tokens")
-            work_size_meta = request_body.get("work_size_meta")
 
         for target_id in target_ids:
             if target_id in visited:
@@ -192,21 +192,19 @@ class RouterResolver:
             state = await self._model_manager.get_state(target.base_model_id)
             worker_key = target.base_model_id  # profile_id-based worker_keys land here in Etapa 6+
 
-            # 1) Loaded, unsaturated, unreserved → hard win.
+            # 1) Loaded and unreserved → always pick, no matter how busy.
+            # The router's purpose is "give me a working model"; if the
+            # primary is hot, adding this request to its queue is strictly
+            # cheaper than paying a cold start on a fallback + potentially
+            # evicting the primary's workers to make room. The fallback
+            # exists for the case "primary can't load because the GPU is
+            # busy with other tasks", not "primary is loaded and serving".
             if state is not None and state.status == ModelStatus.LOADED:
                 if self._session_registry is not None and self._session_registry.has_active_session_holding(
                     worker_key
                 ):
                     audit.append(CandidateAudit(target_id, "session_veto"))
                     continue
-                if self._model_manager.is_busy(worker_key):
-                    # Busy is soft: only skip when the estimator thinks the
-                    # remaining time is longer than a cold-start fallback
-                    # elsewhere. Otherwise wait for the neighbour and reuse
-                    # the hot cache.
-                    if self._should_skip_for_busy(worker_key, target, request_body):
-                        audit.append(CandidateAudit(target_id, "load_would_disrupt"))
-                        continue
                 audit.append(CandidateAudit(target_id, "loaded"))
                 return ResolvedTarget(
                     target_profile_id=target.profile_id,
@@ -225,9 +223,15 @@ class RouterResolver:
                 audit.append(CandidateAudit(target_id, "session_veto"))
                 continue
 
-            # 3) Unloaded / configured / error but loadable without evicting
-            # a busy neighbour → accept, let the ensure-loaded path handle
-            # the actual load.
+            # 3) Unloaded / configured / error. Only accept if loading here
+            # won't force pressure-eviction over a *busy* neighbour. If some
+            # other worker is currently serving, the safer bet is to skip
+            # to the next candidate — otherwise we can end up cross-loading
+            # a bigger model that competes for the same GPU and stalls both.
+            if self._model_manager.any_busy_worker_except(worker_key):
+                audit.append(CandidateAudit(target_id, "load_would_disrupt_busy"))
+                continue
+
             audit.append(CandidateAudit(target_id, "loadable"))
             candidate = ResolvedTarget(
                 target_profile_id=target.profile_id,
@@ -256,31 +260,15 @@ class RouterResolver:
             considered=audit,
         )
 
-    # ── Internals ────────────────────────────────────────────
-
-    def _should_skip_for_busy(
-        self,
-        worker_key: str,
-        target: "ModelProfile",
-        request_body: dict | None,
-    ) -> bool:
-        """Estimator-based tie-break for busy candidates.
-
-        If the estimator has low confidence, we conservatively wait (the
-        cache is hot). If it says "I know this neighbour will take longer
-        than a cold-start fallback", we skip.
-        """
-        if self._duration_estimator is None:
-            return False
-        remaining = self._duration_estimator.in_flight_remaining(
-            worker_key, model_id=target.base_model_id
-        )
-        if remaining is None:
-            return False
-        # Fall back only if the remaining time is more than a full minute —
-        # smaller windows are cheaper to wait out than to pay a cold start
-        # on another candidate.
-        return remaining > 60.0
+    # Note: the previous ``_should_skip_for_busy`` helper (estimator-based
+    # tie-break for loaded-but-busy targets) was removed on 2026-09-15.
+    # A loaded target now always wins, regardless of in-flight load — the
+    # fallback is only meant to cover "can't load because the GPU is
+    # occupied", not "primary is hot but slow". Ripping a loaded neighbour
+    # out to shove a fallback next to it caused a documented ping-pong in
+    # production (router picked vLLM 26b even though Ollama 26b was
+    # serving; pressure-eviction failed; worker got stuck in ``error``
+    # state and every subsequent client got a 503).
 
 
 __all__ = [
