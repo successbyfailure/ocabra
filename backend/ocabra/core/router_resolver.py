@@ -206,6 +206,13 @@ class RouterResolver:
                     audit.append(CandidateAudit(target_id, "session_veto"))
                     continue
                 audit.append(CandidateAudit(target_id, "loaded"))
+                logger.info(
+                    "router_resolver_picked",
+                    router=router.profile_id,
+                    target=target.profile_id,
+                    reason="primary_loaded",
+                    considered=[(a.target_profile_id, a.outcome) for a in audit],
+                )
                 return ResolvedTarget(
                     target_profile_id=target.profile_id,
                     base_model_id=target.base_model_id,
@@ -228,7 +235,14 @@ class RouterResolver:
             # other worker is currently serving, the safer bet is to skip
             # to the next candidate — otherwise we can end up cross-loading
             # a bigger model that competes for the same GPU and stalls both.
-            if self._model_manager.any_busy_worker_except(worker_key):
+            #
+            # Mask ``router.base_model_id``: the stats middleware credits the
+            # in-flight counter for this very request under the router's own
+            # base id (before we knew which target would serve). Without the
+            # mask the router always thinks a neighbour is busy and skips
+            # its first target — reproduced in production 2026-09-15.
+            router_self_mask: tuple[str, ...] = (router.base_model_id,) if router.base_model_id else ()
+            if self._model_manager.any_busy_worker_except(worker_key, also_exclude=router_self_mask):
                 audit.append(CandidateAudit(target_id, "load_would_disrupt_busy"))
                 continue
 
@@ -245,11 +259,23 @@ class RouterResolver:
             # preference among functionally equivalent fallbacks.
             if last_resort is None:
                 last_resort = candidate
+                logger.info(
+                    "router_resolver_picked",
+                    router=router.profile_id,
+                    target=target.profile_id,
+                    reason="loadable_no_disruption",
+                    considered=[(a.target_profile_id, a.outcome) for a in audit],
+                )
                 return candidate
 
         # Nothing survived — fall back to the router's own base_model_id.
         # This is what a plain profile would do, so upstream behaviour
         # matches the pre-router world.
+        logger.info(
+            "router_resolver_no_immediate_winner",
+            router=router.profile_id,
+            considered=[(a.target_profile_id, a.outcome) for a in audit],
+        )
         if last_resort is not None:
             return last_resort
         return ResolvedTarget(

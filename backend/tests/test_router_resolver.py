@@ -91,8 +91,9 @@ class _FakeModelManager:
     def is_busy(self, model_id: str) -> bool:
         return model_id in self.busy
 
-    def any_busy_worker_except(self, target_id: str) -> bool:
-        return any(m != target_id for m in self.busy)
+    def any_busy_worker_except(self, target_id, *, also_exclude=()) -> bool:
+        excluded = {target_id, *also_exclude}
+        return any(m not in excluded for m in self.busy)
 
 
 def _make_resolver(*profiles, **kwargs) -> tuple[RouterResolver, _FakeProfileRegistry, _FakeModelManager]:
@@ -230,6 +231,31 @@ class TestBusyHandling:
             router, t1, t2,
             states={"vllm/a": _FakeState(_Status.UNLOADED)},
             busy=set(),
+        )
+        result = await resolver.pick(router)
+        assert result.target_profile_id == "t1"
+        assert result.reason == "loadable_no_disruption"
+
+    @pytest.mark.asyncio
+    async def test_router_self_busy_does_not_disqualify_first_target(self):
+        """Regression 2026-09-15: the stats middleware credits the router's
+        own base_model_id with the in-flight counter for the current request.
+        Without masking, ``any_busy_worker_except`` sees the router as a
+        busy neighbour of every target and skips them all — the resolver
+        would always fall through to ``no_immediate_winner`` and then to
+        the router's base. Now the router's own base_model_id is masked
+        from the busy check."""
+        router = _FakeProfile("g", "ollama/gemma4:26b", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "ollama/gemma4:26b-ctx160k")
+        t2 = _FakeProfile("t2", "ollama/gemma4:26b")
+        resolver, _, _ = _make_resolver(
+            router, t1, t2,
+            states={
+                "ollama/gemma4:26b-ctx160k": _FakeState(_Status.UNLOADED),
+                "ollama/gemma4:26b": _FakeState(_Status.UNLOADED),
+            },
+            # Middleware credited the current request under router.base_model_id
+            busy={"ollama/gemma4:26b"},
         )
         result = await resolver.pick(router)
         assert result.target_profile_id == "t1"

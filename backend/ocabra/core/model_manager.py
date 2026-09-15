@@ -300,17 +300,28 @@ class ModelManager:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0) > 0
 
-    def any_busy_worker_except(self, target_id: str) -> bool:
+    def any_busy_worker_except(
+        self,
+        target_id: str,
+        *,
+        also_exclude: tuple[str, ...] = (),
+    ) -> bool:
         """Return True if any *other* loaded worker is currently serving.
 
         Used by the router to decide whether choosing an unloaded target would
         likely disrupt something in flight. Conservative heuristic: if any
         neighbour is busy, we assume loading here might need to evict it.
         Cheap: only reads the in-flight counter dict.
+
+        ``also_exclude`` lets the caller mask additional ids that count as
+        "self" for the purpose of this check — the router uses it to mask
+        its own ``base_model_id``, which the stats middleware credits with
+        the very request being resolved. Without the mask the router would
+        skip its first target every time (see 2026-09-15 debug note).
         """
         with self._in_flight_lock:
             for mid, count in self._in_flight.items():
-                if count > 0 and mid != target_id:
+                if count > 0 and mid != target_id and mid not in also_exclude:
                     return True
         return False
 
