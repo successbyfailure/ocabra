@@ -814,20 +814,47 @@ async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
         return f"ollama:{ollama_name}"
 
     # HuggingFace-backed models (vllm, diffusers, whisper, transformers, tensorrt_llm…)
+    #
+    # Blobs live in up to three places on our layout:
+    #   1) ``<models_dir>/huggingface/<repo>--<subdir>``: the download manager
+    #      target for first-time pulls of pipeline artifacts.
+    #   2) ``<hf_cache_dir>/hub/models--<repo>``: the standard HuggingFace
+    #      Hub cache used by ``huggingface_hub`` / ``transformers`` when
+    #      loading pretrained checkpoints on the fly (this is where the
+    #      heavy safetensors typically end up).
+    #   3) ``<hf_cache_dir>/models--<repo>``: a legacy layout that the
+    #      snapshot_download path used to write to before v0.30-ish; still
+    #      appears in older installations. Left in place for compatibility.
+    #
+    # Prior to 2026-09-17 only (1) was cleaned up, so deleting a vLLM
+    # model from the UI left tens of GB of orphaned blobs in (2)/(3) — the
+    # dashboard would report the model gone while ``df`` insisted the
+    # disk was full. Now we clean up whichever locations exist.
     parts = model_id.split("/", 1)
     raw_model = parts[1] if len(parts) == 2 else model_id
     hf_dir_name = raw_model.replace("/", "--")
+    hub_dir_name = f"models--{hf_dir_name}"
     models_dir = Path(settings.models_dir or "/data/models")
-    candidate = models_dir / "huggingface" / hf_dir_name
-    if candidate.exists():
-        if not _is_path_within_base(candidate, models_dir / "huggingface"):
+    hf_cache_dir = Path(settings.hf_cache_dir or "/data/hf_cache")
+
+    deleted_paths: list[str] = []
+    candidates: list[tuple[Path, Path]] = [
+        # (path, base_dir_for_traversal_check)
+        (models_dir / "huggingface" / hf_dir_name, models_dir / "huggingface"),
+        (hf_cache_dir / "hub" / hub_dir_name, hf_cache_dir / "hub"),
+        (hf_cache_dir / hub_dir_name, hf_cache_dir),
+    ]
+    for candidate, base in candidates:
+        if not candidate.exists():
+            continue
+        if not _is_path_within_base(candidate, base):
             raise HTTPException(
                 status_code=400,
-                detail="Refusing to delete a model path outside the configured models directory",
+                detail=f"Refusing to delete '{candidate}' outside its configured base",
             )
         await asyncio.to_thread(shutil.rmtree, candidate)
-        return str(candidate)
-    return None
+        deleted_paths.append(str(candidate))
+    return ",".join(deleted_paths) if deleted_paths else None
 
 
 async def _get_ollama_sizes_bytes() -> dict[str, int]:

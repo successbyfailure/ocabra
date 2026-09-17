@@ -6,7 +6,7 @@ deletion to ensure paths outside the configured base are always rejected.
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -117,20 +117,32 @@ class TestDeleteModelFiles:
         assert not model_dir.exists()
 
     @pytest.mark.asyncio
-    async def test_ollama_model_skips_file_deletion(self, tmp_path, monkeypatch):
-        """Ollama backend delegates to `ollama rm`, returns None."""
+    async def test_ollama_model_delegates_to_http_api(self, tmp_path, monkeypatch):
+        """Ollama backend delegates to the daemon's HTTP DELETE endpoint
+        (the ``ollama`` CLI is NOT installed in the api container, D11).
+        Returns ``ollama:<name>`` on success so the caller can log which
+        remote resource was cleaned up."""
         from ocabra.api.internal import models as models_mod
+        import httpx
 
         monkeypatch.setattr(models_mod.settings, "models_dir", str(tmp_path))
 
-        # Mock asyncio.create_subprocess_exec to avoid actually calling ollama
-        mock_proc = AsyncMock()
-        mock_proc.wait = AsyncMock(return_value=0)
+        mock_response = MagicMock(status_code=200, text="")
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)):
-            result = await _delete_model_files("ollama/llama3:8b", "ollama")
+        class MockClient:
+            async def __aenter__(self):
+                return self
 
-        assert result is None
+            async def __aexit__(self, *args):
+                return False
+
+            async def request(self, method, url, **kwargs):
+                return mock_response
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: MockClient())
+
+        result = await _delete_model_files("ollama/llama3:8b", "ollama")
+        assert result == "ollama:llama3:8b"
 
     @pytest.mark.asyncio
     async def test_nonexistent_model_returns_none(self, tmp_path, monkeypatch):
@@ -143,6 +155,83 @@ class TestDeleteModelFiles:
 
         result = await _delete_model_files("vllm/nonexistent/model", "vllm")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_hf_hub_cache_blobs_are_deleted(self, tmp_path, monkeypatch):
+        """The heavy safetensors typically live in ``<hf_cache>/hub/models--<repo>/``
+        (the standard huggingface_hub cache), not in ``models/huggingface/``.
+        Deleting a model must clean up the hub cache too, otherwise the disk
+        stays full (regression from 2026-09-17: ~94 GB of vLLM blobs leaked)."""
+        from ocabra.api.internal import models as models_mod
+
+        models_dir = tmp_path / "models"
+        (models_dir / "huggingface").mkdir(parents=True)
+        hf_cache = tmp_path / "hf_cache"
+        hub_model = hf_cache / "hub" / "models--org--mymodel"
+        hub_model.mkdir(parents=True)
+        (hub_model / "blob").write_text("x" * 1024)
+
+        monkeypatch.setattr(models_mod.settings, "models_dir", str(models_dir))
+        monkeypatch.setattr(models_mod.settings, "hf_cache_dir", str(hf_cache))
+
+        result = await _delete_model_files("vllm/org/mymodel", "vllm")
+
+        assert result == str(hub_model)
+        assert not hub_model.exists()
+
+    @pytest.mark.asyncio
+    async def test_legacy_hf_cache_blobs_are_deleted(self, tmp_path, monkeypatch):
+        """Older layouts wrote to ``<hf_cache>/models--<repo>/`` directly
+        (before HF Hub moved to the ``hub/`` subdir). Some old installs
+        still have blobs there — clean those up too."""
+        from ocabra.api.internal import models as models_mod
+
+        models_dir = tmp_path / "models"
+        (models_dir / "huggingface").mkdir(parents=True)
+        hf_cache = tmp_path / "hf_cache"
+        legacy_model = hf_cache / "models--org--mymodel"
+        legacy_model.mkdir(parents=True)
+        (legacy_model / "blob").write_text("x" * 1024)
+
+        monkeypatch.setattr(models_mod.settings, "models_dir", str(models_dir))
+        monkeypatch.setattr(models_mod.settings, "hf_cache_dir", str(hf_cache))
+
+        result = await _delete_model_files("vllm/org/mymodel", "vllm")
+
+        assert result == str(legacy_model)
+        assert not legacy_model.exists()
+
+    @pytest.mark.asyncio
+    async def test_all_three_locations_deleted_when_present(self, tmp_path, monkeypatch):
+        """Some models leave blobs in more than one path (e.g. a fresh pull
+        via download manager landed in ``models/huggingface`` and a later
+        transformers-triggered load repopulated the hub cache). Delete
+        must sweep all three and return them comma-separated."""
+        from ocabra.api.internal import models as models_mod
+
+        models_dir = tmp_path / "models"
+        pipeline_dir = models_dir / "huggingface" / "org--mymodel"
+        pipeline_dir.mkdir(parents=True)
+        (pipeline_dir / "weights").write_text("a")
+        hf_cache = tmp_path / "hf_cache"
+        hub_model = hf_cache / "hub" / "models--org--mymodel"
+        hub_model.mkdir(parents=True)
+        (hub_model / "blob").write_text("b")
+        legacy_model = hf_cache / "models--org--mymodel"
+        legacy_model.mkdir(parents=True)
+        (legacy_model / "blob").write_text("c")
+
+        monkeypatch.setattr(models_mod.settings, "models_dir", str(models_dir))
+        monkeypatch.setattr(models_mod.settings, "hf_cache_dir", str(hf_cache))
+
+        result = await _delete_model_files("vllm/org/mymodel", "vllm")
+
+        assert result is not None
+        parts = result.split(",")
+        assert len(parts) == 3
+        assert not pipeline_dir.exists()
+        assert not hub_model.exists()
+        assert not legacy_model.exists()
 
 
 # ── TRT-LLM engine deletion path traversal ───────────────────────
