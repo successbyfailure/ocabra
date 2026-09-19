@@ -71,6 +71,25 @@ async def list_model_profiles(
     return [_profile_to_dict(p) for p in profiles]
 
 
+@router.get(
+    "/profiles",
+    summary="List all profiles",
+    description=(
+        "Return every profile in the registry. Useful for admin surfaces "
+        "that need to list routers (profiles with ``routing_targets``) "
+        "across all base models."
+    ),
+)
+async def list_all_profiles(
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> list[dict]:
+    """List every profile."""
+    registry = _get_registry(request)
+    profiles = await registry.list_all()
+    return [_profile_to_dict(p) for p in profiles]
+
+
 @router.post(
     "/models/{model_id:path}/profiles",
     summary="Create a profile for a model",

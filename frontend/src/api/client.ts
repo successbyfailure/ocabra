@@ -1263,6 +1263,11 @@ export const api = {
   },
 
   profiles: {
+    // Bloque 20 — every profile in the registry. Used by the Routers admin
+    // page to filter for profiles whose ``routing_targets`` is non-empty.
+    listAll: async (): Promise<ModelProfile[]> =>
+      (await request<unknown[]>("GET", "/ocabra/profiles")).map(toModelProfile),
+
     listByModel: async (modelId: string): Promise<ModelProfile[]> =>
       (await request<unknown[]>("GET", `/ocabra/models/${encodeURIComponent(modelId)}/profiles`)).map(toModelProfile),
 
