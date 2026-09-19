@@ -107,6 +107,23 @@ async def completions(
         except HTTPException:
             profile = None
 
+        # Bloque 20 fix (2026-09-19): mirror the same router-in-streaming fix
+        # from chat.py — without it a streaming completion call that hit a
+        # router profile would load the router's base_model_id directly and
+        # skip target selection entirely. See chat.py comment for the full
+        # incident context (GLados-corrala 19/09).
+        router_resolver = getattr(request.app.state, "router_resolver", None)
+        if profile is not None and router_resolver is not None and router_resolver.is_router(profile):
+            resolved = await router_resolver.pick(profile, request_body=body)
+            target = await profile_registry.get(resolved.target_profile_id)
+            if target is not None and target.profile_id != profile.profile_id:
+                try:
+                    request.state.via_router_profile_id = profile.profile_id
+                    request.state.resolved_model_id = target.profile_id
+                except Exception:  # noqa: BLE001 — never break resolution
+                    pass
+                profile = target
+
         if profile is not None:
             worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
             headers = {

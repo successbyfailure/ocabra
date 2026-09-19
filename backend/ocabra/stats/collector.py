@@ -458,7 +458,17 @@ class StatsMiddleware(BaseHTTPMiddleware):
         )
 
         if is_streaming:
+            # Bloque 20 fix (2026-09-19): the streaming path used to store
+            # the raw ``model_id`` from the body — i.e. for a router request
+            # it recorded ``gemma4:26b`` (router name) instead of the target
+            # the resolver actually served. Mirror the non-streaming path's
+            # override so ``/stats/routing`` and ``request_stats`` reflect
+            # reality for the 99% of traffic that uses stream=true.
             model_id = _extract_model_id(request=request, body=request_payload)
+            resolved_model_id = getattr(request.state, "resolved_model_id", None)
+            if resolved_model_id:
+                model_id = resolved_model_id
+            via_router_profile_id = getattr(request.state, "via_router_profile_id", None)
             status_code = response.status_code
             original_iterator = response.body_iterator
 
@@ -499,6 +509,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 out_tok = _stream_output_tokens(all_body, content_type)
                             if in_tok is None:
                                 in_tok = _count_input_tokens(request_payload, request_kind)
+                        work_size_meta = _extract_work_size_meta(
+                            request_kind, request_payload, last_payload
+                        )
                         asyncio.create_task(
                             _record_stat(
                                 request=request,
@@ -512,6 +525,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 request_kind=request_kind,
                                 input_tokens=in_tok,
                                 output_tokens=out_tok,
+                                work_size_meta=work_size_meta,
+                                via_router_profile_id=via_router_profile_id,
                             )
                         )
 

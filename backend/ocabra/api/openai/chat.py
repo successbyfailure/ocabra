@@ -188,6 +188,26 @@ async def chat_completions(
             # will be missing for these requests.
             profile = None
 
+        # Bloque 20 fix (2026-09-19): the streaming path used to skip the
+        # router entirely — ``lookup_profile`` returns the router profile
+        # verbatim and we then loaded the router's ``base_model_id`` instead
+        # of picking a target. Reproduced in production: every gemma4:26b
+        # call from GLados-corrala on 19/09 went to ``ollama/gemma4:26b``
+        # directly, ignoring ``ctx160k`` as target[0]. Bug hit only the
+        # streaming code path (99% of real traffic — chat SDKs default to
+        # stream=true), which is why bench/manual tests looked fine.
+        router_resolver = getattr(request.app.state, "router_resolver", None)
+        if profile is not None and router_resolver is not None and router_resolver.is_router(profile):
+            resolved = await router_resolver.pick(profile, request_body=body)
+            target = await profile_registry.get(resolved.target_profile_id)
+            if target is not None and target.profile_id != profile.profile_id:
+                try:
+                    request.state.via_router_profile_id = profile.profile_id
+                    request.state.resolved_model_id = target.profile_id
+                except Exception:  # noqa: BLE001 — never break resolution
+                    pass
+                profile = target
+
         if profile is not None:
             worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
             headers = {
