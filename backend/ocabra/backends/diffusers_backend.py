@@ -49,14 +49,17 @@ class DiffusersBackend(BackendInterface):
             pip_packages=[
                 "torch>=2.5",
                 "torchvision>=0.20",
-                # diffusers >=0.37 bundles Flux2KleinPipeline, ZImagePipeline
-                # and StableDiffusion3Pipeline (all used by oCabra's image
-                # generation profiles). transformers stays on 4.x because
-                # diffusers 0.37 still expects the 4.x CLIP API and the SDXL
-                # ``from_single_file`` path breaks on transformers 5.x.
-                "diffusers>=0.37,<0.40",
+                # diffusers 0.41+ ships QwenImage21Pipeline +
+                # GGUFQuantizationConfig used by the Qwen-Image-2.1 profile.
+                # Pulled from git until 0.41 lands on PyPI. Still bundles
+                # Flux2KleinPipeline, ZImagePipeline and SD3.5.
+                "diffusers @ git+https://github.com/huggingface/diffusers.git",
                 "accelerate>=1.2",
-                "transformers>=4.57,<5.0",
+                # Qwen3-VL text encoder needs transformers>=5.0 (Qwen3-VL
+                # arch landed there). Also required by diffusers git main
+                # which depends on huggingface-hub>=1.32.
+                "transformers>=5.0",
+                "huggingface-hub>=1.32",
                 "Pillow>=11.0",
                 "safetensors>=0.4",
                 "numpy",
@@ -65,6 +68,10 @@ class DiffusersBackend(BackendInterface):
                 # them the pipeline load aborts on a cryptic ImportError.
                 "sentencepiece>=0.2",
                 "protobuf>=4,<6",
+                # Qwen-Image-2.1: transformer as GGUF Q5_K_M (~6 GB) needs
+                # the ``gguf`` reader; text encoder as NF4 needs bitsandbytes.
+                "gguf>=0.10.0",
+                "bitsandbytes>=0.45.0",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
@@ -124,6 +131,35 @@ class DiffusersBackend(BackendInterface):
             env["TORCHDYNAMO_DISABLE"] = "1"
             env["TORCH_COMPILE_DISABLE"] = "1"
             env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "2")
+
+        # Per-model extras (``extra_config["diffusers"]``) — currently used by
+        # the Qwen-Image-2.1 profile to swap in a GGUF-quantized transformer
+        # and an NF4-quantized text encoder. Values map 1:1 to env vars the
+        # worker reads inside ``load_pipeline``.
+        extra_config = kwargs.get("extra_config") or {}
+        diffusers_cfg = extra_config.get("diffusers") or {}
+        if isinstance(diffusers_cfg, dict):
+            pipeline_override = diffusers_cfg.get("pipeline_class")
+            if pipeline_override:
+                env["DIFFUSERS_PIPELINE_OVERRIDE"] = str(pipeline_override)
+            gguf_transformer = diffusers_cfg.get("gguf_transformer_path")
+            if gguf_transformer:
+                env["DIFFUSERS_GGUF_TRANSFORMER_PATH"] = str(gguf_transformer)
+            transformer_class = diffusers_cfg.get("transformer_class")
+            if transformer_class:
+                env["DIFFUSERS_TRANSFORMER_CLASS"] = str(transformer_class)
+            text_encoder_class = diffusers_cfg.get("text_encoder_class")
+            if text_encoder_class:
+                env["DIFFUSERS_TEXT_ENCODER_CLASS"] = str(text_encoder_class)
+            text_encoder_quant = diffusers_cfg.get("text_encoder_quant")
+            if text_encoder_quant:
+                env["DIFFUSERS_TEXT_ENCODER_QUANT"] = str(text_encoder_quant)
+            offload_mode = diffusers_cfg.get("offload_mode")
+            if offload_mode:
+                env["DIFFUSERS_OFFLOAD_MODE"] = str(offload_mode)
+            torch_dtype = diffusers_cfg.get("torch_dtype")
+            if torch_dtype:
+                env["DIFFUSERS_TORCH_DTYPE"] = str(torch_dtype)
 
         # Slim image needs the venv's CUDA libs on LD path (Deuda D14).
         nvidia_ld = venv_nvidia_ld_library_path(settings.backends_dir, "diffusers")

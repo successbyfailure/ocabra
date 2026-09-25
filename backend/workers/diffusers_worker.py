@@ -31,6 +31,7 @@ SUPPORTED_PIPELINES = {
     "StableDiffusionXLPipeline",
     "StableDiffusionPipeline",
     "ZImagePipeline",
+    "QwenImage21Pipeline",
 }
 
 
@@ -230,6 +231,92 @@ def maybe_enable_cpu_offload(pipeline: Any) -> None:
         return
 
 
+def _load_qwen_image_21_with_gguf(state: WorkerState, dtype: Any) -> Any:
+    """Load Qwen-Image-2.1 with a GGUF-quantized transformer + NF4 text encoder.
+
+    Full BF16 weights are 30.9 GB; this combo drops peak VRAM to ~18 GB on the
+    3090 (see /data/bench/qwen-image-2.1/C_report.json for the bench that
+    picked Q5_K_M + NF4). Requires diffusers >= 0.41 (QwenImage21Pipeline and
+    QwenImage21Transformer2DModel + GGUFQuantizationConfig).
+    """
+
+    import diffusers as _diffusers
+    from diffusers import GGUFQuantizationConfig, QwenImage21Pipeline
+    from diffusers.quantizers.quantization_config import (
+        BitsAndBytesConfig as DiffBnB,
+    )
+    from transformers import BitsAndBytesConfig as HFBnB
+
+    gguf_path = os.getenv("DIFFUSERS_GGUF_TRANSFORMER_PATH", "").strip()
+    if not gguf_path or not Path(gguf_path).is_file():
+        raise FileNotFoundError(
+            "DIFFUSERS_GGUF_TRANSFORMER_PATH must point to a Q5_K_M (or "
+            f"similar) GGUF for the transformer; got '{gguf_path}'"
+        )
+
+    transformer_cls_name = os.getenv(
+        "DIFFUSERS_TRANSFORMER_CLASS", "QwenImage21Transformer2DModel"
+    ).strip()
+    transformer_cls = getattr(_diffusers, transformer_cls_name, None)
+    if transformer_cls is None:
+        raise ValueError(
+            f"transformer class '{transformer_cls_name}' not found in diffusers"
+        )
+
+    # BF16 dtype for GGUF compute + activations. FP16 loses precision on the
+    # Qwen3-VL text encoder in a way that breaks text rendering.
+    compute_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
+
+    transformer = transformer_cls.from_single_file(
+        gguf_path,
+        quantization_config=GGUFQuantizationConfig(compute_dtype=compute_dtype),
+        torch_dtype=compute_dtype,
+        config=str(state.model_path),
+        subfolder="transformer",
+    )
+
+    text_encoder_cls_name = os.getenv(
+        "DIFFUSERS_TEXT_ENCODER_CLASS", "Qwen3VLForConditionalGeneration"
+    ).strip()
+    # Text encoder lives in transformers, not diffusers.
+    import transformers as _transformers
+
+    te_cls = getattr(_transformers, text_encoder_cls_name, None)
+    if te_cls is None:
+        raise ValueError(
+            f"text encoder class '{text_encoder_cls_name}' not found in transformers"
+        )
+
+    quant = os.getenv("DIFFUSERS_TEXT_ENCODER_QUANT", "nf4").strip().lower()
+    if quant == "nf4":
+        hf_q = HFBnB(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_quant_type="nf4",
+        )
+        text_encoder = te_cls.from_pretrained(
+            str(state.model_path),
+            subfolder="text_encoder",
+            quantization_config=hf_q,
+            torch_dtype=compute_dtype,
+        )
+    elif quant in {"", "none", "bf16", "fp16"}:
+        text_encoder = te_cls.from_pretrained(
+            str(state.model_path),
+            subfolder="text_encoder",
+            torch_dtype=compute_dtype,
+        )
+    else:
+        raise ValueError(f"Unsupported DIFFUSERS_TEXT_ENCODER_QUANT='{quant}'")
+
+    return QwenImage21Pipeline.from_pretrained(
+        str(state.model_path),
+        dtype=compute_dtype,
+        transformer=transformer,
+        text_encoder=text_encoder,
+    )
+
+
 def load_pipeline(state: WorkerState) -> None:
     if torch is None:
         raise RuntimeError("torch is required to run diffusers_worker")
@@ -241,7 +328,10 @@ def load_pipeline(state: WorkerState) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    if state.model_path.is_file():
+    gguf_transformer = os.getenv("DIFFUSERS_GGUF_TRANSFORMER_PATH", "").strip()
+    if state.pipeline_type == "QwenImage21Pipeline" and gguf_transformer:
+        pipeline = _load_qwen_image_21_with_gguf(state, dtype)
+    elif state.model_path.is_file():
         # Single-file checkpoint (SDXL / SD1.5 .safetensors from a1111/ComfyUI).
         # ``from_single_file`` re-builds the unet/vae/text_encoder from the
         # bundled weights without expecting a HuggingFace tree on disk.
