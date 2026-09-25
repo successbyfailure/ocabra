@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Download, ImagePlus, Shuffle, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
@@ -14,10 +14,15 @@ interface ImageResult {
 interface ImageInterfaceProps {
   modelId: string
   params: PlaygroundParams
+  canEdit?: boolean
 }
 
-export function ImageInterface({ modelId, params }: ImageInterfaceProps) {
+export function ImageInterface({ modelId, params, canEdit = true }: ImageInterfaceProps) {
   const [mode, setMode] = useState<Mode>("generate")
+
+  useEffect(() => {
+    if (!canEdit && mode === "edit") setMode("generate")
+  }, [canEdit, mode])
   const [prompt, setPrompt] = useState("")
   const [negativePrompt, setNegativePrompt] = useState("")
   const [steps, setSteps] = useState(30)
@@ -167,9 +172,11 @@ export function ImageInterface({ modelId, params }: ImageInterfaceProps) {
           <button
             type="button"
             onClick={() => setMode("edit")}
+            disabled={!canEdit}
+            title={canEdit ? undefined : "Este modelo no admite edicion de imagenes"}
             className={`rounded px-3 py-1.5 transition ${
               mode === "edit" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"
-            }`}
+            } ${canEdit ? "" : "cursor-not-allowed opacity-50 hover:bg-transparent"}`}
           >
             Editar
           </button>
@@ -177,6 +184,11 @@ export function ImageInterface({ modelId, params }: ImageInterfaceProps) {
         {mode === "edit" && (
           <span className="text-xs text-muted-foreground">
             Sube una imagen base y, opcionalmente, una mascara (alfa transparente = zona a editar).
+          </span>
+        )}
+        {!canEdit && mode === "generate" && (
+          <span className="text-xs text-muted-foreground">
+            Este modelo solo soporta generacion desde texto.
           </span>
         )}
       </div>

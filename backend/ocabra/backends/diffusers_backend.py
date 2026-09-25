@@ -21,6 +21,18 @@ from ocabra.backends.base import (
 from ocabra.config import settings
 from ocabra.core.backend_installer import venv_nvidia_ld_library_path
 
+# Pipelines that ship as text-to-image only in the current diffusers build.
+# QwenImage21Pipeline has no Img2Img/Inpaint companion in diffusers 0.41.
+# Flux2Klein and Z-Image-Turbo are distilled few-step pipelines and don't
+# expose img2img either.
+_TEXT2IMG_ONLY_PIPELINES = frozenset(
+    {
+        "QwenImage21Pipeline",
+        "Flux2KleinPipeline",
+        "ZImagePipeline",
+    }
+)
+
 logger = structlog.get_logger(__name__)
 
 
@@ -235,7 +247,31 @@ class DiffusersBackend(BackendInterface):
         return await self._health_check_port(worker.port)
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
-        return BackendCapabilities(image_generation=True, streaming=False)
+        # Query the worker's /info so we can flag ``image_editing`` accurately:
+        # pipelines without an img2img companion (QwenImage21Pipeline in
+        # diffusers 0.41, distilled FLUX.2 Klein / Z-Image-Turbo) would always
+        # 400 on /v1/images/edits, so we surface that as a capability instead
+        # of letting the frontend discover it by trying and failing.
+        image_editing = True
+        worker = self._workers.get(model_id)
+        if worker is not None:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(f"http://127.0.0.1:{worker.port}/info")
+                    resp.raise_for_status()
+                    info = resp.json()
+                pipeline_type = str(info.get("pipeline_type") or "")
+                if pipeline_type in _TEXT2IMG_ONLY_PIPELINES:
+                    image_editing = False
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "diffusers_capabilities_probe_failed",
+                    model_id=model_id,
+                    error=str(exc),
+                )
+        return BackendCapabilities(
+            image_generation=True, image_editing=image_editing, streaming=False
+        )
 
     async def get_vram_estimate_mb(self, model_id: str) -> int:
         model_path = Path(settings.models_dir) / model_id

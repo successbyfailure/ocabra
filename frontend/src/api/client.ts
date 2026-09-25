@@ -357,6 +357,10 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     score: Boolean(data.score),
     reasoning: Boolean(data.reasoning),
     imageGeneration: Boolean(data.image_generation ?? data.imageGeneration),
+    // Default to true when the backend didn't populate it (legacy workers /
+    // pipelines loaded before the capability landed): the endpoint will still
+    // return ``edit_unsupported`` if the pipeline truly can't edit.
+    imageEditing: Boolean(data.image_editing ?? data.imageEditing ?? true),
     audioTranscription: Boolean(data.audio_transcription ?? data.audioTranscription),
     musicGeneration: Boolean(data.music_generation ?? data.musicGeneration),
     tts: Boolean(data.tts),

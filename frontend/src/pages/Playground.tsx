@@ -275,7 +275,13 @@ export function Playground() {
                   classificationCapable={Boolean(selectedModel?.capabilities.classification)}
                 />
               )}
-              {mode === "image" && <ImageInterface modelId={selectedModelId} params={effectiveParams} />}
+              {mode === "image" && (
+                <ImageInterface
+                  modelId={selectedModelId}
+                  params={effectiveParams}
+                  canEdit={Boolean(selectedModel?.capabilities.imageEditing)}
+                />
+              )}
               {mode === "audio" && (
                 <AudioInterface
                   modelId={selectedModelId}

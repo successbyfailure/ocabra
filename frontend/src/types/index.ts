@@ -80,6 +80,7 @@ export interface ModelCapabilities {
   score: boolean
   reasoning: boolean
   imageGeneration: boolean
+  imageEditing: boolean
   audioTranscription: boolean
   musicGeneration: boolean
   tts: boolean

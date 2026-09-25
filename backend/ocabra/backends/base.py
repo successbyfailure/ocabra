@@ -96,6 +96,11 @@ class BackendCapabilities:
     score: bool = False
     reasoning: bool = False  # Model emits ``reasoning_content`` / chain-of-thought
     image_generation: bool = False
+    # ``image_editing`` is True when the loaded pipeline has an img2img (or
+    # inpainting) companion — i.e. ``/v1/images/edits`` will actually work.
+    # False for text-to-image-only pipelines like QwenImage21Pipeline or the
+    # distilled Z-Image-Turbo / FLUX.2 Klein variants.
+    image_editing: bool = False
     audio_transcription: bool = False  # Dedicated STT (e.g. Whisper) on /v1/audio/transcriptions
     tts: bool = False
     music_generation: bool = False

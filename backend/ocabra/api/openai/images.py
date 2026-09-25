@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
+import json
+
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
@@ -384,10 +386,23 @@ async def image_edits(
         # "img2img not supported" into HTTP 400; surface them with a stable
         # OpenAI-style error code so clients can branch on it.
         if exc.response.status_code == 400:
-            detail_text = exc.response.text or ""
+            # Worker returns FastAPI's default ``{"detail": "..."}`` body.
+            # Extract the plain string so the client sees the message the
+            # worker wrote — not a serialized JSON envelope.
+            try:
+                payload = exc.response.json()
+            except Exception:  # noqa: BLE001
+                payload = None
+            if isinstance(payload, dict):
+                raw_detail = payload.get("detail")
+                detail_text = (
+                    raw_detail if isinstance(raw_detail, str) else json.dumps(raw_detail)
+                )
+            else:
+                detail_text = exc.response.text or ""
             code = "mask_unsupported" if mask_bytes is not None else "edit_unsupported"
             raise _openai_error(
-                detail_text.strip() or "Image editing not supported by this model.",
+                (detail_text or "").strip() or "Image editing not supported by this model.",
                 "invalid_request_error",
                 param="model",
                 code=code,
