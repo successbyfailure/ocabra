@@ -197,12 +197,6 @@ export function Playground() {
     ? { ...params, systemPrompt: "" }
     : params
 
-  const consumeImageDraft = () => {
-    const draft = imageDraft
-    setImageDraft(null)
-    return draft
-  }
-
   return (
     <div className="space-y-4">
       <div>
@@ -378,7 +372,8 @@ export function Playground() {
                       canGenerate={Boolean(selectedModel?.capabilities.imageGeneration)}
                       canEdit={Boolean(selectedModel?.capabilities.imageEditing)}
                       supportsMultiRef={selectedModelId === "qwen-image-edit-plus" || selectedModelId.endsWith("/qwen-image-edit-plus")}
-                      editDraft={consumeImageDraft()}
+                      editDraft={imageDraft}
+                      onDraftConsumed={() => setImageDraft(null)}
                       onSendToEdit={(url, prompt) => setImageDraft({ url, prompt })}
                     />
                   )}

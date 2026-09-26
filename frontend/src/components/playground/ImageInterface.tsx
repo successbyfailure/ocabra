@@ -81,6 +81,7 @@ interface ImageInterfaceProps {
   canEdit?: boolean
   supportsMultiRef?: boolean
   editDraft?: { url: string; prompt: string } | null
+  onDraftConsumed?: () => void
   onSendToEdit?: (url: string, prompt: string) => void
 }
 
@@ -91,11 +92,16 @@ export function ImageInterface({
   canEdit = true,
   supportsMultiRef = false,
   editDraft,
+  onDraftConsumed,
   onSendToEdit,
 }: ImageInterfaceProps) {
   const [mode, setMode] = useState<Mode>(canGenerate ? "generate" : "edit")
 
   useEffect(() => {
+    // Both false = the model isn't loaded yet (capabilities default to false
+    // until the worker reports back). Skip forcing a mode — the empty
+    // interface is fine and the user still sees generate/edit toggles.
+    if (!canEdit && !canGenerate) return
     if (!canEdit && mode === "edit") setMode("generate")
     else if (!canGenerate && mode === "generate") setMode("edit")
   }, [canEdit, canGenerate, mode])
@@ -146,24 +152,31 @@ export function ImageInterface({
   }, [])
 
   // Consume "usar como base de edit" drafts sent from another tab / from the
-  // gallery. Runs once when a draft lands, then clears its own reference.
-  const consumedDraftRef = useRef<string | null>(null)
+  // gallery. The parent hands us a `{url, prompt}` object once; we load the
+  // image, apply the prompt, then notify the parent to clear its slot.
   useEffect(() => {
     if (!editDraft) return
-    if (consumedDraftRef.current === editDraft.url) return
-    consumedDraftRef.current = editDraft.url
+    let cancelled = false
     setMode("edit")
-    void (async () => {
+    ;(async () => {
       try {
         const file = await fileFromUrl(editDraft.url, "input.png")
+        if (cancelled) return
         setImageAt(0, file)
-        if (editDraft.prompt && !prompt.trim()) setPrompt(editDraft.prompt)
+        if (editDraft.prompt) {
+          setPrompt((prev) => (prev.trim() ? prev : editDraft.prompt))
+        }
       } catch (err) {
-        toast.error("No se pudo cargar la imagen como base")
+        if (!cancelled) toast.error("No se pudo cargar la imagen como base")
         console.error(err)
+      } finally {
+        if (!cancelled) onDraftConsumed?.()
       }
     })()
-  }, [editDraft, prompt, setImageAt])
+    return () => {
+      cancelled = true
+    }
+  }, [editDraft, setImageAt, onDraftConsumed])
 
   // Ctrl/Cmd+V mientras el foco está en el componente pega la imagen del
   // portapapeles al primer slot libre (o al principal si todos ocupados).
