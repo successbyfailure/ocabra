@@ -18,7 +18,7 @@ type PlaygroundTab = "modal" | "realtime"
 
 function detectMode(model: ModelState | null): "chat" | "image" | "audio" | "pooling" {
   if (!model) return "chat"
-  if (model.capabilities.imageGeneration) return "image"
+  if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
   if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
   return "chat"
@@ -279,6 +279,7 @@ export function Playground() {
                 <ImageInterface
                   modelId={selectedModelId}
                   params={effectiveParams}
+                  canGenerate={Boolean(selectedModel?.capabilities.imageGeneration)}
                   canEdit={Boolean(selectedModel?.capabilities.imageEditing)}
                 />
               )}

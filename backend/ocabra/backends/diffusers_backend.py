@@ -33,6 +33,16 @@ _TEXT2IMG_ONLY_PIPELINES = frozenset(
     }
 )
 
+# Pipelines that are inherently image-editing: they take an input image + a
+# text instruction and produce an edited image. They cannot generate from
+# text alone, so we surface ``image_generation=False``.
+_EDIT_ONLY_PIPELINES = frozenset(
+    {
+        "QwenImageEditPipeline",
+        "QwenImageEditPlusPipeline",
+    }
+)
+
 logger = structlog.get_logger(__name__)
 
 
@@ -203,12 +213,16 @@ class DiffusersBackend(BackendInterface):
         )
 
         try:
-            await self._wait_until_healthy(port=port, process=process, timeout_s=180)
+            # 180s is fine for 10-12 GB fp16 pipelines, but the Qwen-Image
+            # family with GGUF Q5_K_M + NF4 loads sequentially and can take
+            # 3-5 min on the first cold read (weights come from ZFS, then
+            # bitsandbytes converts NF4 blocks on GPU). Give it 600s.
+            await self._wait_until_healthy(port=port, process=process, timeout_s=600)
         except Exception:
             await self._terminate_process(process)
             raise
 
-        vram_estimate = await self.get_vram_estimate_mb(model_id)
+        vram_estimate = await self.get_vram_estimate_mb(model_id, extra_config=extra_config)
         info = WorkerInfo(
             backend_type="diffusers",
             model_id=model_id,
@@ -252,6 +266,7 @@ class DiffusersBackend(BackendInterface):
         # diffusers 0.41, distilled FLUX.2 Klein / Z-Image-Turbo) would always
         # 400 on /v1/images/edits, so we surface that as a capability instead
         # of letting the frontend discover it by trying and failing.
+        image_generation = True
         image_editing = True
         worker = self._workers.get(model_id)
         if worker is not None:
@@ -263,6 +278,9 @@ class DiffusersBackend(BackendInterface):
                 pipeline_type = str(info.get("pipeline_type") or "")
                 if pipeline_type in _TEXT2IMG_ONLY_PIPELINES:
                     image_editing = False
+                if pipeline_type in _EDIT_ONLY_PIPELINES:
+                    image_generation = False
+                    image_editing = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "diffusers_capabilities_probe_failed",
@@ -270,13 +288,37 @@ class DiffusersBackend(BackendInterface):
                     error=str(exc),
                 )
         return BackendCapabilities(
-            image_generation=True, image_editing=image_editing, streaming=False
+            image_generation=image_generation,
+            image_editing=image_editing,
+            streaming=False,
         )
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         model_path = Path(settings.models_dir) / model_id
         if not model_path.exists():
             return 0
+
+        # GGUF + NF4 loading path: the on-disk safetensors size dwarfs the
+        # actual VRAM footprint (30 GB safetensors → ~18 GB peak). Estimate
+        # instead from the GGUF file + a fixed NF4 text-encoder budget so we
+        # don't spuriously reject the load.
+        diffusers_cfg = (extra_config or {}).get("diffusers") if isinstance(extra_config, dict) else None
+        if isinstance(diffusers_cfg, dict):
+            gguf_path = diffusers_cfg.get("gguf_transformer_path")
+            if gguf_path:
+                # GGUF weights stay quantized in VRAM (~5 bpw for Q5_K_M),
+                # so file size ≈ transformer VRAM footprint. NF4 text
+                # encoder budget ≈ 4 GB (Qwen*-VL 7-8B), VAE ≈ 500 MB,
+                # activations for 1024x1024 ≈ 2 GB. Qwen-Image-2.1 bench
+                # (C_report.json) peaks at 18.4 GB, well within this envelope.
+                gguf_bytes = 0
+                try:
+                    gguf_bytes = Path(str(gguf_path)).stat().st_size
+                except OSError:
+                    pass
+                if gguf_bytes > 0:
+                    gguf_mb = gguf_bytes / (1024 * 1024)
+                    return int(math.ceil(gguf_mb + 4000 + 500 + 2000))
 
         # For HuggingFace diffusers trees we estimate VRAM as transformer/UNet +
         # VAE only. Text encoders (often Qwen/T5/CLIP) live in CPU when the

@@ -181,7 +181,7 @@ class OllamaBackend(BackendInterface):
         self._caps_cache[model_id] = caps
         return caps
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         _ = model_id
         return 0
 

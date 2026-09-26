@@ -237,7 +237,7 @@ class TensorRTLLMBackend(BackendInterface):
             context_length=context_length,
         )
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         if not self.is_enabled():
             return 0
         try:

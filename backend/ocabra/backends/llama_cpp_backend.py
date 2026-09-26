@@ -402,7 +402,7 @@ class LlamaCppBackend(BackendInterface):
             context_length=int(options.get("ctx_size", settings.llama_cpp_ctx_size)),
         )
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         options = self._model_configs.get(model_id, {})
         gpu_layers = int(options.get("gpu_layers", settings.llama_cpp_gpu_layers))
         if gpu_layers <= 0:

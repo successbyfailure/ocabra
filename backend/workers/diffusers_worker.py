@@ -32,7 +32,20 @@ SUPPORTED_PIPELINES = {
     "StableDiffusionPipeline",
     "ZImagePipeline",
     "QwenImage21Pipeline",
+    "QwenImageEditPipeline",
+    "QwenImageEditPlusPipeline",
 }
+
+# Pipelines that are inherently image-editing (take an input image + prompt).
+# For these we skip ``generate_sync`` (they can't do text-only-to-image) and
+# ``edit_sync`` uses ``state.pipeline`` directly instead of asking the auto-
+# mapping for an img2img companion.
+_EDIT_NATIVE_PIPELINES = frozenset(
+    {
+        "QwenImageEditPipeline",
+        "QwenImageEditPlusPipeline",
+    }
+)
 
 
 class GenerateRequest(BaseModel):
@@ -231,20 +244,21 @@ def maybe_enable_cpu_offload(pipeline: Any) -> None:
         return
 
 
-def _load_qwen_image_21_with_gguf(state: WorkerState, dtype: Any) -> Any:
-    """Load Qwen-Image-2.1 with a GGUF-quantized transformer + NF4 text encoder.
+def _load_qwen_image_with_gguf(
+    state: WorkerState, pipeline_class: type, dtype: Any
+) -> Any:
+    """Load a Qwen-Image family pipeline with a GGUF transformer + NF4 text encoder.
 
-    Full BF16 weights are 30.9 GB; this combo drops peak VRAM to ~18 GB on the
-    3090 (see /data/bench/qwen-image-2.1/C_report.json for the bench that
-    picked Q5_K_M + NF4). Requires diffusers >= 0.41 (QwenImage21Pipeline and
-    QwenImage21Transformer2DModel + GGUFQuantizationConfig).
+    Works for QwenImage21Pipeline (text2img), QwenImageEditPipeline and
+    QwenImageEditPlusPipeline (edit) — the loader wiring is identical, only
+    the top-level pipeline class differs. Full BF16 weights are ~30 GB; the
+    Q5_K_M + NF4 combo drops peak VRAM to ~18 GB on the 3090 (see
+    ``/data/bench/qwen-image-2.1/C_report.json``). Requires diffusers >= 0.41
+    (GGUFQuantizationConfig + the corresponding Qwen* transformer/pipeline).
     """
 
     import diffusers as _diffusers
-    from diffusers import GGUFQuantizationConfig, QwenImage21Pipeline
-    from diffusers.quantizers.quantization_config import (
-        BitsAndBytesConfig as DiffBnB,
-    )
+    from diffusers import GGUFQuantizationConfig
     from transformers import BitsAndBytesConfig as HFBnB
 
     gguf_path = os.getenv("DIFFUSERS_GGUF_TRANSFORMER_PATH", "").strip()
@@ -254,9 +268,12 @@ def _load_qwen_image_21_with_gguf(state: WorkerState, dtype: Any) -> Any:
             f"similar) GGUF for the transformer; got '{gguf_path}'"
         )
 
-    transformer_cls_name = os.getenv(
-        "DIFFUSERS_TRANSFORMER_CLASS", "QwenImage21Transformer2DModel"
-    ).strip()
+    transformer_cls_name = os.getenv("DIFFUSERS_TRANSFORMER_CLASS", "").strip()
+    if not transformer_cls_name:
+        raise ValueError(
+            "extra_config.diffusers.transformer_class is required when "
+            "gguf_transformer_path is set"
+        )
     transformer_cls = getattr(_diffusers, transformer_cls_name, None)
     if transformer_cls is None:
         raise ValueError(
@@ -275,10 +292,12 @@ def _load_qwen_image_21_with_gguf(state: WorkerState, dtype: Any) -> Any:
         subfolder="transformer",
     )
 
-    text_encoder_cls_name = os.getenv(
-        "DIFFUSERS_TEXT_ENCODER_CLASS", "Qwen3VLForConditionalGeneration"
-    ).strip()
-    # Text encoder lives in transformers, not diffusers.
+    text_encoder_cls_name = os.getenv("DIFFUSERS_TEXT_ENCODER_CLASS", "").strip()
+    if not text_encoder_cls_name:
+        raise ValueError(
+            "extra_config.diffusers.text_encoder_class is required when "
+            "gguf_transformer_path is set"
+        )
     import transformers as _transformers
 
     te_cls = getattr(_transformers, text_encoder_cls_name, None)
@@ -309,7 +328,7 @@ def _load_qwen_image_21_with_gguf(state: WorkerState, dtype: Any) -> Any:
     else:
         raise ValueError(f"Unsupported DIFFUSERS_TEXT_ENCODER_QUANT='{quant}'")
 
-    return QwenImage21Pipeline.from_pretrained(
+    return pipeline_class.from_pretrained(
         str(state.model_path),
         dtype=compute_dtype,
         transformer=transformer,
@@ -329,8 +348,8 @@ def load_pipeline(state: WorkerState) -> None:
         torch.backends.cudnn.allow_tf32 = True
 
     gguf_transformer = os.getenv("DIFFUSERS_GGUF_TRANSFORMER_PATH", "").strip()
-    if state.pipeline_type == "QwenImage21Pipeline" and gguf_transformer:
-        pipeline = _load_qwen_image_21_with_gguf(state, dtype)
+    if gguf_transformer and state.pipeline_type.startswith("QwenImage"):
+        pipeline = _load_qwen_image_with_gguf(state, pipeline_class, dtype)
     elif state.model_path.is_file():
         # Single-file checkpoint (SDXL / SD1.5 .safetensors from a1111/ComfyUI).
         # ``from_single_file`` re-builds the unet/vae/text_encoder from the
@@ -348,6 +367,25 @@ def load_pipeline(state: WorkerState) -> None:
 
     maybe_enable_xformers_attention(pipeline)
     maybe_enable_cpu_offload(pipeline)
+    # VAE tiling caps the decoder's activation footprint (~1 GB per tile vs
+    # ~8 GB for a full 1024x1024 pass on Qwen-Image's 3D VAE). Without it the
+    # edit pipeline OOMs on the final decode even when weights fit. Slicing
+    # applies the same idea to the U-Net/DiT attention. Both are no-ops when
+    # the pipeline doesn't expose them.
+    if env_flag("DIFFUSERS_ENABLE_VAE_TILING", True):
+        vae = getattr(pipeline, "vae", None)
+        enable_tiling = getattr(vae, "enable_tiling", None) if vae is not None else None
+        if callable(enable_tiling):
+            try:
+                enable_tiling()
+            except Exception:  # noqa: BLE001
+                pass
+        enable_slicing = getattr(vae, "enable_slicing", None) if vae is not None else None
+        if callable(enable_slicing):
+            try:
+                enable_slicing()
+            except Exception:  # noqa: BLE001
+                pass
     maybe_compile_pipeline(pipeline)
     state.pipeline = pipeline
 
@@ -473,6 +511,23 @@ def _derive_edit_pipeline(state: WorkerState, *, with_mask: bool) -> Any:
     clean ``edit_unsupported`` / ``mask_unsupported`` error.
     """
     from diffusers import AutoPipelineForImage2Image, AutoPipelineForInpainting
+
+    # Native edit pipelines (QwenImageEditPlus / QwenImageEdit): the loaded
+    # pipeline already IS an image-editing pipeline — it takes ``image`` as
+    # the prompt condition. Skip the auto-mapping (which would raise) and
+    # reuse ``state.pipeline`` directly. Masking isn't part of these
+    # pipelines' contract; surface that as ``mask_unsupported``.
+    if state.pipeline_type in _EDIT_NATIVE_PIPELINES:
+        if with_mask:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Masked inpainting is not supported by native edit "
+                    f"pipeline '{state.pipeline_type}'. Send the request "
+                    "without a ``mask`` field."
+                ),
+            )
+        return state.pipeline
 
     if with_mask:
         if state.inpaint_pipeline is None:

@@ -171,8 +171,17 @@ class BackendInterface(ABC):
         """Detect and return the model capabilities."""
 
     @abstractmethod
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
-        """Estimate VRAM required before loading the model."""
+    async def get_vram_estimate_mb(
+        self, model_id: str, extra_config: dict | None = None
+    ) -> int:
+        """Estimate VRAM required before loading the model.
+
+        ``extra_config`` lets backends compute a realistic estimate for
+        quantized loading paths (e.g. GGUF transformer + NF4 text encoder)
+        whose on-disk safetensors size massively over-estimates the actual
+        VRAM footprint. Callers should pass ``ModelState.extra_config`` when
+        available; None is fine and backends must degrade gracefully.
+        """
 
     @abstractmethod
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:

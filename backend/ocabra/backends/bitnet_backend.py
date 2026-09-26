@@ -294,7 +294,7 @@ class BitnetBackend(BackendInterface):
             context_length=context_length,
         )
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         options = self._model_configs.get(model_id, {})
         gpu_layers = int(options.get("gpu_layers", settings.bitnet_gpu_layers))
         if gpu_layers <= 0:

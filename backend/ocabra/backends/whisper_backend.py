@@ -296,7 +296,7 @@ class WhisperBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(audio_transcription=True)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         normalized = model_id.lower()
         base_model_id = _resolve_worker_model_id(model_id, {})
         base_normalized = base_model_id.lower()

@@ -316,7 +316,7 @@ class SGLangBackend(BackendInterface):
             score=caps.get("score", caps.get("embeddings", False)),
         )
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         model_path = self._resolve_local_model_dir(model_id)
         if model_path is None:
             return _MIN_SGLANG_VRAM_MB

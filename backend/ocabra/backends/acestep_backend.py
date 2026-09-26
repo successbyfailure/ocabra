@@ -320,7 +320,7 @@ class AceStepBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(music_generation=True)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         key = model_id.lower()
         for name, vram in KNOWN_VRAM_MB.items():
             if name in key:

@@ -14,15 +14,22 @@ interface ImageResult {
 interface ImageInterfaceProps {
   modelId: string
   params: PlaygroundParams
+  canGenerate?: boolean
   canEdit?: boolean
 }
 
-export function ImageInterface({ modelId, params, canEdit = true }: ImageInterfaceProps) {
-  const [mode, setMode] = useState<Mode>("generate")
+export function ImageInterface({
+  modelId,
+  params,
+  canGenerate = true,
+  canEdit = true,
+}: ImageInterfaceProps) {
+  const [mode, setMode] = useState<Mode>(canGenerate ? "generate" : "edit")
 
   useEffect(() => {
     if (!canEdit && mode === "edit") setMode("generate")
-  }, [canEdit, mode])
+    else if (!canGenerate && mode === "generate") setMode("edit")
+  }, [canEdit, canGenerate, mode])
   const [prompt, setPrompt] = useState("")
   const [negativePrompt, setNegativePrompt] = useState("")
   const [steps, setSteps] = useState(30)
@@ -163,9 +170,11 @@ export function ImageInterface({ modelId, params, canEdit = true }: ImageInterfa
           <button
             type="button"
             onClick={() => setMode("generate")}
+            disabled={!canGenerate}
+            title={canGenerate ? undefined : "Este modelo solo edita, no genera desde texto"}
             className={`rounded px-3 py-1.5 transition ${
               mode === "generate" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"
-            }`}
+            } ${canGenerate ? "" : "cursor-not-allowed opacity-50 hover:bg-transparent"}`}
           >
             Generar
           </button>
@@ -186,9 +195,14 @@ export function ImageInterface({ modelId, params, canEdit = true }: ImageInterfa
             Sube una imagen base y, opcionalmente, una mascara (alfa transparente = zona a editar).
           </span>
         )}
-        {!canEdit && mode === "generate" && (
+        {!canEdit && canGenerate && mode === "generate" && (
           <span className="text-xs text-muted-foreground">
             Este modelo solo soporta generacion desde texto.
+          </span>
+        )}
+        {!canGenerate && canEdit && mode === "edit" && (
+          <span className="text-xs text-muted-foreground">
+            Este modelo solo admite edicion: sube una imagen base como entrada.
           </span>
         )}
       </div>

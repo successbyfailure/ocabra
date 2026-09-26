@@ -302,7 +302,7 @@ async def image_edits(
         profile_registry,
         user=user,
     )
-    check_capability(state, "image_generation", "image editing")
+    check_capability(state, "image_editing", "image editing")
 
     request_body: dict[str, Any] = {"prompt": prompt}
     for field in ("negative_prompt", "num_inference_steps", "guidance_scale",

@@ -184,7 +184,7 @@ class MageFlowBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(image_generation=True, streaming=False)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         model_path = Path(settings.models_dir) / model_id
         if not model_path.exists():
             return 0

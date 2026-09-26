@@ -880,7 +880,7 @@ class ModelManager:
 
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id)
+                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=state.extra_config)
                 if state.backend_type == "bitnet":
                     vram_needed = self._estimate_bitnet_vram_from_config(state)
                 elif state.backend_type == "llama_cpp":
@@ -1584,7 +1584,7 @@ class ModelManager:
                 return
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id)
+                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=state.extra_config)
                 gpu_indices = await self._gpu_scheduler.find_gpu_for_model(
                     vram_needed, state.preferred_gpu
                 )

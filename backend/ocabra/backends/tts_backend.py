@@ -227,7 +227,7 @@ class TTSBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(tts=True)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         normalized = model_id.lower()
         for key, size_mb in KNOWN_VRAM_MB.items():
             if key in normalized:

@@ -775,7 +775,7 @@ class VLLMBackend(BackendInterface):
             context_length=caps.get("context_length", 0),
         )
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         """
         Estimate VRAM from .safetensors file sizes × 1.2 overhead factor.
 

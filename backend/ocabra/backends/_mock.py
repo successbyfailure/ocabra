@@ -39,7 +39,7 @@ class MockBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(chat=True, streaming=True, context_length=4096)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         return self._vram_mb
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
