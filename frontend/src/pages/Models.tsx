@@ -20,7 +20,7 @@ import { StyledSelect } from "@/components/common/StyledSelect"
 import type { BackendExtraConfig, BackendType, LoadPolicy, ModelProfile, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
 
 function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
-  if (model.capabilities.imageGeneration) return "image"
+  if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
   if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
   return "llm"

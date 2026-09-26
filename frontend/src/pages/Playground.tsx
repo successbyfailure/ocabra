@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react"
-import { AlertTriangle, MessageSquarePlus, Radio, SlidersHorizontal, Sparkles } from "lucide-react"
+import {
+  AlertTriangle,
+  AudioLines,
+  Image as ImageIcon,
+  Layers,
+  MessageSquare,
+  MessageSquarePlus,
+  Radio,
+  SlidersHorizontal,
+  Sparkles,
+} from "lucide-react"
 import { Link } from "react-router-dom"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
@@ -14,14 +24,58 @@ import { PoolingInterface } from "@/components/playground/PoolingInterface"
 import { RealtimeInterface } from "@/components/playground/RealtimeInterface"
 import type { ModelState } from "@/types"
 
-type PlaygroundTab = "modal" | "realtime"
+type TaskTab = "text" | "image" | "audio" | "embeddings" | "realtime"
 
-function detectMode(model: ModelState | null): "chat" | "image" | "audio" | "pooling" {
-  if (!model) return "chat"
+const TAB_DEFS: Array<{
+  id: TaskTab
+  label: string
+  icon: typeof MessageSquare
+  matches: (m: ModelState) => boolean
+  emptyHint: string
+}> = [
+  {
+    id: "text",
+    label: "Texto",
+    icon: MessageSquare,
+    matches: (m) => m.capabilities.chat || m.capabilities.completion,
+    emptyHint: "No hay modelos de chat/completion cargados. Carga uno en /models o selecciona un agente.",
+  },
+  {
+    id: "image",
+    label: "Imagen",
+    icon: ImageIcon,
+    matches: (m) => m.capabilities.imageGeneration || m.capabilities.imageEditing,
+    emptyHint: "No hay modelos de imagen disponibles. Instala qwen-image-2.1 o qwen-image-edit-plus.",
+  },
+  {
+    id: "audio",
+    label: "Audio",
+    icon: AudioLines,
+    matches: (m) => m.capabilities.audioTranscription || m.capabilities.tts,
+    emptyHint: "No hay modelos de audio (STT/TTS) disponibles.",
+  },
+  {
+    id: "embeddings",
+    label: "Embeddings",
+    icon: Layers,
+    matches: (m) => m.capabilities.embeddings || m.capabilities.pooling || m.capabilities.rerank,
+    emptyHint: "No hay modelos de embeddings/rerank disponibles.",
+  },
+  {
+    id: "realtime",
+    label: "Realtime",
+    icon: Radio,
+    matches: () => true,
+    emptyHint: "",
+  },
+]
+
+function suggestInitialTab(model: ModelState | null): TaskTab {
+  if (!model) return "text"
   if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
-  if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
-  return "chat"
+  if (model.capabilities.embeddings || model.capabilities.pooling || model.capabilities.rerank) return "embeddings"
+  return "text"
 }
 
 const DEFAULT_PARAMS: PlaygroundParams = {
@@ -35,8 +89,8 @@ const DEFAULT_PARAMS: PlaygroundParams = {
 export function Playground() {
   const [loading, setLoading] = useState(true)
   const [models, setModels] = useState<ModelState[]>([])
-  // Honour ?model=... in the URL so other pages can deep-link into a
-  // preselected model or agent (e.g. the Agents page "Use in Playground" button).
+  // ?model=... lets other pages (Agents "Use in Playground") deep-link a
+  // preselected model. Task tab is inferred from it below on first load.
   const [selectedModelId, setSelectedModelId] = useState(() => {
     if (typeof window === "undefined") return ""
     return new URLSearchParams(window.location.search).get("model") ?? ""
@@ -46,7 +100,8 @@ export function Playground() {
     typeof window !== "undefined" && window.innerWidth >= 1280,
   )
   const [chatKey, setChatKey] = useState(0)
-  const [tab, setTab] = useState<PlaygroundTab>("modal")
+  const [tab, setTab] = useState<TaskTab | null>(null)
+  const [imageDraft, setImageDraft] = useState<{ url: string; prompt: string } | null>(null)
 
   const agents = useAgentsStore((s) => s.agents)
   const fetchAgents = useAgentsStore((s) => s.fetchAll)
@@ -72,8 +127,6 @@ export function Playground() {
         const loadedFirst = sorted.find((item) => item.status === "loaded")
         setModels(sorted)
         setSelectedModelId((prev) => {
-          // Preserve agent selections — they're not part of the models list
-          // but they're a valid choice in the dropdown.
           if (prev?.startsWith("agent/")) return prev
           if (prev && sorted.some((item) => item.modelId === prev)) return prev
           return loadedFirst?.modelId || sorted[0]?.modelId || ""
@@ -102,8 +155,6 @@ export function Playground() {
     [models, selectedModelId],
   )
 
-  // When an agent is selected, resolve the underlying model so we can show the
-  // same "model not loaded" warning + a quick capabilities readout.
   const agentBaseModel = useMemo(() => {
     if (!selectedAgent?.baseModelId) return null
     return models.find((item) => item.modelId === selectedAgent.baseModelId) ?? null
@@ -111,21 +162,52 @@ export function Playground() {
 
   const effectiveModel = selectedAgent ? agentBaseModel : selectedModel
 
-  // When an agent is selected its base model/profile determines capabilities; for now
-  // agents are chat-only so we force "chat" mode.
-  const mode = selectedAgent ? "chat" : detectMode(selectedModel)
+  // First-load auto-select: pick the tab that matches the initially selected
+  // model. After that, the user's explicit tab selection is honoured.
+  useEffect(() => {
+    if (tab !== null) return
+    if (!models.length && !selectedModel) return
+    setTab(selectedAgent ? "text" : suggestInitialTab(selectedModel))
+  }, [tab, models.length, selectedModel, selectedAgent])
 
-  // When an agent is active, the server forces its system prompt. Pass a placeholder
-  // so the client build doesn't leak the old system prompt to /v1/chat/completions.
+  // Compatible model list for the active tab. Agent selections stay valid on
+  // the Text tab because agents force chat.
+  const activeTab = tab ?? "text"
+  const filteredModels = useMemo(() => {
+    if (activeTab === "realtime") return models
+    const def = TAB_DEFS.find((t) => t.id === activeTab)!
+    return models.filter(def.matches)
+  }, [activeTab, models])
+
+  const tabHasSelection = useMemo(() => {
+    if (selectedAgent && activeTab === "text") return true
+    return filteredModels.some((m) => m.modelId === selectedModelId)
+  }, [filteredModels, selectedAgent, selectedModelId, activeTab])
+
+  // When the tab is switched and the current model doesn't match, prefer a
+  // compatible one (loaded first) so the interface has something to talk to.
+  useEffect(() => {
+    if (tab === null || tab === "realtime") return
+    if (tabHasSelection) return
+    const first = filteredModels.find((m) => m.status === "loaded") ?? filteredModels[0]
+    if (first) setSelectedModelId(first.modelId)
+  }, [tab, tabHasSelection, filteredModels])
+
   const effectiveParams = selectedAgent
     ? { ...params, systemPrompt: "" }
     : params
+
+  const consumeImageDraft = () => {
+    const draft = imageDraft
+    setImageDraft(null)
+    return draft
+  }
 
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-semibold">Playground</h1>
-        <p className="text-muted-foreground">Prueba chat, pooling, imagen y audio por capacidad del modelo.</p>
+        <p className="text-muted-foreground">Elige tarea, selecciona modelo compatible y trabaja.</p>
       </div>
 
       {loading ? (
@@ -135,173 +217,190 @@ export function Playground() {
         </div>
       ) : (
         <>
-          <div className="inline-flex rounded-md border border-border bg-card p-0.5">
-            <button
-              type="button"
-              onClick={() => setTab("modal")}
-              className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm transition-colors ${
-                tab === "modal"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <MessageSquarePlus size={14} />
-              Modal
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("realtime")}
-              className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm transition-colors ${
-                tab === "realtime"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Radio size={14} />
-              Realtime
-            </button>
+          <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-card p-0.5">
+            {TAB_DEFS.map((def) => {
+              const Icon = def.icon
+              const count = def.id === "realtime"
+                ? null
+                : models.filter(def.matches).length
+              const active = activeTab === def.id
+              return (
+                <button
+                  key={def.id}
+                  type="button"
+                  onClick={() => setTab(def.id)}
+                  className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm transition-colors ${
+                    active
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Icon size={14} />
+                  {def.label}
+                  {count !== null && count > 0 && (
+                    <span className={`ml-1 rounded-full px-1.5 text-[10px] ${
+                      active ? "bg-primary-foreground/20" : "bg-muted"
+                    }`}>{count}</span>
+                  )}
+                </button>
+              )
+            })}
           </div>
 
-          {tab === "realtime" ? (
+          {activeTab === "realtime" ? (
             <RealtimeInterface models={models} />
           ) : (
-          <>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex-1 min-w-0">
-              <ModelSelector
-                models={models}
-                selectedModelId={selectedModelId}
-                onSelect={setSelectedModelId}
-                agents={agents}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={() => setChatKey((k) => k + 1)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            >
-              <MessageSquarePlus size={14} />
-              Nueva conversacion
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowParams((p) => !p)}
-              className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors ${
-                showParams
-                  ? "border-primary/40 bg-primary/10 text-primary"
-                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-              }`}
-              title={showParams ? "Ocultar parametros" : "Mostrar parametros"}
-            >
-              <SlidersHorizontal size={14} />
-              <span className="hidden sm:inline">Params</span>
-            </button>
-          </div>
-
-          {selectedAgent && (
-            <Tooltip.Provider delayDuration={200}>
-              <Tooltip.Root>
-                <Tooltip.Trigger asChild>
-                  <div
-                    role="status"
-                    className="flex cursor-help items-start gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm text-primary"
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <ModelSelector
+                    models={filteredModels}
+                    selectedModelId={selectedModelId}
+                    onSelect={setSelectedModelId}
+                    agents={activeTab === "text" ? agents : []}
+                  />
+                </div>
+                {activeTab === "text" && (
+                  <button
+                    type="button"
+                    onClick={() => setChatKey((k) => k + 1)}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
                   >
-                    <Sparkles size={16} className="mt-0.5 shrink-0" />
-                    <span>
-                      Powered by agent:{" "}
-                      <code className="font-mono">agent/{selectedAgent.slug}</code>. El system
-                      prompt y las tools los impone el agente.
-                    </span>
-                  </div>
-                </Tooltip.Trigger>
-                <Tooltip.Portal>
-                  <Tooltip.Content
-                    side="bottom"
-                    className="z-50 max-w-md whitespace-pre-wrap rounded-md border border-border bg-popover p-3 text-xs shadow-md"
-                  >
-                    <p className="mb-1 font-semibold">System prompt</p>
-                    <p className="font-mono text-[11px] text-muted-foreground">
-                      {selectedAgent.systemPrompt.slice(0, 600)}
-                      {selectedAgent.systemPrompt.length > 600 ? "..." : ""}
-                    </p>
-                    <Tooltip.Arrow className="fill-border" />
-                  </Tooltip.Content>
-                </Tooltip.Portal>
-              </Tooltip.Root>
-            </Tooltip.Provider>
-          )}
-
-          {effectiveModel && effectiveModel.status !== "loaded" && (
-            <div role="alert" className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
-              <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" aria-hidden="true" />
-              <div>
-                <span className="font-medium">
-                  {selectedAgent ? "Modelo del agente no cargado" : "Modelo no cargado"}
-                </span>
-                {" — "}estado actual:{" "}
-                <span className="font-mono">{effectiveModel.status}</span>
-                {selectedAgent && (
-                  <>
-                    {" ("}
-                    <span className="font-mono">{effectiveModel.displayName}</span>
-                    {")"}
-                  </>
+                    <MessageSquarePlus size={14} />
+                    Nueva conversacion
+                  </button>
                 )}
-                .{" "}La primera llamada lo cargara automaticamente (puede tardar 1-2 min en frio).{" "}
-                <Link to="/models" className="underline underline-offset-2 hover:text-amber-50">
-                  Gestionar modelos
-                </Link>
+                <button
+                  type="button"
+                  onClick={() => setShowParams((p) => !p)}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                    showParams
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                  title={showParams ? "Ocultar parametros" : "Mostrar parametros"}
+                >
+                  <SlidersHorizontal size={14} />
+                  <span className="hidden sm:inline">Params</span>
+                </button>
               </div>
-            </div>
-          )}
 
-          <div className={`grid gap-4 transition-all duration-200 ${showParams ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
-            <section className="h-[calc(100vh-16rem)] min-h-[400px]">
-              {mode === "chat" && (
-                <ChatInterface
-                  key={chatKey}
-                  modelId={selectedModelId}
-                  backendType={selectedModel?.backendType ?? null}
-                  params={effectiveParams}
-                  modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
-                  audioInputCapable={Boolean(effectiveModel?.capabilities.audioInput)}
-                />
+              {selectedAgent && activeTab === "text" && (
+                <Tooltip.Provider delayDuration={200}>
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <div
+                        role="status"
+                        className="flex cursor-help items-start gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm text-primary"
+                      >
+                        <Sparkles size={16} className="mt-0.5 shrink-0" />
+                        <span>
+                          Powered by agent:{" "}
+                          <code className="font-mono">agent/{selectedAgent.slug}</code>. El system
+                          prompt y las tools los impone el agente.
+                        </span>
+                      </div>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content
+                        side="bottom"
+                        className="z-50 max-w-md whitespace-pre-wrap rounded-md border border-border bg-popover p-3 text-xs shadow-md"
+                      >
+                        <p className="mb-1 font-semibold">System prompt</p>
+                        <p className="font-mono text-[11px] text-muted-foreground">
+                          {selectedAgent.systemPrompt.slice(0, 600)}
+                          {selectedAgent.systemPrompt.length > 600 ? "..." : ""}
+                        </p>
+                        <Tooltip.Arrow className="fill-border" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                </Tooltip.Provider>
               )}
-              {mode === "pooling" && (
-                <PoolingInterface
-                  modelId={selectedModelId}
-                  scoreCapable={Boolean(selectedModel?.capabilities.score)}
-                  rerankCapable={Boolean(selectedModel?.capabilities.rerank)}
-                  classificationCapable={Boolean(selectedModel?.capabilities.classification)}
-                />
+
+              {effectiveModel && effectiveModel.status !== "loaded" && (
+                <div role="alert" className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-amber-100">
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" aria-hidden="true" />
+                  <div>
+                    <span className="font-medium">
+                      {selectedAgent ? "Modelo del agente no cargado" : "Modelo no cargado"}
+                    </span>
+                    {" — "}estado actual:{" "}
+                    <span className="font-mono">{effectiveModel.status}</span>
+                    {selectedAgent && (
+                      <>
+                        {" ("}
+                        <span className="font-mono">{effectiveModel.displayName}</span>
+                        {")"}
+                      </>
+                    )}
+                    .{" "}La primera llamada lo cargara automaticamente (puede tardar 1-2 min en frio).{" "}
+                    <Link to="/models" className="underline underline-offset-2 hover:text-amber-50">
+                      Gestionar modelos
+                    </Link>
+                  </div>
+                </div>
               )}
-              {mode === "image" && (
-                <ImageInterface
-                  modelId={selectedModelId}
-                  params={effectiveParams}
-                  canGenerate={Boolean(selectedModel?.capabilities.imageGeneration)}
-                  canEdit={Boolean(selectedModel?.capabilities.imageEditing)}
-                />
+
+              {filteredModels.length === 0 && !selectedAgent && (
+                <div
+                  role="status"
+                  className="rounded-md border border-border bg-card px-3 py-4 text-sm text-muted-foreground"
+                >
+                  {TAB_DEFS.find((t) => t.id === activeTab)?.emptyHint}
+                </div>
               )}
-              {mode === "audio" && (
-                <AudioInterface
-                  modelId={selectedModelId}
-                  params={effectiveParams}
-                  canTranscribe={Boolean(selectedModel?.capabilities.audioTranscription)}
-                  canTTS={Boolean(selectedModel?.capabilities.tts)}
-                />
-              )}
-            </section>
-            {showParams && (
-              <ParamsPanel
-                params={params}
-                onChange={setParams}
-                disableSystemPrompt={Boolean(selectedAgent)}
-                modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
-              />
-            )}
-          </div>
-          </>
+
+              <div className={`grid gap-4 transition-all duration-200 ${showParams ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
+                <section className="h-[calc(100vh-16rem)] min-h-[400px]">
+                  {activeTab === "text" && (
+                    <ChatInterface
+                      key={chatKey}
+                      modelId={selectedModelId}
+                      backendType={selectedModel?.backendType ?? null}
+                      params={effectiveParams}
+                      modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
+                      audioInputCapable={Boolean(effectiveModel?.capabilities.audioInput)}
+                    />
+                  )}
+                  {activeTab === "embeddings" && (
+                    <PoolingInterface
+                      modelId={selectedModelId}
+                      scoreCapable={Boolean(selectedModel?.capabilities.score)}
+                      rerankCapable={Boolean(selectedModel?.capabilities.rerank)}
+                      classificationCapable={Boolean(selectedModel?.capabilities.classification)}
+                    />
+                  )}
+                  {activeTab === "image" && (
+                    <ImageInterface
+                      modelId={selectedModelId}
+                      params={effectiveParams}
+                      canGenerate={Boolean(selectedModel?.capabilities.imageGeneration)}
+                      canEdit={Boolean(selectedModel?.capabilities.imageEditing)}
+                      supportsMultiRef={selectedModelId === "qwen-image-edit-plus" || selectedModelId.endsWith("/qwen-image-edit-plus")}
+                      editDraft={consumeImageDraft()}
+                      onSendToEdit={(url, prompt) => setImageDraft({ url, prompt })}
+                    />
+                  )}
+                  {activeTab === "audio" && (
+                    <AudioInterface
+                      modelId={selectedModelId}
+                      params={effectiveParams}
+                      canTranscribe={Boolean(selectedModel?.capabilities.audioTranscription)}
+                      canTTS={Boolean(selectedModel?.capabilities.tts)}
+                    />
+                  )}
+                </section>
+                {showParams && (
+                  <ParamsPanel
+                    params={params}
+                    onChange={setParams}
+                    disableSystemPrompt={Boolean(selectedAgent)}
+                    modelContextLength={effectiveModel?.capabilities.contextLength ?? null}
+                  />
+                )}
+              </div>
+            </>
           )}
         </>
       )}

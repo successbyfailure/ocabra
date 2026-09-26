@@ -240,6 +240,20 @@ async def image_edits(
         )
 
     image_bytes = await image.read()
+    # Optional extra reference images for native multi-image edit pipelines
+    # (Qwen-Image-Edit-Plus takes up to 3). Accepts either repeated ``image``
+    # form fields or explicit ``image_ref_1``/``image_ref_2`` slots — the UI
+    # uses the latter so the primary image stays under ``image``.
+    extra_image_bytes: list[bytes] = []
+    for extra_key in ("image_ref_1", "image_ref_2", "image_ref_3"):
+        extra_upload = form.get(extra_key)
+        if extra_upload is not None and hasattr(extra_upload, "read"):
+            extra_image_bytes.append(await extra_upload.read())
+    if not extra_image_bytes:
+        for extra_upload in form.getlist("image"):
+            if extra_upload is image or not hasattr(extra_upload, "read"):
+                continue
+            extra_image_bytes.append(await extra_upload.read())
     mask_upload = form.get("mask")
     mask_bytes: bytes | None = None
     mask_filename: str | None = None
@@ -272,6 +286,12 @@ async def image_edits(
             image.content_type or "image/png",
         )
     }
+    for idx, extra in enumerate(extra_image_bytes, start=1):
+        federation_files[f"image_ref_{idx}"] = (
+            f"image_ref_{idx}.png",
+            extra,
+            "image/png",
+        )
     if mask_bytes is not None:
         federation_files["mask"] = (
             mask_filename or "mask.png",
@@ -330,9 +350,20 @@ async def image_edits(
     if size_raw and not hasattr(size_raw, "read"):
         width, height = _parse_size(str(size_raw))
 
+    # Serialize the primary image + any extras as a list under ``image_b64``
+    # when we have refs, keeping the single-string shape otherwise (worker
+    # accepts both and older clients rely on the string form).
+    if extra_image_bytes:
+        image_b64_field: Any = [
+            base64.b64encode(image_bytes).decode("ascii"),
+            *[base64.b64encode(b).decode("ascii") for b in extra_image_bytes],
+        ]
+    else:
+        image_b64_field = base64.b64encode(image_bytes).decode("ascii")
+
     worker_body: dict[str, Any] = {
         "prompt": merged_body.get("prompt", ""),
-        "image_b64": base64.b64encode(image_bytes).decode("ascii"),
+        "image_b64": image_b64_field,
     }
     if mask_bytes is not None:
         worker_body["mask_b64"] = base64.b64encode(mask_bytes).decode("ascii")
@@ -367,7 +398,12 @@ async def image_edits(
     # are redacted (only the size is informative); everything else is the
     # full payload the pipeline will see.
     log_payload = {k: v for k, v in worker_body.items() if k not in ("image_b64", "mask_b64")}
-    log_payload["image_bytes"] = len(worker_body.get("image_b64", "")) * 3 // 4
+    _img_field = worker_body.get("image_b64")
+    if isinstance(_img_field, list):
+        log_payload["image_count"] = len(_img_field)
+        log_payload["image_bytes"] = sum(len(x) for x in _img_field) * 3 // 4
+    else:
+        log_payload["image_bytes"] = len(_img_field or "") * 3 // 4
     if "mask_b64" in worker_body:
         log_payload["mask_bytes"] = len(worker_body["mask_b64"]) * 3 // 4
     logger.info(

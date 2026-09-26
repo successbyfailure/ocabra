@@ -75,7 +75,11 @@ class EditRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt: str
-    image_b64: str
+    # ``image_b64`` accepts a single base64 string (traditional img2img /
+    # inpainting) or a list of them. Native edit pipelines like
+    # QwenImageEditPlusPipeline take up to 3 reference images and blend them
+    # according to the prompt.
+    image_b64: str | list[str]
     mask_b64: str | None = None
     negative_prompt: str | None = None
     # When omitted, output keeps the input image's dimensions.
@@ -563,7 +567,16 @@ def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
     if state.pipeline is None:
         raise RuntimeError("Pipeline not loaded")
 
-    base_image = _decode_b64_image(req.image_b64, field="image_b64").convert("RGB")
+    # ``image_b64`` may be a single string (canonical img2img/inpaint) or a
+    # list (native multi-image edit — QwenImageEditPlus takes up to 3 refs).
+    raw_images = req.image_b64 if isinstance(req.image_b64, list) else [req.image_b64]
+    if not raw_images:
+        raise HTTPException(status_code=400, detail="No image provided")
+    base_images = [
+        _decode_b64_image(b64, field=f"image_b64[{i}]").convert("RGB")
+        for i, b64 in enumerate(raw_images)
+    ]
+    base_image = base_images[0]
 
     mask_image = None
     if req.mask_b64:
@@ -577,6 +590,10 @@ def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
     height = req.height or base_image.height
     if (width, height) != base_image.size:
         base_image = base_image.resize((width, height))
+        base_images = [
+            img.resize((width, height)) if img.size != (width, height) else img
+            for img in base_images
+        ]
         if mask_image is not None:
             mask_image = mask_image.resize((width, height))
 
@@ -588,10 +605,18 @@ def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
     else:
         generator = torch.Generator().manual_seed(seed_used)
 
+    # Native edit pipelines (QwenImageEditPlus…) accept a list of references
+    # under ``image``. Traditional img2img/inpainting pipelines expect a
+    # single PIL image; fall back to just the first when >1 was submitted.
+    if state.pipeline_type in _EDIT_NATIVE_PIPELINES and len(base_images) > 1:
+        image_kwarg: Any = base_images
+    else:
+        image_kwarg = base_image
+
     candidate_kwargs: dict[str, Any] = {
         "prompt": req.prompt,
         "negative_prompt": req.negative_prompt,
-        "image": base_image,
+        "image": image_kwarg,
         "mask_image": mask_image,
         "width": width,
         "height": height,

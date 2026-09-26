@@ -41,7 +41,7 @@ const CATEGORY_COLORS: Record<ProfileCategory, string> = {
 function inferDefaultCategory(model: ModelState): ProfileCategory {
   if (model.capabilities.tts) return "tts"
   if (model.capabilities.audioTranscription) return "stt"
-  if (model.capabilities.imageGeneration) return "image"
+  if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
   if (model.capabilities.musicGeneration) return "music"
   return "llm"
 }
