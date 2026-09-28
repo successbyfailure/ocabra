@@ -150,6 +150,13 @@ class ModelManager:
         # from stepping on each other. The per-model lock above still
         # covers concurrent requests for the same model.
         self._backend_load_gate: asyncio.Lock = asyncio.Lock()
+        # Counters exposed to clients so they can render meaningful hints
+        # instead of a spinner during cold starts.
+        # ``_load_queue_waiters``: how many loads are currently blocked
+        # behind the backend gate (excluding the one holding it).
+        # ``_load_in_progress``: model_id set of loads currently active.
+        self._load_queue_waiters: int = 0
+        self._load_in_progress: set[str] = set()
         self._persisted_model_ids: set[str] = set()
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
         # In-flight request tracking
@@ -1069,14 +1076,28 @@ class ModelManager:
                     )
                     effective_extra = state.extra_config
 
-                async with self._backend_load_gate:
-                    worker_info = await backend.load(
-                        state.backend_model_id,
-                        gpu_indices,
-                        port=assigned_port,
-                        extra_config=effective_extra,
-                        load_policy=state.load_policy.value,
-                    )
+                self._load_queue_waiters += 1
+                try:
+                    async with self._backend_load_gate:
+                        self._load_queue_waiters -= 1
+                        self._load_in_progress.add(model_id)
+                        try:
+                            worker_info = await backend.load(
+                                state.backend_model_id,
+                                gpu_indices,
+                                port=assigned_port,
+                                extra_config=effective_extra,
+                                load_policy=state.load_policy.value,
+                            )
+                        finally:
+                            self._load_in_progress.discard(model_id)
+                except BaseException:
+                    # We may have decremented already inside the ``with`` (if
+                    # the gate was acquired). Only decrement here when the
+                    # exception happened before we entered the block.
+                    if self._load_queue_waiters > 0 and model_id not in self._load_in_progress:
+                        self._load_queue_waiters -= 1
+                    raise
                 backend_loaded = True
                 capabilities = await backend.get_capabilities(state.backend_model_id)
                 capabilities = self._apply_capability_fallbacks(state, capabilities)

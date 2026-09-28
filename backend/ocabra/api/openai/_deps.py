@@ -465,6 +465,13 @@ async def build_model_status_headers(
             expected = await model_manager.get_expected_load_seconds(base_model_id)
         if expected is not None:
             headers["X-Ocabra-Expected-Wait-Seconds"] = str(expected)
+    # Cross-request load pressure. Clients render this as "queued behind N
+    # cold starts" so the wait doesn't feel silent.
+    queue_waiters = int(getattr(model_manager, "_load_queue_waiters", 0) or 0)
+    in_progress = len(getattr(model_manager, "_load_in_progress", set()) or ())
+    if queue_waiters or in_progress:
+        headers["X-Ocabra-Load-Queue-Depth"] = str(queue_waiters + in_progress)
+        headers["X-Ocabra-Load-Active"] = str(in_progress)
     return headers
 
 

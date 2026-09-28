@@ -1056,6 +1056,7 @@ app.include_router(health_router)
 
 # ── Internal routers (hidden from /docs — admin dashboard only) ──
 from ocabra.api.internal.gpus import router as gpus_router
+from ocabra.api.internal.status import router as status_router
 from ocabra.api.internal.video import router as video_router  # noqa: E402
 from ocabra.api.internal.models import router as models_router
 from ocabra.api.internal.ws import router as ws_router
@@ -1067,6 +1068,7 @@ from ocabra.api.internal.ollama_admin import router as ollama_admin_router  # no
 from ocabra.api.internal.models_update import router as models_update_router  # noqa: E402
 
 app.include_router(gpus_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(status_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(video_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)

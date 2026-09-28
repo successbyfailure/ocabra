@@ -106,6 +106,13 @@ class WorkerState:
     # text2img pipeline (no extra VRAM, no second load).
     img2img_pipeline: Any = None
     inpaint_pipeline: Any = None
+    # Serializes concurrent /generate + /edit calls: diffusers pipelines
+    # mutate the scheduler (``sigmas`` index) on every step, so two callers
+    # sharing the same pipeline object trample each other and crash with
+    # ``IndexError: sigmas[N] out of bounds``. One inference at a time per
+    # worker keeps state coherent; callers with parallel needs run separate
+    # workers (per-profile) instead.
+    inference_lock: asyncio.Lock | None = None
 
 
 def detect_pipeline_class(model_path: Path) -> str:
@@ -667,6 +674,10 @@ def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
 def create_app(state: WorkerState) -> FastAPI:
     app = FastAPI(title="oCabra Diffusers Worker")
 
+    @app.on_event("startup")
+    async def _init_inference_lock() -> None:  # noqa: RUF029
+        state.inference_lock = asyncio.Lock()
+
     @app.post("/generate", response_model=GenerateResponse)
     async def generate(req: GenerateRequest) -> GenerateResponse:
         if state.pipeline is None:
@@ -674,9 +685,11 @@ def create_app(state: WorkerState) -> FastAPI:
                 status_code=503, detail=state.load_error or "Pipeline not ready"
             )
 
-        loop = asyncio.get_running_loop()
-        run = partial(generate_sync, state, req)
-        return await loop.run_in_executor(None, run)
+        assert state.inference_lock is not None
+        async with state.inference_lock:
+            loop = asyncio.get_running_loop()
+            run = partial(generate_sync, state, req)
+            return await loop.run_in_executor(None, run)
 
     @app.post("/edit", response_model=GenerateResponse)
     async def edit(req: EditRequest) -> GenerateResponse:
@@ -685,9 +698,11 @@ def create_app(state: WorkerState) -> FastAPI:
                 status_code=503, detail=state.load_error or "Pipeline not ready"
             )
 
-        loop = asyncio.get_running_loop()
-        run = partial(edit_sync, state, req)
-        return await loop.run_in_executor(None, run)
+        assert state.inference_lock is not None
+        async with state.inference_lock:
+            loop = asyncio.get_running_loop()
+            run = partial(edit_sync, state, req)
+            return await loop.run_in_executor(None, run)
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
