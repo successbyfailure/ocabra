@@ -9,6 +9,7 @@ from typing import Annotated, Any
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
 
@@ -20,6 +21,7 @@ from ._deps import (
     get_openai_user,
     get_profile_registry,
     merge_profile_defaults,
+    ocabra_response_headers,
     raise_upstream_http_error,
     resolve_profile,
     to_backend_body,
@@ -62,6 +64,7 @@ async def embeddings(
         model_manager,
         profile_registry,
         user=user,
+        request_state=request.state,
     )
     check_capability(state, "embeddings", "embeddings")
 
@@ -70,10 +73,14 @@ async def embeddings(
 
     worker_pool = request.app.state.worker_pool
     try:
-        return await worker_pool.forward_request(
+        result = await worker_pool.forward_request(
             worker_key,
             "/v1/embeddings",
             to_backend_body(state, merged_body),
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    resp_headers = await ocabra_response_headers(
+        request, model_manager, worker_key, profile.base_model_id
+    )
+    return JSONResponse(content=result, headers=resp_headers)

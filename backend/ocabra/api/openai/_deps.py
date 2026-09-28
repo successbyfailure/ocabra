@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -176,6 +177,61 @@ def get_profile_registry(request: Request) -> ProfileRegistry:
     return registry
 
 
+async def ocabra_response_headers(
+    request: object,
+    model_manager: ModelManager,
+    worker_key: str,
+    base_model_id: str,
+) -> dict[str, str]:
+    """Compact wrapper for post-load endpoints.
+
+    Reads ``pre_load_status`` and ``load_started_wall`` off ``request.state``
+    (populated by :func:`_snapshot_pre_load`) and calls
+    :func:`build_model_status_headers` with the cold-start + router fields
+    already filled in. Endpoints get a one-liner for the whole header set.
+    """
+    st = getattr(request, "state", None)
+    pre_status = getattr(st, "pre_load_status", None) if st is not None else None
+    load_started = getattr(st, "load_started_wall", None) if st is not None else None
+    via_router = getattr(st, "via_router_profile_id", None) if st is not None else None
+    router_target = getattr(st, "resolved_model_id", None) if st is not None else None
+    elapsed_ms: int | None = None
+    if load_started is not None:
+        elapsed_ms = int(max(0.0, time.monotonic() - load_started) * 1000)
+    return await build_model_status_headers(
+        model_manager,
+        worker_key,
+        base_model_id,
+        pre_status=pre_status,
+        elapsed_ms=elapsed_ms,
+        via_router_profile_id=via_router,
+        router_target_profile_id=router_target,
+    )
+
+
+async def _snapshot_pre_load(
+    model_manager: ModelManager,
+    worker_key: str,
+    request_state: object | None,
+) -> None:
+    """Stamp ``pre_load_status`` + ``load_started_wall`` on ``request.state``.
+
+    Called right before ``_ensure_worker_loaded`` so downstream endpoints can
+    tell whether the request paid for a cold start and how long the load
+    took. No-op when ``request_state`` isn't provided.
+    """
+    if request_state is None:
+        return
+    try:
+        if hasattr(request_state, "pre_load_status"):
+            return  # first snapshot wins (e.g. router fallback path)
+        state = await model_manager.get_state(worker_key)
+        request_state.pre_load_status = state.status.value if state is not None else "unknown"
+        request_state.load_started_wall = time.monotonic()
+    except Exception:  # noqa: BLE001 — never block resolution on telemetry
+        pass
+
+
 async def resolve_profile(
     profile_id: str,
     model_manager: ModelManager,
@@ -248,6 +304,7 @@ async def resolve_profile(
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None:
                 worker_key = compute_worker_key(target.base_model_id, target.load_overrides)
+                await _snapshot_pre_load(model_manager, worker_key, request_state)
                 state = await _ensure_worker_loaded(
                     model_manager,
                     target.base_model_id,
@@ -283,6 +340,7 @@ async def resolve_profile(
             # request still gets served with the router's own base_model_id.
 
         worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        await _snapshot_pre_load(model_manager, worker_key, request_state)
         state = await _ensure_worker_loaded(
             model_manager,
             profile.base_model_id,
@@ -320,6 +378,7 @@ async def resolve_profile(
                 status_code=404,
             )
         worker_key = compute_worker_key(selected.base_model_id, selected.load_overrides)
+        await _snapshot_pre_load(model_manager, worker_key, request_state)
         state = await _ensure_worker_loaded(
             model_manager,
             selected.base_model_id,
@@ -436,14 +495,38 @@ async def build_model_status_headers(
     model_manager: ModelManager,
     worker_key: str,
     base_model_id: str,
+    *,
+    pre_status: str | None = None,
+    elapsed_ms: int | None = None,
+    via_router_profile_id: str | None = None,
+    router_target_profile_id: str | None = None,
 ) -> dict[str, str]:
-    """Return diagnostic headers describing the worker's current load state.
+    """Return the canonical ``X-Ocabra-*`` header set for any request.
 
-    Always includes ``X-Ocabra-Model-Status`` and ``X-Ocabra-Model-Id``. When
-    the worker is not yet loaded, also adds
-    ``X-Ocabra-Expected-Wait-Seconds`` based on historical load times. Headers
-    are intended to be flushed *before* the load begins (streaming endpoints)
-    so the client learns the wait time up front.
+    Base fields (always emitted when the state is known):
+      - ``X-Ocabra-Model-Status`` — worker state at header-flush time.
+      - ``X-Ocabra-Model-Id`` — canonical model id after router resolution.
+
+    Pressure hints (emitted only when the worker isn't yet ``loaded``):
+      - ``X-Ocabra-Expected-Wait-Seconds`` — median of the last 5 loads.
+      - ``X-Ocabra-Load-Queue-Depth`` / ``-Load-Active`` — how many other
+        loads are pending/running behind the backend gate.
+
+    Cold-start flags (post-load; require ``pre_status`` from *before* the
+    load call):
+      - ``X-Ocabra-Was-Cold-Start`` — ``"1"`` when the client paid for a
+        load. Omitted when the model was already warm.
+      - ``X-Ocabra-Load-Duration-Ms`` — how long the request had to wait
+        for the model to be ready. Requires ``elapsed_ms``.
+
+    Router attribution (chat/completions routers):
+      - ``X-Ocabra-Router`` — the router profile the client asked for.
+      - ``X-Ocabra-Router-Target`` — the target profile that actually ran.
+
+    Streaming endpoints call this **before** the load with no cold-start /
+    router kwargs; non-streaming ones call it **after** and pass
+    ``pre_status``/``elapsed_ms`` so the response fully describes what
+    happened.
     """
     state = await model_manager.get_state(worker_key)
     if state is None and worker_key != base_model_id:
@@ -472,6 +555,20 @@ async def build_model_status_headers(
     if queue_waiters or in_progress:
         headers["X-Ocabra-Load-Queue-Depth"] = str(queue_waiters + in_progress)
         headers["X-Ocabra-Load-Active"] = str(in_progress)
+
+    # Cold-start attribution — set only when the caller captured the state
+    # before triggering the load. ``pre_status="loaded"`` is treated as
+    # "warm request" and both fields are omitted.
+    if pre_status is not None and pre_status != "loaded":
+        headers["X-Ocabra-Was-Cold-Start"] = "1"
+        if elapsed_ms is not None and elapsed_ms >= 0:
+            headers["X-Ocabra-Load-Duration-Ms"] = str(int(elapsed_ms))
+
+    # Router attribution — same shape as chat/completions streaming today.
+    if via_router_profile_id:
+        headers["X-Ocabra-Router"] = str(via_router_profile_id)
+        if router_target_profile_id:
+            headers["X-Ocabra-Router-Target"] = str(router_target_profile_id)
     return headers
 
 

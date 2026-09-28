@@ -245,6 +245,7 @@ async def _resolve_and_forward(
         model_manager,
         profile_registry,
         user=user,
+        request_state=request.state,
     )
     check_capability(state, capability, endpoint_label)
 
@@ -253,13 +254,20 @@ async def _resolve_and_forward(
 
     worker_pool = request.app.state.worker_pool
     try:
-        return await worker_pool.forward_request(
+        result = await worker_pool.forward_request(
             worker_key,
             forward_path,
             to_backend_body(state, merged_body),
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    from fastapi.responses import JSONResponse
+    from ocabra.api.openai._deps import ocabra_response_headers
+
+    resp_headers = await ocabra_response_headers(
+        request, model_manager, worker_key, profile.base_model_id
+    )
+    return JSONResponse(content=result, headers=resp_headers)
 
 
 @router.post("/pooling", summary="Run pooling on a model")

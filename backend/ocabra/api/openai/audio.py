@@ -12,7 +12,7 @@ from typing import Annotated, Any
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, Request, UploadFile
-from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
@@ -177,6 +177,7 @@ async def transcriptions(
         model_manager,
         profile_registry,
         user=user,
+        request_state=request.state,
     )
     check_capability(state, "audio_transcription", "audio transcription")
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
@@ -275,11 +276,16 @@ async def transcriptions(
             status_code=503,
         )
 
+    from ocabra.api.openai._deps import ocabra_response_headers
+
+    stt_headers = await ocabra_response_headers(
+        request, model_manager, worker_key, profile.base_model_id
+    )
     # OpenAI format: {"text": "..."}
     normalized_format = str(response_format).lower()
     if normalized_format in {"text", "srt", "vtt"}:
-        return PlainTextResponse(resp.text)
-    return resp.json()
+        return PlainTextResponse(resp.text, headers=stt_headers)
+    return JSONResponse(content=resp.json(), headers=stt_headers)
 
 
 @router.get("/audio/voices", summary="List TTS voices for a model")
@@ -395,6 +401,7 @@ async def speech(
         model_manager,
         profile_registry,
         user=user,
+        request_state=request.state,
     )
     check_capability(state, "tts", "text-to-speech")
 
@@ -444,6 +451,13 @@ async def speech(
     if instruct:
         payload["instruct"] = instruct
 
+    from ocabra.api.openai._deps import ocabra_response_headers
+
+    tts_headers = await ocabra_response_headers(
+        request, model_manager, worker_key, profile.base_model_id
+    )
+    tts_headers["Content-Disposition"] = f'attachment; filename="speech.{response_format}"'
+
     if not stream_safe:
         # Non-streaming (WAV): fetch full response so errors propagate correctly
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -454,7 +468,7 @@ async def speech(
             return StreamingResponse(
                 iter([resp.content]),
                 media_type=content_type,
-                headers={"Content-Disposition": f'attachment; filename="speech.{response_format}"'},
+                headers=tts_headers,
             )
 
     async def _stream_audio():
@@ -473,7 +487,7 @@ async def speech(
     return StreamingResponse(
         _stream_audio(),
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="speech.{response_format}"'},
+        headers=tts_headers,
     )
 
 
@@ -531,6 +545,7 @@ async def generate_music(
         model_manager,
         profile_registry,
         user=user,
+        request_state=request.state,
     )
     check_capability(state, "music_generation", "music generation")
 
@@ -576,8 +591,14 @@ async def generate_music(
 
     audio_bytes, content_type = result[0], result[1]
     filename = f"music.{response_format}"
+    from ocabra.api.openai._deps import ocabra_response_headers
+
+    music_headers = await ocabra_response_headers(
+        request, model_manager, worker_key, profile.base_model_id
+    )
+    music_headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return Response(
         content=audio_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=music_headers,
     )

@@ -130,13 +130,16 @@ async def completions(
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
             }
-            headers.update(
-                await build_model_status_headers(model_manager, worker_key, profile.base_model_id)
-            )
             via_router = getattr(request.state, "via_router_profile_id", None)
-            if via_router:
-                headers["X-Ocabra-Router"] = str(via_router)
-                headers["X-Ocabra-Router-Target"] = profile.profile_id
+            headers.update(
+                await build_model_status_headers(
+                    model_manager,
+                    worker_key,
+                    profile.base_model_id,
+                    via_router_profile_id=via_router,
+                    router_target_profile_id=profile.profile_id if via_router else None,
+                )
+            )
             return StreamingResponse(
                 _stream_completions_with_load(
                     model_manager=model_manager,
@@ -178,7 +181,13 @@ async def completions(
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    return result
+    from fastapi.responses import JSONResponse
+    from ocabra.api.openai._deps import ocabra_response_headers
+
+    resp_headers = await ocabra_response_headers(
+        request, model_manager, worker_key, profile.base_model_id
+    )
+    return JSONResponse(content=result, headers=resp_headers)
 
 
 def _sse_error(message: str, code: str) -> bytes:

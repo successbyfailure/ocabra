@@ -25,6 +25,7 @@ from ocabra.config import settings
 
 from ._deps import (
     _openai_error,
+    build_model_status_headers,
     check_capability,
     compute_worker_key,
     get_federation_manager,
@@ -142,10 +143,7 @@ async def image_generations(
 
     # Capture load state up front so we can surface it as headers on the
     # eventual response — clients then see whether they paid a cold start.
-    from ocabra.api.openai._deps import build_model_status_headers as _bmsh
-
     pre_status = state.status.value
-    pre_headers = await _bmsh(model_manager, worker_key, profile.base_model_id)
     load_started_wall = time.monotonic()
 
     # Translate OpenAI size to width/height
@@ -194,12 +192,13 @@ async def image_generations(
             "created": int(time.time()),
             "data": [{"b64_json": img.get("b64_json", "")} for img in images],
         }
-    resp_headers = dict(pre_headers)
-    if pre_status != "loaded":
-        resp_headers["X-Ocabra-Was-Cold-Start"] = "1"
-        resp_headers["X-Ocabra-Load-Duration-Ms"] = str(
-            int((time.monotonic() - load_started_wall) * 1000)
-        )
+    resp_headers = await build_model_status_headers(
+        model_manager,
+        worker_key,
+        profile.base_model_id,
+        pre_status=pre_status,
+        elapsed_ms=int((time.monotonic() - load_started_wall) * 1000),
+    )
     return JSONResponse(content=payload, headers=resp_headers)
 
 
@@ -339,10 +338,7 @@ async def image_edits(
     check_capability(state, "image_editing", "image editing")
 
     # Snapshot cold-start state for the response headers below.
-    from ocabra.api.openai._deps import build_model_status_headers as _bmsh
-
     pre_status = state.status.value
-    pre_headers = await _bmsh(model_manager, profile.base_model_id, profile.base_model_id)
     edit_started_wall = time.monotonic()
 
     request_body: dict[str, Any] = {"prompt": prompt}
@@ -484,12 +480,13 @@ async def image_edits(
             "created": int(time.time()),
             "data": [{"b64_json": img.get("b64_json", "")} for img in images],
         }
-    edit_headers = dict(pre_headers)
-    if pre_status != "loaded":
-        edit_headers["X-Ocabra-Was-Cold-Start"] = "1"
-        edit_headers["X-Ocabra-Load-Duration-Ms"] = str(
-            int((time.monotonic() - edit_started_wall) * 1000)
-        )
+    edit_headers = await build_model_status_headers(
+        model_manager,
+        profile.base_model_id,
+        profile.base_model_id,
+        pre_status=pre_status,
+        elapsed_ms=int((time.monotonic() - edit_started_wall) * 1000),
+    )
     return JSONResponse(content=edit_payload, headers=edit_headers)
 
 
