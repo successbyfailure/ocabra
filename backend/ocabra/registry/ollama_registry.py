@@ -290,7 +290,10 @@ class OllamaRegistry:
 
     async def load(self, model_ref: str, keep_alive: str | int | None = None) -> None:
         keep_alive_value = settings.ollama_keep_alive if keep_alive is None else keep_alive
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # 180s covers cold starts of ~30B models (llama-server spawn + blob
+        # read + first CUDA discovery). The old 120s tripped on qwen3:32b and
+        # gemma4:26b-ctx160k under normal load.
+        async with httpx.AsyncClient(timeout=180.0) as client:
             if self._is_embed_model(model_ref):
                 payload: dict[str, object] = {
                     "model": model_ref,

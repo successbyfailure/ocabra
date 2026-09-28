@@ -141,6 +141,15 @@ class ModelManager:
         self._service_manager = None
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
+        # Global gate around ``backend.load()`` to serialise cross-backend
+        # starts. Ollama's ``llama-server`` GPU discovery has a hardcoded
+        # watchdog that trips when other CUDA processes are booting in
+        # parallel (torch/diffusers workers); the failure surfaces as
+        # ``context deadline exceeded`` and the load hangs for minutes. A
+        # single mutex around the actual load call keeps parallel starts
+        # from stepping on each other. The per-model lock above still
+        # covers concurrent requests for the same model.
+        self._backend_load_gate: asyncio.Lock = asyncio.Lock()
         self._persisted_model_ids: set[str] = set()
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
         # In-flight request tracking
@@ -1060,13 +1069,14 @@ class ModelManager:
                     )
                     effective_extra = state.extra_config
 
-                worker_info = await backend.load(
-                    state.backend_model_id,
-                    gpu_indices,
-                    port=assigned_port,
-                    extra_config=effective_extra,
-                    load_policy=state.load_policy.value,
-                )
+                async with self._backend_load_gate:
+                    worker_info = await backend.load(
+                        state.backend_model_id,
+                        gpu_indices,
+                        port=assigned_port,
+                        extra_config=effective_extra,
+                        load_policy=state.load_policy.value,
+                    )
                 backend_loaded = True
                 capabilities = await backend.get_capabilities(state.backend_model_id)
                 capabilities = self._apply_capability_fallbacks(state, capabilities)
@@ -1120,7 +1130,12 @@ class ModelManager:
                 if "assigned_port" in locals() and assigned_port:
                     self._worker_pool.release_port(assigned_port)
                 await self._publish_event(model_id, "load_failed")
-                logger.error("model_load_failed", model_id=model_id, error=str(e))
+                # ``str(e)`` returns empty for ``asyncio.TimeoutError`` and
+                # some bare exception classes, which used to hide the real
+                # cause of ollama load failures. Fall back to a typed label
+                # so the log always names *something*.
+                _err_text = str(e) or f"{type(e).__name__}"
+                logger.error("model_load_failed", model_id=model_id, error=_err_text)
                 from ocabra.core.scheduler import InsufficientVRAMError
 
                 if isinstance(e, InsufficientVRAMError):
