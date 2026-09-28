@@ -1,7 +1,9 @@
 import { useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
-import { LogOut, Menu, Search, X } from "lucide-react"
+import { Loader2, LogOut, Menu, Search, X } from "lucide-react"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import { useAuthStore } from "@/stores/authStore"
+import { useServerStatus } from "@/hooks/useServerStatus"
 import { api } from "@/api/client"
 
 interface HeaderProps {
@@ -32,6 +34,11 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
   const logout = useAuthStore((s) => s.logout)
 
   const pageTitle = PAGE_TITLES[location.pathname] ?? ""
+  const serverStatus = useServerStatus(4000)
+  const activeLoads = serverStatus?.loads.active ?? 0
+  const queueDepth = serverStatus?.loads.queue_depth ?? 0
+  const inFlight = serverStatus?.workers.in_flight_requests ?? 0
+  const loadedCount = serverStatus?.workers.loaded_count ?? 0
 
   async function handleLogout() {
     try {
@@ -78,8 +85,50 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
         </div>
       </div>
 
-      {/* Right: connection status + user */}
+      {/* Right: server-load pill + connection status + user */}
       <div className="flex items-center gap-3">
+        {serverStatus && (activeLoads > 0 || queueDepth > 0) && (
+          <Tooltip.Provider delayDuration={100}>
+            <Tooltip.Root>
+              <Tooltip.Trigger asChild>
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-sky-500/15 px-2.5 py-0.5 text-xs font-medium text-sky-300 cursor-help"
+                >
+                  <Loader2 size={11} className="animate-spin" />
+                  {activeLoads > 0
+                    ? `${activeLoads} cargando`
+                    : `${queueDepth} en cola`}
+                </span>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content
+                  side="bottom"
+                  sideOffset={6}
+                  className="z-50 max-w-xs rounded-md border border-border bg-popover px-3 py-2 text-xs shadow-md"
+                >
+                  <p className="mb-1 font-semibold text-foreground">Cargas activas</p>
+                  {serverStatus.loads.in_progress.length > 0 ? (
+                    <ul className="mb-2 space-y-0.5 font-mono text-[11px] text-muted-foreground">
+                      {serverStatus.loads.in_progress.map((m) => (
+                        <li key={m}>· {m}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mb-2 text-muted-foreground">Ninguna en curso</p>
+                  )}
+                  <p className="text-muted-foreground">
+                    En cola: <span className="font-mono">{queueDepth}</span> ·
+                    {" "}Cargados: <span className="font-mono">{loadedCount}</span> ·
+                    {" "}Requests activas: <span className="font-mono">{inFlight}</span>
+                  </p>
+                  <Tooltip.Arrow className="fill-border" />
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
+          </Tooltip.Provider>
+        )}
         <span
           role="status"
           aria-live="polite"
