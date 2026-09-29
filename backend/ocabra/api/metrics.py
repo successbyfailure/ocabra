@@ -124,7 +124,7 @@ async def _update_gauges(request: Request) -> None:
         from ocabra.core.model_manager import ModelStatus
 
         model_manager = request.app.state.model_manager
-        states = await model_manager.list_states()
+        states = await model_manager.list_states(include_derived=True)
         loaded = [s for s in states if s.status == ModelStatus.LOADED]
 
         # Reset and recount by backend type

@@ -1759,8 +1759,19 @@ class ModelManager:
     async def get_state(self, model_id: str) -> "ModelState | None":
         return self._states.get(model_id)
 
-    async def list_states(self) -> list["ModelState"]:
-        return list(self._states.values())
+    async def list_states(self, *, include_derived: bool = False) -> list["ModelState"]:
+        """Return the registered ModelState list.
+
+        Derived workers (created by ``_ensure_worker_loaded`` for profiles
+        with non-empty ``load_overrides``) are not persisted and would
+        surface in the model list as phantom ``(override)`` entries.
+        Callers that render the user-facing model catalog pass the default
+        ``include_derived=False``; the scheduler / eviction watchdog / stats
+        code paths that need the full picture pass ``True``.
+        """
+        if include_derived:
+            return list(self._states.values())
+        return [s for s in self._states.values() if s.model_id in self._persisted_model_ids]
 
     async def sync_ollama_models(self, model_ids: list[str]) -> int:
         """Ensure native Ollama models are present in the internal inventory."""
@@ -1908,7 +1919,19 @@ class ModelManager:
         auto_reload: bool = False,
         preferred_gpu: int | None = None,
         extra_config: dict | None = None,
+        *,
+        persist: bool = True,
     ) -> "ModelState":
+        """Register a model with ModelManager.
+
+        ``persist=True`` (default) writes a row to ``model_configs`` and
+        marks the model as user-visible in ``/v1/models``. ``persist=False``
+        keeps the state in memory only — used for derived workers created
+        by ``_ensure_worker_loaded`` when a profile carries non-empty
+        ``load_overrides``: the base ``model_config`` already covers the
+        weights on disk, and the override tag lives on the profile, so a
+        second DB row would just clutter the model list and the estimator.
+        """
         normalized_model_id, backend_model_id = normalize_model_ref(backend_type, model_id)
         normalized_backend = str(backend_type or "").strip().lower()
 
@@ -1924,21 +1947,22 @@ class ModelManager:
                 normalized_model_id, extra_config or {}
             )
 
-        async with database.AsyncSessionLocal() as session:
-            cfg = ModelConfig(
-                model_id=normalized_model_id,
-                display_name=display_name or backend_model_id,
-                backend_type=normalized_backend,
-                load_policy=load_policy,
-                auto_reload=auto_reload,
-                preferred_gpu=preferred_gpu,
-                extra_config=extra_config,
-                vocab_size=vocab_size,
-                bos_id=bos_id,
-                eos_id=eos_id,
-            )
-            session.add(cfg)
-            await session.commit()
+        if persist:
+            async with database.AsyncSessionLocal() as session:
+                cfg = ModelConfig(
+                    model_id=normalized_model_id,
+                    display_name=display_name or backend_model_id,
+                    backend_type=normalized_backend,
+                    load_policy=load_policy,
+                    auto_reload=auto_reload,
+                    preferred_gpu=preferred_gpu,
+                    extra_config=extra_config,
+                    vocab_size=vocab_size,
+                    bos_id=bos_id,
+                    eos_id=eos_id,
+                )
+                session.add(cfg)
+                await session.commit()
 
         state = ModelState(
             model_id=normalized_model_id,
@@ -1952,7 +1976,8 @@ class ModelManager:
         )
         self._states[normalized_model_id] = state
         self._load_locks[normalized_model_id] = asyncio.Lock()
-        self._persisted_model_ids.add(normalized_model_id)
+        if persist:
+            self._persisted_model_ids.add(normalized_model_id)
         self._notify_event_listeners("register", state)
         return state
 

@@ -822,7 +822,7 @@ async def _record_stat(
             state = await mm.get_state(resolved_model_id or model_id)
             if state is None:
                 # Fallback: resolve by backend_model_id alias (e.g. "mistral:7b" → "ollama/mistral:7b")
-                states = await mm.list_states()
+                states = await mm.list_states(include_derived=True)
                 state = next(
                     (
                         s

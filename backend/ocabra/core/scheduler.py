@@ -235,7 +235,7 @@ class GPUScheduler:
         if schedule.model_id:
             state = await self._model_manager.get_state(schedule.model_id)
             return [state] if state is not None else []
-        return await self._model_manager.list_states()
+        return await self._model_manager.list_states(include_derived=True)
 
     def _should_evict_state(self, state, action: str) -> bool:
         from ocabra.core.model_manager import LoadPolicy, ModelStatus

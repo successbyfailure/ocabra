@@ -79,6 +79,7 @@ secrets/
 
 # === Local workspaces ===
 Hunyuan3D-2.1/
+TRELLIS.2/
 .claude/
 
 # El patrón models/ (dir de modelos IA) no debe ignorar componentes del frontend

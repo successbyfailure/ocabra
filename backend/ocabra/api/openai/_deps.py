@@ -699,6 +699,12 @@ async def _ensure_worker_loaded(
 
     merged_extra = {**base_state.extra_config, **(load_overrides or {})}
     try:
+        # Derived workers are in-memory only: the profile that owns the
+        # overrides is already persisted in ``model_profiles`` and knows how
+        # to reconstruct this state on demand, so a second ``model_configs``
+        # row would just show up as a phantom "(override)" entry in the
+        # model list. Restart drops these — that's fine, they get recreated
+        # by the next request that resolves the profile.
         await model_manager.add_model(
             model_id=worker_key,
             backend_type=base_state.backend_type,
@@ -707,6 +713,7 @@ async def _ensure_worker_loaded(
             auto_reload=base_state.auto_reload,
             preferred_gpu=base_state.preferred_gpu,
             extra_config=merged_extra,
+            persist=False,
         )
     except Exception:
         # May already exist from concurrent request
