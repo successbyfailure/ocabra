@@ -24,6 +24,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 
 from ._deps import (
+    NON_STREAMING_LOAD_RESPONSE_DOC,
     _openai_error,
     build_model_status_headers,
     check_capability,
@@ -84,7 +85,7 @@ def _build_public_url(request: Request, name: str) -> str:
     return f"{base}/v1/images/files/{name}"
 
 
-@router.post("/images/generations", summary="Create image")
+@router.post("/images/generations", summary="Create image", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def image_generations(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -202,7 +203,7 @@ async def image_generations(
     return JSONResponse(content=payload, headers=resp_headers)
 
 
-@router.post("/images/edits", summary="Edit image")
+@router.post("/images/edits", summary="Edit image", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def image_edits(
     request: Request,
     image: UploadFile,

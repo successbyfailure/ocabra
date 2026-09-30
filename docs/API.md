@@ -50,43 +50,43 @@ El campo `model` acepta **profile_id** (recomendado) o model_id canonico (legacy
 | GET | `/v1/models` | Listar modelos/perfiles disponibles |
 | GET | `/v1/models/{model_id}` | Detalle de un modelo |
 
-#### Headers de carga en respuestas streaming
+#### Cabeceras `X-Ocabra-*` — contrato unificado
 
-Cuando una peticion `stream=true` toca un modelo que aun no esta cargado, oCabra
-hace **flush de los headers antes de bloquear**, de forma que el cliente sepa
-desde el primer momento que va a haber espera. Headers expuestos:
+**Todos los endpoints** de `/v1/*` que apuntan a un modelo (chat, completions,
+embeddings, pooling/score/rerank/classify, audio/transcriptions, audio/speech,
+audio/generate, images/generations, images/edits) exponen el mismo set de
+cabeceras. Los endpoints streaming las flushean **antes** de bloquear en el
+load, así el cliente ve la espera desde el primer byte; los no-streaming las
+adjuntan a la respuesta final (útil para logs y para saber si la petición
+pagó una carga en frío).
 
-| Header | Valor |
-|--------|-------|
-| `X-Ocabra-Model-Status` | Estado del worker en el momento de abrir el stream (`configured`, `loading`, `loaded`, ...) |
-| `X-Ocabra-Model-Id` | ID canonico del modelo resuelto |
-| `X-Ocabra-Expected-Wait-Seconds` | Estimacion (mediana de las ultimas 5 cargas) del tiempo de carga si el modelo no esta `loaded`. Ausente si no hay historico. |
+| Header | Cuándo | Valor |
+|--------|--------|-------|
+| `X-Ocabra-Model-Status` | siempre | Estado del worker en el momento de emitir (`configured`, `loading`, `loaded`, `unloaded`, `error`) |
+| `X-Ocabra-Model-Id` | siempre | ID canónico del modelo resuelto (post-router) |
+| `X-Ocabra-Expected-Wait-Seconds` | cuando no `loaded` y hay histórico | Mediana de las últimas 5 cargas del modelo, en segundos |
+| `X-Ocabra-Load-Queue-Depth` | cuando hay presión | Total de cargas encoladas (activas + esperando el mutex de carga cross-backend) |
+| `X-Ocabra-Load-Active` | cuando hay presión | Nº de loads actualmente ejecutándose |
+| `X-Ocabra-Was-Cold-Start` | post-load y `pre_status != loaded` | `1` cuando la petición pagó un cold-start |
+| `X-Ocabra-Load-Duration-Ms` | junto a `Was-Cold-Start` | Tiempo real que el request esperó al load, en milisegundos |
+| `X-Ocabra-Router` | routers | `profile_id` del router al que el cliente apuntó |
+| `X-Ocabra-Router-Target` | routers | `profile_id` del target que finalmente sirvió la petición |
 
-Ademas de los headers, dentro del propio stream se envian dos **eventos SSE
-con nombre `ocabra.<name>`** siguiendo la misma convencion que ya usa
-`ocabra.tool_started` / `ocabra.tool_result` en los agentes. Clientes que no
-reconozcan estos nombres simplemente los ignoran; el resto del stream son
-chunks `data: {...}` de OpenAI estandar.
-
-Formato:
+Ademas, en respuestas SSE (`stream=true`) el servidor intercala dos comentarios
+oCabra-aware con el mismo shape:
 
 ```
-event: ocabra.model_loading
-data: {"model_id":"...","worker_key":"...","status":"configured","expected_wait_seconds":12}
+: {"event": "ocabra.model_loading", "model_id": "...", "worker_key": "...",
+   "status": "configured", "expected_wait_seconds": 12}
 
-event: ocabra.model_ready
-data: {"model_id":"...","worker_key":"...","load_duration_ms":11820,"was_cold_start":true}
+: {"event": "ocabra.model_ready", "model_id": "...", "worker_key": "...",
+   "load_duration_ms": 11820, "was_cold_start": true}
 ```
 
-- `ocabra.model_loading`: emitido inmediatamente al abrir el stream. `status`
-  es el estado del worker antes del load (`loaded`, `configured`, `loading`,
-  etc.). `expected_wait_seconds` es `null` si no hay historico.
-- `ocabra.model_ready`: emitido tras completarse el load (o inmediatamente si
-  el modelo ya estaba en memoria, con `was_cold_start: false`).
-
-Si la carga falla o el modelo no soporta la operacion, el error se emite como
-evento SSE `data:` con payload `{"error": ...}` (no como HTTP error, porque
-los headers ya se enviaron).
+Las líneas empiezan con `:` (comentario SSE) para no romper parsers estrictos
+tipo OpenAI SDK; los oCabra-aware pueden extraer el JSON tras el `:`. Si el
+load falla después de haber flusheado headers, el error viaja como
+`data: {"error": ...}` en el mismo stream (no como HTTP status).
 
 **POST /v1/chat/completions**
 ```json
@@ -171,21 +171,56 @@ diarize=true          # opcional, requiere perfil con diarizacion
 |--------|----------|-------------|
 | POST | `/v1/audio/generate` | Generar musica (ACE-Step) |
 
-### Image Generation
+### Image Generation & Editing
 
 | Method | Endpoint | Descripcion |
 |--------|----------|-------------|
-| POST | `/v1/images/generations` | Generar imagen a partir de texto |
+| POST | `/v1/images/generations` | Generar imagen a partir de texto (`image_generation`) |
+| POST | `/v1/images/edits` | Editar imagen guiado por prompt (`image_editing`) |
+| GET | `/v1/images/files/{name}` | Servir imagen generada (respuesta `response_format=url`) |
 
 **POST /v1/images/generations**
 ```json
 {
-  "model": "stable-diffusion",
+  "model": "qwen-image-2.1",
   "prompt": "A cat sitting on a rainbow",
-  "size": "512x512",
-  "n": 1
+  "size": "1024x1024",
+  "n": 1,
+  "num_inference_steps": 20,
+  "guidance_scale": 4.0,
+  "response_format": "url"
 }
 ```
+
+Tamaños recomendados para Qwen-Image 2.1: `1024x1024`, `1152x864`, `864x1152`,
+`1216x832`, `832x1216`, `1344x768`, `768x1344`.
+
+**POST /v1/images/edits** (multipart/form-data)
+```
+model=qwen-image-edit-plus
+prompt=change the neon text to say ELECTRIC
+image=@input.png
+image_ref_1=@ref2.png    # opcional (multi-referencia; hasta 3 refs)
+image_ref_2=@ref3.png    # opcional
+mask=@mask.png           # opcional; PNG con alfa (transparente = zona a editar)
+num_inference_steps=20
+guidance_scale=4.0
+strength=0.75
+response_format=url
+n=1
+```
+
+Códigos de error específicos:
+- `400 edit_unsupported` — el pipeline del modelo cargado no tiene variante
+  img2img (p.ej. `Flux2KleinPipeline`, `ZImagePipeline`, `QwenImage21Pipeline`).
+- `400 mask_unsupported` — enviaste una máscara pero el pipeline es
+  edit-nativo sin soporte de inpainting (p.ej. `QwenImageEditPlusPipeline`).
+- `400 model_not_capable` — el modelo tiene `image_editing=false`.
+
+Capabilities relevantes en `/v1/models/{id}`:
+- `image_generation` — soporta text-to-image (`/v1/images/generations`).
+- `image_editing` — soporta img2img o edición prompt-based (`/v1/images/edits`).
+  Un modelo puede tener uno, otro, ambos o ninguno según el pipeline del backend.
 
 ---
 
@@ -346,6 +381,48 @@ Ejemplo de perfil STT con diarizacion:
 **load_overrides vs request_defaults**:
 - `load_overrides`: Afectan como se carga el modelo en GPU. Si difieren entre perfiles, se crea un worker separado (dedicado).
 - `request_defaults`: Valores inyectados en cada request. El cliente puede sobreescribirlos.
+
+### Status — Estado del servidor
+
+| Method | Endpoint | Descripcion |
+|--------|----------|-------------|
+| GET | `/ocabra/status` | Foto compacta de carga: cola, cargas activas y workers residentes |
+
+Endpoint pensado para banners y widgets que quieran renderizar "N cargando /
+Q en cola" sin sondear `/ocabra/models` completo. Requiere solo rol `user`.
+
+```json
+{
+  "loads": {
+    "queue_depth": 2,
+    "waiting": 1,
+    "active": 1,
+    "in_progress": ["diffusers/qwen-image-2.1"],
+    "waiting_for_service_gpu": [
+      {"modelId": "diffusers/qwen-image-2.1", "blockedBy": "hunyuan3d"}
+    ]
+  },
+  "workers": {
+    "loaded_count": 2,
+    "loaded_ids": ["ollama/gemma4:26b-ctx160k", "whisper/openai/whisper-base"],
+    "in_flight_requests": 3
+  }
+}
+```
+
+Semántica:
+- `loads.active` — número de `backend.load()` en ejecución (serializados por
+  un mutex global; nunca > 1 con la config actual).
+- `loads.waiting` — peticiones esperando ese mutex.
+- `loads.queue_depth` — `waiting + active`.
+- `loads.in_progress` — model_ids canónicos de los loads activos.
+- `loads.waiting_for_service_gpu` — peticiones que abortaron por VRAM ocupada
+  por un servicio externo (Hunyuan, TRELLIS.2…) y están reintentando en
+  bucle hasta que libere. Cada entrada tiene `modelId` y `blockedBy`.
+- `workers.in_flight_requests` — suma de requests en vuelo por modelo,
+  útil para saber si algo se está sirviendo aunque no haya loads activos.
+
+Poll recomendado: cada 4-5 s.
 
 ### GPUs — Estado de GPUs
 

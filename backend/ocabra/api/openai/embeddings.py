@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
+    NON_STREAMING_LOAD_RESPONSE_DOC,
     check_capability,
     compute_worker_key,
     get_federation_manager,
@@ -32,7 +33,7 @@ router = APIRouter()
 logger = structlog.get_logger(__name__)
 
 
-@router.post("/embeddings", summary="Create embeddings")
+@router.post("/embeddings", summary="Create embeddings", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def embeddings(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],

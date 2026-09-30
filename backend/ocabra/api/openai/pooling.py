@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from ocabra.api._deps_auth import UserContext
 
 from ._deps import (
+    NON_STREAMING_LOAD_RESPONSE_DOC,
     _openai_error,
     check_capability,
     compute_worker_key,
@@ -270,7 +271,7 @@ async def _resolve_and_forward(
     return JSONResponse(content=result, headers=resp_headers)
 
 
-@router.post("/pooling", summary="Run pooling on a model")
+@router.post("/pooling", summary="Run pooling on a model", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def pooling(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -282,7 +283,7 @@ async def pooling(
     return await _resolve_and_forward(request, body, "pooling", "pooling", "/pooling", user)
 
 
-@router.post("/score", summary="Score text pairs")
+@router.post("/score", summary="Score text pairs", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def score(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -294,7 +295,7 @@ async def score(
     return await _resolve_and_forward(request, body, "score", "score", "/score", user)
 
 
-@router.post("/rerank", summary="Rerank documents for a query")
+@router.post("/rerank", summary="Rerank documents for a query", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def rerank(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -306,7 +307,7 @@ async def rerank(
     return await _resolve_and_forward(request, body, "rerank", "rerank", "/rerank", user)
 
 
-@router.post("/classify", summary="Classify inputs with a classification model")
+@router.post("/classify", summary="Classify inputs with a classification model", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def classify(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],

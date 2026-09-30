@@ -35,6 +35,53 @@ def _ensure_load_timeout_s() -> int:
     return max(60, int(settings.model_load_wait_timeout_s))
 
 
+async def _wait_for_service_gpu_and_retry_load(
+    model_manager: ModelManager,
+    model_id: str,
+    state: ModelState | None,
+) -> ModelState | None:
+    """After a load fails with InsufficientVRAMError, check whether the cause is
+    an external service (Hunyuan, TRELLIS.2, ...) holding a temporary VRAM
+    reservation on this model's preferred GPU (see ServiceManager.reserve_gpu_vram)
+    — as opposed to genuine, indefinite capacity exhaustion. If so, poll until the
+    reservation clears (or we time out) and retry the load, instead of failing
+    the request immediately. Plain models competing for VRAM with each other are
+    unaffected: this only activates when a service reservation is the reason.
+
+    Returns the freshly loaded state on success, or None if the caller should
+    fall through to the normal InsufficientVRAMError → 409 response.
+    """
+    from ocabra.core.model_manager import ModelStatus
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = model_manager.gpu_manager
+    target_gpu = state.preferred_gpu if state else None
+    if gpu_manager is None or target_gpu is None:
+        return None
+    if not gpu_manager.has_service_lock(target_gpu):
+        return None
+
+    blockers = gpu_manager.service_locks(target_gpu)
+    model_manager.mark_service_gpu_wait(model_id, ", ".join(blockers) or "?")
+    try:
+        for _ in range(_ensure_load_timeout_s()):
+            await asyncio.sleep(1)
+            if gpu_manager.has_service_lock(target_gpu):
+                continue
+            try:
+                await model_manager.load(model_id)
+            except InsufficientVRAMError:
+                # Reservation cleared but something else (a genuinely concurrent
+                # load) grabbed the VRAM first — keep waiting for the timeout.
+                continue
+            new_state = await model_manager.get_state(model_id)
+            if new_state and new_state.status == ModelStatus.LOADED:
+                return new_state
+        return None
+    finally:
+        model_manager.clear_service_gpu_wait(model_id)
+
+
 def _openai_error(
     message: str,
     error_type: str,
@@ -402,48 +449,118 @@ async def resolve_profile(
     )
 
 
-# OpenAPI: shared response metadata for streaming endpoints. Surfaces the
-# X-Ocabra-* headers (only set when the request asks for stream=true) and a
-# short description of the SSE comment events the server interleaves.
+# OpenAPI: canonical X-Ocabra-* header set emitted by every endpoint that
+# resolves a model (chat, completions, embeddings, pooling/score/rerank/
+# classify, audio/transcriptions, audio/speech, audio/generate,
+# images/generations, images/edits). Streaming endpoints flush these before
+# the load blocks; non-streaming attach them to the final response.
+OCABRA_MODEL_HEADERS: dict = {
+    "X-Ocabra-Model-Status": {
+        "description": (
+            "Worker status at emit time (``configured``, ``loading``, "
+            "``loaded``, ``unloaded``, ``error``). Always present."
+        ),
+        "schema": {"type": "string"},
+    },
+    "X-Ocabra-Model-Id": {
+        "description": (
+            "Canonical model id resolved from the request (post-router)."
+        ),
+        "schema": {"type": "string"},
+    },
+    "X-Ocabra-Expected-Wait-Seconds": {
+        "description": (
+            "Median load time (seconds) over the last 5 successful loads of "
+            "this model. Emitted only when the worker isn't ``loaded`` yet "
+            "and historical samples exist."
+        ),
+        "schema": {"type": "integer"},
+    },
+    "X-Ocabra-Load-Queue-Depth": {
+        "description": (
+            "Total loads currently queued (waiting + active) behind the "
+            "cross-backend load gate. Emitted only under pressure."
+        ),
+        "schema": {"type": "integer"},
+    },
+    "X-Ocabra-Load-Active": {
+        "description": (
+            "Loads actually running right now. With the current mutex this "
+            "is at most 1; kept explicit so clients can distinguish "
+            "queued-behind vs. loading-now."
+        ),
+        "schema": {"type": "integer"},
+    },
+    "X-Ocabra-Was-Cold-Start": {
+        "description": (
+            "``1`` when the request paid for a model load. Omitted when the "
+            "model was already warm. Requires the endpoint to have "
+            "captured the pre-load state (all resource endpoints do)."
+        ),
+        "schema": {"type": "string", "enum": ["1"]},
+    },
+    "X-Ocabra-Load-Duration-Ms": {
+        "description": (
+            "Milliseconds the request spent waiting for the model to be "
+            "ready. Only emitted alongside ``X-Ocabra-Was-Cold-Start``."
+        ),
+        "schema": {"type": "integer"},
+    },
+    "X-Ocabra-Router": {
+        "description": (
+            "When the requested model was a router profile, this is the "
+            "``profile_id`` the client asked for. See "
+            "``X-Ocabra-Router-Target`` for what actually served."
+        ),
+        "schema": {"type": "string"},
+    },
+    "X-Ocabra-Router-Target": {
+        "description": (
+            "``profile_id`` of the profile that actually served the request "
+            "after the router picked. Present only alongside "
+            "``X-Ocabra-Router``."
+        ),
+        "schema": {"type": "string"},
+    },
+}
+
+
 STREAMING_LOAD_RESPONSE_DOC: dict = {
     200: {
         "description": (
             "Successful response. When ``stream=true`` the body is "
-            "``text/event-stream``; oCabra pre-flushes the response headers "
-            "below before triggering any model load, and interleaves two "
-            "named SSE events carrying load progress (same convention as "
-            "``ocabra.tool_started`` / ``ocabra.tool_result``):\n\n"
-            '``event: ocabra.model_loading\\ndata: {"model_id": ..., '
-            '"worker_key": ..., "status": ..., '
-            '"expected_wait_seconds": ...}\\n\\n`` on stream open, and '
-            '``event: ocabra.model_ready\\ndata: {"model_id": ..., '
-            '"load_duration_ms": ..., "was_cold_start": ...}\\n\\n`` '
-            "once the model is ready. Clients that don't recognise these "
-            "named events ignore them; the rest of the stream is plain "
-            "OpenAI-format ``data: {...}`` chunks."
+            "``text/event-stream``; oCabra pre-flushes the ``X-Ocabra-*`` "
+            "headers below **before** triggering any model load, and "
+            "interleaves two oCabra-aware SSE **comment** frames carrying "
+            "load progress:\n\n"
+            '``: {\"event\":\"ocabra.model_loading\",\"model_id\":...,'
+            '\"worker_key\":...,\"status\":...,'
+            '\"expected_wait_seconds\":...}\\n\\n`` on stream open, and\n\n'
+            '``: {\"event\":\"ocabra.model_ready\",\"model_id\":...,'
+            '\"worker_key\":...,\"load_duration_ms\":...,'
+            '\"was_cold_start\":...}\\n\\n`` once the model is ready.\n\n'
+            "The leading ``:`` makes these SSE **comments**, ignored by "
+            "strict OpenAI SDK parsers. oCabra-aware clients may parse the "
+            "JSON after the colon. If the load fails after headers have "
+            "been flushed, the error travels as ``data: {\"error\": ...}`` "
+            "in the same stream (not as an HTTP status)."
         ),
-        "headers": {
-            "X-Ocabra-Model-Status": {
-                "description": (
-                    "Worker status when the stream was opened: "
-                    "``configured``, ``loading``, ``loaded``, etc. "
-                    "Streaming responses only."
-                ),
-                "schema": {"type": "string"},
-            },
-            "X-Ocabra-Model-Id": {
-                "description": "Canonical model id resolved from the request.",
-                "schema": {"type": "string"},
-            },
-            "X-Ocabra-Expected-Wait-Seconds": {
-                "description": (
-                    "Median load time (seconds) over the last 5 successful "
-                    "loads of this model. Only emitted when the worker is "
-                    "not yet ``loaded`` and historical samples exist."
-                ),
-                "schema": {"type": "integer"},
-            },
-        },
+        "headers": OCABRA_MODEL_HEADERS,
+    },
+}
+
+
+NON_STREAMING_LOAD_RESPONSE_DOC: dict = {
+    200: {
+        "description": (
+            "Successful response. Non-streaming endpoints attach the "
+            "``X-Ocabra-*`` headers below to the final response — clients "
+            "then learn retrospectively whether the request paid for a cold "
+            "start (``X-Ocabra-Was-Cold-Start`` + ``-Load-Duration-Ms``) "
+            "and whether the server is under load (``-Load-Queue-Depth`` / "
+            "``-Load-Active``)."
+        ),
+        "headers": OCABRA_MODEL_HEADERS,
     },
 }
 
@@ -766,6 +883,12 @@ async def _do_ensure_loaded(
             from ocabra.core.scheduler import InsufficientVRAMError
 
             if isinstance(exc, InsufficientVRAMError):
+                retried_state = await _wait_for_service_gpu_and_retry_load(
+                    model_manager, model_id, state
+                )
+                if retried_state is not None:
+                    await _touch(model_id, datetime.now(UTC))
+                    return retried_state
                 raise _openai_error(
                     str(exc),
                     "invalid_request_error",
@@ -896,6 +1019,13 @@ async def ensure_loaded(
             from ocabra.core.scheduler import InsufficientVRAMError
 
             if isinstance(exc, InsufficientVRAMError):
+                retried_state = await _wait_for_service_gpu_and_retry_load(
+                    model_manager, resolved_model_id, state
+                )
+                if retried_state is not None:
+                    request_at = datetime.now(UTC)
+                    await _touch_last_request_at(resolved_model_id, request_at)
+                    return retried_state
                 raise _openai_error(
                     str(exc),
                     "invalid_request_error",

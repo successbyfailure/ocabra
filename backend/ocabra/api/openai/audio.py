@@ -18,6 +18,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 
 from ._deps import (
+    NON_STREAMING_LOAD_RESPONSE_DOC,
     _openai_error,
     check_capability,
     compute_worker_key,
@@ -44,7 +45,7 @@ _AUDIO_CONTENT_TYPES = {
 }
 
 
-@router.post("/audio/transcriptions", summary="Transcribe audio")
+@router.post("/audio/transcriptions", summary="Transcribe audio", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def transcriptions(
     request: Request,
     file: UploadFile,
@@ -342,7 +343,7 @@ async def list_voices(
         }
 
 
-@router.post("/audio/speech", summary="Generate speech")
+@router.post("/audio/speech", summary="Generate speech", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def speech(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -491,7 +492,7 @@ async def speech(
     )
 
 
-@router.post("/audio/generate", summary="Generate music")
+@router.post("/audio/generate", summary="Generate music", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def generate_music(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
