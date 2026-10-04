@@ -568,6 +568,37 @@ export interface OllamaRuntimeInfo {
   contextLength: number | null
 }
 
+export interface GpuUsageTotal {
+  gpuIndex: number
+  samples: number
+  hoursTotal: number
+  hoursActive: number
+  activeRatio: number
+  avgUtilizationPct: number
+  avgVramMb: number
+  peakVramMb: number
+  avgTempC: number
+  kwh: number
+}
+
+export interface GpuUsageSeriesPoint {
+  t: string
+  gpuIndex: number
+  utilizationPct: number
+  vramMb: number
+  powerW: number
+  tempC: number
+}
+
+export interface GpuUsageStats {
+  from: string
+  to: string
+  bucket: "hour" | "day"
+  activeThresholdPct: number
+  totals: GpuUsageTotal[]
+  series: GpuUsageSeriesPoint[]
+}
+
 export interface EnergyStats {
   totalKwh: number
   estimatedCostEur: number

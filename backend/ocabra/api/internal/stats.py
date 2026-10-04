@@ -33,6 +33,27 @@ async def request_stats(
 
 
 @router.get(
+    "/stats/gpu",
+    summary="GPU usage statistics",
+    description=(
+        "Return per-GPU usage over the time window: total hours covered, "
+        "hours above an activity threshold (default 5% utilization), "
+        "average/peak VRAM, average temperature and estimated kWh, plus a "
+        "bucketed time series (hourly for windows ≤ 72 h, daily beyond)."
+    ),
+)
+async def gpu_usage_stats(
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    active_threshold_pct: float = Query(5.0, alias="activeThresholdPct", ge=0.0, le=100.0),
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    from ocabra.stats.aggregator import get_gpu_usage_stats
+
+    return await get_gpu_usage_stats(from_dt, to_dt, active_threshold_pct)
+
+
+@router.get(
     "/stats/energy",
     summary="Energy statistics",
     description="Return total kWh consumption and estimated cost, broken down per GPU.",

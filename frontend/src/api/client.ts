@@ -22,6 +22,7 @@ import type {
   ServerConfig,
   RequestStats,
   EnergyStats,
+  GpuUsageStats,
   PerformanceStats,
   TokenStats,
   OverviewStats,
@@ -1402,6 +1403,14 @@ export const api = {
     energy: (params: StatsParams) => {
       const query = buildQuery({ from: params.from, to: params.to })
       return request<EnergyStats>("GET", `/ocabra/stats/energy${query}`)
+    },
+    gpu: (params: StatsParams & { activeThresholdPct?: number }) => {
+      const query = buildQuery({
+        from: params.from,
+        to: params.to,
+        activeThresholdPct: params.activeThresholdPct,
+      })
+      return request<GpuUsageStats>("GET", `/ocabra/stats/gpu${query}`)
     },
     tokens: (params: StatsParams) => {
       const query = buildQuery({

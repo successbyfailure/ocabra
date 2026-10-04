@@ -7,6 +7,7 @@ import { StyledSelect } from "@/components/common/StyledSelect"
 import { useIsModelManager } from "@/hooks/useAuth"
 import { DateRangePicker, defaultDateRange, type DateRangeValue } from "@/components/stats/DateRangePicker"
 import { EnergyPanel } from "@/components/stats/EnergyPanel"
+import { GpuUsagePanel } from "@/components/stats/GpuUsagePanel"
 import { PerformanceTable } from "@/components/stats/PerformanceTable"
 import { RequestsChart } from "@/components/stats/RequestsChart"
 import { TokensChart } from "@/components/stats/TokensChart"
@@ -21,6 +22,7 @@ import type {
   ByGroupStats,
   ByUserStats,
   EnergyStats,
+  GpuUsageStats,
   FederationStats,
   MyGroupStats,
   OverviewStats,
@@ -424,6 +426,7 @@ export function Stats() {
   const [requests, setRequests] = useState<RequestStats>(EMPTY_REQUESTS)
   const [tokens, setTokens] = useState<TokenStats>(EMPTY_TOKENS)
   const [energy, setEnergy] = useState<EnergyStats>(EMPTY_ENERGY)
+  const [gpuUsage, setGpuUsage] = useState<GpuUsageStats | null>(null)
   const [performance, setPerformance] = useState<PerformanceStats>(EMPTY_PERFORMANCE)
   const [overview, setOverview] = useState<OverviewStats>(EMPTY_OVERVIEW)
   const [byUser, setByUser] = useState<ByUserStats>(EMPTY_BY_USER)
@@ -454,11 +457,12 @@ export function Stats() {
     const load = async () => {
       try {
         if (isManagerOrAdmin) {
-          const [modelList, req, tok, ene, perf, over, bu, bg, bak, rec, my, mg, fed, sp] = await Promise.all([
+          const [modelList, req, tok, ene, gpu, perf, over, bu, bg, bak, rec, my, mg, fed, sp] = await Promise.all([
             api.models.list(),
             api.stats.requests(params),
             api.stats.tokens(params),
             api.stats.energy(params),
+            api.stats.gpu(params).catch(() => null),
             api.stats.performance(params),
             api.stats.overview(params),
             api.stats.byUser(params),
@@ -477,6 +481,7 @@ export function Stats() {
           setRequests(req)
           setTokens(tok)
           setEnergy(ene)
+          setGpuUsage(gpu)
           setPerformance(perf)
           setOverview(over)
           setByUser(bu)
@@ -488,9 +493,10 @@ export function Stats() {
           setFederationStats(fed)
           setServerPower(sp)
         } else {
-          const [modelList, ene, my, mg, sp] = await Promise.all([
+          const [modelList, ene, gpu, my, mg, sp] = await Promise.all([
             api.models.list(),
             api.stats.energy(params),
+            api.stats.gpu(params).catch(() => null),
             api.stats.my(params),
             api.stats.myGroup(params),
             api.stats.serverPower().catch(() => null),
@@ -500,6 +506,7 @@ export function Stats() {
 
           setModels(modelList.map((model) => ({ id: model.modelId, label: model.displayName })))
           setEnergy(ene)
+          setGpuUsage(gpu)
           setMyStats(my)
           setMyGroup(mg)
           setServerPower(sp)
@@ -623,6 +630,10 @@ export function Stats() {
                 <h3 className="mb-3 text-sm font-semibold text-muted-foreground">Energia del servidor</h3>
                 <EnergyPanel data={energy} serverPower={serverPower} />
               </div>
+
+              {/* GPU usage: hours active, kWh, chart */}
+              <GpuUsagePanel data={gpuUsage} />
+
 
               {isManagerOrAdmin ? (
                 <>

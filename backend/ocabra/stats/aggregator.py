@@ -105,6 +105,148 @@ async def get_request_stats(
     }
 
 
+async def get_gpu_usage_stats(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+    active_threshold_pct: float = 5.0,
+) -> dict:
+    """Aggregated GPU usage over a time window.
+
+    Returns per-GPU totals (``hours_total``, ``hours_active`` where
+    ``utilization_pct >= active_threshold_pct``, average/peak VRAM, average
+    temperature, estimated kWh) plus a bucketed time series ready for a
+    chart. Bucketing switches from hourly to daily when the window exceeds
+    72 h so the client never gets more than ~200 points per GPU.
+
+    Interval accounting caps per-sample gaps at 30 s so a server restart or
+    monitor pause doesn't inflate the "covered time" totals.
+    """
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    window_hours = max(0.0, (to_dt - from_dt).total_seconds() / 3600.0)
+    bucket = "day" if window_hours > 72 else "hour"
+
+    totals_q = sa.text(
+        """
+        WITH ordered AS (
+            SELECT
+                gpu_index,
+                recorded_at,
+                utilization_pct,
+                vram_used_mb,
+                power_draw_w,
+                temperature_c,
+                LEAD(recorded_at) OVER (
+                    PARTITION BY gpu_index ORDER BY recorded_at
+                ) AS next_at
+            FROM gpu_stats
+            WHERE recorded_at BETWEEN :from_dt AND :to_dt
+        ),
+        with_gap AS (
+            SELECT
+                gpu_index,
+                utilization_pct,
+                vram_used_mb,
+                power_draw_w,
+                temperature_c,
+                LEAST(
+                    EXTRACT(EPOCH FROM (COALESCE(next_at, :to_dt) - recorded_at)),
+                    30
+                ) AS gap_s
+            FROM ordered
+        )
+        SELECT
+            gpu_index,
+            COUNT(*) AS samples,
+            COALESCE(SUM(gap_s), 0) / 3600.0 AS hours_total,
+            COALESCE(SUM(gap_s) FILTER (
+                WHERE utilization_pct >= :threshold
+            ), 0) / 3600.0 AS hours_active,
+            AVG(utilization_pct) AS avg_util,
+            AVG(vram_used_mb) AS avg_vram,
+            MAX(vram_used_mb) AS peak_vram,
+            AVG(temperature_c) AS avg_temp,
+            COALESCE(SUM(power_draw_w * gap_s), 0) / 3600.0 / 1000.0 AS kwh
+        FROM with_gap
+        GROUP BY gpu_index
+        ORDER BY gpu_index
+        """
+    )
+
+    series_q = sa.text(
+        """
+        SELECT
+            date_trunc(:bucket, recorded_at) AS t,
+            gpu_index,
+            AVG(utilization_pct) AS util,
+            AVG(vram_used_mb) AS vram,
+            AVG(power_draw_w) AS power,
+            AVG(temperature_c) AS temp
+        FROM gpu_stats
+        WHERE recorded_at BETWEEN :from_dt AND :to_dt
+        GROUP BY t, gpu_index
+        ORDER BY t, gpu_index
+        """
+    )
+
+    async with AsyncSessionLocal() as session:
+        totals_result = await session.execute(
+            totals_q,
+            {"from_dt": from_dt, "to_dt": to_dt, "threshold": active_threshold_pct},
+        )
+        totals_rows = totals_result.all()
+        series_result = await session.execute(
+            series_q,
+            {"bucket": bucket, "from_dt": from_dt, "to_dt": to_dt},
+        )
+        series_rows = series_result.all()
+
+    totals = []
+    for row in totals_rows:
+        m = row._mapping
+        hours_total = float(m["hours_total"] or 0.0)
+        hours_active = float(m["hours_active"] or 0.0)
+        totals.append(
+            {
+                "gpuIndex": int(m["gpu_index"]),
+                "samples": int(m["samples"] or 0),
+                "hoursTotal": round(hours_total, 3),
+                "hoursActive": round(hours_active, 3),
+                "activeRatio": round(
+                    hours_active / hours_total if hours_total else 0.0, 4
+                ),
+                "avgUtilizationPct": round(float(m["avg_util"] or 0.0), 2),
+                "avgVramMb": int(round(float(m["avg_vram"] or 0.0))),
+                "peakVramMb": int(m["peak_vram"] or 0),
+                "avgTempC": round(float(m["avg_temp"] or 0.0), 1),
+                "kwh": round(float(m["kwh"] or 0.0), 4),
+            }
+        )
+
+    series: list[dict] = []
+    for row in series_rows:
+        m = row._mapping
+        t = m["t"]
+        series.append(
+            {
+                "t": t.isoformat() if t is not None else None,
+                "gpuIndex": int(m["gpu_index"]),
+                "utilizationPct": round(float(m["util"] or 0.0), 2),
+                "vramMb": int(round(float(m["vram"] or 0.0))),
+                "powerW": round(float(m["power"] or 0.0), 1),
+                "tempC": round(float(m["temp"] or 0.0), 1),
+            }
+        )
+
+    return {
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "bucket": bucket,
+        "activeThresholdPct": active_threshold_pct,
+        "totals": totals,
+        "series": series,
+    }
+
+
 async def get_energy_stats(
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,
