@@ -317,11 +317,13 @@ class Settings(BaseSettings):
 
     # 11.4: Busy timeout for individual requests
     inference_request_timeout_seconds: int = Field(
-        default=900,
+        default=1500,
         ge=30,
         description=(
             "Max seconds to wait for an inference upstream before cancelling "
-            "the connection and returning HTTP 504."
+            "the connection and returning HTTP 504. 25 min covers long chat "
+            "completions on 26B/27B Ollama models with ctx>=128k that stream "
+            "slowly; empírico sobre gemma4:26b-ctx160k."
         ),
     )
     busy_timeout_seconds: int = Field(
