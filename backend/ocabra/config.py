@@ -359,23 +359,29 @@ class Settings(BaseSettings):
     hunyuan_base_url: str = "http://hunyuan:8080"
     comfyui_base_url: str = "http://comfyui:8188"
     a1111_base_url: str = "http://a1111:7860"
+    trellis2_base_url: str = "http://trellis2:8080"
     hunyuan_ui_url: str = ""
     comfyui_ui_url: str = ""
     a1111_ui_url: str = ""
+    trellis2_ui_url: str = ""
     hunyuan_preferred_gpu: int = 1
     comfyui_preferred_gpu: int = 1
     a1111_preferred_gpu: int = 1
+    trellis2_preferred_gpu: int = 1
     hunyuan_idle_unload_seconds: int = 300
     comfyui_idle_unload_seconds: int = 600
     a1111_idle_unload_seconds: int = 600
+    trellis2_idle_unload_seconds: int = 300
     hunyuan_docker_container: str = "ocabra-hunyuan-1"
     comfyui_docker_container: str = "ocabra-comfyui-1"
     a1111_docker_container: str = "ocabra-a1111-1"
+    trellis2_docker_container: str = "ocabra-trellis2-1"
     # Seconds to wait for an active generation to finish before forcing eviction.
     # 0 = evict immediately, -1 = wait indefinitely (not recommended for pressure eviction).
     hunyuan_generation_grace_period_s: int = 120
     comfyui_generation_grace_period_s: int = 120
     a1111_generation_grace_period_s: int = 120
+    trellis2_generation_grace_period_s: int = 120
 
     # LiteLLM
     litellm_base_url: str = "http://litellm:4000"

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { Loader2 } from "lucide-react"
 import * as Tabs from "@radix-ui/react-tabs"
 import { toast } from "sonner"
 import { api } from "@/api/client"
@@ -339,6 +340,34 @@ function RequestLogPanel({ data }: { data: RecentRequestsData }) {
             </thead>
             <tbody className="divide-y divide-border bg-card">
               {data.requests.map((req) => {
+                if (req.inFlight) {
+                  const elapsed = req.elapsedMs != null ? `${Math.round(req.elapsedMs / 1000)}s` : "—"
+                  const remaining =
+                    req.estimatedRemainingMs != null
+                      ? `~${Math.round(req.estimatedRemainingMs / 1000)}s restantes`
+                      : "sin estimacion"
+                  const hora = new Date(req.startedAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })
+                  return (
+                    <tr key={req.id} className="bg-sky-500/5 hover:bg-sky-500/10">
+                      <td className="px-3 py-2 font-mono text-xs">{hora}</td>
+                      <td className="px-3 py-2 max-w-[12rem] truncate" title={req.modelId}>{req.modelId}</td>
+                      <td className="px-3 py-2 text-muted-foreground">en curso</td>
+                      <td className="px-3 py-2 text-right text-sky-300">{elapsed}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{remaining}</td>
+                      <td className="px-3 py-2 text-muted-foreground">—</td>
+                      <td className="px-3 py-2 text-xs font-medium text-sky-300">
+                        <span className="inline-flex items-center gap-1">
+                          <Loader2 size={11} className="animate-spin" />
+                          En vuelo
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                }
                 const statusColor =
                   req.error
                     ? "text-red-400"

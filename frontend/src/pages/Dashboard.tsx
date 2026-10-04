@@ -676,6 +676,7 @@ export function Dashboard() {
 
   const services = useServiceStore((state) => state.services)
   const setServices = useServiceStore((state) => state.setServices)
+  const unloadService = useServiceStore((state) => state.unloadService)
 
   const activeModels = useMemo(
     () => Object.values(models).filter((model) => model.status === "loaded" || model.status === "loading"),
@@ -698,6 +699,13 @@ export function Dashboard() {
   const serviceList = useMemo(() => Object.values(services), [services])
   const externalRuntimeServices = useMemo(
     () => serviceList.filter((service) => !service.enabled && service.serviceAlive),
+    [serviceList],
+  )
+  // Services (Hunyuan, TRELLIS.2, ComfyUI, ...) with their runtime loaded right
+  // now — merged into "Modelos activos" so it's a single place to see what's
+  // actually resident on GPU, instead of splitting models vs. services.
+  const activeServices = useMemo(
+    () => serviceList.filter((service) => service.runtimeLoaded),
     [serviceList],
   )
   const tokenStatsByDevice = useMemo(() => {
@@ -964,14 +972,11 @@ export function Dashboard() {
 
       {/* Active Models */}
       <Section title="Modelos activos" badge={
-        activeModels.length > 0 ? <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">{activeModels.length}</span> : undefined
+        (activeModels.length + activeServices.length) > 0
+          ? <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">{activeModels.length + activeServices.length}</span>
+          : undefined
       }>
         <div className="space-y-3">
-          {activeModels.length === 0 && externalRuntimeServices.length > 0 && (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-              Hay runtimes externos ocupando GPU en servicios de generacion.
-            </div>
-          )}
           {activeModels.map((model) => (
             <div
               key={model.modelId}
@@ -999,7 +1004,41 @@ export function Dashboard() {
               )}
             </div>
           ))}
-          {activeModels.length === 0 && (
+          {/* Servicios (Hunyuan, TRELLIS.2, ComfyUI, ...) con runtime cargado ahora
+              mismo — antes solo vivian en la seccion "Servicios" aparte, dificultando
+              ver de un vistazo que esta usando GPU en un momento dado. */}
+          {activeServices.map((service) => (
+            <div
+              key={service.serviceId}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3"
+            >
+              <div className="space-y-1">
+                <p className="font-medium">{service.displayName}</p>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center rounded-full border border-sky-500/40 bg-sky-500/20 px-2.5 py-0.5 text-xs font-medium text-sky-200">
+                    Servicio
+                  </span>
+                  {service.isGenerating && (
+                    <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/20 px-2.5 py-0.5 text-xs font-medium text-amber-100 animate-pulse">
+                      Generando
+                    </span>
+                  )}
+                  <span className="rounded-md bg-muted px-2 py-0.5">GPU {service.preferredGpu ?? "-"}</span>
+                  <span>{service.vramUsedMb != null ? `${service.vramUsedMb.toLocaleString()} MB` : service.gpuUtilPct != null ? `${service.gpuUtilPct.toFixed(0)}% util` : "—"}</span>
+                </div>
+              </div>
+              <button type="button" onClick={() => void unloadService(service.serviceId)}
+                className="rounded-md border border-red-500/40 px-3 py-1 text-sm text-red-200 hover:bg-red-500/20">
+                Descargar
+              </button>
+            </div>
+          ))}
+          {activeModels.length === 0 && activeServices.length === 0 && externalRuntimeServices.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              Hay runtimes externos ocupando GPU en servicios de generacion.
+            </div>
+          )}
+          {activeModels.length === 0 && activeServices.length === 0 && externalRuntimeServices.length === 0 && (
             <EmptyState title="Sin modelos cargados" description="Carga un modelo desde la pagina de Models." />
           )}
         </div>

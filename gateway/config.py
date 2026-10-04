@@ -38,6 +38,7 @@ STARTUP_TIMEOUT_S: int = int(os.getenv("GATEWAY_STARTUP_TIMEOUT_S", "180"))
 # Service definitions: (service_id, UI_URL env var, base_url env var, display name)
 _SERVICE_DEFS: list[tuple[str, str, str, str]] = [
     ("hunyuan", "HUNYUAN_UI_URL", "HUNYUAN_BASE_URL", "Hunyuan3D"),
+    ("trellis2", "TRELLIS2_UI_URL", "TRELLIS2_BASE_URL", "TRELLIS.2"),
     ("comfyui", "COMFYUI_UI_URL", "COMFYUI_BASE_URL", "ComfyUI"),
     ("a1111",   "A1111_UI_URL",   "A1111_BASE_URL",   "Automatic1111"),
     ("acestep", "ACESTEP_UI_URL", "ACESTEP_BASE_URL",  "ACE-Step"),

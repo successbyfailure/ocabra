@@ -638,6 +638,7 @@ async def lifespan(app: FastAPI):
         model_manager=model_manager,
         duration_estimator=duration_estimator,
         session_registry=session_registry,
+        gpu_manager=gpu_manager,
     )
     app.state.router_resolver = router_resolver
     logger.info("router_resolver_ready")

@@ -39,6 +39,7 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
   const queueDepth = serverStatus?.loads.queue_depth ?? 0
   const inFlight = serverStatus?.workers.in_flight_requests ?? 0
   const loadedCount = serverStatus?.workers.loaded_count ?? 0
+  const serviceGpuWaits = serverStatus?.loads.waiting_for_service_gpu ?? []
 
   async function handleLogout() {
     try {
@@ -87,7 +88,7 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
 
       {/* Right: server-load pill + connection status + user */}
       <div className="flex items-center gap-3">
-        {serverStatus && (activeLoads > 0 || queueDepth > 0) && (
+        {serverStatus && (activeLoads > 0 || queueDepth > 0 || serviceGpuWaits.length > 0) && (
           <Tooltip.Provider delayDuration={100}>
             <Tooltip.Root>
               <Tooltip.Trigger asChild>
@@ -99,7 +100,9 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
                   <Loader2 size={11} className="animate-spin" />
                   {activeLoads > 0
                     ? `${activeLoads} cargando`
-                    : `${queueDepth} en cola`}
+                    : serviceGpuWaits.length > 0
+                      ? `${serviceGpuWaits.length} esperando GPU`
+                      : `${queueDepth} en cola`}
                 </span>
               </Tooltip.Trigger>
               <Tooltip.Portal>
@@ -117,6 +120,18 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
                     </ul>
                   ) : (
                     <p className="mb-2 text-muted-foreground">Ninguna en curso</p>
+                  )}
+                  {serviceGpuWaits.length > 0 && (
+                    <>
+                      <p className="mb-1 font-semibold text-foreground">Esperando GPU reservada</p>
+                      <ul className="mb-2 space-y-0.5 font-mono text-[11px] text-muted-foreground">
+                        {serviceGpuWaits.map((w) => (
+                          <li key={w.modelId}>
+                            · {w.modelId} (por {w.blockedBy})
+                          </li>
+                        ))}
+                      </ul>
+                    </>
                   )}
                   <p className="text-muted-foreground">
                     En cola: <span className="font-mono">{queueDepth}</span> ·

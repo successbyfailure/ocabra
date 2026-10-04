@@ -969,7 +969,7 @@ async def _build_model_memory_estimate(
         estimate["warning"] = "No backend runtime available to calculate memory estimates."
         return estimate
 
-    heuristic_mb = int(await backend.get_vram_estimate_mb(state.backend_model_id) or 0)
+    heuristic_mb = int(await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=extra_config) or 0)
 
     if state.backend_type == "vllm":
         gpu_util = _resolve_vllm_gpu_memory_utilization(extra_config)

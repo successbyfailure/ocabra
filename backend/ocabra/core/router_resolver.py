@@ -43,6 +43,7 @@ current_router_profile_id: contextvars.ContextVar[str | None] = contextvars.Cont
 
 if TYPE_CHECKING:
     from ocabra.core.duration_estimator import DurationEstimator
+    from ocabra.core.gpu_manager import GPUManager
     from ocabra.core.model_manager import ModelManager, ModelState
     from ocabra.core.profile_registry import ModelProfile, ProfileRegistry
     from ocabra.core.session_registry import SessionRegistry
@@ -95,11 +96,13 @@ class RouterResolver:
         model_manager: "ModelManager",
         duration_estimator: "DurationEstimator | None" = None,
         session_registry: "SessionRegistry | None" = None,
+        gpu_manager: "GPUManager | None" = None,
     ) -> None:
         self._profile_registry = profile_registry
         self._model_manager = model_manager
         self._duration_estimator = duration_estimator
         self._session_registry = session_registry
+        self._gpu_manager = gpu_manager
 
     # ── Public API ────────────────────────────────────────────
 
@@ -228,6 +231,21 @@ class RouterResolver:
                 worker_key
             ):
                 audit.append(CandidateAudit(target_id, "session_veto"))
+                continue
+
+            # 3a) Preferred GPU reserved by an external service (Hunyuan,
+            # TRELLIS.2, ...) generating right now — same idea as the busy-
+            # neighbour check below, but for VRAM a service is holding
+            # outside of ModelManager's own bookkeeping (see
+            # ServiceManager.reserve_gpu_vram). Skip to the next candidate
+            # instead of racing that service for VRAM or force-evicting it.
+            if (
+                self._gpu_manager is not None
+                and state is not None
+                and state.preferred_gpu is not None
+                and self._gpu_manager.has_service_lock(state.preferred_gpu)
+            ):
+                audit.append(CandidateAudit(target_id, "gpu_reserved_by_service"))
                 continue
 
             # 3) Unloaded / configured / error. Only accept if loading here

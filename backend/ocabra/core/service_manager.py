@@ -47,6 +47,10 @@ class ServiceState:
     # Seconds to wait for an active generation before forcing eviction.
     # 0 = evict immediately; -1 = wait indefinitely (capped at 30 s for pressure eviction).
     generation_grace_period_s: int = 120
+    # Max age for a VRAM reservation (reserve_gpu_vram) before it's force-released
+    # regardless of state, in case the service never reaches runtime_loaded=True
+    # and never fails its health check either (stuck loading forever).
+    vram_reservation_max_age_s: int = 1200
 
     # ── Live state ────────────────────────────────────────────────────────
     enabled: bool = True
@@ -57,6 +61,12 @@ class ServiceState:
     last_activity_at: datetime | None = None
     last_health_check_at: datetime | None = None
     last_unload_at: datetime | None = None
+    vram_reserved_at: datetime | None = None
+    # Set by _refresh_runtime_status from the service's own /runtime/status
+    # payload when it reports in_flight_requests (Hunyuan, TRELLIS.2). None
+    # when the service exposes no such signal — falls back to the GPU-util
+    # heuristic in _refresh_generation_metrics.
+    precise_in_flight: int | None = None
     detail: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -135,6 +145,21 @@ class ServiceManager:
                 docker_container_name=settings.hunyuan_docker_container,
                 compose_service_name="hunyuan",
             ),
+            "trellis2": ServiceState(
+                service_id="trellis2",
+                service_type="trellis2",
+                display_name="TRELLIS.2",
+                base_url=settings.trellis2_base_url.rstrip("/"),
+                ui_url=settings.trellis2_ui_url,
+                preferred_gpu=settings.trellis2_preferred_gpu,
+                idle_unload_after_seconds=settings.trellis2_idle_unload_seconds,
+                generation_grace_period_s=settings.trellis2_generation_grace_period_s,
+                runtime_check_path="/runtime/status",
+                runtime_check_key="runtime_loaded",
+                unload_path="/runtime/unload",
+                docker_container_name=settings.trellis2_docker_container,
+                compose_service_name="trellis2",
+            ),
             "comfyui": ServiceState(
                 service_id="comfyui",
                 service_type="comfyui",
@@ -203,6 +228,29 @@ class ServiceManager:
 
     def set_gpu_manager(self, gpu_manager: GPUManager) -> None:
         self._gpu_manager = gpu_manager
+
+    # ── VRAM reservation (external services managing their own GPU load) ───
+    # Services like Hunyuan/TRELLIS.2 load VRAM directly inside their own
+    # container, outside ModelManager's scheduler — so without an explicit
+    # reservation here, GPUScheduler.find_gpu_for_model sees their GPU as
+    # free and lets an unrelated inference load land right on top of them
+    # mid-generation. This reuses the same GPUManager.lock_vram/unlock_vram
+    # accounting ModelManager already uses for its own loads.
+
+    async def reserve_gpu_vram(self, service_id: str, vram_mb: int) -> None:
+        state = self._require(service_id)
+        if self._gpu_manager is None or state.preferred_gpu is None:
+            return
+        await self._gpu_manager.lock_vram(state.preferred_gpu, vram_mb, f"service:{service_id}")
+        state.vram_reserved_at = datetime.now(timezone.utc)
+
+    async def release_gpu_vram(self, service_id: str) -> None:
+        state = self._states.get(service_id)
+        if state is not None:
+            state.vram_reserved_at = None
+        if self._gpu_manager is None or state is None or state.preferred_gpu is None:
+            return
+        await self._gpu_manager.unlock_vram(state.preferred_gpu, f"service:{service_id}")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -316,6 +364,8 @@ class ServiceManager:
             await self._publish_state(state, "health_checked")
             return state
 
+        was_runtime_loaded = state.runtime_loaded
+        was_generating = state.is_generating
         try:
             service_alive = await self._check_service_alive(state)
             if not service_alive:
@@ -339,9 +389,25 @@ class ServiceManager:
                 state.last_activity_at = now
 
             state.status = "active" if state.runtime_loaded else "idle"
+            if was_runtime_loaded and not state.runtime_loaded:
+                # Safety net: the runtime just transitioned loaded → unloaded
+                # (unloaded some other way than our own unload()) — release any
+                # VRAM reservation, nothing is using that GPU space anymore.
+                # Checking the falling edge (not just "currently false") matters:
+                # a reservation made via reserve_gpu_vram() right before the
+                # service starts loading must survive the polls that still see
+                # runtime_loaded=False while the pipeline is loading.
+                await self.release_gpu_vram(service_id)
 
             # Refresh generation metrics (best-effort, never blocks health check)
             await self._refresh_generation_metrics(state)
+            if was_generating and not state.is_generating:
+                # The service just finished its current task (precise signal
+                # when available — see precise_in_flight — otherwise the GPU-util
+                # heuristic). Release the VRAM reservation now instead of making
+                # a queued request wait for the full idle-unload cycle (minutes
+                # away) even though the GPU is free again right now.
+                await self.release_gpu_vram(state.service_id)
 
             # Refresh container CPU/RAM stats (best-effort)
             await self._refresh_container_stats(state)
@@ -354,6 +420,14 @@ class ServiceManager:
             state.last_health_check_at = now
             state.status = "unreachable"
             state.detail = str(exc)
+            if was_runtime_loaded:
+                # Container crashed/unresponsive after having a runtime loaded —
+                # release any VRAM reservation, docker's restart: unless-stopped
+                # will bring it back fresh and re-reserve if it generates again.
+                # Skip this if it was never loaded yet (e.g. a transient health
+                # check blip during a heavy first load) — same falling-edge
+                # reasoning as the success path above.
+                await self.release_gpu_vram(service_id)
         await self._publish_state(state, "health_checked")
         return state
 
@@ -407,6 +481,15 @@ class ServiceManager:
                 elif not val:
                     state.active_model_ref = None
 
+        # Precise generation signal, when the service exposes one (Hunyuan,
+        # TRELLIS.2: both report in_flight_requests on this same endpoint).
+        # _refresh_generation_metrics prefers this over its GPU-util heuristic
+        # — the heuristic can read "idle" mid-generation during CPU-bound
+        # steps (e.g. TRELLIS.2's mesh remeshing/export) with GPU util briefly
+        # under threshold, which would release a VRAM reservation too early.
+        in_flight = payload.get("in_flight_requests")
+        state.precise_in_flight = int(in_flight) if isinstance(in_flight, (int, float)) else None
+
     async def _refresh_generation_metrics(self, state: ServiceState) -> None:
         """Poll GPU and service-specific endpoints to update generation metrics.
 
@@ -427,8 +510,13 @@ class ServiceManager:
                 await self._refresh_comfyui_metrics(state)
             elif state.service_type == "automatic1111":
                 await self._refresh_a1111_metrics(state)
+            elif state.precise_in_flight is not None:
+                # Hunyuan, TRELLIS.2: exact signal from /runtime/status.
+                state.is_generating = state.precise_in_flight > 0
+                state.queue_depth = 0
             else:
-                # Hunyuan, ACE-Step: infer from GPU utilisation
+                # ACE-Step and anything else without a dedicated status
+                # endpoint: infer from GPU utilisation (coarse, delayed).
                 threshold = settings.generation_gpu_util_threshold_pct
                 state.is_generating = bool(
                     state.gpu_util_pct is not None
@@ -598,6 +686,7 @@ class ServiceManager:
                 state.detail = f"unloaded:{reason}"
                 logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
                 await self._publish_state(state, "runtime_unloaded")
+            await self.release_gpu_vram(service_id)
             return state
 
         url = f"{state.base_url}{state.unload_path}"
@@ -631,6 +720,7 @@ class ServiceManager:
                 # Do NOT stop the container — the REST unload already freed GPU memory.
                 # Stopping would cause Docker to restart it (restart: unless-stopped),
                 # which looks like the service keeps reloading.
+                await self.release_gpu_vram(service_id)
             except Exception as exc:
                 state.detail = str(exc)
                 logger.warning(
@@ -649,6 +739,21 @@ class ServiceManager:
     async def check_idle_unloads(self) -> None:
         now = datetime.now(timezone.utc)
         for state in self._states.values():
+            if (
+                state.vram_reserved_at is not None
+                and (now - state.vram_reserved_at) > timedelta(seconds=state.vram_reservation_max_age_s)
+            ):
+                # Stuck: never reached runtime_loaded=True and never failed its
+                # health check either (otherwise refresh() would've already
+                # released this). Force-release so it doesn't starve the GPU
+                # forever if this service never actually starts generating.
+                logger.warning(
+                    "service_vram_reservation_expired",
+                    service_id=state.service_id,
+                    reserved_at=state.vram_reserved_at.isoformat(),
+                )
+                await self.release_gpu_vram(state.service_id)
+
             if not state.enabled:
                 continue
             if state.idle_unload_after_seconds <= 0:

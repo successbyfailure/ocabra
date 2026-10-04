@@ -296,12 +296,38 @@ class BitnetBackend(BackendInterface):
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         options = self._model_configs.get(model_id, {})
-        gpu_layers = int(options.get("gpu_layers", settings.bitnet_gpu_layers))
-        if gpu_layers <= 0:
-            return 0
-        total_layers = max(1, int(options.get("total_layers", _DEFAULT_TOTAL_LAYERS)))
-        model_mb = max(1, int(options.get("model_vram_mb", _DEFAULT_MODEL_MB)))
-        return int(model_mb * min(gpu_layers, total_layers) / total_layers)
+        if options:
+            # Already loaded at least once — this cache reflects the actually
+            # resolved config (post is_prismml/gpu_layers detection), the most
+            # accurate source available.
+            gpu_layers = int(options.get("gpu_layers", settings.bitnet_gpu_layers))
+            if gpu_layers <= 0:
+                return 0
+            total_layers = max(1, int(options.get("total_layers", _DEFAULT_TOTAL_LAYERS)))
+            model_mb = max(1, int(options.get("model_vram_mb", _DEFAULT_MODEL_MB)))
+            return int(model_mb * min(gpu_layers, total_layers) / total_layers)
+
+        # Never loaded yet: this used to ignore `extra_config` entirely and
+        # fall back to settings.bitnet_gpu_layers (default 0 => "return 0"),
+        # so a never-loaded BitNet model always looked free to the scheduler
+        # regardless of what the caller actually configured. Reuse the same
+        # extra_config-aware resolution model_manager.py's pre-load path uses
+        # (estimate_bitnet_vram_from_config) via a minimal state-shaped shim —
+        # that helper only reads .model_id/.backend_model_id/.extra_config.
+        from types import SimpleNamespace
+
+        from ocabra.core.model_manager_helpers import estimate_bitnet_vram_from_config
+
+        shim_state = SimpleNamespace(
+            model_id=model_id, backend_model_id=model_id, extra_config=extra_config or {}
+        )
+        return estimate_bitnet_vram_from_config(
+            shim_state,
+            default_gpu_layers=settings.bitnet_gpu_layers,
+            default_total_layers=_DEFAULT_TOTAL_LAYERS,
+            default_model_vram_mb=_DEFAULT_MODEL_MB,
+            models_dir=getattr(settings, "models_dir", None),
+        )
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         entry = self._processes.get(model_id)

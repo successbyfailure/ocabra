@@ -404,18 +404,42 @@ class LlamaCppBackend(BackendInterface):
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         options = self._model_configs.get(model_id, {})
-        gpu_layers = int(options.get("gpu_layers", settings.llama_cpp_gpu_layers))
-        if gpu_layers <= 0:
-            return 0
+        if options:
+            # Already loaded at least once — reflects the actually resolved
+            # config, the most accurate source available.
+            gpu_layers = int(options.get("gpu_layers", settings.llama_cpp_gpu_layers))
+            if gpu_layers <= 0:
+                return 0
 
-        total_layers = max(1, int(options.get("total_layers", _DEFAULT_TOTAL_LAYERS)))
-        model_file = options.get("model_file")
-        if model_file:
-            size_bytes = await asyncio.to_thread(lambda: Path(model_file).stat().st_size)
-            total_mb = max(1, int(size_bytes / (1024 * 1024)))
-        else:
-            total_mb = max(1, int(options.get("model_vram_mb", 4096)))
-        return max(1, int(total_mb * min(gpu_layers, total_layers) / total_layers))
+            total_layers = max(1, int(options.get("total_layers", _DEFAULT_TOTAL_LAYERS)))
+            model_file = options.get("model_file")
+            if model_file:
+                size_bytes = await asyncio.to_thread(lambda: Path(model_file).stat().st_size)
+                total_mb = max(1, int(size_bytes / (1024 * 1024)))
+            else:
+                total_mb = max(1, int(options.get("model_vram_mb", 4096)))
+            return max(1, int(total_mb * min(gpu_layers, total_layers) / total_layers))
+
+        # Never loaded yet: this used to ignore `extra_config` entirely and
+        # fall back to settings.llama_cpp_gpu_layers, so a never-loaded model
+        # always looked free to the scheduler regardless of what the caller
+        # configured. Reuse the same extra_config-aware resolution
+        # model_manager.py's pre-load path uses (estimate_llama_cpp_vram_from_config)
+        # via a minimal state-shaped shim — it only reads
+        # .model_id/.backend_model_id/.extra_config.
+        from types import SimpleNamespace
+
+        from ocabra.core.model_manager_helpers import estimate_llama_cpp_vram_from_config
+
+        shim_state = SimpleNamespace(
+            model_id=model_id, backend_model_id=model_id, extra_config=extra_config or {}
+        )
+        return estimate_llama_cpp_vram_from_config(
+            shim_state,
+            default_gpu_layers=settings.llama_cpp_gpu_layers,
+            default_ctx_size=settings.llama_cpp_ctx_size,
+            default_total_layers=_DEFAULT_TOTAL_LAYERS,
+        )
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         entry = self._processes.get(model_id)

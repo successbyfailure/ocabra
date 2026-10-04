@@ -317,3 +317,24 @@ class GPUManager:
         state = self._states[gpu_index]
         locked = sum(self._locks.get(gpu_index, {}).values())
         return max(0, state.free_vram_mb - locked - settings.vram_buffer_mb)
+
+    def has_service_lock(self, gpu_index: int) -> bool:
+        """Whether an external service (Hunyuan, TRELLIS.2, ...) currently holds a
+        VRAM reservation on this GPU via ServiceManager.reserve_gpu_vram. Cheap,
+        synchronous check meant for the router's "is this GPU usable right now"
+        fast path — see RouterResolver.pick().
+        """
+        return any(
+            key.startswith("service:") for key in self._locks.get(gpu_index, {})
+        )
+
+    def service_locks(self, gpu_index: int) -> list[str]:
+        """service_id(s) currently holding a VRAM reservation on this GPU (see
+        has_service_lock) — used to explain *what* a queued request is waiting
+        on, e.g. in the /ocabra/status badge.
+        """
+        return [
+            key.removeprefix("service:")
+            for key in self._locks.get(gpu_index, {})
+            if key.startswith("service:")
+        ]

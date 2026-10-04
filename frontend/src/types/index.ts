@@ -507,6 +507,9 @@ export interface ServerConfig {
   hunyuanIdleUnloadSeconds: number
   hunyuanGenerationGracePeriodS: number
   hunyuanPreferredGpu: number
+  trellis2IdleUnloadSeconds: number
+  trellis2GenerationGracePeriodS: number
+  trellis2PreferredGpu: number
   comfyuiIdleUnloadSeconds: number
   comfyuiGenerationGracePeriodS: number
   comfyuiPreferredGpu: number
@@ -653,6 +656,9 @@ export interface RecentRequest {
   apiKeyName: string | null
   clientAddr: string | null
   userAgent: string | null
+  inFlight?: boolean
+  elapsedMs?: number | null
+  estimatedRemainingMs?: number | null
 }
 
 export interface RecentRequestsData {

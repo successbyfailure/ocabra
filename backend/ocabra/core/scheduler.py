@@ -83,6 +83,16 @@ class GPUScheduler:
                 ordered.append(preferred)
             ordered.extend(i for i in candidates if i != preferred)
             for gpu_idx in ordered:
+                # A GPU reserved by an external service (Hunyuan, TRELLIS.2, ...)
+                # via ServiceManager.reserve_gpu_vram is off-limits regardless of
+                # the free-VRAM math below. This matters beyond the obvious case:
+                # a backend that under-reports its VRAM estimate (0, or a
+                # weights-only figure — see get_vram_estimate_mb on each
+                # backend) would otherwise trivially satisfy
+                # ``free >= vram_needed_mb`` for any GPU no matter how much of
+                # it a service has reserved.
+                if self._gpu_manager.has_service_lock(gpu_idx):
+                    continue
                 free = free_per_gpu[gpu_idx]
                 if free >= vram_needed_mb and _has_vllm_headroom(gpu_idx):
                     logger.info(
@@ -103,7 +113,11 @@ class GPUScheduler:
                 state_by_gpu[i].total_vram_mb >= vram_needed_mb for i in candidates
             )
             if not fits_single_gpu:
-                tp_candidates = [i for i in candidates if _has_vllm_headroom(i)]
+                tp_candidates = [
+                    i
+                    for i in candidates
+                    if _has_vllm_headroom(i) and not self._gpu_manager.has_service_lock(i)
+                ]
                 tp_total_free = sum(free_per_gpu[i] for i in tp_candidates)
                 if tp_total_free >= vram_needed_mb:
                     logger.info(
@@ -117,9 +131,14 @@ class GPUScheduler:
         details = []
         for gpu_idx in gpu_indices:
             state = state_by_gpu[gpu_idx]
+            reserved_note = (
+                ", reserved by an external service"
+                if self._gpu_manager.has_service_lock(gpu_idx)
+                else ""
+            )
             detail = (
                 f"GPU {gpu_idx}: free {free_per_gpu[gpu_idx]} MB, "
-                f"total {state.total_vram_mb} MB"
+                f"total {state.total_vram_mb} MB{reserved_note}"
             )
             if enforce_vllm_headroom:
                 required_free_mb = int(state.total_vram_mb * vllm_utilization)

@@ -8,7 +8,7 @@ interface GenerationServicesSettingsProps {
   onSave: (patch: Partial<ServerConfig>) => Promise<void>
 }
 
-type ServiceKey = "hunyuan" | "comfyui" | "a1111" | "acestep" | "unsloth"
+type ServiceKey = "hunyuan" | "trellis2" | "comfyui" | "a1111" | "acestep" | "unsloth"
 
 interface ServiceMeta {
   key: ServiceKey
@@ -24,6 +24,13 @@ const SERVICES: ServiceMeta[] = [
     key: "hunyuan",
     label: "Hunyuan3D",
     hint: "Text/Image → 3D mesh. Generación corta-media (segundos).",
+    maxIdle: 1800,
+    allowDisable: false,
+  },
+  {
+    key: "trellis2",
+    label: "TRELLIS.2",
+    hint: "Image → 3D mesh PBR (Microsoft, evaluación paralela a Hunyuan3D).",
     maxIdle: 1800,
     allowDisable: false,
   },
@@ -67,6 +74,11 @@ const KEY_MAP = {
     idle: "comfyuiIdleUnloadSeconds",
     grace: "comfyuiGenerationGracePeriodS",
     gpu: "comfyuiPreferredGpu",
+  },
+  trellis2: {
+    idle: "trellis2IdleUnloadSeconds",
+    grace: "trellis2GenerationGracePeriodS",
+    gpu: "trellis2PreferredGpu",
   },
   a1111: {
     idle: "a1111IdleUnloadSeconds",

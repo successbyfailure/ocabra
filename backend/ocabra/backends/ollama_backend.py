@@ -21,6 +21,11 @@ class OllamaBackend(BackendInterface):
         self._registry = OllamaRegistry()
         self._loaded: set[str] = set()
         self._caps_cache: dict[str, BackendCapabilities] = {}
+        # Real size_vram observed via /api/ps after a successful load, keyed by
+        # model_id. Reused by get_vram_estimate_mb so the scheduler sees Ollama
+        # models' actual footprint (context-size KV cache included) on repeat
+        # loads, instead of always reporting 0 — see get_vram_estimate_mb.
+        self._observed_vram_mb: dict[str, int] = {}
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         _ = gpu_indices
@@ -37,6 +42,22 @@ class OllamaBackend(BackendInterface):
         await self._registry.load(model_id, keep_alive=keep_alive)
         self._loaded.add(model_id)
 
+        # Real footprint (weights + KV cache for this model's configured
+        # context) straight from Ollama, so the scheduler can actually reason
+        # about this model's VRAM usage instead of treating every Ollama load
+        # as free. Best-effort: a slow/failed /api/ps here must never fail an
+        # otherwise-successful load.
+        vram_used_mb = 0
+        try:
+            for detail in await self._registry.list_loaded_details():
+                if detail["name"] == model_id or detail["model"] == model_id:
+                    vram_used_mb = int(detail["size_vram"] / (1024 * 1024))
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ollama_vram_probe_failed", model_id=model_id, error=str(exc))
+        if vram_used_mb > 0:
+            self._observed_vram_mb[model_id] = vram_used_mb
+
         parsed = urlparse(settings.ollama_base_url)
         port = int(parsed.port or 11434)
         return WorkerInfo(
@@ -45,7 +66,7 @@ class OllamaBackend(BackendInterface):
             gpu_indices=[],
             port=port,
             pid=0,
-            vram_used_mb=0,
+            vram_used_mb=vram_used_mb,
         )
 
     async def unload(self, model_id: str) -> None:
@@ -181,8 +202,37 @@ class OllamaBackend(BackendInterface):
         self._caps_cache[model_id] = caps
         return caps
 
+    # Disk size undercounts real VRAM for large-context models — the KV cache
+    # for a big num_ctx can add several extra GB on top of the raw weights.
+    # Applied only as a fallback, before we've ever seen this model actually
+    # loaded (see _observed_vram_mb).
+    _DISK_SIZE_VRAM_MULTIPLIER = 1.3
+
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
-        _ = model_id
+        """Best-effort VRAM estimate so the scheduler can reason about Ollama
+        loads the same way it does vLLM/diffusers ones (pressure-eviction,
+        wait-for-service-gpu, ...). Previously always returned 0, which made
+        every Ollama load look "free" regardless of what else was resident —
+        the scheduler approved it instantly and the actual contention only
+        surfaced later as a raw httpx ReadTimeout hitting Ollama's own load
+        endpoint (reproduced 2026-09-29: cascading model-swap timeouts while
+        a different Ollama model was mid-generation).
+
+        Prefers the real size_vram observed the last time this exact model
+        was loaded (accounts for this model's configured context size); falls
+        back to on-disk blob size with a safety margin when never observed.
+        """
+        _ = extra_config
+        observed = self._observed_vram_mb.get(model_id)
+        if observed:
+            return observed
+        try:
+            for detail in await self._registry.list_installed_details():
+                if detail["name"] == model_id or detail["model"] == model_id:
+                    size_mb = detail["size"] / (1024 * 1024)
+                    return int(size_mb * self._DISK_SIZE_VRAM_MULTIPLIER)
+        except Exception as exc:  # noqa: BLE001 — never block scheduling on this
+            logger.warning("ollama_vram_estimate_failed", model_id=model_id, error=str(exc))
         return 0
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:

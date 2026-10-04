@@ -76,6 +76,11 @@ class ModelState:
     extra_config: dict = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Set by ModelManager.ensure_vram_free (services evicting on their own
+    # behalf, e.g. Hunyuan/TRELLIS.2) to hold off the normal pressure-eviction
+    # auto_reload watcher — otherwise a WARM model evicted for a multi-minute
+    # service generation just reloads itself 30s later and re-fills the GPU.
+    reload_suppressed_until: datetime | None = None
 
 
     def __post_init__(self) -> None:
@@ -163,6 +168,12 @@ class ModelManager:
         self._in_flight: dict[str, int] = {}
         self._in_flight_lock = Lock()
         self._active_requests: dict[str, ActiveRequest] = {}  # request_id -> ActiveRequest
+        # model_id -> blocking service_id, for requests parked in
+        # _wait_for_service_gpu_and_retry_load (see _deps.py). Surfaced via
+        # /ocabra/status so the frontend badge can show "esperando a que
+        # <service> termine" instead of those requests looking like nothing
+        # is happening for minutes at a time.
+        self._service_gpu_waiters: dict[str, str] = {}
         self._timeout_counts: dict[str, int] = {}  # model_id -> timeout count
         self._busy_watchdog_task: asyncio.Task | None = None
         self._vram_watchdog_task: asyncio.Task | None = None
@@ -216,6 +227,16 @@ class ModelManager:
     def inflight_count(self, model_id: str) -> int:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0)
+
+    def active_requests_snapshot(self) -> list[ActiveRequest]:
+        """Copy of currently in-flight requests — for surfacing "processing,
+        not yet in request_stats" rows next to completed ones (see
+        /ocabra/stats/recent). request_stats only gets a row once a request
+        finishes, so without this a request that's been running for minutes
+        is invisible everywhere except the raw /ocabra/models/activity count.
+        """
+        with self._in_flight_lock:
+            return list(self._active_requests.values())
 
     def inflight_snapshot(self) -> dict[str, int]:
         """Copy of the in-flight counters keyed by whatever id begin_request saw
@@ -430,6 +451,7 @@ class ModelManager:
 
     async def _busy_watchdog(self) -> None:
         """Loop every 10s checking for requests that exceed busy_timeout_seconds."""
+        logger.info("busy_watchdog_started")
         while True:
             try:
                 await asyncio.sleep(10)
@@ -651,6 +673,16 @@ class ModelManager:
     def set_gpu_manager(self, gpu_manager) -> None:
         self._gpu_manager = gpu_manager
 
+    @property
+    def gpu_manager(self):
+        return self._gpu_manager
+
+    def mark_service_gpu_wait(self, model_id: str, service_id: str) -> None:
+        self._service_gpu_waiters[model_id] = service_id
+
+    def clear_service_gpu_wait(self, model_id: str) -> None:
+        self._service_gpu_waiters.pop(model_id, None)
+
     def set_gpu_scheduler(self, scheduler) -> None:
         self._gpu_scheduler = scheduler
 
@@ -701,11 +733,19 @@ class ModelManager:
                     task_name=f"load:{model_id}",
                     model_id=model_id,
                 )
-        self._busy_watchdog_task = asyncio.create_task(
-            self._busy_watchdog(), name="busy-watchdog"
+        # Bare asyncio.create_task here previously: if either loop ever died from
+        # an exception the `while True` structure doesn't catch (or the task got
+        # GC'd for lack of a live reference before this assignment completed),
+        # it would fail *silently* — nothing awaits these tasks or logs their
+        # outcome, so a dead watchdog looks identical to a healthy idle one.
+        # Reproduced 2026-09-29: in_flight counters for a router's base model_id
+        # leaked past the 930s effective busy_timeout with zero log output.
+        # _create_background_task's done-callback at least surfaces the death.
+        self._busy_watchdog_task = self._create_background_task(
+            self._busy_watchdog(), task_name="busy-watchdog"
         )
-        self._vram_watchdog_task = asyncio.create_task(
-            self._vram_watchdog(), name="vram-watchdog"
+        self._vram_watchdog_task = self._create_background_task(
+            self._vram_watchdog(), task_name="vram-watchdog"
         )
 
     async def stop(self) -> None:
@@ -1077,9 +1117,11 @@ class ModelManager:
                     effective_extra = state.extra_config
 
                 self._load_queue_waiters += 1
+                gate_entered = False
                 try:
                     async with self._backend_load_gate:
                         self._load_queue_waiters -= 1
+                        gate_entered = True
                         self._load_in_progress.add(model_id)
                         try:
                             worker_info = await backend.load(
@@ -1092,10 +1134,10 @@ class ModelManager:
                         finally:
                             self._load_in_progress.discard(model_id)
                 except BaseException:
-                    # We may have decremented already inside the ``with`` (if
-                    # the gate was acquired). Only decrement here when the
-                    # exception happened before we entered the block.
-                    if self._load_queue_waiters > 0 and model_id not in self._load_in_progress:
+                    # Only decrement the waiter counter when the exception
+                    # happened before we even entered the gate; once inside,
+                    # the inline decrement above already ran.
+                    if not gate_entered:
                         self._load_queue_waiters -= 1
                     raise
                 backend_loaded = True
@@ -1105,7 +1147,16 @@ class ModelManager:
                 actual_gpu_indices = worker_info.gpu_indices or gpu_indices
                 state.worker_info = worker_info
                 state.current_gpu = actual_gpu_indices
-                state.vram_used_mb = worker_info.vram_used_mb
+                # Prefer the honest pre-load estimate (vram_needed, computed
+                # above) over the backend's own post-load report when it's
+                # higher. vLLM's WorkerInfo.vram_used_mb is weights-only (see
+                # VLLMBackend.get_vram_estimate_mb) — it never accounts for the
+                # KV cache reserve that estimate_vllm_vram_from_config already
+                # computed for the eviction decision, so using it alone here
+                # under-recorded state.vram_used_mb (and the real GPUManager
+                # lock below) by the full KV cache size on long-context loads.
+                effective_vram_mb = max(worker_info.vram_used_mb, vram_needed)
+                state.vram_used_mb = effective_vram_mb
                 state.capabilities = capabilities
                 state.status = ModelStatus.LOADED
                 state.loaded_at = datetime.now(UTC)
@@ -1120,7 +1171,7 @@ class ModelManager:
                 )
 
                 if gpu_managed and self._gpu_manager:
-                    vram_per_gpu = worker_info.vram_used_mb // max(1, len(actual_gpu_indices))
+                    vram_per_gpu = effective_vram_mb // max(1, len(actual_gpu_indices))
                     for gpu_idx in actual_gpu_indices:
                         await self._gpu_manager.lock_vram(
                             gpu_idx, vram_per_gpu, model_id
@@ -1133,7 +1184,7 @@ class ModelManager:
                     "model_loaded",
                     model_id=model_id,
                     gpu=gpu_indices,
-                    vram_mb=worker_info.vram_used_mb,
+                    vram_mb=effective_vram_mb,
                 )
             except Exception as e:
                 state.status = ModelStatus.ERROR
@@ -1358,6 +1409,36 @@ class ModelManager:
             for arg in extra_args
         )
 
+    async def ensure_vram_free(
+        self,
+        requesting_id: str,
+        vram_needed_mb: int,
+        preferred_gpu: int | None,
+        suppress_reload_seconds: int = 0,
+    ) -> list[int]:
+        """Evict on-demand/warm models (and evictable services) on ``preferred_gpu``
+        until ``vram_needed_mb`` is free, reusing the same pressure-eviction cascade
+        as a normal model load. Never evicts PIN-policy models. Intended for external
+        interactive services (Hunyuan, TRELLIS.2, ...) to call before loading their
+        own pipeline, since those services load VRAM outside of oCabra's own
+        scheduler and would otherwise never trigger eviction on their behalf.
+
+        ``suppress_reload_seconds`` holds off the normal auto_reload watcher on any
+        WARM model evicted here — otherwise it reloads itself ~30s later (as soon as
+        the scheduler sees free VRAM again) and re-fills the GPU mid-generation,
+        since a service generation can run for several minutes. Set this to roughly
+        the service's worst-case generation time.
+
+        Raises InsufficientVRAMError if not enough VRAM could be freed.
+        """
+        return await self._assign_gpus_for_load(
+            model_id=requesting_id,
+            vram_needed=vram_needed_mb,
+            preferred_gpu=preferred_gpu,
+            enforce_vllm_headroom=False,
+            suppress_reload_seconds=suppress_reload_seconds,
+        )
+
     async def _assign_gpus_for_load(
         self,
         model_id: str,
@@ -1365,6 +1446,7 @@ class ModelManager:
         preferred_gpu: int | None,
         enforce_vllm_headroom: bool,
         vllm_gpu_memory_utilization: float | None = None,
+        suppress_reload_seconds: int = 0,
     ) -> list[int]:
         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -1473,7 +1555,17 @@ class ModelManager:
                     requested_model_id=model_id,
                     evicting_model_id=candidate_id,
                 )
-                evicted_vram_mb = self._states.get(candidate_id).vram_used_mb if self._states.get(candidate_id) else 0
+                candidate_state = self._states.get(candidate_id)
+                evicted_vram_mb = candidate_state.vram_used_mb if candidate_state else 0
+                if candidate_state:
+                    # Always set explicitly (None clears any stale suppression left
+                    # over from an earlier service-triggered eviction) so a plain
+                    # model-vs-model pressure eviction never inherits a leftover hold.
+                    candidate_state.reload_suppressed_until = (
+                        datetime.now(UTC) + timedelta(seconds=suppress_reload_seconds)
+                        if suppress_reload_seconds > 0
+                        else None
+                    )
                 await self.unload(candidate_id, reason="pressure")
                 await self._wait_for_vram_released(evicted_vram_mb)
                 try:
@@ -1611,6 +1703,18 @@ class ModelManager:
                 return
             if state.status != ModelStatus.UNLOADED:
                 return
+            # A caller (e.g. ModelManager.ensure_vram_free, on behalf of a
+            # service like Hunyuan/TRELLIS.2) may have asked to hold off
+            # auto-reload for a while — extend our own deadline to match so
+            # we don't give up on reloading just because the hold is long,
+            # then keep sleeping until the hold expires.
+            suppressed_until = state.reload_suppressed_until
+            if suppressed_until is not None:
+                if suppressed_until > deadline:
+                    deadline = suppressed_until
+                if datetime.now(UTC) < suppressed_until:
+                    await asyncio.sleep(30)
+                    continue
             if datetime.now(UTC) >= deadline:
                 logger.warning("watch_and_reload_timeout", model_id=model_id)
                 return
@@ -1618,6 +1722,8 @@ class ModelManager:
             state = self._states.get(model_id)
             if not state or not state.auto_reload or state.status != ModelStatus.UNLOADED:
                 return
+            if state.reload_suppressed_until and datetime.now(UTC) < state.reload_suppressed_until:
+                continue
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
                 vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=state.extra_config)

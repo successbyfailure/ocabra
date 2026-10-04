@@ -153,6 +153,11 @@ class ServerConfigPatch(BaseModel):
         default=None, alias="a1111GenerationGracePeriodS"
     )
     a1111_preferred_gpu: int | None = Field(default=None, alias="a1111PreferredGpu")
+    trellis2_idle_unload_seconds: int | None = Field(default=None, alias="trellis2IdleUnloadSeconds")
+    trellis2_generation_grace_period_s: int | None = Field(
+        default=None, alias="trellis2GenerationGracePeriodS"
+    )
+    trellis2_preferred_gpu: int | None = Field(default=None, alias="trellis2PreferredGpu")
     acestep_idle_unload_seconds: int | None = Field(default=None, alias="acestepIdleUnloadSeconds")
     acestep_generation_grace_period_s: int | None = Field(
         default=None, alias="acestepGenerationGracePeriodS"
@@ -273,6 +278,9 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "a1111IdleUnloadSeconds": settings.a1111_idle_unload_seconds,
         "a1111GenerationGracePeriodS": settings.a1111_generation_grace_period_s,
         "a1111PreferredGpu": settings.a1111_preferred_gpu,
+        "trellis2IdleUnloadSeconds": settings.trellis2_idle_unload_seconds,
+        "trellis2GenerationGracePeriodS": settings.trellis2_generation_grace_period_s,
+        "trellis2PreferredGpu": settings.trellis2_preferred_gpu,
         "acestepIdleUnloadSeconds": settings.acestep_idle_unload_seconds,
         "acestepGenerationGracePeriodS": settings.acestep_generation_grace_period_s,
         "acestepPreferredGpu": settings.acestep_preferred_gpu,
@@ -568,6 +576,7 @@ async def patch_config(
         ("hunyuan", "hunyuan"),
         ("comfyui", "comfyui"),
         ("a1111", "a1111"),
+        ("trellis2", "trellis2"),
         ("acestep", "acestep"),
         ("unsloth", "unsloth"),
     )

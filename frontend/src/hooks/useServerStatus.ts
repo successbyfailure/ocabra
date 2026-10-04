@@ -6,6 +6,7 @@ export interface ServerStatus {
     waiting: number
     active: number
     in_progress: string[]
+    waiting_for_service_gpu: { modelId: string; blockedBy: string }[]
   }
   workers: {
     loaded_count: number

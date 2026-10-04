@@ -423,10 +423,45 @@ PATCH /ocabra/services/{service_id}/runtime → ServiceState
     detail?: str|null
   }
 POST /ocabra/services/{service_id}/unload → ServiceState
+POST /ocabra/services/{service_id}/ensure_vram → { ok: bool, gpu_indices?: int[], detail?: str }
+  body: { vram_needed_mb: int, suppress_reload_seconds?: int = 0 }
+  Evicts on-demand/warm inference models (never PIN) on el preferred_gpu del
+  servicio hasta liberar vram_needed_mb, reusando la misma cascada de
+  pressure-eviction que un load normal (ModelManager.ensure_vram_free). Pensado
+  para que servicios que gestionan su propia VRAM fuera del scheduler de oCabra
+  (Hunyuan, TRELLIS.2) lo llamen justo antes de cargar su pipeline — de otro
+  modo nunca disparan evicción por sí mismos.
+  suppress_reload_seconds evita que un modelo WARM evictado se auto-recargue
+  (el watcher normal de auto_reload lo intenta a los ~30s) mientras el servicio
+  todavía está generando — usar un valor cercano al peor caso de duración de
+  una generación del servicio.
+
+  Además, tras evictar, este endpoint reserva la VRAM liberada vía
+  GPUManager.lock_vram (ServiceManager.reserve_gpu_vram), reutilizando la misma
+  contabilidad que ModelManager usa para sus propias cargas. Con esto
+  GPUScheduler.find_gpu_for_model deja de ver esa VRAM como libre mientras el
+  servicio genera, así que una petición de inferencia no relacionada no puede
+  aterrizar en la misma GPU a mitad de generación. La reserva se libera sola:
+  al llamar a /unload del servicio, en el siguiente health check una vez que
+  runtime_loaded pase a false, si el contenedor deja de responder, o tras
+  vram_reservation_max_age_s (20 min por defecto) como red de seguridad si
+  nunca llega a cargar ni falla limpio. RouterResolver.pick() también respeta
+  esta reserva (GPUManager.has_service_lock) — un router como "Gemma" salta
+  automáticamente al siguiente target si su GPU preferida está reservada.
+
+  La reserva también se libera en cuanto el servicio termina su tarea actual
+  (no solo al descargar el runtime): si /runtime/status expone
+  in_flight_requests (Hunyuan, TRELLIS.2), ServiceManager lo usa como señal
+  exacta de is_generating en vez del umbral de utilización de GPU (más lento
+  e impreciso), y libera la reserva en la transición generando→idle. El
+  servicio debe volver a pedir ensure_vram antes de CADA generación, no solo
+  en la carga en frío del pipeline — si no, una segunda generación sobre un
+  pipeline ya caliente corre sin ninguna protección.
 ```
 
 `service_id` iniciales:
 - `hunyuan`
+- `trellis2`
 - `comfyui`
 - `a1111`
 - `acestep`

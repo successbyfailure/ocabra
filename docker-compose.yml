@@ -98,6 +98,7 @@ services:
       # /docker/ACE-Step-1.5). The api needs to see them at the same path
       # so `docker compose up -d <service>` finds the build context.
       - ./Hunyuan3D-2.1:/opt/ocabra/Hunyuan3D-2.1:ro
+      - ./TRELLIS.2:/opt/ocabra/TRELLIS.2:ro
       - /docker/ACE-Step-1.5:/docker/ACE-Step-1.5:ro
       # ACE-Step weights checkpoint dir (~11 GB) is mounted into the modular
       # install path so the cloned src/ tree finds them where the acestep
@@ -236,7 +237,14 @@ services:
               "--public-url", "${HUNYUAN_UI_URL:-}"]
     runtime: nvidia
     environment:
-      NVIDIA_VISIBLE_DEVICES: all
+      # Same CUDA-vs-NVML device order mismatch documented on the ollama
+      # service and fixed on trellis2 below — Hunyuan's shared_runtime.py
+      # also calls .from_pretrained(..., device="cuda") with no explicit
+      # index, so it silently used whichever GPU the driver enumerated first
+      # under NVIDIA_VISIBLE_DEVICES=all, which doesn't reliably match
+      # hunyuan_preferred_gpu (oCabra's NVML-indexed "1" = the 3090).
+      # Restricting visibility to a single GPU removes the ambiguity.
+      NVIDIA_VISIBLE_DEVICES: ${HUNYUAN_NVIDIA_VISIBLE_DEVICES:-1}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       IDLE_TIMEOUT_SECONDS: ${HUNYUAN_IDLE_UNLOAD_SECONDS:-300}
       IDLE_CHECK_INTERVAL_SECONDS: 30
@@ -250,6 +258,62 @@ services:
       - /docker/ai-models/ocabra/models/hy3dgen:/root/.cache/hy3dgen
     ports:
       - "${HUNYUAN_PORT:-8480}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
+
+  trellis2:
+    profiles: ["services"]
+    build:
+      context: ./TRELLIS.2
+      dockerfile: docker/Dockerfile
+    # Evaluación paralela a Hunyuan3D (ver docs de integración): mismo patrón
+    # de servicio interactivo (carga/descarga perezosa, /health, /runtime/status,
+    # /runtime/unload). Validado en la 3090: ~9GB VRAM pico, sin OOM.
+    command: ["python", "server_app.py", "--host", "0.0.0.0", "--port", "8080",
+              "--cache-path", "./gradio_cache",
+              "--root-path", "${TRELLIS2_ROOT_PATH:-}",
+              "--public-url", "${TRELLIS2_UI_URL:-}"]
+    runtime: nvidia
+    environment:
+      # NOT "all": CUDA orders GPUs by "fastest first" inside the container
+      # (cuda:0=3090, cuda:1=3060) while oCabra's own NVML-based indexing
+      # (what ensure_vram/preferred_gpu talk about) uses PCI order (GPU
+      # 0=3060, GPU 1=3090) — same mismatch already documented on the ollama
+      # service above. pipeline.cuda() in server_app.py always grabs
+      # cuda:0 with no explicit device index, so exposing both GPUs meant it
+      # silently used whichever the driver put first — usually the 3090 by
+      # luck, but not always, and oCabra's VRAM reservation was tracking
+      # *its own* "GPU 1" regardless of which one that actually was inside
+      # the container. Reproduced 2026-09-29: ensure_vram reserved oCabra's
+      # GPU 0 (the 3060) while the container's cuda:0 (still the 3090) ran
+      # completely unprotected, causing a real OOM. Restricting visibility to
+      # a single GPU (same pattern as acestep/unsloth-studio below) removes
+      # the ambiguity entirely — only ever the 3090, always cuda:0.
+      NVIDIA_VISIBLE_DEVICES: ${TRELLIS2_NVIDIA_VISIBLE_DEVICES:-1}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      IDLE_TIMEOUT_SECONDS: ${TRELLIS2_IDLE_UNLOAD_SECONDS:-300}
+      IDLE_CHECK_INTERVAL_SECONDS: 30
+      MALLOC_TRIM_THRESHOLD_: 0
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Para pedirle a oCabra que libere VRAM (evict on-demand/warm) en su GPU
+      # preferida antes de cargar el pipeline — ver POST .../ensure_vram en
+      # docs/CONTRACTS.md 5.7. Sin esto, compite en silencio por VRAM con lo
+      # que ya esté cargado y puede colgarse en vez de fallar limpio.
+      OCABRA_API_URL: http://api:8000
+      GATEWAY_SERVICE_TOKEN: ${GATEWAY_SERVICE_TOKEN:-}
+      OCABRA_SERVICE_ID: trellis2
+    volumes:
+      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
+      - /docker/ai-models/ocabra/models/trellis2:/workspace/TRELLIS.2/gradio_cache
+    ports:
+      - "${TRELLIS2_PORT:-8481}:8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 20s

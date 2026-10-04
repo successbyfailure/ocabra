@@ -3,10 +3,11 @@ GET /ocabra/stats/* — Statistics API endpoints.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import time
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
 
@@ -124,10 +125,12 @@ async def overview_stats(
     description="Return the most recent inference requests with user, group, and timing details.",
 )
 async def recent_requests(
+    request: Request,
     limit: int = Query(20, ge=1, le=200),
     user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
-    """Return the most recent N inference requests with user and group info.
+    """Return the most recent N inference requests with user and group info,
+    with any currently in-flight requests prepended.
 
     Args:
         limit: Max number of records to return (default 20, max 200).
@@ -135,10 +138,55 @@ async def recent_requests(
     Returns:
         { requests: [{ id, modelId, backendType, requestKind, statusCode, startedAt,
                        durationMs, inputTokens, outputTokens, error,
-                       userId, username, groupId, groupName }] }
+                       userId, username, groupId, groupName, inFlight,
+                       elapsedMs, estimatedRemainingMs }] }
+        In-flight rows have statusCode/durationMs/error = null and inFlight = true;
+        completed rows have inFlight = false and no elapsed/estimate fields.
     """
     from ocabra.stats.aggregator import get_recent_requests
-    return await get_recent_requests(limit)
+    result = await get_recent_requests(limit)
+
+    mm = getattr(request.app.state, "model_manager", None)
+    estimator = getattr(request.app.state, "duration_estimator", None)
+    in_flight_rows: list[dict] = []
+    if mm is not None:
+        now = time.time()
+        for req in mm.active_requests_snapshot():
+            remaining_s = None
+            if estimator is not None:
+                try:
+                    remaining_s = estimator.in_flight_remaining(req.model_id, model_id=req.model_id)
+                except Exception:  # noqa: BLE001 — never break this endpoint
+                    remaining_s = None
+            in_flight_rows.append({
+                "id": req.request_id,
+                "modelId": req.model_id,
+                "backendType": None,
+                "requestKind": None,
+                "endpointPath": None,
+                "statusCode": None,
+                "startedAt": datetime.fromtimestamp(req.started_at, tz=UTC).isoformat(),
+                "durationMs": None,
+                "inputTokens": None,
+                "outputTokens": None,
+                "error": None,
+                "userId": None,
+                "username": None,
+                "groupId": None,
+                "groupName": None,
+                "apiKeyName": None,
+                "clientAddr": None,
+                "userAgent": None,
+                "inFlight": True,
+                "elapsedMs": int((now - req.started_at) * 1000),
+                "estimatedRemainingMs": int(remaining_s * 1000) if remaining_s is not None else None,
+            })
+        in_flight_rows.sort(key=lambda r: r["elapsedMs"], reverse=True)
+
+    for row in result.get("requests", []):
+        row["inFlight"] = False
+    result["requests"] = in_flight_rows + result.get("requests", [])
+    return result
 
 
 @router.get(

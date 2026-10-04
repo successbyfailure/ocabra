@@ -18,6 +18,14 @@ class ServicePatch(BaseModel):
     enabled: bool
 
 
+class EnsureVramRequest(BaseModel):
+    vram_needed_mb: int
+    # Holds off the normal auto_reload watcher on any evicted WARM model for this
+    # many seconds, so it doesn't reload itself mid-generation and re-fill the GPU.
+    # 0 = no hold (default pressure-eviction behaviour: may reload within ~30s).
+    suppress_reload_seconds: int = 0
+
+
 @router.get(
     "/services",
     summary="List all services",
@@ -211,6 +219,58 @@ async def get_service_generations(
         }
         for row in rows
     ]
+
+
+@router.post(
+    "/services/{service_id}/ensure_vram",
+    summary="Ensure free VRAM on a service's preferred GPU",
+    description=(
+        "Evict on-demand/warm inference models (and other evictable services) on "
+        "this service's preferred GPU until vram_needed_mb is free. Never evicts "
+        "PIN-policy models. Call this right before loading a heavy pipeline in a "
+        "service that manages its own VRAM outside of oCabra's scheduler (Hunyuan, "
+        "TRELLIS.2, ...) — those services never trigger eviction on their own."
+    ),
+    responses={404: {"description": "Service not found"}},
+)
+async def ensure_service_vram(
+    service_id: str,
+    body: EnsureVramRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    sm = request.app.state.service_manager
+    state = await sm.get_state(service_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Service '{service_id}' not found")
+
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    mm = request.app.state.model_manager
+    try:
+        gpu_indices = await mm.ensure_vram_free(
+            requesting_id=f"service:{service_id}",
+            vram_needed_mb=body.vram_needed_mb,
+            preferred_gpu=state.preferred_gpu,
+            suppress_reload_seconds=body.suppress_reload_seconds,
+        )
+        # Reserve the freed VRAM for the duration of the service's own generation
+        # (released on /unload, on the next health check once runtime_loaded goes
+        # false, or if the container becomes unreachable) — otherwise an unrelated
+        # inference load can land on this GPU mid-generation and starve it.
+        await sm.reserve_gpu_vram(service_id, body.vram_needed_mb)
+        return {"ok": True, "gpu_indices": gpu_indices}
+    except InsufficientVRAMError as exc:
+        # Eviction couldn't free the FULL amount requested — but the caller's own
+        # design (see TRELLIS.2/server_app.py's _ensure_ocabra_vram) is to attempt
+        # the load anyway; it may still fit in whatever got freed, or fail with a
+        # clean CUDA OOM. Either way it's about to use this GPU, so still reserve —
+        # skipping the reservation here would leave a real, in-progress generation
+        # completely unprotected against a second unrelated load racing in right
+        # behind it (reproduced 2026-09-29: ensure_vram partial-failed, no lock was
+        # taken, the generation ran with zero protection).
+        await sm.reserve_gpu_vram(service_id, body.vram_needed_mb)
+        return {"ok": False, "detail": str(exc)}
 
 
 @router.post(
