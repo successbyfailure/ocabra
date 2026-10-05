@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import redis.asyncio as aioredis
+from redis.asyncio.connection import BlockingConnectionPool
 
 from ocabra.config import settings
 
@@ -11,12 +12,24 @@ _redis: aioredis.Redis | None = None
 
 
 async def init_redis() -> None:
+    """Initialise the shared async Redis client with a bounded pool.
+
+    Uses ``BlockingConnectionPool`` so callers queue on the pool when it
+    saturates instead of raising ``MaxConnectionsError`` (observed in prod
+    on 2026-10-05 16:35 UTC: 116 failed auth revocation checks and 500s on
+    /ocabra/downloads under concurrent polling). 200 connections cover the
+    stats collector middleware + model events + downloads sync + per-request
+    auth checks with plenty of headroom; Redis server-side cap is 10 k.
+    """
     global _redis
-    _redis = aioredis.from_url(
+    pool = BlockingConnectionPool.from_url(
         settings.redis_url,
         encoding="utf-8",
         decode_responses=True,
+        max_connections=200,
+        timeout=30.0,
     )
+    _redis = aioredis.Redis(connection_pool=pool)
 
 
 async def close_redis() -> None:

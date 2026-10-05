@@ -407,7 +407,10 @@ class FederationManager:
             logger.warning(
                 "federation_peer_heartbeat_failed",
                 peer=peer.name,
-                error=str(exc),
+                # ``str(exc)`` is empty for ``asyncio.TimeoutError`` and
+                # bare httpx connect errors; the typed name keeps the log
+                # meaningful instead of ``error=''``.
+                error=str(exc) or type(exc).__name__,
                 failures=peer.consecutive_failures,
             )
 
