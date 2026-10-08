@@ -55,6 +55,7 @@ import type {
   FederationTestResult,
   LlamaCppConfig,
 } from "@/types"
+import { useAuthStore } from "@/stores/authStore"
 
 const BASE = ""
 
@@ -850,6 +851,13 @@ async function request<T>(
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {
+    // Session gone → clear user so ProtectedRoute redirects to /login and
+    // the dashboard's setInterval polls unmount instead of looping on 401.
+    // Skip for /ocabra/auth/* so a failed login attempt doesn't nuke an
+    // already-null user and the login form keeps its own error flow.
+    if (res.status === 401 && !path.startsWith("/ocabra/auth/")) {
+      useAuthStore.getState().setUser(null)
+    }
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? res.statusText)
   }

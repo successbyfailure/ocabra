@@ -290,10 +290,15 @@ class OllamaRegistry:
 
     async def load(self, model_ref: str, keep_alive: str | int | None = None) -> None:
         keep_alive_value = settings.ollama_keep_alive if keep_alive is None else keep_alive
-        # 180s covers cold starts of ~30B models (llama-server spawn + blob
-        # read + first CUDA discovery). The old 120s tripped on qwen3:32b and
-        # gemma4:26b-ctx160k under normal load.
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        # 300s covers cold starts of ~30B models with large KV reservations
+        # (llama-server spawn + 20GB blob read from cold disk + 160k KV alloc
+        # + first-of-day CUDA kernel compile). The previous 180s was tripping
+        # gemma4:26b-ctx160k whenever Ollama needed to re-read the weights
+        # from disk; successful loads were observed up to ~172s warm, so cold
+        # starts legitimately overflow a 180s cap. Ollama does not cancel the
+        # load on client disconnect, so a timeout here surfaces to the user as
+        # a 503 even though the model finishes loading a minute later.
+        async with httpx.AsyncClient(timeout=300.0) as client:
             if self._is_embed_model(model_ref):
                 payload: dict[str, object] = {
                     "model": model_ref,

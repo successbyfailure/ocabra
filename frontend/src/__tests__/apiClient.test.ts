@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
+import { useAuthStore } from "@/stores/authStore"
 
 describe("api client mappings", () => {
   afterEach(() => {
@@ -168,5 +169,45 @@ describe("api client mappings", () => {
     expect(estimate.disk.totalPeakMb).toBe(17500)
     expect(estimate.warnings[0]).toContain("selected GPU 1")
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("gpu_indices=1")
+  })
+
+  it("clears the auth user on 401 so ProtectedRoute kicks the user back to /login", async () => {
+    useAuthStore.getState().setUser({
+      id: "u1",
+      username: "u",
+      email: null,
+      role: "system_admin",
+      createdAt: "",
+    } as never)
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Session expired" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+
+    await expect(api.models.list()).rejects.toThrow("Session expired")
+    expect(useAuthStore.getState().user).toBeNull()
+  })
+
+  it("does not clear the auth user on a failed /auth/login attempt", async () => {
+    useAuthStore.getState().setUser({
+      id: "u1",
+      username: "u",
+      email: null,
+      role: "system_admin",
+      createdAt: "",
+    } as never)
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Bad credentials" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+
+    await expect(api.auth.login("x", "y")).rejects.toThrow("Bad credentials")
+    expect(useAuthStore.getState().user).not.toBeNull()
   })
 })
