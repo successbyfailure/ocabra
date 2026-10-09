@@ -19,6 +19,7 @@ import { Agents } from "@/pages/Agents"
 import { MCPServers } from "@/pages/MCPServers"
 import { Sessions } from "@/pages/Sessions"
 import { Routers } from "@/pages/Routers"
+import { Services } from "@/pages/Services"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -40,6 +41,7 @@ export default function App() {
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/models" element={<Models />} />
+                <Route path="/services" element={<Services />} />
                 <Route path="/playground" element={<Playground />} />
                 <Route path="/stats" element={<Stats />} />
                 <Route path="/settings" element={<Settings />} />
