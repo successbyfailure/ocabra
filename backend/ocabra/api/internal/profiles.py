@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.core.profile_registry import ProfileRegistry
 from ocabra.database import AsyncSessionLocal
-from ocabra.schemas.profiles import ProfileCreate, ProfileOut, ProfileUpdate
+from ocabra.schemas.profiles import ProfileClone, ProfileCreate, ProfileOut, ProfileRename, ProfileUpdate
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["profiles"])
@@ -176,6 +176,72 @@ async def update_profile(
     async with AsyncSessionLocal() as session:
         try:
             profile = await registry.update(session, profile_id, patch)
+        except ValueError as exc:
+            msg = str(exc)
+            if "not found" in msg.lower():
+                raise HTTPException(status_code=404, detail=msg) from exc
+            raise HTTPException(status_code=400, detail=msg) from exc
+    return _profile_to_dict(profile)
+
+
+@router.post(
+    "/profiles/{profile_id}/rename",
+    summary="Rename a profile",
+    description=(
+        "Change a profile's primary id and cascade the new id into every "
+        "router whose ``routing_targets`` references it. Historical rows in "
+        "``request_stats.via_router_profile_id`` are left alone on purpose "
+        "(they describe which router handled a given request at the time)."
+    ),
+    responses={
+        400: {"description": "Invalid new_profile_id or duplicate"},
+        404: {"description": "Profile not found"},
+    },
+)
+async def rename_profile(
+    profile_id: str,
+    body: ProfileRename,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    registry = _get_registry(request)
+    async with AsyncSessionLocal() as session:
+        try:
+            profile = await registry.rename(session, profile_id, body.new_profile_id)
+        except ValueError as exc:
+            msg = str(exc)
+            if "not found" in msg.lower():
+                raise HTTPException(status_code=404, detail=msg) from exc
+            raise HTTPException(status_code=400, detail=msg) from exc
+    return _profile_to_dict(profile)
+
+
+@router.post(
+    "/profiles/{profile_id}/clone",
+    summary="Clone a profile",
+    description=(
+        "Create a new profile with the same fields as the source, under a "
+        "fresh profile_id. ``is_default`` is forced to False in the clone "
+        "to avoid two defaults for the same base model."
+    ),
+    status_code=201,
+    responses={
+        400: {"description": "Invalid new_profile_id or duplicate"},
+        404: {"description": "Profile not found"},
+    },
+)
+async def clone_profile(
+    profile_id: str,
+    body: ProfileClone,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    registry = _get_registry(request)
+    async with AsyncSessionLocal() as session:
+        try:
+            profile = await registry.clone(
+                session, profile_id, body.new_profile_id, body.display_name
+            )
         except ValueError as exc:
             msg = str(exc)
             if "not found" in msg.lower():

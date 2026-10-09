@@ -1323,6 +1323,31 @@ export const api = {
       await request<unknown>("DELETE", `/ocabra/profiles/${encodeURIComponent(profileId)}`)
     },
 
+    rename: async (profileId: string, newProfileId: string): Promise<ModelProfile> =>
+      toModelProfile(
+        await request<unknown>(
+          "POST",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/rename`,
+          { new_profile_id: newProfileId },
+        ),
+      ),
+
+    clone: async (
+      profileId: string,
+      newProfileId: string,
+      displayName?: string,
+    ): Promise<ModelProfile> =>
+      toModelProfile(
+        await request<unknown>(
+          "POST",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/clone`,
+          {
+            new_profile_id: newProfileId,
+            ...(displayName !== undefined && { display_name: displayName }),
+          },
+        ),
+      ),
+
     uploadAsset: async (profileId: string, file: File): Promise<ModelProfile> => {
       const form = new FormData()
       form.append("file", file)

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { AlertCircle, ArrowDown, ArrowUp, GitBranch, Loader2, Plus, RefreshCw, Save, Trash2, X } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, Copy, GitBranch, Loader2, Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, type RoutingDecisionsResponse } from "@/api/client"
 import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
@@ -77,6 +77,8 @@ export function Routers() {
   const [addingTo, setAddingTo] = useState<string | null>(null)
   const [addTargetValue, setAddTargetValue] = useState("")
   const [showCreate, setShowCreate] = useState(false)
+  const [editingRouter, setEditingRouter] = useState<ModelProfile | null>(null)
+  const [cloningRouter, setCloningRouter] = useState<ModelProfile | null>(null)
 
   const refresh = async () => {
     setLoading(true)
@@ -276,6 +278,30 @@ export function Routers() {
         />
       )}
 
+      {editingRouter && (
+        <EditRouterModal
+          router={editingRouter}
+          existingIds={Array.from(profilesById.keys())}
+          onClose={() => setEditingRouter(null)}
+          onSaved={async () => {
+            setEditingRouter(null)
+            await refresh()
+          }}
+        />
+      )}
+
+      {cloningRouter && (
+        <CloneRouterModal
+          source={cloningRouter}
+          existingIds={Array.from(profilesById.keys())}
+          onClose={() => setCloningRouter(null)}
+          onCloned={async () => {
+            setCloningRouter(null)
+            await refresh()
+          }}
+        />
+      )}
+
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           <AlertCircle size={16} className="mt-0.5" />
@@ -302,6 +328,9 @@ export function Routers() {
                       router
                     </span>
                     <code className="font-mono text-sm font-semibold">{card.router.profileId}</code>
+                    {card.router.displayName && card.router.displayName !== card.router.profileId && (
+                      <span className="text-sm text-muted-foreground">— {card.router.displayName}</span>
+                    )}
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     base: <code className="font-mono">{card.router.baseModelId}</code>
@@ -322,6 +351,24 @@ export function Routers() {
                       Guardar orden
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => setEditingRouter(card.router)}
+                    disabled={saving === card.router.profileId}
+                    className="rounded p-1.5 text-muted-foreground hover:bg-muted disabled:opacity-30"
+                    title="Editar nombre y descripción"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCloningRouter(card.router)}
+                    disabled={saving === card.router.profileId}
+                    className="rounded p-1.5 text-muted-foreground hover:bg-muted disabled:opacity-30"
+                    title="Clonar router"
+                  >
+                    <Copy size={14} />
+                  </button>
                   <button
                     type="button"
                     onClick={() => void deleteRouter(card.router.profileId)}
@@ -684,6 +731,241 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
           >
             {submitting ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
             Crear router
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface EditRouterModalProps {
+  router: ModelProfile
+  existingIds: string[]
+  onClose: () => void
+  onSaved: () => Promise<void>
+}
+
+function EditRouterModal({ router: r, existingIds, onClose, onSaved }: EditRouterModalProps) {
+  const [profileId, setProfileId] = useState(r.profileId)
+  const [displayName, setDisplayName] = useState(r.displayName ?? "")
+  const [description, setDescription] = useState(r.description ?? "")
+  const [submitting, setSubmitting] = useState(false)
+
+  const idChanged = profileId.trim() !== r.profileId
+  const duplicate =
+    idChanged && existingIds.includes(profileId.trim()) && profileId.trim() !== r.profileId
+
+  const handleSubmit = async () => {
+    const newId = profileId.trim()
+    if (!newId) {
+      toast.error("profile_id es obligatorio")
+      return
+    }
+    if (duplicate) {
+      toast.error("Ya existe un perfil con ese profile_id")
+      return
+    }
+    setSubmitting(true)
+    try {
+      if (idChanged) {
+        await api.profiles.rename(r.profileId, newId)
+      }
+      const patchChanged =
+        displayName.trim() !== (r.displayName ?? "") ||
+        description.trim() !== (r.description ?? "")
+      if (patchChanged) {
+        await api.profiles.update(idChanged ? newId : r.profileId, {
+          displayName: displayName.trim(),
+          description: description.trim(),
+        })
+      }
+      toast.success(idChanged ? `Router renombrado a ${newId}` : "Router actualizado")
+      await onSaved()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error guardando")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-lg border border-border bg-card p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <h2 className="text-lg font-semibold">Editar router</h2>
+          <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium">profile_id</label>
+            <input
+              type="text"
+              value={profileId}
+              onChange={(e) => setProfileId(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+            />
+            {idChanged && (
+              <p className="mt-1 text-[10px] text-amber-500">
+                Renombrar actualiza en cascada las referencias en routing_targets de otros routers.
+                Los clientes que invoquen el id antiguo recibirán 404 — avisa antes de aplicar.
+              </p>
+            )}
+            {duplicate && (
+              <p className="mt-1 text-[10px] text-destructive">Ya existe un perfil con ese profile_id.</p>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Display name</label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Descripción</label>
+            <textarea
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </div>
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={submitting || duplicate}
+            onClick={() => void handleSubmit()}
+            className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {submitting ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+            Guardar cambios
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface CloneRouterModalProps {
+  source: ModelProfile
+  existingIds: string[]
+  onClose: () => void
+  onCloned: () => Promise<void>
+}
+
+function CloneRouterModal({ source, existingIds, onClose, onCloned }: CloneRouterModalProps) {
+  const [profileId, setProfileId] = useState(`${source.profileId}-copy`)
+  const [displayName, setDisplayName] = useState(source.displayName ?? "")
+  const [submitting, setSubmitting] = useState(false)
+  const duplicate = existingIds.includes(profileId.trim())
+
+  const handleSubmit = async () => {
+    const newId = profileId.trim()
+    if (!newId) {
+      toast.error("profile_id es obligatorio")
+      return
+    }
+    if (duplicate) {
+      toast.error("Ya existe un perfil con ese profile_id")
+      return
+    }
+    setSubmitting(true)
+    try {
+      await api.profiles.clone(source.profileId, newId, displayName.trim() || undefined)
+      toast.success(`Router clonado como ${newId}`)
+      await onCloned()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error clonando")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-lg border border-border bg-card p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Clonar router</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Crea un nuevo router copiando <code>{source.profileId}</code>. Los destinos
+              y configuración se replican; <code>is_default</code> se desactiva en la copia.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium">Nuevo profile_id</label>
+            <input
+              type="text"
+              value={profileId}
+              onChange={(e) => setProfileId(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+            />
+            {duplicate && (
+              <p className="mt-1 text-[10px] text-destructive">Ya existe un perfil con ese profile_id.</p>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Display name (opcional)</label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </div>
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={submitting || duplicate}
+            onClick={() => void handleSubmit()}
+            className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {submitting ? <Loader2 size={14} className="animate-spin" /> : <Copy size={14} />}
+            Clonar
           </button>
         </div>
       </div>

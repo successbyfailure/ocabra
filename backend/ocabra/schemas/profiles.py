@@ -38,6 +38,19 @@ class ProfileUpdate(BaseModel):
     routing_targets: list[str] | None = None
 
 
+class ProfileRename(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    new_profile_id: str = Field(..., min_length=1, max_length=512)
+
+
+class ProfileClone(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    new_profile_id: str = Field(..., min_length=1, max_length=512)
+    display_name: str | None = None
+
+
 class ProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -164,6 +164,130 @@ class ProfileRegistry:
         logger.info("profile_updated", profile_id=profile_id)
         return db_profile
 
+    async def rename(
+        self,
+        session: AsyncSession,
+        old_profile_id: str,
+        new_profile_id: str,
+    ) -> ModelProfile:
+        """Rename a profile and cascade the change into every router that
+        references it in ``routing_targets``.
+
+        The attribution column ``via_router_profile_id`` on ``request_stats``
+        is intentionally **not** rewritten: historical rows describe which
+        router processed a given request at the time it happened; mutating
+        them would falsify history. New requests will naturally use the new
+        id.
+        """
+        if not _is_valid_slug(new_profile_id):
+            raise ValueError(
+                f"Invalid profile_id '{new_profile_id}': must be lowercase "
+                "alphanumeric with dots/dashes/colons."
+            )
+        if old_profile_id == new_profile_id:
+            raise ValueError("new_profile_id matches current id.")
+        if new_profile_id in self._profiles:
+            raise ValueError(f"Profile '{new_profile_id}' already exists.")
+
+        result = await session.execute(
+            select(ModelProfile).where(ModelProfile.profile_id == old_profile_id)
+        )
+        db_profile = result.scalar_one_or_none()
+        if db_profile is None:
+            raise ValueError(f"Profile '{old_profile_id}' not found.")
+
+        # Update the row's primary key.
+        db_profile.profile_id = new_profile_id
+
+        # Cascade into every other profile whose routing_targets includes the
+        # old id. Walk the full registry rather than issuing a jsonb query
+        # because we also need the SQLAlchemy session-attached rows.
+        other_rows = (
+            await session.execute(
+                select(ModelProfile).where(ModelProfile.profile_id != new_profile_id)
+            )
+        ).scalars().all()
+        affected_routers: list[str] = []
+        for row in other_rows:
+            targets = row.routing_targets
+            if not isinstance(targets, list) or old_profile_id not in targets:
+                continue
+            row.routing_targets = [
+                new_profile_id if t == old_profile_id else t for t in targets
+            ]
+            affected_routers.append(row.profile_id)
+
+        await session.commit()
+        await session.refresh(db_profile)
+
+        # Rebuild the in-memory cache so every row (including the renamed
+        # entries we just mutated) is addressable under its new id.
+        self._profiles.pop(old_profile_id, None)
+        self._profiles[new_profile_id] = db_profile
+        for pid in affected_routers:
+            cached = self._profiles.get(pid)
+            if cached is not None:
+                cached.routing_targets = [
+                    new_profile_id if t == old_profile_id else t
+                    for t in (cached.routing_targets or [])
+                ]
+        logger.info(
+            "profile_renamed",
+            old_profile_id=old_profile_id,
+            new_profile_id=new_profile_id,
+            affected_routers=affected_routers,
+        )
+        return db_profile
+
+    async def clone(
+        self,
+        session: AsyncSession,
+        source_profile_id: str,
+        new_profile_id: str,
+        display_name: str | None = None,
+    ) -> ModelProfile:
+        """Clone a profile under a new id. The clone keeps every field except
+        the primary key; ``is_default`` is forced to False to avoid two
+        defaults for the same base model.
+        """
+        if not _is_valid_slug(new_profile_id):
+            raise ValueError(
+                f"Invalid profile_id '{new_profile_id}': must be lowercase "
+                "alphanumeric with dots/dashes/colons."
+            )
+        if new_profile_id in self._profiles:
+            raise ValueError(f"Profile '{new_profile_id}' already exists.")
+
+        source = self._profiles.get(source_profile_id)
+        if source is None:
+            raise ValueError(f"Profile '{source_profile_id}' not found.")
+
+        clone = ModelProfile(
+            profile_id=new_profile_id,
+            base_model_id=source.base_model_id,
+            display_name=display_name if display_name is not None else source.display_name,
+            description=source.description,
+            category=source.category,
+            load_overrides=source.load_overrides,
+            request_defaults=source.request_defaults,
+            assets=source.assets,
+            enabled=source.enabled,
+            is_default=False,
+            routing_targets=(
+                list(source.routing_targets) if source.routing_targets is not None else None
+            ),
+        )
+        session.add(clone)
+        await session.commit()
+        await session.refresh(clone)
+        self._profiles[new_profile_id] = clone
+        logger.info(
+            "profile_cloned",
+            source_profile_id=source_profile_id,
+            new_profile_id=new_profile_id,
+        )
+        return clone
+
     async def delete(self, session: AsyncSession, profile_id: str) -> None:
         """Delete a profile and remove from cache."""
         result = await session.execute(
