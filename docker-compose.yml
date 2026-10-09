@@ -45,7 +45,6 @@ services:
       VIBEASR_STREAM_SERVER_BIN: ${VIBEASR_STREAM_SERVER_BIN:-/usr/local/bin/asr_stream_server}
       VIBEASR_THREADS: ${VIBEASR_THREADS:-8}
       VIBEASR_STARTUP_TIMEOUT_S: ${VIBEASR_STARTUP_TIMEOUT_S:-300}
-      HUNYUAN_UI_URL: ${HUNYUAN_UI_URL:-}
       COMFYUI_UI_URL: ${COMFYUI_UI_URL:-}
       A1111_UI_URL: ${A1111_UI_URL:-}
       # Gradio mode (default): http://acestep:7860 | API mode: http://acestep:8001
@@ -93,11 +92,10 @@ services:
       # so they need to resolve at the same relative path. Read-only is fine
       # because compose only reads them.
       - ./services:/opt/ocabra/services:ro
-      # Hunyuan3D + ACE-Step are external repos used as compose build
-      # contexts (paths declared in docker-compose.yml: ./Hunyuan3D-2.1 and
+      # TRELLIS.2 + ACE-Step are external repos used as compose build
+      # contexts (paths declared in docker-compose.yml: ./TRELLIS.2 and
       # /docker/ACE-Step-1.5). The api needs to see them at the same path
       # so `docker compose up -d <service>` finds the build context.
-      - ./Hunyuan3D-2.1:/opt/ocabra/Hunyuan3D-2.1:ro
       - ./TRELLIS.2:/opt/ocabra/TRELLIS.2:ro
       - /docker/ACE-Step-1.5:/docker/ACE-Step-1.5:ro
       # ACE-Step weights checkpoint dir (~11 GB) is mounted into the modular
@@ -214,56 +212,6 @@ services:
       - /docker/ai-models/ollama:/root/.ollama
     ports:
       - "7869:11434"
-    restart: unless-stopped
-
-  hunyuan:
-    profiles: ["services"]
-    build:
-      context: ./Hunyuan3D-2.1
-      dockerfile: docker/Dockerfile
-    # NOTE: --low_vram_mode y HUNYUAN_ENABLE_CPU_OFFLOAD activan model_cpu_offload,
-    # que copia pesos CPU<->GPU por capa. En esta máquina (3090 con 18+ GB libres)
-    # eso es contraproducente y, con presión de swap en el host, hace que la
-    # generación tarde horas. Mantenerlos en false salvo VRAM realmente escasa.
-    # --root-path debe ser un prefijo de path ASGI (p.ej. /hunyuan) o vacío
-    # cuando el servicio se sirve en la raíz de un subdominio. NO una URL completa.
-    # --root-path: prefijo ASGI (vacío al servir en raíz de subdominio).
-    # --public-url: URL pública completa para gradio.mount_gradio_app, necesaria
-    #   porque nuestro gateway no reenvía X-Forwarded-Host/Proto y gradio no
-    #   puede derivar el root del navegador.
-    command: ["python", "gradio_app.py", "--host", "0.0.0.0", "--port", "8080",
-              "--cache-path", "./gradio_cache",
-              "--root-path", "${HUNYUAN_ROOT_PATH:-}",
-              "--public-url", "${HUNYUAN_UI_URL:-}"]
-    runtime: nvidia
-    environment:
-      # Same CUDA-vs-NVML device order mismatch documented on the ollama
-      # service and fixed on trellis2 below — Hunyuan's shared_runtime.py
-      # also calls .from_pretrained(..., device="cuda") with no explicit
-      # index, so it silently used whichever GPU the driver enumerated first
-      # under NVIDIA_VISIBLE_DEVICES=all, which doesn't reliably match
-      # hunyuan_preferred_gpu (oCabra's NVML-indexed "1" = the 3090).
-      # Restricting visibility to a single GPU removes the ambiguity.
-      NVIDIA_VISIBLE_DEVICES: ${HUNYUAN_NVIDIA_VISIBLE_DEVICES:-1}
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      IDLE_TIMEOUT_SECONDS: ${HUNYUAN_IDLE_UNLOAD_SECONDS:-300}
-      IDLE_CHECK_INTERVAL_SECONDS: 30
-      HUNYUAN_ENABLE_CPU_OFFLOAD: ${HUNYUAN_ENABLE_CPU_OFFLOAD:-false}
-      MALLOC_TRIM_THRESHOLD_: 0
-      HF_HOME: /root/.cache/huggingface
-      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
-    volumes:
-      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
-      - /docker/ai-models/ocabra/models/hunyuan3d:/workspace/Hunyuan3D-2.1/gradio_cache
-      - /docker/ai-models/ocabra/models/hy3dgen:/root/.cache/hy3dgen
-    ports:
-      - "${HUNYUAN_PORT:-8480}:8080"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-      start_period: 180s
     restart: unless-stopped
 
   trellis2:

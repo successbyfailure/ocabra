@@ -2,7 +2,15 @@ import { useEffect, useMemo, useState } from "react"
 import { AlertCircle, ArrowDown, ArrowUp, GitBranch, Loader2, Plus, RefreshCw, Save, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, type RoutingDecisionsResponse } from "@/api/client"
-import type { ModelProfile, ModelState } from "@/types"
+import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
+
+const ROUTER_CATEGORIES: { value: ProfileCategory; label: string }[] = [
+  { value: "llm", label: "LLM" },
+  { value: "tts", label: "TTS" },
+  { value: "stt", label: "STT" },
+  { value: "image", label: "Image" },
+  { value: "music", label: "Music" },
+]
 
 /**
  * Bloque 20 — dedicated admin surface for router profiles.
@@ -68,6 +76,7 @@ export function Routers() {
   const [saving, setSaving] = useState<string | null>(null)
   const [addingTo, setAddingTo] = useState<string | null>(null)
   const [addTargetValue, setAddTargetValue] = useState("")
+  const [showCreate, setShowCreate] = useState(false)
 
   const refresh = async () => {
     setLoading(true)
@@ -212,16 +221,38 @@ export function Routers() {
             objetivo cargado (o cargable sin desalojar workers ocupados).
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          disabled={loading}
-          className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-        >
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-          Actualizar
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Plus size={14} />
+            Nuevo router
+          </button>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+            Actualizar
+          </button>
+        </div>
       </div>
+
+      {showCreate && (
+        <CreateRouterModal
+          models={Array.from(statesByModelId.values())}
+          profiles={Array.from(profilesById.values())}
+          onClose={() => setShowCreate(false)}
+          onCreated={async () => {
+            setShowCreate(false)
+            await refresh()
+          }}
+        />
+      )}
 
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -397,6 +428,214 @@ export function Routers() {
             </div>
           )
         })}
+      </div>
+    </div>
+  )
+}
+
+interface CreateRouterModalProps {
+  models: ModelState[]
+  profiles: ModelProfile[]
+  onClose: () => void
+  onCreated: () => Promise<void>
+}
+
+function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRouterModalProps) {
+  const sortedModels = useMemo(
+    () => [...models].sort((a, b) => a.modelId.localeCompare(b.modelId)),
+    [models],
+  )
+  const [baseModelId, setBaseModelId] = useState(sortedModels[0]?.modelId ?? "")
+  const [profileId, setProfileId] = useState("")
+  const [displayName, setDisplayName] = useState("")
+  const [description, setDescription] = useState("")
+  const [category, setCategory] = useState<ProfileCategory>("llm")
+  const [targetsText, setTargetsText] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  const targetProfileIds = useMemo(() => {
+    return new Set(profiles.map((p) => p.profileId))
+  }, [profiles])
+
+  const parsedTargets = useMemo(() => {
+    return targetsText
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }, [targetsText])
+
+  const unknownTargets = parsedTargets.filter((t) => !targetProfileIds.has(t))
+  const selfReference = parsedTargets.includes(profileId.trim())
+
+  const handleSubmit = async () => {
+    const trimmedId = profileId.trim()
+    if (!baseModelId) {
+      toast.error("Elige un modelo base")
+      return
+    }
+    if (!trimmedId) {
+      toast.error("profile_id es obligatorio")
+      return
+    }
+    if (parsedTargets.length === 0) {
+      toast.error("Un router necesita al menos un destino")
+      return
+    }
+    if (selfReference) {
+      toast.error("Un router no puede referenciarse a sí mismo")
+      return
+    }
+    setSubmitting(true)
+    try {
+      await api.profiles.create(baseModelId, {
+        profileId: trimmedId,
+        displayName: displayName.trim() || undefined,
+        description: description.trim() || undefined,
+        category,
+        enabled: true,
+        isDefault: false,
+        routingTargets: parsedTargets,
+      })
+      toast.success(`Router ${trimmedId} creado`)
+      await onCreated()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error creando el router")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-lg border border-border bg-card p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Nuevo router</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Un router es un perfil con <code>routing_targets</code>: cuando un cliente
+              lo invoca, se resuelve al primer destino disponible de la lista.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-muted-foreground hover:bg-muted"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium">Modelo base</label>
+            <select
+              value={baseModelId}
+              onChange={(e) => setBaseModelId(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            >
+              {sortedModels.map((m) => (
+                <option key={m.modelId} value={m.modelId}>{m.modelId}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Fallback último del resolver. Si ninguno de los destinos está disponible,
+              se cae al perfil default de este modelo.
+            </p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">profile_id</label>
+            <input
+              type="text"
+              value={profileId}
+              onChange={(e) => setProfileId(e.target.value)}
+              placeholder="chat-router"
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Display name (opcional)</label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Chat Router"
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Categoría</label>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value as ProfileCategory)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            >
+              {ROUTER_CATEGORIES.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">
+              Destinos (profile_id, uno por línea o separados por coma)
+            </label>
+            <textarea
+              rows={4}
+              value={targetsText}
+              onChange={(e) => setTargetsText(e.target.value)}
+              placeholder="qwen3.8:27b-ctx160k&#10;gemma4:26b-ctx160k"
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+            />
+            {parsedTargets.length > 0 && (
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                {parsedTargets.length} destino{parsedTargets.length === 1 ? "" : "s"}
+                {unknownTargets.length > 0 && (
+                  <span className="ml-1 text-amber-500">
+                    (desconocidos: {unknownTargets.join(", ")})
+                  </span>
+                )}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Descripción (opcional)</label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </div>
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => void handleSubmit()}
+            className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {submitting ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            Crear router
+          </button>
+        </div>
       </div>
     </div>
   )
