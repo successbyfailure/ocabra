@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react"
-import { AlertCircle, ArrowDown, ArrowUp, Copy, GitBranch, Loader2, Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { AlertCircle, ArrowDown, ArrowUp, Copy, GitBranch, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, type RoutingDecisionsResponse } from "@/api/client"
 import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
@@ -483,29 +483,26 @@ export function Routers() {
 
               {addingTo === card.router.profileId ? (
                 <div className="mt-2 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={addTargetValue}
-                      onChange={(e) => setAddTargetValue(e.target.value)}
-                      disabled={candidatesForAdd.length === 0 || saving === card.router.profileId}
-                      className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs disabled:opacity-50"
-                    >
-                      <option value="">
-                        {candidatesForAdd.length === 0
-                          ? "Sin candidatos disponibles"
-                          : "Seleccionar perfil…"}
-                      </option>
-                      {candidatesForAdd.map((p) => (
-                        <option key={p.profileId} value={p.profileId}>
-                          {p.profileId} — {p.baseModelId}
-                        </option>
-                      ))}
-                    </select>
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1">
+                      <ProfilePicker
+                        options={candidatesForAdd.map((p) => ({
+                          profileId: p.profileId,
+                          baseModelId: p.baseModelId,
+                          displayName: p.displayName,
+                          category: p.category,
+                        }))}
+                        value={addTargetValue ? [addTargetValue] : []}
+                        onChange={(ids) => setAddTargetValue(ids[0] ?? "")}
+                        placeholder="Filtrar perfiles disponibles…"
+                        disabled={candidatesForAdd.length === 0 || saving === card.router.profileId}
+                      />
+                    </div>
                     <button
                       type="button"
                       onClick={() => addTarget(card.router.profileId, addTargetValue)}
                       disabled={!addTargetValue || saving === card.router.profileId}
-                      className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50"
+                      className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
                     >
                       {saving === card.router.profileId ? (
                         <Loader2 size={12} className="animate-spin" />
@@ -520,7 +517,7 @@ export function Routers() {
                         setAddingTo(null)
                         setAddTargetValue("")
                       }}
-                      className="rounded p-1 text-muted-foreground hover:bg-muted"
+                      className="rounded p-1.5 text-muted-foreground hover:bg-muted"
                     >
                       <X size={12} />
                     </button>
@@ -577,21 +574,22 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
   const [displayName, setDisplayName] = useState("")
   const [description, setDescription] = useState("")
   const [category, setCategory] = useState<ProfileCategory>("llm")
-  const [targetsText, setTargetsText] = useState("")
+  const [parsedTargets, setParsedTargets] = useState<string[]>([])
   const [submitting, setSubmitting] = useState(false)
 
-  const targetProfileIds = useMemo(() => {
-    return new Set(profiles.map((p) => p.profileId))
-  }, [profiles])
+  const selectableProfiles = useMemo(
+    () =>
+      profiles
+        .filter((p) => p.enabled && p.routingTargets === null)
+        .map((p) => ({
+          profileId: p.profileId,
+          baseModelId: p.baseModelId,
+          displayName: p.displayName,
+          category: p.category,
+        })),
+    [profiles],
+  )
 
-  const parsedTargets = useMemo(() => {
-    return targetsText
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-  }, [targetsText])
-
-  const unknownTargets = parsedTargets.filter((t) => !targetProfileIds.has(t))
   const selfReference = parsedTargets.includes(profileId.trim())
 
   const handleSubmit = async () => {
@@ -713,23 +711,20 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
 
           <div>
             <label className="mb-1 block text-xs font-medium">
-              Destinos (profile_id, uno por línea o separados por coma)
+              Destinos (en orden de prioridad)
             </label>
-            <textarea
-              rows={4}
-              value={targetsText}
-              onChange={(e) => setTargetsText(e.target.value)}
-              placeholder="qwen3.8:27b-ctx160k&#10;gemma4:26b-ctx160k"
-              className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+            <ProfilePicker
+              multi
+              options={selectableProfiles}
+              value={parsedTargets}
+              onChange={setParsedTargets}
+              placeholder="Filtrar perfiles disponibles…"
+              excludeIds={profileId.trim() ? [profileId.trim()] : []}
             />
             {parsedTargets.length > 0 && (
               <p className="mt-1 text-[10px] text-muted-foreground">
-                {parsedTargets.length} destino{parsedTargets.length === 1 ? "" : "s"}
-                {unknownTargets.length > 0 && (
-                  <span className="ml-1 text-amber-500">
-                    (desconocidos: {unknownTargets.join(", ")})
-                  </span>
-                )}
+                {parsedTargets.length} destino{parsedTargets.length === 1 ? "" : "s"} —
+                el resolver los recorrerá en este orden.
               </p>
             )}
           </div>
@@ -999,6 +994,192 @@ function CloneRouterModal({ source, existingIds, onClose, onCloned }: CloneRoute
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+interface ProfileOption {
+  profileId: string
+  baseModelId: string
+  displayName?: string | null
+  category: string
+}
+
+interface ProfilePickerProps {
+  options: ProfileOption[]
+  value: string[]
+  onChange: (next: string[]) => void
+  multi?: boolean
+  placeholder?: string
+  disabled?: boolean
+  excludeIds?: string[]
+}
+
+/** Combobox con filtro por texto. Si ``multi`` muestra chips para los
+ * elementos ya elegidos y un input que añade al array; en modo single
+ * se comporta como un ``<select>`` con búsqueda. Filtra sobre profile_id,
+ * base_model_id y display_name a la vez. */
+function ProfilePicker({
+  options,
+  value,
+  onChange,
+  multi = false,
+  placeholder,
+  disabled,
+  excludeIds = [],
+}: ProfilePickerProps) {
+  const [query, setQuery] = useState("")
+  const [open, setOpen] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDocClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", onDocClick)
+    return () => document.removeEventListener("mousedown", onDocClick)
+  }, [open])
+
+  const excluded = useMemo(
+    () => new Set([...excludeIds, ...(multi ? value : [])]),
+    [excludeIds, value, multi],
+  )
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return options
+      .filter((o) => !excluded.has(o.profileId))
+      .filter((o) => {
+        if (!q) return true
+        return (
+          o.profileId.toLowerCase().includes(q) ||
+          o.baseModelId.toLowerCase().includes(q) ||
+          (o.displayName ?? "").toLowerCase().includes(q)
+        )
+      })
+      .sort((a, b) => a.profileId.localeCompare(b.profileId))
+  }, [options, excluded, query])
+
+  useEffect(() => {
+    if (activeIndex >= filtered.length) setActiveIndex(0)
+  }, [filtered.length, activeIndex])
+
+  const selectOption = (opt: ProfileOption) => {
+    if (multi) {
+      onChange([...value, opt.profileId])
+      setQuery("")
+    } else {
+      onChange([opt.profileId])
+      setQuery(opt.profileId)
+      setOpen(false)
+    }
+  }
+
+  const removeChip = (id: string) => {
+    onChange(value.filter((v) => v !== id))
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open) {
+      if (["ArrowDown", "ArrowUp", "Enter"].includes(e.key)) setOpen(true)
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault()
+      setActiveIndex((i) => Math.min(i + 1, filtered.length - 1))
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault()
+      setActiveIndex((i) => Math.max(i - 1, 0))
+    } else if (e.key === "Enter") {
+      e.preventDefault()
+      const opt = filtered[activeIndex]
+      if (opt) selectOption(opt)
+    } else if (e.key === "Escape") {
+      setOpen(false)
+    } else if (e.key === "Backspace" && multi && !query && value.length > 0) {
+      // Backspace sobre input vacío: quita el último chip (patrón habitual
+      // de tag-inputs; evita que el usuario tenga que ir al botón ×).
+      removeChip(value[value.length - 1])
+    }
+  }
+
+  return (
+    <div ref={wrapRef} className="relative">
+      {multi && value.length > 0 && (
+        <div className="mb-1 flex flex-wrap gap-1">
+          {value.map((id) => (
+            <span
+              key={id}
+              className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-primary"
+            >
+              {id}
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => removeChip(id)}
+                className="rounded hover:bg-primary/20 disabled:opacity-50"
+                aria-label={`Quitar ${id}`}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="relative">
+        <Search
+          size={12}
+          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+        />
+        <input
+          type="text"
+          disabled={disabled}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value)
+            setOpen(true)
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder ?? "Filtrar…"}
+          className="w-full rounded-md border border-input bg-background pl-7 pr-2 py-1.5 text-sm disabled:opacity-50"
+        />
+      </div>
+      {open && !disabled && (
+        <ul className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-md border border-border bg-popover shadow-lg">
+          {filtered.length === 0 ? (
+            <li className="px-2 py-1.5 text-xs text-muted-foreground">Sin coincidencias.</li>
+          ) : (
+            filtered.map((opt, idx) => (
+              <li
+                key={opt.profileId}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  selectOption(opt)
+                }}
+                onMouseEnter={() => setActiveIndex(idx)}
+                className={`cursor-pointer px-2 py-1.5 text-xs ${
+                  idx === activeIndex ? "bg-primary/10" : "hover:bg-muted"
+                }`}
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <code className="truncate font-mono">{opt.profileId}</code>
+                  <span className="shrink-0 rounded border border-border/60 bg-muted/40 px-1 text-[10px] text-muted-foreground">
+                    {opt.category}
+                  </span>
+                </div>
+                <div className="truncate text-[10px] text-muted-foreground">
+                  {opt.baseModelId}
+                  {opt.displayName && opt.displayName !== opt.profileId && ` — ${opt.displayName}`}
+                </div>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
     </div>
   )
 }
