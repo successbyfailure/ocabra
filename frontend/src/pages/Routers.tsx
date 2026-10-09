@@ -107,7 +107,14 @@ export function Routers() {
         })
         return { router, targets, dirty: false }
       })
-      setCards(built)
+      // Preserve any locally-dirty cards (user reordered but has not saved yet)
+      // so the periodic refresh doesn't wipe their pending moves.
+      setCards((prev) => {
+        const dirtyById = new Map(
+          prev.filter((c) => c.dirty).map((c) => [c.router.profileId, c]),
+        )
+        return built.map((b) => dirtyById.get(b.router.profileId) ?? b)
+      })
 
       // Best-effort: routing stats last 7 days
       const to = new Date().toISOString()
@@ -156,39 +163,54 @@ export function Routers() {
     )
   }
 
+  const persistTargets = async (routerId: string, targetIds: string[]) => {
+    setSaving(routerId)
+    try {
+      await api.profiles.update(routerId, { routingTargets: targetIds })
+      await refresh()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Error guardando router")
+      await refresh()
+    } finally {
+      setSaving(null)
+    }
+  }
+
   const removeTarget = (routerId: string, index: number) => {
-    setCards((prev) =>
-      prev.map((c) => {
-        if (c.router.profileId !== routerId) return c
-        return { ...c, targets: c.targets.filter((_, i) => i !== index), dirty: true }
-      }),
-    )
+    const card = cards.find((c) => c.router.profileId === routerId)
+    if (!card) return
+    const newTargets = card.targets.filter((_, i) => i !== index).map((t) => t.profileId)
+    void persistTargets(routerId, newTargets)
   }
 
   const addTarget = (routerId: string, targetId: string) => {
     if (!targetId) return
-    setCards((prev) =>
-      prev.map((c) => {
-        if (c.router.profileId !== routerId) return c
-        const target = profilesById.get(targetId)
-        if (!target) return c
-        const modelState = statesByModelId.get(target.baseModelId)
-        return {
-          ...c,
-          targets: [
-            ...c.targets,
-            {
-              profileId: targetId,
-              status: coerceStatus(modelState?.status),
-              errorMessage: modelState?.errorMessage ?? null,
-            },
-          ],
-          dirty: true,
-        }
-      }),
-    )
+    const card = cards.find((c) => c.router.profileId === routerId)
+    if (!card) return
+    if (card.targets.some((t) => t.profileId === targetId)) {
+      toast.error("Ese destino ya está en el router")
+      return
+    }
+    const newTargets = [...card.targets.map((t) => t.profileId), targetId]
     setAddingTo(null)
     setAddTargetValue("")
+    void persistTargets(routerId, newTargets)
+  }
+
+  const deleteRouter = async (routerId: string) => {
+    if (!window.confirm(`¿Eliminar el router "${routerId}"? Esto borra también el perfil.`)) {
+      return
+    }
+    setSaving(routerId)
+    try {
+      await api.profiles.delete(routerId)
+      toast.success(`Router ${routerId} eliminado`)
+      await refresh()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Error eliminando router")
+    } finally {
+      setSaving(null)
+    }
   }
 
   const save = async (routerId: string) => {
@@ -264,8 +286,7 @@ export function Routers() {
       {cards.length === 0 && !loading && !error && (
         <div className="rounded-md border border-border bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
           <GitBranch size={20} className="mx-auto mb-2 opacity-60" />
-          No hay routers configurados. Cualquier perfil se convierte en router
-          al añadirle <code>routing_targets</code> desde la página Models.
+          No hay routers configurados. Usa el botón <strong>Nuevo router</strong> para crear uno.
         </div>
       )}
 
@@ -289,17 +310,28 @@ export function Routers() {
                     <p className="mt-1 text-xs text-muted-foreground">{card.router.description}</p>
                   )}
                 </div>
-                {card.dirty && (
+                <div className="flex items-center gap-2">
+                  {card.dirty && (
+                    <button
+                      type="button"
+                      onClick={() => void save(card.router.profileId)}
+                      disabled={saving === card.router.profileId || card.targets.length === 0}
+                      className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      {saving === card.router.profileId ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                      Guardar orden
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => void save(card.router.profileId)}
-                    disabled={saving === card.router.profileId || card.targets.length === 0}
-                    className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                    onClick={() => void deleteRouter(card.router.profileId)}
+                    disabled={saving === card.router.profileId}
+                    className="rounded p-1.5 text-destructive hover:bg-destructive/10 disabled:opacity-30"
+                    title="Eliminar router"
                   >
-                    {saving === card.router.profileId ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                    Guardar orden
+                    <Trash2 size={14} />
                   </button>
-                )}
+                </div>
               </div>
 
               <ol className="space-y-1">
@@ -373,37 +405,55 @@ export function Routers() {
               </ol>
 
               {addingTo === card.router.profileId ? (
-                <div className="mt-2 flex items-center gap-2">
-                  <select
-                    value={addTargetValue}
-                    onChange={(e) => setAddTargetValue(e.target.value)}
-                    className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs"
-                  >
-                    <option value="">Seleccionar perfil…</option>
-                    {candidatesForAdd.map((p) => (
-                      <option key={p.profileId} value={p.profileId}>
-                        {p.profileId} — {p.baseModelId}
+                <div className="mt-2 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={addTargetValue}
+                      onChange={(e) => setAddTargetValue(e.target.value)}
+                      disabled={candidatesForAdd.length === 0 || saving === card.router.profileId}
+                      className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs disabled:opacity-50"
+                    >
+                      <option value="">
+                        {candidatesForAdd.length === 0
+                          ? "Sin candidatos disponibles"
+                          : "Seleccionar perfil…"}
                       </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => addTarget(card.router.profileId, addTargetValue)}
-                    disabled={!addTargetValue}
-                    className="rounded-md bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50"
-                  >
-                    Añadir
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAddingTo(null)
-                      setAddTargetValue("")
-                    }}
-                    className="rounded p-1 text-muted-foreground hover:bg-muted"
-                  >
-                    <X size={12} />
-                  </button>
+                      {candidatesForAdd.map((p) => (
+                        <option key={p.profileId} value={p.profileId}>
+                          {p.profileId} — {p.baseModelId}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => addTarget(card.router.profileId, addTargetValue)}
+                      disabled={!addTargetValue || saving === card.router.profileId}
+                      className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50"
+                    >
+                      {saving === card.router.profileId ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Plus size={12} />
+                      )}
+                      Añadir
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddingTo(null)
+                        setAddTargetValue("")
+                      }}
+                      className="rounded p-1 text-muted-foreground hover:bg-muted"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                  {candidatesForAdd.length === 0 && (
+                    <p className="text-[10px] text-muted-foreground">
+                      No hay perfiles enabled no-router disponibles. Un router no puede
+                      apuntar a otro router (para evitar loops).
+                    </p>
+                  )}
                 </div>
               ) : (
                 <button
