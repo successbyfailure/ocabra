@@ -93,7 +93,13 @@ export function Routers() {
       const stateMap = new Map(models.map((m) => [m.modelId, m]))
       setStatesByModelId(stateMap)
 
-      const routerProfiles = profiles.filter((p) => Array.isArray(p.routingTargets) && p.routingTargets.length > 0)
+      // A profile counts as a router whenever its ``routingTargets`` is a
+      // list, even an empty one — ``null`` means "regular profile, never
+      // configured as a router". This distinction lets a router that just
+      // had its last target removed stay visible in /routers so the user can
+      // repopulate it or delete it; previously an empty list hid the card
+      // and left an orphan profile behind.
+      const routerProfiles = profiles.filter((p) => Array.isArray(p.routingTargets))
       const built: RouterCardData[] = routerProfiles.map((router) => {
         const targets = (router.routingTargets ?? []).map((targetId) => {
           const target = byId.get(targetId)
@@ -148,7 +154,10 @@ export function Routers() {
     already.add(forRouter.router.profileId)
     return Array.from(profilesById.values())
       .filter((p) => p.enabled && !already.has(p.profileId))
-      .filter((p) => !p.routingTargets || p.routingTargets.length === 0)
+      // Only non-router profiles are eligible — ``routingTargets === null``
+      // means "regular profile", a list (even empty) marks it as a router
+      // and routers can't be nested to avoid resolver loops.
+      .filter((p) => p.routingTargets === null)
       .sort((a, b) => a.profileId.localeCompare(b.profileId))
   }, [cards, addingTo, profilesById])
 
@@ -181,6 +190,15 @@ export function Routers() {
   const removeTarget = (routerId: string, index: number) => {
     const card = cards.find((c) => c.router.profileId === routerId)
     if (!card) return
+    if (card.targets.length === 1) {
+      if (
+        !window.confirm(
+          `Vas a quitar el último destino del router "${routerId}". Mientras esté vacío, las peticiones resolverán directo al base model (${card.router.baseModelId}). Para eliminar el router del todo usa el botón de la papelera. ¿Continuar?`,
+        )
+      ) {
+        return
+      }
+    }
     const newTargets = card.targets.filter((_, i) => i !== index).map((t) => t.profileId)
     void persistTargets(routerId, newTargets)
   }
@@ -380,6 +398,18 @@ export function Routers() {
                   </button>
                 </div>
               </div>
+
+              {card.targets.length === 0 && (
+                <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertCircle size={14} className="mt-0.5" />
+                  <span>
+                    Router sin destinos. Mientras esté vacío las peticiones a
+                    {" "}<code>{card.router.profileId}</code> resuelven directo al
+                    base model <code>{card.router.baseModelId}</code>. Añade destinos
+                    para que vuelva a actuar como router.
+                  </span>
+                </div>
+              )}
 
               <ol className="space-y-1">
                 {card.targets.map((target, idx) => {
