@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
+from starlette.websockets import WebSocketState
 
 from ocabra.core.vad import SimpleVAD, VadEvent
 
@@ -47,6 +48,18 @@ _INPUT_SAMPLE_RATE = 16000  # Input audio sample rate (PCM16 from client)
 # partial hypotheses, and the minimum audio before we bother.
 _PARTIAL_INTERVAL_S = 0.6
 _PARTIAL_MIN_BYTES = int(_INPUT_SAMPLE_RATE * 2 * 0.5)  # 0.5 s of PCM16
+# Max consecutive partial-loop ticks where the audio buffer did not grow. When
+# the WebSocket client dies without a clean close (half-closed TCP, no FIN),
+# the main ``receive_text()`` blocks forever and the partial task keeps
+# re-transcribing the exact same bytes once per interval, pegging the Whisper
+# worker. 100 ticks × 0.6 s ≈ 60 s of silence are enough to call it dead and
+# bail. Observed in production (2026-10-14): one session kept the whisper
+# worker at 259 % CPU for ~2 h after the client died.
+_PARTIAL_STAGNANT_MAX = 100
+# Max seconds the main ``run()`` loop will block on ``receive_text()`` without
+# any client message before probing/giving up. 300 s is comfortable for a
+# human conversation; a healthy client sends audio chunks every ~20 ms.
+_RECEIVE_IDLE_TIMEOUT_S = 300.0
 
 
 def _common_prefix(a: list[str], b: list[str]) -> list[str]:
@@ -420,7 +433,23 @@ class RealtimeSession:
                 self._stt_ready.set()
             try:
                 while True:
-                    raw = await self.ws.receive_text()
+                    # Idle timeout — a half-closed TCP (client crashed, network
+                    # dropped) leaves ``receive_text()`` blocked forever and
+                    # background tasks pegging the whisper worker on a stale
+                    # buffer. Treat ``asyncio.TimeoutError`` here as a
+                    # disconnect so the outer finally clean-up runs.
+                    try:
+                        raw = await asyncio.wait_for(
+                            self.ws.receive_text(),
+                            timeout=_RECEIVE_IDLE_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        logger.info(
+                            "realtime_session_idle_timeout",
+                            session_id=self._session_id,
+                            timeout_s=_RECEIVE_IDLE_TIMEOUT_S,
+                        )
+                        raise RuntimeError("WebSocket idle timeout") from exc
                     try:
                         message = json.loads(raw)
                     except json.JSONDecodeError:
@@ -476,7 +505,19 @@ class RealtimeSession:
 
         try:
             while True:
-                raw = await self.ws.receive_text()
+                # Idle timeout — see transcription-only path above.
+                try:
+                    raw = await asyncio.wait_for(
+                        self.ws.receive_text(),
+                        timeout=_RECEIVE_IDLE_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError as exc:
+                    logger.info(
+                        "realtime_session_idle_timeout",
+                        session_id=self._session_id,
+                        timeout_s=_RECEIVE_IDLE_TIMEOUT_S,
+                    )
+                    raise RuntimeError("WebSocket idle timeout") from exc
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:
@@ -1513,12 +1554,42 @@ class RealtimeSession:
         """Re-transcribe the growing buffer on an interval and emit the newly
         stable word-prefix as ``input_audio_transcription.delta`` (LocalAgreement-2:
         a word is committed once two consecutive hypotheses agree on it)."""
+        last_buf_len = -1
+        stagnant_ticks = 0
         try:
             while True:
                 await asyncio.sleep(_PARTIAL_INTERVAL_S)
+                # Guard A — Starlette normally raises on the main receive_text
+                # loop when the client disconnects, but a half-closed TCP (no
+                # FIN delivered, e.g. network drop or client crash) leaves this
+                # background task spinning forever on a dead buffer. Check the
+                # WS state directly and bail.
+                if self.ws.client_state != WebSocketState.CONNECTED:
+                    logger.info(
+                        "realtime_partial_abort_ws_closed",
+                        session_id=self._session_id,
+                    )
+                    return
                 if not self._stt_ready.is_set():
                     continue  # no partials until the model finishes cold-loading
                 buf = bytes(self.audio_buffer)
+                # Guard B — detect a dead peer that stopped sending audio: if
+                # the buffer length hasn't grown over ``_PARTIAL_STAGNANT_MAX``
+                # consecutive ticks, assume the client is gone and release the
+                # whisper worker.
+                if len(buf) == last_buf_len:
+                    stagnant_ticks += 1
+                    if stagnant_ticks >= _PARTIAL_STAGNANT_MAX:
+                        logger.info(
+                            "realtime_partial_abort_idle",
+                            session_id=self._session_id,
+                            buffer_bytes=len(buf),
+                            idle_ticks=stagnant_ticks,
+                        )
+                        return
+                    continue
+                stagnant_ticks = 0
+                last_buf_len = len(buf)
                 if len(buf) < _PARTIAL_MIN_BYTES:
                     continue
                 text = await self._transcribe(buf)
