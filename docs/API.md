@@ -149,6 +149,31 @@ Parametros para CustomVoice:
 
 Formatos soportados: `mp3` (default), `wav`, `opus`, `flac`, `pcm`, `aac`
 
+**Streaming**. El endpoint responde con `Transfer-Encoding: chunked` para los
+formatos `mp3`, `pcm`, `opus`, `flac` y `aac`: el worker sintetiza
+frase-a-frase y oCabra reenvía cada chunk en cuanto llega, sin esperar al
+final. El cliente puede empezar a reproducir audio típicamente al
+**primer segundo** (TTFB ≈ tiempo de sintetizar la primera frase),
+independientemente de lo largo que sea el texto completo. Ejemplo (TTFB
+observado 0,9 s con chatterbox-turbo para 4 frases, mp3, duración total
+7,7 s):
+
+```python
+async with httpx.AsyncClient(timeout=90) as c:
+    async with c.stream("POST", f"{base}/v1/audio/speech",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": "chatterbox-turbo", "input": texto,
+                  "response_format": "mp3"}) as r:
+        async for chunk in r.aiter_bytes():
+            player.feed(chunk)  # ya se oye antes de terminar la síntesis
+```
+
+El formato `wav` NO va en streaming (requiere escribir la cabecera RIFF
+con la longitud total conocida de antemano). Para streaming de audio
+sin cabecera elige `pcm`; para audio con cabecera streameable, usa `wav`
+sabiendo que el worker la escribe primero con un `data` size placeholder
+(reproductores tolerantes como ffmpeg/mpv aceptan ese formato).
+
 ### Audio — STT (Speech-to-Text)
 
 | Method | Endpoint | Descripcion |

@@ -445,16 +445,24 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             raise
 
-        # Detect streaming by content-type (SSE or NDJSON).
-        # For streaming we tee the body_iterator: chunks go to the client in real-time
-        # while we buffer them to extract token counts from the final chunk.
-        # end_request is moved to the generator's finally block so it fires only
-        # after the last byte is delivered (or the client disconnects).
+        # Detect streaming by content-type (SSE or NDJSON) or by response
+        # shape (any Starlette response that exposes ``body_iterator``). The
+        # last check is critical: ``BaseHTTPMiddleware`` wraps every downstream
+        # response in a private ``starlette.middleware.base._StreamingResponse``
+        # so a FastAPI ``StreamingResponse`` is NOT recognised by isinstance
+        # anymore. Without the body_iterator fallback, audio/*, video/* and
+        # file downloads fell through to the non-streaming branch and were
+        # fully buffered via ``response.body``, which turned the TTS endpoint
+        # from true streaming into "wait, then dump everything at once"
+        # (observed TTFB == total duration).
         content_type = response.headers.get("content-type", "")
         is_streaming = (
             "text/event-stream" in content_type
             or "x-ndjson" in content_type
+            or content_type.startswith("audio/")
+            or content_type.startswith("video/")
             or isinstance(response, StreamingResponse)
+            or hasattr(response, "body_iterator")
         )
 
         if is_streaming:

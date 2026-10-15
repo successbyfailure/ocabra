@@ -582,6 +582,14 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
         content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/mpeg")
 
         async def _generate():
+            # Both ``_wav_to_pcm`` (numpy copy) and ``_encode_audio`` (ffmpeg
+            # subprocess for mp3/opus/aac/flac fallbacks) are blocking. Running
+            # them on the asyncio loop thread stalls Starlette's chunked
+            # response writer between sentences, which collapses the whole
+            # stream into a single late burst at the end — observed TTFB equal
+            # to total duration before this fix. Offload to a worker thread so
+            # the loop can push the previous chunk to the client while the
+            # next encode runs.
             wav_header_sent = False
             for sentence in sentences:
                 wav_bytes = await asyncio.to_thread(
@@ -599,11 +607,11 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
                         sr, ch, bits = _wav_params(wav_bytes)
                         yield _make_streaming_wav_header(sr, ch, bits)
                         wav_header_sent = True
-                    yield _wav_to_pcm(wav_bytes)
+                    yield await asyncio.to_thread(_wav_to_pcm, wav_bytes)
                 elif fmt == "pcm":
-                    yield _wav_to_pcm(wav_bytes)
+                    yield await asyncio.to_thread(_wav_to_pcm, wav_bytes)
                 else:
-                    encoded, _ = _encode_audio(wav_bytes, fmt)
+                    encoded, _ = await asyncio.to_thread(_encode_audio, wav_bytes, fmt)
                     yield encoded
 
         return StreamingResponse(
