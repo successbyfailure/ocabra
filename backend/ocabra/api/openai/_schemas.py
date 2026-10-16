@@ -37,7 +37,18 @@ class ChatCompletionRequest(BaseModel):
     tools: list[Any] | None = Field(None, description="Tool definitions for function calling")
     tool_choice: str | Any | None = Field(None, description="Tool choice strategy")
     response_format: dict | None = Field(
-        None, description='Response format, e.g. {"type": "json_object"}'
+        None,
+        description=(
+            "Structured output. Two shapes supported, forwarded verbatim to "
+            "the backend:\n"
+            "- `{\"type\": \"json_object\"}` — any valid JSON. Supported by "
+            "vLLM, Ollama ≥0.1.33 and llama.cpp.\n"
+            "- `{\"type\": \"json_schema\", \"json_schema\": {\"name\": \"...\", "
+            "\"strict\": true, \"schema\": {...}}}` — constrained decoding "
+            "against a JSON Schema. Supported by vLLM ≥0.26, Ollama ≥0.4 "
+            "and llama.cpp (grammar). The model is forced to produce output "
+            "that validates against the schema."
+        ),
     )
 
     model_config = {"json_schema_extra": {"examples": [
@@ -49,7 +60,34 @@ class ChatCompletionRequest(BaseModel):
             ],
             "max_tokens": 256,
             "temperature": 0.7,
-        }
+        },
+        {
+            "model": "mistral-7b",
+            "messages": [
+                {"role": "user", "content": "Give me a fictional person"},
+            ],
+            "max_tokens": 300,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "person",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"},
+                            "hobbies": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["name", "age", "hobbies"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        },
     ]}}
 
 

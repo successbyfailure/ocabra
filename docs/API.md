@@ -102,6 +102,53 @@ load falla después de haber flusheado headers, el error viaja como
 }
 ```
 
+**Structured output (`response_format`)** — oCabra reenvía el campo verbatim
+al backend; las dos variantes OpenAI están soportadas end-to-end:
+
+| Variante | vLLM ≥0.26 | Ollama ≥0.4 | llama.cpp |
+|---|---|---|---|
+| `{"type": "json_object"}` (JSON libre) | ✅ nativo | ✅ nativo | ✅ grammar |
+| `{"type": "json_schema", "json_schema": {...}}` (constrained a schema) | ✅ nativo | ✅ nativo (traducido a `format: {schema}`) | ✅ grammar |
+
+Ejemplo con schema estricto:
+
+```json
+POST /v1/chat/completions
+{
+  "model": "mistral:7b",
+  "messages": [{"role": "user", "content": "Give me a fictional person"}],
+  "max_tokens": 300,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "person",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name":    {"type": "string"},
+          "age":     {"type": "integer"},
+          "hobbies": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["name", "age", "hobbies"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
+```
+
+El decoding es **constrained real** (no "please return JSON"): se verificó
+que un schema con `enum: ["red", "blue"]` para la pregunta "¿de qué color
+es el césped?" devuelve `"blue"` en vez del "green" habitual.
+
+Caveats:
+- Modelos **thinking** (qwen3.*, qwen3.8.* con `thinking=true`) pueden gastar
+  todo el `max_tokens` en la fase de reasoning y dejar `content: ""`. Sube
+  `max_tokens` o desactiva thinking para schemas.
+- Para `strict: true` evita `anyOf`, referencias cíclicas y propiedades
+  opcionales no listadas en `required` — algunos backends los rechazan.
+
 ### Embeddings & Reranking
 
 | Method | Endpoint | Descripcion |
