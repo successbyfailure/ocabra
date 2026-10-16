@@ -36,6 +36,18 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float | None = Field(0.0, description="Presence penalty (-2.0 to 2.0)")
     tools: list[Any] | None = Field(None, description="Tool definitions for function calling")
     tool_choice: str | Any | None = Field(None, description="Tool choice strategy")
+    reasoning_effort: str | None = Field(
+        None,
+        description=(
+            "Thinking budget for reasoning-capable models: `low`, `medium` or "
+            "`high` (`off`/`none`/`disabled` also accepted to turn thinking off). "
+            "oCabra translates the value per backend: vLLM gets it as "
+            "`extra_body.chat_template_kwargs.reasoning_effort`, Ollama ≥0.5 "
+            "receives `think: 'low'|'medium'|'high'|False`, and backends with "
+            "no native control ignore it. Non-reasoning models silently accept "
+            "the field."
+        ),
+    )
     response_format: dict | None = Field(
         None,
         description=(

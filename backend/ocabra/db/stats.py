@@ -25,6 +25,15 @@ class RequestStat(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Subset of ``input_tokens`` that hit the backend's prompt cache
+    # (``usage.prompt_tokens_details.cached_tokens`` in the OpenAI schema).
+    # NULL = backend didn't report it; 0 = reported, no cache hit.
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Subset of ``output_tokens`` the backend spent on hidden reasoning
+    # (``usage.completion_tokens_details.reasoning_tokens``). When the
+    # backend doesn't emit the detail we fall back to counting words of
+    # ``choices[].message.reasoning_content`` and record the approximation.
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer)
     # Vatios-hora estimados consumidos durante el request
     energy_wh: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(Text)

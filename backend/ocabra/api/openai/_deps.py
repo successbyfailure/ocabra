@@ -1142,6 +1142,62 @@ def _apply_thinking_controls(state: ModelState, payload: dict) -> None:
         payload["chat_template_kwargs"] = cct
 
 
+_REASONING_EFFORT_LEVELS = {"low", "medium", "high"}
+_REASONING_EFFORT_OFF = {"off", "none", "disabled", "no", "false"}
+
+
+def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
+    """Translate the OpenAI-style ``reasoning_effort`` field into whatever the
+    target backend understands. The field is already in the ChatCompletionRequest
+    schema; here we fan it out:
+
+    - **vLLM**: forwarded as ``extra_body.chat_template_kwargs.reasoning_effort``
+      (vLLM 0.9+ wires that through to the chat template; harmless on older
+      versions because unknown kwargs are ignored).
+    - **Ollama ≥0.5**: translated to the native ``think`` field
+      (``True`` for low/medium/high — Ollama has a single on/off switch —
+      and ``False`` for off/none/disabled).
+    - **Everything else**: silently dropped — no-op for backends with no
+      native reasoning control.
+
+    The input ``reasoning_effort`` key is always popped from the forwarded
+    payload so unknown backends don't 400 on it.
+    """
+    raw = payload.pop("reasoning_effort", None)
+    if raw is None:
+        return
+    value = str(raw).strip().lower()
+    if value in _REASONING_EFFORT_OFF:
+        enabled = False
+    elif value in _REASONING_EFFORT_LEVELS:
+        enabled = True
+    else:
+        # Unknown value — leave the payload alone and let the backend 400.
+        payload["reasoning_effort"] = raw
+        return
+
+    backend = getattr(state, "backend_type", "") or ""
+    if backend == "vllm":
+        extra = payload.get("extra_body")
+        if not isinstance(extra, dict):
+            extra = {}
+        template_kwargs = extra.get("chat_template_kwargs")
+        if not isinstance(template_kwargs, dict):
+            template_kwargs = {}
+        # Preserve the full "low/medium/high/off" granularity for vLLM — some
+        # chat templates branch on the exact level, not just on/off.
+        template_kwargs.setdefault("reasoning_effort", value if enabled else "off")
+        extra["chat_template_kwargs"] = template_kwargs
+        payload["extra_body"] = extra
+    elif backend == "ollama":
+        # Ollama 0.5+ only has a boolean switch; carry it through. When the
+        # payload goes to ``/api/chat`` the ``think`` key sits at the top
+        # level; when it goes to the OpenAI-compat ``/v1/chat/completions``
+        # Ollama passes unknown top-level keys to the chat template so the
+        # same key still works.
+        payload.setdefault("think", enabled)
+
+
 def to_backend_body(state: ModelState, body: dict) -> dict:
     """Copy request payload and normalize model field to backend-native model id."""
     payload = dict(body)
@@ -1152,6 +1208,7 @@ def to_backend_body(state: ModelState, body: dict) -> dict:
             payload["stream_options"] = {**stream_options, "include_usage": True}
         else:
             payload["stream_options"] = {"include_usage": True}
+    _apply_reasoning_effort(state, payload)
     _apply_thinking_controls(state, payload)
     return payload
 

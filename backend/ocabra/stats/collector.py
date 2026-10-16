@@ -253,8 +253,29 @@ def _extract_usage_tokens(
     request_kind: str = "",
     request_payload: dict | None = None,
 ) -> tuple[int | None, int | None]:
+    in_tok, out_tok, _cached, _reason = _extract_usage_tokens_detailed(
+        payload, request_kind, request_payload
+    )
+    return in_tok, out_tok
+
+
+def _extract_usage_tokens_detailed(
+    payload: dict | None,
+    request_kind: str = "",
+    request_payload: dict | None = None,
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """Variant of :func:`_extract_usage_tokens` that also returns the
+    ``cached_tokens`` and ``reasoning_tokens`` sub-counts from the OpenAI
+    ``usage.*_tokens_details`` payload. When the backend doesn't emit the
+    reasoning detail we fall back to counting words of
+    ``choices[].message.reasoning_content`` — approximate, but much better
+    than losing the signal entirely for Ollama's thinking models (which
+    report the big ``completion_tokens`` without breaking out reasoning).
+    """
     in_tok: int | None = None
     out_tok: int | None = None
+    cached_tok: int | None = None
+    reason_tok: int | None = None
 
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if isinstance(usage, dict):
@@ -272,6 +293,22 @@ def _extract_usage_tokens(
         except (TypeError, ValueError):
             in_tok, out_tok = None, None
 
+        prompt_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_details, dict):
+            raw_cached = prompt_details.get("cached_tokens")
+            try:
+                cached_tok = int(raw_cached) if raw_cached is not None else None
+            except (TypeError, ValueError):
+                cached_tok = None
+
+        completion_details = usage.get("completion_tokens_details")
+        if isinstance(completion_details, dict):
+            raw_reason = completion_details.get("reasoning_tokens")
+            try:
+                reason_tok = int(raw_reason) if raw_reason is not None else None
+            except (TypeError, ValueError):
+                reason_tok = None
+
     # Ollama-style normalized responses.
     if in_tok is None and out_tok is None and isinstance(payload, dict):
         prompt_eval_count = payload.get("prompt_eval_count")
@@ -282,12 +319,39 @@ def _extract_usage_tokens(
                 out_tok = int(eval_count) if eval_count is not None else None
             except (TypeError, ValueError):
                 in_tok, out_tok = None, None
+        # Ollama exposes cache hits on /api/chat as ``prompt_eval_cached_count``.
+        cached_native = payload.get("prompt_eval_cached_count")
+        if cached_native is not None and cached_tok is None:
+            try:
+                cached_tok = int(cached_native)
+            except (TypeError, ValueError):
+                cached_tok = None
+
+    # Reasoning fallback — Ollama/vLLM don't always break out
+    # reasoning_tokens into the details sub-object, but they do surface the
+    # raw reasoning in ``message.reasoning`` / ``message.reasoning_content``.
+    # Approximate from word count so dashboards see at least a lower bound.
+    if reason_tok is None and isinstance(payload, dict):
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            reasoning_text: str | None = None
+            if isinstance(message, dict):
+                reasoning_text = (
+                    message.get("reasoning_content")
+                    or message.get("reasoning")
+                )
+            if reasoning_text:
+                reason_tok = _approx_text_tokens(reasoning_text)
 
     # Whisper-style: {"text": "..."} — use word count as output proxy.
     if request_kind == "audio_transcription" and out_tok is None and isinstance(payload, dict):
         out_tok = _approx_text_tokens(payload.get("text"))
 
-    return _apply_token_kind_defaults(in_tok, out_tok, request_kind, request_payload)
+    in_tok, out_tok = _apply_token_kind_defaults(
+        in_tok, out_tok, request_kind, request_payload
+    )
+    return in_tok, out_tok, cached_tok, reason_tok
 
 
 def _extract_error_message(payload: dict | None, status_code: int) -> str | None:
@@ -462,8 +526,13 @@ class StatsMiddleware(BaseHTTPMiddleware):
             or content_type.startswith("audio/")
             or content_type.startswith("video/")
             or isinstance(response, StreamingResponse)
-            or hasattr(response, "body_iterator")
         )
+        # NOTE: do NOT fall back to ``hasattr(response, "body_iterator")`` —
+        # BaseHTTPMiddleware wraps every downstream response in a
+        # ``_StreamingResponse`` that exposes ``body_iterator`` even for
+        # application/json. Treating those as streaming leaves token counts
+        # NULL because we never read the final usage block. The explicit
+        # content-type checks above already cover genuine streams.
 
         if is_streaming:
             # Bloque 20 fix (2026-09-19): the streaming path used to store
@@ -506,7 +575,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                             error_msg, error_code = stream_error
                             recorded_status = _stream_error_status(error_code)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
-                        in_tok, out_tok = _extract_usage_tokens(
+                        in_tok, out_tok, cached_tok, reason_tok = _extract_usage_tokens_detailed(
                             last_payload, request_kind, request_payload
                         )
                         # Streaming without a usage payload (e.g. no stream_options.
@@ -533,6 +602,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 request_kind=request_kind,
                                 input_tokens=in_tok,
                                 output_tokens=out_tok,
+                                cached_tokens=cached_tok,
+                                reasoning_tokens=reason_tok,
                                 work_size_meta=work_size_meta,
                                 via_router_profile_id=via_router_profile_id,
                             )
@@ -558,7 +629,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
         if resolved_model_id:
             model_id = resolved_model_id
         if model_id:
-            in_tok, out_tok = _extract_usage_tokens(
+            in_tok, out_tok, cached_tok, reason_tok = _extract_usage_tokens_detailed(
                 response_payload, request_kind=request_kind, request_payload=request_payload
             )
             # Transcription output: JSON formats are proxied above; for non-JSON
@@ -592,6 +663,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     request_kind=request_kind,
                     input_tokens=in_tok,
                     output_tokens=out_tok,
+                    cached_tokens=cached_tok,
+                    reasoning_tokens=reason_tok,
                     work_size_meta=work_size_meta,
                     via_router_profile_id=via_router,
                 )
@@ -818,6 +891,8 @@ async def _record_stat(
     remote_node_id: str | None = None,
     work_size_meta: dict | None = None,
     via_router_profile_id: str | None = None,
+    cached_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
 ) -> None:
     """Write a RequestStat row to the database and update Prometheus counters."""
     try:
@@ -935,6 +1010,8 @@ async def _record_stat(
                 duration_ms=int(duration_ms),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                reasoning_tokens=reasoning_tokens,
                 energy_wh=energy_wh,
                 error=error_message,
                 user_id=parsed_user_id,
