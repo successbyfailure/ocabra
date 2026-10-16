@@ -149,6 +149,44 @@ Caveats:
 - Para `strict: true` evita `anyOf`, referencias cíclicas y propiedades
   opcionales no listadas en `required` — algunos backends los rechazan.
 
+**Control de reasoning (`reasoning_effort`)** — campo opcional del request
+que acepta `"low"`, `"medium"`, `"high"` o `"off"` (sinónimos: `none`,
+`disabled`). oCabra lo traduce al backend concreto:
+
+| Backend | Traducción |
+|---|---|
+| vLLM | `extra_body.chat_template_kwargs.reasoning_effort = <value>` |
+| Ollama ≥0.5 | `think: true` (low/medium/high) o `think: false` (off) |
+| Ollama 0.4 | aceptado y traducido, pero el upstream lo ignora de momento (ollama/ollama#15288) |
+| Otros | silenciosamente ignorado |
+
+```json
+{"model": "qwen3.8:27b", "messages": [...], "reasoning_effort": "off"}
+```
+
+**Observabilidad de tokens**. El response trae los campos OpenAI estándar
+y oCabra persiste los detalles en `request_stats`:
+
+```json
+"usage": {
+  "prompt_tokens": 10,
+  "prompt_tokens_details": {"cached_tokens": 3},
+  "completion_tokens": 38,
+  "completion_tokens_details": {"reasoning_tokens": 21},
+  "total_tokens": 48
+}
+```
+
+- `cached_tokens`: subset del prompt que hizo hit en el prefix cache del
+  backend. Para Ollama (que expone `prompt_eval_cached_count` nativo) se
+  traduce automáticamente.
+- `reasoning_tokens`: subset del output gastado en reasoning. Cuando el
+  backend no lo emite (Ollama 0.40 actualmente) se aproxima contando
+  palabras de `reasoning_content` — mejor que perder la señal.
+
+Las dos columnas aparecen en `/ocabra/stats/by-agent`, `/ocabra/stats/by-user`,
+etc. para desglosar coste real vs tokens visibles.
+
 ### Embeddings & Reranking
 
 | Method | Endpoint | Descripcion |
