@@ -813,7 +813,9 @@ class VLLMBackend(BackendInterface):
                 )
                 cfg = row.scalar_one_or_none()
                 if cfg is not None:
-                    override = (cfg.extra_config or {}).get("vram_estimate_mb")
+                    override = self._get_vllm_option(
+                        cfg.extra_config or {}, "vram_estimate_mb", None
+                    )
                     if override:
                         return int(override)
         except Exception:

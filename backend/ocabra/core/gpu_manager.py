@@ -315,8 +315,17 @@ class GPUManager:
 
     async def get_free_vram(self, gpu_index: int) -> int:
         state = self._states[gpu_index]
-        locked = sum(self._locks.get(gpu_index, {}).values())
-        return max(0, state.free_vram_mb - locked - settings.vram_buffer_mb)
+        locks = self._locks.get(gpu_index, {})
+        # Model locks are taken once the worker is up, so that memory is already
+        # missing from NVML's free figure; subtracting it again counted every
+        # resident model twice and made small models evict each other. They
+        # still cap free VRAM when the estimate exceeds what NVML shows in use.
+        # Service locks are reservations made ahead of the service allocating,
+        # so they are always subtracted.
+        model_locked = sum(mb for key, mb in locks.items() if not key.startswith("service:"))
+        service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+        free = min(state.free_vram_mb, state.total_vram_mb - model_locked) - service_locked
+        return max(0, free - settings.vram_buffer_mb)
 
     def has_service_lock(self, gpu_index: int) -> bool:
         """Whether an external service (Hunyuan, TRELLIS.2, ...) currently holds a

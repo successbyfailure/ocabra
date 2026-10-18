@@ -67,7 +67,8 @@ async def test_start_detects_gpus():
 
 @pytest.mark.asyncio
 async def test_lock_vram_reduces_free():
-    patches = _make_mock_nvml(free_mb=20000, used_mb=4000)
+    # Idle GPU: the locked model's memory is not visible in NVML yet.
+    patches = _make_mock_nvml(free_mb=24000, used_mb=0)
     with ExitStack() as stack:
         stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
         stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
@@ -87,7 +88,7 @@ async def test_lock_vram_reduces_free():
 
 @pytest.mark.asyncio
 async def test_unlock_vram_restores_free():
-    patches = _make_mock_nvml(free_mb=20000, used_mb=4000)
+    patches = _make_mock_nvml(free_mb=24000, used_mb=0)
     with ExitStack() as stack:
         stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
         stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
@@ -104,6 +105,47 @@ async def test_unlock_vram_restores_free():
         free_unlocked = await gm.get_free_vram(0)
 
         assert free_unlocked == free_locked + 5000
+
+
+@pytest.mark.asyncio
+async def test_resident_model_lock_not_double_counted():
+    """A loaded model's lock must not be subtracted again from NVML free memory."""
+    from ocabra.config import settings
+
+    # 6 GB card: 700 MB desktop + 2150 MB of an already-resident vLLM worker.
+    patches = _make_mock_nvml(free_mb=3294, used_mb=2850)
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
+        gm = GPUManager()
+        gm._locks = {0: {}}
+        gm._states[0] = gm._read_gpu(0)
+        await gm.lock_vram(0, 2150, "vllm/Qwen/Qwen3-Embedding-0.6B")
+
+        assert await gm.get_free_vram(0) == 3294 - settings.vram_buffer_mb
+
+
+@pytest.mark.asyncio
+async def test_service_lock_always_subtracted():
+    """Service reservations are taken before the service allocates, so they count."""
+    from ocabra.config import settings
+
+    patches = _make_mock_nvml(free_mb=10000, used_mb=2000)
+    with ExitStack() as stack:
+        stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+        stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+        for k, v in patches.items():
+            stack.enter_context(patch(k, v))
+
+        gm = GPUManager()
+        gm._locks = {0: {}}
+        gm._states[0] = gm._read_gpu(0)
+        await gm.lock_vram(0, 4000, "service:hunyuan")
+
+        assert await gm.get_free_vram(0) == 10000 - 4000 - settings.vram_buffer_mb
 
 
 @pytest.mark.asyncio
