@@ -235,6 +235,28 @@ class TestGetCapabilities:
         assert caps.score is True
 
     @pytest.mark.asyncio
+    async def test_decoder_embedding_model(self, tmp_model_dir: Path):
+        _make_model(
+            tmp_model_dir,
+            "Qwen/Qwen3-Embedding-0.6B",
+            {"architectures": ["Qwen3ForCausalLM"], "max_position_embeddings": 32768},
+            tok_cfg={"chat_template": "{{ messages }}"},
+        )
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            caps = await backend.get_capabilities("Qwen/Qwen3-Embedding-0.6B")
+
+        assert caps.embeddings is True
+        assert caps.pooling is True
+        assert caps.chat is False
+        assert caps.completion is False
+        assert caps.context_length == 32768
+
+    @pytest.mark.asyncio
     async def test_unknown_architecture_fallback(self, tmp_model_dir: Path):
         _make_model(
             tmp_model_dir,

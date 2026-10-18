@@ -756,6 +756,20 @@ class VLLMBackend(BackendInterface):
             caps["score"] = True
         if "classifier" in model_hint or "classification" in model_hint:
             caps["classification"] = True
+        # Decoder-based embedding models (Qwen3-Embedding, gte-Qwen2, ...) ship a
+        # *ForCausalLM architecture and a chat template, but vLLM serves them with
+        # the pooling runner: they embed, they do not generate.
+        if "embedding" in model_hint and not caps.get("rerank"):
+            caps.update(
+                embeddings=True,
+                pooling=True,
+                score=True,
+                chat=False,
+                completion=False,
+                tools=False,
+                reasoning=False,
+                vision=False,
+            )
 
         return BackendCapabilities(
             chat=caps.get("chat", False),
