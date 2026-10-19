@@ -89,6 +89,7 @@ export interface ModelCapabilities {
   videoInput: boolean
   streaming: boolean
   contextLength: number
+  nativeContextLength: number
 }
 
 export interface ModelState {

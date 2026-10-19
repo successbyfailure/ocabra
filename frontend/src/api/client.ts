@@ -378,6 +378,7 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     videoInput: Boolean(data.video_input ?? data.videoInput),
     streaming: Boolean(data.streaming),
     contextLength: Number(data.context_length ?? data.contextLength ?? 0),
+    nativeContextLength: Number(data.native_context_length ?? data.nativeContextLength ?? 0),
   }
 }
 

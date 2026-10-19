@@ -93,10 +93,19 @@ export function getWhisperConfig(model: ModelState): WhisperConfig | null {
 }
 
 export function getModelContextSummary(model: ModelState): ModelContextSummary {
-  const nativeContext =
+  // Prefer the actual native ceiling (e.g. 262144 for gemma4:26b) when the
+  // backend reports it; fall back to the served context otherwise. Before,
+  // "nativo" showed OLLAMA_CONTEXT_LENGTH (65536) which is the effective cap,
+  // not what the model was trained for.
+  const nativeFromBackend =
+    typeof model.capabilities.nativeContextLength === "number" && model.capabilities.nativeContextLength > 0
+      ? model.capabilities.nativeContextLength
+      : null
+  const servedContext =
     typeof model.capabilities.contextLength === "number" && model.capabilities.contextLength > 0
       ? model.capabilities.contextLength
       : null
+  const nativeContext = nativeFromBackend ?? servedContext
 
   let configuredContext: number | null = null
   switch (model.backendType) {
@@ -129,7 +138,7 @@ export function getModelContextSummary(model: ModelState): ModelContextSummary {
     }
   }
 
-  configuredContext ??= nativeContext
+  configuredContext ??= servedContext ?? nativeContext
 
   return {
     nativeContext,

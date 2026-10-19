@@ -166,6 +166,7 @@ class OllamaBackend(BackendInterface):
         audio_input = False
         video_input = False
         context_length = 8192
+        native_context_length = 0
 
         # Query Ollama /api/show for accurate capabilities
         try:
@@ -250,6 +251,7 @@ class OllamaBackend(BackendInterface):
                     if native_ctx > 0:
                         effective_ctx = min(effective_ctx, native_ctx)
                     context_length = effective_ctx
+                    native_context_length = native_ctx
         except Exception as exc:
             logger.debug("ollama_show_failed", model_id=model_id, error=str(exc))
 
@@ -272,6 +274,7 @@ class OllamaBackend(BackendInterface):
             video_input=video_input,
             streaming=True,
             context_length=context_length,
+            native_context_length=native_context_length,
         )
         self._caps_cache[model_id] = caps
         return caps

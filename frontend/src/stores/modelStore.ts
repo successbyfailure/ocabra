@@ -54,6 +54,7 @@ export const useModelStore = create<ModelStore>((set) => ({
         videoInput: false,
                 streaming: false,
                 contextLength: 0,
+                nativeContextLength: 0,
               },
               lastRequestAt: null,
               loadedAt: null,

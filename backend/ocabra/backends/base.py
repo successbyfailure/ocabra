@@ -120,6 +120,13 @@ class BackendCapabilities:
     video_upscaling: bool = False
     streaming: bool = False
     context_length: int = 0
+    # Native context length the model was trained/configured for, independent
+    # of runtime caps (OLLAMA_CONTEXT_LENGTH, use_case overrides, ...). When
+    # the backend can tell them apart, ``context_length`` is the effective
+    # window it will actually serve and ``native_context_length`` is the hard
+    # ceiling that bounds presets. Zero means "unknown — treat context_length
+    # as both".
+    native_context_length: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
