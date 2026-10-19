@@ -999,19 +999,29 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               </label>
             </FieldSection>
 
-            {model && ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(model.backendType) && (
-              <FieldSection
-                title="Memoria y contexto"
-                description="Contexto máximo por slot/concurrencia y curva de VRAM (predicción por arquitectura); configura el caso de uso (contexto, paralelismo, KV cache) que se aplica al cargar. La estimación por probe de runtime va justo debajo."
-              >
-                <CapacityPanel
-                  modelId={model.modelId}
-                  gpus={gpus}
-                  extraConfig={model.extraConfig}
-                  onUseCaseChange={setUseCaseActive}
-                />
-              </FieldSection>
-            )}
+            {model && ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(model.backendType) && (() => {
+              const hasEnabledPresets = (model.profiles ?? []).some((profile) =>
+                profile.runtimePresets.some((preset) => preset.enabled),
+              )
+              return (
+                <FieldSection
+                  title="Memoria y contexto"
+                  description={
+                    hasEnabledPresets
+                      ? "Predicción de contexto máximo por slot y curva de VRAM. El caso de uso (contexto, paralelismo, KV cache) lo maneja el preset activo del profile — edítalo en Profiles."
+                      : "Contexto máximo por slot/concurrencia y curva de VRAM (predicción por arquitectura); configura el caso de uso (contexto, paralelismo, KV cache) que se aplica al cargar. La estimación por probe de runtime va justo debajo."
+                  }
+                >
+                  <CapacityPanel
+                    modelId={model.modelId}
+                    gpus={gpus}
+                    extraConfig={model.extraConfig}
+                    onUseCaseChange={setUseCaseActive}
+                    hideUseCase={hasEnabledPresets}
+                  />
+                </FieldSection>
+              )
+            })()}
 
             {model && (
               <FieldSection

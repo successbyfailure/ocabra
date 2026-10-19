@@ -151,7 +151,9 @@ export function ModelCard({
             )}
             <div>
               <div className="flex items-center gap-1.5">
-                <span className={`font-medium${model.federation?.remote ? " opacity-75" : ""}`}>{model.displayName}</span>
+                <span className={`font-medium${model.federation?.remote ? " opacity-75" : ""}`}>
+                  {profileCount > 1 ? model.modelId : model.displayName}
+                </span>
                 {model.federation?.remote && (
                   <Tooltip.Root>
                     <Tooltip.Trigger asChild>
@@ -169,7 +171,11 @@ export function ModelCard({
                   </Tooltip.Root>
                 )}
               </div>
-              <div className="text-xs text-muted-foreground">{model.modelId}</div>
+              <div className="text-xs text-muted-foreground">
+                {profileCount > 1
+                  ? `${profileCount} perfiles: ${profiles.map((p) => p.profileId).join(", ")}`
+                  : model.modelId}
+              </div>
               {(() => {
                 const release = model.releaseDate ?? null
                 const upstream = model.lastUpdated ?? null

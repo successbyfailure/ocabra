@@ -9,6 +9,7 @@ interface CapacityPanelProps {
   extraConfig?: BackendExtraConfig
   onSaved?: () => void
   onUseCaseChange?: (active: boolean) => void
+  hideUseCase?: boolean
 }
 
 const KV_DTYPES = ["fp16", "fp8", "q4"] as const
@@ -40,7 +41,7 @@ function Chip({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function CapacityPanel({ modelId, gpus, extraConfig, onSaved, onUseCaseChange }: CapacityPanelProps) {
+export function CapacityPanel({ modelId, gpus, extraConfig, onSaved, onUseCaseChange, hideUseCase }: CapacityPanelProps) {
   const stored = useMemo(() => readUseCase(extraConfig), [extraConfig])
   const [active, setActive] = useState<boolean>(Boolean((extraConfig as Record<string, unknown> | undefined)?.use_case))
   const [cap, setCap] = useState<ModelCapacity | null>(null)
@@ -242,6 +243,7 @@ export function CapacityPanel({ modelId, gpus, extraConfig, onSaved, onUseCaseCh
           )}
 
           {/* Use-case configurator */}
+          {!hideUseCase && (
           <div className="rounded-lg border border-border bg-muted/20 p-3">
             <div className="mb-2 text-[12px] font-semibold text-foreground">Caso de uso</div>
             <div className="flex flex-wrap items-end gap-3">
@@ -330,6 +332,7 @@ export function CapacityPanel({ modelId, gpus, extraConfig, onSaved, onUseCaseCh
               {savedMsg && <span className="text-[11.5px] text-muted-foreground">{savedMsg}</span>}
             </div>
           </div>
+          )}
         </>
       )}
     </div>
