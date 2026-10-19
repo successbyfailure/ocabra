@@ -430,3 +430,167 @@ class TestFederationManagerBasics:
         fm = _make_fm_with_peers(peer)
         remote = fm.get_remote_models()
         assert "whisper/large-v3" in remote
+
+
+# ---------------------------------------------------------------------------
+# Canonical-id retry (defense-in-depth against stale peer profile cache)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_try_proxy_json_retries_with_canonical_id_on_404() -> None:
+    """A peer may advertise a profile_id in its heartbeat but then 404 that
+    same id when hit directly (observed when the peer inserts a profile row
+    without reloading its in-memory profile_registry). The federation helper
+    must retry once with the canonical ``base_model_id`` before falling back
+    to local, otherwise federation silently stops working for every freshly
+    added profile until the peer restarts.
+    """
+    from types import SimpleNamespace
+
+    from ocabra.api.openai._federation import try_proxy_json
+
+    base_id = "ollama/qwen3-embedding:0.6b"
+    public_id = "qwen3-embedding:0.6b"
+
+    peer = SimpleNamespace(
+        name="mapache",
+        peer_id="peer-1",
+        url="http://peer",
+        models=[{"model_id": base_id, "profiles": [public_id]}],
+    )
+
+    # proxy_request: first call (with public id) → 404, second (canonical) → 200.
+    calls: list[dict[str, Any]] = []
+
+    def _mk_resp(status: int, body: bytes) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.content = body
+        resp.text = body.decode()
+        resp.headers = {"content-type": "application/json"}
+        return resp
+
+    async def _proxy(peer, path, body, headers):
+        calls.append({"model": body.get("model")})
+        if len(calls) == 1:
+            return _mk_resp(404, b'{"detail":{"error":{"message":"not found"}}}')
+        return _mk_resp(200, b'{"data":[{"embedding":[0.1]}]}')
+
+    fm = MagicMock()
+    fm.get_remote_models.return_value = {base_id: [peer]}
+    fm.find_best_peer.return_value = peer
+    fm.select_target.return_value = "local"
+    fm.proxy_request = _proxy
+
+    # Model manager: local has the model CONFIGURED (not loaded), so federation
+    # path kicks in with peer warm.
+    mm = _FakeModelManager({base_id: _FakeModelState(model_id=base_id, status="configured")})
+
+    class _FakeProfile:
+        profile_id = public_id
+        base_model_id = base_id
+        runtime_presets: list = []
+
+    class _FakeRegistry:
+        async def get(self, pid):
+            if pid in (public_id, base_id):
+                return _FakeProfile()
+            return None
+        async def resolve_alias(self, pid):
+            return None
+
+    request = MagicMock()
+    request.state = SimpleNamespace()
+    request.url.path = "/v1/embeddings"
+    request.headers = {}
+
+    logger = MagicMock()
+
+    with patch("ocabra.core.federation.ModelStatus", _FakeModelStatus):
+        resp = await try_proxy_json(
+            request,
+            model_id=public_id,
+            body={"model": public_id, "input": "hi"},
+            federation_manager=fm,
+            model_manager=mm,
+            profile_registry=_FakeRegistry(),
+            logger=logger,
+        )
+
+    assert resp is not None, "helper should have returned the peer's canonical-retry response"
+    assert resp.status_code == 200
+    assert len(calls) == 2, f"expected two proxy_request calls (profile + canonical), got {calls}"
+    assert calls[0]["model"] == public_id
+    assert calls[1]["model"] == base_id
+
+
+@pytest.mark.asyncio
+async def test_try_proxy_json_does_not_retry_when_already_canonical() -> None:
+    """When the first proxy already used the canonical id (peer didn't
+    advertise the public profile), a 404 is a real "model missing" — don't
+    double-send, just fall back to local."""
+    from types import SimpleNamespace
+
+    from ocabra.api.openai._federation import try_proxy_json
+
+    base_id = "ollama/qwen3-embedding:0.6b"
+
+    peer = SimpleNamespace(
+        name="mapache",
+        peer_id="peer-1",
+        url="http://peer",
+        models=[{"model_id": base_id, "profiles": []}],  # no public profile
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def _mk_resp(status: int) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.content = b'{"err":"nope"}'
+        resp.text = '{"err":"nope"}'
+        resp.headers = {}
+        return resp
+
+    async def _proxy(peer, path, body, headers):
+        calls.append({"model": body.get("model")})
+        return _mk_resp(404)
+
+    fm = MagicMock()
+    fm.get_remote_models.return_value = {base_id: [peer]}
+    fm.find_best_peer.return_value = peer
+    fm.select_target.return_value = "local"
+    fm.proxy_request = _proxy
+
+    mm = _FakeModelManager({base_id: _FakeModelState(model_id=base_id, status="configured")})
+
+    class _FakeProfile:
+        profile_id = base_id
+        base_model_id = base_id
+        runtime_presets: list = []
+
+    class _FakeRegistry:
+        async def get(self, pid):
+            return _FakeProfile() if pid == base_id else None
+        async def resolve_alias(self, pid):
+            return None
+
+    request = MagicMock()
+    request.state = SimpleNamespace()
+    request.url.path = "/v1/embeddings"
+    request.headers = {}
+
+    with patch("ocabra.core.federation.ModelStatus", _FakeModelStatus):
+        resp = await try_proxy_json(
+            request,
+            model_id=base_id,
+            body={"model": base_id, "input": "hi"},
+            federation_manager=fm,
+            model_manager=mm,
+            profile_registry=_FakeRegistry(),
+            logger=MagicMock(),
+        )
+
+    assert resp is None, "should fall back to local, not retry a canonical id with itself"
+    assert len(calls) == 1
