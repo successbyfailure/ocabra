@@ -71,13 +71,24 @@ async def _list_tags_from_profiles(
 ) -> dict:
     """Build Ollama-format tags from enabled profiles."""
     enabled_profiles = await profile_registry.list_enabled()
+    execution_profiles = [
+        profile
+        for profile in enabled_profiles
+        if getattr(profile, "profile_kind", "execution") == "execution"
+    ]
+    router_profiles = [
+        profile
+        for profile in enabled_profiles
+        if getattr(profile, "profile_kind", "execution") == "router"
+    ]
 
     models: list[dict] = []
     local_model_ids: set[str] = set()
     local_profile_ids: set[str] = set()
     entry_index_by_model_id: dict[str, int] = {}
+    entries_by_profile_id: dict[str, dict] = {}
 
-    for profile in enabled_profiles:
+    for profile in execution_profiles:
         # Access control: check both profile_id and base_model_id since
         # group_models stores canonical model_ids while clients use profile_ids.
         if (
@@ -116,8 +127,61 @@ async def _list_tags_from_profiles(
             },
             "loaded": bool(base_state and base_state.status.value == "loaded"),
         }
+        if base_state is not None and getattr(profile, "runtime_presets", []):
+            try:
+                from ocabra.api.openai.models import _context_metadata
+
+                context = await _context_metadata(
+                    profile, model_manager, base_state
+                )
+                if context is not None:
+                    entry["details"]["context_length"] = context["effective_max"]
+                    entry["ocabra"] = {"context": context}
+            except Exception:  # noqa: BLE001 -- inventory remains best effort
+                pass
 
         entry_index_by_model_id[profile.base_model_id] = len(models)
+        entries_by_profile_id[profile.profile_id] = entry
+        models.append(entry)
+
+    for profile in router_profiles:
+        if not user.is_admin and profile.profile_id not in user.accessible_model_ids:
+            continue
+        target_entries = [
+            entries_by_profile_id[target_id]
+            for target_id in (profile.routing_targets or [])
+            if target_id in entries_by_profile_id
+        ]
+        if not target_entries:
+            continue
+        primary = target_entries[0]
+        contexts = [
+            int(entry.get("details", {}).get("context_length") or 0)
+            for entry in target_entries
+        ]
+        entry = {
+            "name": profile.profile_id,
+            "model": profile.profile_id,
+            "modified_at": primary["modified_at"],
+            "size": max(int(item.get("size") or 0) for item in target_entries),
+            "digest": "sha256:" + hashlib.sha256(profile.profile_id.encode()).hexdigest(),
+            "details": {
+                **primary["details"],
+                "parent_model": "",
+                "family": profile.category,
+                "families": [profile.category],
+            },
+            "loaded": any(bool(item.get("loaded")) for item in target_entries),
+            "ocabra": {
+                "kind": "router",
+                "routing_targets": list(profile.routing_targets or []),
+            },
+        }
+        if max(contexts, default=0) > 0:
+            entry["details"]["context_length"] = max(contexts)
+            entry["ocabra"]["context"] = {"effective_max": max(contexts)}
+        local_profile_ids.add(profile.profile_id)
+        entries_by_profile_id[profile.profile_id] = entry
         models.append(entry)
 
     # ── Federation: merge remote models ─────────────────────────

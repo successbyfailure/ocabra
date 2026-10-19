@@ -171,6 +171,118 @@ async def test_concurrent_load_only_loads_once(model_manager):
 
 
 @pytest.mark.asyncio
+async def test_gpu_admission_waits_for_prior_backend_load_to_finish():
+    """A queued vLLM load must inspect VRAM after an Ollama load completes."""
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    ollama_started = asyncio.Event()
+    finish_ollama = asyncio.Event()
+
+    ollama_backend = AsyncMock(spec=BackendInterface)
+    ollama_backend.get_vram_estimate_mb = AsyncMock(return_value=12_000)
+
+    async def _load_ollama(*args, **kwargs):
+        ollama_started.set()
+        await finish_ollama.wait()
+        return WorkerInfo(
+            backend_type="ollama",
+            model_id="gemma4:26b",
+            gpu_indices=[],
+            port=0,
+            pid=100,
+            vram_used_mb=12_000,
+        )
+
+    ollama_backend.load = AsyncMock(side_effect=_load_ollama)
+    ollama_backend.get_capabilities = AsyncMock(return_value=BackendCapabilities(chat=True))
+
+    vllm_backend = AsyncMock(spec=BackendInterface)
+    vllm_backend.get_vram_estimate_mb = AsyncMock(return_value=1024)
+    vllm_backend.load = AsyncMock(
+        return_value=WorkerInfo(
+            backend_type="vllm",
+            model_id="gemma-4-12B-AWQ",
+            gpu_indices=[1],
+            port=18001,
+            pid=200,
+            vram_used_mb=1024,
+        )
+    )
+    vllm_backend.get_capabilities = AsyncMock(return_value=BackendCapabilities(chat=True))
+
+    worker_pool = WorkerPool()
+    worker_pool.register_backend("ollama", ollama_backend)
+    worker_pool.register_backend("vllm", vllm_backend)
+
+    gpu_state = GPUState(
+        index=1,
+        name="RTX 3090",
+        total_vram_mb=24_576,
+        free_vram_mb=24_000,
+        used_vram_mb=576,
+        utilization_pct=0,
+        temperature_c=40,
+        power_draw_w=50,
+        power_limit_w=350,
+        locked_vram_mb=0,
+    )
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram = AsyncMock(return_value=24_000)
+    gpu_manager.get_state = AsyncMock(return_value=gpu_state)
+    gpu_manager.get_all_states = AsyncMock(return_value=[gpu_state])
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+    scheduler = AsyncMock()
+
+    async def _admit_vllm(*args, **kwargs):
+        assert mm._states["ollama/gemma4:26b"].status == ModelStatus.LOADED
+        return [1]
+
+    scheduler.find_gpu_for_model = AsyncMock(side_effect=_admit_vllm)
+    mm._gpu_scheduler = scheduler
+
+    mm._states["ollama/gemma4:26b"] = ModelState(
+        model_id="ollama/gemma4:26b",
+        display_name="gemma4:26b",
+        backend_type="ollama",
+    )
+    mm._states["vllm/gemma-4-12B-AWQ"] = ModelState(
+        model_id="vllm/gemma-4-12B-AWQ",
+        display_name="gemma-4-12B-AWQ",
+        backend_type="vllm",
+        preferred_gpu=1,
+        extra_config={"vllm": {"gpu_memory_utilization": 0.94}},
+    )
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+    ):
+        ollama_task = asyncio.create_task(mm.load("ollama/gemma4:26b"))
+        await asyncio.wait_for(ollama_started.wait(), timeout=1)
+
+        vllm_task = asyncio.create_task(mm.load("vllm/gemma-4-12B-AWQ"))
+        for _ in range(100):
+            if mm._load_queue_waiters == 1:
+                break
+            await asyncio.sleep(0)
+
+        assert mm._load_queue_waiters == 1
+        scheduler.find_gpu_for_model.assert_not_called()
+
+        finish_ollama.set()
+        ollama_state, vllm_state = await asyncio.gather(ollama_task, vllm_task)
+
+    assert ollama_state.status == ModelStatus.LOADED
+    assert vllm_state.status == ModelStatus.LOADED
+    scheduler.find_gpu_for_model.assert_awaited_once()
+    vllm_backend.load.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_in_flight_counters_are_thread_safe(model_manager):
     model_id = "test/model"
     await add_test_model(model_manager, model_id=model_id)
@@ -398,7 +510,7 @@ class _PortRequiredBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(chat=True, completion=True, streaming=True)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, **kwargs) -> int:
         return 1024
 
     async def forward_request(self, model_id: str, path: str, body: dict):
@@ -594,7 +706,7 @@ class _BitnetPortBackend(BackendInterface):
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(chat=True, completion=True, streaming=True)
 
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, **kwargs) -> int:
         return 0
 
     async def forward_request(self, model_id: str, path: str, body: dict):

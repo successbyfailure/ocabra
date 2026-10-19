@@ -813,6 +813,68 @@ class TestPoolingEndpoints:
             "bge-reranker", "/rerank", payload
         )
 
+    def test_rerank_uses_profile_id_advertised_by_warm_peer(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.config import settings
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        canonical_id = "vllm/BAAI/bge-reranker-v2-m3"
+        state = ModelState(
+            model_id=canonical_id,
+            display_name="BGE Reranker",
+            backend_type="vllm",
+            status=ModelStatus.UNLOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(pooling=True, rerank=True, score=True),
+        )
+        app = _make_app(model_state=state)
+        app.state.profile_registry = FakeProfileRegistry(
+            [_make_test_profile("bge-reranker", canonical_id)]
+        )
+        peer = SimpleNamespace(
+            peer_id="peer-1",
+            name="mapache",
+            models=[
+                {
+                    "model_id": canonical_id,
+                    "status": "loaded",
+                    "profiles": ["bge-reranker"],
+                }
+            ],
+        )
+        federation_manager = MagicMock()
+        federation_manager.proxy_request = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={"results": [{"index": 0, "relevance_score": 0.9}]},
+                headers={"content-type": "application/json"},
+            )
+        )
+        app.state.federation_manager = federation_manager
+        client = TestClient(app)
+
+        with (
+            patch.object(settings, "federation_enabled", True),
+            patch(
+                "ocabra.core.federation.resolve_federated",
+                new=AsyncMock(return_value=("remote", peer)),
+            ),
+        ):
+            resp = client.post(
+                "/v1/rerank",
+                json={
+                    "model": "bge-reranker",
+                    "query": "best retrieval model",
+                    "documents": ["alpha", "beta"],
+                },
+            )
+
+        assert resp.status_code == 200
+        forwarded = federation_manager.proxy_request.await_args.kwargs
+        assert forwarded["path"] == "/v1/rerank"
+        assert forwarded["body"]["model"] == "bge-reranker"
+        app.state.worker_pool.forward_request.assert_not_called()
+
     def test_rerank_normalizes_document_objects(self):
         from ocabra.backends.base import BackendCapabilities
         from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
@@ -1082,6 +1144,54 @@ class TestEmbeddings:
         })
         assert resp.status_code == 200
         assert resp.json()["object"] == "list"
+
+    def test_embeddings_proxy_uses_canonical_model_id_for_local_alias(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.config import settings
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        canonical_id = "ollama/qwen3-embedding:0.6b"
+        state = ModelState(
+            model_id=canonical_id,
+            display_name="Qwen3 Embedding",
+            backend_type="ollama",
+            status=ModelStatus.UNLOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True),
+        )
+        app = _make_app(model_state=state)
+        app.state.profile_registry = FakeProfileRegistry(
+            [_make_test_profile("qwen3-embedding:0.6b", canonical_id)]
+        )
+        peer = SimpleNamespace(peer_id="peer-1", name="mapache")
+        federation_manager = MagicMock()
+        federation_manager.proxy_request = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={"object": "list", "data": []},
+                headers={"content-type": "application/json"},
+            )
+        )
+        app.state.federation_manager = federation_manager
+        client = TestClient(app)
+
+        with (
+            patch.object(settings, "federation_enabled", True),
+            patch(
+                "ocabra.core.federation.resolve_federated",
+                new=AsyncMock(return_value=("remote", peer)),
+            ),
+        ):
+            resp = client.post(
+                "/v1/embeddings",
+                json={"model": "qwen3-embedding:0.6b", "input": "Hello"},
+            )
+
+        assert resp.status_code == 200
+        forwarded = federation_manager.proxy_request.await_args.kwargs
+        assert forwarded["path"] == "/v1/embeddings"
+        assert forwarded["body"] == {"model": canonical_id, "input": "Hello"}
+        app.state.worker_pool.forward_request.assert_not_called()
 
     def test_chat_model_cannot_embed(self):
         app = _make_app()  # default state has chat=True, embeddings=False

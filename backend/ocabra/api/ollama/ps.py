@@ -47,8 +47,11 @@ async def list_running(
         enabled_profiles = []
 
     seen_base_models: set[str] = set()
+    all_states = await model_manager.list_states(include_derived=True)
 
     for profile in enabled_profiles:
+        if getattr(profile, "profile_kind", "execution") != "execution":
+            continue
         if (
             not user.is_admin
             and profile.profile_id not in user.accessible_model_ids
@@ -57,19 +60,37 @@ async def list_running(
             continue
 
         base_state = await model_manager.get_state(profile.base_model_id)
-        if base_state is None or base_state.status.value != "loaded":
+        active_state = next(
+            (
+                state
+                for state in all_states
+                if state.status.value == "loaded"
+                and isinstance(state.extra_config, dict)
+                and isinstance(state.extra_config.get("_runtime"), dict)
+                and state.extra_config["_runtime"].get("profile_id")
+                == profile.profile_id
+            ),
+            None,
+        )
+        served_state = active_state or base_state
+        if served_state is None or served_state.status.value != "loaded":
             continue
 
         seen_base_models.add(profile.base_model_id)
-        backend_model_id = base_state.backend_model_id or profile.base_model_id
-        size_bytes = _estimate_size_bytes(backend_model_id, base_state.vram_used_mb)
+        backend_model_id = served_state.backend_model_id or profile.base_model_id
+        size_bytes = _estimate_size_bytes(backend_model_id, served_state.vram_used_mb)
+        runtime = (
+            served_state.extra_config.get("_runtime", {})
+            if isinstance(served_state.extra_config, dict)
+            else {}
+        )
 
         models.append(
             {
                 "name": profile.profile_id,
                 "model": profile.profile_id,
                 "size": size_bytes,
-                "size_vram": int(max(0, base_state.vram_used_mb)) * 1024 * 1024,
+                "size_vram": int(max(0, served_state.vram_used_mb)) * 1024 * 1024,
                 "digest": "sha256:"
                 + hashlib.sha256(profile.profile_id.encode("utf-8")).hexdigest(),
                 "details": {
@@ -80,7 +101,9 @@ async def list_running(
                     "parameter_size": "unknown",
                     "quantization_level": "F16",
                 },
-                "expires_at": _compute_expires_at(base_state),
+                "expires_at": _compute_expires_at(served_state),
+                "context_length": runtime.get("effective_context"),
+                "context_preset": runtime.get("preset_key"),
                 "expected_load_seconds": await model_manager.get_expected_load_seconds(
                     profile.base_model_id
                 ),

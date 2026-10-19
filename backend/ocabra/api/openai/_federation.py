@@ -35,6 +35,24 @@ from fastapi.responses import Response
 # by passing ``return_raw=True``. Default is the safer Response wrap.
 
 
+async def _first_execution_profile(profile_registry: Any, profile: Any) -> Any:
+    """Resolve a router to its first valid execution target for federation."""
+
+    visited: set[str] = set()
+    while profile is not None and getattr(profile, "profile_kind", "execution") == "router":
+        if profile.profile_id in visited:
+            return None
+        visited.add(profile.profile_id)
+        next_profile = None
+        for target_id in profile.routing_targets or []:
+            candidate = await profile_registry.get(target_id)
+            if candidate is not None:
+                next_profile = candidate
+                break
+        profile = next_profile
+    return profile
+
+
 async def try_proxy_json(
     request: Request,
     *,
@@ -69,6 +87,7 @@ async def try_proxy_json(
             if profile is None:
                 alias_target = await profile_registry.resolve_alias(model_id)
                 profile = alias_target[0] if alias_target is not None else None
+            profile = await _first_execution_profile(profile_registry, profile)
             if profile is not None and getattr(profile, "runtime_presets", []):
                 from ocabra.core.runtime_coordinator import plan_profile_runtime
 
@@ -113,6 +132,7 @@ async def try_proxy_json(
             if profile is None:
                 alias_target = await profile_registry.resolve_alias(model_id)
                 profile = alias_target[0] if alias_target is not None else None
+            profile = await _first_execution_profile(profile_registry, profile)
         except Exception:  # noqa: BLE001 -- registry lookup must not break inference
             profile = None
         if profile is not None:

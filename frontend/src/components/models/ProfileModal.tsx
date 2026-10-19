@@ -12,6 +12,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { RuntimePresetsPanel } from "@/components/models/RuntimePresetsPanel"
 import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
 
 interface ProfileModalProps {
@@ -564,7 +565,7 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-4xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
           <div className="mb-4 flex items-center justify-between">
             <Dialog.Title className="text-lg font-semibold">
               {isEdit ? "Editar perfil" : "Nuevo perfil"}
@@ -767,6 +768,10 @@ export function ProfileModal({ open, onOpenChange, model, profile, onSaved }: Pr
                 Perfil por defecto
               </label>
             </div>
+
+            {isEdit && category === "llm" && !isRouter && (
+              <RuntimePresetsPanel profile={profile} onChanged={onSaved} />
+            )}
 
             {/* Assets section (only in edit mode) */}
             {isEdit && (

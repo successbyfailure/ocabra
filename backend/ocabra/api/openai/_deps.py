@@ -19,7 +19,9 @@ import structlog
 from fastapi import Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, get_current_user
-from ocabra.core.model_manager_helpers import compute_worker_key
+from ocabra.core.model_manager_helpers import compute_worker_key  # noqa: F401
+from ocabra.core.runtime_coordinator import RuntimePlan, plan_profile_runtime
+from ocabra.core.runtime_presets import ContextCapacityError
 
 if TYPE_CHECKING:
     from ocabra.core.model_manager import ModelManager, ModelState
@@ -279,6 +281,43 @@ async def _snapshot_pre_load(
         pass
 
 
+async def resolve_profile_runtime_plan(
+    profile: ModelProfile,
+    model_manager: ModelManager,
+    request_body: dict | None,
+    *,
+    request_state: object | None = None,
+) -> RuntimePlan:
+    """Select a profile runtime preset and expose its attribution on request state."""
+
+    try:
+        plan = await plan_profile_runtime(profile, model_manager, request_body)
+    except ContextCapacityError as exc:
+        raise _openai_error(
+            str(exc),
+            "invalid_request_error",
+            param="model",
+            code="context_length_exceeded",
+            status_code=400,
+        ) from exc
+    if request_state is not None:
+        try:
+            request_state.runtime_worker_key = plan.worker_key
+            request_state.runtime_preset_key = plan.preset_key
+            request_state.runtime_key = plan.runtime_key
+            request_state.runtime_effective_context = plan.effective_context
+            request_state.runtime_required_tokens = plan.required_tokens
+            request_state.runtime_selection_reason = plan.selection_reason
+            request_id = getattr(request_state, "inflight_request_id", None)
+            old_worker = getattr(request_state, "inflight_model_id", None)
+            if request_id and old_worker and old_worker != plan.worker_key:
+                model_manager.rebind_request(request_id, old_worker, plan.worker_key)
+                request_state.inflight_model_id = plan.worker_key
+        except Exception:  # noqa: BLE001 — telemetry must not break inference
+            pass
+    return plan
+
+
 async def resolve_profile(
     profile_id: str,
     model_manager: ModelManager,
@@ -314,8 +353,21 @@ async def resolve_profile(
             status_code=404,
         )
 
-    # 1. Direct profile lookup
-    profile = await profile_registry.get(requested)
+    # 1. Hidden compatibility alias, then direct profile lookup. Aliases may
+    # pin a historical ``-ctx*`` id to one canonical runtime preset.
+    alias_resolver = getattr(profile_registry, "resolve_alias", None)
+    alias_target = await alias_resolver(requested) if alias_resolver is not None else None
+    profile = alias_target[0] if alias_target is not None else None
+    if alias_target is not None and alias_target[1]:
+        extension = (
+            dict(request_body.get("ocabra") or {})
+            if isinstance(request_body, dict)
+            else {}
+        )
+        extension["context_preset"] = alias_target[1]
+        request_body = {**(request_body or {}), "ocabra": extension}
+    if profile is None:
+        profile = await profile_registry.get(requested)
     if profile is not None:
         if not profile.enabled:
             raise _openai_error(
@@ -331,7 +383,7 @@ async def resolve_profile(
         if (
             user is not None
             and not user.is_admin
-            and requested not in user.accessible_model_ids
+            and profile.profile_id not in user.accessible_model_ids
             and profile.base_model_id not in user.accessible_model_ids
         ):
             raise _openai_error(
@@ -347,16 +399,36 @@ async def resolve_profile(
         # The router's own attribution flows via ``via_router_profile_id`` on
         # the eventual request_stat row so ``/stats/routing`` can aggregate it.
         if router_resolver is not None and router_resolver.is_router(profile):
-            resolved = await router_resolver.pick(profile, request_body=request_body)
+            from ocabra.core.router_resolver import NoRoutableTargetError
+
+            try:
+                resolved = await router_resolver.pick(profile, request_body=request_body)
+            except NoRoutableTargetError as exc:
+                raise _openai_error(
+                    str(exc),
+                    "server_error",
+                    param="model",
+                    code="router_no_target",
+                    status_code=503,
+                ) from exc
             target = await profile_registry.get(resolved.target_profile_id)
-            if target is not None:
-                worker_key = compute_worker_key(target.base_model_id, target.load_overrides)
+            if target is not None and target.base_model_id is not None:
+                runtime_plan = await resolve_profile_runtime_plan(
+                    target,
+                    model_manager,
+                    request_body,
+                    request_state=request_state,
+                )
+                worker_key = runtime_plan.worker_key
                 await _snapshot_pre_load(model_manager, worker_key, request_state)
                 state = await _ensure_worker_loaded(
                     model_manager,
                     target.base_model_id,
                     worker_key,
-                    target.load_overrides,
+                    runtime_plan.load_overrides,
+                    preferred_gpu=runtime_plan.preferred_gpu,
+                    load_policy=runtime_plan.load_policy,
+                    required_tokens=runtime_plan.required_tokens,
                 )
                 # Router attribution — StatsMiddleware (BaseHTTPMiddleware)
                 # doesn't propagate contextvars set by the handler back to
@@ -382,17 +454,39 @@ async def resolve_profile(
                     except Exception:  # noqa: BLE001 — never break resolution
                         pass
                 return target, state
-            # Router failed to resolve any target (shouldn't happen — pick
-            # always returns something), fall through to plain path so the
-            # request still gets served with the router's own base_model_id.
+            raise _openai_error(
+                f"Router '{requested}' resolved an invalid target.",
+                "server_error",
+                param="model",
+                code="router_invalid_target",
+                status_code=503,
+            )
 
-        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        if profile.base_model_id is None:
+            raise _openai_error(
+                f"Router '{requested}' is unavailable while routing is disabled.",
+                "server_error",
+                param="model",
+                code="routing_disabled",
+                status_code=503,
+            )
+
+        runtime_plan = await resolve_profile_runtime_plan(
+            profile,
+            model_manager,
+            request_body,
+            request_state=request_state,
+        )
+        worker_key = runtime_plan.worker_key
         await _snapshot_pre_load(model_manager, worker_key, request_state)
         state = await _ensure_worker_loaded(
             model_manager,
             profile.base_model_id,
             worker_key,
-            profile.load_overrides,
+            runtime_plan.load_overrides,
+            preferred_gpu=runtime_plan.preferred_gpu,
+            load_policy=runtime_plan.load_policy,
+            required_tokens=runtime_plan.required_tokens,
         )
         return profile, state
 
@@ -424,13 +518,22 @@ async def resolve_profile(
                 code="profile_not_configured",
                 status_code=404,
             )
-        worker_key = compute_worker_key(selected.base_model_id, selected.load_overrides)
+        runtime_plan = await resolve_profile_runtime_plan(
+            selected,
+            model_manager,
+            request_body,
+            request_state=request_state,
+        )
+        worker_key = runtime_plan.worker_key
         await _snapshot_pre_load(model_manager, worker_key, request_state)
         state = await _ensure_worker_loaded(
             model_manager,
             selected.base_model_id,
             worker_key,
-            selected.load_overrides,
+            runtime_plan.load_overrides,
+            preferred_gpu=runtime_plan.preferred_gpu,
+            load_policy=runtime_plan.load_policy,
+            required_tokens=runtime_plan.required_tokens,
         )
         return selected, state
 
@@ -760,13 +863,25 @@ async def ensure_worker_loaded(
     base_model_id: str,
     worker_key: str,
     load_overrides: dict | None,
+    *,
+    preferred_gpu: int | None = None,
+    load_policy: str | None = None,
+    required_tokens: int | None = None,
 ) -> ModelState:
     """Public wrapper around :func:`_ensure_worker_loaded`.
 
     Exposed for streaming endpoints that pre-flush headers and trigger the
     actual load from inside the SSE generator.
     """
-    return await _ensure_worker_loaded(model_manager, base_model_id, worker_key, load_overrides)
+    return await _ensure_worker_loaded(
+        model_manager,
+        base_model_id,
+        worker_key,
+        load_overrides,
+        preferred_gpu=preferred_gpu,
+        load_policy=load_policy,
+        required_tokens=required_tokens,
+    )
 
 
 async def _ensure_worker_loaded(
@@ -774,6 +889,10 @@ async def _ensure_worker_loaded(
     base_model_id: str,
     worker_key: str,
     load_overrides: dict | None,
+    *,
+    preferred_gpu: int | None = None,
+    load_policy: str | None = None,
+    required_tokens: int | None = None,
 ) -> ModelState:
     """Ensure the worker identified by *worker_key* is loaded.
 
@@ -784,6 +903,14 @@ async def _ensure_worker_loaded(
 
     Returns the :class:`ModelState` of the loaded worker.
     """
+    async def _mark_runtime(state: ModelState) -> None:
+        marker = getattr(model_manager, "mark_runtime_request", None)
+        if marker is None:
+            return
+        result = marker(state.model_id, required_tokens=required_tokens)
+        if inspect.isawaitable(result):
+            await result
+
     # If worker_key == base_model_id, just use the normal path
     if worker_key == base_model_id:
         state = await model_manager.get_state(base_model_id)
@@ -796,12 +923,16 @@ async def _ensure_worker_loaded(
                 status_code=404,
             )
         # Delegate to the existing ensure_loaded for actual loading
-        return await _do_ensure_loaded(model_manager, base_model_id)
+        state = await _do_ensure_loaded(model_manager, base_model_id)
+        await _mark_runtime(state)
+        return state
 
     # Dedicated worker: check if a state already exists for this key
     state = await model_manager.get_state(worker_key)
     if state is not None:
-        return await _do_ensure_loaded(model_manager, worker_key)
+        state = await _do_ensure_loaded(model_manager, worker_key)
+        await _mark_runtime(state)
+        return state
 
     # Clone from base model
     base_state = await model_manager.get_state(base_model_id)
@@ -826,17 +957,22 @@ async def _ensure_worker_loaded(
             model_id=worker_key,
             backend_type=base_state.backend_type,
             display_name=f"{base_state.display_name} (override)",
-            load_policy=base_state.load_policy.value,
+            load_policy=load_policy or base_state.load_policy.value,
             auto_reload=base_state.auto_reload,
-            preferred_gpu=base_state.preferred_gpu,
+            preferred_gpu=(
+                preferred_gpu if preferred_gpu is not None else base_state.preferred_gpu
+            ),
             extra_config=merged_extra,
             persist=False,
+            backend_model_id_override=base_state.backend_model_id,
         )
     except Exception:
         # May already exist from concurrent request
         pass
 
-    return await _do_ensure_loaded(model_manager, worker_key)
+    state = await _do_ensure_loaded(model_manager, worker_key)
+    await _mark_runtime(state)
+    return state
 
 
 async def _do_ensure_loaded(
@@ -866,11 +1002,10 @@ async def _do_ensure_loaded(
     async def _touch(resolved_id: str, request_at: datetime) -> None:
         state.last_request_at = request_at
         touch = getattr(model_manager, "touch_last_request_at", None)
-        if touch is None:
-            return
-        result = touch(resolved_id, request_at)
-        if inspect.isawaitable(result):
-            await result
+        if touch is not None:
+            result = touch(resolved_id, request_at)
+            if inspect.isawaitable(result):
+                await result
 
     if state.status == ModelStatus.LOADED:
         await _touch(model_id, datetime.now(UTC))
@@ -1201,6 +1336,9 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
 def to_backend_body(state: ModelState, body: dict) -> dict:
     """Copy request payload and normalize model field to backend-native model id."""
     payload = dict(body)
+    # oCabra request extensions are consumed by the coordinator and must not
+    # leak into strict OpenAI-compatible upstreams.
+    payload.pop("ocabra", None)
     payload["model"] = state.backend_model_id
     if payload.get("stream") is True:
         stream_options = payload.get("stream_options")

@@ -204,7 +204,12 @@ async def test_pressure_eviction_evicts_on_demand_first():
     from ocabra.core.scheduler import InsufficientVRAMError
     call_count = 0
 
-    async def _find_gpu(vram_needed, preferred_gpu=None, enforce_vllm_headroom=False):
+    async def _find_gpu(
+        vram_needed,
+        preferred_gpu=None,
+        enforce_vllm_headroom=False,
+        vllm_gpu_memory_utilization=None,
+    ):
         nonlocal call_count
         call_count += 1
         if call_count <= 1:

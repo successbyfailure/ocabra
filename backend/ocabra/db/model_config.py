@@ -2,7 +2,17 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -41,17 +51,30 @@ class ModelConfig(Base):
 class ModelProfile(Base):
     """A public-facing profile derived from a base model.
 
-    Each model can have multiple profiles with different load overrides,
-    request defaults, and attached assets (e.g. voice reference audio).
+    Execution profiles belong to one physical model. Router profiles are
+    model-independent public entry points whose ordered targets are profiles.
     """
 
     __tablename__ = "model_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "(profile_kind = 'execution' AND base_model_id IS NOT NULL "
+            "AND (routing_targets IS NULL OR routing_targets = '[]'::jsonb)) OR "
+            "(profile_kind = 'router' AND base_model_id IS NULL "
+            "AND jsonb_typeof(routing_targets) = 'array' "
+            "AND jsonb_array_length(routing_targets) > 0)",
+            name="ck_model_profile_kind_shape",
+        ),
+    )
 
     profile_id: Mapped[str] = mapped_column(String(512), primary_key=True)
-    base_model_id: Mapped[str] = mapped_column(
+    profile_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="execution"
+    )
+    base_model_id: Mapped[str | None] = mapped_column(
         String(512),
         ForeignKey("model_configs.model_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     display_name: Mapped[str | None] = mapped_column(String(512))
@@ -60,11 +83,13 @@ class ModelProfile(Base):
     load_overrides: Mapped[dict | None] = mapped_column(JSONB)
     request_defaults: Mapped[dict | None] = mapped_column(JSONB)
     assets: Mapped[dict | None] = mapped_column(JSONB)
-    # Bloque 20 — Router profiles.
-    # When non-null, this profile is a router that delegates to the listed
-    # target profile_ids in order. Its own ``load_overrides`` /
-    # ``base_model_id`` remain as a final fallback if no target is available.
+    # Router profiles delegate to these ordered public profile ids. They do
+    # not own a base model: every successful request resolves to a target.
     routing_targets: Mapped[list | None] = mapped_column(JSONB)
+    # Bloque 21 — selection/hysteresis policy shared by the profile's
+    # context/runtime presets. Presets themselves live in their own table so
+    # they can be addressed and mutated independently from the public profile.
+    runtime_policy: Mapped[dict | None] = mapped_column(JSONB)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -72,7 +97,101 @@ class ModelProfile(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    base_model: Mapped["ModelConfig"] = relationship("ModelConfig", back_populates="profiles")
+    base_model: Mapped["ModelConfig | None"] = relationship(
+        "ModelConfig", back_populates="profiles"
+    )
+    runtime_presets: Mapped[list["ProfileRuntimePreset"]] = relationship(
+        "ProfileRuntimePreset",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        order_by="ProfileRuntimePreset.priority, ProfileRuntimePreset.context_tokens",
+    )
+    aliases: Mapped[list["ModelProfileAlias"]] = relationship(
+        "ModelProfileAlias",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class ModelProfileAlias(Base):
+    """Hidden compatibility name that resolves to a canonical profile preset."""
+
+    __tablename__ = "model_profile_aliases"
+
+    alias_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    profile_id: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey(
+            "model_profiles.profile_id", ondelete="CASCADE", onupdate="CASCADE"
+        ),
+        nullable=False,
+        index=True,
+    )
+    preset_key: Mapped[str | None] = mapped_column(String(64))
+    hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    profile: Mapped["ModelProfile"] = relationship(
+        "ModelProfile", back_populates="aliases"
+    )
+
+
+class ProfileRuntimePreset(Base):
+    """One load-affecting runtime configuration exposed by a public profile."""
+
+    __tablename__ = "profile_runtime_presets"
+    __table_args__ = (
+        UniqueConstraint("profile_id", "preset_key", name="uq_profile_runtime_preset_key"),
+        CheckConstraint(
+            "(context_mode = 'fixed' AND context_tokens > 0) OR "
+            "(context_mode = 'max' AND context_tokens IS NULL)",
+            name="ck_profile_runtime_preset_context",
+        ),
+        CheckConstraint(
+            "parallelism > 0", name="ck_profile_runtime_preset_parallelism"
+        ),
+        CheckConstraint("priority >= 0", name="ck_profile_runtime_preset_priority"),
+        CheckConstraint(
+            "NOT is_default OR enabled", name="ck_profile_runtime_preset_default_enabled"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    profile_id: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey("model_profiles.profile_id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    preset_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(String(128), nullable=False)
+    context_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="fixed")
+    context_tokens: Mapped[int | None] = mapped_column(Integer)
+    parallelism: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    kv_cache_dtype: Mapped[str] = mapped_column(String(16), nullable=False, default="q8")
+    placement_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
+    preferred_gpus: Mapped[list[int] | None] = mapped_column(JSONB)
+    execution_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
+    load_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="on_demand")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    profile: Mapped["ModelProfile"] = relationship(
+        "ModelProfile", back_populates="runtime_presets"
+    )
 
 
 class EvictionSchedule(Base):

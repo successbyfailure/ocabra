@@ -1,6 +1,7 @@
 import asyncio
 import json as _json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -11,6 +12,153 @@ from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
+
+
+def _ollama_native_messages(messages: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Convert OpenAI content blocks to Ollama native chat messages.
+
+    Ollama's OpenAI endpoint accepts ``content`` arrays, while ``/api/chat``
+    requires a string plus a separate base64 ``images`` list.  Remote image
+    URLs and unknown block types stay on the OpenAI endpoint because fetching
+    arbitrary URLs here would both change semantics and introduce SSRF risk.
+    """
+
+    if not isinstance(messages, list):
+        return [], False
+
+    converted: list[dict[str, Any]] = []
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            return [], False
+        message = dict(raw_message)
+        content = message.get("content")
+        if not isinstance(content, list):
+            converted.append(message)
+            continue
+
+        text_parts: list[str] = []
+        images = list(message.get("images") or [])
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                return [], False
+
+            block_type = str(block.get("type") or "")
+            text = block.get("text")
+            if block_type in {"text", "input_text", "output_text"} and isinstance(
+                text, str
+            ):
+                text_parts.append(text)
+                continue
+            if block_type == "image_url":
+                image_url = block.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                if not isinstance(url, str) or not url.startswith("data:"):
+                    return [], False
+                marker = ";base64,"
+                if marker not in url:
+                    return [], False
+                images.append(url.split(marker, 1)[1])
+                continue
+            return [], False
+
+        message["content"] = "".join(text_parts)
+        if images:
+            message["images"] = images
+        converted.append(message)
+    return converted, True
+
+
+def _ollama_native_body(path: str, body: dict) -> tuple[str, dict, str | None]:
+    """Translate Ollama's OpenAI shim requests to its native API.
+
+    The native endpoints are required for runtime presets because Ollama's
+    OpenAI-compatible endpoints ignore ``options.num_ctx`` and silently reload
+    the daemon default context.
+    """
+
+    if path not in {"/v1/chat/completions", "/v1/completions"}:
+        return path, body, None
+    kind = "chat" if path.endswith("chat/completions") else "completion"
+    native: dict[str, Any] = {
+        "model": body.get("model"),
+        "stream": bool(body.get("stream", False)),
+    }
+    if kind == "chat":
+        messages, compatible = _ollama_native_messages(body.get("messages", []))
+        if not compatible:
+            return path, body, None
+        native["messages"] = messages
+        for key in ("tools", "format", "think", "keep_alive"):
+            if key in body:
+                native[key] = body[key]
+        native_path = "/api/chat"
+    else:
+        native["prompt"] = body.get("prompt", "")
+        for key in ("suffix", "system", "template", "raw", "format", "think", "keep_alive"):
+            if key in body:
+                native[key] = body[key]
+        native_path = "/api/generate"
+
+    options = dict(body.get("options") or {})
+    aliases = {
+        "max_completion_tokens": "num_predict",
+        "max_tokens": "num_predict",
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "stop": "stop",
+        "seed": "seed",
+        "frequency_penalty": "frequency_penalty",
+        "presence_penalty": "presence_penalty",
+    }
+    for source, target in aliases.items():
+        if source in body and target not in options:
+            options[target] = body[source]
+    native["options"] = options
+    return native_path, native, kind
+
+
+def _ollama_native_response(kind: str, result: dict, model: str) -> dict:
+    usage = {
+        "prompt_tokens": int(result.get("prompt_eval_count") or 0),
+        "completion_tokens": int(result.get("eval_count") or 0),
+    }
+    usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+    common = {
+        "id": f"{kind}-{uuid.uuid4().hex}",
+        "created": int(time.time()),
+        "model": model,
+        "usage": usage,
+    }
+    if kind == "chat":
+        message = dict(result.get("message") or {})
+        if "thinking" in message and "reasoning_content" not in message:
+            message["reasoning_content"] = message.pop("thinking")
+        return {
+            **common,
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": result.get("done_reason") or "stop",
+                }
+            ],
+        }
+    return {
+        **common,
+        "object": "text_completion",
+        "choices": [
+            {
+                "index": 0,
+                "text": str(result.get("response") or ""),
+                "finish_reason": result.get("done_reason") or "stop",
+            }
+        ],
+    }
 
 
 class InferenceTimeoutError(TimeoutError):
@@ -40,9 +188,14 @@ class WorkerPool:
         """Cap ``options.num_ctx`` on native Ollama requests to the model's
         configured use-case context. Ollama reserves KV = num_ctx × slots up front,
         so an unclamped client (OpenWebUI often sends 32k+) inflates VRAM for
-        everyone. Only touches ``/api/*`` bodies; a no-op without a resolver/cap.
+        everyone. Applies to native ``/api/*`` and Ollama's OpenAI-compatible
+        completion paths; it is a no-op without a resolver/cap.
         """
-        if not (self._ollama_ctx_resolver and path.startswith("/api/")):
+        context_aware_path = path.startswith("/api/") or path in {
+            "/v1/chat/completions",
+            "/v1/completions",
+        }
+        if not (self._ollama_ctx_resolver and context_aware_path):
             return body
         try:
             cap = await self._ollama_ctx_resolver(model_id)
@@ -109,9 +262,13 @@ class WorkerPool:
             raise KeyError(f"No worker found for model '{model_id}'")
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
-            base = settings.ollama_base_url.rstrip("/")
+            requested_model = str(body.get("model") or worker.model_id)
+            path, body, ollama_adapter = _ollama_native_body(path, body)
+            base = (worker.endpoint_url or settings.ollama_base_url).rstrip("/")
             url = f"{base}{path}"
         else:
+            ollama_adapter = None
+            requested_model = worker.model_id
             url = f"http://127.0.0.1:{worker.port}{path}"
         start = time.monotonic()
         timeout_s = max(30, int(settings.inference_request_timeout_seconds))
@@ -130,6 +287,8 @@ class WorkerPool:
                 timeout_s=timeout_s,
             )
             raise InferenceTimeoutError(model_id, path, timeout_s) from exc
+        if ollama_adapter is not None:
+            result = _ollama_native_response(ollama_adapter, result, requested_model)
         # Normalize reasoning → reasoning_content for chat completions
         if "/chat/completions" in path:
             for choice in result.get("choices", []):
@@ -157,9 +316,13 @@ class WorkerPool:
             raise KeyError(f"No worker found for model '{model_id}'")
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
-            base = settings.ollama_base_url.rstrip("/")
+            requested_model = str(body.get("model") or worker.model_id)
+            path, body, ollama_adapter = _ollama_native_body(path, body)
+            base = (worker.endpoint_url or settings.ollama_base_url).rstrip("/")
             url = f"{base}{path}"
         else:
+            ollama_adapter = None
+            requested_model = worker.model_id
             url = f"http://127.0.0.1:{worker.port}{path}"
 
         async def _raw_stream() -> AsyncIterator[bytes]:
@@ -196,7 +359,13 @@ class WorkerPool:
         # Normalize reasoning → reasoning_content for chat completions
         is_chat = "/chat/completions" in path
         source: AsyncIterator[bytes] = _raw_stream()
-        if is_chat:
+        if ollama_adapter is not None:
+            source = self._ollama_native_stream(
+                source,
+                kind=ollama_adapter,
+                model=requested_model,
+            )
+        elif is_chat:
             source = self._normalize_reasoning_stream(source)
 
         if settings.langfuse_enabled:
@@ -217,6 +386,81 @@ class WorkerPool:
     # ------------------------------------------------------------------
     # SSE normalisation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _ollama_native_stream(
+        raw: AsyncIterator[bytes],
+        *,
+        kind: str,
+        model: str,
+    ) -> AsyncIterator[bytes]:
+        """Convert Ollama native NDJSON to OpenAI-compatible SSE."""
+
+        buffer = ""
+        response_id = f"{kind}-{uuid.uuid4().hex}"
+        created = int(time.time())
+        async for chunk in raw:
+            buffer += chunk.decode("utf-8", errors="ignore")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    payload = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                done = bool(payload.get("done"))
+                finish_reason = payload.get("done_reason") or ("stop" if done else None)
+                if kind == "chat":
+                    message = dict(payload.get("message") or {})
+                    delta: dict[str, Any] = {}
+                    if message.get("role"):
+                        delta["role"] = message["role"]
+                    if "content" in message:
+                        delta["content"] = message.get("content") or ""
+                    if message.get("thinking"):
+                        delta["reasoning_content"] = message["thinking"]
+                    if message.get("tool_calls"):
+                        delta["tool_calls"] = message["tool_calls"]
+                    event = {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+                else:
+                    event = {
+                        "id": response_id,
+                        "object": "text_completion",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "text": str(payload.get("response") or ""),
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+                if done:
+                    prompt_tokens = int(payload.get("prompt_eval_count") or 0)
+                    completion_tokens = int(payload.get("eval_count") or 0)
+                    event["usage"] = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    }
+                yield f"data: {_json.dumps(event)}\n\n".encode()
+                if done:
+                    yield b"data: [DONE]\n\n"
+                    return
 
     @staticmethod
     async def _normalize_reasoning_stream(

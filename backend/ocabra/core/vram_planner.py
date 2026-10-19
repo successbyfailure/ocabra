@@ -48,9 +48,14 @@ class ModelArch:
     hidden_size: int = 0
     context_length: int = 0  # native max context the model was trained/config'd for
     weight_dtype_bytes: float = 2.0  # bytes/param, for weight estimates when no file size
+    # Exact long-context KV elements for hybrid/sliding-window architectures
+    # that cannot be represented by one homogeneous layer/head tuple.
+    kv_elements_per_token_override: int = 0
 
     def kv_bytes_per_token(self, kv_dtype_bytes: float = 2.0) -> int:
         """KV cache bytes for one token across all layers (K and V)."""
+        if self.kv_elements_per_token_override > 0:
+            return int(self.kv_elements_per_token_override * kv_dtype_bytes)
         return int(
             self.layers * self.n_kv_heads * (self.key_length + self.value_length) * kv_dtype_bytes
         )
@@ -139,14 +144,52 @@ def arch_from_ollama_model_info(model_info: dict, arch_family: str) -> ModelArch
 
     try:
         layers = int(g("block_count"))
-        n_kv = int(g("attention.head_count_kv"))
+        raw_n_kv = g("attention.head_count_kv")
+        n_kv_values = (
+            [int(value) for value in raw_n_kv]
+            if isinstance(raw_n_kv, list)
+            else [int(raw_n_kv)] * layers
+        )
+        if len(n_kv_values) != layers:
+            return None
+        n_kv = max(n_kv_values)
         key_len = int(g("attention.key_length"))
         val_len = int(g("attention.value_length") or key_len)
         hidden = int(g("embedding_length") or 0)
         ctx = int(g("context_length") or 0)
         if layers <= 0 or n_kv <= 0 or key_len <= 0:
             return None
-        return ModelArch(layers, n_kv, key_len, val_len, hidden, ctx, 2.0)
+        kv_elements_override = 0
+        sliding_pattern = g("attention.sliding_window_pattern")
+        if isinstance(sliding_pattern, list) and len(sliding_pattern) == layers:
+            # Local sliding-window layers retain a fixed-size cache. Only the
+            # global-attention layers grow with long context.
+            kv_elements_override = sum(
+                heads * (key_len + val_len)
+                for heads, sliding in zip(n_kv_values, sliding_pattern, strict=True)
+                if not sliding
+            )
+        else:
+            full_attention_interval = int(g("full_attention_interval") or 0)
+            if full_attention_interval > 1:
+                # Hybrid SSM/attention models allocate long KV only on their
+                # periodic full-attention blocks.
+                attention_layers = (
+                    layers + full_attention_interval - 1
+                ) // full_attention_interval
+                kv_elements_override = (
+                    attention_layers * n_kv * (key_len + val_len)
+                )
+        return ModelArch(
+            layers,
+            n_kv,
+            key_len,
+            val_len,
+            hidden,
+            ctx,
+            2.0,
+            kv_elements_override,
+        )
     except (TypeError, ValueError):
         return None
 
@@ -289,7 +332,11 @@ def plan_llama_cpp_vram_mb(
         arch.hidden_size, arch.context_length, arch.weight_dtype_bytes,
     )
     return estimate_total_vram_mb(
-        weights_mb, kv_arch, max(1, ctx_size), kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb
+        weights_mb,
+        kv_arch,
+        max(1, ctx_size),
+        kv_dtype_bytes=kv_dtype_bytes,
+        overhead_mb=overhead_mb,
     )
 
 
@@ -412,7 +459,8 @@ def plan_use_case(
             effective = native
         if effective > max_ctx:
             warnings.append(
-                f"contexto {effective} no cabe con {slots} slots (máx {max_ctx}); reducido a {max_ctx}"
+                f"contexto {effective} no cabe con {slots} slots "
+                f"(máx {max_ctx}); reducido a {max_ctx}"
             )
             effective = max_ctx
 

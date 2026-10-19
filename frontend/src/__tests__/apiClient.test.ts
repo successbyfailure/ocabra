@@ -171,6 +171,122 @@ describe("api client mappings", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("gpu_indices=1")
   })
 
+  it("maps runtime presets and their MAX context mode", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            id: "preset-1",
+            profile_id: "gemma4:12b",
+            preset_key: "max",
+            label: "Máximo efectivo",
+            context_mode: "max",
+            context_tokens: null,
+            parallelism: 2,
+            kv_cache_dtype: "q8",
+            placement_policy: "forced",
+            preferred_gpus: [1],
+            execution_policy: "auto",
+            load_policy: "warm",
+            enabled: true,
+            is_default: false,
+            priority: 40,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+
+    const presets = await api.profiles.listRuntimePresets("gemma4:12b")
+
+    expect(presets[0]).toMatchObject({
+      presetKey: "max",
+      contextMode: "max",
+      contextTokens: null,
+      parallelism: 2,
+      preferredGpus: [1],
+    })
+  })
+
+  it("serializes a fixed runtime preset using backend field names", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "preset-2",
+          profile_id: "gemma4:12b",
+          preset_key: "64k",
+          label: "Normal",
+          context_mode: "fixed",
+          context_tokens: 65536,
+          parallelism: 2,
+          kv_cache_dtype: "q8",
+          placement_policy: "auto",
+          preferred_gpus: null,
+          execution_policy: "auto",
+          load_policy: "on_demand",
+          enabled: true,
+          is_default: true,
+          priority: 20,
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+
+    await api.profiles.createRuntimePreset("gemma4:12b", {
+      presetKey: "64k",
+      label: "Normal",
+      contextMode: "fixed",
+      contextTokens: 65536,
+      parallelism: 2,
+      kvCacheDtype: "q8",
+      placementPolicy: "auto",
+      executionPolicy: "auto",
+      loadPolicy: "on_demand",
+      isDefault: true,
+      priority: 20,
+    })
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body).toMatchObject({
+      preset_key: "64k",
+      context_mode: "fixed",
+      context_tokens: 65536,
+      parallelism: 2,
+      is_default: true,
+    })
+  })
+
+  it("maps resolved runtime capacity snapshots", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            preset_key: "max",
+            resolved: true,
+            requested_context: null,
+            effective_context: 262144,
+            model_max: 262144,
+            hardware_max: 262144,
+            target_gpus: [1],
+            fits: true,
+            runtime_key: "runtime:abc",
+            warnings: [],
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+
+    const rows = await api.profiles.resolveRuntimePresets("gemma4:12b")
+
+    expect(rows[0]).toMatchObject({
+      presetKey: "max",
+      effectiveContext: 262144,
+      targetGpus: [1],
+      runtimeKey: "runtime:abc",
+    })
+  })
+
   it("clears the auth user on 401 so ProtectedRoute kicks the user back to /login", async () => {
     useAuthStore.getState().setUser({
       id: "u1",

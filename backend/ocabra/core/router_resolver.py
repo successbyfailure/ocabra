@@ -31,7 +31,6 @@ import structlog
 
 from ocabra.config import settings
 
-
 # Contextvar-based attribution so the stats collector can pick up the
 # router's profile_id without threading a scoped parameter through every
 # handler. Set inside ``resolve_profile`` when the router picks a target;
@@ -44,7 +43,7 @@ current_router_profile_id: contextvars.ContextVar[str | None] = contextvars.Cont
 if TYPE_CHECKING:
     from ocabra.core.duration_estimator import DurationEstimator
     from ocabra.core.gpu_manager import GPUManager
-    from ocabra.core.model_manager import ModelManager, ModelState
+    from ocabra.core.model_manager import ModelManager
     from ocabra.core.profile_registry import ModelProfile, ProfileRegistry
     from ocabra.core.session_registry import SessionRegistry
 
@@ -86,6 +85,10 @@ class RoutingLoopError(RuntimeError):
     """
 
 
+class NoRoutableTargetError(RuntimeError):
+    """Raised when no enabled router target can serve the request."""
+
+
 class RouterResolver:
     """Stateless router — one instance per app, injected everywhere."""
 
@@ -116,7 +119,8 @@ class RouterResolver:
         if not settings.routing_enabled:
             return False
         targets = getattr(profile, "routing_targets", None)
-        return isinstance(targets, list) and len(targets) > 0
+        kind = getattr(profile, "profile_kind", None)
+        return kind == "router" or (isinstance(targets, list) and len(targets) > 0)
 
     async def pick(
         self,
@@ -134,12 +138,12 @@ class RouterResolver:
              loading it here would not disrupt a busy neighbour — that is
              the only case the fallback list is meant to handle.
 
-        ``request_body`` is currently unused but kept in the signature so
-        future estimator-driven heuristics can slot in without changing
-        every call site.
+        Context/runtime capacity is resolved before availability so a router
+        never selects a hot target that cannot cover the incoming request.
         """
-        del request_body  # noqa: F841 — reserved for future heuristics
         from ocabra.core.model_manager import ModelStatus
+        from ocabra.core.runtime_coordinator import plan_profile_runtime
+        from ocabra.core.runtime_presets import ContextCapacityError
 
         audit: list[CandidateAudit] = []
         # Loop prevention: routers can point at other routers, but a cycle
@@ -148,10 +152,6 @@ class RouterResolver:
         visited: set[str] = {router.profile_id}
 
         target_ids = list(router.routing_targets or [])
-        # Fall back to the router's own base_model_id at the very end so a
-        # router whose targets all fail still behaves like a plain profile.
-        # We wrap it as a virtual candidate: the caller looks it up via the
-        # profile itself (no separate profile lookup needed).
         last_resort: ResolvedTarget | None = None
 
         for target_id in target_ids:
@@ -192,8 +192,31 @@ class RouterResolver:
                         considered=audit + nested.considered,
                     )
 
-            state = await self._model_manager.get_state(target.base_model_id)
-            worker_key = target.base_model_id  # profile_id-based worker_keys land here in Etapa 6+
+            if not target.base_model_id:
+                audit.append(CandidateAudit(target_id, "invalid_target"))
+                continue
+            try:
+                runtime_plan = await plan_profile_runtime(
+                    target,
+                    self._model_manager,
+                    request_body,
+                )
+            except ContextCapacityError:
+                audit.append(CandidateAudit(target_id, "context_unavailable"))
+                continue
+            worker_key = runtime_plan.worker_key
+            state = await self._model_manager.get_state(worker_key)
+            if state is None and worker_key != target.base_model_id:
+                state = await self._model_manager.get_state(target.base_model_id)
+            candidate = ResolvedTarget(
+                target_profile_id=target.profile_id,
+                base_model_id=target.base_model_id,
+                load_overrides=runtime_plan.load_overrides,
+                reason="forced_fallback",
+                considered=list(audit),
+            )
+            if last_resort is None:
+                last_resort = candidate
 
             # 1) Loaded and unreserved → always pick, no matter how busy.
             # The router's purpose is "give me a working model"; if the
@@ -275,33 +298,29 @@ class RouterResolver:
             # Only keep the FIRST loadable candidate as the winner — the
             # ordering of ``routing_targets`` expresses the operator's
             # preference among functionally equivalent fallbacks.
-            if last_resort is None:
-                last_resort = candidate
-                logger.info(
-                    "router_resolver_picked",
-                    router=router.profile_id,
-                    target=target.profile_id,
-                    reason="loadable_no_disruption",
-                    considered=[(a.target_profile_id, a.outcome) for a in audit],
-                )
-                return candidate
+            logger.info(
+                "router_resolver_picked",
+                router=router.profile_id,
+                target=target.profile_id,
+                reason="loadable_no_disruption",
+                considered=[(a.target_profile_id, a.outcome) for a in audit],
+            )
+            return candidate
 
-        # Nothing survived — fall back to the router's own base_model_id.
-        # This is what a plain profile would do, so upstream behaviour
-        # matches the pre-router world.
+        # Nothing was immediately available. Use the first otherwise viable
+        # target so routing remains deterministic, but never fall back to a
+        # fictitious model owned by the router itself.
         logger.info(
             "router_resolver_no_immediate_winner",
             router=router.profile_id,
             considered=[(a.target_profile_id, a.outcome) for a in audit],
         )
         if last_resort is not None:
+            last_resort.reason = "forced_fallback"
+            last_resort.considered = audit
             return last_resort
-        return ResolvedTarget(
-            target_profile_id=router.profile_id,
-            base_model_id=router.base_model_id,
-            load_overrides=router.load_overrides,
-            reason="no_immediate_winner",
-            considered=audit,
+        raise NoRoutableTargetError(
+            f"router '{router.profile_id}' has no enabled target capable of serving the request"
         )
 
     # Note: the previous ``_should_skip_for_busy`` helper (estimator-based
@@ -320,4 +339,5 @@ __all__ = [
     "ResolvedTarget",
     "RouterResolver",
     "RoutingLoopError",
+    "NoRoutableTargetError",
 ]

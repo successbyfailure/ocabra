@@ -37,6 +37,7 @@ def _make_profile(**overrides):
     """Create a SimpleNamespace that looks enough like a ModelProfile for cache tests."""
     defaults = {
         "profile_id": "test-profile",
+        "profile_kind": "execution",
         "base_model_id": "vllm/my-model",
         "display_name": "Test Profile",
         "description": None,
@@ -44,6 +45,9 @@ def _make_profile(**overrides):
         "load_overrides": None,
         "request_defaults": None,
         "assets": None,
+        "routing_targets": None,
+        "runtime_policy": None,
+        "runtime_presets": [],
         "enabled": True,
         "is_default": False,
         "created_at": None,
@@ -171,6 +175,36 @@ def _make_session(*, model_exists=True, profiles=None):
 
 
 class TestProfileRegistryCRUD:
+    @pytest.mark.asyncio
+    async def test_create_router_without_base_model(self):
+        registry = ProfileRegistry()
+        registry._profiles["target"] = _make_profile(profile_id="target")
+        session = _make_session()
+
+        profile = await registry.create(
+            session,
+            profile_id="recommended",
+            profile_kind="router",
+            base_model_id=None,
+            routing_targets=["target"],
+        )
+
+        assert profile.profile_kind == "router"
+        assert profile.base_model_id is None
+        assert profile.routing_targets == ["target"]
+
+    @pytest.mark.asyncio
+    async def test_router_rejects_missing_target(self):
+        registry = ProfileRegistry()
+        with pytest.raises(ValueError, match="not found"):
+            await registry.create(
+                _make_session(),
+                profile_id="recommended",
+                profile_kind="router",
+                base_model_id=None,
+                routing_targets=["missing"],
+            )
+
     @pytest.mark.asyncio
     async def test_create_validates_slug(self):
         registry = ProfileRegistry()
@@ -585,3 +619,154 @@ class TestProfileSchema:
 
         with pytest.raises(ValidationError):
             ProfileCreate(profile_id="x", extra_field="bad")
+
+
+# ── Runtime preset schema/registry tests ─────────────────────
+
+
+class TestRuntimePresetSchema:
+    def test_fixed_context_requires_tokens(self):
+        from pydantic import ValidationError
+
+        from ocabra.schemas.profiles import RuntimePresetCreate
+
+        with pytest.raises(ValidationError, match="context_tokens is required"):
+            RuntimePresetCreate(
+                preset_key="normal",
+                label="Normal",
+                context_mode="fixed",
+            )
+
+    def test_max_context_rejects_fixed_value(self):
+        from pydantic import ValidationError
+
+        from ocabra.schemas.profiles import RuntimePresetCreate
+
+        with pytest.raises(ValidationError, match="must be null"):
+            RuntimePresetCreate(
+                preset_key="max",
+                label="Maximum",
+                context_mode="max",
+                context_tokens=262144,
+            )
+
+    def test_default_must_be_enabled(self):
+        from pydantic import ValidationError
+
+        from ocabra.schemas.profiles import RuntimePresetCreate
+
+        with pytest.raises(ValidationError, match="must be enabled"):
+            RuntimePresetCreate(
+                preset_key="normal",
+                label="Normal",
+                context_tokens=65536,
+                enabled=False,
+                is_default=True,
+            )
+
+    def test_forced_placement_requires_gpus(self):
+        from pydantic import ValidationError
+
+        from ocabra.schemas.profiles import RuntimePresetCreate
+
+        with pytest.raises(ValidationError, match="preferred_gpus is required"):
+            RuntimePresetCreate(
+                preset_key="normal",
+                label="Normal",
+                context_tokens=65536,
+                placement_policy="forced",
+            )
+
+    def test_max_preset_is_valid_without_context_tokens(self):
+        from ocabra.schemas.profiles import RuntimePresetCreate
+
+        preset = RuntimePresetCreate(
+            preset_key="max",
+            label="Maximum",
+            context_mode="max",
+            parallelism=2,
+            kv_cache_dtype="q8",
+        )
+        assert preset.context_tokens is None
+        assert preset.parallelism == 2
+
+
+class TestRuntimePresetRegistry:
+    @pytest.mark.asyncio
+    async def test_first_preset_becomes_enabled_default(self):
+        registry = ProfileRegistry()
+        profile = _make_profile(profile_id="gemma4-12b")
+        registry._profiles[profile.profile_id] = profile
+        session = AsyncMock()
+        session.add = MagicMock()
+        registry._reload_profile = AsyncMock(return_value=profile)
+
+        preset = await registry.create_runtime_preset(
+            session,
+            profile.profile_id,
+            {
+                "preset_key": "normal",
+                "label": "Normal",
+                "context_tokens": 65536,
+                "enabled": False,
+                "is_default": False,
+            },
+        )
+
+        assert preset.enabled is True
+        assert preset.is_default is True
+        session.add.assert_called_once_with(preset)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_preset_key_is_rejected(self):
+        registry = ProfileRegistry()
+        existing = SimpleNamespace(
+            preset_key="normal",
+            priority=100,
+            context_tokens=65536,
+        )
+        profile = _make_profile(profile_id="gemma4-12b", runtime_presets=[existing])
+        registry._profiles[profile.profile_id] = profile
+
+        with pytest.raises(ValueError, match="already exists"):
+            await registry.create_runtime_preset(
+                AsyncMock(),
+                profile.profile_id,
+                {
+                    "preset_key": "normal",
+                    "label": "Normal",
+                    "context_tokens": 65536,
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_cannot_clear_current_default_directly(self):
+        from ocabra.db.model_config import ProfileRuntimePreset
+
+        registry = ProfileRegistry()
+        profile = _make_profile(profile_id="gemma4-12b")
+        registry._profiles[profile.profile_id] = profile
+        preset = ProfileRuntimePreset(
+            profile_id=profile.profile_id,
+            preset_key="normal",
+            label="Normal",
+            context_mode="fixed",
+            context_tokens=65536,
+            parallelism=2,
+            kv_cache_dtype="q8",
+            placement_policy="auto",
+            execution_policy="auto",
+            load_policy="warm",
+            enabled=True,
+            is_default=True,
+            priority=100,
+        )
+        registry._get_runtime_preset_row = AsyncMock(return_value=preset)
+
+        with pytest.raises(ValueError, match="Set another runtime preset"):
+            await registry.update_runtime_preset(
+                AsyncMock(),
+                profile.profile_id,
+                "normal",
+                {"is_default": False},
+            )

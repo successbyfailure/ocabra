@@ -940,9 +940,85 @@ export interface UpdateGroupPayload {
 // Model profiles
 export type ProfileCategory = "llm" | "tts" | "stt" | "image" | "music"
 
+export interface RuntimePolicy {
+  selection: "prefer_loaded" | "prefer_default"
+  restoreDefaultWhenIdle: boolean
+  downgradeGraceSeconds: number
+  minimumResidencySeconds: number
+  smallRequestsExtendLargeTtl: boolean
+  remoteWarmThresholdSeconds: number
+  maxContextTokens: number | null
+}
+
+export interface RuntimePreset {
+  id: string
+  profileId: string
+  presetKey: string
+  label: string
+  contextMode: "fixed" | "max"
+  contextTokens: number | null
+  parallelism: number
+  kvCacheDtype: "fp16" | "bf16" | "fp8" | "q8" | "q4"
+  placementPolicy: "auto" | "preferred" | "forced"
+  preferredGpus: number[] | null
+  executionPolicy: "auto" | "local" | "remote"
+  loadPolicy: "warm" | "on_demand"
+  enabled: boolean
+  isDefault: boolean
+  priority: number
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export interface RuntimePresetResolution {
+  presetKey: string
+  resolved: boolean
+  requestedContext: number | null
+  effectiveContext: number | null
+  modelMax: number | null
+  hardwareMax: number | null
+  policyMax: number | null
+  requestedParallelism: number
+  effectiveParallelism: number
+  targetGpus: number[]
+  fits: boolean
+  runtimeKey: string | null
+  warnings: string[]
+}
+
+export interface RuntimePresetBenchmark {
+  presetKey: string
+  effectiveContext: number
+  workerKey: string
+  wasCold: boolean
+  loadMs: number
+  generationMs: number
+  outputTokens: number | null
+  tokensPerSecond: number | null
+}
+
+export interface RuntimePresetCreate {
+  presetKey: string
+  label: string
+  contextMode: "fixed" | "max"
+  contextTokens?: number | null
+  parallelism: number
+  kvCacheDtype: RuntimePreset["kvCacheDtype"]
+  placementPolicy: RuntimePreset["placementPolicy"]
+  preferredGpus?: number[] | null
+  executionPolicy: RuntimePreset["executionPolicy"]
+  loadPolicy: RuntimePreset["loadPolicy"]
+  enabled?: boolean
+  isDefault?: boolean
+  priority?: number
+}
+
+export type RuntimePresetUpdate = Partial<Omit<RuntimePresetCreate, "presetKey">>
+
 export interface ModelProfile {
   profileId: string
-  baseModelId: string
+  profileKind: "execution" | "router"
+  baseModelId: string | null
   displayName: string | null
   description: string | null
   category: ProfileCategory
@@ -955,8 +1031,18 @@ export interface ModelProfile {
   // walks these profile IDs in order and returns the first available
   // one. An empty/null array means "regular profile".
   routingTargets: string[] | null
+  runtimePolicy: RuntimePolicy | null
+  runtimePresets: RuntimePreset[]
+  aliases: ProfileAlias[]
   createdAt: string | null
   updatedAt: string | null
+}
+
+export interface ProfileAlias {
+  aliasId: string
+  profileId: string
+  presetKey: string | null
+  hidden: boolean
 }
 
 export interface ProfileCreate {
@@ -969,6 +1055,7 @@ export interface ProfileCreate {
   enabled?: boolean
   isDefault?: boolean
   routingTargets?: string[] | null
+  runtimePolicy?: RuntimePolicy | null
 }
 
 export interface ProfileUpdate {
@@ -980,6 +1067,17 @@ export interface ProfileUpdate {
   enabled?: boolean
   isDefault?: boolean
   routingTargets?: string[] | null
+  runtimePolicy?: RuntimePolicy | null
+}
+
+export interface RouterCreate {
+  profileId: string
+  displayName?: string
+  description?: string
+  category: ProfileCategory
+  requestDefaults?: Record<string, unknown>
+  enabled?: boolean
+  routingTargets: string[]
 }
 
 // Federation types

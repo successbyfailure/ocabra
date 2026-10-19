@@ -122,6 +122,40 @@ def test_arch_from_ollama_model_info():
     assert arch == QWEN3_4B
 
 
+def test_arch_from_ollama_gemma4_per_layer_kv_and_sliding_window():
+    mi = {
+        "gemma4.block_count": 6,
+        "gemma4.attention.head_count_kv": [8, 8, 8, 8, 8, 1],
+        "gemma4.attention.key_length": 512,
+        "gemma4.attention.value_length": 512,
+        "gemma4.attention.sliding_window_pattern": [True, True, True, True, True, False],
+        "gemma4.embedding_length": 3840,
+        "gemma4.context_length": 262144,
+    }
+
+    arch = vp.arch_from_ollama_model_info(mi, "gemma4")
+
+    assert arch is not None
+    assert arch.kv_bytes_per_token(1.0) == 1024
+
+
+def test_arch_from_ollama_hybrid_counts_only_full_attention_layers():
+    mi = {
+        "qwen35.block_count": 65,
+        "qwen35.attention.head_count_kv": 4,
+        "qwen35.attention.key_length": 256,
+        "qwen35.attention.value_length": 256,
+        "qwen35.full_attention_interval": 4,
+        "qwen35.embedding_length": 5120,
+        "qwen35.context_length": 262144,
+    }
+
+    arch = vp.arch_from_ollama_model_info(mi, "qwen35")
+
+    assert arch is not None
+    assert arch.kv_bytes_per_token(1.0) == 17 * 4 * (256 + 256)
+
+
 def test_capacity_rows_scales_with_slots_and_caps_native():
     arch = vp.ModelArch(36, 8, 128, 128, context_length=40000)
     rows = vp.capacity_rows("ollama", arch, 2400, gpu_total_mb=24000, slots=(1, 2, 4))

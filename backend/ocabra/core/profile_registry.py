@@ -8,8 +8,15 @@ import re
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from ocabra.db.model_config import ModelConfig, ModelProfile
+from ocabra.db.model_config import (
+    ModelConfig,
+    ModelProfile,
+    ModelProfileAlias,
+    ProfileRuntimePreset,
+)
+from ocabra.schemas.profiles import RuntimePresetCreate
 
 logger = structlog.get_logger(__name__)
 
@@ -30,14 +37,23 @@ class ProfileRegistry:
 
     def __init__(self) -> None:
         self._profiles: dict[str, ModelProfile] = {}
+        self._aliases: dict[str, ModelProfileAlias] = {}
 
     # ── Bulk load ────────────────────────────────────────────
 
     async def load_all(self, session: AsyncSession) -> None:
         """Load all profiles from the database into memory."""
-        result = await session.execute(select(ModelProfile))
+        result = await session.execute(
+            select(ModelProfile).options(
+                selectinload(ModelProfile.runtime_presets),
+                selectinload(ModelProfile.aliases),
+            )
+        )
         rows = result.scalars().all()
         self._profiles = {p.profile_id: p for p in rows}
+        alias_result = await session.execute(select(ModelProfileAlias))
+        aliases = alias_result.scalars().all()
+        self._aliases = {alias.alias_id: alias for alias in aliases}
         logger.info("profile_registry_loaded", count=len(self._profiles))
 
     # ── Read operations (from cache) ─────────────────────────
@@ -46,13 +62,75 @@ class ProfileRegistry:
         """Return a single profile by id, or None."""
         return self._profiles.get(profile_id)
 
+    async def resolve_alias(
+        self, alias_id: str
+    ) -> tuple[ModelProfile, str | None] | None:
+        alias = self._aliases.get(alias_id)
+        if alias is None:
+            return None
+        profile = self._profiles.get(alias.profile_id)
+        return (profile, alias.preset_key) if profile is not None else None
+
+    async def create_alias(
+        self,
+        session: AsyncSession,
+        *,
+        alias_id: str,
+        profile_id: str,
+        preset_key: str | None = None,
+        hidden: bool = True,
+    ) -> ModelProfileAlias:
+        if not _is_valid_slug(alias_id):
+            raise ValueError(f"Invalid alias_id '{alias_id}'.")
+        if alias_id in self._aliases:
+            raise ValueError(f"Alias '{alias_id}' already exists.")
+        if alias_id in self._profiles:
+            raise ValueError(f"Alias '{alias_id}' conflicts with an existing profile.")
+        if alias_id == profile_id:
+            raise ValueError("An alias cannot target the profile with the same id.")
+        profile = self._profiles.get(profile_id)
+        if profile is None:
+            raise ValueError(f"Profile '{profile_id}' not found.")
+        if preset_key and not any(
+            preset.preset_key == preset_key for preset in profile.runtime_presets
+        ):
+            raise ValueError(
+                f"Runtime preset '{preset_key}' not found in profile '{profile_id}'."
+            )
+        alias = ModelProfileAlias(
+            alias_id=alias_id,
+            profile_id=profile_id,
+            preset_key=preset_key,
+            hidden=hidden,
+        )
+        session.add(alias)
+        await session.commit()
+        await session.refresh(alias)
+        self._aliases[alias_id] = alias
+        return alias
+
+    async def delete_alias(self, session: AsyncSession, alias_id: str) -> None:
+        alias = self._aliases.get(alias_id)
+        if alias is None:
+            raise ValueError(f"Alias '{alias_id}' not found.")
+        await session.delete(alias)
+        await session.commit()
+        self._aliases.pop(alias_id, None)
+
     async def list_by_model(self, base_model_id: str) -> list[ModelProfile]:
         """Return all profiles for a given base model."""
         return [p for p in self._profiles.values() if p.base_model_id == base_model_id]
 
     async def list_enabled(self) -> list[ModelProfile]:
         """Return all enabled profiles."""
-        return [p for p in self._profiles.values() if p.enabled]
+        hidden_alias_ids = {
+            alias.alias_id for alias in self._aliases.values() if alias.hidden
+        }
+        return [
+            profile
+            for profile in self._profiles.values()
+            if profile.enabled and profile.profile_id not in hidden_alias_ids
+        ]
 
     async def list_all(self) -> list[ModelProfile]:
         """Return all profiles."""
@@ -65,7 +143,8 @@ class ProfileRegistry:
         session: AsyncSession,
         *,
         profile_id: str,
-        base_model_id: str,
+        base_model_id: str | None,
+        profile_kind: str = "execution",
         display_name: str | None = None,
         description: str | None = None,
         category: str = "llm",
@@ -75,6 +154,7 @@ class ProfileRegistry:
         enabled: bool = True,
         is_default: bool = False,
         routing_targets: list[str] | None = None,
+        runtime_policy: dict | None = None,
     ) -> ModelProfile:
         """Create a new profile, validate constraints, persist, and update cache."""
         if not _is_valid_slug(profile_id):
@@ -84,23 +164,39 @@ class ProfileRegistry:
             )
         if profile_id in self._profiles:
             raise ValueError(f"Profile '{profile_id}' already exists.")
+        if profile_id in self._aliases:
+            raise ValueError(f"Profile '{profile_id}' conflicts with a compatibility alias.")
 
         if category not in ("llm", "tts", "stt", "image", "music"):
             raise ValueError(f"Invalid category '{category}'.")
 
-        # Verify base model exists
-        result = await session.execute(
-            select(ModelConfig).where(ModelConfig.model_id == base_model_id)
-        )
-        if result.scalar_one_or_none() is None:
-            raise ValueError(f"Base model '{base_model_id}' not found.")
+        if profile_kind not in {"execution", "router"}:
+            raise ValueError(f"Invalid profile_kind '{profile_kind}'.")
+        if profile_kind == "execution":
+            if not base_model_id:
+                raise ValueError("Execution profiles require a base_model_id.")
+            if routing_targets:
+                raise ValueError("Execution profiles cannot declare routing_targets.")
+            result = await session.execute(
+                select(ModelConfig).where(ModelConfig.model_id == base_model_id)
+            )
+            if result.scalar_one_or_none() is None:
+                raise ValueError(f"Base model '{base_model_id}' not found.")
+        else:
+            if base_model_id is not None:
+                raise ValueError("Router profiles cannot declare a base_model_id.")
+            await self._validate_router_targets(profile_id, routing_targets)
+            load_overrides = None
+            runtime_policy = None
+            is_default = False
 
         # If marking as default, clear existing default for this base model
-        if is_default:
+        if is_default and base_model_id is not None:
             await self._clear_default(session, base_model_id)
 
         profile = ModelProfile(
             profile_id=profile_id,
+            profile_kind=profile_kind,
             base_model_id=base_model_id,
             display_name=display_name,
             description=description,
@@ -111,6 +207,7 @@ class ProfileRegistry:
             enabled=enabled,
             is_default=is_default,
             routing_targets=routing_targets,
+            runtime_policy=runtime_policy,
         )
         session.add(profile)
         await session.commit()
@@ -148,13 +245,24 @@ class ProfileRegistry:
             "enabled",
             "is_default",
             "routing_targets",
+            "runtime_policy",
         }
+        if db_profile.profile_kind == "router":
+            forbidden = {"load_overrides", "runtime_policy", "is_default"} & patch.keys()
+            if forbidden:
+                raise ValueError(
+                    "Router profiles cannot configure load overrides, runtime policy, or default status."
+                )
+            if "routing_targets" in patch:
+                await self._validate_router_targets(profile_id, patch["routing_targets"])
+        elif patch.get("routing_targets"):
+            raise ValueError("Execution profiles cannot declare routing_targets.")
         for key, value in patch.items():
             if key not in allowed_keys:
                 continue
             if key == "category" and value not in ("llm", "tts", "stt", "image", "music"):
                 raise ValueError(f"Invalid category '{value}'.")
-            if key == "is_default" and value:
+            if key == "is_default" and value and db_profile.base_model_id is not None:
                 await self._clear_default(session, db_profile.base_model_id)
             setattr(db_profile, key, value)
 
@@ -264,6 +372,7 @@ class ProfileRegistry:
 
         clone = ModelProfile(
             profile_id=new_profile_id,
+            profile_kind=source.profile_kind,
             base_model_id=source.base_model_id,
             display_name=display_name if display_name is not None else source.display_name,
             description=source.description,
@@ -271,6 +380,7 @@ class ProfileRegistry:
             load_overrides=source.load_overrides,
             request_defaults=source.request_defaults,
             assets=source.assets,
+            runtime_policy=source.runtime_policy,
             enabled=source.enabled,
             is_default=False,
             routing_targets=(
@@ -278,9 +388,32 @@ class ProfileRegistry:
             ),
         )
         session.add(clone)
+        await session.flush()
+        for preset in source.runtime_presets:
+            session.add(
+                ProfileRuntimePreset(
+                    profile_id=new_profile_id,
+                    preset_key=preset.preset_key,
+                    label=preset.label,
+                    context_mode=preset.context_mode,
+                    context_tokens=preset.context_tokens,
+                    parallelism=preset.parallelism,
+                    kv_cache_dtype=preset.kv_cache_dtype,
+                    placement_policy=preset.placement_policy,
+                    preferred_gpus=(
+                        list(preset.preferred_gpus)
+                        if preset.preferred_gpus is not None
+                        else None
+                    ),
+                    execution_policy=preset.execution_policy,
+                    load_policy=preset.load_policy,
+                    enabled=preset.enabled,
+                    is_default=preset.is_default,
+                    priority=preset.priority,
+                )
+            )
         await session.commit()
-        await session.refresh(clone)
-        self._profiles[new_profile_id] = clone
+        clone = await self._reload_profile(session, new_profile_id)
         logger.info(
             "profile_cloned",
             source_profile_id=source_profile_id,
@@ -288,8 +421,147 @@ class ProfileRegistry:
         )
         return clone
 
+    # ── Runtime presets ───────────────────────────────────────
+
+    async def list_runtime_presets(self, profile_id: str) -> list[ProfileRuntimePreset]:
+        """Return a profile's runtime presets in deterministic UI order."""
+        profile = self._profiles.get(profile_id)
+        if profile is None:
+            raise ValueError(f"Profile '{profile_id}' not found.")
+        return sorted(
+            profile.runtime_presets,
+            key=lambda preset: (
+                preset.priority,
+                preset.context_tokens if preset.context_tokens is not None else 2**63,
+                preset.preset_key,
+            ),
+        )
+
+    async def create_runtime_preset(
+        self,
+        session: AsyncSession,
+        profile_id: str,
+        values: dict,
+    ) -> ProfileRuntimePreset:
+        """Validate and persist a runtime preset for ``profile_id``."""
+        profile = self._profiles.get(profile_id)
+        if profile is None:
+            raise ValueError(f"Profile '{profile_id}' not found.")
+        if getattr(profile, "profile_kind", "execution") != "execution":
+            raise ValueError("Runtime presets can only be added to execution profiles.")
+        validated = RuntimePresetCreate.model_validate(values)
+        existing = await self.list_runtime_presets(profile_id)
+        if any(p.preset_key == validated.preset_key for p in existing):
+            raise ValueError(
+                f"Runtime preset '{validated.preset_key}' already exists in profile "
+                f"'{profile_id}'."
+            )
+
+        payload = validated.model_dump()
+        # The first preset becomes the default automatically. This keeps the
+        # profile valid while making the create flow pleasant in the UI.
+        if not existing:
+            payload["is_default"] = True
+            payload["enabled"] = True
+        elif payload["is_default"]:
+            await self._clear_runtime_default(session, profile_id)
+            await session.flush()
+
+        preset = ProfileRuntimePreset(profile_id=profile_id, **payload)
+        session.add(preset)
+        await session.commit()
+        await session.refresh(preset)
+        await self._reload_profile(session, profile_id)
+        logger.info(
+            "profile_runtime_preset_created",
+            profile_id=profile_id,
+            preset_key=preset.preset_key,
+        )
+        return preset
+
+    async def update_runtime_preset(
+        self,
+        session: AsyncSession,
+        profile_id: str,
+        preset_key: str,
+        patch: dict,
+    ) -> ProfileRuntimePreset:
+        """Patch a runtime preset after validating the merged configuration."""
+        preset = await self._get_runtime_preset_row(session, profile_id, preset_key)
+        current = {
+            "preset_key": preset.preset_key,
+            "label": preset.label,
+            "context_mode": preset.context_mode,
+            "context_tokens": preset.context_tokens,
+            "parallelism": preset.parallelism,
+            "kv_cache_dtype": preset.kv_cache_dtype,
+            "placement_policy": preset.placement_policy,
+            "preferred_gpus": preset.preferred_gpus,
+            "execution_policy": preset.execution_policy,
+            "load_policy": preset.load_policy,
+            "enabled": preset.enabled,
+            "is_default": preset.is_default,
+            "priority": preset.priority,
+        }
+        merged = {**current, **patch}
+        validated = RuntimePresetCreate.model_validate(merged)
+
+        if preset.is_default and patch.get("is_default") is False:
+            raise ValueError(
+                "Set another runtime preset as default instead of clearing the current default."
+            )
+        if validated.is_default and not preset.is_default:
+            await self._clear_runtime_default(session, profile_id)
+            await session.flush()
+
+        for key, value in validated.model_dump(exclude={"preset_key"}).items():
+            setattr(preset, key, value)
+        await session.commit()
+        await session.refresh(preset)
+        await self._reload_profile(session, profile_id)
+        logger.info(
+            "profile_runtime_preset_updated",
+            profile_id=profile_id,
+            preset_key=preset_key,
+        )
+        return preset
+
+    async def delete_runtime_preset(
+        self,
+        session: AsyncSession,
+        profile_id: str,
+        preset_key: str,
+    ) -> None:
+        """Delete a non-default preset, or the only preset in a profile."""
+        preset = await self._get_runtime_preset_row(session, profile_id, preset_key)
+        count = len(await self.list_runtime_presets(profile_id))
+        if preset.is_default and count > 1:
+            raise ValueError(
+                "Set another runtime preset as default before deleting the current default."
+            )
+        await session.delete(preset)
+        await session.commit()
+        await self._reload_profile(session, profile_id)
+        logger.info(
+            "profile_runtime_preset_deleted",
+            profile_id=profile_id,
+            preset_key=preset_key,
+        )
+
     async def delete(self, session: AsyncSession, profile_id: str) -> None:
         """Delete a profile and remove from cache."""
+        referenced_by = [
+            profile.profile_id
+            for profile in self._profiles.values()
+            if profile.profile_id != profile_id
+            and isinstance(profile.routing_targets, list)
+            and profile_id in profile.routing_targets
+        ]
+        if referenced_by:
+            raise ValueError(
+                f"Profile '{profile_id}' is referenced by router(s): "
+                + ", ".join(sorted(referenced_by))
+            )
         result = await session.execute(
             select(ModelProfile).where(ModelProfile.profile_id == profile_id)
         )
@@ -322,6 +594,25 @@ class ProfileRegistry:
         # Refresh all profiles for this model in cache
         await self._refresh_model_profiles(session, base_model_id)
         return db_profile
+
+    async def _validate_router_targets(
+        self,
+        profile_id: str,
+        routing_targets: list[str] | None,
+    ) -> None:
+        """Validate a router's ordered destinations against the registry."""
+
+        if not isinstance(routing_targets, list) or not routing_targets:
+            raise ValueError("Router profiles require at least one routing target.")
+        if len(set(routing_targets)) != len(routing_targets):
+            raise ValueError("Router routing_targets must not contain duplicates.")
+        if profile_id in routing_targets:
+            raise ValueError("A router cannot target itself.")
+        missing = [target for target in routing_targets if target not in self._profiles]
+        if missing:
+            raise ValueError(
+                "Router target profile(s) not found: " + ", ".join(missing)
+            )
 
     async def update_assets(
         self,
@@ -470,14 +761,14 @@ class ProfileRegistry:
         if not slug:
             return None
 
-        if slug in self._profiles:
+        if slug in self._profiles or slug in self._aliases:
             # Display names are not unique ("Flux", "Whisper", …).  Skipping
             # here silently leaves the newly registered model invisible to the
             # public API, so derive a deterministic collision-safe id instead.
             suffix = hashlib.sha256(model.model_id.encode()).hexdigest()[:8]
             stem = slug[: _MAX_PROFILE_ID_LEN - len(suffix) - 1].rstrip("-.: ")
             slug = f"{stem or 'model'}-{suffix}"
-            if slug in self._profiles:
+            if slug in self._profiles or slug in self._aliases:
                 return None
 
         category = self._BACKEND_CATEGORY.get(model.backend_type or "", "llm")
@@ -551,10 +842,60 @@ class ProfileRegistry:
         for p in result.scalars().all():
             p.is_default = False
 
+    async def _clear_runtime_default(self, session: AsyncSession, profile_id: str) -> None:
+        """Clear the current default runtime preset inside one profile."""
+        result = await session.execute(
+            select(ProfileRuntimePreset).where(
+                ProfileRuntimePreset.profile_id == profile_id,
+                ProfileRuntimePreset.is_default.is_(True),
+            )
+        )
+        for preset in result.scalars().all():
+            preset.is_default = False
+
+    async def _get_runtime_preset_row(
+        self,
+        session: AsyncSession,
+        profile_id: str,
+        preset_key: str,
+    ) -> ProfileRuntimePreset:
+        if profile_id not in self._profiles:
+            raise ValueError(f"Profile '{profile_id}' not found.")
+        result = await session.execute(
+            select(ProfileRuntimePreset).where(
+                ProfileRuntimePreset.profile_id == profile_id,
+                ProfileRuntimePreset.preset_key == preset_key,
+            )
+        )
+        preset = result.scalar_one_or_none()
+        if preset is None:
+            raise ValueError(
+                f"Runtime preset '{preset_key}' not found in profile '{profile_id}'."
+            )
+        return preset
+
+    async def _reload_profile(
+        self,
+        session: AsyncSession,
+        profile_id: str,
+    ) -> ModelProfile:
+        result = await session.execute(
+            select(ModelProfile)
+            .options(selectinload(ModelProfile.runtime_presets))
+            .where(ModelProfile.profile_id == profile_id)
+        )
+        profile = result.scalar_one_or_none()
+        if profile is None:
+            raise ValueError(f"Profile '{profile_id}' not found.")
+        self._profiles[profile_id] = profile
+        return profile
+
     async def _refresh_model_profiles(self, session: AsyncSession, base_model_id: str) -> None:
         """Refresh cache for all profiles of a base model."""
         result = await session.execute(
-            select(ModelProfile).where(ModelProfile.base_model_id == base_model_id)
+            select(ModelProfile)
+            .options(selectinload(ModelProfile.runtime_presets))
+            .where(ModelProfile.base_model_id == base_model_id)
         )
         for p in result.scalars().all():
             self._profiles[p.profile_id] = p

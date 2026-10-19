@@ -16,6 +16,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       MODELS_DIR: /data/models
       HF_CACHE_DIR: /data/hf_cache
+      OLLAMA_POOLS_JSON: '${OLLAMA_POOLS_JSON:-[{"id":"3090","url":"http://ollama:11434","gpus":[1],"num_parallel":2},{"id":"3060","url":"http://ollama-3060:11434","gpus":[0],"num_parallel":2}]}'
       VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       VLLM_ENFORCE_EAGER: ${VLLM_ENFORCE_EAGER:-true}
       VLLM_ATTENTION_BACKEND: ${VLLM_ATTENTION_BACKEND:-}
@@ -179,7 +180,7 @@ services:
     image: ocabra-ollama:latest
     runtime: nvidia
     environment:
-      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_VISIBLE_DEVICES: "1"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       # Sin esto CUDA ordena GPUs por "fastest first": CUDA0=3090, CUDA1=3060.
       # oCabra usa NVML (PCI order): GPU 0=3060, GPU 1=3090. Ollama por defecto
@@ -212,6 +213,25 @@ services:
       - /docker/ai-models/ollama:/root/.ollama
     ports:
       - "7869:11434"
+    restart: unless-stopped
+
+  ollama-3060:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    image: ocabra-ollama:latest
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: "q8_0"
+      OLLAMA_CONTEXT_LENGTH: "65536"
+    volumes:
+      - /docker/ai-models/ollama:/root/.ollama
     restart: unless-stopped
 
   trellis2:

@@ -11,6 +11,7 @@ import type {
   ModelProfile,
   ProfileCreate,
   ProfileUpdate,
+  RouterCreate,
   DownloadJob,
   DownloadSource,
   HFModelCard,
@@ -54,6 +55,12 @@ import type {
   FederationPeerUpdate,
   FederationTestResult,
   LlamaCppConfig,
+  RuntimePolicy,
+  RuntimePreset,
+  RuntimePresetCreate,
+  RuntimePresetResolution,
+  RuntimePresetBenchmark,
+  RuntimePresetUpdate,
 } from "@/types"
 import { useAuthStore } from "@/stores/authStore"
 
@@ -468,11 +475,137 @@ function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
   }
 }
 
+function toRuntimePolicy(raw: unknown): RuntimePolicy | null {
+  if (!isRecord(raw)) return null
+  return {
+    selection: String(raw.selection ?? "prefer_loaded") as RuntimePolicy["selection"],
+    restoreDefaultWhenIdle: Boolean(raw.restore_default_when_idle ?? raw.restoreDefaultWhenIdle ?? true),
+    downgradeGraceSeconds: Number(raw.downgrade_grace_seconds ?? raw.downgradeGraceSeconds ?? 600),
+    minimumResidencySeconds: Number(raw.minimum_residency_seconds ?? raw.minimumResidencySeconds ?? 120),
+    smallRequestsExtendLargeTtl: Boolean(
+      raw.small_requests_extend_large_ttl ?? raw.smallRequestsExtendLargeTtl ?? false,
+    ),
+    remoteWarmThresholdSeconds: Number(
+      raw.remote_warm_threshold_seconds ?? raw.remoteWarmThresholdSeconds ?? 10,
+    ),
+    maxContextTokens:
+      raw.max_context_tokens == null && raw.maxContextTokens == null
+        ? null
+        : Number(raw.max_context_tokens ?? raw.maxContextTokens),
+  }
+}
+
+function fromRuntimePolicy(policy: RuntimePolicy | null): Record<string, unknown> | null {
+  if (policy === null) return null
+  return {
+    selection: policy.selection,
+    restore_default_when_idle: policy.restoreDefaultWhenIdle,
+    downgrade_grace_seconds: policy.downgradeGraceSeconds,
+    minimum_residency_seconds: policy.minimumResidencySeconds,
+    small_requests_extend_large_ttl: policy.smallRequestsExtendLargeTtl,
+    remote_warm_threshold_seconds: policy.remoteWarmThresholdSeconds,
+    max_context_tokens: policy.maxContextTokens,
+  }
+}
+
+function toRuntimePreset(raw: unknown): RuntimePreset {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    id: String(data.id ?? ""),
+    profileId: String(data.profile_id ?? data.profileId ?? ""),
+    presetKey: String(data.preset_key ?? data.presetKey ?? ""),
+    label: String(data.label ?? ""),
+    contextMode: String(data.context_mode ?? data.contextMode ?? "fixed") as RuntimePreset["contextMode"],
+    contextTokens:
+      data.context_tokens == null && data.contextTokens == null
+        ? null
+        : Number(data.context_tokens ?? data.contextTokens),
+    parallelism: Number(data.parallelism ?? 2),
+    kvCacheDtype: String(data.kv_cache_dtype ?? data.kvCacheDtype ?? "q8") as RuntimePreset["kvCacheDtype"],
+    placementPolicy: String(
+      data.placement_policy ?? data.placementPolicy ?? "auto",
+    ) as RuntimePreset["placementPolicy"],
+    preferredGpus: Array.isArray(data.preferred_gpus ?? data.preferredGpus)
+      ? ((data.preferred_gpus ?? data.preferredGpus) as unknown[]).map(Number)
+      : null,
+    executionPolicy: String(
+      data.execution_policy ?? data.executionPolicy ?? "auto",
+    ) as RuntimePreset["executionPolicy"],
+    loadPolicy: String(data.load_policy ?? data.loadPolicy ?? "on_demand") as RuntimePreset["loadPolicy"],
+    enabled: Boolean(data.enabled ?? true),
+    isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
+    priority: Number(data.priority ?? 100),
+    createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
+    updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
+  }
+}
+
+function fromRuntimePreset(data: RuntimePresetCreate | RuntimePresetUpdate): Record<string, unknown> {
+  return {
+    ...("presetKey" in data && { preset_key: data.presetKey }),
+    ...(data.label !== undefined && { label: data.label }),
+    ...(data.contextMode !== undefined && { context_mode: data.contextMode }),
+    ...(data.contextTokens !== undefined && { context_tokens: data.contextTokens }),
+    ...(data.parallelism !== undefined && { parallelism: data.parallelism }),
+    ...(data.kvCacheDtype !== undefined && { kv_cache_dtype: data.kvCacheDtype }),
+    ...(data.placementPolicy !== undefined && { placement_policy: data.placementPolicy }),
+    ...(data.preferredGpus !== undefined && { preferred_gpus: data.preferredGpus }),
+    ...(data.executionPolicy !== undefined && { execution_policy: data.executionPolicy }),
+    ...(data.loadPolicy !== undefined && { load_policy: data.loadPolicy }),
+    ...(data.enabled !== undefined && { enabled: data.enabled }),
+    ...(data.isDefault !== undefined && { is_default: data.isDefault }),
+    ...(data.priority !== undefined && { priority: data.priority }),
+  }
+}
+
+function toRuntimePresetResolution(raw: unknown): RuntimePresetResolution {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    presetKey: String(data.preset_key ?? data.presetKey ?? ""),
+    resolved: Boolean(data.resolved),
+    requestedContext: toNumberOrNull(data, "requested_context", "requestedContext"),
+    effectiveContext: toNumberOrNull(data, "effective_context", "effectiveContext"),
+    modelMax: toNumberOrNull(data, "model_max", "modelMax"),
+    hardwareMax: toNumberOrNull(data, "hardware_max", "hardwareMax"),
+    policyMax: toNumberOrNull(data, "policy_max", "policyMax"),
+    requestedParallelism: Number(
+      data.requested_parallelism ?? data.requestedParallelism ?? 1,
+    ),
+    effectiveParallelism: Number(
+      data.effective_parallelism ?? data.effectiveParallelism ?? 1,
+    ),
+    targetGpus: Array.isArray(data.target_gpus ?? data.targetGpus)
+      ? ((data.target_gpus ?? data.targetGpus) as unknown[]).map(Number)
+      : [],
+    fits: Boolean(data.fits),
+    runtimeKey: (data.runtime_key ?? data.runtimeKey ?? null) as string | null,
+    warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
+  }
+}
+
+function toRuntimePresetBenchmark(raw: unknown): RuntimePresetBenchmark {
+  const data = isRecord(raw) ? raw : {}
+  return {
+    presetKey: String(data.preset_key ?? data.presetKey ?? ""),
+    effectiveContext: Number(data.effective_context ?? data.effectiveContext ?? 0),
+    workerKey: String(data.worker_key ?? data.workerKey ?? ""),
+    wasCold: Boolean(data.was_cold ?? data.wasCold),
+    loadMs: Number(data.load_ms ?? data.loadMs ?? 0),
+    generationMs: Number(data.generation_ms ?? data.generationMs ?? 0),
+    outputTokens: toNumberOrNull(data, "output_tokens", "outputTokens"),
+    tokensPerSecond: toNumberOrNull(data, "tokens_per_second", "tokensPerSecond"),
+  }
+}
+
 function toModelProfile(raw: unknown): ModelProfile {
   const data = isRecord(raw) ? raw : {}
   return {
     profileId: String(data.profile_id ?? data.profileId ?? ""),
-    baseModelId: String(data.base_model_id ?? data.baseModelId ?? ""),
+    profileKind: String(data.profile_kind ?? data.profileKind ?? "execution") as ModelProfile["profileKind"],
+    baseModelId:
+      data.base_model_id == null && data.baseModelId == null
+        ? null
+        : String(data.base_model_id ?? data.baseModelId),
     displayName: (data.display_name ?? data.displayName ?? null) as string | null,
     description: (data.description ?? null) as string | null,
     category: String(data.category ?? "llm") as ModelProfile["category"],
@@ -488,6 +621,21 @@ function toModelProfile(raw: unknown): ModelProfile {
     routingTargets: Array.isArray(data.routing_targets ?? data.routingTargets)
       ? ((data.routing_targets ?? data.routingTargets) as unknown[]).map(String)
       : null,
+    runtimePolicy: toRuntimePolicy(data.runtime_policy ?? data.runtimePolicy),
+    runtimePresets: Array.isArray(data.runtime_presets ?? data.runtimePresets)
+      ? ((data.runtime_presets ?? data.runtimePresets) as unknown[]).map(toRuntimePreset)
+      : [],
+    aliases: Array.isArray(data.aliases)
+      ? data.aliases.map((rawAlias) => {
+          const alias = isRecord(rawAlias) ? rawAlias : {}
+          return {
+            aliasId: String(alias.alias_id ?? alias.aliasId ?? ""),
+            profileId: String(alias.profile_id ?? alias.profileId ?? ""),
+            presetKey: (alias.preset_key ?? alias.presetKey ?? null) as string | null,
+            hidden: Boolean(alias.hidden ?? true),
+          }
+        })
+      : [],
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
   }
@@ -1299,6 +1447,20 @@ export const api = {
           enabled: data.enabled,
           is_default: data.isDefault,
           ...(data.routingTargets !== undefined && { routing_targets: data.routingTargets }),
+          ...(data.runtimePolicy !== undefined && { runtime_policy: fromRuntimePolicy(data.runtimePolicy) }),
+        }),
+      ),
+
+    createRouter: async (data: RouterCreate): Promise<ModelProfile> =>
+      toModelProfile(
+        await request<unknown>("POST", "/ocabra/profiles", {
+          profile_id: data.profileId,
+          display_name: data.displayName,
+          description: data.description,
+          category: data.category,
+          request_defaults: data.requestDefaults,
+          enabled: data.enabled,
+          routing_targets: data.routingTargets,
         }),
       ),
 
@@ -1316,8 +1478,70 @@ export const api = {
           ...(data.enabled !== undefined && { enabled: data.enabled }),
           ...(data.isDefault !== undefined && { is_default: data.isDefault }),
           ...(data.routingTargets !== undefined && { routing_targets: data.routingTargets }),
+          ...(data.runtimePolicy !== undefined && { runtime_policy: fromRuntimePolicy(data.runtimePolicy) }),
         }),
       ),
+
+    listRuntimePresets: async (profileId: string): Promise<RuntimePreset[]> =>
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets`,
+        )
+      ).map(toRuntimePreset),
+
+    resolveRuntimePresets: async (profileId: string): Promise<RuntimePresetResolution[]> =>
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/resolved`,
+        )
+      ).map(toRuntimePresetResolution),
+
+    benchmarkRuntimePreset: async (
+      profileId: string,
+      presetKey: string,
+      coldStart = true,
+    ): Promise<RuntimePresetBenchmark> =>
+      toRuntimePresetBenchmark(
+        await request<unknown>(
+          "POST",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}/benchmark`,
+          { cold_start: coldStart },
+        ),
+      ),
+
+    createRuntimePreset: async (
+      profileId: string,
+      data: RuntimePresetCreate,
+    ): Promise<RuntimePreset> =>
+      toRuntimePreset(
+        await request<unknown>(
+          "POST",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets`,
+          fromRuntimePreset(data),
+        ),
+      ),
+
+    updateRuntimePreset: async (
+      profileId: string,
+      presetKey: string,
+      data: RuntimePresetUpdate,
+    ): Promise<RuntimePreset> =>
+      toRuntimePreset(
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}`,
+          fromRuntimePreset(data),
+        ),
+      ),
+
+    deleteRuntimePreset: async (profileId: string, presetKey: string): Promise<void> => {
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}`,
+      )
+    },
 
     delete: async (profileId: string): Promise<void> => {
       await request<unknown>("DELETE", `/ocabra/profiles/${encodeURIComponent(profileId)}`)

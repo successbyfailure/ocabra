@@ -20,7 +20,6 @@ from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
     build_model_status_headers,
     check_capability,
-    compute_worker_key,
     ensure_worker_loaded,
     get_federation_manager,
     get_model_manager,
@@ -31,6 +30,7 @@ from ._deps import (
     merge_profile_defaults,
     raise_upstream_http_error,
     resolve_profile,
+    resolve_profile_runtime_plan,
     sse_ocabra_event,
     stream_error_details,
     to_backend_body,
@@ -66,9 +66,36 @@ async def completions(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
-            target, peer = await resolve_federated(
-                model_id, model_manager, federation_manager, profile_registry
-            )
+            execution_policy = "auto"
+            fed_profile = await profile_registry.get(model_id)
+            if fed_profile is None:
+                alias_target = await profile_registry.resolve_alias(model_id)
+                fed_profile = alias_target[0] if alias_target is not None else None
+            if fed_profile is not None and getattr(fed_profile, "runtime_presets", []):
+                try:
+                    fed_plan = await resolve_profile_runtime_plan(
+                        fed_profile, model_manager, body
+                    )
+                    selected = next(
+                        preset
+                        for preset in getattr(fed_profile, "runtime_presets", [])
+                        if preset.preset_key == fed_plan.preset_key
+                    )
+                    execution_policy = selected.execution_policy
+                except Exception:  # noqa: BLE001 -- federation stays best effort
+                    pass
+            if execution_policy == "local":
+                target, peer = "local", None
+            else:
+                target, peer = await resolve_federated(
+                    model_id, model_manager, federation_manager, profile_registry
+                )
+                if execution_policy == "remote" and fed_profile is not None:
+                    forced_peer = federation_manager.find_best_peer(
+                        fed_profile.base_model_id
+                    )
+                    if forced_peer is not None:
+                        target, peer = "remote", forced_peer
             if target == "remote" and peer is not None:
                 request.state.federation_remote_node_id = peer.peer_id
                 return StreamingResponse(
@@ -113,7 +140,11 @@ async def completions(
         # skip target selection entirely. See chat.py comment for the full
         # incident context (GLados-corrala 19/09).
         router_resolver = getattr(request.app.state, "router_resolver", None)
-        if profile is not None and router_resolver is not None and router_resolver.is_router(profile):
+        if (
+            profile is not None
+            and router_resolver is not None
+            and router_resolver.is_router(profile)
+        ):
             resolved = await router_resolver.pick(profile, request_body=body)
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None and target.profile_id != profile.profile_id:
@@ -125,7 +156,13 @@ async def completions(
                 profile = target
 
         if profile is not None:
-            worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+            runtime_plan = await resolve_profile_runtime_plan(
+                profile,
+                model_manager,
+                body,
+                request_state=request.state,
+            )
+            worker_key = runtime_plan.worker_key
             headers = {
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
@@ -146,6 +183,10 @@ async def completions(
                     worker_pool=worker_pool,
                     profile=profile,
                     worker_key=worker_key,
+                    load_overrides=runtime_plan.load_overrides,
+                    preferred_gpu=runtime_plan.preferred_gpu,
+                    load_policy=runtime_plan.load_policy,
+                    required_tokens=runtime_plan.required_tokens,
                     body=body,
                 ),
                 media_type="text/event-stream",
@@ -164,7 +205,7 @@ async def completions(
     check_capability(state, "completion", "text completions")
 
     merged_body = merge_profile_defaults(profile, body)
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    worker_key = state.model_id
 
     if stream:
         return StreamingResponse(
@@ -182,6 +223,7 @@ async def completions(
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
     from fastapi.responses import JSONResponse
+
     from ocabra.api.openai._deps import ocabra_response_headers
 
     resp_headers = await ocabra_response_headers(
@@ -214,6 +256,10 @@ async def _stream_completions_with_load(
     worker_pool,
     profile,
     worker_key: str,
+    load_overrides: dict | None,
+    preferred_gpu: int | None,
+    load_policy: str | None,
+    required_tokens: int | None,
     body: dict,
 ):
     """SSE generator that triggers the model load lazily — see chat.py."""
@@ -241,7 +287,10 @@ async def _stream_completions_with_load(
             model_manager,
             profile.base_model_id,
             worker_key,
-            profile.load_overrides,
+            load_overrides,
+            preferred_gpu=preferred_gpu,
+            load_policy=load_policy,
+            required_tokens=required_tokens,
         )
     )
     async for ka in keepalive_until_done(load_task):

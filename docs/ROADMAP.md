@@ -573,6 +573,79 @@ Etapas UI extras completadas:
 
 ---
 
+## 🚧 Bloque 21 — Presets de contexto y runtimes adaptativos
+
+Objetivo: exponer un único ``profile_id`` estable por modelo/uso y convertir
+las variantes ``-ctx*`` en presets internos. oCabra anuncia el máximo efectivo
+que puede servir, mantiene un contexto normal configurable y escala al preset
+mínimo suficiente cuando llega una petición mayor.
+
+### Decisiones cerradas
+
+- ``MAX`` se calcula por modelo y despliegue; nunca es un número global.
+- La API pública anuncia ``effective_max_context``.
+- El contexto default es configurable por perfil y no limita la capacidad
+  pública anunciada.
+- El preset 64k puede usar paralelismo 2; la colocación se valida por
+  modelo+contexto+paralelismo y capacidades reales del backend, no se deduce
+  solo del contexto. Si el backend fuerza menos slots, la UI debe mostrar el
+  paralelismo efectivo y no únicamente el solicitado.
+- Un preset mayor ya cargado atiende peticiones pequeñas. El downgrade al
+  default se difiere con histéresis y las peticiones pequeñas no prolongan por
+  defecto el TTL de contexto grande.
+- Los presets ``-ctx*`` existentes se migran a aliases ocultos antes de retirar
+  tags/modelos duplicados.
+- Warm/on-demand pasa a ser configurable por preset.
+
+### Fases
+
+| Fase | Contenido | Estado |
+|---|---|---|
+| 0 | Contrato, spike Ollama con un tag y varios ``num_ctx``, pools de GPU | ✅ contrato y mediciones completados |
+| 1 | Alembic + dominio + CRUD de ``profile_runtime_presets`` | ✅ implementado |
+| 2 | Cálculo ``model_max/effective_max/default/active`` y generación inicial | ✅ resolución, caché y exposición pública implementadas |
+| 3 | Selector por presupuesto de tokens + RuntimeKey + histéresis | ✅ integrado en OpenAI/Ollama con upgrade y downgrade drenados |
+| 4 | Afinidad real Ollama mediante pools 3090/3060/dual | ✅ pools independientes por GPU implementados |
+| 5 | OpenAI/Ollama, federación, aliases y estadísticas por preset | ✅ implementado |
+| 6 | UI de presets, validación, benchmark y aplicación drenada | ✅ implementado |
+| 7 | Migración Gemma4 12B → Gemma4 26B → Qwen3.8 27B | ✅ aplicada en el nodo principal; aliases legacy activos |
+
+### Criterios de aceptación
+
+- ``/v1/models`` lista un único ``gemma4:12b`` con contexto efectivo 262144.
+- Las peticiones normales usan 64k/p2; las mayores escalan automáticamente.
+- Gemma4 12B 64k y 256k/p2 se colocan solo en la RTX 3090 conforme a las
+  mediciones validadas.
+- Deshabilitar el preset MAX reduce el máximo anunciado.
+- Un remoto caliente puede ganar frente a una carga local fría.
+- Solicitudes concurrentes para presets diferentes no descargan el runner
+  equivocado ni duplican una misma carga.
+- La UI permite activar, editar, validar, medir y marcar el preset default sin
+  editar JSON.
+- Los IDs legacy ``-ctx*`` siguen funcionando durante la transición.
+
+### Revalidación pendiente — paralelismo de Qwen 3.8 en Ollama
+
+Ollama 0.40.6 identifica Qwen 3.8 como arquitectura ``qwen35`` y fuerza
+``num_parallel=1`` aunque el pool esté configurado con
+``OLLAMA_NUM_PARALLEL=2``. El runner confirma la reducción mediante ``-np 1``.
+Es una limitación upstream de la gestión de varias secuencias sobre su estado
+recurrente/híbrido, no una capacidad validada del despliegue actual.
+
+- Mantener los presets efectivos de Qwen 3.8 en ``p1`` mientras Ollama emita
+  ``model architecture does not currently support parallel requests``.
+- Revisar esta restricción al actualizar Ollama y seguir las incidencias
+  upstream de ``qwen35``/``qwen35moe``.
+- Para considerar ``p2`` soportado deben cumplirse las tres comprobaciones:
+  runner arrancado con ``-np 2``, dos peticiones solapadas realmente en el
+  tiempo y ausencia de errores/corrupción en contexto, imágenes y tools.
+- Tras habilitarlo, repetir las curvas de VRAM para 32k/64k/128k/MAX: el coste
+  de KV se multiplica por los slots y puede reducir el máximo efectivo.
+- No retirar el límite validado de 163840 ni anunciar un MAX mayor hasta
+  repetir carga, inferencia y prueba sostenida con el nuevo runtime.
+
+---
+
 ## 🔬 Investigación pendiente — vLLM sleep mode
 
 Evaluar cómo integrar `--enable-sleep-mode` de vLLM con el ciclo de vida de
@@ -633,6 +706,8 @@ corrección para el estado Mamba con tokens especulativos:
 [✅ Hecho]    Bloque 18 — Fiabilidad de peticiones y backends ternarios
 [✅ Hecho]    Bloque 19 — Observabilidad atribuible de OpenAI Realtime
 [🚧 En curso] Bloque 20 — Router profiles, duration estimator y session registry
+[✅ Hecho]    Bloque 21 — Presets de contexto y runtimes adaptativos
+[Pendiente]   Revalidar paralelismo Qwen 3.8 cuando Ollama soporte qwen35 con más de un slot
 [Pendiente]   Investigación e integración de vLLM sleep mode
 [Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido
 [Pendiente]   Validación manual TRT-LLM multi-engine en producción

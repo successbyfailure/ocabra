@@ -30,9 +30,11 @@ class OllamaRegistry:
     _SIZE_RE = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>KB|MB|GB|TB)", re.IGNORECASE)
     _CTX_RE = re.compile(r"(\d+[kKmM])\s+context window")
 
+    def __init__(self, base_url: str | None = None) -> None:
+        self._base_url = (base_url or settings.ollama_base_url).rstrip("/")
+
     def _url(self, path: str) -> str:
-        base = settings.ollama_base_url.rstrip("/")
-        return f"{base}{path}"
+        return f"{self._base_url}{path}"
 
     async def search(self, query: str) -> list[OllamaModelCard]:
         try:
@@ -288,7 +290,12 @@ class OllamaRegistry:
         name = model_ref.lower()
         return "embed" in name or "nomic-embed" in name or "mxbai-embed" in name
 
-    async def load(self, model_ref: str, keep_alive: str | int | None = None) -> None:
+    async def load(
+        self,
+        model_ref: str,
+        keep_alive: str | int | None = None,
+        options: dict | None = None,
+    ) -> None:
         keep_alive_value = settings.ollama_keep_alive if keep_alive is None else keep_alive
         # 300s covers cold starts of ~30B models with large KV reservations
         # (llama-server spawn + 20GB blob read from cold disk + 160k KV alloc
@@ -305,6 +312,8 @@ class OllamaRegistry:
                     "input": "",
                     "keep_alive": keep_alive_value,
                 }
+                if options:
+                    payload["options"] = options
                 response = await client.post(self._url("/api/embed"), json=payload)
             else:
                 payload = {
@@ -313,6 +322,8 @@ class OllamaRegistry:
                     "stream": False,
                     "keep_alive": keep_alive_value,
                 }
+                if options:
+                    payload["options"] = options
                 response = await client.post(self._url("/api/generate"), json=payload)
             response.raise_for_status()
 

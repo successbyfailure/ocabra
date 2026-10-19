@@ -146,14 +146,16 @@ class ModelManager:
         self._service_manager = None
         self._states: dict[str, ModelState] = {}
         self._load_locks: dict[str, asyncio.Lock] = {}
-        # Global gate around ``backend.load()`` to serialise cross-backend
-        # starts. Ollama's ``llama-server`` GPU discovery has a hardcoded
+        # Global gate around GPU admission and ``backend.load()`` to serialise
+        # cross-backend starts. Ollama's ``llama-server`` GPU discovery has a
+        # hardcoded
         # watchdog that trips when other CUDA processes are booting in
         # parallel (torch/diffusers workers); the failure surfaces as
         # ``context deadline exceeded`` and the load hangs for minutes. A
-        # single mutex around the actual load call keeps parallel starts
-        # from stepping on each other. The per-model lock above still
-        # covers concurrent requests for the same model.
+        # single mutex from admission through the final LOADED transition keeps
+        # parallel starts from stepping on each other and prevents stale VRAM
+        # decisions. The per-model lock above still covers concurrent requests
+        # for the same model.
         self._backend_load_gate: asyncio.Lock = asyncio.Lock()
         # Counters exposed to clients so they can render meaningful hints
         # instead of a spinner during cold starts.
@@ -190,6 +192,25 @@ class ModelManager:
         request_id = self.try_begin_request(model_id, max_inflight=0, source=source)
         assert request_id is not None  # max_inflight<=0 never rejects
         return request_id
+
+    def rebind_request(
+        self, request_id: str, old_model_id: str, new_model_id: str
+    ) -> None:
+        """Move an admitted request from its public key to the resolved runtime."""
+
+        if not request_id or old_model_id == new_model_id:
+            return
+        with self._in_flight_lock:
+            active = self._active_requests.get(request_id)
+            if active is None or active.model_id != old_model_id:
+                return
+            old_count = self._in_flight.get(old_model_id, 0)
+            if old_count <= 1:
+                self._in_flight.pop(old_model_id, None)
+            else:
+                self._in_flight[old_model_id] = old_count - 1
+            self._in_flight[new_model_id] = self._in_flight.get(new_model_id, 0) + 1
+            active.model_id = new_model_id
 
     def try_begin_request(
         self,
@@ -884,6 +905,33 @@ class ModelManager:
         state.last_request_at = at or datetime.now(UTC)
         await self._persist_state(model_id)
 
+    async def mark_runtime_request(
+        self,
+        model_id: str,
+        required_tokens: int | None = None,
+        at: datetime | None = None,
+    ) -> None:
+        """Record demand that should keep a high-context runtime resident.
+
+        Small requests routed through an already-loaded large context do not
+        normally extend its grace period. This is separate from the generic
+        LRU timestamp, which every successful request must still update.
+        """
+
+        state = self._states.get(model_id)
+        if state is None or not isinstance(state.extra_config, dict):
+            return
+        runtime = state.extra_config.get("_runtime")
+        if not isinstance(runtime, dict):
+            return
+        effective = int(runtime.get("effective_context") or 0)
+        default = int(runtime.get("default_context") or effective)
+        required = int(required_tokens or 0)
+        extend_small = bool(runtime.get("small_requests_extend_large_ttl", False))
+        if effective <= default or required > default or extend_small:
+            runtime["last_large_request_at"] = (at or datetime.now(UTC)).isoformat()
+            await self._persist_state(model_id)
+
     def _notify_event_listeners(self, event: str, state: "ModelState") -> None:
         if not self._event_listeners:
             return
@@ -995,127 +1043,6 @@ class ModelManager:
                     and not self._has_explicit_vllm_kv_cache(state)
                 )
 
-                if not gpu_managed:
-                    gpu_indices = []
-                elif self._gpu_scheduler:
-                    gpu_indices = await self._assign_gpus_for_load(
-                        model_id=model_id,
-                        vram_needed=vram_needed,
-                        preferred_gpu=force_gpu or state.preferred_gpu,
-                        enforce_vllm_headroom=enforce_vllm_headroom,
-                        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
-                    )
-                else:
-                    gpu_indices = [settings.default_gpu_index]
-
-                # Pre-load: try to evict LRU models if VRAM is insufficient
-                if gpu_managed and self._gpu_manager and gpu_indices:
-                    if len(gpu_indices) > 1:
-                        # Tensor-parallel: llama.cpp --tensor-split / vLLM TP shard
-                        # the model across GPUs (proportional to VRAM), so no single
-                        # GPU holds the whole model. The scheduler already admitted
-                        # this split against the COMBINED free VRAM, so verify (and
-                        # evict toward) the total across the assigned GPUs — checking
-                        # the full ``vram_needed`` against each GPU would wrongly
-                        # reject on the smallest card.
-                        available_total = 0
-                        for gpu_idx in gpu_indices:
-                            available_total += await self._gpu_manager.get_free_vram(gpu_idx)
-                        if vram_needed > available_total:
-                            deficit = vram_needed - available_total
-                            freed_total = 0
-                            for gpu_idx in gpu_indices:
-                                if freed_total >= deficit:
-                                    break
-                                freed_total += await self._evict_for_space(
-                                    gpu_idx, deficit - freed_total
-                                )
-                            if freed_total < deficit:
-                                from ocabra.core.scheduler import InsufficientVRAMError
-
-                                raise InsufficientVRAMError(
-                                    f"Tensor-parallel across GPUs {gpu_indices}: need "
-                                    f"{vram_needed} MB, only {available_total + freed_total} MB "
-                                    "free combined after eviction"
-                                )
-                    else:
-                        for gpu_idx in gpu_indices:
-                            available = await self._gpu_manager.get_free_vram(gpu_idx)
-                            if vram_needed > available:
-                                freed = await self._evict_for_space(
-                                    gpu_idx, vram_needed - available
-                                )
-                                if freed < (vram_needed - available):
-                                    from ocabra.core.scheduler import InsufficientVRAMError
-
-                                    raise InsufficientVRAMError(
-                                        f"GPU {gpu_idx}: need {vram_needed} MB, "
-                                        f"only {available + freed} MB available after eviction"
-                                    )
-
-                # vLLM checks against a fraction of total VRAM, not only model weights.
-                if enforce_vllm_headroom and self._gpu_manager:
-                    from ocabra.core.scheduler import InsufficientVRAMError
-
-                    for gpu_idx in gpu_indices:
-                        gpu_state = await self._gpu_manager.get_state(gpu_idx)
-                        # vLLM's utilization limit already reserves the remaining
-                        # GPU fraction.  ``get_free_vram`` additionally subtracts
-                        # oCabra's generic buffer, which would double-count the
-                        # safety margin and reject valid near-capacity profiles.
-                        physical_free_mb = gpu_state.free_vram_mb
-                        utilization = (
-                            vllm_gpu_memory_utilization
-                            if vllm_gpu_memory_utilization is not None
-                            else float(settings.vllm_gpu_memory_utilization)
-                        )
-                        required_free_mb = int(
-                            gpu_state.total_vram_mb * utilization
-                        )
-                        if physical_free_mb < required_free_mb:
-                            raise InsufficientVRAMError(
-                                "GPU "
-                                f"{gpu_idx} has {physical_free_mb} MB physically free, "
-                                f"vLLM requires at least {required_free_mb} MB free "
-                                f"(gpu_memory_utilization={utilization:g})."
-                            )
-
-                # Use-case resolution (opt-in): when extra_config has a "use_case"
-                # block, translate its target context/slots/kv_dtype into the
-                # concrete backend load flags, auto-picking the max context that
-                # fits when unset. Never blocks a load — falls back on any error.
-                effective_extra = state.extra_config
-                try:
-                    if gpu_managed and gpu_indices and self._gpu_manager:
-                        from ocabra.core.vram_capacity import (
-                            apply_use_case_flags,
-                            resolve_use_case,
-                        )
-
-                        gpu_states = await self._gpu_manager.get_all_states()
-                        tgt = next(
-                            (g for g in gpu_states if g.index == gpu_indices[0]), None
-                        )
-                        gpu_total = tgt.total_vram_mb if tgt else 0
-                        if gpu_total:
-                            plan = await resolve_use_case(state, gpu_total)
-                            if plan and plan.get("applied"):
-                                effective_extra = apply_use_case_flags(
-                                    state.extra_config, state.backend_type, plan
-                                )
-                                logger.info(
-                                    "use_case_applied",
-                                    model_id=model_id,
-                                    effective_context=plan.get("effective_context"),
-                                    slots=plan.get("slots"),
-                                    warnings=plan.get("warnings"),
-                                )
-                except Exception as exc:  # noqa: BLE001 — never block a load on planning
-                    logger.warning(
-                        "use_case_resolution_failed", model_id=model_id, error=str(exc)
-                    )
-                    effective_extra = state.extra_config
-
                 self._load_queue_waiters += 1
                 gate_entered = False
                 try:
@@ -1124,13 +1051,131 @@ class ModelManager:
                         gate_entered = True
                         self._load_in_progress.add(model_id)
                         try:
+                            if state.backend_type == "ollama":
+                                await self._prepare_ollama_runtime_switch(state)
+                            # Admission must share the same critical section as the
+                            # backend start. Otherwise another model (notably Ollama,
+                            # whose runner may span every GPU) can consume VRAM after
+                            # vLLM's headroom check but before its process starts.
+                            gpu_indices = await self._admit_gpu_load(
+                                model_id=model_id,
+                                vram_needed=vram_needed,
+                                preferred_gpu=(
+                                    force_gpu
+                                    if force_gpu is not None
+                                    else state.preferred_gpu
+                                ),
+                                gpu_managed=gpu_managed,
+                                enforce_vllm_headroom=enforce_vllm_headroom,
+                                vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                            )
+
+                            # Use-case resolution stays inside the gate because it
+                            # depends on the GPU selected by admission.
+                            effective_extra = state.extra_config
+                            try:
+                                if self._gpu_manager and (
+                                    (gpu_managed and gpu_indices)
+                                    or state.backend_type == "ollama"
+                                ):
+                                    from ocabra.core.vram_capacity import (
+                                        apply_use_case_flags,
+                                        resolve_use_case,
+                                    )
+
+                                    gpu_states = await self._gpu_manager.get_all_states()
+                                    target_gpu = (
+                                        gpu_indices[0]
+                                        if gpu_indices
+                                        else state.preferred_gpu
+                                    )
+                                    if target_gpu is None and gpu_states:
+                                        target_gpu = max(
+                                            gpu_states,
+                                            key=lambda gpu: gpu.total_vram_mb,
+                                        ).index
+                                    tgt = next(
+                                        (g for g in gpu_states if g.index == target_gpu),
+                                        None,
+                                    )
+                                    gpu_total = tgt.total_vram_mb if tgt else 0
+                                    if gpu_total:
+                                        plan = await resolve_use_case(state, gpu_total)
+                                        if plan and plan.get("applied"):
+                                            effective_extra = apply_use_case_flags(
+                                                state.extra_config,
+                                                state.backend_type,
+                                                plan,
+                                            )
+                                            logger.info(
+                                                "use_case_applied",
+                                                model_id=model_id,
+                                                effective_context=plan.get(
+                                                    "effective_context"
+                                                ),
+                                                slots=plan.get("slots"),
+                                                warnings=plan.get("warnings"),
+                                            )
+                            except Exception as exc:  # noqa: BLE001
+                                # Planning is advisory and must never block a load.
+                                logger.warning(
+                                    "use_case_resolution_failed",
+                                    model_id=model_id,
+                                    error=str(exc),
+                                )
+                                effective_extra = state.extra_config
+
+                            backend_gpu_indices = gpu_indices
+                            if (
+                                state.backend_type == "ollama"
+                                and state.preferred_gpu is not None
+                            ):
+                                # Ollama affinity is enforced by selecting an
+                                # independently CUDA-pinned pool endpoint.
+                                backend_gpu_indices = [state.preferred_gpu]
                             worker_info = await backend.load(
                                 state.backend_model_id,
-                                gpu_indices,
+                                backend_gpu_indices,
                                 port=assigned_port,
                                 extra_config=effective_extra,
                                 load_policy=state.load_policy.value,
                             )
+                            backend_loaded = True
+                            capabilities = await backend.get_capabilities(
+                                state.backend_model_id
+                            )
+                            capabilities = self._apply_capability_fallbacks(
+                                state, capabilities
+                            )
+
+                            actual_gpu_indices = (
+                                worker_info.gpu_indices or gpu_indices
+                            )
+                            state.worker_info = worker_info
+                            state.current_gpu = actual_gpu_indices
+                            # Prefer the honest pre-load estimate over the backend's
+                            # weights-only report so KV cache is represented too.
+                            effective_vram_mb = max(
+                                worker_info.vram_used_mb, vram_needed
+                            )
+                            state.vram_used_mb = effective_vram_mb
+                            state.capabilities = capabilities
+                            state.status = ModelStatus.LOADED
+                            state.loaded_at = datetime.now(UTC)
+                            state.error_message = None
+
+                            if gpu_managed and self._gpu_manager:
+                                vram_per_gpu = effective_vram_mb // max(
+                                    1, len(actual_gpu_indices)
+                                )
+                                for gpu_idx in actual_gpu_indices:
+                                    await self._gpu_manager.lock_vram(
+                                        gpu_idx, vram_per_gpu, model_id
+                                    )
+
+                            # Make the completed model visible to the next admission
+                            # before releasing the gate.
+                            self._worker_pool.set_worker(model_id, worker_info)
                         finally:
                             self._load_in_progress.discard(model_id)
                 except BaseException:
@@ -1140,28 +1185,6 @@ class ModelManager:
                     if not gate_entered:
                         self._load_queue_waiters -= 1
                     raise
-                backend_loaded = True
-                capabilities = await backend.get_capabilities(state.backend_model_id)
-                capabilities = self._apply_capability_fallbacks(state, capabilities)
-
-                actual_gpu_indices = worker_info.gpu_indices or gpu_indices
-                state.worker_info = worker_info
-                state.current_gpu = actual_gpu_indices
-                # Prefer the honest pre-load estimate (vram_needed, computed
-                # above) over the backend's own post-load report when it's
-                # higher. vLLM's WorkerInfo.vram_used_mb is weights-only (see
-                # VLLMBackend.get_vram_estimate_mb) — it never accounts for the
-                # KV cache reserve that estimate_vllm_vram_from_config already
-                # computed for the eviction decision, so using it alone here
-                # under-recorded state.vram_used_mb (and the real GPUManager
-                # lock below) by the full KV cache size on long-context loads.
-                effective_vram_mb = max(worker_info.vram_used_mb, vram_needed)
-                state.vram_used_mb = effective_vram_mb
-                state.capabilities = capabilities
-                state.status = ModelStatus.LOADED
-                state.loaded_at = datetime.now(UTC)
-                state.error_message = None
-
                 await self._record_model_load_stat(
                     model_id=model_id,
                     backend_type=state.backend_type,
@@ -1170,14 +1193,6 @@ class ModelManager:
                     gpu_indices=actual_gpu_indices,
                 )
 
-                if gpu_managed and self._gpu_manager:
-                    vram_per_gpu = effective_vram_mb // max(1, len(actual_gpu_indices))
-                    for gpu_idx in actual_gpu_indices:
-                        await self._gpu_manager.lock_vram(
-                            gpu_idx, vram_per_gpu, model_id
-                        )
-
-                self._worker_pool.set_worker(model_id, worker_info)
                 await self._publish_event(model_id, "status_changed")
                 self._notify_event_listeners("load", state)
                 logger.info(
@@ -1439,6 +1454,102 @@ class ModelManager:
             suppress_reload_seconds=suppress_reload_seconds,
         )
 
+    async def _admit_gpu_load(
+        self,
+        *,
+        model_id: str,
+        vram_needed: int,
+        preferred_gpu: int | None,
+        gpu_managed: bool,
+        enforce_vllm_headroom: bool,
+        vllm_gpu_memory_utilization: float | None,
+    ) -> list[int]:
+        """Assign and validate GPUs immediately before a backend starts.
+
+        The caller must hold ``_backend_load_gate``. Keeping admission and the
+        backend start in one critical section prevents another cold load from
+        invalidating the VRAM decision while this model waits to start.
+        """
+        if not gpu_managed:
+            return []
+
+        if self._gpu_scheduler:
+            gpu_indices = await self._assign_gpus_for_load(
+                model_id=model_id,
+                vram_needed=vram_needed,
+                preferred_gpu=preferred_gpu,
+                enforce_vllm_headroom=enforce_vllm_headroom,
+                vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+            )
+        else:
+            gpu_indices = [settings.default_gpu_index]
+
+        # Pre-load: try to evict LRU models if VRAM is insufficient.
+        if self._gpu_manager and gpu_indices:
+            if len(gpu_indices) > 1:
+                # Tensor-parallel backends shard the model across GPUs, so
+                # validate and evict against combined capacity.
+                available_total = 0
+                for gpu_idx in gpu_indices:
+                    available_total += await self._gpu_manager.get_free_vram(gpu_idx)
+                if vram_needed > available_total:
+                    deficit = vram_needed - available_total
+                    freed_total = 0
+                    for gpu_idx in gpu_indices:
+                        if freed_total >= deficit:
+                            break
+                        freed_total += await self._evict_for_space(
+                            gpu_idx, deficit - freed_total
+                        )
+                    if freed_total < deficit:
+                        from ocabra.core.scheduler import InsufficientVRAMError
+
+                        raise InsufficientVRAMError(
+                            f"Tensor-parallel across GPUs {gpu_indices}: need "
+                            f"{vram_needed} MB, only {available_total + freed_total} MB "
+                            "free combined after eviction"
+                        )
+            else:
+                for gpu_idx in gpu_indices:
+                    available = await self._gpu_manager.get_free_vram(gpu_idx)
+                    if vram_needed > available:
+                        freed = await self._evict_for_space(
+                            gpu_idx, vram_needed - available
+                        )
+                        if freed < (vram_needed - available):
+                            from ocabra.core.scheduler import InsufficientVRAMError
+
+                            raise InsufficientVRAMError(
+                                f"GPU {gpu_idx}: need {vram_needed} MB, "
+                                f"only {available + freed} MB available after eviction"
+                            )
+
+        # vLLM checks against a fraction of total VRAM, not only model weights.
+        if enforce_vllm_headroom and self._gpu_manager:
+            from ocabra.core.scheduler import InsufficientVRAMError
+
+            for gpu_idx in gpu_indices:
+                gpu_state = await self._gpu_manager.get_state(gpu_idx)
+                # get_free_vram subtracts oCabra's generic buffer. vLLM's own
+                # utilization limit already reserves its safety margin, so use
+                # physical free memory here to avoid counting it twice.
+                physical_free_mb = gpu_state.free_vram_mb
+                utilization = (
+                    vllm_gpu_memory_utilization
+                    if vllm_gpu_memory_utilization is not None
+                    else float(settings.vllm_gpu_memory_utilization)
+                )
+                required_free_mb = int(gpu_state.total_vram_mb * utilization)
+                if physical_free_mb < required_free_mb:
+                    raise InsufficientVRAMError(
+                        "GPU "
+                        f"{gpu_idx} has {physical_free_mb} MB physically free, "
+                        f"vLLM requires at least {required_free_mb} MB free "
+                        f"(gpu_memory_utilization={utilization:g})."
+                    )
+
+        return gpu_indices
+
     async def _assign_gpus_for_load(
         self,
         model_id: str,
@@ -1662,7 +1773,17 @@ class ModelManager:
 
         try:
             backend = await self._worker_pool.get_backend(state.backend_type)
-            await backend.unload(state.backend_model_id)
+            if (
+                state.backend_type == "ollama"
+                and state.worker_info is not None
+                and state.worker_info.endpoint_url
+            ):
+                await backend.unload(
+                    state.backend_model_id,
+                    endpoint_url=state.worker_info.endpoint_url,
+                )
+            else:
+                await backend.unload(state.backend_model_id)
 
             if self._gpu_manager:
                 for gpu_idx in state.current_gpu:
@@ -1690,6 +1811,89 @@ class ModelManager:
             await self._publish_event(model_id, "unload_failed")
             logger.error("model_unload_failed", model_id=model_id, error=str(e))
             raise
+
+    async def _prepare_ollama_runtime_switch(self, target: "ModelState") -> None:
+        """Drain and unload a stale context variant of the same Ollama model.
+
+        A single Ollama daemon can only keep one runner configuration for a
+        model tag. Derived oCabra workers therefore represent successive
+        contexts, not independently resident processes. This guard prevents
+        stale LOADED states and never replaces a runner with live requests.
+        """
+
+        target_extra = target.extra_config if isinstance(target.extra_config, dict) else {}
+        target_runtime = target_extra.get("_runtime")
+        if not isinstance(target_runtime, dict):
+            return
+        siblings = [
+            state
+            for state in self._states.values()
+            if state.model_id != target.model_id
+            and state.backend_type == "ollama"
+            and state.backend_model_id == target.backend_model_id
+            and state.status == ModelStatus.LOADED
+            and (
+                target.preferred_gpu is None
+                or not state.current_gpu
+                or target.preferred_gpu in state.current_gpu
+            )
+        ]
+        if not siblings:
+            return
+
+        timeout_s = max(1, int(settings.max_drain_timeout_s))
+        for _ in range(timeout_s * 2):
+            if not any(self.is_busy(sibling.model_id) for sibling in siblings):
+                break
+            await asyncio.sleep(0.5)
+        if any(self.is_busy(sibling.model_id) for sibling in siblings):
+            raise RuntimeError(
+                "cannot switch Ollama context while another profile request is active"
+            )
+
+        for sibling in siblings:
+            await self.unload(sibling.model_id, reason="runtime_context_switch")
+
+    async def _downgrade_runtime_variant(self, model_id: str) -> None:
+        """Unload an idle high-context variant and restore a warm default."""
+
+        state = self._states.get(model_id)
+        runtime = (
+            state.extra_config.get("_runtime")
+            if state is not None and isinstance(state.extra_config, dict)
+            else None
+        )
+        try:
+            if state is None or not isinstance(runtime, dict):
+                return
+            profile_id = runtime.get("profile_id")
+            default_context = int(runtime.get("default_context") or 0)
+            await self.unload(model_id, reason="runtime_context_downgrade")
+            default_state = next(
+                (
+                    candidate
+                    for candidate in self._states.values()
+                    if candidate.model_id != model_id
+                    and candidate.status == ModelStatus.UNLOADED
+                    and candidate.load_policy in {LoadPolicy.WARM, LoadPolicy.PIN}
+                    and isinstance(candidate.extra_config, dict)
+                    and isinstance(candidate.extra_config.get("_runtime"), dict)
+                    and candidate.extra_config["_runtime"].get("profile_id")
+                    == profile_id
+                    and int(
+                        candidate.extra_config["_runtime"].get(
+                            "effective_context", 0
+                        )
+                    )
+                    == default_context
+                ),
+                None,
+            )
+            if default_state is not None:
+                await self._load_model(default_state.model_id)
+        finally:
+            if isinstance(runtime, dict):
+                runtime.pop("downgrade_scheduled", None)
 
     async def _watch_and_reload(self, model_id: str) -> None:
         if not self._gpu_scheduler:
@@ -1742,6 +1946,52 @@ class ModelManager:
         for model_id, state in list(self._states.items()):
             if state.status != ModelStatus.LOADED:
                 continue
+            runtime = (
+                state.extra_config.get("_runtime")
+                if isinstance(state.extra_config, dict)
+                else None
+            )
+            if isinstance(runtime, dict):
+                effective = int(runtime.get("effective_context") or 0)
+                default_context = int(runtime.get("default_context") or effective)
+                restore_default = bool(
+                    runtime.get("restore_default_when_idle", True)
+                )
+                if (
+                    effective > default_context
+                    and restore_default
+                    and not self.is_busy(model_id)
+                ):
+                    loaded_at = state.loaded_at or now
+                    residence_s = (now - loaded_at).total_seconds()
+                    last_large = self._parse_datetime(
+                        runtime.get("last_large_request_at")
+                    )
+                    demand_anchor = last_large or loaded_at
+                    grace_s = max(
+                        0, int(runtime.get("downgrade_grace_seconds", 600))
+                    )
+                    min_residence_s = max(
+                        0, int(runtime.get("minimum_residency_seconds", 120))
+                    )
+                    if (
+                        residence_s >= min_residence_s
+                        and (now - demand_anchor).total_seconds() >= grace_s
+                        and not runtime.get("downgrade_scheduled")
+                    ):
+                        runtime["downgrade_scheduled"] = True
+                        logger.info(
+                            "runtime_context_downgrade",
+                            model_id=model_id,
+                            effective_context=effective,
+                            default_context=default_context,
+                        )
+                        self._create_background_task(
+                            self._downgrade_runtime_variant(model_id),
+                            task_name=f"runtime-downgrade:{model_id}",
+                            model_id=model_id,
+                        )
+                        continue
             if state.load_policy != LoadPolicy.ON_DEMAND:
                 continue
             if self.is_busy(model_id):
@@ -2027,6 +2277,7 @@ class ModelManager:
         extra_config: dict | None = None,
         *,
         persist: bool = True,
+        backend_model_id_override: str | None = None,
     ) -> "ModelState":
         """Register a model with ModelManager.
 
@@ -2039,6 +2290,8 @@ class ModelManager:
         second DB row would just clutter the model list and the estimator.
         """
         normalized_model_id, backend_model_id = normalize_model_ref(backend_type, model_id)
+        if backend_model_id_override:
+            backend_model_id = str(backend_model_id_override)
         normalized_backend = str(backend_type or "").strip().lower()
 
         if normalized_model_id in self._states:

@@ -77,6 +77,11 @@ class RequestStat(Base):
     via_router_profile_id: Mapped[str | None] = mapped_column(
         String(512), nullable=True, index=True
     )
+    runtime_preset: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    runtime_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    effective_context: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class GpuStat(Base):

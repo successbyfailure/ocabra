@@ -5,7 +5,11 @@ import pytest
 
 from ocabra import config
 from ocabra.backends._mock import MockBackend
-from ocabra.core.worker_pool import WorkerPool
+from ocabra.core.worker_pool import (
+    WorkerPool,
+    _ollama_native_body,
+    _ollama_native_response,
+)
 
 
 @pytest.fixture
@@ -75,6 +79,106 @@ async def test_get_backend_disabled_reason():
 
     with pytest.raises(RuntimeError, match="feature flag disabled"):
         await pool.get_backend("tensorrt_llm")
+
+
+@pytest.mark.asyncio
+async def test_ollama_context_cap_applies_to_openai_compat_path():
+    pool = WorkerPool()
+
+    async def resolve_cap(_model_id: str) -> int:
+        return 32_768
+
+    pool.set_ollama_ctx_resolver(resolve_cap)
+    body = await pool._clamp_ollama_ctx(
+        "ollama/gemma4:12b::runtime",
+        "/v1/chat/completions",
+        {"model": "gemma4:12b", "messages": []},
+    )
+
+    assert body["options"]["num_ctx"] == 32_768
+
+
+def test_ollama_openai_chat_uses_native_endpoint_and_normalizes_response():
+    path, body, kind = _ollama_native_body(
+        "/v1/chat/completions",
+        {
+            "model": "gemma4:12b",
+            "messages": [{"role": "user", "content": "hola"}],
+            "max_tokens": 12,
+            "options": {"num_ctx": 32_768},
+        },
+    )
+
+    assert path == "/api/chat"
+    assert kind == "chat"
+    assert body["options"] == {"num_ctx": 32_768, "num_predict": 12}
+    normalized = _ollama_native_response(
+        "chat",
+        {
+            "message": {"role": "assistant", "content": "hola"},
+            "prompt_eval_count": 4,
+            "eval_count": 2,
+            "done_reason": "stop",
+        },
+        "gemma4:12b",
+    )
+    assert normalized["choices"][0]["message"]["content"] == "hola"
+    assert normalized["usage"]["total_tokens"] == 6
+
+
+def test_ollama_native_chat_converts_openai_content_blocks():
+    path, body, kind = _ollama_native_body(
+        "/v1/chat/completions",
+        {
+            "model": "gemma4:12b",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe "},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                        },
+                        {"type": "text", "text": "this image"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert path == "/api/chat"
+    assert kind == "chat"
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": "Describe this image",
+            "images": ["aGVsbG8="],
+        }
+    ]
+
+
+def test_ollama_native_chat_keeps_remote_images_on_openai_endpoint():
+    original = {
+        "model": "gemma4:12b",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.test/image.png"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    path, body, kind = _ollama_native_body("/v1/chat/completions", original)
+
+    assert path == "/v1/chat/completions"
+    assert body is original
+    assert kind is None
 
 
 @pytest.mark.asyncio

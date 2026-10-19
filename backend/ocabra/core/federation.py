@@ -13,7 +13,7 @@ import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from ocabra.config import Settings
+    from ocabra.core.model_manager import ModelManager
 
 logger = structlog.get_logger(__name__)
 
@@ -373,7 +374,7 @@ class FederationManager:
             peer.online = True
             peer.consecutive_failures = 0
             peer._next_retry_at = 0.0
-            peer.last_heartbeat = datetime.now(timezone.utc)
+            peer.last_heartbeat = datetime.now(UTC)
             peer.gpus = data.get("gpus", [])
             peer.models = data.get("models", [])
             peer.load = data.get("load", {})
@@ -756,10 +757,23 @@ async def resolve_federated(
     if profile_registry is not None:
         try:
             profile = await profile_registry.get(model_id)
+            if profile is None:
+                alias_target = await profile_registry.resolve_alias(model_id)
+                profile = alias_target[0] if alias_target is not None else None
         except Exception:  # noqa: BLE001
             profile = None
         if profile is not None:
-            model_id = profile.base_model_id
+            if getattr(profile, "profile_kind", "execution") == "router":
+                target = None
+                for target_id in profile.routing_targets or []:
+                    candidate = await profile_registry.get(target_id)
+                    if candidate is not None:
+                        target = candidate
+                        break
+                if target is not None and target.base_model_id is not None:
+                    model_id = target.base_model_id
+            elif profile.base_model_id is not None:
+                model_id = profile.base_model_id
 
     # Look up local state — also try the canonical ``ollama/<id>`` form for
     # bare Ollama names.

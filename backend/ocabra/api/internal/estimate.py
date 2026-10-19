@@ -92,7 +92,14 @@ async def estimate_request(
         profile = await profile_registry.get(body.model)
         if profile is not None:
             stats_key = profile.profile_id
-            base_model_id = profile.base_model_id
+            if getattr(profile, "profile_kind", "execution") == "router":
+                for target_id in profile.routing_targets or []:
+                    target = await profile_registry.get(target_id)
+                    if target is not None and target.enabled and target.base_model_id:
+                        base_model_id = target.base_model_id
+                        break
+            else:
+                base_model_id = profile.base_model_id
 
     if stats_key is None:
         # Legacy path: canonical model_id.

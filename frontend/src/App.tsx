@@ -19,6 +19,7 @@ import { Agents } from "@/pages/Agents"
 import { MCPServers } from "@/pages/MCPServers"
 import { Sessions } from "@/pages/Sessions"
 import { Routers } from "@/pages/Routers"
+import { Profiles } from "@/pages/Profiles"
 import { Services } from "@/pages/Services"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
@@ -95,6 +96,14 @@ export default function App() {
                   element={
                     <ProtectedRoute minRole="system_admin">
                       <Sessions />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/profiles"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <Profiles />
                     </ProtectedRoute>
                   }
                 />

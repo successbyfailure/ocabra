@@ -36,7 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ocabra.core.router_resolver import RouterResolver
+from ocabra.core.router_resolver import NoRoutableTargetError, RouterResolver
 
 
 class _Status(str, Enum):
@@ -144,15 +144,11 @@ class TestBasicResolution:
 
     @pytest.mark.asyncio
     async def test_no_target_survives_returns_no_immediate_winner(self):
-        """All targets missing/disabled/loop → we advertise the router's own
-        base as the fallback via reason='no_immediate_winner', matching
-        pre-Bloque 20 behaviour so callers don't need a special case."""
+        """A router never falls through to a fictitious base model."""
         router = _FakeProfile("g", "vllm/base", routing_targets=["missing1", "missing2"])
         resolver, _, _ = _make_resolver(router)
-        result = await resolver.pick(router)
-        assert result.reason == "no_immediate_winner"
-        assert result.target_profile_id == "g"
-        assert result.base_model_id == "vllm/base"
+        with pytest.raises(NoRoutableTargetError):
+            await resolver.pick(router)
 
 
 class TestSessionVeto:
@@ -216,9 +212,10 @@ class TestBusyHandling:
             busy={"vllm/other-model"},  # unrelated but currently busy
         )
         result = await resolver.pick(router)
-        # Both t1 and t2 got skipped as "load_would_disrupt_busy"; nothing
-        # survived, so we fall back to the router's own base.
-        assert result.reason == "no_immediate_winner"
+        # Both immediate loads would disrupt a busy neighbour. The router
+        # still returns its first viable target, never a fictitious own base.
+        assert result.reason == "forced_fallback"
+        assert result.target_profile_id == "t1"
 
     @pytest.mark.asyncio
     async def test_unloaded_target_accepted_when_no_neighbour_busy(self):

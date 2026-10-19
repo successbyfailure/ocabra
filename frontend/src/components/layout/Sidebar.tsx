@@ -19,6 +19,7 @@ import {
   Plug,
   Radio,
   GitBranch,
+  Layers3,
   Wand2,
 } from "lucide-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
@@ -52,6 +53,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/services",  label: "Services",   icon: Wand2 },
   { to: "/agents",    label: "Agents",     icon: Sparkles,       minRole: "model_manager" },
   { to: "/mcp-servers", label: "MCP Servers", icon: Plug,        minRole: "model_manager" },
+  { to: "/profiles",  label: "Profiles",    icon: Layers3,        minRole: "model_manager" },
   { to: "/routers",   label: "Routers",    icon: GitBranch,      minRole: "model_manager" },
   { to: "/engines",   label: "Engines",    icon: Cpu,            minRole: "model_manager" },
   { to: "/explore",   label: "Explore",    icon: Search,         minRole: "model_manager" },

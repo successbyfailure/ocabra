@@ -765,7 +765,8 @@ class ModelProfile(Base):
     __tablename__ = "model_profiles"
 
     profile_id: str           # PK, slug sin /, lowercase, solo guiones y alfanuméricos
-    base_model_id: str        # FK model_configs.model_id, ON DELETE CASCADE
+    profile_kind: str         # "execution" | "router"
+    base_model_id: str | None # requerido en execution; NULL en router
     display_name: str
     description: str | None
     category: str             # "llm" | "tts" | "stt" | "image" | "music"
@@ -781,7 +782,13 @@ class ModelProfile(Base):
 Validaciones:
 - `profile_id`: regex `^[a-z0-9]+(-[a-z0-9]+)*$` (slug, no `/`, no espacios, no mayúsculas).
 - `is_default`: si se marca True, cualquier otro perfil del mismo `base_model_id` con `is_default=True` se desactiva automáticamente.
-- `base_model_id`: debe existir en `model_configs.model_id`. Cascada al borrar el modelo.
+- Un perfil ``execution`` requiere ``base_model_id`` existente en
+  ``model_configs.model_id`` y no puede declarar ``routing_targets``.
+- Un perfil ``router`` no tiene ``base_model_id`` ni presets de runtime y debe
+  declarar al menos un ``routing_target`` válido. Los destinos siempre son
+  ``profile_id`` estables de perfiles de ejecución u otros routers.
+- Borrar un modelo sólo cascada sus perfiles de ejecución. Los routers son
+  independientes del artefacto físico y se validan antes de borrar destinos.
 
 ### 8.2 Resolución de perfiles (ProfileRegistry → OpenAI/Ollama API)
 
@@ -885,7 +892,8 @@ GET    /ocabra/profiles/{profile_id}                 → ModelProfile
 POST   /ocabra/profiles                              → ModelProfile
   body: {
     profile_id: str,          # slug requerido
-    base_model_id: str,       # FK a model_configs.model_id
+    profile_kind: "execution"|"router",
+    base_model_id?: str|null, # requerido únicamente para execution
     display_name: str,
     description?: str|null,
     category: "llm"|"tts"|"stt"|"image"|"music",
@@ -893,6 +901,7 @@ POST   /ocabra/profiles                              → ModelProfile
     request_defaults?: dict,
     enabled?: bool,
     is_default?: bool
+    routing_targets?: list[str] # requerido únicamente para router
   }
 PATCH  /ocabra/profiles/{profile_id}                 → ModelProfile
   body: {
@@ -918,6 +927,140 @@ profile:events              → {"event": "created"|"updated"|"deleted", "profil
 # Key (cache)
 profile:state:{profile_id}  → ModelProfile (JSON, TTL: none)
 ```
+
+### 8.9 Presets de runtime por perfil
+
+El contexto deja de representarse mediante perfiles o modelos duplicados con
+sufijos ``-ctx*``. Un perfil público estable puede ofrecer varios presets de
+runtime; cada preset agrupa todos los parámetros que cambian la identidad del
+runner (contexto, paralelismo, KV cache y colocación).
+
+```python
+class ProfileRuntimePreset(Base):
+    __tablename__ = "profile_runtime_presets"
+
+    id: UUID                    # PK
+    profile_id: str             # FK model_profiles.profile_id, ON DELETE CASCADE
+    preset_key: str             # slug único dentro del perfil ("normal", "max")
+    label: str
+    context_mode: str           # "fixed" | "max"
+    context_tokens: int | None  # requerido para fixed; NULL para max
+    parallelism: int            # paralelismo solicitado, >= 1
+    kv_cache_dtype: str         # "fp16" | "bf16" | "fp8" | "q8" | "q4"
+    placement_policy: str       # "auto" | "preferred" | "forced"
+    preferred_gpus: list[int] | None
+    execution_policy: str       # "auto" | "local" | "remote"
+    load_policy: str            # "warm" | "on_demand"
+    enabled: bool
+    is_default: bool
+    priority: int
+    created_at: datetime
+    updated_at: datetime
+```
+
+Restricciones:
+
+- ``(profile_id, preset_key)`` es único.
+- Solo puede existir un preset ``is_default=true`` por perfil.
+- El preset default debe estar habilitado.
+- ``context_mode=fixed`` requiere ``context_tokens > 0``.
+- ``context_mode=max`` no persiste un máximo como fuente de verdad; se resuelve
+  contra metadatos del modelo, backend, hardware, paralelismo y límites de
+  administración.
+- La configuración que identifica un runner se canonicaliza en un
+  ``runtime_key`` independiente del nombre visible del preset.
+
+El perfil conserva además una política de selección JSONB:
+
+```python
+runtime_policy = {
+    "selection": "prefer_loaded",              # prefer_loaded | prefer_default
+    "restore_default_when_idle": True,
+    "downgrade_grace_seconds": 600,
+    "minimum_residency_seconds": 120,
+    "small_requests_extend_large_ttl": False,
+    "remote_warm_threshold_seconds": 10,
+    "max_context_tokens": None,               # techo validado opcional
+}
+```
+
+Selección de preset para chat/completions:
+
+1. Estimar ``prompt_tokens + reserved_output_tokens``.
+2. Si un preset cargado cubre la petición, reutilizar el menor cargado que
+   cubra el trabajo (salvo override explícito).
+3. Sin candidato cargado, usar el default si cubre la petición; si no, usar el
+   menor preset habilitado suficiente.
+4. Comparar carga local con un remoto caliente cuando la política lo permita.
+5. Si ningún preset cubre el presupuesto, responder
+   ``context_length_exceeded`` antes de arrancar un runner.
+6. El escalado hacia arriba es inmediato; la vuelta al default se difiere por
+   ``downgrade_grace_seconds`` y nunca interrumpe peticiones activas.
+
+Endpoints internos:
+
+```
+GET    /ocabra/profiles/{profile_id}/runtime-presets
+GET    /ocabra/profiles/{profile_id}/runtime-presets/resolved
+POST   /ocabra/profiles/{profile_id}/runtime-presets
+PATCH  /ocabra/profiles/{profile_id}/runtime-presets/{preset_key}
+DELETE /ocabra/profiles/{profile_id}/runtime-presets/{preset_key}
+POST   /ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/benchmark
+```
+
+``runtime-presets/resolved`` calcula una instantánea administrativa contra la
+arquitectura, backend y VRAM total actuales. Devuelve por preset
+``effective_context``, ``model_max``, ``hardware_max``, GPUs resueltas,
+``requested_parallelism``, ``effective_parallelism``, ``fits`` y advertencias.
+El paralelismo efectivo aplica límites conocidos del runtime antes de calcular
+KV y ``runtime_key``; nunca se anuncia ni reserva memoria para slots que el
+backend va a reducir. No carga ni descarga el modelo y no se usa directamente
+en ``/v1/models``; la API pública consumirá la misma información desde una
+caché de capacidades para no convertir el listado en una sonda bloqueante.
+
+``runtime-presets/{preset_key}/benchmark`` admite una carga fría opcional y
+devuelve ``load_ms``, ``generation_ms``, tokens de salida y tokens/segundo. No
+se ejecuta automáticamente al guardar: es una acción administrativa explícita.
+
+``ProfileOut`` incluye ``runtime_presets`` y ``runtime_policy``. La creación de
+presets no cambia por sí sola el runtime cargado; aplicar un cambio al runner es
+una operación explícita posterior (inmediata, drenada o en la siguiente carga).
+
+Exposición pública:
+
+- ``/v1/models`` y ``/v1/models/{id}`` anuncian el máximo efectivo de los
+  presets habilitados, no el contexto del runner activo.
+- La extensión ``ocabra.context`` diferencia ``model_max``, ``effective_max``,
+  ``default`` y ``active``.
+- Los alias legacy ``-ctx*`` pueden seguir aceptándose durante la migración,
+  pero quedan ocultos del listado y resuelven al perfil canónico + preset. Un
+  alias puede superponerse temporalmente a un perfil legacy existente: el
+  alias tiene precedencia en resolución y oculta ese perfil de los listados.
+
+Selección y observabilidad:
+
+- Un cuerpo OpenAI puede fijar preset mediante la extensión opcional
+  ``ocabra.context_preset``. oCabra la elimina antes de llamar al backend.
+- ``context_length`` público equivale a ``effective_max``. El contexto activo
+  se expone aparte y nunca reduce la capacidad anunciada.
+- El heartbeat federado puede añadir ``runtime_preset``,
+  ``effective_context`` y ``parallelism`` al runtime cargado. Son campos
+  opcionales para permitir nodos con versiones distintas.
+- Las estadísticas conservan el ``profile_id`` público y atribuyen también el
+  preset, runtime key y contexto efectivos cuando existan.
+
+Afinidad Ollama:
+
+- Solo se considera forzada cuando hay un daemon independiente fijado a la
+  GPU. ``OLLAMA_POOLS_JSON`` declara una lista de
+  ``{id,url,gpus,num_parallel}``.
+- El endpoint elegido forma parte del worker y se reutiliza para carga,
+  descarga e inferencia. Una GPU o paralelismo sin pool compatible produce un
+  error explícito, no un fallback silencioso al daemon global.
+- Para perfiles con contexto dinámico, las rutas OpenAI se traducen dentro del
+  worker pool a ``/api/chat`` o ``/api/generate`` y la respuesta vuelve a
+  normalizarse como OpenAI. El shim ``/v1`` nativo de Ollama no se usa porque
+  ignora ``options.num_ctx`` y recargaría el contexto global del daemon.
 
 ---
 

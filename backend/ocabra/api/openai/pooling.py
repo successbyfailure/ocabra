@@ -7,7 +7,9 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 import httpx
+import structlog
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
 
@@ -16,16 +18,20 @@ from ._deps import (
     _openai_error,
     check_capability,
     compute_worker_key,
+    get_federation_manager,
     get_model_manager,
     get_openai_user,
     get_profile_registry,
     merge_profile_defaults,
+    ocabra_response_headers,
     raise_upstream_http_error,
     resolve_profile,
     to_backend_body,
 )
+from ._federation import try_proxy_json
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
 
 
 def _normalize_non_empty_text(value: Any, *, param: str, code: str, message: str) -> str:
@@ -241,6 +247,18 @@ async def _resolve_and_forward(
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
 
+    fed_resp = await try_proxy_json(
+        request,
+        model_id=model_id,
+        body=body,
+        federation_manager=get_federation_manager(request),
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        logger=logger,
+    )
+    if fed_resp is not None:
+        return fed_resp
+
     profile, state = await resolve_profile(
         model_id,
         model_manager,
@@ -262,8 +280,6 @@ async def _resolve_and_forward(
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    from fastapi.responses import JSONResponse
-    from ocabra.api.openai._deps import ocabra_response_headers
 
     resp_headers = await ocabra_response_headers(
         request, model_manager, worker_key, profile.base_model_id

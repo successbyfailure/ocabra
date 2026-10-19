@@ -141,6 +141,8 @@ class WorkerInfo:
     port: int
     pid: int
     vram_used_mb: int
+    # External backends may live at different per-GPU pool endpoints.
+    endpoint_url: str | None = None
 
 
 class BackendInterface(ABC):

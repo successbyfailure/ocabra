@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,24 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.core.profile_registry import ProfileRegistry
+from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
 from ocabra.database import AsyncSessionLocal
-from ocabra.schemas.profiles import ProfileClone, ProfileCreate, ProfileOut, ProfileRename, ProfileUpdate
+from ocabra.schemas.profiles import (
+    ProfileAliasCreate,
+    ProfileAliasOut,
+    ProfileClone,
+    ProfileCreate,
+    ProfileOut,
+    ProfileRename,
+    ProfileUpdate,
+    RouterCreate,
+    RuntimePresetBenchmarkOut,
+    RuntimePresetBenchmarkRequest,
+    RuntimePresetCreate,
+    RuntimePresetOut,
+    RuntimePresetResolutionOut,
+    RuntimePresetUpdate,
+)
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["profiles"])
@@ -42,6 +59,14 @@ def _get_registry(request: Request) -> ProfileRegistry:
 
 def _profile_to_dict(profile) -> dict[str, Any]:
     return ProfileOut.model_validate(profile).model_dump(mode="json")
+
+
+def _preset_to_dict(preset) -> dict[str, Any]:
+    return RuntimePresetOut.model_validate(preset).model_dump(mode="json")
+
+
+def _alias_to_dict(alias) -> dict[str, Any]:
+    return ProfileAliasOut.model_validate(alias).model_dump(mode="json")
 
 
 def _is_path_within_base(path: Path, base: Path) -> bool:
@@ -114,6 +139,7 @@ async def create_model_profile(
                 session,
                 profile_id=body.profile_id,
                 base_model_id=model_id,
+                profile_kind="execution",
                 display_name=body.display_name,
                 description=body.description,
                 category=body.category,
@@ -122,6 +148,9 @@ async def create_model_profile(
                 enabled=body.enabled,
                 is_default=body.is_default,
                 routing_targets=body.routing_targets,
+                runtime_policy=(
+                    body.runtime_policy.model_dump() if body.runtime_policy else None
+                ),
             )
         except ValueError as exc:
             msg = str(exc)
@@ -131,7 +160,338 @@ async def create_model_profile(
     return _profile_to_dict(profile)
 
 
+# ── Runtime preset endpoints ─────────────────────────────────
+
+
+@router.get(
+    "/profiles/{profile_id}/runtime-presets",
+    summary="List profile runtime presets",
+    description="Return the context/runtime presets configured for a public profile.",
+    responses={404: {"description": "Profile not found"}},
+)
+async def list_runtime_presets(
+    profile_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> list[dict]:
+    """List a profile's runtime presets in selection/UI order."""
+    registry = _get_registry(request)
+    try:
+        presets = await registry.list_runtime_presets(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [_preset_to_dict(preset) for preset in presets]
+
+
+@router.get(
+    "/profiles/{profile_id}/runtime-presets/resolved",
+    summary="Resolve profile runtime preset capacities",
+    description=(
+        "Calculate each preset's effective context against current model metadata "
+        "and total GPU capacity without loading or unloading a model."
+    ),
+    responses={404: {"description": "Profile or base model not found"}},
+)
+async def resolve_runtime_presets(
+    profile_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> list[dict]:
+    """Return the current administrative capacity snapshot for a profile."""
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+    if profile.profile_kind != "execution" or profile.base_model_id is None:
+        raise HTTPException(status_code=400, detail="Routers do not have runtime presets")
+    model_manager = request.app.state.model_manager
+    state = await model_manager.get_state(profile.base_model_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Base model '{profile.base_model_id}' not found",
+        )
+    gpu_manager = model_manager.gpu_manager
+    gpu_states = await gpu_manager.get_all_states() if gpu_manager is not None else []
+    rows = await runtime_capacity_cache.resolve(
+        profile,
+        state,
+        gpu_states,
+        force=True,
+    )
+    return [
+        RuntimePresetResolutionOut.model_validate(row).model_dump(mode="json")
+        for row in rows
+    ]
+
+
+@router.post(
+    "/profiles/{profile_id}/runtime-presets/{preset_key}/benchmark",
+    summary="Measure one runtime preset",
+    response_model=RuntimePresetBenchmarkOut,
+)
+async def benchmark_runtime_preset(
+    profile_id: str,
+    preset_key: str,
+    body: RuntimePresetBenchmarkRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Measure load latency and generation throughput for a selected preset."""
+    from ocabra.api.openai._deps import ensure_worker_loaded, to_backend_body
+    from ocabra.core.runtime_coordinator import plan_profile_runtime
+    from ocabra.core.runtime_presets import ContextCapacityError
+
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+    if profile.profile_kind != "execution" or profile.base_model_id is None:
+        raise HTTPException(status_code=400, detail="Routers cannot be benchmarked")
+    manager = request.app.state.model_manager
+    try:
+        plan = await plan_profile_runtime(
+            profile,
+            manager,
+            {
+                "messages": [{"role": "user", "content": body.prompt}],
+                "max_tokens": body.max_tokens,
+                "ocabra": {"context_preset": preset_key},
+            },
+        )
+    except ContextCapacityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    before = await manager.get_state(plan.worker_key)
+    was_cold = before is None or before.status.value != "loaded"
+    if body.cold_start and before is not None and before.status.value == "loaded":
+        if manager.is_busy(plan.worker_key):
+            raise HTTPException(status_code=409, detail="Runtime is serving a request")
+        await manager.unload(plan.worker_key, reason="runtime_benchmark")
+        was_cold = True
+
+    load_started = time.monotonic()
+    state = await ensure_worker_loaded(
+        manager,
+        profile.base_model_id,
+        plan.worker_key,
+        plan.load_overrides,
+        preferred_gpu=plan.preferred_gpu,
+        load_policy=plan.load_policy,
+        required_tokens=plan.required_tokens,
+    )
+    load_ms = int((time.monotonic() - load_started) * 1000)
+    generation_body = {
+        "model": state.backend_model_id,
+        "messages": [{"role": "user", "content": body.prompt}],
+        "max_tokens": body.max_tokens,
+        "stream": False,
+    }
+    generation_started = time.monotonic()
+    result = await request.app.state.worker_pool.forward_request(
+        plan.worker_key,
+        "/v1/chat/completions",
+        to_backend_body(state, generation_body),
+    )
+    generation_ms = max(1, int((time.monotonic() - generation_started) * 1000))
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+    output_tokens = usage.get("completion_tokens")
+    tokens_per_second = (
+        round(float(output_tokens) * 1000 / generation_ms, 2)
+        if isinstance(output_tokens, int)
+        else None
+    )
+    return RuntimePresetBenchmarkOut(
+        preset_key=preset_key,
+        effective_context=int(plan.effective_context or 0),
+        worker_key=plan.worker_key,
+        was_cold=was_cold,
+        load_ms=load_ms,
+        generation_ms=generation_ms,
+        output_tokens=output_tokens,
+        tokens_per_second=tokens_per_second,
+    ).model_dump(mode="json")
+
+
+@router.post(
+    "/profiles/{profile_id}/runtime-presets",
+    summary="Create profile runtime preset",
+    description=(
+        "Create a context/runtime preset. The first preset becomes the enabled "
+        "default automatically. Configuration is applied on a later runtime load."
+    ),
+    status_code=201,
+    responses={
+        400: {"description": "Invalid or duplicate preset"},
+        404: {"description": "Profile not found"},
+    },
+)
+async def create_runtime_preset(
+    profile_id: str,
+    body: RuntimePresetCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Create one runtime preset under ``profile_id``."""
+    registry = _get_registry(request)
+    async with AsyncSessionLocal() as session:
+        try:
+            preset = await registry.create_runtime_preset(
+                session,
+                profile_id,
+                body.model_dump(),
+            )
+        except ValueError as exc:
+            status = 404 if "profile" in str(exc).lower() and "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return _preset_to_dict(preset)
+
+
+@router.patch(
+    "/profiles/{profile_id}/runtime-presets/{preset_key}",
+    summary="Update profile runtime preset",
+    description="Patch a runtime preset after validating the complete merged configuration.",
+    responses={
+        400: {"description": "Invalid preset patch"},
+        404: {"description": "Profile or preset not found"},
+    },
+)
+async def update_runtime_preset(
+    profile_id: str,
+    preset_key: str,
+    body: RuntimePresetUpdate,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Update a profile runtime preset."""
+    patch = body.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    async with AsyncSessionLocal() as session:
+        try:
+            preset = await _get_registry(request).update_runtime_preset(
+                session,
+                profile_id,
+                preset_key,
+                patch,
+            )
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return _preset_to_dict(preset)
+
+
+@router.delete(
+    "/profiles/{profile_id}/runtime-presets/{preset_key}",
+    summary="Delete profile runtime preset",
+    description=(
+        "Delete a preset. A default preset cannot be deleted while another "
+        "preset exists; make its replacement default first."
+    ),
+    responses={
+        400: {"description": "Current default cannot be deleted"},
+        404: {"description": "Profile or preset not found"},
+    },
+)
+async def delete_runtime_preset(
+    profile_id: str,
+    preset_key: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Delete one runtime preset."""
+    async with AsyncSessionLocal() as session:
+        try:
+            await _get_registry(request).delete_runtime_preset(
+                session,
+                profile_id,
+                preset_key,
+            )
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return {"ok": True, "profile_id": profile_id, "preset_key": preset_key}
+
+
+@router.post(
+    "/profiles/{profile_id}/aliases",
+    summary="Create hidden profile alias",
+    response_model=ProfileAliasOut,
+)
+async def create_profile_alias(
+    profile_id: str,
+    body: ProfileAliasCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Map a compatibility id (normally ``-ctx*``) to a profile preset."""
+    async with AsyncSessionLocal() as session:
+        try:
+            alias = await _get_registry(request).create_alias(
+                session,
+                alias_id=body.alias_id,
+                profile_id=profile_id,
+                preset_key=body.preset_key,
+                hidden=body.hidden,
+            )
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return _alias_to_dict(alias)
+
+
+@router.delete(
+    "/profiles/{profile_id}/aliases/{alias_id:path}",
+    summary="Delete profile alias",
+)
+async def delete_profile_alias(
+    profile_id: str,
+    alias_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    registry = _get_registry(request)
+    resolved = await registry.resolve_alias(alias_id)
+    if resolved is None or resolved[0].profile_id != profile_id:
+        raise HTTPException(status_code=404, detail=f"Alias '{alias_id}' not found.")
+    async with AsyncSessionLocal() as session:
+        await registry.delete_alias(session, alias_id)
+    return {"ok": True, "profile_id": profile_id, "alias_id": alias_id}
+
+
 # ── Direct profile endpoints ─────────────────────────────────
+
+
+@router.post(
+    "/profiles",
+    summary="Create a router profile",
+    description="Create a model-independent router with ordered profile targets.",
+    status_code=201,
+    responses={400: {"description": "Invalid router or targets"}},
+)
+async def create_router_profile(
+    body: RouterCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Create a router that owns no physical base model."""
+
+    async with AsyncSessionLocal() as session:
+        try:
+            profile = await _get_registry(request).create(
+                session,
+                profile_id=body.profile_id,
+                profile_kind="router",
+                base_model_id=None,
+                display_name=body.display_name,
+                description=body.description,
+                category=body.category,
+                request_defaults=body.request_defaults,
+                enabled=body.enabled,
+                routing_targets=body.routing_targets,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _profile_to_dict(profile)
 
 
 @router.get(
@@ -267,7 +627,8 @@ async def delete_profile(
         try:
             await registry.delete(session, profile_id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            status = 404 if "not found" in str(exc).lower() else 409
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     # Clean up asset directory
     asset_dir = PROFILES_ASSET_BASE / profile_id

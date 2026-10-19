@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, ArrowDown, ArrowUp, Copy, GitBranch, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, type RoutingDecisionsResponse } from "@/api/client"
-import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
+import type { ModelProfile, ProfileCategory } from "@/types"
 
 const ROUTER_CATEGORIES: { value: ProfileCategory; label: string }[] = [
   { value: "llm", label: "LLM" },
@@ -69,7 +69,6 @@ function coerceStatus(raw: string | undefined): WorkerStatus {
 export function Routers() {
   const [cards, setCards] = useState<RouterCardData[]>([])
   const [profilesById, setProfilesById] = useState<Map<string, ModelProfile>>(new Map())
-  const [statesByModelId, setStatesByModelId] = useState<Map<string, ModelState>>(new Map())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [routingStats, setRoutingStats] = useState<RoutingDecisionsResponse | null>(null)
@@ -91,22 +90,15 @@ export function Routers() {
       const byId = new Map(profiles.map((p) => [p.profileId, p]))
       setProfilesById(byId)
       const stateMap = new Map(models.map((m) => [m.modelId, m]))
-      setStatesByModelId(stateMap)
 
-      // A profile counts as a router whenever its ``routingTargets`` is a
-      // list, even an empty one — ``null`` means "regular profile, never
-      // configured as a router". This distinction lets a router that just
-      // had its last target removed stay visible in /routers so the user can
-      // repopulate it or delete it; previously an empty list hid the card
-      // and left an orphan profile behind.
-      const routerProfiles = profiles.filter((p) => Array.isArray(p.routingTargets))
+      const routerProfiles = profiles.filter((p) => p.profileKind === "router")
       const built: RouterCardData[] = routerProfiles.map((router) => {
         const targets = (router.routingTargets ?? []).map((targetId) => {
           const target = byId.get(targetId)
           if (!target) {
             return { profileId: targetId, status: "unknown" as WorkerStatus, errorMessage: null }
           }
-          const modelState = stateMap.get(target.baseModelId)
+          const modelState = target.baseModelId ? stateMap.get(target.baseModelId) : undefined
           return {
             profileId: targetId,
             status: coerceStatus(modelState?.status),
@@ -154,10 +146,7 @@ export function Routers() {
     already.add(forRouter.router.profileId)
     return Array.from(profilesById.values())
       .filter((p) => p.enabled && !already.has(p.profileId))
-      // Only non-router profiles are eligible — ``routingTargets === null``
-      // means "regular profile", a list (even empty) marks it as a router
-      // and routers can't be nested to avoid resolver loops.
-      .filter((p) => p.routingTargets === null)
+      .filter((p) => p.profileKind === "execution")
       .sort((a, b) => a.profileId.localeCompare(b.profileId))
   }, [cards, addingTo, profilesById])
 
@@ -191,13 +180,8 @@ export function Routers() {
     const card = cards.find((c) => c.router.profileId === routerId)
     if (!card) return
     if (card.targets.length === 1) {
-      if (
-        !window.confirm(
-          `Vas a quitar el último destino del router "${routerId}". Mientras esté vacío, las peticiones resolverán directo al base model (${card.router.baseModelId}). Para eliminar el router del todo usa el botón de la papelera. ¿Continuar?`,
-        )
-      ) {
-        return
-      }
+      toast.error("Un router necesita al menos un destino. Añade otro o elimina el router.")
+      return
     }
     const newTargets = card.targets.filter((_, i) => i !== index).map((t) => t.profileId)
     void persistTargets(routerId, newTargets)
@@ -286,7 +270,6 @@ export function Routers() {
 
       {showCreate && (
         <CreateRouterModal
-          models={Array.from(statesByModelId.values())}
           profiles={Array.from(profilesById.values())}
           onClose={() => setShowCreate(false)}
           onCreated={async () => {
@@ -488,7 +471,7 @@ export function Routers() {
                       <ProfilePicker
                         options={candidatesForAdd.map((p) => ({
                           profileId: p.profileId,
-                          baseModelId: p.baseModelId,
+                          baseModelId: p.baseModelId ?? "",
                           displayName: p.displayName,
                           category: p.category,
                         }))}
@@ -558,18 +541,12 @@ export function Routers() {
 }
 
 interface CreateRouterModalProps {
-  models: ModelState[]
   profiles: ModelProfile[]
   onClose: () => void
   onCreated: () => Promise<void>
 }
 
-function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRouterModalProps) {
-  const sortedModels = useMemo(
-    () => [...models].sort((a, b) => a.modelId.localeCompare(b.modelId)),
-    [models],
-  )
-  const [baseModelId, setBaseModelId] = useState(sortedModels[0]?.modelId ?? "")
+function CreateRouterModal({ profiles, onClose, onCreated }: CreateRouterModalProps) {
   const [profileId, setProfileId] = useState("")
   const [displayName, setDisplayName] = useState("")
   const [description, setDescription] = useState("")
@@ -580,10 +557,10 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
   const selectableProfiles = useMemo(
     () =>
       profiles
-        .filter((p) => p.enabled && p.routingTargets === null)
+        .filter((p) => p.enabled && p.profileKind === "execution")
         .map((p) => ({
           profileId: p.profileId,
-          baseModelId: p.baseModelId,
+          baseModelId: p.baseModelId ?? "",
           displayName: p.displayName,
           category: p.category,
         })),
@@ -594,10 +571,6 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
 
   const handleSubmit = async () => {
     const trimmedId = profileId.trim()
-    if (!baseModelId) {
-      toast.error("Elige un modelo base")
-      return
-    }
     if (!trimmedId) {
       toast.error("profile_id es obligatorio")
       return
@@ -612,13 +585,12 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
     }
     setSubmitting(true)
     try {
-      await api.profiles.create(baseModelId, {
+      await api.profiles.createRouter({
         profileId: trimmedId,
         displayName: displayName.trim() || undefined,
         description: description.trim() || undefined,
         category,
         enabled: true,
-        isDefault: false,
         routingTargets: parsedTargets,
       })
       toast.success(`Router ${trimmedId} creado`)
@@ -657,23 +629,6 @@ function CreateRouterModal({ models, profiles, onClose, onCreated }: CreateRoute
         </div>
 
         <div className="space-y-3">
-          <div>
-            <label className="mb-1 block text-xs font-medium">Modelo base</label>
-            <select
-              value={baseModelId}
-              onChange={(e) => setBaseModelId(e.target.value)}
-              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-            >
-              {sortedModels.map((m) => (
-                <option key={m.modelId} value={m.modelId}>{m.modelId}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              Fallback último del resolver. Si ninguno de los destinos está disponible,
-              se cae al perfil default de este modelo.
-            </p>
-          </div>
-
           <div>
             <label className="mb-1 block text-xs font-medium">profile_id</label>
             <input

@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     ai_models_root: str = "/docker/ai-models"
     hf_token: str = ""
     ollama_base_url: str = "http://ollama:11434"
+    # Optional JSON array of independently pinned Ollama daemons, e.g.
+    # [{"id":"3090","url":"http://ollama-3090:11434","gpus":[1],"num_parallel":2}].
+    ollama_pools_json: str = ""
     ollama_keep_alive: str = "30m"
     ollama_inventory_sync_interval_seconds: int = 15
     # Spill-reload monitor: when a WARM/PIN Ollama model has partially spilled to

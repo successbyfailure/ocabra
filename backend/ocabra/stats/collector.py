@@ -451,12 +451,17 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         }
                     },
                 )
+            request.state.inflight_model_id = inflight_model_id
+            request.state.inflight_request_id = inflight_request_id
 
         try:
             response = await call_next(request)
         except InferenceTimeoutError as exc:
             if mm and inflight_model_id:
-                mm.end_request(inflight_model_id, inflight_request_id)
+                mm.end_request(
+                    getattr(request.state, "inflight_model_id", inflight_model_id),
+                    inflight_request_id,
+                )
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
                 asyncio.create_task(
@@ -490,7 +495,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
             )
         except Exception as exc:
             if mm and inflight_model_id:
-                mm.end_request(inflight_model_id, inflight_request_id)
+                mm.end_request(
+                    getattr(request.state, "inflight_model_id", inflight_model_id),
+                    inflight_request_id,
+                )
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
                 asyncio.create_task(
@@ -564,7 +572,12 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 finally:
                     duration_ms = (time.monotonic() - start) * 1000
                     if mm and inflight_model_id:
-                        mm.end_request(inflight_model_id, inflight_request_id)
+                        mm.end_request(
+                            getattr(
+                                request.state, "inflight_model_id", inflight_model_id
+                            ),
+                            inflight_request_id,
+                        )
                     if model_id:
                         all_body = b"".join(chunks)
                         stream_error = _extract_stream_error(all_body, content_type)
@@ -614,7 +627,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         # Non-streaming: end in-flight immediately, buffer body, extract tokens.
         if mm and inflight_model_id:
-            mm.end_request(inflight_model_id, inflight_request_id)
+            mm.end_request(
+                getattr(request.state, "inflight_model_id", inflight_model_id),
+                inflight_request_id,
+            )
 
         duration_ms = (time.monotonic() - start) * 1000
         response_payload, response = await _extract_response_payload_and_rebuild(response)
@@ -728,6 +744,15 @@ async def _resolve_inflight_model_id(request: Request, requested: str | None) ->
         try:
             profile = await registry.get(requested)
             if profile is not None and profile.enabled:
+                if getattr(profile, "profile_kind", "execution") == "router":
+                    for target_id in profile.routing_targets or []:
+                        target = await registry.get(target_id)
+                        if target is not None and target.enabled and target.base_model_id:
+                            return compute_worker_key(
+                                target.base_model_id,
+                                target.load_overrides,
+                            )
+                    return None
                 return compute_worker_key(profile.base_model_id, profile.load_overrides)
 
             # Legacy canonical model ids resolve through their default profile.
@@ -1024,6 +1049,11 @@ async def _record_stat(
                 # Bloque 20 — Duration estimator + Router audit.
                 work_size_meta=work_size_meta,
                 via_router_profile_id=via_router_profile_id,
+                runtime_preset=getattr(request.state, "runtime_preset_key", None),
+                runtime_key=getattr(request.state, "runtime_key", None),
+                effective_context=getattr(
+                    request.state, "runtime_effective_context", None
+                ),
             )
             session.add(stat)
             await session.commit()

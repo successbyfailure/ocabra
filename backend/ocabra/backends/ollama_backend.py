@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
@@ -19,6 +20,10 @@ class OllamaBackend(BackendInterface):
         return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
     def __init__(self) -> None:
         self._registry = OllamaRegistry()
+        self._registries: dict[str, OllamaRegistry] = {
+            settings.ollama_base_url.rstrip("/"): self._registry
+        }
+        self._model_endpoints: dict[str, str] = {}
         self._loaded: set[str] = set()
         self._caps_cache: dict[str, BackendCapabilities] = {}
         # Real size_vram observed via /api/ps after a successful load, keyed by
@@ -27,8 +32,53 @@ class OllamaBackend(BackendInterface):
         # loads, instead of always reporting 0 — see get_vram_estimate_mb.
         self._observed_vram_mb: dict[str, int] = {}
 
+    @staticmethod
+    def _configured_pools() -> list[dict[str, Any]]:
+        raw = settings.ollama_pools_json.strip()
+        if not raw:
+            return []
+        try:
+            pools = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("OLLAMA_POOLS_JSON is not valid JSON") from exc
+        if not isinstance(pools, list):
+            raise RuntimeError("OLLAMA_POOLS_JSON must be a JSON array")
+        return [pool for pool in pools if isinstance(pool, dict)]
+
+    def _select_pool(
+        self, gpu_indices: list[int], extra_config: dict[str, Any] | None
+    ) -> tuple[str, list[int]]:
+        pools = self._configured_pools()
+        if not pools:
+            return settings.ollama_base_url.rstrip("/"), []
+        desired = gpu_indices[0] if len(gpu_indices) == 1 else None
+        runtime = extra_config.get("_runtime", {}) if isinstance(extra_config, dict) else {}
+        required_parallelism = max(1, int(runtime.get("parallelism") or 1))
+        eligible = []
+        for pool in pools:
+            url = str(pool.get("url") or "").rstrip("/")
+            gpus = [int(index) for index in pool.get("gpus", [])]
+            parallelism = max(1, int(pool.get("num_parallel") or 1))
+            if url and parallelism >= required_parallelism:
+                eligible.append((url, gpus))
+        if desired is not None:
+            match = next((item for item in eligible if desired in item[1]), None)
+            if match is None:
+                raise RuntimeError(
+                    f"no Ollama pool for GPU {desired} with parallelism "
+                    f"{required_parallelism}"
+                )
+            return match
+        if not eligible:
+            raise RuntimeError(
+                f"no Ollama pool supports parallelism {required_parallelism}"
+            )
+        return eligible[0]
+
+    def _registry_for(self, endpoint: str) -> OllamaRegistry:
+        return self._registries.setdefault(endpoint, OllamaRegistry(endpoint))
+
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
-        _ = gpu_indices
         # Honour the oCabra load_policy when telling Ollama how long to keep
         # the weights in memory. For warm/pin models we pass keep_alive=-1
         # ("never evict") so Ollama doesn't silently drop the weights after
@@ -39,7 +89,21 @@ class OllamaBackend(BackendInterface):
         keep_alive: int | str | None = None
         if load_policy in ("warm", "pin"):
             keep_alive = -1
-        await self._registry.load(model_id, keep_alive=keep_alive)
+        extra_config = kwargs.get("extra_config")
+        endpoint, actual_gpus = self._select_pool(gpu_indices, extra_config)
+        registry = self._registry_for(endpoint)
+        ollama_config = (
+            extra_config.get("ollama", {}) if isinstance(extra_config, dict) else {}
+        )
+        options: dict[str, object] = {}
+        num_ctx = ollama_config.get("num_ctx") if isinstance(ollama_config, dict) else None
+        if isinstance(num_ctx, int) and num_ctx > 0:
+            options["num_ctx"] = num_ctx
+        await registry.load(
+            model_id,
+            keep_alive=keep_alive,
+            options=options or None,
+        )
         self._loaded.add(model_id)
 
         # Real footprint (weights + KV cache for this model's configured
@@ -49,7 +113,7 @@ class OllamaBackend(BackendInterface):
         # otherwise-successful load.
         vram_used_mb = 0
         try:
-            for detail in await self._registry.list_loaded_details():
+            for detail in await registry.list_loaded_details():
                 if detail["name"] == model_id or detail["model"] == model_id:
                     vram_used_mb = int(detail["size_vram"] / (1024 * 1024))
                     break
@@ -58,23 +122,33 @@ class OllamaBackend(BackendInterface):
         if vram_used_mb > 0:
             self._observed_vram_mb[model_id] = vram_used_mb
 
-        parsed = urlparse(settings.ollama_base_url)
+        self._model_endpoints[model_id] = endpoint
+        parsed = urlparse(endpoint)
         port = int(parsed.port or 11434)
         return WorkerInfo(
             backend_type="ollama",
             model_id=model_id,
-            gpu_indices=[],
+            gpu_indices=actual_gpus,
             port=port,
             pid=0,
             vram_used_mb=vram_used_mb,
+            endpoint_url=endpoint,
         )
 
-    async def unload(self, model_id: str) -> None:
-        await self._registry.unload(model_id)
+    async def unload(self, model_id: str, *, endpoint_url: str | None = None) -> None:
+        endpoint = endpoint_url or self._model_endpoints.get(
+            model_id, settings.ollama_base_url.rstrip("/")
+        )
+        await self._registry_for(endpoint).unload(model_id)
+        if self._model_endpoints.get(model_id) == endpoint:
+            self._model_endpoints.pop(model_id, None)
         self._loaded.discard(model_id)
 
     async def health_check(self, model_id: str) -> bool:
-        loaded = await self._registry.list_loaded()
+        endpoint = self._model_endpoints.get(
+            model_id, settings.ollama_base_url.rstrip("/")
+        )
+        loaded = await self._registry_for(endpoint).list_loaded()
         return model_id in loaded
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:

@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
-from starlette.responses import StreamingResponse
-
 from ocabra.core.federation import PeerState
 from ocabra.schemas.federation import (
     HeartbeatGpu,
@@ -93,22 +92,31 @@ async def heartbeat(
         try:
             from ocabra.core.model_manager import ModelStatus
 
-            model_states = await model_manager.list_states()
+            model_states = await model_manager.list_states(include_derived=True)
             for ms in model_states:
                 if ms.status != ModelStatus.LOADED:
                     continue
+                extra = ms.extra_config if isinstance(ms.extra_config, dict) else {}
+                runtime = extra.get("_runtime")
+                runtime = runtime if isinstance(runtime, dict) else {}
+                public_model_id = str(runtime.get("base_model_id") or ms.model_id)
                 profile_ids: list[str] = []
-                if profile_registry is not None:
+                if runtime.get("profile_id"):
+                    profile_ids = [str(runtime["profile_id"])]
+                elif profile_registry is not None:
                     try:
-                        profiles = await profile_registry.list_by_model(ms.model_id)
+                        profiles = await profile_registry.list_by_model(public_model_id)
                         profile_ids = [p.profile_id for p in profiles if p.enabled]
                     except Exception:
                         pass
                 models.append(
                     HeartbeatModel(
-                        model_id=ms.model_id,
+                        model_id=public_model_id,
                         status=ms.status.value,
                         profiles=profile_ids,
+                        runtime_preset=runtime.get("preset_key"),
+                        effective_context=runtime.get("effective_context"),
+                        parallelism=runtime.get("parallelism"),
                     )
                 )
         except Exception as exc:

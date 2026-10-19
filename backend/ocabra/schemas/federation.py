@@ -65,6 +65,9 @@ class HeartbeatModel(BaseModel):
     model_id: str
     status: str
     profiles: list[str] = []
+    runtime_preset: str | None = None
+    effective_context: int | None = None
+    parallelism: int | None = None
 
 
 class HeartbeatLoad(BaseModel):

@@ -96,6 +96,19 @@ function CategoryBadge({ category }: { category: ProfileCategory }) {
   )
 }
 
+function presetContext(profile: ModelProfile): string | null {
+  const enabled = profile.runtimePresets.filter((preset) => preset.enabled)
+  if (enabled.length === 0) return null
+  const normal = enabled.find((preset) => preset.isDefault)
+  const maximum = enabled.some((preset) => preset.contextMode === "max")
+    ? "MAX"
+    : formatTokenCount(Math.max(...enabled.map((preset) => preset.contextTokens ?? 0)))
+  const normalLabel = normal?.contextMode === "max"
+    ? "MAX"
+    : formatTokenCount(normal?.contextTokens ?? 0)
+  return `normal ${normalLabel}${normal ? `/p${normal.parallelism}` : ""} · máximo ${maximum}`
+}
+
 export function ModelCard({
   model,
   busy,
@@ -371,6 +384,11 @@ export function ModelCard({
               <span className="text-xs text-muted-foreground">
                 {profile.displayName || "-"}
               </span>
+              {presetContext(profile) && (
+                <div className="mt-0.5 text-[10px] text-muted-foreground/70">
+                  {presetContext(profile)}
+                </div>
+              )}
             </td>
             <td className="px-3 py-2 hidden lg:table-cell">
               <CategoryBadge category={profile.category} />

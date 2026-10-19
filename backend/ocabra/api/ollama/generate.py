@@ -15,7 +15,6 @@ from starlette.responses import StreamingResponse
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     check_capability,
-    compute_worker_key,
     ensure_loaded,
     get_federation_manager,
     get_model_manager,
@@ -126,10 +125,14 @@ async def generate(
             model_manager,
             profile_registry,
             user=user,
+            request_body=body,
+            request_state=request.state,
         )
         merged_body = merge_profile_defaults(profile, body)
-        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        worker_key = state.model_id
     except HTTPException as profile_exc:
+        if profile_exc.status_code != 404:
+            raise
         # Fallback to legacy Ollama resolution for native Ollama models
         model_id, resolved_state = await resolve_model(model_manager, ollama_model, user=user)
         if resolved_state is None:
