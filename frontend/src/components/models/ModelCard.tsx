@@ -129,6 +129,10 @@ export function ModelCard({
   const context = getModelContextSummary(model)
   const profiles = model.profiles ?? []
   const profileCount = profiles.length
+  const presetCount = profiles.reduce(
+    (acc, profile) => acc + profile.runtimePresets.filter((preset) => preset.enabled).length,
+    0,
+  )
 
   return (
     <>
@@ -238,7 +242,10 @@ export function ModelCard({
           <ModelStatusBadge status={model.status} />
         </td>
         <td className="px-3 py-3 text-center text-xs text-muted-foreground">
-          {profileCount}
+          <div>{profileCount}</div>
+          {presetCount > 0 && (
+            <div className="text-[10px] opacity-70">{presetCount} preset{presetCount === 1 ? "" : "s"}</div>
+          )}
         </td>
         <td className="px-3 py-3">
           <div className="flex items-center gap-1.5">

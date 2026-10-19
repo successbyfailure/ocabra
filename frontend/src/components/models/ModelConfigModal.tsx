@@ -1,7 +1,8 @@
 import type { ReactNode } from "react"
 import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { X } from "lucide-react"
+import { Link } from "react-router-dom"
+import { Layers3, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import {
@@ -936,6 +937,21 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           </div>
 
           <div className="space-y-4">
+            {model && (model.profiles ?? []).some((profile) => profile.runtimePresets.some((preset) => preset.enabled)) && (
+              <div className="rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-100">
+                <div className="flex items-start gap-2">
+                  <Layers3 size={14} className="mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    Este modelo tiene perfiles con presets runtime (contexto, slots, KV cache por preset).
+                    Lo que configures aquí es la base del backend; los presets viven en{" "}
+                    <Link to="/profiles" className="font-medium underline underline-offset-2 hover:text-white">
+                      Profiles
+                    </Link>
+                    .
+                  </div>
+                </div>
+              </div>
+            )}
             <FieldSection
               title="General"
               description="Politica de carga, afinidad de GPU y recarga automatica."
