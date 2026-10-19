@@ -18,6 +18,7 @@ import {
 } from "@/lib/modelContext"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
 import { CapacityPanel } from "@/components/models/CapacityPanel"
+import { RuntimePresetsPanel } from "@/components/models/RuntimePresetsPanel"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useIsAdmin } from "@/hooks/useAuth"
 import type {
@@ -942,8 +943,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 <div className="flex items-start gap-2">
                   <Layers3 size={14} className="mt-0.5 shrink-0" />
                   <div className="flex-1">
-                    Este modelo tiene perfiles con presets runtime (contexto, slots, KV cache por preset).
-                    Lo que configures aquí es la base del backend; los presets viven en{" "}
+                    Los presets de contexto están debajo. Para gestión global de perfiles (alias, categoría, políticas) usa{" "}
                     <Link to="/profiles" className="font-medium underline underline-offset-2 hover:text-white">
                       Profiles
                     </Link>
@@ -1023,7 +1023,17 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               )
             })()}
 
-            {model && (
+            {model && (model.profiles ?? []).filter((profile) => profile.profileKind === "execution").map((profile) => (
+              <FieldSection
+                key={profile.profileId}
+                title={`Presets de contexto · ${profile.displayName || profile.profileId}`}
+                description="Variantes internas (contexto, slots, KV cache). El preset predeterminado es el que arranca por defecto; «Medir frío» descarga y vuelve a cargar midiendo tiempo real."
+              >
+                <RuntimePresetsPanel profile={profile} onChanged={() => {}} />
+              </FieldSection>
+            ))}
+
+            {model && !(model.profiles ?? []).some((profile) => profile.runtimePresets.some((preset) => preset.enabled)) && (
               <FieldSection
                 title="Estimación por probe (runtime)"
                 description="Medición real opcional del engine para la configuración actual; complementa la predicción por arquitectura de arriba."
