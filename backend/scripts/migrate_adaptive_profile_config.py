@@ -58,7 +58,9 @@ async def migrate(apply: bool) -> None:
             print("Dry-run only; rerun with --apply to persist the cleanup.")
             return
 
-        async with session.begin():
+        # ``AsyncSessionLocal()`` opens a transaction automatically on first
+        # use, so we commit at the end rather than nesting another begin().
+        try:
             await session.execute(
                 text(
                     """
@@ -112,6 +114,9 @@ async def migrate(apply: bool) -> None:
             # Qwen 3.8 currently requests p2 for the normal presets, but
             # Ollama/qwen35 enforces p1. The planner consumes this cap before
             # sizing KV and the UI shows requested versus effective values.
+            # Use jsonb_build_object instead of a literal '{"a":1}' so
+            # SQLAlchemy doesn't treat the ``:`` inside the JSON as bind
+            # parameter markers (``:1`` reads as placeholder "1").
             await session.execute(
                 text(
                     """
@@ -119,7 +124,10 @@ async def migrate(apply: bool) -> None:
                     SET extra_config = jsonb_set(
                         COALESCE(extra_config, '{}'::jsonb),
                         '{runtime_capabilities}',
-                        '{"max_parallelism":1,"reason":"ollama_qwen35_single_sequence"}'::jsonb,
+                        jsonb_build_object(
+                            'max_parallelism', 1,
+                            'reason', 'ollama_qwen35_single_sequence'
+                        ),
                         true
                     ), updated_at = now()
                     WHERE model_id IN (
@@ -133,8 +141,15 @@ async def migrate(apply: bool) -> None:
                 text(
                     """
                     UPDATE model_profiles
-                    SET runtime_policy = COALESCE(runtime_policy, '{}'::jsonb) ||
-                        '{"selection":"prefer_loaded","max_context_tokens":163840,"restore_default_when_idle":true,"downgrade_grace_seconds":600,"minimum_residency_seconds":120,"small_requests_extend_large_ttl":false,"remote_warm_threshold_seconds":10}'::jsonb,
+                    SET runtime_policy = COALESCE(runtime_policy, '{}'::jsonb) || jsonb_build_object(
+                            'selection', 'prefer_loaded',
+                            'max_context_tokens', 163840,
+                            'restore_default_when_idle', true,
+                            'downgrade_grace_seconds', 600,
+                            'minimum_residency_seconds', 120,
+                            'small_requests_extend_large_ttl', false,
+                            'remote_warm_threshold_seconds', 10
+                        ),
                         updated_at = now()
                     WHERE profile_id IN ('qwen3.8:27b', 'qwen3.8:27b-abliterated')
                     """
@@ -221,6 +236,10 @@ async def migrate(apply: bool) -> None:
                 text("DELETE FROM model_configs WHERE model_id = ANY(:ids)"),
                 {"ids": list(LEGACY_MODELS)},
             )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
         print("Cleanup applied. Resulting inventory:")
         await _inventory(session)
