@@ -428,6 +428,16 @@ Load policies:
 Los perfiles exponen variantes de un modelo base con defaults distintos.
 Los clientes usan `profile_id` como valor de `model=` en las APIs.
 
+Un perfil es ahora de uno de dos tipos (`profile_kind`):
+
+- `execution`: ejecuta un modelo concreto. Lleva `base_model_id`, puede tener
+  `load_overrides` y define 0..N **presets de runtime** (contexto/paralelismo/
+  KV cache por preset).
+- `router`: no ejecuta nada por sí mismo. Enumera `routing_targets`
+  (profile_ids ordenados por preferencia) y delega la petición al primero
+  que esté disponible/cargado. Sin `base_model_id`, sin presets, sin
+  `load_overrides`.
+
 | Method | Endpoint | Descripcion |
 |--------|----------|-------------|
 | GET | `/ocabra/models/{model_id}/profiles` | Perfiles de un modelo |
@@ -437,6 +447,14 @@ Los clientes usan `profile_id` como valor de `model=` en las APIs.
 | DELETE | `/ocabra/profiles/{profile_id}` | Eliminar perfil |
 | POST | `/ocabra/profiles/{profile_id}/assets` | Subir asset (multipart) |
 | DELETE | `/ocabra/profiles/{profile_id}/assets/{key}` | Eliminar asset |
+| GET | `/ocabra/profiles/{profile_id}/runtime-presets` | Lista presets runtime |
+| GET | `/ocabra/profiles/{profile_id}/runtime-presets/resolved` | Capacidad simulada contra la GPU actual |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets` | Crear preset |
+| PATCH | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}` | Actualizar preset |
+| DELETE | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}` | Eliminar preset |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/benchmark` | Medir carga/generación |
+| POST | `/ocabra/profiles/{profile_id}/aliases` | Alias oculto hacia `(profile, preset_key)` |
+| DELETE | `/ocabra/profiles/{profile_id}/aliases/{alias_id}` | Eliminar alias |
 
 **POST /ocabra/models/{model_id}/profiles** — Crear perfil
 ```json
@@ -491,6 +509,72 @@ Ejemplo de perfil STT con diarizacion:
 **load_overrides vs request_defaults**:
 - `load_overrides`: Afectan como se carga el modelo en GPU. Si difieren entre perfiles, se crea un worker separado (dedicado).
 - `request_defaults`: Valores inyectados en cada request. El cliente puede sobreescribirlos.
+
+#### Runtime presets
+
+Un perfil `execution` puede ofrecer varios **presets de runtime** que varían
+en contexto, paralelismo y KV cache sin crear perfiles públicos nuevos. Un
+preset es una tupla `(context_tokens|max, parallelism, kv_cache_dtype,
+placement_policy, load_policy)`. Al llegar una petición, el coordinator elige
+el preset: `prefer_loaded` reutiliza un runner ya cargado que cubra el
+contexto solicitado; si no, se selecciona el preset habilitado más pequeño
+que lo cubra. Un cambio de preset descarga el runner viejo y crea uno nuevo.
+
+Convención sugerida: `32k` / `64k` (default, `warm`) / `128k` / `max` (modo
+`contextMode="max"` → el coordinator calcula el tope que cabe en la GPU
+objetivo). Perfiles LLM típicos: cuatro presets por perfil.
+
+**POST `/ocabra/profiles/{profile_id}/runtime-presets`**:
+
+```json
+{
+  "preset_key": "128k",
+  "label": "128K",
+  "context_mode": "fixed",
+  "context_tokens": 131072,
+  "parallelism": 2,
+  "kv_cache_dtype": "q8",
+  "placement_policy": "auto",
+  "load_policy": "on_demand",
+  "enabled": true,
+  "is_default": false,
+  "priority": 30
+}
+```
+
+Request del cliente puede forzar un preset concreto mediante extensión
+`ocabra.context_preset`:
+
+```json
+POST /v1/chat/completions
+{
+  "model": "gemma4:26b",
+  "messages": [...],
+  "ocabra": {"context_preset": "128k"}
+}
+```
+
+Si el preset indicado no existe o está deshabilitado se responde HTTP 400 con
+`ContextCapacityError`.
+
+#### Aliases ocultos
+
+Los `-ctx*` y variantes legacy (`gemma4:26b-ctx160k`, `qwen3.8:27b-ctx160k`,
+…) viven como **alias ocultos** apuntando a `(profile, preset_key)`. Un alias
+con `hidden=true` se resuelve en todas las APIs (chat, embeddings, …) pero no
+aparece en `/v1/models` ni en el panel. Es el camino de compatibilidad para
+clientes legacy; los nuevos deben usar `profile_id` + `ocabra.context_preset`.
+
+#### Contexto nativo vs servido
+
+`BackendCapabilities` del modelo (visible en `/ocabra/models/{id}`) expone:
+
+- `context_length`: ventana **efectiva** que el backend servirá hoy
+  (`min(num_ctx_del_modelfile_o_OLLAMA_CONTEXT_LENGTH, nativo)`). Es lo que
+  los clientes OpenAI deben respetar para no provocar truncamiento silencioso.
+- `native_context_length`: ventana nativa del modelo (p. ej. 262144 en
+  gemma4:26b). Opcional, cero significa "desconocido". Sirve para el panel y
+  para que los presets `max` sepan hasta dónde pueden escalar.
 
 ### Status — Estado del servidor
 

@@ -34,7 +34,8 @@ class BackendCapabilities:
     tts: bool = False
     music_generation: bool = False
     streaming: bool = False
-    context_length: int = 0
+    context_length: int = 0        # Ventana efectiva que servirá el backend (post-cap).
+    native_context_length: int = 0 # Nativa del modelo (opcional, 0 = desconocido).
 
 @dataclass
 class WorkerInfo:
