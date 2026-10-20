@@ -233,6 +233,11 @@ async def plan_profile_runtime(
         "kv_cache_dtype": preset.kv_cache_dtype,
         "placement_policy": preset.placement_policy,
         "execution_policy": preset.execution_policy,
+        # Multi-GPU hint para los backends con pool shared (Ollama). El
+        # coordinator no sabe pools, pero sí sabe que este preset pide >1 GPU.
+        # ``_select_pool`` del backend usa esta lista para elegir un pool que
+        # exponga todas estas GPUs juntas (``multi_gpu=true`` + ``gpus`` ⊇).
+        "gpu_indices": list(chosen.gpu_indices),
         "tracking_worker_key": compute_worker_key(
             profile.base_model_id,
             profile.load_overrides,

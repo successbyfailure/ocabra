@@ -51,29 +51,76 @@ class OllamaBackend(BackendInterface):
         pools = self._configured_pools()
         if not pools:
             return settings.ollama_base_url.rstrip("/"), []
-        desired = gpu_indices[0] if len(gpu_indices) == 1 else None
         runtime = extra_config.get("_runtime", {}) if isinstance(extra_config, dict) else {}
         required_parallelism = max(1, int(runtime.get("parallelism") or 1))
-        eligible = []
+        eligible: list[tuple[str, list[int], bool]] = []
         for pool in pools:
             url = str(pool.get("url") or "").rstrip("/")
             gpus = [int(index) for index in pool.get("gpus", [])]
             parallelism = max(1, int(pool.get("num_parallel") or 1))
+            multi_gpu = bool(pool.get("multi_gpu"))
             if url and parallelism >= required_parallelism:
-                eligible.append((url, gpus))
+                eligible.append((url, gpus, multi_gpu))
+        # Multi-GPU preset: necesita un pool que exponga TODAS las GPUs pedidas
+        # a la vez (p. ej. gemma4:26b max → preferred_gpus=[0,1] + pool shared).
+        # Preferimos el pool más pequeño que cumpla para no monopolizar el
+        # shared cuando un single-GPU bastaría. La hint canónica es
+        # ``_runtime.gpu_indices`` del coordinator; ``gpu_indices`` entrante
+        # suele venir con 1 GPU del admit incluso para presets multi-GPU.
+        runtime_gpu_indices = runtime.get("gpu_indices") or []
+        effective_multi = (
+            [int(idx) for idx in runtime_gpu_indices]
+            if len(runtime_gpu_indices) > 1
+            else gpu_indices if len(gpu_indices) > 1 else []
+        )
+        if effective_multi:
+            required = set(effective_multi)
+            matches = [
+                (url, gpus) for url, gpus, multi in eligible
+                if multi and required.issubset(set(gpus))
+            ]
+            if not matches:
+                raise RuntimeError(
+                    f"no Ollama pool exposes GPUs {sorted(required)} with multi_gpu=true "
+                    f"and parallelism {required_parallelism}"
+                )
+            matches.sort(key=lambda item: len(item[1]))
+            return matches[0]
+        desired = gpu_indices[0] if len(gpu_indices) == 1 else None
+        # Pool single-GPU preferido: evita elegir el pool shared cuando una
+        # sola GPU basta (reserva al shared para presets multi-GPU reales).
+        single_gpu_candidates = [
+            (url, gpus) for url, gpus, multi in eligible if not multi
+        ]
         if desired is not None:
-            match = next((item for item in eligible if desired in item[1]), None)
+            match = next(
+                (item for item in single_gpu_candidates if desired in item[1]),
+                None,
+            )
+            if match is None:
+                # Fallback: cualquier pool (incluido shared) que incluya la
+                # GPU pedida, por si no hay single-GPU pool configurado.
+                match = next(
+                    (
+                        (url, gpus)
+                        for url, gpus, _multi in eligible
+                        if desired in gpus
+                    ),
+                    None,
+                )
             if match is None:
                 raise RuntimeError(
                     f"no Ollama pool for GPU {desired} with parallelism "
                     f"{required_parallelism}"
                 )
             return match
+        if single_gpu_candidates:
+            return single_gpu_candidates[0]
         if not eligible:
             raise RuntimeError(
                 f"no Ollama pool supports parallelism {required_parallelism}"
             )
-        return eligible[0]
+        return (eligible[0][0], eligible[0][1])
 
     def _registry_for(self, endpoint: str) -> OllamaRegistry:
         return self._registries.setdefault(endpoint, OllamaRegistry(endpoint))

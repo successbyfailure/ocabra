@@ -209,22 +209,113 @@ async def resolve_profile_runtime_capacities(
         )
         requested_gpus = list(preset.preferred_gpus or [])
         if preset.placement_policy == "forced" and len(requested_gpus) > 1:
+            # Multi-GPU spread: solo soportado hoy en Ollama con un pool
+            # ``shared`` que exponga todas las GPUs + OLLAMA_SCHED_SPREAD=1.
+            # vLLM y backends con tensor_parallel genuino siguen devolviendo
+            # unresolved porque su planner de sharding no está integrado.
+            if backend != "ollama":
+                rows.append(
+                    {
+                        "preset_key": preset.preset_key,
+                        "resolved": False,
+                        "requested_context": preset.context_tokens,
+                        "effective_context": None,
+                        "model_max": model_max,
+                        "hardware_max": None,
+                        "requested_parallelism": preset.parallelism,
+                        "effective_parallelism": effective_parallelism,
+                        "target_gpus": requested_gpus,
+                        "fits": False,
+                        "runtime_key": None,
+                        "warnings": [
+                            "la capacidad multi-GPU requiere el planner de sharding del backend"
+                        ],
+                    }
+                )
+                continue
+            by_index = {gpu["index"]: gpu for gpu in gpus}
+            selected_gpus = [by_index[idx] for idx in requested_gpus if idx in by_index]
+            if len(selected_gpus) != len(requested_gpus):
+                rows.append(
+                    {
+                        "preset_key": preset.preset_key,
+                        "resolved": False,
+                        "requested_context": preset.context_tokens,
+                        "effective_context": None,
+                        "model_max": model_max,
+                        "hardware_max": None,
+                        "requested_parallelism": preset.parallelism,
+                        "effective_parallelism": effective_parallelism,
+                        "target_gpus": requested_gpus,
+                        "fits": False,
+                        "runtime_key": None,
+                        "warnings": [
+                            f"preferred_gpus={requested_gpus} no están todas presentes"
+                        ],
+                    }
+                )
+                continue
+            virtual_gpu = {
+                "index": -1,
+                "total_mb": sum(int(gpu["total_mb"]) for gpu in selected_gpus),
+            }
+            requested_context: int | str | None = (
+                "max" if preset.context_mode == "max" else preset.context_tokens
+            )
+            kv_bytes = KV_DTYPES.get(str(preset.kv_cache_dtype).lower(), (2.0, None, "f16"))[0]
+            plan = vp.plan_use_case(
+                backend,
+                resolution.arch,
+                resolution.weights_mb,
+                gpu_total_mb=virtual_gpu["total_mb"],
+                requested_context=requested_context,
+                slots=effective_parallelism,
+                gpu_memory_utilization=gpu_memory_utilization,
+                kv_dtype_bytes=kv_bytes,
+            )
+            effective = int(plan["effective_context"] or 0)
+            warnings = list(plan["warnings"])
+            if policy_max is not None and effective > policy_max:
+                if preset.context_mode != "max":
+                    warnings.append(
+                        f"contexto {effective} supera el límite validado {policy_max}; "
+                        f"reducido a {policy_max}"
+                    )
+                effective = policy_max
+            if effective <= 0 and not warnings:
+                warnings.append(
+                    "el modelo y su KV cache no caben ni sumando ambas GPUs"
+                )
+            fits = effective > 0 and not warnings
+            if parallelism_warning:
+                warnings.append(parallelism_warning)
+            runtime_key = None
+            if effective > 0:
+                runtime_key = build_runtime_key(
+                    model_id=profile.base_model_id,
+                    backend_type=backend,
+                    effective_context=effective,
+                    parallelism=effective_parallelism,
+                    kv_cache_dtype=preset.kv_cache_dtype,
+                    placement_policy=preset.placement_policy,
+                    gpu_indices=tuple(requested_gpus),
+                    load_flags=profile.load_overrides,
+                )
             rows.append(
                 {
                     "preset_key": preset.preset_key,
-                    "resolved": False,
+                    "resolved": True,
                     "requested_context": preset.context_tokens,
-                    "effective_context": None,
+                    "effective_context": effective,
                     "model_max": model_max,
-                    "hardware_max": None,
+                    "hardware_max": int(plan["max_context"] or 0),
+                    "policy_max": policy_max,
                     "requested_parallelism": preset.parallelism,
                     "effective_parallelism": effective_parallelism,
-                    "target_gpus": requested_gpus,
-                    "fits": False,
-                    "runtime_key": None,
-                    "warnings": [
-                        "la capacidad multi-GPU requiere el planner de sharding del backend"
-                    ],
+                    "target_gpus": list(requested_gpus),
+                    "fits": fits,
+                    "runtime_key": runtime_key,
+                    "warnings": warnings,
                 }
             )
             continue
