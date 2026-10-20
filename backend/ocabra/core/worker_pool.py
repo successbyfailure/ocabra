@@ -71,6 +71,94 @@ def _ollama_native_messages(messages: Any) -> tuple[list[dict[str, Any]], bool]:
     return converted, True
 
 
+def _coerce_tool_arguments_to_object(messages: list[dict[str, Any]]) -> None:
+    """Normalize assistant tool_calls' ``arguments`` to Ollama's native format.
+
+    OpenAI-standard clients send ``arguments`` as a JSON-encoded STRING
+    (e.g. ``'{"city":"Madrid"}'``); Ollama's native ``/api/chat`` expects a
+    dict. Without this coercion, the second turn of a tool loop fails with
+    ``upstream_invalid_request: Value looks like object, but can't find
+    closing '}' symbol`` because Ollama tries to parse the already-JSON
+    string as a dict.
+    """
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    function["arguments"] = _json.loads(arguments) if arguments else {}
+                except _json.JSONDecodeError:
+                    # Leave as-is; Ollama may still handle string arguments
+                    # on malformed input, otherwise the upstream error
+                    # bubbles up untouched.
+                    pass
+
+
+def _apply_openai_tool_choice(
+    native: dict[str, Any], tool_choice: Any
+) -> None:
+    """Translate OpenAI's ``tool_choice`` into something Ollama can honour.
+
+    Ollama 0.4+ does not expose a native ``tool_choice`` knob; the model
+    decides. We approximate by filtering ``tools`` and injecting a system
+    instruction so the model behaves as if the knob existed:
+
+    - ``"auto"`` / unset: pass tools through, let the model decide.
+    - ``"none"``: strip ``tools`` entirely; the model never sees them.
+    - ``"required"``: keep tools and nudge the model to invoke one.
+    - ``{"type":"function","function":{"name":"X"}}``: keep ONLY that tool
+      and nudge the model to invoke it specifically.
+    """
+    if tool_choice in (None, "auto"):
+        return
+    tools = native.get("tools") or []
+    messages = native.get("messages") or []
+    if tool_choice == "none":
+        native.pop("tools", None)
+        return
+    if tool_choice == "required":
+        if tools:
+            system_hint = (
+                "You MUST call one of the provided tools to answer this "
+                "turn. Do not reply with plain text."
+            )
+            native["messages"] = [
+                {"role": "system", "content": system_hint},
+                *messages,
+            ]
+        return
+    if isinstance(tool_choice, dict):
+        function = tool_choice.get("function") or {}
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            filtered = [
+                tool for tool in tools
+                if isinstance(tool, dict)
+                and (tool.get("function") or {}).get("name") == name
+            ]
+            if filtered:
+                native["tools"] = filtered
+            system_hint = (
+                f"You MUST call the tool named '{name}' to answer this "
+                "turn. Do not reply with plain text and do not call any "
+                "other tool."
+            )
+            native["messages"] = [
+                {"role": "system", "content": system_hint},
+                *messages,
+            ]
+
+
 def _ollama_native_body(path: str, body: dict) -> tuple[str, dict, str | None]:
     """Translate Ollama's OpenAI shim requests to its native API.
 
@@ -90,10 +178,12 @@ def _ollama_native_body(path: str, body: dict) -> tuple[str, dict, str | None]:
         messages, compatible = _ollama_native_messages(body.get("messages", []))
         if not compatible:
             return path, body, None
+        _coerce_tool_arguments_to_object(messages)
         native["messages"] = messages
         for key in ("tools", "format", "think", "keep_alive"):
             if key in body:
                 native[key] = body[key]
+        _apply_openai_tool_choice(native, body.get("tool_choice"))
         native_path = "/api/chat"
     else:
         native["prompt"] = body.get("prompt", "")
@@ -121,6 +211,59 @@ def _ollama_native_body(path: str, body: dict) -> tuple[str, dict, str | None]:
     return native_path, native, kind
 
 
+def _normalize_tool_calls_from_ollama(
+    tool_calls: Any,
+) -> list[dict[str, Any]]:
+    """Reshape Ollama's tool_calls into the OpenAI wire format.
+
+    Ollama emits each call as ``{"function": {"index": N, "name": X,
+    "arguments": {...}}}``. OpenAI clients expect
+    ``{"index": N, "id": "call_...", "type": "function",
+    "function": {"name": X, "arguments": "<json-string>"}}`` and the AI SDK
+    treats ``arguments`` as a plain string. Mismatched shapes break every
+    standard client that parses on the OpenAI schema (including Vercel's
+    AI SDK and openai-python).
+
+    Returns a NEW list; the input is left untouched for the stream path
+    that reuses this helper per chunk.
+    """
+    if not isinstance(tool_calls, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for position, raw in enumerate(tool_calls):
+        if not isinstance(raw, dict):
+            continue
+        source = dict(raw)
+        function = dict(source.get("function") or {})
+        inner_index = function.pop("index", None)
+        index = source.get("index")
+        if index is None:
+            index = inner_index if isinstance(inner_index, int) else position
+        name = function.get("name") or ""
+        arguments = function.get("arguments")
+        if isinstance(arguments, (dict, list)):
+            function["arguments"] = _json.dumps(arguments, ensure_ascii=False)
+        elif arguments is None:
+            function["arguments"] = ""
+        elif not isinstance(arguments, str):
+            function["arguments"] = _json.dumps(arguments, ensure_ascii=False)
+        call_id = source.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = f"call_{uuid.uuid4().hex[:12]}"
+        normalized.append(
+            {
+                "index": int(index) if isinstance(index, (int, float)) else position,
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": function.get("arguments") or "",
+                },
+            }
+        )
+    return normalized
+
+
 def _ollama_native_response(kind: str, result: dict, model: str) -> dict:
     usage = {
         "prompt_tokens": int(result.get("prompt_eval_count") or 0),
@@ -137,6 +280,21 @@ def _ollama_native_response(kind: str, result: dict, model: str) -> dict:
         message = dict(result.get("message") or {})
         if "thinking" in message and "reasoning_content" not in message:
             message["reasoning_content"] = message.pop("thinking")
+        raw_tool_calls = message.get("tool_calls")
+        normalized_tool_calls = _normalize_tool_calls_from_ollama(raw_tool_calls)
+        if normalized_tool_calls:
+            message["tool_calls"] = normalized_tool_calls
+        elif "tool_calls" in message:
+            message.pop("tool_calls")
+        # OpenAI contract: finish_reason MUST be "tool_calls" whenever the
+        # assistant turn emits any tool_calls, regardless of Ollama's own
+        # done_reason (Ollama frequently returns "stop" even when it also
+        # emits a tool_call, which breaks downstream dispatchers that key
+        # off this field).
+        if normalized_tool_calls:
+            finish_reason = "tool_calls"
+        else:
+            finish_reason = result.get("done_reason") or "stop"
         return {
             **common,
             "object": "chat.completion",
@@ -144,7 +302,7 @@ def _ollama_native_response(kind: str, result: dict, model: str) -> dict:
                 {
                     "index": 0,
                     "message": message,
-                    "finish_reason": result.get("done_reason") or "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
         }
@@ -420,8 +578,16 @@ class WorkerPool:
                         delta["content"] = message.get("content") or ""
                     if message.get("thinking"):
                         delta["reasoning_content"] = message["thinking"]
-                    if message.get("tool_calls"):
-                        delta["tool_calls"] = message["tool_calls"]
+                    normalized_tool_calls = _normalize_tool_calls_from_ollama(
+                        message.get("tool_calls")
+                    )
+                    if normalized_tool_calls:
+                        delta["tool_calls"] = normalized_tool_calls
+                        # Stream finish_reason must match the final shape
+                        # (OpenAI emits ``"tool_calls"`` on the terminating
+                        # chunk whenever the assistant produced any call).
+                        if done:
+                            finish_reason = "tool_calls"
                     event = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
