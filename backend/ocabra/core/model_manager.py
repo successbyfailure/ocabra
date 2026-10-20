@@ -1057,6 +1057,25 @@ class ModelManager:
                             # backend start. Otherwise another model (notably Ollama,
                             # whose runner may span every GPU) can consume VRAM after
                             # vLLM's headroom check but before its process starts.
+                            # Multi-GPU hint ``_runtime.gpu_indices`` (set by the
+                            # runtime coordinator for presets with multiple
+                            # ``preferred_gpus``) bypasses the single-GPU
+                            # scheduler so admission validates VRAM and evicts
+                            # neighbours on every GPU the backend will spread
+                            # onto, not just the "best" single one.
+                            _runtime_meta = (
+                                state.extra_config.get("_runtime")
+                                if isinstance(state.extra_config, dict)
+                                else None
+                            )
+                            required_multi_gpu: list[int] | None = None
+                            if isinstance(_runtime_meta, dict):
+                                raw_indices = _runtime_meta.get("gpu_indices") or []
+                                if isinstance(raw_indices, list) and len(raw_indices) > 1:
+                                    try:
+                                        required_multi_gpu = [int(i) for i in raw_indices]
+                                    except (TypeError, ValueError):
+                                        required_multi_gpu = None
                             gpu_indices = await self._admit_gpu_load(
                                 model_id=model_id,
                                 vram_needed=vram_needed,
@@ -1068,6 +1087,7 @@ class ModelManager:
                                 gpu_managed=gpu_managed,
                                 enforce_vllm_headroom=enforce_vllm_headroom,
                                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                                required_gpu_indices=required_multi_gpu,
                             )
 
                             # Use-case resolution stays inside the gate because it
@@ -1463,17 +1483,25 @@ class ModelManager:
         gpu_managed: bool,
         enforce_vllm_headroom: bool,
         vllm_gpu_memory_utilization: float | None,
+        required_gpu_indices: list[int] | None = None,
     ) -> list[int]:
         """Assign and validate GPUs immediately before a backend starts.
 
         The caller must hold ``_backend_load_gate``. Keeping admission and the
         backend start in one critical section prevents another cold load from
         invalidating the VRAM decision while this model waits to start.
+
+        ``required_gpu_indices`` short-circuits GPU selection: used when the
+        caller already knows which GPUs the backend will spread onto (e.g.
+        Ollama shared pool with OLLAMA_SCHED_SPREAD) and only needs admission
+        to validate VRAM and evict LRU neighbours in all of them.
         """
         if not gpu_managed:
             return []
 
-        if self._gpu_scheduler:
+        if required_gpu_indices:
+            gpu_indices = list(required_gpu_indices)
+        elif self._gpu_scheduler:
             gpu_indices = await self._assign_gpus_for_load(
                 model_id=model_id,
                 vram_needed=vram_needed,
