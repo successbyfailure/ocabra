@@ -998,6 +998,27 @@ Selección de preset para chat/completions:
 6. El escalado hacia arriba es inmediato; la vuelta al default se difiere por
    ``downgrade_grace_seconds`` y nunca interrumpe peticiones activas.
 
+**Presets ``max`` y el límite del split entre GPUs.** El preset con
+``context_mode="max"`` pide el mayor contexto que ``vram_planner`` cree que
+cabe. ``vram_planner`` evalúa UNA GPU por preset (``placement_policy=auto``
+elige la que ofrezca mayor contexto efectivo, no suma varias). Ollama corre
+hoy como dos pools segmentados por ``CUDA_VISIBLE_DEVICES``: un modelo
+cargado en el pool 3090 no puede ver la 3060 y viceversa, así que split
+real entre tarjetas no está soportado por el camino de Ollama. Para modelos
+cuyo contexto nativo (``runtime_policy.max_context_tokens``) no cabe en la
+GPU más grande disponible, el preset ``max`` queda deshabilitado hasta que
+se añada un pool compartido o soporte explícito de ``OLLAMA_SCHED_SPREAD``.
+A fecha de 2026-10-20 esto afecta a: ``gemma4:26b``, ``qwen3.8:27b``,
+``qwen3.8:27b-abliterated``, ``qwen3-coder:30b``, ``nemotron-3-nano:30b``.
+
+**Margen de seguridad del budget KV.** ``max_context_tokens`` aplica un
+``DEFAULT_KV_SAFETY_FACTOR=0.90`` al presupuesto (``free - weights -
+overhead``) para absorber buffers no modelados (CUDA graphs,
+Flash-Attention workspace, scratch de Ollama/llama.cpp, chunked prefill).
+Sin esto el planner reportaba ``fits=True`` para 262k en 24 GB cuando
+Ollama lo rechazaba con HTTP 500. vLLM no lo necesita porque ya reserva
+VRAM via ``gpu_memory_utilization``.
+
 Endpoints internos:
 
 ```

@@ -78,6 +78,15 @@ def estimate_total_vram_mb(
     return int(weights_mb + kv_vram_mb(arch, kv_tokens, kv_dtype_bytes) + overhead_mb)
 
 
+#: Fraction of (free - weights - overhead) actually usable for KV cache after
+#: runtime buffers the model-level estimator doesn't track (CUDA graphs,
+#: Flash-Attention workspace, Ollama runner scratch, chunked prefill tokens).
+#: 0.90 means we assume 10% of the "logical" KV budget is burnt on buffers.
+#: Set from measurements: without this margin, gemma4:26b was reporting fits
+#: for 262k on a 24 GB 3090 and Ollama rejected the load with HTTP 500.
+DEFAULT_KV_SAFETY_FACTOR = 0.90
+
+
 def max_context_tokens(
     free_mb: float,
     weights_mb: float,
@@ -86,14 +95,19 @@ def max_context_tokens(
     slots: int = 1,
     kv_dtype_bytes: float = 2.0,
     overhead_mb: float = DEFAULT_OVERHEAD_MB,
+    safety_factor: float = DEFAULT_KV_SAFETY_FACTOR,
 ) -> int:
     """Largest per-slot context that fits in ``free_mb`` given weights + overhead.
 
     ``slots`` divides the KV budget (Ollama: NUM_PARALLEL; llama.cpp: --parallel).
+    ``safety_factor`` discounts the raw KV budget to leave headroom for runtime
+    buffers the estimator doesn't model (CUDA graphs, Flash-Attention workspace,
+    scratch allocations). Default 0.90.
     """
     budget_mb = free_mb - weights_mb - overhead_mb
     if budget_mb <= 0:
         return 0
+    budget_mb *= max(0.0, min(1.0, safety_factor))
     per_token_mb = arch.kv_bytes_per_token(kv_dtype_bytes) / _MB
     if per_token_mb <= 0:
         return 0

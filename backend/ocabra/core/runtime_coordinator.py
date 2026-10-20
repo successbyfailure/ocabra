@@ -210,6 +210,7 @@ async def plan_profile_runtime(
         parallelism=chosen.parallelism,
         gpu_indices=list(chosen.gpu_indices),
         candidate_presets=[item.preset_key for item in candidates],
+        fits_by_preset={row["preset_key"]: bool(row.get("fits")) for row in rows},
         loaded_runtime_keys=sorted(loaded_keys),
         explicit=bool(explicit_key),
     )
