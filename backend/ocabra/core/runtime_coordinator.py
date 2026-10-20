@@ -6,7 +6,11 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from ocabra.core.model_manager_helpers import compute_worker_key
+
+logger = structlog.get_logger(__name__)
 from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
 from ocabra.core.runtime_presets import (
     ContextCapacityError,
@@ -151,6 +155,13 @@ async def plan_profile_runtime(
         )
 
     if not candidates:
+        logger.warning(
+            "runtime_plan_no_candidates",
+            profile_id=profile.profile_id,
+            base_model_id=profile.base_model_id,
+            enabled_preset_keys=[preset.preset_key for preset in enabled_presets],
+            fits_by_key={row["preset_key"]: row.get("fits") for row in rows},
+        )
         raise ContextCapacityError("profile has no enabled runtime preset that fits")
 
     body = request_body or {}
@@ -187,6 +198,21 @@ async def plan_profile_runtime(
         )
         chosen = selected.preset
         reason = selected.reason
+
+    logger.info(
+        "runtime_plan_selected",
+        profile_id=profile.profile_id,
+        base_model_id=profile.base_model_id,
+        preset_key=chosen.preset_key,
+        selection_reason=reason,
+        required_tokens=required_tokens,
+        effective_context=chosen.effective_context,
+        parallelism=chosen.parallelism,
+        gpu_indices=list(chosen.gpu_indices),
+        candidate_presets=[item.preset_key for item in candidates],
+        loaded_runtime_keys=sorted(loaded_keys),
+        explicit=bool(explicit_key),
+    )
 
     preset = preset_by_key[chosen.preset_key]
     overrides = dict(profile.load_overrides or {})
