@@ -16,7 +16,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       MODELS_DIR: /data/models
       HF_CACHE_DIR: /data/hf_cache
-      OLLAMA_POOLS_JSON: '${OLLAMA_POOLS_JSON:-[{"id":"3090","url":"http://ollama:11434","gpus":[1],"num_parallel":2},{"id":"3060","url":"http://ollama-3060:11434","gpus":[0],"num_parallel":2},{"id":"shared","url":"http://ollama-shared:11434","gpus":[0,1],"num_parallel":2,"multi_gpu":true}]}'
+      OLLAMA_POOLS_JSON: '${OLLAMA_POOLS_JSON:-[{"id":"3090","url":"http://ollama:11434","gpus":[1],"num_parallel":2},{"id":"3060","url":"http://ollama-3060:11434","gpus":[0],"num_parallel":2},{"id":"shared","url":"http://ollama-shared:11434","gpus":[0,1],"num_parallel":1,"multi_gpu":true}]}'
       VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       VLLM_ENFORCE_EAGER: ${VLLM_ENFORCE_EAGER:-true}
       VLLM_ATTENTION_BACKEND: ${VLLM_ATTENTION_BACKEND:-}
@@ -248,11 +248,22 @@ services:
     image: ocabra-ollama:latest
     runtime: nvidia
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0,1"
+      # 3090 primero (device_id 1 → cuda:0 dentro del container tras
+      # CUDA_DEVICE_ORDER=PCI_BUS_ID queda como main_gpu). Ollama con
+      # SCHED_SPREAD llena main_gpu primero y usa la secundaria como
+      # overflow; con 0,1 llenaba la 3060 (12 GB) y spill a CPU, perdiendo
+      # la 3090 vacía. Orden descendiente por VRAM es lo lógico.
+      NVIDIA_VISIBLE_DEVICES: "1,0"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_NUM_PARALLEL: "2"
+      # 1 slot: este pool solo sirve presets ``max`` donde el KV cache
+      # consume toda la VRAM disponible entre ambas GPUs. Con np=2 Ollama
+      # reservaría 2 × num_ctx (p.ej. 2×262144=524k para gemma4:26b max)
+      # y cualquier carga reventaría con CUDA OOM — observado 2026-10-21
+      # con 3 clientes afectados. OLLAMA_NUM_PARALLEL es env del daemon,
+      # no se puede ajustar por request.
+      OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: "q8_0"
       # Reparte capas entre ambas GPUs al cargar en vez de intentar meter el
