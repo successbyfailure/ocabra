@@ -76,7 +76,15 @@ async def chat(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
-            target, peer = await resolve_federated(ollama_model, model_manager, federation_manager)
+            # Pass the profile_registry so resolve_federated can normalize
+            # profile ids and router profiles to their base_model_id before
+            # the local/remote lookup. Without it, router profiles like
+            # ``recomendado-ha-chatbots`` fell through to the "not found
+            # anywhere" branch and the caller received 404 model_not_found
+            # from the federation layer, before resolve_profile ever ran.
+            target, peer = await resolve_federated(
+                ollama_model, model_manager, federation_manager, profile_registry
+            )
             if target == "remote":
                 import structlog as _structlog
 
@@ -144,12 +152,18 @@ async def chat(
 
     # Try profile resolution first
     try:
+        # Pass the router resolver so router profiles (``recomendado-*``)
+        # also work when called via the Ollama-compatible path, not only
+        # the OpenAI one. Without it, resolve_profile treated the router
+        # as "no base_model_id → routing_disabled" / 404 depending on
+        # the branch, breaking Ollama clients that selected the router.
         profile, state = await resolve_profile(
             ollama_model,
             model_manager,
             profile_registry,
             user=user,
             request_body=body,
+            router_resolver=getattr(request.app.state, "router_resolver", None),
             request_state=request.state,
         )
         merged_body = merge_profile_defaults(profile, body)

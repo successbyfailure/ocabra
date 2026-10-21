@@ -62,7 +62,12 @@ async def generate(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
-            target, peer = await resolve_federated(ollama_model, model_manager, federation_manager)
+            # Same fix as /api/chat: pass the profile_registry so router
+            # profiles are normalized to their base_model_id before the
+            # federation lookup (otherwise -> 404 model_not_found).
+            target, peer = await resolve_federated(
+                ollama_model, model_manager, federation_manager, profile_registry
+            )
             if target == "remote":
                 import structlog as _structlog
 
@@ -120,12 +125,15 @@ async def generate(
 
     # Try profile resolution first
     try:
+        # Pass the router resolver so router profiles also work when the
+        # client calls the Ollama-compatible path. Same fix as /api/chat.
         profile, state = await resolve_profile(
             ollama_model,
             model_manager,
             profile_registry,
             user=user,
             request_body=body,
+            router_resolver=getattr(request.app.state, "router_resolver", None),
             request_state=request.state,
         )
         merged_body = merge_profile_defaults(profile, body)
