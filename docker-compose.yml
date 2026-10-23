@@ -16,7 +16,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       MODELS_DIR: /data/models
       HF_CACHE_DIR: /data/hf_cache
-      OLLAMA_POOLS_JSON: '${OLLAMA_POOLS_JSON:-[{"id":"3090","url":"http://ollama:11434","gpus":[1],"num_parallel":2},{"id":"3060","url":"http://ollama-3060:11434","gpus":[0],"num_parallel":2},{"id":"shared","url":"http://ollama-shared:11434","gpus":[0,1],"num_parallel":1,"multi_gpu":true}]}'
+      OLLAMA_POOLS_JSON: '${OLLAMA_POOLS_JSON:-[{"id":"3090","url":"http://ollama:11434","gpus":[1],"num_parallel":2},{"id":"3060","url":"http://ollama-3060:11434","gpus":[0],"num_parallel":2},{"id":"shared","url":"http://ollama-shared:11434","gpus":[0,1],"num_parallel":1,"multi_gpu":true},{"id":"shared-np2","url":"http://ollama-shared-np2:11434","gpus":[0,1],"num_parallel":2,"multi_gpu":true}]}'
       VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       VLLM_ENFORCE_EAGER: ${VLLM_ENFORCE_EAGER:-true}
       VLLM_ATTENTION_BACKEND: ${VLLM_ATTENTION_BACKEND:-}
@@ -269,6 +269,36 @@ services:
       # Reparte capas entre ambas GPUs al cargar en vez de intentar meter el
       # modelo entero en la "mejor" GPU. Imprescindible para que un max 256k
       # ocupe 3090+3060 en lugar de fallar por VRAM en una sola tarjeta.
+      OLLAMA_SCHED_SPREAD: "1"
+      OLLAMA_CONTEXT_LENGTH: "131072"
+    volumes:
+      - /docker/ai-models/ollama:/root/.ollama
+    restart: unless-stopped
+
+  # Variante del shared con 2 slots: para presets ``128k`` de LLMs grandes
+  # que no caben en la 3090 sola con np=2 (num_ctx × 2 slots > budget KV)
+  # pero sí caben repartidos en 3090+3060 sumando 36 GB. Compleementario,
+  # no sustituto, del pool ``shared`` (np=1) que sirve el preset ``max``.
+  # oCabra ``_select_pool`` elige el más pequeño que cumpla ``multi_gpu``
+  # + GPUs + parallelism, así que un preset multi-GPU con parallelism=1 va
+  # a ``shared`` y uno con parallelism=2 va a ``shared-np2`` naturalmente.
+  ollama-shared-np2:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    image: ocabra-ollama:latest
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "1,0"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      OLLAMA_HOST: 0.0.0.0:11434
+      # 2 slots: KV reservado = num_ctx × 2. Para gemma4:26b 128k = 262k
+      # tokens ≈ 15 GB KV + 17 GB pesos = 32 GB → cabe en los 36 GB
+      # combinados pero deja 4 GB de margen (tight pero viable).
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: "q8_0"
       OLLAMA_SCHED_SPREAD: "1"
       OLLAMA_CONTEXT_LENGTH: "131072"
     volumes:
