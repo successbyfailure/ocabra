@@ -538,6 +538,35 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     }
                 },
             )
+        except asyncio.CancelledError:
+            # Admin or owner cancelled via /ocabra/stats/requests/{id}/cancel.
+            # ``CancelledError`` is BaseException on 3.8+, so the generic
+            # ``except Exception`` below never catches it. Clean up the
+            # in-flight slot (otherwise the counter leaks until the ActiveRequest
+            # ages out) and record the stat as a 499 — the canonical "client
+            # closed request" code — so the UI shows the cancelled turn.
+            if mm and inflight_model_id:
+                mm.end_request(
+                    getattr(request.state, "inflight_model_id", inflight_model_id),
+                    inflight_request_id,
+                )
+            model_id = _extract_model_id(request=request, body=request_payload)
+            if model_id:
+                asyncio.create_task(
+                    _record_stat(
+                        request=request,
+                        model_id=model_id,
+                        started_at=started_at,
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        error_message="cancelled",
+                        status_code=499,
+                        endpoint_path=path,
+                        request_kind=request_kind,
+                        input_tokens=None,
+                        output_tokens=None,
+                    )
+                )
+            raise
         except Exception as exc:
             if mm and inflight_model_id:
                 mm.end_request(

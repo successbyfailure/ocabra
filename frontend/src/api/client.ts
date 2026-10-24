@@ -1690,6 +1690,11 @@ export const api = {
     },
     recent: (limit = 20) =>
       request<RecentRequestsData>("GET", `/ocabra/stats/recent?limit=${limit}`),
+    cancelRequest: (requestId: string) =>
+      request<{ cancelled: boolean; requestId: string; hadTask: boolean }>(
+        "POST",
+        `/ocabra/stats/requests/${encodeURIComponent(requestId)}/cancel`,
+      ),
     myRecent: (limit = 20) =>
       request<RecentRequestsData>("GET", `/ocabra/stats/my-recent?limit=${limit}`),
     byUser: (params: StatsParams) => {

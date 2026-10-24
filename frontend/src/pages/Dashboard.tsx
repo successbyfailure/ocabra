@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { toast } from "sonner"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { ConcentricGauge } from "@/components/gpu/ConcentricGauge"
 import { MemoryBars } from "@/components/gpu/MemoryBars"
@@ -414,18 +415,19 @@ function RecentRequestsSection() {
   const [data, setData] = useState<RecentRequestsData>({ requests: [] })
   const [loading, setLoading] = useState(true)
 
+  const load = useCallback(async () => {
+    try {
+      const result = await api.stats.recent(20)
+      setData(result)
+    } catch { /* keep stale */ }
+    finally { setLoading(false) }
+  }, [])
+
   useEffect(() => {
-    let active = true
-    async function load() {
-      try {
-        const result = await api.stats.recent(20)
-        if (active) { setData(result); setLoading(false) }
-      } catch { if (active) setLoading(false) }
-    }
     void load()
     const timer = window.setInterval(() => { void load() }, 30_000)
-    return () => { active = false; window.clearInterval(timer) }
-  }, [])
+    return () => { window.clearInterval(timer) }
+  }, [load])
 
   return (
     <Section title="Últimas peticiones" defaultOpen={true}>
@@ -474,9 +476,28 @@ function RecentRequestsSection() {
                         )}
                       </td>
                       <td className="px-3 py-2 text-xs font-medium text-sky-300">
-                        <span className="inline-flex items-center gap-1">
-                          <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" /> En vuelo
-                        </span>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1">
+                            <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" /> En vuelo
+                          </span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!window.confirm(`Cancelar la petición en curso a ${req.modelId}?`)) return
+                              try {
+                                await api.stats.cancelRequest(req.id)
+                                toast.success("Petición cancelada")
+                                void load()
+                              } catch (err) {
+                                toast.error(err instanceof Error ? err.message : "No se pudo cancelar")
+                              }
+                            }}
+                            className="rounded border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium text-red-200 hover:bg-red-500/20"
+                            title="Cancelar esta petición"
+                          >
+                            ✕ Cancelar
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   )

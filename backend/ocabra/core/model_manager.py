@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from threading import Lock
+from typing import Any
 from urllib.parse import urlparse
 
 import sqlalchemy as sa
@@ -145,6 +146,14 @@ class ActiveRequest:
     # Human-friendly identifier the UI shows above the raw worker key
     # (e.g. "qwen3.8:27b" instead of "ollama/qwen3.8:27b::2bcc9dfe6014").
     profile_id: str | None = None
+    # asyncio.Task of the request handler, captured when begin_request runs
+    # inside the request's own task context. Used by cancel_request to
+    # abort an in-flight call: cancelling the task propagates
+    # ``CancelledError`` through the ``async with httpx.AsyncClient`` scope
+    # that forwards to the backend, which closes the upstream connection
+    # and lets Ollama/vLLM abort the generation. Only set for middleware
+    # callers; in-process begin_request paths leave it None.
+    task: Any = None
 
 
 class ModelManager:
@@ -221,6 +230,39 @@ class ModelManager:
             self._in_flight[new_model_id] = self._in_flight.get(new_model_id, 0) + 1
             active.model_id = new_model_id
 
+    def cancel_request(self, request_id: str) -> dict | None:
+        """Cancel an in-flight request by its id.
+
+        Returns a dict with the cancelled request's metadata (for audit
+        logs) or ``None`` if the id is unknown. The actual cancellation is
+        best-effort: it schedules ``task.cancel()`` on the handler, which
+        propagates ``CancelledError`` through the request's own
+        ``async with`` scopes. If the task hasn't captured a handler
+        (in-process callers), we still clear the in-flight slot so the
+        counter doesn't leak.
+        """
+        with self._in_flight_lock:
+            active = self._active_requests.get(request_id)
+            if active is None:
+                return None
+            task = active.task
+            audit = {
+                "request_id": request_id,
+                "model_id": active.model_id,
+                "profile_id": active.profile_id,
+                "user_id": active.user_id,
+                "username": active.username,
+                "api_key_name": active.api_key_name,
+                "started_at": active.started_at,
+                "had_task": task is not None,
+            }
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:  # noqa: BLE001 — never raise from cancel
+                pass
+        return audit
+
     def try_begin_request(
         self,
         model_id: str,
@@ -248,6 +290,13 @@ class ModelManager:
                 return None
             request_id = str(uuid.uuid4())
             self._in_flight[model_id] = current + 1
+            # Capture the asyncio task owning this request so a later
+            # ``cancel_request`` can abort it. Safe when called from a
+            # synchronous admission path (returns None).
+            try:
+                owning_task = asyncio.current_task()
+            except RuntimeError:
+                owning_task = None
             self._active_requests[request_id] = ActiveRequest(
                 request_id=request_id,
                 model_id=model_id,
@@ -257,6 +306,7 @@ class ModelManager:
                 username=username,
                 api_key_name=api_key_name,
                 profile_id=profile_id,
+                task=owning_task,
             )
         # Bloque 20 — track start on the estimator so
         # ``in_flight_remaining`` returns useful numbers for the dynamic

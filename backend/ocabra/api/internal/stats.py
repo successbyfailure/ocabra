@@ -7,9 +7,12 @@ import time
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["stats"])
 
@@ -214,6 +217,50 @@ async def recent_requests(
         row["inFlight"] = False
     result["requests"] = in_flight_rows + result.get("requests", [])
     return result
+
+
+@router.post(
+    "/stats/requests/{request_id}/cancel",
+    summary="Cancel an in-flight request",
+    description=(
+        "Abort an in-flight inference by its request id. Admin cancels any "
+        "request; non-admin callers can only cancel their own. Cancels the "
+        "underlying asyncio task, which closes the backend connection and "
+        "aborts the generation. If the id is unknown (already finished or "
+        "never existed) returns 404."
+    ),
+)
+async def cancel_inflight_request(
+    request: Request,
+    request_id: str,
+    user: UserContext = Depends(require_role("user")),
+) -> dict:
+    mm = getattr(request.app.state, "model_manager", None)
+    if mm is None:
+        raise HTTPException(status_code=503, detail="model_manager unavailable")
+    # Peek first to enforce ownership without side effects.
+    active = None
+    with mm._in_flight_lock:  # noqa: SLF001 — intentional, keeps lookup atomic
+        active = mm._active_requests.get(request_id)
+    if active is None:
+        raise HTTPException(status_code=404, detail="request not found or already finished")
+    if not user.is_admin:
+        owner_id = str(active.user_id) if active.user_id else None
+        caller_id = str(user.user_id) if user.user_id else None
+        if not caller_id or caller_id != owner_id:
+            raise HTTPException(status_code=403, detail="not the owner of this request")
+    audit = mm.cancel_request(request_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail="request not found or already finished")
+    logger.info(
+        "request_cancelled",
+        request_id=request_id,
+        model_id=audit.get("model_id"),
+        cancelled_by=user.username,
+        owner=audit.get("username"),
+        had_task=audit.get("had_task"),
+    )
+    return {"cancelled": True, "requestId": request_id, "hadTask": audit.get("had_task")}
 
 
 @router.get(
