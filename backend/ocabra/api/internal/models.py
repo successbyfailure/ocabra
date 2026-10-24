@@ -228,12 +228,51 @@ async def get_models_activity(
     snapshot = mm.inflight_snapshot()
     ages = mm.active_request_ages()
     sources = mm.activity_sources()
+    # ``list_states()`` (sin include_derived) devuelve solo los canónicos,
+    # pero ``begin_request`` registra con el worker-key derivado del
+    # preset activo (``ollama/qwen3.8:27b::<hash>``). Para que el badge
+    # del card del modelo canónico cuente las peticiones de sus
+    # derivados, suma todos los inflights cuyo ``model_id`` empieza por
+    # ``canonical.model_id + "::"``.
     states = await mm.list_states()
+    # Derivados cargados (``<canonical>::<hash>``). Nos interesan por dos
+    # motivos: (1) agregarles las peticiones en vuelo al canonical, y
+    # (2) leer el ``_runtime.parallelism`` del preset activo, que vive en
+    # el derivado y no en el canonical state.
+    all_states = await mm.list_states(include_derived=True)
+    runtime_by_canonical: dict[str, int] = {}
+    for s in all_states:
+        if "::" not in s.model_id:
+            continue
+        base = s.model_id.rsplit("::", 1)[0]
+        meta = s.extra_config.get("_runtime") if isinstance(s.extra_config, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        try:
+            p = int(meta.get("parallelism") or 0)
+        except (TypeError, ValueError):
+            p = 0
+        if p > 0:
+            # Guardar el mayor por si hay varios derivados activos (distintos
+            # presets) — es la capacidad real de slots concurrentes.
+            runtime_by_canonical[base] = max(runtime_by_canonical.get(base, 0), p)
+    derived_keys_by_canonical: dict[str, list[str]] = {}
+    for key in snapshot:
+        if "::" not in key:
+            continue
+        base = key.rsplit("::", 1)[0]
+        derived_keys_by_canonical.setdefault(base, []).append(key)
     activity: dict[str, dict] = {}
     for state in states:
-        # begin_request may key by the canonical id or the raw backend model name.
-        keys = (state.model_id, state.backend_model_id)
-        count = max((snapshot.get(k, 0) for k in keys), default=0)
+        # begin_request may key by the canonical id, the raw backend model
+        # name, or a derived worker-key (``<canonical>::<hash>``) when the
+        # active preset creates a dedicated runner.
+        keys = (
+            state.model_id,
+            state.backend_model_id,
+            *derived_keys_by_canonical.get(state.model_id, ()),
+        )
+        count = sum(snapshot.get(k, 0) for k in keys)
         if count > 0:
             oldest = max((ages.get(k, 0.0) for k in keys), default=0.0)
             source_counts: dict[str, int] = {}
@@ -247,17 +286,20 @@ async def get_models_activity(
             # the active preset); fall back to the admission cap. Clients
             # render ``processing = min(count, slots)`` and
             # ``queued = max(0, count - slots)``.
-            runtime_meta = (
-                state.extra_config.get("_runtime")
-                if isinstance(state.extra_config, dict)
-                else None
-            )
-            slots: int | None = None
-            if isinstance(runtime_meta, dict):
-                try:
-                    slots = int(runtime_meta.get("parallelism") or 0) or None
-                except (TypeError, ValueError):
-                    slots = None
+            # Preferir el ``parallelism`` del derivado cargado (preset
+            # activo) sobre el del canonical o el cap global.
+            slots: int | None = runtime_by_canonical.get(state.model_id) or None
+            if slots is None:
+                runtime_meta = (
+                    state.extra_config.get("_runtime")
+                    if isinstance(state.extra_config, dict)
+                    else None
+                )
+                if isinstance(runtime_meta, dict):
+                    try:
+                        slots = int(runtime_meta.get("parallelism") or 0) or None
+                    except (TypeError, ValueError):
+                        slots = None
             if slots is None:
                 cap = int(getattr(settings, "max_inflight_per_model", 0) or 0)
                 slots = cap if cap > 0 else None
