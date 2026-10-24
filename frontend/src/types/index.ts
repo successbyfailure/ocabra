@@ -554,6 +554,7 @@ export interface RequestStats {
 export interface ModelActivity {
   inFlight: number
   oldestSeconds: number
+  slots?: number | null
 }
 
 export interface ModelActivityMap {
@@ -691,6 +692,7 @@ export interface RecentRequest {
   inFlight?: boolean
   elapsedMs?: number | null
   estimatedRemainingMs?: number | null
+  workerKey?: string | null
 }
 
 export interface RecentRequestsData {

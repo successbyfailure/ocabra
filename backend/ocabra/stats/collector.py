@@ -22,6 +22,40 @@ from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key
 from ocabra.core.worker_pool import InferenceTimeoutError
 
+
+async def _resolve_inflight_auth_meta(request: Request) -> dict:
+    """Best-effort auth lookup for the stats middleware.
+
+    Runs BEFORE ``call_next``, so ``request.state.auth_user`` isn't populated
+    yet (that happens inside endpoint handlers). We re-resolve the bearer
+    token here solely so ``/stats/recent`` can show *who* is driving the
+    currently in-flight request instead of a bare "anónimo" row. Failures
+    are swallowed — this never gates the request.
+    """
+    header = request.headers.get("authorization") or ""
+    if not header.lower().startswith("bearer "):
+        return {}
+    token = header[7:].strip()
+    if not token:
+        return {}
+    try:
+        from ocabra.api._deps_auth import _resolve_api_key
+        from ocabra.database import AsyncSessionLocal
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        async with AsyncSessionLocal() as session:
+            ctx = await _resolve_api_key(token, session)
+    except Exception:  # noqa: BLE001
+        return {}
+    if ctx is None or ctx.is_anonymous:
+        return {}
+    return {
+        "user_id": ctx.user_id,
+        "username": ctx.username,
+        "api_key_name": ctx.api_key_name,
+    }
+
 logger = structlog.get_logger(__name__)
 
 _TRACKED_API_PATHS = {
@@ -416,8 +450,19 @@ class StatsMiddleware(BaseHTTPMiddleware):
         except AttributeError:
             mm = None
         if mm and inflight_model_id:
+            auth_meta = await _resolve_inflight_auth_meta(request)
             inflight_request_id = mm.try_begin_request(
-                inflight_model_id, settings.max_inflight_per_model
+                inflight_model_id,
+                settings.max_inflight_per_model,
+                user_id=auth_meta.get("user_id"),
+                username=auth_meta.get("username"),
+                api_key_name=auth_meta.get("api_key_name"),
+                # ``requested_model_id`` is the public ``model`` field the
+                # client sent — a profile id ("qwen3.8:27b") or router id
+                # ("recomendado-ha-chatbots"). We keep it alongside the
+                # resolved worker key so the UI can show the friendly name
+                # instead of ``ollama/qwen3.8:27b::<hash>``.
+                profile_id=requested_model_id,
             )
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject

@@ -136,6 +136,15 @@ class ActiveRequest:
     model_id: str
     started_at: float  # time.time()
     source: str = "api"
+    # Optional attribution. Populated by the stats middleware when it knows
+    # the caller; left None for in-process callers (chat_glue, realtime
+    # session, periodic self-tests) that don't carry a UserContext.
+    user_id: str | None = None
+    username: str | None = None
+    api_key_name: str | None = None
+    # Human-friendly identifier the UI shows above the raw worker key
+    # (e.g. "qwen3.8:27b" instead of "ollama/qwen3.8:27b::2bcc9dfe6014").
+    profile_id: str | None = None
 
 
 class ModelManager:
@@ -218,11 +227,20 @@ class ModelManager:
         max_inflight: int,
         *,
         source: str = "api",
+        user_id: str | None = None,
+        username: str | None = None,
+        api_key_name: str | None = None,
+        profile_id: str | None = None,
     ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
         reject with 429 instead of letting a flood pile up on one worker).
         ``max_inflight <= 0`` disables the cap.
+
+        Attribution metadata is optional: the stats middleware populates it so
+        the ``/stats/recent`` endpoint can render the caller next to the in
+        -flight row, instead of showing "anónimo" while the request is still
+        running.
         """
         with self._in_flight_lock:
             current = self._in_flight.get(model_id, 0)
@@ -235,6 +253,10 @@ class ModelManager:
                 model_id=model_id,
                 started_at=time.time(),
                 source=source,
+                user_id=user_id,
+                username=username,
+                api_key_name=api_key_name,
+                profile_id=profile_id,
             )
         # Bloque 20 — track start on the estimator so
         # ``in_flight_remaining`` returns useful numbers for the dynamic

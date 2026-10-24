@@ -179,9 +179,15 @@ async def recent_requests(
                     remaining_s = estimator.in_flight_remaining(req.model_id, model_id=req.model_id)
                 except Exception:  # noqa: BLE001 — never break this endpoint
                     remaining_s = None
+            # ``profile_id`` carries the friendly name the client sent
+            # (e.g. "qwen3.8:27b"); ``model_id`` is the resolved worker key
+            # used internally (``ollama/qwen3.8:27b::<hash>``). The UI shows
+            # the friendly one when present, so a running request looks the
+            # same as a completed one in the recent-requests table.
             in_flight_rows.append({
                 "id": req.request_id,
-                "modelId": req.model_id,
+                "modelId": req.profile_id or req.model_id,
+                "workerKey": req.model_id,
                 "backendType": None,
                 "requestKind": None,
                 "endpointPath": None,
@@ -191,11 +197,11 @@ async def recent_requests(
                 "inputTokens": None,
                 "outputTokens": None,
                 "error": None,
-                "userId": None,
-                "username": None,
+                "userId": str(req.user_id) if req.user_id else None,
+                "username": req.username,
                 "groupId": None,
                 "groupName": None,
-                "apiKeyName": None,
+                "apiKeyName": req.api_key_name,
                 "clientAddr": None,
                 "userAgent": None,
                 "inFlight": True,

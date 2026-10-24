@@ -242,10 +242,30 @@ async def get_models_activity(
                     source_counts[source] = max(
                         source_counts.get(source, 0), source_count
                     )
+            # Concurrency the backend will actually serve in parallel. Prefer
+            # the ``_runtime.parallelism`` set by the coordinator (reflects
+            # the active preset); fall back to the admission cap. Clients
+            # render ``processing = min(count, slots)`` and
+            # ``queued = max(0, count - slots)``.
+            runtime_meta = (
+                state.extra_config.get("_runtime")
+                if isinstance(state.extra_config, dict)
+                else None
+            )
+            slots: int | None = None
+            if isinstance(runtime_meta, dict):
+                try:
+                    slots = int(runtime_meta.get("parallelism") or 0) or None
+                except (TypeError, ValueError):
+                    slots = None
+            if slots is None:
+                cap = int(getattr(settings, "max_inflight_per_model", 0) or 0)
+                slots = cap if cap > 0 else None
             activity[state.model_id] = {
                 "inFlight": count,
                 "oldestSeconds": round(oldest, 1),
                 "sources": source_counts,
+                "slots": slots,
             }
     return {
         "activity": activity,

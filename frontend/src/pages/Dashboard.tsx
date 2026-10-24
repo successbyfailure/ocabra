@@ -452,12 +452,40 @@ function RecentRequestsSection() {
             </thead>
             <tbody className="divide-y divide-border bg-card">
               {data.requests.map((req) => {
+                const hora = new Date(req.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                if (req.inFlight) {
+                  const elapsed = req.elapsedMs != null ? `${Math.round(req.elapsedMs / 1000)}s` : "—"
+                  const remaining = req.estimatedRemainingMs != null ? ` · ~${Math.round(req.estimatedRemainingMs / 1000)}s restantes` : ""
+                  return (
+                    <tr key={req.id} className="bg-sky-500/5 hover:bg-sky-500/10">
+                      <td className="px-3 py-2 font-mono text-xs">{hora}</td>
+                      <td className="px-3 py-2 max-w-[10rem] truncate" title={req.modelId}>{req.modelId}</td>
+                      <td className="px-3 py-2 text-muted-foreground">en curso</td>
+                      <td className="px-3 py-2 text-right text-sky-300 tabular-nums" title={`Lleva ${elapsed}${remaining}`}>⏱ {elapsed}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">—</td>
+                      <td className="px-3 py-2">
+                        <div className={req.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>
+                          {req.username ?? "anónimo"}
+                        </div>
+                        {req.apiKeyName && (
+                          <div className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/70" title={`API key: ${req.apiKeyName}`}>
+                            🔑 {req.apiKeyName}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-xs font-medium text-sky-300">
+                        <span className="inline-flex items-center gap-1">
+                          <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" /> En vuelo
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                }
                 const statusColor =
                   req.error ? "text-red-400"
                   : req.statusCode != null && req.statusCode < 400 ? "text-emerald-400"
                   : "text-muted-foreground"
                 const statusLabel = req.error ? `Error: ${req.error.substring(0, 40)}` : req.statusCode != null ? String(req.statusCode) : "—"
-                const hora = new Date(req.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
                 return (
                   <tr key={req.id} className={`hover:bg-muted/30 transition-colors${req.error ? " bg-red-500/5" : ""}`}>
                     <td className="px-3 py-2 font-mono text-xs">{hora}</td>
@@ -809,15 +837,34 @@ export function Dashboard() {
                       GPU {model.currentGpu.join(", ") || "-"}
                     </span>
                     <span>{model.vramUsedMb.toLocaleString()} MB</span>
-                    {act && act.inFlight > 0 && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-medium text-amber-200">
-                        <Activity size={10} />
-                        {act.inFlight} en vuelo
-                        {act.oldestSeconds > stuckThreshold && (
-                          <span className="text-amber-300">· {Math.round(act.oldestSeconds)}s</span>
-                        )}
-                      </span>
-                    )}
+                    {act && act.inFlight > 0 && (() => {
+                      const slots = act.slots ?? act.inFlight
+                      const processing = Math.min(act.inFlight, slots)
+                      const queued = Math.max(0, act.inFlight - slots)
+                      const oldestLabel = `${Math.round(act.oldestSeconds)}s`
+                      const stuck = act.oldestSeconds > stuckThreshold
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${
+                            stuck
+                              ? "border-red-500/40 bg-red-500/15 text-red-200"
+                              : queued > 0
+                                ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                                : "border-sky-500/40 bg-sky-500/15 text-sky-200"
+                          }`}
+                          title={
+                            `Procesando ${processing}/${slots} slot${slots === 1 ? "" : "s"}` +
+                            (queued > 0 ? `, ${queued} encolada${queued === 1 ? "" : "s"}` : "") +
+                            ` · petición más antigua ${oldestLabel}`
+                          }
+                        >
+                          <span className="h-2 w-2 rounded-full bg-current animate-pulse" />
+                          {processing}/{slots} procesando
+                          {queued > 0 && <span>· {queued} encoladas</span>}
+                          <span className="opacity-75">· {oldestLabel}</span>
+                        </span>
+                      )
+                    })()}
                     {loadedMeta(model.loadedAt, nowMs) && (
                       <span className="rounded-md bg-muted px-2 py-0.5">
                         Cargado {loadedMeta(model.loadedAt, nowMs)!.at} ·{" "}
