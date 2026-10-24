@@ -457,13 +457,27 @@ function RecentRequestsSection() {
                 const hora = new Date(req.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
                 if (req.inFlight) {
                   const elapsed = req.elapsedMs != null ? `${Math.round(req.elapsedMs / 1000)}s` : "—"
-                  const remaining = req.estimatedRemainingMs != null ? ` · ~${Math.round(req.estimatedRemainingMs / 1000)}s restantes` : ""
+                  const remaining = req.estimatedRemainingMs != null ? `~${Math.round(req.estimatedRemainingMs / 1000)}s restantes` : null
+                  const queueWait = req.queueWaitEstimateMs != null ? `~${Math.round(req.queueWaitEstimateMs / 1000)}s en cola` : null
+                  const isQueued = req.queued === true
+                  const durationCell = isQueued
+                    ? queueWait ?? "en cola"
+                    : remaining ?? `⏱ ${elapsed}`
+                  const durationTitle = isQueued
+                    ? `Posición ${(req.queuePosition ?? 0) + 1} de la cola${queueWait ? ` · ${queueWait}` : ""}`
+                    : `Lleva ${elapsed}${remaining ? ` · ${remaining}` : ""}`
                   return (
-                    <tr key={req.id} className="bg-sky-500/5 hover:bg-sky-500/10">
+                    <tr key={req.id} className={isQueued ? "bg-amber-500/5 hover:bg-amber-500/10" : "bg-sky-500/5 hover:bg-sky-500/10"}>
                       <td className="px-3 py-2 font-mono text-xs">{hora}</td>
                       <td className="px-3 py-2 max-w-[10rem] truncate" title={req.modelId}>{req.modelId}</td>
-                      <td className="px-3 py-2 text-muted-foreground">en curso</td>
-                      <td className="px-3 py-2 text-right text-sky-300 tabular-nums" title={`Lleva ${elapsed}${remaining}`}>⏱ {elapsed}</td>
+                      <td className="px-3 py-2 text-muted-foreground">
+                        {isQueued ? (
+                          <span>en cola <span className="text-[11px] opacity-75">(#{(req.queuePosition ?? 0) + 1 - (req.slots ?? 0)})</span></span>
+                        ) : "procesando"}
+                      </td>
+                      <td className={`px-3 py-2 text-right tabular-nums ${isQueued ? "text-amber-300" : "text-sky-300"}`} title={durationTitle}>
+                        {durationCell}
+                      </td>
                       <td className="px-3 py-2 text-right text-muted-foreground">—</td>
                       <td className="px-3 py-2">
                         <div className={req.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>
@@ -475,10 +489,11 @@ function RecentRequestsSection() {
                           </div>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-xs font-medium text-sky-300">
+                      <td className={`px-3 py-2 text-xs font-medium ${isQueued ? "text-amber-300" : "text-sky-300"}`}>
                         <div className="flex items-center justify-between gap-2">
                           <span className="inline-flex items-center gap-1">
-                            <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" /> En vuelo
+                            <span className={`h-2 w-2 rounded-full animate-pulse ${isQueued ? "bg-amber-400" : "bg-sky-400"}`} />
+                            {isQueued ? "En cola" : "En vuelo"}
                           </span>
                           <button
                             type="button"

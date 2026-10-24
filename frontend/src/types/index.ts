@@ -693,6 +693,10 @@ export interface RecentRequest {
   elapsedMs?: number | null
   estimatedRemainingMs?: number | null
   workerKey?: string | null
+  queued?: boolean
+  queuePosition?: number
+  slots?: number
+  queueWaitEstimateMs?: number | null
 }
 
 export interface RecentRequestsData {

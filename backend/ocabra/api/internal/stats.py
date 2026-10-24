@@ -213,6 +213,67 @@ async def recent_requests(
             })
         in_flight_rows.sort(key=lambda r: r["elapsedMs"], reverse=True)
 
+        # Grupo por canonical model id (sin el ``::<hash>`` del derivado).
+        # Dentro del grupo, las más viejas están procesándose (FIFO), las
+        # últimas esperan en la cola interna del llama-server. Posición y
+        # estimación de espera se calculan aquí para que el UI pueda pintar
+        # "procesando" vs "N en cola · ~Xs" sin reimplementar la lógica.
+        all_states = await mm.list_states(include_derived=True)
+        slots_by_canonical: dict[str, int] = {}
+        for state in all_states:
+            model_id = state.model_id
+            canonical = model_id.split("::", 1)[0]
+            meta = state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
+            if isinstance(meta, dict):
+                try:
+                    p = int(meta.get("parallelism") or 0)
+                except (TypeError, ValueError):
+                    p = 0
+                if p > 0:
+                    slots_by_canonical[canonical] = max(slots_by_canonical.get(canonical, 0), p)
+        # Agrupa índices por canonical (los más viejos primero → procesando).
+        grouped: dict[str, list[int]] = {}
+        for idx, row in enumerate(in_flight_rows):
+            canonical = (row.get("workerKey") or row["modelId"]).split("::", 1)[0]
+            grouped.setdefault(canonical, []).append(idx)
+        p50_cache: dict[str, float | None] = {}
+        for canonical, indices in grouped.items():
+            # Más viejas primero (elapsedMs mayor = empezaron antes).
+            indices.sort(key=lambda i: -in_flight_rows[i]["elapsedMs"])
+            slots = slots_by_canonical.get(canonical) or 1
+            processing_slice = indices[:slots]
+            max_remaining_ms = 0
+            for i in processing_slice:
+                rem = in_flight_rows[i].get("estimatedRemainingMs")
+                if rem is not None and rem > max_remaining_ms:
+                    max_remaining_ms = rem
+            # Solo pide p50 si realmente hay cola (ahorra una llamada por grupo).
+            p50_ms: int | None = None
+            if estimator is not None and len(indices) > slots:
+                if canonical not in p50_cache:
+                    try:
+                        est = await estimator.estimate(canonical)
+                        p50_cache[canonical] = est.p50_s
+                    except Exception:  # noqa: BLE001
+                        p50_cache[canonical] = None
+                p50_s = p50_cache[canonical]
+                if p50_s is not None and p50_s > 0:
+                    p50_ms = int(p50_s * 1000)
+            for pos, idx in enumerate(indices):
+                row = in_flight_rows[idx]
+                row["queuePosition"] = pos
+                row["slots"] = slots
+                if pos < slots:
+                    row["queued"] = False
+                else:
+                    row["queued"] = True
+                    if p50_ms is not None:
+                        # Cada vez que un slot libera, procesa la siguiente de la cola.
+                        # Posición K ≥ slots espera ⌈(K-slots+1)/slots⌉ turnos.
+                        turns_ahead = (pos - slots) // slots + 1
+                        wait_ms = max_remaining_ms + turns_ahead * p50_ms
+                        row["queueWaitEstimateMs"] = wait_ms
+
     for row in result.get("requests", []):
         row["inFlight"] = False
     result["requests"] = in_flight_rows + result.get("requests", [])
