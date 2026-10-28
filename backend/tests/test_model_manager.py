@@ -1247,6 +1247,123 @@ async def test_bitnet_cpu_only_skips_gpu_assignment_but_keeps_port():
     scheduler.find_gpu_for_model.assert_not_called()
 
 
+class _PiperStyleBackend(BackendInterface):
+    """Mimics PiperBackend: a local HTTP server (needs a port) that is
+    unconditionally CPU-only, regardless of the gpu_indices it's called
+    with — the real backend ignores its gpu_indices argument entirely."""
+
+    def __init__(self) -> None:
+        self.received_gpu_indices: list[int] | None = None
+
+    async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
+        self.received_gpu_indices = gpu_indices
+        return WorkerInfo(
+            backend_type="piper",
+            model_id=model_id,
+            gpu_indices=[],
+            port=kwargs.get("port", 0),
+            pid=4322,
+            vram_used_mb=0,
+        )
+
+    async def unload(self, model_id: str) -> None:
+        return None
+
+    async def health_check(self, model_id: str) -> bool:
+        return True
+
+    async def get_capabilities(self, model_id: str) -> BackendCapabilities:
+        return BackendCapabilities(tts=True, streaming=True)
+
+    async def get_vram_estimate_mb(self, model_id: str, **kwargs) -> int:
+        return 0
+
+    async def forward_request(self, model_id: str, path: str, body: dict):
+        return {}
+
+    async def forward_stream(self, model_id: str, path: str, body: dict):
+        if False:
+            yield b""
+
+
+@pytest.mark.asyncio
+async def test_piper_backend_is_cpu_only_and_skips_gpu_admission():
+    """Regression test (2026-10-28): Piper models showed a GPU badge and
+    were attributed to a GPU card on the Dashboard even though Piper is
+    CPU-only. Root cause #1: piper wasn't added to the gpu_managed
+    exclusion list (unlike bitnet/llama_cpp's CPU-only special cases), so
+    the generic scheduler assigned it a real GPU before PiperBackend.load()
+    ignored that and returned gpu_indices=[]. This test locks in that the
+    scheduler is never even consulted for piper."""
+    wp = WorkerPool()
+    backend = _PiperStyleBackend()
+    wp.register_backend("piper", backend)
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(return_value=[1])
+    mm = ModelManager(wp, gpu_scheduler=scheduler)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        from ocabra.core.model_manager import ModelState
+
+        mm._states["test/piper-voice"] = ModelState(
+            model_id="test/piper-voice",
+            display_name="test/piper-voice",
+            backend_type="piper",
+            load_policy=LoadPolicy.ON_DEMAND,
+        )
+        mm._load_locks["test/piper-voice"] = asyncio.Lock()
+
+        state = await mm.load("test/piper-voice")
+
+    assert state.status == ModelStatus.LOADED
+    assert state.current_gpu == []
+    scheduler.find_gpu_for_model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_load_never_substitutes_scheduler_gpu_for_an_empty_worker_report():
+    """Root cause #2 of the same incident: even when a backend DOES go
+    through GPU admission (gpu_managed=True) but its WorkerInfo honestly
+    reports gpu_indices=[] (e.g. it fell back to CPU internally), the old
+    `worker_info.gpu_indices or gpu_indices` silently replaced that empty
+    list with whatever GPU the scheduler had pre-assigned — Python treats
+    [] as falsy, so the "or" always preferred the scheduler's guess over
+    the backend's actual, authoritative report. state.current_gpu must
+    reflect what the worker actually reported, never a scheduler guess."""
+    wp = WorkerPool()
+    backend = _PiperStyleBackend()
+    wp.register_backend("mock-gpu-managed", backend)
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(return_value=[1])
+    mm = ModelManager(wp, gpu_scheduler=scheduler)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        from ocabra.core.model_manager import ModelState
+
+        mm._states["test/gpu-managed-but-cpu-fallback"] = ModelState(
+            model_id="test/gpu-managed-but-cpu-fallback",
+            display_name="test/gpu-managed-but-cpu-fallback",
+            backend_type="mock-gpu-managed",
+            load_policy=LoadPolicy.ON_DEMAND,
+        )
+        mm._load_locks["test/gpu-managed-but-cpu-fallback"] = asyncio.Lock()
+
+        state = await mm.load("test/gpu-managed-but-cpu-fallback")
+
+    # The scheduler WAS consulted (this backend isn't in the gpu_managed
+    # exclusion list) and assigned GPU 1 — but the worker's own report of
+    # gpu_indices=[] must win.
+    scheduler.find_gpu_for_model.assert_awaited()
+    assert backend.received_gpu_indices == [1]
+    assert state.current_gpu == []
+
+
 @pytest.mark.asyncio
 async def test_add_model_concurrent_calls_for_same_derived_key_share_one_state():
     """qwen3.8:27b incident (2026-10-26): two concurrent requests creating

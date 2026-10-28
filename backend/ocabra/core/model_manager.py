@@ -1262,6 +1262,7 @@ class ModelManager:
                 )
                 gpu_managed = (
                     state.backend_type != "ollama"
+                    and state.backend_type != "piper"
                     and not bitnet_cpu_only
                     and not llama_cpp_cpu_only
                 )
@@ -1490,9 +1491,17 @@ class ModelManager:
                                 state, capabilities
                             )
 
-                            actual_gpu_indices = (
-                                worker_info.gpu_indices or gpu_indices
-                            )
+                            # WorkerInfo.gpu_indices is always a list (never
+                            # None) — CPU-only backends (e.g. Piper) report
+                            # [] deliberately. An `or gpu_indices` fallback
+                            # here would silently replace that empty list
+                            # with the scheduler's REQUESTED placement,
+                            # making a CPU-only model look GPU-resident in
+                            # the UI/stats even though it never touched that
+                            # GPU. Found 2026-10-28: Piper models showed a
+                            # GPU badge and VRAM attribution on a GPU card
+                            # they never loaded onto.
+                            actual_gpu_indices = worker_info.gpu_indices
                             state.worker_info = worker_info
                             state.current_gpu = actual_gpu_indices
                             # Prefer the honest pre-load estimate over the backend's
