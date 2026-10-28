@@ -2,7 +2,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -204,6 +204,40 @@ class ModelManager:
         self._expected_load_cache_ttl_s: float = 300.0
         # model_id -> (resolved_at, num_ctx cap) for Ollama use-case clamping
         self._ollama_ctx_cap_cache: dict[str, tuple[float, int | None]] = {}
+        # Canonical model_ids (no ``::<hash>`` suffix) currently under
+        # maintenance — see set_maintenance(). In-memory only: a maintenance
+        # window is a short-lived operational state, not configuration worth
+        # persisting across a restart.
+        self._maintenance_models: set[str] = set()
+
+    @asynccontextmanager
+    async def _acquire_load_gate(self):
+        """Acquire ``_backend_load_gate`` with a bounded wait.
+
+        The gate is held for the full admission+eviction+start sequence of
+        one model load (see ``_load_model``). If the load currently holding
+        it is stuck evicting a wedged backend (e.g. an Ollama runner that
+        stopped responding but never freed its VRAM), every other model's
+        load used to wait on this lock forever — no error, no 503, just an
+        in-flight request that never resolves. Bound the wait to the same
+        budget the eviction cascade itself already uses
+        (``max_drain_timeout_s``) so a stuck neighbour surfaces as a clear,
+        catchable timeout instead of an invisible hang.
+        """
+        try:
+            await asyncio.wait_for(
+                self._backend_load_gate.acquire(),
+                timeout=max(1, int(settings.max_drain_timeout_s)),
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Timed out waiting for the GPU load lock — another model's "
+                "load/eviction appears stuck"
+            ) from exc
+        try:
+            yield
+        finally:
+            self._backend_load_gate.release()
 
     def begin_request(self, model_id: str, *, source: str = "api") -> str:
         """Mark one request as in-flight. Returns request_id."""
@@ -263,6 +297,54 @@ class ModelManager:
                 pass
         return audit
 
+    def effective_inflight_cap(self, model_id: str, max_inflight: int) -> int:
+        """Scale ``max_inflight`` down for models with few concurrency slots.
+
+        ``max_inflight`` is a flat ceiling shared by every model regardless of
+        how many requests its worker can actually run at once. A single-slot
+        worker (most Ollama models) would otherwise accept requests up to
+        that flat number, each just adding to a serial queue with no
+        rejection — a burst promises everyone several minutes of silent
+        waiting instead of a prompt 429. Looks up the same
+        ``_runtime.parallelism`` value ``/stats/recent`` uses for queue
+        position; models without that metadata are treated as 1 slot.
+        """
+        if max_inflight <= 0:
+            return max_inflight
+        canonical = model_id.split("::", 1)[0]
+        state = self._states.get(canonical) or self._states.get(model_id)
+        slots = 1
+        if state is not None:
+            meta = (
+                state.extra_config.get("_runtime")
+                if isinstance(state.extra_config, dict)
+                else None
+            )
+            if isinstance(meta, dict):
+                try:
+                    parallelism = int(meta.get("parallelism") or 0)
+                except (TypeError, ValueError):
+                    parallelism = 0
+                if parallelism > 0:
+                    slots = parallelism
+        per_slot_cap = max(1, int(settings.max_queued_per_slot))
+        return min(max_inflight, slots * per_slot_cap)
+
+    def set_maintenance(self, model_id: str, enabled: bool) -> None:
+        """Pause/resume admission of *new* requests for a model, keyed by its
+        canonical id (no ``::<hash>`` suffix) so it covers every derived
+        worker key. Requests already in flight are untouched — this only
+        gates ``try_begin_request``, called before a request is admitted.
+        """
+        canonical = model_id.split("::", 1)[0]
+        if enabled:
+            self._maintenance_models.add(canonical)
+        else:
+            self._maintenance_models.discard(canonical)
+
+    def is_in_maintenance(self, model_id: str) -> bool:
+        return model_id.split("::", 1)[0] in self._maintenance_models
+
     def try_begin_request(
         self,
         model_id: str,
@@ -277,16 +359,18 @@ class ModelManager:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
         reject with 429 instead of letting a flood pile up on one worker).
-        ``max_inflight <= 0`` disables the cap.
+        ``max_inflight <= 0`` disables the cap. The effective cap is scaled
+        down for low-concurrency workers — see ``effective_inflight_cap``.
 
         Attribution metadata is optional: the stats middleware populates it so
         the ``/stats/recent`` endpoint can render the caller next to the in
         -flight row, instead of showing "anónimo" while the request is still
         running.
         """
+        effective_max = self.effective_inflight_cap(model_id, max_inflight)
         with self._in_flight_lock:
             current = self._in_flight.get(model_id, 0)
-            if max_inflight > 0 and current >= max_inflight:
+            if effective_max > 0 and current >= effective_max:
                 return None
             request_id = str(uuid.uuid4())
             self._in_flight[model_id] = current + 1
@@ -808,9 +892,88 @@ class ModelManager:
         task.add_done_callback(_log_task_result)
         return task
 
+    async def _reconcile_ollama_state(self) -> None:
+        """Adopt (or flag) Ollama models that are actually resident in a
+        pool but that our own bookkeeping has no record of.
+
+        Worker tracking for derived/ephemeral keys lives only in
+        ``self._states`` / the worker pool, in-memory — an API restart wipes
+        it. Ollama's containers are separate, long-lived services that
+        survive the restart, so a model can stay loaded (and holding real
+        VRAM) while oCabra believes it is unloaded. Reproduced 2026-10-25:
+        gemma4:12b stayed resident across a restart and oCabra kept
+        rejecting qwen3.8:27b with "insufficient VRAM" against free memory
+        that NVML correctly reported as unavailable but nothing had
+        attributed. Must run before the PIN auto-load loop in ``start()`` so
+        an already-resident PIN model is adopted instead of redundantly
+        reloaded.
+        """
+        try:
+            backend = await self._worker_pool.get_backend("ollama")
+        except KeyError:
+            return
+        discover = getattr(backend, "discover_resident_models", None)
+        if not callable(discover):
+            return
+        try:
+            resident = await discover()
+        except Exception as exc:  # noqa: BLE001 — must never block startup
+            logger.warning("ollama_reconciliation_failed", error=str(exc))
+            return
+        if not resident:
+            return
+
+        by_backend_model_id: dict[str, ModelState] = {
+            state.backend_model_id: state
+            for state in self._states.values()
+            if state.backend_type == "ollama"
+        }
+        for item in resident:
+            state = by_backend_model_id.get(item["name"])
+            if state is None:
+                logger.warning(
+                    "ollama_resident_model_unknown",
+                    name=item["name"],
+                    vram_mb=item["vram_mb"],
+                    pool_url=item["pool_url"],
+                    pool_gpus=item["pool_gpus"],
+                )
+                continue
+            if state.status == ModelStatus.LOADED:
+                continue
+            logger.info(
+                "ollama_model_adopted_on_startup",
+                model_id=state.model_id,
+                vram_mb=item["vram_mb"],
+                pool_gpus=item["pool_gpus"],
+            )
+            worker_info = WorkerInfo(
+                backend_type="ollama",
+                model_id=state.model_id,
+                gpu_indices=item["pool_gpus"],
+                port=0,
+                pid=0,
+                vram_used_mb=item["vram_mb"],
+                endpoint_url=item["pool_url"],
+            )
+            state.worker_info = worker_info
+            state.current_gpu = item["pool_gpus"]
+            state.vram_used_mb = item["vram_mb"]
+            state.status = ModelStatus.LOADED
+            state.loaded_at = datetime.now(UTC)
+            state.error_message = None
+            self._worker_pool.set_worker(state.model_id, worker_info)
+            if self._gpu_manager and item["pool_gpus"]:
+                vram_per_gpu = item["vram_mb"] // max(1, len(item["pool_gpus"]))
+                for gpu_idx in item["pool_gpus"]:
+                    await self._gpu_manager.lock_vram(
+                        gpu_idx, vram_per_gpu, state.model_id
+                    )
+
     async def start(self) -> None:
         await self._load_configs_from_db()
         await self._hydrate_last_request_at_from_redis()
+        await self._reconcile_ollama_state()
         for model_id, state in self._states.items():
             # PIN: always preload, never evictable.
             # WARM: load on first request and then keep resident until VRAM
@@ -1118,7 +1281,7 @@ class ModelManager:
                 self._load_queue_waiters += 1
                 gate_entered = False
                 try:
-                    async with self._backend_load_gate:
+                    async with self._acquire_load_gate():
                         self._load_queue_waiters -= 1
                         gate_entered = True
                         self._load_in_progress.add(model_id)
@@ -1176,21 +1339,42 @@ class ModelManager:
                                     )
 
                                     gpu_states = await self._gpu_manager.get_all_states()
-                                    target_gpu = (
-                                        gpu_indices[0]
-                                        if gpu_indices
-                                        else state.preferred_gpu
-                                    )
-                                    if target_gpu is None and gpu_states:
-                                        target_gpu = max(
-                                            gpu_states,
-                                            key=lambda gpu: gpu.total_vram_mb,
-                                        ).index
-                                    tgt = next(
-                                        (g for g in gpu_states if g.index == target_gpu),
-                                        None,
-                                    )
-                                    gpu_total = tgt.total_vram_mb if tgt else 0
+                                    if gpu_indices and len(gpu_indices) > 1:
+                                        # Multi-GPU forced placement (Ollama's
+                                        # shared pool, llama.cpp/bitnet's
+                                        # --split-mode layer): capacity is the
+                                        # SUM across every selected GPU, not
+                                        # just the first one. Using only
+                                        # gpu_indices[0] here used to size the
+                                        # use-case plan against a single GPU
+                                        # (often the smallest) that alone
+                                        # can't even hold the weights,
+                                        # producing a zero/negative budget —
+                                        # apply_use_case_flags then silently
+                                        # no-ops on falsy ctx and the load
+                                        # keeps whatever stale ctx_size was
+                                        # already in extra_config.
+                                        gpu_total = sum(
+                                            g.total_vram_mb
+                                            for g in gpu_states
+                                            if g.index in gpu_indices
+                                        )
+                                    else:
+                                        target_gpu = (
+                                            gpu_indices[0]
+                                            if gpu_indices
+                                            else state.preferred_gpu
+                                        )
+                                        if target_gpu is None and gpu_states:
+                                            target_gpu = max(
+                                                gpu_states,
+                                                key=lambda gpu: gpu.total_vram_mb,
+                                            ).index
+                                        tgt = next(
+                                            (g for g in gpu_states if g.index == target_gpu),
+                                            None,
+                                        )
+                                        gpu_total = tgt.total_vram_mb if tgt else 0
                                     if gpu_total:
                                         plan = await resolve_use_case(state, gpu_total)
                                         if plan and plan.get("applied"):
@@ -1223,8 +1407,74 @@ class ModelManager:
                                 and state.preferred_gpu is not None
                             ):
                                 # Ollama affinity is enforced by selecting an
-                                # independently CUDA-pinned pool endpoint.
-                                backend_gpu_indices = [state.preferred_gpu]
+                                # independently CUDA-pinned pool endpoint —
+                                # the generic scheduler's gpu_indices is
+                                # ignored here by design (it doesn't know
+                                # about pool/parallelism constraints). But a
+                                # model statically pinned to one GPU used to
+                                # have zero fallback when that GPU was busy:
+                                # the load would sit through the full
+                                # pressure-eviction cascade and fail minutes
+                                # later even when another, idle single-GPU
+                                # pool had plenty of room (2026-10-26
+                                # incident: gemma4:12b forced onto a busy
+                                # 3090, 3 failed loads, while the 3060 sat
+                                # completely free). Check real free VRAM on
+                                # the preferred GPU first; only fall back to
+                                # an alternate single-GPU pool when it
+                                # genuinely doesn't fit there.
+                                target_gpu = state.preferred_gpu
+                                fallback_candidates = getattr(
+                                    backend, "single_gpu_pool_candidates", None
+                                )
+                                if (
+                                    self._gpu_manager is not None
+                                    and vram_needed
+                                    and callable(fallback_candidates)
+                                ):
+                                    try:
+                                        free_mb = await self._gpu_manager.get_free_vram(
+                                            target_gpu
+                                        )
+                                    except Exception:  # noqa: BLE001
+                                        free_mb = None
+                                    if free_mb is not None and free_mb < vram_needed:
+                                        runtime_meta = (
+                                            effective_extra.get("_runtime")
+                                            if isinstance(effective_extra, dict)
+                                            else None
+                                        )
+                                        required_parallelism = max(
+                                            1,
+                                            int(
+                                                (runtime_meta or {}).get("parallelism")
+                                                or 1
+                                            ),
+                                        )
+                                        for alt_gpu in fallback_candidates(
+                                            exclude_gpu=target_gpu,
+                                            required_parallelism=required_parallelism,
+                                        ):
+                                            try:
+                                                alt_free_mb = (
+                                                    await self._gpu_manager.get_free_vram(
+                                                        alt_gpu
+                                                    )
+                                                )
+                                            except Exception:  # noqa: BLE001
+                                                continue
+                                            if alt_free_mb >= vram_needed:
+                                                logger.info(
+                                                    "ollama_preferred_gpu_fallback",
+                                                    model_id=model_id,
+                                                    preferred_gpu=target_gpu,
+                                                    fallback_gpu=alt_gpu,
+                                                    vram_needed_mb=vram_needed,
+                                                    free_vram_mb=alt_free_mb,
+                                                )
+                                                target_gpu = alt_gpu
+                                                break
+                                backend_gpu_indices = [target_gpu]
                             worker_info = await backend.load(
                                 state.backend_model_id,
                                 backend_gpu_indices,
@@ -2433,8 +2683,25 @@ class ModelManager:
             preferred_gpu=preferred_gpu,
             extra_config=extra_config or {},
         )
-        self._states[normalized_model_id] = state
-        self._load_locks[normalized_model_id] = asyncio.Lock()
+        # The membership check at the top of this method is not enough to
+        # make registration race-safe: it runs before the awaits above
+        # (fingerprint extraction, DB persist), so two concurrent calls for
+        # the same derived worker key (e.g. two requests racing to create
+        # ``llama_cpp/qwen3.8-27b::<hash>``) can both pass it and both reach
+        # here. Without a re-check, the second writer clobbers the first
+        # one's ModelState *and* its asyncio.Lock — a load already running
+        # on the first object keeps mutating it, but ``get_state`` (and the
+        # next ``_load_model`` call, which gets a brand new unlocked Lock)
+        # can no longer see it, so the real worker loads successfully onto
+        # an orphaned state object while everything else believes the model
+        # was never loaded. Reproduced live 2026-10-26: qwen3.8:27b's own
+        # VRAM lock ended up blocking its own future admissions forever.
+        # setdefault makes the actual insert atomic: whoever loses adopts
+        # the winner's objects instead of overwriting them.
+        existing = self._states.setdefault(normalized_model_id, state)
+        if existing is not state:
+            return existing
+        self._load_locks.setdefault(normalized_model_id, asyncio.Lock())
         if persist:
             self._persisted_model_ids.add(normalized_model_id)
         self._notify_event_listeners("register", state)
@@ -2590,7 +2857,7 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
                 caps.tools = True
     elif backend_type in {"whisper", "vibeasr"}:
         caps.audio_transcription = True
-    elif backend_type in {"chatterbox", "tts", "voxtral"}:
+    elif backend_type in {"chatterbox", "tts", "voxtral", "piper"}:
         caps.tts = True
         caps.streaming = True
     elif backend_type in {"diffusers", "mage"}:

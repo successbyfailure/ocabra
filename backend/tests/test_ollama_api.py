@@ -299,6 +299,96 @@ def test_chat_stream_translates_sse_to_ndjson() -> None:
     assert payloads[-1]["done"] is True
 
 
+def test_chat_non_streaming_converts_tool_calls_to_ollama_shape() -> None:
+    """Regression test: non-ollama backends (vllm/llama_cpp/...) used to drop
+    tool_calls entirely when translating the OpenAI-shaped worker response
+    back into Ollama's /api/chat shape — the HTTP request succeeded but the
+    tool call silently vanished. See gpu-bench README, 2026-10-27."""
+    worker_result = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city":"Madrid"}'},
+                        }
+                    ],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    app = _make_app(worker_result=worker_result)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/chat",
+        json={
+            "model": "llama3.2:3b",
+            "messages": [{"role": "user", "content": "weather in Madrid?"}],
+            "stream": False,
+            "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+        },
+    )
+
+    assert resp.status_code == 200
+    message = resp.json()["message"]
+    assert message["tool_calls"] == [
+        {"function": {"name": "get_weather", "arguments": {"city": "Madrid"}}}
+    ]
+
+
+def test_chat_stream_accumulates_and_converts_tool_call_deltas() -> None:
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    model_state = ModelState(
+        model_id="meta-llama/Llama-3.2-3B-Instruct",
+        display_name="Llama 3.2 3B",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, completion=True, embeddings=True, streaming=True),
+    )
+    app = _make_app(model_state=model_state)
+    app.state.worker_pool.forward_stream = MagicMock(
+        return_value=_async_gen(
+            [
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"get_weather","arguments":"{"}}]}}]}\n\n',
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"city\\":"}}]}}]}\n\n',
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"Madrid\\"}"}}]}}]}\n\n',
+                b'data: {"choices":[{"finish_reason":"tool_calls","delta":{}}]}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+        )
+    )
+
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={
+            "model": "llama3.2:3b",
+            "messages": [{"role": "user", "content": "weather in Madrid?"}],
+            "stream": True,
+            "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line for line in resp.iter_lines() if line]
+
+    payloads = [json.loads(line) for line in lines]
+    final = payloads[-1]
+    assert final["done"] is True
+    assert final["message"]["tool_calls"] == [
+        {"function": {"name": "get_weather", "arguments": {"city": "Madrid"}}}
+    ]
+
+
 def test_generate_translates_options_to_vllm_params() -> None:
     app = _make_app(worker_result={"choices": [{"text": "ok"}], "usage": {"prompt_tokens": 2, "completion_tokens": 1}})
     client = TestClient(app)
@@ -336,3 +426,133 @@ def test_build_vllm_chat_body_preserves_top_level_max_tokens() -> None:
     )
 
     assert body["max_tokens"] == 12
+
+
+def test_openai_tool_calls_to_ollama_parses_stringified_arguments() -> None:
+    from ocabra.api.ollama.chat import _openai_tool_calls_to_ollama
+
+    out = _openai_tool_calls_to_ollama(
+        [{"id": "x", "type": "function", "function": {"name": "f", "arguments": '{"a":1}'}}]
+    )
+
+    assert out == [{"function": {"name": "f", "arguments": {"a": 1}}}]
+
+
+def test_openai_tool_calls_to_ollama_handles_malformed_json_and_dict_args() -> None:
+    from ocabra.api.ollama.chat import _openai_tool_calls_to_ollama
+
+    out = _openai_tool_calls_to_ollama(
+        [
+            {"function": {"name": "broken", "arguments": "{not json"}},
+            {"function": {"name": "already_dict", "arguments": {"a": 1}}},
+            {"function": {"name": "", "arguments": "{}"}},
+        ]
+    )
+
+    assert out == [
+        {"function": {"name": "broken", "arguments": {}}},
+        {"function": {"name": "already_dict", "arguments": {"a": 1}}},
+    ]
+
+
+def test_normalize_messages_coerces_null_content_to_empty_string() -> None:
+    """Regression test: gemma4's llama.cpp worker hard-crashes (process dies,
+    not just a 500) when a historical assistant message has content: null
+    alongside tool_calls — the standard OpenAI shape for a tool-calls-only
+    message. Reproduced live 2026-10-27; content: "" with identical
+    tool_calls does not crash it. See gpu-bench README for the isolation."""
+    from ocabra.api.ollama.chat import _normalize_messages_for_backend
+
+    out = _normalize_messages_for_backend(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"function": {"name": "f", "arguments": "{}"}}],
+            },
+            {"role": "tool", "content": "result"},
+        ]
+    )
+
+    assert out[0]["content"] == "hi"
+    assert out[1]["content"] == ""
+    assert out[1]["tool_calls"] == [
+        {"function": {"name": "f", "arguments": "{}"}, "type": "function"}
+    ]
+    assert out[2]["content"] == "result"
+
+
+def test_build_vllm_chat_body_normalizes_null_content_in_messages() -> None:
+    from ocabra.api.ollama.chat import _build_vllm_chat_body
+
+    body = _build_vllm_chat_body(
+        {"messages": [{"role": "assistant", "content": None, "tool_calls": []}], "stream": False},
+        "meta-llama/Llama-3.2-3B-Instruct",
+        False,
+    )
+
+    assert body["messages"][0]["content"] == ""
+
+
+def test_ollama_messages_to_openai_coerces_null_content() -> None:
+    from ocabra.api.ollama.chat import _ollama_messages_to_openai
+
+    out = _ollama_messages_to_openai(
+        [{"role": "assistant", "content": None, "tool_calls": [{"function": {"name": "f"}}]}]
+    )
+
+    assert out[0]["content"] == ""
+
+
+def test_normalize_tool_call_backfills_type_and_stringifies_arguments() -> None:
+    """Regression test: oCabra hands clients Ollama-native tool_calls
+    (no "type", arguments as a plain object). A client that echoes that
+    exact shape back as history on the next turn gets forwarded straight
+    to llama-server's OpenAI-compatible endpoint, which rejects it with
+    "Failed to parse messages: Missing tool call type". Reproduced live
+    2026-10-27 via a real Home Assistant conversation (intent__HassTurnOn),
+    caught by the diagnostic logging added for the content:null crash."""
+    from ocabra.api.ollama.chat import _normalize_tool_call_for_backend
+
+    out = _normalize_tool_call_for_backend(
+        {"function": {"name": "intent__HassTurnOn", "arguments": {"name": "Lámpara"}}}
+    )
+
+    assert out["type"] == "function"
+    assert out["function"]["arguments"] == '{"name": "L\\u00e1mpara"}'
+
+
+def test_normalize_tool_call_preserves_existing_type_and_string_arguments() -> None:
+    from ocabra.api.ollama.chat import _normalize_tool_call_for_backend
+
+    out = _normalize_tool_call_for_backend(
+        {"id": "x", "type": "function", "function": {"name": "f", "arguments": '{"a":1}'}}
+    )
+
+    assert out["type"] == "function"
+    assert out["function"]["arguments"] == '{"a":1}'
+    assert out["id"] == "x"
+
+
+def test_build_vllm_chat_body_normalizes_historical_tool_calls() -> None:
+    from ocabra.api.ollama.chat import _build_vllm_chat_body
+
+    body = _build_vllm_chat_body(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "f", "arguments": {"a": 1}}}],
+                }
+            ],
+            "stream": False,
+        },
+        "meta-llama/Llama-3.2-3B-Instruct",
+        False,
+    )
+
+    tc = body["messages"][0]["tool_calls"][0]
+    assert tc["type"] == "function"
+    assert tc["function"]["arguments"] == '{"a": 1}'

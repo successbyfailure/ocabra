@@ -53,6 +53,7 @@ def _get_registry(request: Request) -> SessionRegistry:
         raise HTTPException(
             status_code=503,
             detail="Session registry not ready",
+            headers={"Retry-After": "5"},
         )
     return registry
 

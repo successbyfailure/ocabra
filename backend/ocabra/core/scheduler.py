@@ -57,6 +57,16 @@ class GPUScheduler:
                 return True
             state = state_by_gpu[gpu_idx]
             required_free_mb = int(state.total_vram_mb * vllm_utilization)
+            # This GPU's vLLM-allocatable budget must actually cover the
+            # model's real footprint, not just be proportionally free. A
+            # small, empty GPU otherwise "passes" trivially (its own
+            # total*utilization share is small but 100% free) ahead of a
+            # larger GPU that's merely not completely idle, even though
+            # the small GPU has nowhere near enough total capacity —
+            # e.g. an idle 12 GB card outranking a 24 GB card for a model
+            # that needs ~20 GB.
+            if required_free_mb < vram_needed_mb:
+                return False
             # ``get_free_vram`` subtracts oCabra's generic VRAM buffer.  vLLM's
             # ``gpu_memory_utilization`` already leaves its own share of the GPU
             # unused, so applying the generic buffer to this second check would

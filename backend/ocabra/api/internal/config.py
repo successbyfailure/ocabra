@@ -73,6 +73,14 @@ class ServerConfigPatch(BaseModel):
     models_dir: str | None = Field(default=None, alias="modelsDir")
     download_dir: str | None = Field(default=None, alias="downloadDir")
     max_temperature_c: int | None = Field(default=None, alias="maxTemperatureC")
+    gpu_throttle_enabled: bool | None = Field(default=None, alias="gpuThrottleEnabled")
+    gpu_throttle_power_reduction_pct: int | None = Field(
+        default=None, alias="gpuThrottlePowerReductionPct"
+    )
+    gpu_throttle_cooldown_s: int | None = Field(default=None, alias="gpuThrottleCooldownS")
+    gpu_throttle_recovery_margin_c: int | None = Field(
+        default=None, alias="gpuThrottleRecoveryMarginC"
+    )
     vllm_gpu_memory_utilization: float | None = Field(
         default=None, alias="vllmGpuMemoryUtilization"
     )
@@ -239,6 +247,10 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "modelsDir": settings.models_dir,
         "downloadDir": effective_download_dir,
         "maxTemperatureC": settings.max_temperature_c,
+        "gpuThrottleEnabled": settings.gpu_throttle_enabled,
+        "gpuThrottlePowerReductionPct": settings.gpu_throttle_power_reduction_pct,
+        "gpuThrottleCooldownS": settings.gpu_throttle_cooldown_s,
+        "gpuThrottleRecoveryMarginC": settings.gpu_throttle_recovery_margin_c,
         "vllmGpuMemoryUtilization": settings.vllm_gpu_memory_utilization,
         "vllmMaxNumSeqs": settings.vllm_max_num_seqs,
         "vllmMaxNumBatchedTokens": settings.vllm_max_num_batched_tokens,
@@ -569,6 +581,18 @@ async def patch_config(
         await _persist("max_temperature_c", settings.max_temperature_c)
         if hasattr(request.app.state, "gpu_manager"):
             request.app.state.gpu_manager.max_temperature_c = settings.max_temperature_c
+    for field_name, caster in (
+        ("gpu_throttle_enabled", bool),
+        ("gpu_throttle_power_reduction_pct", int),
+        ("gpu_throttle_cooldown_s", int),
+        ("gpu_throttle_recovery_margin_c", int),
+    ):
+        if field_name in payload:
+            value = caster(payload[field_name])
+            setattr(settings, field_name, value)
+            await _persist(field_name, value)
+            if hasattr(request.app.state, "gpu_manager"):
+                setattr(request.app.state.gpu_manager, field_name, value)
 
     # ── Generation services: persist setting + propagate to live ServiceState ──
     # service_id (in ServiceManager) → settings prefix

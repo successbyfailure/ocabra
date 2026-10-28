@@ -23,6 +23,17 @@ class RequestStat(Base):
         DateTime(timezone=True), nullable=False, index=True
     )
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+    # Pure generation time (ms) reported by the backend engine itself —
+    # llama.cpp's ``timings.predicted_ms`` or Ollama's ``eval_duration``
+    # (ns, converted). NULL when the backend doesn't report it (vLLM) or
+    # for rows written before this field existed. ``duration_ms`` is wall
+    # clock from the moment the HTTP request arrived — it includes queue
+    # wait and cold-start time, so tok/s computed against it understates
+    # real throughput under contention. Use this field for tok/s instead
+    # when it's present. Added 2026-10-27 after a user's real tok/s came
+    # out ~5 during a congested window despite the engine doing 50-80+ in
+    # isolation — see gpu-bench/README.md.
+    generation_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     # Subset of ``input_tokens`` that hit the backend's prompt cache

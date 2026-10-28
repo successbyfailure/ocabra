@@ -20,7 +20,7 @@ from starlette.types import ASGIApp
 
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key
-from ocabra.core.worker_pool import InferenceTimeoutError
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 
 async def _resolve_inflight_auth_meta(request: Request) -> dict:
@@ -388,6 +388,37 @@ def _extract_usage_tokens_detailed(
     return in_tok, out_tok, cached_tok, reason_tok
 
 
+def _extract_generation_ms(payload: dict | None) -> int | None:
+    """Pure generation time (ms), reported directly by the backend engine —
+    independent of ``duration_ms``, which measures wall clock from the
+    moment the HTTP request arrived (so it includes queue wait and
+    cold-start time, and understates real throughput under contention).
+
+    llama.cpp's non-streaming/final-chunk response body carries a
+    ``timings.predicted_ms`` field; Ollama's carries ``eval_duration``
+    (nanoseconds). Neither vLLM nor the OpenAI-shape-only backends expose
+    this, so this returns ``None`` far more often than not — callers must
+    treat a ``None`` as "unknown", not "zero".
+    """
+    if not isinstance(payload, dict):
+        return None
+    timings = payload.get("timings")
+    if isinstance(timings, dict):
+        predicted_ms = timings.get("predicted_ms")
+        if predicted_ms is not None:
+            try:
+                return int(float(predicted_ms))
+            except (TypeError, ValueError):
+                pass
+    eval_duration_ns = payload.get("eval_duration")
+    if eval_duration_ns is not None:
+        try:
+            return int(float(eval_duration_ns) / 1_000_000.0)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _extract_error_message(payload: dict | None, status_code: int) -> str | None:
     """Preserve the structured API error instead of reducing it to ``HTTP 5xx``."""
     if status_code < 400:
@@ -449,6 +480,40 @@ class StatsMiddleware(BaseHTTPMiddleware):
             mm = request.app.state.model_manager
         except AttributeError:
             mm = None
+        if mm and inflight_model_id and mm.is_in_maintenance(inflight_model_id):
+            # Maintenance window: reject new requests fast and clear so
+            # whoever is testing against this model doesn't have real
+            # traffic contending for the same GPU/worker. Requests already
+            # admitted before the window opened are untouched — this check
+            # runs before try_begin_request ever marks one in-flight.
+            asyncio.create_task(
+                _record_stat(
+                    request=request,
+                    model_id=inflight_model_id,
+                    started_at=started_at,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    error_message="model_maintenance",
+                    status_code=503,
+                    endpoint_path=path,
+                    request_kind=request_kind,
+                    input_tokens=None,
+                    output_tokens=None,
+                )
+            )
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "30"},
+                content={
+                    "error": {
+                        "message": (
+                            f"Model '{inflight_model_id}' is under maintenance. "
+                            "Please retry shortly."
+                        ),
+                        "type": "server_error",
+                        "code": "model_maintenance",
+                    }
+                },
+            )
         if mm and inflight_model_id:
             auth_meta = await _resolve_inflight_auth_meta(request)
             inflight_request_id = mm.try_begin_request(
@@ -467,6 +532,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
                 # rather than pile on so one client's burst can't starve others.
+                effective_cap = mm.effective_inflight_cap(
+                    inflight_model_id, settings.max_inflight_per_model
+                )
                 asyncio.create_task(
                     _record_stat(
                         request=request,
@@ -481,15 +549,20 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         output_tokens=None,
                     )
                 )
+                # A low-concurrency worker (e.g. a single-slot Ollama model)
+                # drains its queue far slower than the flat 2s this used to
+                # suggest unconditionally — tell low-slot callers to back off
+                # longer so they don't hammer an already-saturated worker.
+                retry_after_s = 2 if effective_cap > 4 else 10
                 return JSONResponse(
                     status_code=429,
-                    headers={"Retry-After": "2"},
+                    headers={"Retry-After": str(retry_after_s)},
                     content={
                         "error": {
                             "message": (
                                 f"Model '{inflight_model_id}' is at capacity "
-                                f"({settings.max_inflight_per_model} concurrent "
-                                "requests). Please retry shortly."
+                                f"({effective_cap} concurrent requests for this "
+                                "worker). Please retry shortly."
                             ),
                             "type": "rate_limit_error",
                             "code": "model_at_capacity",
@@ -535,6 +608,50 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         "message": str(exc),
                         "type": "server_error",
                         "code": "generation_timeout",
+                    }
+                },
+            )
+        except WorkerDegradedError as exc:
+            # Circuit breaker tripped: this worker just failed several times
+            # in a row in a way that means its process died (see
+            # worker_pool._looks_like_dead_backend). Fail fast with a clear
+            # 503 instead of letting the request sit behind a dead runner for
+            # a full upstream timeout only to fail the same way anyway.
+            if mm and inflight_model_id:
+                mm.end_request(
+                    getattr(request.state, "inflight_model_id", inflight_model_id),
+                    inflight_request_id,
+                )
+            model_id = _extract_model_id(request=request, body=request_payload)
+            if model_id:
+                asyncio.create_task(
+                    _record_stat(
+                        request=request,
+                        model_id=model_id,
+                        started_at=started_at,
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        error_message=str(exc),
+                        status_code=503,
+                        endpoint_path=path,
+                        request_kind=request_kind,
+                        input_tokens=None,
+                        output_tokens=None,
+                    )
+                )
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    status_code=503,
+                    headers={"Retry-After": str(settings.worker_circuit_breaker_cooldown_s)},
+                    content={"error": str(exc)},
+                )
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": str(settings.worker_circuit_breaker_cooldown_s)},
+                content={
+                    "error": {
+                        "message": str(exc),
+                        "type": "server_error",
+                        "code": "worker_degraded",
                     }
                 },
             )
@@ -665,6 +782,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         in_tok, out_tok, cached_tok, reason_tok = _extract_usage_tokens_detailed(
                             last_payload, request_kind, request_payload
                         )
+                        generation_ms = _extract_generation_ms(last_payload)
                         # Streaming without a usage payload (e.g. no stream_options.
                         # include_usage): approximate from the streamed content and
                         # the request so the row isn't left as "—".
@@ -691,6 +809,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 output_tokens=out_tok,
                                 cached_tokens=cached_tok,
                                 reasoning_tokens=reason_tok,
+                                generation_ms=generation_ms,
                                 work_size_meta=work_size_meta,
                                 via_router_profile_id=via_router_profile_id,
                             )
@@ -722,6 +841,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             in_tok, out_tok, cached_tok, reason_tok = _extract_usage_tokens_detailed(
                 response_payload, request_kind=request_kind, request_payload=request_payload
             )
+            generation_ms = _extract_generation_ms(response_payload)
             # Transcription output: JSON formats are proxied above; for non-JSON
             # (srt/vtt/text) count words from the raw body. Empty/silence → 0
             # (not "—") so the row is consistent.
@@ -755,6 +875,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     output_tokens=out_tok,
                     cached_tokens=cached_tok,
                     reasoning_tokens=reason_tok,
+                    generation_ms=generation_ms,
                     work_size_meta=work_size_meta,
                     via_router_profile_id=via_router,
                 )
@@ -817,6 +938,19 @@ async def _resolve_inflight_model_id(request: Request, requested: str | None) ->
     if registry is not None:
         try:
             profile = await registry.get(requested)
+            if profile is None:
+                # Hidden compatibility aliases (e.g. "gemma4:26b" -> the
+                # renamed "gemma4:26b-llamacpp" profile after a backend
+                # migration) aren't profile_ids themselves, so a plain
+                # registry.get() misses them. Without this, stats blamed
+                # the alias's OLD backend_model_id match in the fallback
+                # below — attributing every request to the wrong backend
+                # even though the real request correctly used the new one.
+                # See resolve_profile() in api/openai/_deps.py for the
+                # same alias-then-direct-lookup order this mirrors.
+                alias_resolver = getattr(registry, "resolve_alias", None)
+                alias_target = await alias_resolver(requested) if alias_resolver is not None else None
+                profile = alias_target[0] if alias_target is not None else None
             if profile is not None and profile.enabled:
                 if getattr(profile, "profile_kind", "execution") == "router":
                     for target_id in profile.routing_targets or []:
@@ -992,6 +1126,7 @@ async def _record_stat(
     via_router_profile_id: str | None = None,
     cached_tokens: int | None = None,
     reasoning_tokens: int | None = None,
+    generation_ms: int | None = None,
 ) -> None:
     """Write a RequestStat row to the database and update Prometheus counters."""
     try:
@@ -1107,6 +1242,7 @@ async def _record_stat(
                 gpu_index=gpu_index,
                 started_at=started_at,
                 duration_ms=int(duration_ms),
+                generation_ms=generation_ms,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_tokens=cached_tokens,

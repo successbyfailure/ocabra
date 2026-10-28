@@ -305,6 +305,45 @@ class TestProfileRegistryCRUD:
             await registry.delete(session, "nonexistent")
 
 
+# ── Alias create/delete must keep the cached profile.aliases in sync ────
+#
+# Regression: a GET right after create/delete used to serve a stale aliases
+# list until the next restart repopulated the registry from the DB. Root
+# cause: self._aliases (flat dict) was updated, but self._profiles[id] is a
+# long-lived cached ORM instance whose .aliases relationship was loaded once
+# at startup and never refreshed by writes through a separate session.
+
+
+class TestProfileAliasCacheSync:
+    @pytest.mark.asyncio
+    async def test_create_alias_appends_to_cached_profile_aliases(self):
+        registry = ProfileRegistry()
+        profile = _make_profile(profile_id="target", aliases=[])
+        registry._profiles["target"] = profile
+        session = AsyncMock()
+
+        alias = await registry.create_alias(
+            session, alias_id="target-alias", profile_id="target"
+        )
+
+        assert alias in profile.aliases
+        assert registry._aliases["target-alias"] is alias
+
+    @pytest.mark.asyncio
+    async def test_delete_alias_removes_from_cached_profile_aliases(self):
+        registry = ProfileRegistry()
+        existing_alias = SimpleNamespace(alias_id="target-alias", profile_id="target")
+        profile = _make_profile(profile_id="target", aliases=[existing_alias])
+        registry._profiles["target"] = profile
+        registry._aliases["target-alias"] = existing_alias
+        session = AsyncMock()
+
+        await registry.delete_alias(session, "target-alias")
+
+        assert profile.aliases == []
+        assert "target-alias" not in registry._aliases
+
+
 # ── Auto default-profile creation on model registration ─────
 
 

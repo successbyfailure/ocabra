@@ -10,6 +10,7 @@ from math import ceil
 
 import sqlalchemy as sa
 
+from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.stats import GpuStat, ModelLoadStat, RequestStat, ServerStat
 from ocabra.stats.cost_calculator import estimate_cost_for_rows
@@ -118,8 +119,13 @@ async def get_gpu_usage_stats(
     chart. Bucketing switches from hourly to daily when the window exceeds
     72 h so the client never gets more than ~200 points per GPU.
 
-    Interval accounting caps per-sample gaps at 30 s so a server restart or
-    monitor pause doesn't inflate the "covered time" totals.
+    Interval accounting caps per-sample gaps at
+    ``settings.gpu_stats_expected_interval_s`` (default 90s — a bit above
+    hw-monitor's real ~60s persist cadence) so a server restart or monitor
+    pause doesn't inflate the "covered time" totals, without the cap itself
+    truncating every normal interval (2026-10-26: it used to hardcode 30s
+    against a real 60s cadence, silently halving every coverage/activity/kWh
+    figure in this endpoint, always, regardless of window size).
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
     window_hours = max(0.0, (to_dt - from_dt).total_seconds() / 3600.0)
@@ -150,7 +156,7 @@ async def get_gpu_usage_stats(
                 temperature_c,
                 LEAST(
                     EXTRACT(EPOCH FROM (COALESCE(next_at, :to_dt) - recorded_at)),
-                    30
+                    :gap_cap_s
                 ) AS gap_s
             FROM ordered
         )
@@ -191,7 +197,12 @@ async def get_gpu_usage_stats(
     async with AsyncSessionLocal() as session:
         totals_result = await session.execute(
             totals_q,
-            {"from_dt": from_dt, "to_dt": to_dt, "threshold": active_threshold_pct},
+            {
+                "from_dt": from_dt,
+                "to_dt": to_dt,
+                "threshold": active_threshold_pct,
+                "gap_cap_s": settings.gpu_stats_expected_interval_s,
+            },
         )
         totals_rows = totals_result.all()
         series_result = await session.execute(
@@ -378,7 +389,22 @@ async def get_performance_stats(
         total_duration_ms = sum(durations)
         tokenized_requests = sum(1 for r in model_rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0)
 
-        tokens_ps = (sum(out_tokens) / total_duration_ms * 1000) if total_duration_ms else 0.0
+        # tokensPerSecond: duration_ms is wall clock from HTTP arrival, so it
+        # includes queue wait / cold-start time under contention — dividing
+        # by it understates real engine throughput (reported 2026-10-27:
+        # ~5 tok/s during a congested window for an engine that does 50-80+
+        # in isolation). generation_ms (when the backend reports it —
+        # llama.cpp/Ollama, not vLLM) is pure engine time; prefer it
+        # per-request and fall back to duration_ms only for rows that don't
+        # have it (older rows, or backends that don't report it).
+        tokens_for_rate = 0
+        ms_for_rate = 0
+        for r in model_rows:
+            effective_ms = r.generation_ms if r.generation_ms else r.duration_ms
+            if effective_ms:
+                tokens_for_rate += max(0, int(r.output_tokens or 0))
+                ms_for_rate += max(0, int(effective_ms))
+        tokens_ps = (tokens_for_rate / ms_for_rate * 1000) if ms_for_rate else 0.0
         req_per_min = (n * 60000 / total_duration_ms) if total_duration_ms else 0.0
 
         request_kinds = sorted({(r.request_kind or "other") for r in model_rows})

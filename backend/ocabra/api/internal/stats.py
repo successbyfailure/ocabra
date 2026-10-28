@@ -298,7 +298,11 @@ async def cancel_inflight_request(
 ) -> dict:
     mm = getattr(request.app.state, "model_manager", None)
     if mm is None:
-        raise HTTPException(status_code=503, detail="model_manager unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="model_manager unavailable",
+            headers={"Retry-After": "5"},
+        )
     # Peek first to enforce ownership without side effects.
     active = None
     with mm._in_flight_lock:  # noqa: SLF001 — intentional, keeps lookup atomic

@@ -7,9 +7,9 @@
 #   BIN_DIR      /data/backends/llama_cpp/bin
 #
 # Optional env (read with sensible defaults):
-#   LLAMA_CUDA_ARCHITECTURES  "61;70;75;80;86;89"  (RTX 3060 → RTX 4090 + L4/L40S)
-#   ENABLE_CUDA               "ON" | "OFF"          (default ON)
-#   BUILD_JOBS                int                   (default nproc/2 capped at 8)
+#   LLAMA_CUDA_ARCHITECTURES  "75;80;86;89"  (RTX 2060/Turing → RTX 4090 + L4/L40S)
+#   ENABLE_CUDA               "ON" | "OFF"   (default ON)
+#   BUILD_JOBS                int            (default nproc/2 capped at 8)
 #
 # Output: ${BIN_DIR}/llama-server, plus any libggml*.so/libllama*.so referenced
 # by the binary, copied next to it for LD_LIBRARY_PATH-free loading.
@@ -23,7 +23,12 @@ set -euo pipefail
 : "${SRC_DIR:?SRC_DIR is required (BackendInstaller must clone llama.cpp first)}"
 : "${BIN_DIR:?BIN_DIR is required}"
 
-LLAMA_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES:-61;70;75;80;86;89}"
+# 61/70 (Pascal/Volta) dropped from the default: CUDA 13's nvcc
+# (`nvcc --list-gpu-arch`) no longer accepts them at all — "nvcc fatal:
+# Unsupported gpu architecture 'compute_61'" fails the whole build even
+# though real targets like 86 are listed alongside it. 75 (Turing) is
+# nvcc 13's actual floor.
+LLAMA_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES:-75;80;86;89}"
 ENABLE_CUDA="${ENABLE_CUDA:-ON}"
 BUILD_JOBS="${BUILD_JOBS:-$(( $(nproc 2>/dev/null || echo 4) / 2 ))}"
 [[ "${BUILD_JOBS}" -lt 1 ]] && BUILD_JOBS=1

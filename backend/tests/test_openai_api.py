@@ -1111,6 +1111,38 @@ class TestPoolingEndpoints:
         })
         assert r.status_code == 503
         assert r.json()["detail"]["error"]["code"] == "model_load_failed"
+        # 2026-10-27: a generic load failure is a transient condition (worker
+        # crash, I/O hiccup) — clients should be told to retry rather than
+        # treat it as a hard stop.
+        assert r.headers.get("retry-after") == "10"
+
+    def test_model_stuck_in_error_status_returns_503_without_retry_hint(self):
+        """A model whose last load attempt left it in ModelStatus.ERROR needs
+        a human to look at it — unlike the transient statuses above, don't
+        tell the client to retry on a timer (2026-10-27)."""
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        error_state = ModelState(
+            model_id="broken-model",
+            display_name="Broken",
+            backend_type="vllm",
+            status=ModelStatus.ERROR,
+            load_policy=LoadPolicy.ON_DEMAND,
+            error_message="repeated crash on load",
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+        )
+        app = _make_app(model_state=error_state)
+        app.state.model_manager.get_state = AsyncMock(return_value=error_state)
+        client = TestClient(app)
+
+        r = client.post("/v1/chat/completions", json={
+            "model": "broken-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert r.status_code == 503
+        assert r.json()["detail"]["error"]["code"] == "model_unavailable"
+        assert "retry-after" not in r.headers
 
 
 # ---------------------------------------------------------------------------

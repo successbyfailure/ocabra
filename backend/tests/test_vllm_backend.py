@@ -13,6 +13,7 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -456,7 +457,9 @@ class TestMemoryProfileParsing:
         assert profile["estimated_max_model_len"] == 7824
 
     @pytest.mark.asyncio
-    async def test_empty_directory(self, tmp_model_dir: Path):
+    async def test_empty_directory_falls_back_to_floor_when_remote_lookup_fails(
+        self, tmp_model_dir: Path
+    ):
         model_path = tmp_model_dir / "empty"
         model_path.mkdir()
 
@@ -464,10 +467,79 @@ class TestMemoryProfileParsing:
 
         with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
             mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_token = ""
             backend = VLLMBackend()
-            estimate = await backend.get_vram_estimate_mb("empty")
+            with patch.object(
+                VLLMBackend, "_estimate_remote_hf_size_bytes", new=AsyncMock(return_value=0)
+            ):
+                estimate = await backend.get_vram_estimate_mb("empty")
 
-        assert estimate >= 2048
+        assert estimate == 2048
+
+    @pytest.mark.asyncio
+    async def test_no_local_files_uses_remote_hf_size_before_floor(
+        self, tmp_model_dir: Path
+    ):
+        """Regression: before the first ``vllm serve`` download, no local
+        .safetensors exist. The estimate must reflect the real remote repo
+        size (so the scheduler can reject GPUs too small to ever hold it)
+        instead of silently returning the tiny floor — see gpu-bench
+        2026-10-24 incident where a 20+ GB model got scheduled onto a
+        12 GB GPU because the floor estimate (2048 MB) looked tiny."""
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            mock_settings.hf_token = ""
+            backend = VLLMBackend()
+            with patch.object(
+                VLLMBackend,
+                "_estimate_remote_hf_size_bytes",
+                new=AsyncMock(return_value=20 * 1024 * 1024 * 1024),  # 20 GB repo
+            ):
+                estimate = await backend.get_vram_estimate_mb("not-downloaded-yet/model")
+
+        # 20 GB * 1.2 overhead, in MB.
+        assert estimate == int(20 * 1024 * 1.2)
+
+    @pytest.mark.asyncio
+    async def test_remote_hf_size_lookup_sums_safetensors_and_ignores_other_files(self):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        tree_response = [
+            {"path": "model-00001-of-00002.safetensors", "size": 10 * 1024 * 1024 * 1024},
+            {"path": "model-00002-of-00002.safetensors", "size": 5 * 1024 * 1024 * 1024},
+            {"path": "README.md", "size": 2048},
+            {"path": "tokenizer.json", "size": 19_000_000},
+        ]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value=tree_response)
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.hf_token = ""
+            backend = VLLMBackend()
+            with patch(
+                "httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)
+            ):
+                total_bytes = await backend._estimate_remote_hf_size_bytes("org/model")
+
+        assert total_bytes == 15 * 1024 * 1024 * 1024
+
+    @pytest.mark.asyncio
+    async def test_remote_hf_size_lookup_returns_zero_on_network_error(self):
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.hf_token = ""
+            backend = VLLMBackend()
+            with patch(
+                "httpx.AsyncClient.get",
+                new=AsyncMock(side_effect=httpx.ConnectError("boom")),
+            ):
+                total_bytes = await backend._estimate_remote_hf_size_bytes("org/model")
+
+        assert total_bytes == 0
 
 
 # ---------------------------------------------------------------------------

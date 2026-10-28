@@ -85,7 +85,14 @@ class ModelProfile(Base):
     assets: Mapped[dict | None] = mapped_column(JSONB)
     # Router profiles delegate to these ordered public profile ids. They do
     # not own a base model: every successful request resolves to a target.
-    routing_targets: Mapped[list | None] = mapped_column(JSONB)
+    #
+    # ``none_as_null=True``: without it, SQLAlchemy's JSONB binds a Python
+    # ``None`` as the JSON value ``null`` rather than SQL ``NULL``.
+    # ``ck_model_profile_kind_shape`` checks ``routing_targets IS NULL OR
+    # routing_targets = '[]'::jsonb`` — a JSON ``null`` satisfies neither
+    # branch, so every execution-profile insert/update that leaves this
+    # unset (i.e. every non-router profile) violated the constraint.
+    routing_targets: Mapped[list | None] = mapped_column(JSONB(none_as_null=True))
     # Bloque 21 — selection/hysteresis policy shared by the profile's
     # context/runtime presets. Presets themselves live in their own table so
     # they can be addressed and mutated independently from the public profile.

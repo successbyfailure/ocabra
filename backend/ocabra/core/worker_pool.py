@@ -329,6 +329,86 @@ class InferenceTimeoutError(TimeoutError):
         super().__init__(f"Inference for model '{model_id}' timed out after {timeout_s}s")
 
 
+class WorkerDegradedError(RuntimeError):
+    """A worker has failed repeatedly in a way that indicates its backend
+    process died (not a one-off error) — raised instead of forwarding another
+    request so callers fail fast rather than queueing behind a dead worker."""
+
+    def __init__(self, model_id: str, failure_count: int) -> None:
+        self.model_id = model_id
+        self.failure_count = failure_count
+        super().__init__(
+            f"Worker for model '{model_id}' failed {failure_count} consecutive "
+            "times and looks like its backend process died; rejecting new "
+            "requests until it recovers"
+        )
+
+
+# Substrings of a 5xx body that indicate the backend's own process died
+# rather than a request-specific error (bad input, OOM on this one prompt,
+# etc). Matching on these keeps the breaker from tripping on ordinary 5xx
+# noise — only patterns that mean "the runner itself is gone" count.
+_DEAD_BACKEND_MARKERS = (
+    "no longer running",
+    "connection refused",
+    "connect call failed",
+)
+
+
+def _summarize_messages_for_log(body: dict) -> list[dict] | None:
+    """Structural (not content) summary of a chat ``messages`` list for error
+    logs — role, content type/length, tool_calls count, presence of
+    reasoning_content — without dumping user/model text into logs. Added
+    after a gemma4 worker crash (2026-10-27) that cost a debugging cycle
+    purely because the triggering message shape wasn't recoverable after
+    the fact; see gpu-bench README.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return None
+    out = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append({"type": type(m).__name__})
+            continue
+        content = m.get("content")
+        out.append(
+            {
+                "role": m.get("role"),
+                "content_type": type(content).__name__ if content is not None else "None",
+                "content_len": len(content) if isinstance(content, (str, list)) else None,
+                "tool_calls": len(m["tool_calls"]) if isinstance(m.get("tool_calls"), list) else 0,
+                "has_reasoning_content": bool(m.get("reasoning_content")),
+            }
+        )
+    return out
+
+
+def _log_upstream_http_error(logger_, event: str, *, model_id: str, path: str, body: dict, exc: httpx.HTTPStatusError) -> None:
+    try:
+        error_body = exc.response.text[:2000]
+    except Exception:  # noqa: BLE001 — best-effort diagnostics only
+        error_body = None
+    logger_.warning(
+        event,
+        model_id=model_id,
+        path=path,
+        status_code=exc.response.status_code,
+        error_body=error_body,
+        messages=_summarize_messages_for_log(body),
+    )
+
+
+def _looks_like_dead_backend(exc: httpx.HTTPStatusError) -> bool:
+    if exc.response.status_code < 500:
+        return False
+    try:
+        body = exc.response.text.lower()
+    except Exception:  # noqa: BLE001 — body read failures just mean "no match"
+        return False
+    return any(marker in body for marker in _DEAD_BACKEND_MARKERS)
+
+
 class WorkerPool:
     def __init__(self) -> None:
         self._backends: dict[str, BackendInterface] = {}
@@ -338,6 +418,27 @@ class WorkerPool:
         # Optional async callback (model_id) -> num_ctx cap | None, used to clamp
         # Ollama requests to a model's configured use-case context (wired in main).
         self._ollama_ctx_resolver: Any | None = None
+        # Circuit breaker bookkeeping — see WorkerDegradedError.
+        self._consecutive_failures: dict[str, int] = {}
+        self._last_failure_at: dict[str, float] = {}
+
+    def _check_circuit_breaker(self, model_id: str) -> None:
+        failures = self._consecutive_failures.get(model_id, 0)
+        if failures < settings.worker_circuit_breaker_threshold:
+            return
+        elapsed = time.monotonic() - self._last_failure_at.get(model_id, 0.0)
+        if elapsed < settings.worker_circuit_breaker_cooldown_s:
+            raise WorkerDegradedError(model_id, failures)
+        # Cooldown elapsed: let one probe request through (half-open) instead
+        # of tripping forever on a worker that may have already recovered.
+
+    def _record_forward_failure(self, model_id: str) -> None:
+        self._consecutive_failures[model_id] = self._consecutive_failures.get(model_id, 0) + 1
+        self._last_failure_at[model_id] = time.monotonic()
+
+    def _record_forward_success(self, model_id: str) -> None:
+        self._consecutive_failures.pop(model_id, None)
+        self._last_failure_at.pop(model_id, None)
 
     def set_ollama_ctx_resolver(self, resolver: Any) -> None:
         self._ollama_ctx_resolver = resolver
@@ -398,11 +499,13 @@ class WorkerPool:
     def set_worker(self, model_id: str, info: WorkerInfo) -> None:
         self._workers[model_id] = info
         self._used_ports.add(info.port)
+        self._record_forward_success(model_id)
 
     def remove_worker(self, model_id: str) -> None:
         info = self._workers.pop(model_id, None)
         if info:
             self._used_ports.discard(info.port)
+        self._record_forward_success(model_id)
 
     async def assign_port(self) -> int:
         for port in range(settings.worker_port_range_start, settings.worker_port_range_end):
@@ -418,6 +521,7 @@ class WorkerPool:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
+        self._check_circuit_breaker(model_id)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -445,6 +549,20 @@ class WorkerPool:
                 timeout_s=timeout_s,
             )
             raise InferenceTimeoutError(model_id, path, timeout_s) from exc
+        except httpx.HTTPStatusError as exc:
+            _log_upstream_http_error(
+                logger, "inference_upstream_http_error", model_id=model_id, path=path, body=body, exc=exc
+            )
+            if _looks_like_dead_backend(exc):
+                self._record_forward_failure(model_id)
+                logger.warning(
+                    "worker_looks_dead",
+                    model_id=model_id,
+                    path=path,
+                    consecutive_failures=self._consecutive_failures[model_id],
+                )
+            raise
+        self._record_forward_success(model_id)
         if ollama_adapter is not None:
             result = _ollama_native_response(ollama_adapter, result, requested_model)
         # Normalize reasoning → reasoning_content for chat completions
@@ -472,6 +590,7 @@ class WorkerPool:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
+        self._check_circuit_breaker(model_id)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -505,6 +624,7 @@ class WorkerPool:
                         resp.raise_for_status()
                         async for chunk in resp.aiter_bytes():
                             yield chunk
+                self._record_forward_success(model_id)
             except httpx.TimeoutException as exc:
                 logger.warning(
                     "inference_upstream_stream_timeout",
@@ -513,6 +633,19 @@ class WorkerPool:
                     timeout_s=timeout_s,
                 )
                 raise InferenceTimeoutError(model_id, path, timeout_s) from exc
+            except httpx.HTTPStatusError as exc:
+                _log_upstream_http_error(
+                    logger, "inference_upstream_stream_http_error", model_id=model_id, path=path, body=body, exc=exc
+                )
+                if _looks_like_dead_backend(exc):
+                    self._record_forward_failure(model_id)
+                    logger.warning(
+                        "worker_looks_dead",
+                        model_id=model_id,
+                        path=path,
+                        consecutive_failures=self._consecutive_failures[model_id],
+                    )
+                raise
 
         # Normalize reasoning → reasoning_content for chat completions
         is_chat = "/chat/completions" in path

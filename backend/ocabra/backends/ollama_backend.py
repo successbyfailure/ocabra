@@ -45,6 +45,31 @@ class OllamaBackend(BackendInterface):
             raise RuntimeError("OLLAMA_POOLS_JSON must be a JSON array")
         return [pool for pool in pools if isinstance(pool, dict)]
 
+    def single_gpu_pool_candidates(
+        self, *, exclude_gpu: int | None = None, required_parallelism: int = 1
+    ) -> list[int]:
+        """GPU indices with a dedicated (non-multi_gpu) Ollama pool, other
+        than ``exclude_gpu``, usable as a fallback target when a model's
+        preferred GPU doesn't have room. Only single-GPU pools are offered —
+        falling back to a ``multi_gpu`` shared pool would silently also use
+        whatever other GPU it spans, which isn't what a same-size fallback
+        should do.
+        """
+        candidates: list[int] = []
+        for pool in self._configured_pools():
+            if bool(pool.get("multi_gpu")):
+                continue
+            if max(1, int(pool.get("num_parallel") or 1)) < required_parallelism:
+                continue
+            gpus = [int(index) for index in pool.get("gpus", [])]
+            if len(gpus) != 1:
+                continue
+            gpu = gpus[0]
+            if gpu == exclude_gpu:
+                continue
+            candidates.append(gpu)
+        return candidates
+
     def _select_pool(
         self, gpu_indices: list[int], extra_config: dict[str, Any] | None
     ) -> tuple[str, list[int]]:
@@ -197,6 +222,46 @@ class OllamaBackend(BackendInterface):
         )
         loaded = await self._registry_for(endpoint).list_loaded()
         return model_id in loaded
+
+    async def discover_resident_models(self) -> list[dict[str, Any]]:
+        """Query every configured pool's ``/api/ps`` for what it actually
+        has resident right now, independent of what oCabra's in-memory
+        bookkeeping (``self._model_endpoints``/``self._loaded``) thinks is
+        loaded.
+
+        oCabra's own tracking of *which specific worker* (base model_id or a
+        derived ``::<hash>`` runtime variant) owns a given Ollama load is
+        in-memory only — it isn't persisted, so an API restart forgets it
+        even though the real llama-server process, running in a separate
+        long-lived Ollama container, keeps serving and keeps holding its
+        GPU's VRAM. Used at startup to re-adopt (or at least flag) resident
+        models oCabra would otherwise have no record of — see the
+        2026-10-26 incident: gemma4:12b stayed loaded in the 3060 pool
+        across a restart, oCabra reported it as unloaded/0 VRAM, and
+        qwen3.8:27b kept getting rejected with "insufficient VRAM" against
+        the real (correctly reported by NVML, but unattributed) free memory.
+        """
+        discovered: list[dict[str, Any]] = []
+        for pool in self._configured_pools():
+            url = str(pool.get("url") or "").rstrip("/")
+            if not url:
+                continue
+            gpus = [int(index) for index in pool.get("gpus", [])]
+            try:
+                details = await self._registry_for(url).list_loaded_details()
+            except Exception as exc:  # noqa: BLE001 — one unreachable pool must not block the rest
+                logger.warning("ollama_pool_discovery_failed", pool_url=url, error=str(exc))
+                continue
+            for item in details:
+                discovered.append(
+                    {
+                        "name": item["name"],
+                        "vram_mb": item["size_vram"] // (1024 * 1024),
+                        "pool_url": url,
+                        "pool_gpus": gpus,
+                    }
+                )
+        return discovered
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         cached = self._caps_cache.get(model_id)

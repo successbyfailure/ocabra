@@ -9,8 +9,18 @@ from typing import Any
 
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
+from ocabra.core.model_manager_helpers import _resolve_rs_rollback_snapshots
 from ocabra.core.runtime_presets import build_runtime_key
 from ocabra.core.vram_capacity import KV_DTYPES, resolve_arch_and_weights
+
+# Backends whose multi-GPU placement is a real, proportional spread across
+# the requested GPUs (Ollama's shared-pool mode, llama.cpp/bitnet's default
+# --split-mode layer) rather than a sharding scheme this planner would have
+# to model explicitly (vLLM/sglang tensor-parallel). For these, summing the
+# requested GPUs' capacity with the same single-GPU formula is a faithful
+# model — validated empirically for llama_cpp against a real asymmetric
+# 3060+3090 load (2026-10-26).
+_PROPORTIONAL_MULTI_GPU_BACKENDS = {"ollama", "llama_cpp", "bitnet"}
 
 
 @dataclass(frozen=True)
@@ -192,6 +202,13 @@ async def resolve_profile_runtime_capacities(
         (extra.get("vllm") or {}).get("gpu_memory_utilization")
         or settings.vllm_gpu_memory_utilization
     )
+    # Set for self-speculative loads (--spec-type draft-mtp and friends) —
+    # widens the hybrid rs_cache deduction and adds the draft model's own
+    # KV+compute overhead. Same resolution model_manager_helpers.py uses at
+    # actual load time; without it this display path (and the "fits"/
+    # "hardware_max" it reports) would silently drift back to the
+    # pre-2026-10-27 over-optimistic numbers that caused the OOM.
+    rs_rollback_snapshots = _resolve_rs_rollback_snapshots(state)
     model_max = resolution.arch.context_length or None
     policy = profile.runtime_policy if isinstance(profile.runtime_policy, dict) else {}
     raw_policy_max = policy.get("max_context_tokens")
@@ -209,11 +226,13 @@ async def resolve_profile_runtime_capacities(
         )
         requested_gpus = list(preset.preferred_gpus or [])
         if preset.placement_policy == "forced" and len(requested_gpus) > 1:
-            # Multi-GPU spread: solo soportado hoy en Ollama con un pool
-            # ``shared`` que exponga todas las GPUs + OLLAMA_SCHED_SPREAD=1.
-            # vLLM y backends con tensor_parallel genuino siguen devolviendo
-            # unresolved porque su planner de sharding no está integrado.
-            if backend != "ollama":
+            # Multi-GPU spread: solo soportado hoy para backends con reparto
+            # proporcional real (Ollama con un pool ``shared`` que exponga
+            # todas las GPUs + OLLAMA_SCHED_SPREAD=1; llama.cpp/bitnet con su
+            # --split-mode layer por defecto). vLLM/sglang con tensor_parallel
+            # genuino siguen devolviendo unresolved porque su planner de
+            # sharding no está integrado.
+            if backend not in _PROPORTIONAL_MULTI_GPU_BACKENDS:
                 rows.append(
                     {
                         "preset_key": preset.preset_key,
@@ -272,6 +291,7 @@ async def resolve_profile_runtime_capacities(
                 slots=effective_parallelism,
                 gpu_memory_utilization=gpu_memory_utilization,
                 kv_dtype_bytes=kv_bytes,
+                rs_rollback_snapshots=rs_rollback_snapshots,
             )
             effective = int(plan["effective_context"] or 0)
             warnings = list(plan["warnings"])
@@ -336,6 +356,7 @@ async def resolve_profile_runtime_capacities(
                 slots=effective_parallelism,
                 gpu_memory_utilization=gpu_memory_utilization,
                 kv_dtype_bytes=kv_bytes,
+                rs_rollback_snapshots=rs_rollback_snapshots,
             )
             evaluated.append((gpu, plan))
 

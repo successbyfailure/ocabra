@@ -340,6 +340,10 @@ class LocalScanner:
         if "chatterbox" in name_lower:
             return "chatterbox"
 
+        # Piper TTS voices (CPU-only VITS, rhasspy/piper-voices naming)
+        if "piper" in name_lower:
+            return "piper"
+
         # Whisper / faster-whisper models
         if "whisper" in name_lower:
             return "whisper"

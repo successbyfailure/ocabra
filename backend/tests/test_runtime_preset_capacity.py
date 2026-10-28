@@ -68,12 +68,22 @@ async def test_resolves_fixed_and_max_on_the_3090(monkeypatch) -> None:
     assert rows[0]["effective_context"] == 65_536
     assert rows[0]["target_gpus"] == [1]
     assert rows[0]["fits"] is True
-    assert rows[1]["effective_context"] == 113_408
+    # 113_408 was the pre-DEFAULT_KV_SAFETY_FACTOR value (no 0.90 margin).
+    # vram_planner.max_context_tokens applies that margin since the gemma4:26b
+    # incident (262k reported as fitting, Ollama rejected the load with
+    # HTTP 500) — 113_408 * 0.90 = 102_067.
+    assert rows[1]["effective_context"] == 102_067
     assert rows[1]["runtime_key"].startswith("runtime:")
 
 
 @pytest.mark.asyncio
-async def test_does_not_fake_explicit_multi_gpu_capacity(monkeypatch) -> None:
+async def test_ollama_forced_multi_gpu_resolves_via_shared_pool(monkeypatch) -> None:
+    """Ollama is the one backend with a real shared-pool multi-GPU mode
+    (OLLAMA_SCHED_SPREAD=1, see the ``ocabra-ollama-shared-*`` containers) —
+    unlike vLLM/sglang, whose tensor-parallel sharding planner isn't
+    integrated here, forced multi-GPU placement for Ollama resolves against
+    the *summed* capacity of the requested GPUs, same formula and safety
+    margin as the single-GPU case."""
     arch = ModelArch(32, 8, 128, 128, context_length=262_144)
     monkeypatch.setattr(
         "ocabra.core.runtime_preset_capacity.resolve_arch_and_weights",
@@ -88,6 +98,75 @@ async def test_does_not_fake_explicit_multi_gpu_capacity(monkeypatch) -> None:
         ],
     )
     state = SimpleNamespace(backend_type="ollama", preferred_gpu=1, extra_config={})
+    gpus = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+
+    row = (await resolve_profile_runtime_capacities(profile, state, gpus))[0]
+
+    assert row["resolved"] is True
+    assert row["target_gpus"] == [0, 1]
+    # (12_288 + 24_576 - 10_000 weights - 400 overhead) * 0.90 safety margin
+    # / 0.0625 MB-per-token / 2 slots.
+    assert row["effective_context"] == 190_540
+    assert row["fits"] is True
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_forced_multi_gpu_resolves_via_layer_split(monkeypatch) -> None:
+    """llama.cpp's default --split-mode layer does the same real proportional
+    multi-GPU spread as Ollama's shared pool (not vLLM-style tensor-parallel
+    sharding) — validated empirically against a real asymmetric 3060+3090
+    load (2026-10-26, qwen3.8:27b self-MTP). Same sum-capacity formula."""
+    arch = ModelArch(32, 8, 128, 128, context_length=262_144)
+    monkeypatch.setattr(
+        "ocabra.core.runtime_preset_capacity.resolve_arch_and_weights",
+        AsyncMock(return_value=ArchResolution(arch, 10_000, "")),
+    )
+    profile = SimpleNamespace(
+        base_model_id="llama_cpp/qwen3.8-27b",
+        load_overrides=None,
+        runtime_policy=None,
+        runtime_presets=[
+            _preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])
+        ],
+    )
+    state = SimpleNamespace(backend_type="llama_cpp", preferred_gpu=1, extra_config={})
+    gpus = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+
+    row = (await resolve_profile_runtime_capacities(profile, state, gpus))[0]
+
+    assert row["resolved"] is True
+    assert row["target_gpus"] == [0, 1]
+    assert row["effective_context"] == 190_540
+    assert row["fits"] is True
+
+
+@pytest.mark.asyncio
+async def test_non_ollama_backend_does_not_fake_explicit_multi_gpu_capacity(
+    monkeypatch,
+) -> None:
+    """vLLM/sglang genuine tensor-parallel sharding isn't modeled here — forced
+    multi-GPU placement for those backends must stay unresolved rather than
+    silently (and wrongly) sum capacity across GPUs that don't share a pool."""
+    arch = ModelArch(32, 8, 128, 128, context_length=262_144)
+    monkeypatch.setattr(
+        "ocabra.core.runtime_preset_capacity.resolve_arch_and_weights",
+        AsyncMock(return_value=ArchResolution(arch, 10_000, "")),
+    )
+    profile = SimpleNamespace(
+        base_model_id="vllm/some-model",
+        load_overrides=None,
+        runtime_policy=None,
+        runtime_presets=[
+            _preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])
+        ],
+    )
+    state = SimpleNamespace(backend_type="vllm", preferred_gpu=1, extra_config={})
     gpus = [
         SimpleNamespace(index=0, total_vram_mb=12_288),
         SimpleNamespace(index=1, total_vram_mb=24_576),

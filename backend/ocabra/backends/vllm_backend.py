@@ -793,10 +793,19 @@ class VLLMBackend(BackendInterface):
         """
         Estimate VRAM from .safetensors file sizes × 1.2 overhead factor.
 
-        Falls back to 0 if the directory does not exist yet. Honours an
-        explicit ``extra_config["vram_estimate_mb"]`` override on the model
-        config (used when the file-size heuristic over-counts, e.g. quantised
-        weights with auxiliary tensors like MTP that don't all live on GPU).
+        Before the first ``vllm serve`` download, no local weight files
+        exist yet; falls back to the HuggingFace Hub tree API to sum remote
+        ``.safetensors`` sizes instead of silently returning the small
+        ``_MIN_VLLM_VRAM_MB`` floor, which the scheduler would otherwise read
+        as "this model is tiny" and place it on whichever GPU looks emptiest
+        — including one far too small to ever hold it once downloaded. Only
+        falls through to the floor if the remote lookup itself fails
+        (network error, gated repo, 404).
+
+        Honours an explicit ``extra_config["vram_estimate_mb"]`` override on
+        the model config (used when the file-size heuristic over-counts,
+        e.g. quantised weights with auxiliary tensors like MTP that don't
+        all live on GPU).
         """
         # Allow per-model override via DB-stored extra_config. Caller passes
         # the backend-stripped id (e.g. "palmfuture/Qwen3.6-..."); the DB row
@@ -822,17 +831,60 @@ class VLLMBackend(BackendInterface):
             pass
 
         model_path = self._resolve_local_model_dir(model_id)
-        if model_path is None:
-            return 0
-        total_bytes = sum(
-            p.stat().st_size for p in model_path.rglob("*.safetensors") if p.is_file()
-        )
+        total_bytes = 0
+        if model_path is not None:
+            total_bytes = sum(
+                p.stat().st_size for p in model_path.rglob("*.safetensors") if p.is_file()
+            )
+            if total_bytes == 0:
+                # Try .bin (older format)
+                total_bytes = sum(
+                    p.stat().st_size for p in model_path.rglob("*.bin") if p.is_file()
+                )
         if total_bytes == 0:
-            # Try .bin (older format)
-            total_bytes = sum(p.stat().st_size for p in model_path.rglob("*.bin") if p.is_file())
+            total_bytes = await self._estimate_remote_hf_size_bytes(model_id)
         estimated = int(total_bytes / 1024 / 1024 * 1.2)
         # Reserve a practical baseline for runtime memory (KV cache, graph capture, kernels).
         return max(_MIN_VLLM_VRAM_MB, estimated)
+
+    async def _estimate_remote_hf_size_bytes(self, model_id: str) -> int:
+        """Sum ``.safetensors``/``.bin`` sizes from the HF Hub tree API.
+
+        Used only when no local weight files exist yet (first load before
+        ``vllm serve`` has downloaded anything). Returns 0 on any failure
+        so the caller falls back to ``_MIN_VLLM_VRAM_MB`` — a bad estimate
+        from a network hiccup should degrade to the old floor, not raise.
+        """
+        headers = {"Authorization": f"Bearer {settings.hf_token}"} if settings.hf_token else {}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"https://huggingface.co/api/models/{model_id}/tree/main",
+                    headers=headers,
+                    params={"recursive": "true"},
+                )
+                resp.raise_for_status()
+                entries = resp.json()
+        except Exception as exc:
+            logger.warning(
+                "vllm_remote_size_lookup_failed",
+                model_id=model_id,
+                error=str(exc),
+            )
+            return 0
+        total = sum(
+            int(entry.get("size") or 0)
+            for entry in entries
+            if isinstance(entry, dict)
+            and str(entry.get("path", "")).endswith((".safetensors", ".bin"))
+        )
+        if total:
+            logger.info(
+                "vllm_remote_size_lookup_ok",
+                model_id=model_id,
+                total_mb=int(total / 1024 / 1024),
+            )
+        return total
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         """Proxy a request to the vLLM worker."""

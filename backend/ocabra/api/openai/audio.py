@@ -208,6 +208,7 @@ async def transcriptions(
                     "server_error",
                     code="worker_unavailable",
                     status_code=503,
+                    headers={"Retry-After": "10"},
                 )
 
             url = f"http://127.0.0.1:{worker.port}/transcribe"
@@ -263,6 +264,7 @@ async def transcriptions(
                     "server_error",
                     code="worker_unavailable",
                     status_code=503,
+                    headers={"Retry-After": "10"},
                 ) from exc
             except httpx.HTTPStatusError as exc:
                 raise_upstream_http_error(exc)
@@ -275,6 +277,7 @@ async def transcriptions(
             "server_error",
             code="worker_unavailable",
             status_code=503,
+            headers={"Retry-After": "10"},
         )
 
     from ocabra.api.openai._deps import ocabra_response_headers
@@ -427,6 +430,7 @@ async def speech(
             "server_error",
             code="worker_unavailable",
             status_code=503,
+            headers={"Retry-After": "10"},
         )
 
     # Use /synthesize/stream for formats that support concatenation (mp3, pcm, opus,
@@ -564,6 +568,7 @@ async def generate_music(
             "server_error",
             code="worker_unavailable",
             status_code=503,
+            headers={"Retry-After": "10"},
         )
 
     try:

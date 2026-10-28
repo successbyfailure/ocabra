@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ocabra.core.model_manager_helpers import estimate_vllm_vram_from_config
+from ocabra.core.model_manager_helpers import (
+    _resolve_rs_rollback_snapshots,
+    estimate_vllm_vram_from_config,
+)
 from ocabra.core.vram_planner import DEFAULT_OVERHEAD_MB
 
 
@@ -516,3 +519,40 @@ def test_explicit_override_bypasses_helper(tmp_path: Path) -> None:
         )
         == 0
     )
+
+
+class TestResolveRsRollbackSnapshots:
+    """qwen3.8:27b production config: extra_config.llama_cpp.speculative =
+    {"spec_type": "draft-mtp"} — no draft_n override, so this must default
+    to llama.cpp's own CLI default (3) to match the real n_rs_seq the
+    process reserves. Getting this wrong under-counts rs_cache/draft
+    overhead for every hybrid-SSM self-speculative load."""
+
+    def test_defaults_to_three_for_draft_mtp_without_explicit_draft_n(self) -> None:
+        state = _FakeState(
+            backend_model_id="qwen3.8-27b",
+            extra_config={"llama_cpp": {"speculative": {"spec_type": "draft-mtp"}}},
+        )
+        assert _resolve_rs_rollback_snapshots(state) == 3
+
+    def test_honours_explicit_draft_n_override(self) -> None:
+        state = _FakeState(
+            backend_model_id="qwen3.8-27b",
+            extra_config={
+                "llama_cpp": {"speculative": {"spec_type": "draft-mtp", "draft_n": 5}}
+            },
+        )
+        assert _resolve_rs_rollback_snapshots(state) == 5
+
+    def test_zero_when_no_speculative_block(self) -> None:
+        state = _FakeState(backend_model_id="qwen3.8-27b", extra_config={})
+        assert _resolve_rs_rollback_snapshots(state) == 0
+
+    def test_zero_for_spec_type_that_does_not_need_rollback(self) -> None:
+        # Plain draft-model speculative decoding (a separate smaller GGUF,
+        # not self-speculative) never touches recurrent-state memory.
+        state = _FakeState(
+            backend_model_id="qwen3.8-27b",
+            extra_config={"llama_cpp": {"speculative": {"spec_type": "draft"}}},
+        )
+        assert _resolve_rs_rollback_snapshots(state) == 0

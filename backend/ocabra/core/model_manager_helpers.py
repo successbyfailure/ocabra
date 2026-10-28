@@ -6,7 +6,11 @@ import hashlib
 import json
 from pathlib import Path
 
-from ocabra.core.vram_planner import arch_from_gguf, plan_llama_cpp_vram_mb
+from ocabra.core.vram_planner import (
+    arch_from_gguf,
+    kv_dtype_bytes_for_cache_type,
+    plan_llama_cpp_vram_mb,
+)
 
 PRISMML_DEFAULT_GPU_LAYERS = 99
 
@@ -156,6 +160,37 @@ def resolve_llama_cpp_gpu_layers(state, default_gpu_layers: int) -> int:
         return int(default_gpu_layers)
 
 
+# llama.cpp CLI default for the draft length (common_params_speculative_draft::n_max
+# in common/common.h). When a self-speculative load (--spec-type draft-mtp /
+# draft-eagle3 / draft-dflash / draft-dspark) doesn't override it with
+# --spec-draft-n-max, this is also the number of recurrent-state rollback
+# snapshots (n_rs_seq) llama.cpp reserves for hybrid SSM models — widening the
+# rs_cache tensors to (1 + n_rs_seq) rows per sequence. See common.h
+# need_n_rs_seq() / llama-context.cpp cparams.n_rs_seq.
+_LLAMA_CPP_DEFAULT_DRAFT_N_MAX = 3
+# --spec-type values that require recurrent-state rollback (need_n_rs_seq()).
+_LLAMA_CPP_SPEC_TYPES_NEEDING_RS_ROLLBACK = {
+    "draft-mtp", "draft-eagle3", "draft-dflash", "draft-dspark",
+}
+
+
+def _resolve_rs_rollback_snapshots(state) -> int:
+    """How many extra recurrent-state rollback rows (llama.cpp's n_rs_seq) this
+    load needs, from the configured ``speculative`` block. 0 unless the model
+    self-speculates with a type that needs rollback (draft-mtp and friends)."""
+    spec_cfg = resolve_llama_cpp_option(state, "speculative", None)
+    if not isinstance(spec_cfg, dict):
+        return 0
+    spec_type = str(spec_cfg.get("spec_type") or "").lower()
+    if spec_type not in _LLAMA_CPP_SPEC_TYPES_NEEDING_RS_ROLLBACK:
+        return 0
+    try:
+        draft_n = spec_cfg.get("draft_n")
+        return int(draft_n) if draft_n is not None else _LLAMA_CPP_DEFAULT_DRAFT_N_MAX
+    except (TypeError, ValueError):
+        return _LLAMA_CPP_DEFAULT_DRAFT_N_MAX
+
+
 def estimate_llama_cpp_vram_from_config(
     state,
     *,
@@ -172,8 +207,11 @@ def estimate_llama_cpp_vram_from_config(
     When the GGUF architecture is readable we compute weights + an *exact* KV
     cache for the configured ctx_size (KV scales with context, which a flat
     file-size multiplier misses entirely — e.g. a low-KV-head model over-reserves
-    and a large-context one under-reserves). Otherwise we fall back to the on-disk
-    GGUF size scaled by the offloaded-layer fraction plus a small overhead.
+    and a large-context one under-reserves). Hybrid SSM/attention models (e.g.
+    qwen3.8:27b / arch "qwen35") additionally reserve a fixed-per-sequence
+    "rs cache" for their recurrent layers — see ``plan_llama_cpp_vram_mb``.
+    Otherwise we fall back to the on-disk GGUF size scaled by the
+    offloaded-layer fraction plus a small overhead.
     Returns 0 for CPU-only (gpu_layers <= 0).
     """
     gpu_layers = resolve_llama_cpp_gpu_layers(state, default_gpu_layers)
@@ -208,21 +246,20 @@ def estimate_llama_cpp_vram_from_config(
             or resolve_llama_cpp_option(state, "cache_type_v", None)
             or "f16"
         ).lower()
-        kv_dtype_bytes = {
-            "f16": 2.0,
-            "fp16": 2.0,
-            "bf16": 2.0,
-            "q8_0": 1.0,
-            "q8": 1.0,
-            "q5_0": 0.65,
-            "q5_1": 0.65,
-            "q4_0": 0.5,
-            "q4_1": 0.5,
-            "q4": 0.5,
-            "iq4_nl": 0.5,
-        }.get(cache_type, 2.0)
+        kv_dtype_bytes = kv_dtype_bytes_for_cache_type(cache_type)
+        try:
+            parallel_slots = max(1, int(resolve_llama_cpp_option(state, "parallel_slots", 1)))
+        except (TypeError, ValueError):
+            parallel_slots = 1
+        rs_rollback_snapshots = _resolve_rs_rollback_snapshots(state)
         est = plan_llama_cpp_vram_mb(
-            arch, size_mb, ctx_size, gpu_layers=gpu_layers, kv_dtype_bytes=kv_dtype_bytes
+            arch,
+            size_mb,
+            ctx_size,
+            gpu_layers=gpu_layers,
+            kv_dtype_bytes=kv_dtype_bytes,
+            parallel_slots=parallel_slots,
+            rs_rollback_snapshots=rs_rollback_snapshots,
         )
         if est > 0:
             return est

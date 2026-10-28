@@ -75,7 +75,11 @@ def _get_installer(request: Request) -> BackendInstaller:
         request.app.state, "backend_installer", None
     )
     if installer is None:
-        raise HTTPException(status_code=503, detail="Backend installer not ready")
+        raise HTTPException(
+            status_code=503,
+            detail="Backend installer not ready",
+            headers={"Retry-After": "5"},
+        )
     return installer
 
 

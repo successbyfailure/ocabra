@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -283,6 +284,82 @@ async def test_gpu_admission_waits_for_prior_backend_load_to_finish():
 
 
 @pytest.mark.asyncio
+async def test_gpu_admission_times_out_instead_of_hanging_forever(monkeypatch):
+    """A load stuck holding the backend gate (e.g. an eviction cascade wedged
+    on a backend that never frees its VRAM) must not block every other
+    model's load indefinitely. The waiting load should fail with a clear
+    TimeoutError instead of sitting in-flight forever with no 429/503."""
+    from ocabra.core.model_manager import ModelState
+
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_drain_timeout_s", 1)
+
+    stuck_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    stuck_backend = AsyncMock(spec=BackendInterface)
+    stuck_backend.get_vram_estimate_mb = AsyncMock(return_value=12_000)
+
+    async def _load_stuck(*args, **kwargs):
+        stuck_started.set()
+        await never_finishes.wait()  # pragma: no cover - never set in this test
+        raise AssertionError("should never reach here")
+
+    stuck_backend.load = AsyncMock(side_effect=_load_stuck)
+    stuck_backend.get_capabilities = AsyncMock(return_value=BackendCapabilities(chat=True))
+
+    other_backend = AsyncMock(spec=BackendInterface)
+    other_backend.get_vram_estimate_mb = AsyncMock(return_value=1024)
+    other_backend.load = AsyncMock(
+        return_value=WorkerInfo(
+            backend_type="vllm",
+            model_id="other-model",
+            gpu_indices=[1],
+            port=18001,
+            pid=200,
+            vram_used_mb=1024,
+        )
+    )
+    other_backend.get_capabilities = AsyncMock(return_value=BackendCapabilities(chat=True))
+
+    worker_pool = WorkerPool()
+    worker_pool.register_backend("ollama", stuck_backend)
+    worker_pool.register_backend("vllm", other_backend)
+
+    mm = ModelManager(worker_pool)
+    mm._states["ollama/stuck-model"] = ModelState(
+        model_id="ollama/stuck-model",
+        display_name="stuck-model",
+        backend_type="ollama",
+    )
+    mm._states["vllm/other-model"] = ModelState(
+        model_id="vllm/other-model",
+        display_name="other-model",
+        backend_type="vllm",
+        preferred_gpu=1,
+    )
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.publish_system_alert", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+    ):
+        stuck_task = asyncio.create_task(mm.load("ollama/stuck-model"))
+        await asyncio.wait_for(stuck_started.wait(), timeout=1)
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(mm.load("vllm/other-model"), timeout=5)
+
+        assert mm._states["vllm/other-model"].status == ModelStatus.ERROR
+        assert mm._load_queue_waiters == 0
+
+        never_finishes.set()
+        stuck_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stuck_task
+
+
+@pytest.mark.asyncio
 async def test_in_flight_counters_are_thread_safe(model_manager):
     model_id = "test/model"
     await add_test_model(model_manager, model_id=model_id)
@@ -296,6 +373,74 @@ async def test_in_flight_counters_are_thread_safe(model_manager):
         *[asyncio.to_thread(model_manager.end_request, model_id) for _ in range(200)]
     )
     assert model_manager._in_flight.get(model_id, 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_try_begin_request_scales_cap_down_for_single_slot_worker(
+    model_manager, monkeypatch
+):
+    """A model with no declared ``_runtime.parallelism`` (the common case for
+    Ollama models) defaults to 1 slot. The flat 32-request ceiling must not
+    apply as-is — a burst against a single-slot worker should get rejected
+    with 429 well before 32 requests pile up behind the one being served."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = "test/model"
+    await add_test_model(model_manager, model_id=model_id)
+
+    accepted = [
+        model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(6)
+    ]
+    assert accepted.count(None) == 2  # 4 admitted (1 slot * cap 4), 2 rejected
+    assert accepted[:4] != [None, None, None, None]
+
+
+@pytest.mark.asyncio
+async def test_try_begin_request_scales_cap_up_for_multi_slot_worker(
+    model_manager, monkeypatch
+):
+    """A model that declares real concurrency via ``_runtime.parallelism``
+    (e.g. a vLLM worker with max_num_seqs > 1) should get a proportionally
+    larger cap instead of being clamped to the single-slot default."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = "test/model"
+    state = await add_test_model(model_manager, model_id=model_id)
+    state.extra_config = {"_runtime": {"parallelism": 8}}
+
+    results = [
+        model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(32)
+    ]
+    assert results.count(None) == 0  # 8 slots * cap 4 = 32, none rejected
+
+    assert model_manager.try_begin_request(model_id, max_inflight=32) is None
+
+
+def test_effective_inflight_cap_disabled_when_max_inflight_is_zero(model_manager):
+    assert model_manager.effective_inflight_cap("test/model", 0) == 0
+
+
+def test_maintenance_toggle_covers_derived_worker_keys(model_manager):
+    canonical = "ollama/qwen3.8:27b"
+    derived = f"{canonical}::abc123"
+
+    assert not model_manager.is_in_maintenance(canonical)
+    assert not model_manager.is_in_maintenance(derived)
+
+    model_manager.set_maintenance(canonical, True)
+    assert model_manager.is_in_maintenance(canonical)
+    assert model_manager.is_in_maintenance(derived)  # same canonical id
+
+    model_manager.set_maintenance(canonical, False)
+    assert not model_manager.is_in_maintenance(canonical)
+    assert not model_manager.is_in_maintenance(derived)
+
+
+def test_maintenance_toggle_via_derived_key_resolves_to_canonical(model_manager):
+    canonical = "ollama/qwen3.8:27b"
+    derived = f"{canonical}::abc123"
+
+    model_manager.set_maintenance(derived, True)
+    assert model_manager.is_in_maintenance(canonical)
+    assert model_manager.is_in_maintenance(derived)
 
 
 @pytest.mark.asyncio
@@ -650,6 +795,230 @@ async def test_vllm_load_with_fixed_kv_uses_estimated_vram_instead_of_fraction()
 
 
 @pytest.mark.asyncio
+async def test_use_case_resolution_sums_capacity_across_forced_multi_gpu():
+    """Forced multi-GPU placement (llama.cpp/bitnet --split-mode layer,
+    Ollama's shared pool) must size the use-case plan against the SUMMED
+    capacity of every selected GPU, not just gpu_indices[0]. Using only the
+    first GPU (often the smallest) used to compute a near-zero budget there,
+    silently leaving the stale/base ctx_size in place instead of the
+    use-case-resolved one — see gpu-bench/README.md 2026-10-26."""
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    wp.register_backend("llama_cpp", backend)
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states = AsyncMock(
+        return_value=[
+            GPUState(
+                index=0, name="RTX 3060", total_vram_mb=12_288, free_vram_mb=12_000,
+                used_vram_mb=288, utilization_pct=0, temperature_c=40,
+                power_draw_w=50, power_limit_w=170, locked_vram_mb=0,
+            ),
+            GPUState(
+                index=1, name="RTX 3090", total_vram_mb=24_576, free_vram_mb=24_000,
+                used_vram_mb=576, utilization_pct=0, temperature_c=40,
+                power_draw_w=50, power_limit_w=350, locked_vram_mb=0,
+            ),
+        ]
+    )
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = "llama_cpp/multi-gpu-model"
+
+    captured_gpu_total = {}
+
+    async def _fake_resolve_use_case(state, gpu_total_mb):
+        captured_gpu_total["value"] = gpu_total_mb
+        return {"applied": True, "effective_context": 131_072, "slots": 1}
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[0, 1])),
+        patch(
+            "ocabra.core.vram_capacity.resolve_use_case",
+            new=_fake_resolve_use_case,
+        ),
+        patch.object(backend, "load", new=AsyncMock(wraps=backend.load)),
+    ):
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name="multi-gpu-model",
+            backend_type="llama_cpp",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={
+                "llama_cpp": {"ctx_size": 65_536, "parallel_slots": 1, "gpu_layers": 99},
+                "use_case": {"context": 131_072, "slots": 1, "kv_dtype": "q8"},
+                "_runtime": {"gpu_indices": [0, 1]},
+            },
+        )
+        mm._load_locks[model_id] = asyncio.Lock()
+
+        state = await mm.load(model_id)
+        load_kwargs = backend.load.await_args.kwargs
+
+    assert state.status == ModelStatus.LOADED
+    # 12_288 + 24_576, not just GPU0's 12_288.
+    assert captured_gpu_total["value"] == 36_864
+    assert load_kwargs["extra_config"]["llama_cpp"]["ctx_size"] == 131_072
+
+
+class _FakeOllamaBackend(BackendInterface):
+    """Minimal ollama-shaped backend exposing single_gpu_pool_candidates,
+    for testing the preferred-GPU-busy fallback without the real
+    OllamaBackend's pool/HTTP machinery."""
+
+    def __init__(
+        self, fallback_gpus: list[int], resident: list[dict] | None = None
+    ) -> None:
+        self._fallback_gpus = fallback_gpus
+        self.load_calls: list[list[int]] = []
+        self._resident = resident or []
+
+    async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
+        self.load_calls.append(list(gpu_indices))
+        return WorkerInfo(
+            backend_type="ollama", model_id=model_id, gpu_indices=gpu_indices,
+            port=0, pid=1, vram_used_mb=1024,
+        )
+
+    def single_gpu_pool_candidates(self, *, exclude_gpu, required_parallelism=1):
+        return [g for g in self._fallback_gpus if g != exclude_gpu]
+
+    async def discover_resident_models(self) -> list[dict]:
+        return self._resident
+
+    async def unload(self, model_id: str) -> None:
+        return None
+
+    async def health_check(self, model_id: str) -> bool:
+        return True
+
+    async def get_capabilities(self, model_id: str) -> BackendCapabilities:
+        return BackendCapabilities(chat=True, completion=True, streaming=True)
+
+    async def get_vram_estimate_mb(self, model_id: str, **kwargs) -> int:
+        return 5_000
+
+    async def forward_request(self, model_id: str, path: str, body: dict):
+        raise NotImplementedError
+
+    async def forward_stream(self, model_id: str, path: str, body: dict):
+        raise NotImplementedError
+        yield b""  # pragma: no cover - makes this an async generator
+
+
+@pytest.mark.asyncio
+async def test_ollama_falls_back_to_alternate_gpu_when_preferred_is_busy():
+    """gemma4:12b incident (2026-10-26): a model statically pinned to one
+    GPU used to have zero fallback — a busy preferred GPU meant 5-7 minutes
+    through the pressure-eviction cascade and a hard failure, even when a
+    completely idle single-GPU Ollama pool had plenty of room. The preferred
+    GPU's real free VRAM must be checked first, and only then should it fall
+    back to an alternate single-GPU pool."""
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _FakeOllamaBackend(fallback_gpus=[0])
+    wp.register_backend("ollama", backend)
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states = AsyncMock(
+        return_value=[
+            GPUState(
+                index=0, name="RTX 3060", total_vram_mb=12_288, free_vram_mb=12_000,
+                used_vram_mb=288, utilization_pct=0, temperature_c=40,
+                power_draw_w=50, power_limit_w=170, locked_vram_mb=0,
+            ),
+            GPUState(
+                index=1, name="RTX 3090", total_vram_mb=24_576, free_vram_mb=500,
+                used_vram_mb=24_076, utilization_pct=0, temperature_c=40,
+                power_draw_w=50, power_limit_w=350, locked_vram_mb=0,
+            ),
+        ]
+    )
+    # GPU1 (preferred) is nearly full — not enough for the 5_000 MB need.
+    # GPU0 (fallback) has plenty.
+    gpu_manager.get_free_vram = AsyncMock(side_effect=lambda idx: {0: 20_000, 1: 500}[idx])
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = "ollama/busy-preferred-model"
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[1])),
+    ):
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name="busy-preferred-model",
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+            preferred_gpu=1,
+        )
+        mm._load_locks[model_id] = asyncio.Lock()
+
+        state = await mm.load(model_id)
+
+    assert state.status == ModelStatus.LOADED
+    assert backend.load_calls[-1] == [0]
+
+
+@pytest.mark.asyncio
+async def test_ollama_keeps_preferred_gpu_when_it_has_room():
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _FakeOllamaBackend(fallback_gpus=[0])
+    wp.register_backend("ollama", backend)
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states = AsyncMock(
+        return_value=[
+            GPUState(
+                index=1, name="RTX 3090", total_vram_mb=24_576, free_vram_mb=20_000,
+                used_vram_mb=4_576, utilization_pct=0, temperature_c=40,
+                power_draw_w=50, power_limit_w=350, locked_vram_mb=0,
+            ),
+        ]
+    )
+    gpu_manager.get_free_vram = AsyncMock(return_value=20_000)
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = "ollama/happy-model"
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[1])),
+    ):
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name="happy-model",
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+            preferred_gpu=1,
+        )
+        mm._load_locks[model_id] = asyncio.Lock()
+
+        state = await mm.load(model_id)
+
+    assert state.status == ModelStatus.LOADED
+    assert backend.load_calls[-1] == [1]
+
+
+@pytest.mark.asyncio
 async def test_load_assigns_port_for_backend_that_requires_it():
     wp = WorkerPool()
     backend = _PortRequiredBackend()
@@ -677,6 +1046,135 @@ async def test_load_assigns_port_for_backend_that_requires_it():
     worker = wp.get_worker("test/port-required")
     assert worker is not None
     assert worker.port == backend.received_port
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ollama_state_adopts_untracked_resident_model():
+    """gemma4:12b incident (2026-10-25): after an API restart, a model that
+    was still resident in a persistent Ollama container had zero record in
+    ModelManager's in-memory state — oCabra reported it unloaded/0 VRAM
+    while NVML correctly (but silently) showed the real GPU as unavailable.
+    Reconciliation must adopt it as LOADED using the real pool GPUs/VRAM
+    reported by the backend."""
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _FakeOllamaBackend(
+        fallback_gpus=[0],
+        resident=[
+            {
+                "name": "gemma4:12b",
+                "vram_mb": 10_300,
+                "pool_url": "http://ocabra-ollama-3060-1:11434",
+                "pool_gpus": [0],
+            }
+        ],
+    )
+    wp.register_backend("ollama", backend)
+    gpu_manager = AsyncMock()
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = "ollama/gemma4-12b"
+    mm._states[model_id] = ModelState(
+        model_id=model_id,
+        display_name="gemma4:12b",
+        backend_type="ollama",
+        backend_model_id="gemma4:12b",
+        load_policy=LoadPolicy.ON_DEMAND,
+        preferred_gpu=0,
+    )
+
+    await mm._reconcile_ollama_state()
+
+    state = mm._states[model_id]
+    assert state.status == ModelStatus.LOADED
+    assert state.current_gpu == [0]
+    assert state.vram_used_mb == 10_300
+    assert state.loaded_at is not None
+    assert wp.get_worker(model_id) is not None
+    gpu_manager.lock_vram.assert_awaited_once_with(0, 10_300, model_id)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ollama_state_leaves_already_loaded_model_alone():
+    """A model oCabra already correctly tracks as LOADED must not be
+    re-adopted/re-locked — reconciliation only fills in gaps."""
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _FakeOllamaBackend(
+        fallback_gpus=[0],
+        resident=[
+            {
+                "name": "qwen3.8:27b",
+                "vram_mb": 24_000,
+                "pool_url": "http://ocabra-ollama-1:11434",
+                "pool_gpus": [1],
+            }
+        ],
+    )
+    wp.register_backend("ollama", backend)
+    gpu_manager = AsyncMock()
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = "ollama/qwen3.8-27b"
+    mm._states[model_id] = ModelState(
+        model_id=model_id,
+        display_name="qwen3.8:27b",
+        backend_type="ollama",
+        backend_model_id="qwen3.8:27b",
+        load_policy=LoadPolicy.ON_DEMAND,
+        preferred_gpu=1,
+        status=ModelStatus.LOADED,
+        current_gpu=[1],
+        vram_used_mb=24_000,
+    )
+
+    await mm._reconcile_ollama_state()
+
+    gpu_manager.lock_vram.assert_not_awaited()
+    assert wp.get_worker(model_id) is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ollama_state_warns_on_unknown_resident_model(caplog):
+    """A resident model with no matching model_config must not crash
+    startup — it should just be flagged for an admin to investigate."""
+    wp = WorkerPool()
+    backend = _FakeOllamaBackend(
+        fallback_gpus=[0],
+        resident=[
+            {
+                "name": "some-stray-model:latest",
+                "vram_mb": 2_000,
+                "pool_url": "http://ocabra-ollama-1:11434",
+                "pool_gpus": [1],
+            }
+        ],
+    )
+    wp.register_backend("ollama", backend)
+    gpu_manager = AsyncMock()
+    gpu_manager.lock_vram = AsyncMock()
+
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+
+    await mm._reconcile_ollama_state()
+
+    gpu_manager.lock_vram.assert_not_awaited()
+    assert wp.get_worker("some-stray-model:latest") is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ollama_state_is_a_noop_without_an_ollama_backend():
+    """Most test/dev setups (and any deployment with Ollama disabled)
+    register no 'ollama' backend at all — reconciliation must no-op, not
+    raise."""
+    wp = WorkerPool()
+    mm = ModelManager(wp)
+
+    await mm._reconcile_ollama_state()
 
 
 class _BitnetPortBackend(BackendInterface):
@@ -747,6 +1245,50 @@ async def test_bitnet_cpu_only_skips_gpu_assignment_but_keeps_port():
     assert state.current_gpu == []
     assert backend.received_port is not None
     scheduler.find_gpu_for_model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_model_concurrent_calls_for_same_derived_key_share_one_state():
+    """qwen3.8:27b incident (2026-10-26): two concurrent requests creating
+    the same derived worker key (e.g. llama_cpp/qwen3.8-27b::<hash>) both
+    passed add_model's early 'already registered' guard — it only runs
+    before the GGUF fingerprint await, not after — so both went on to
+    insert a *new* ModelState + Lock, with whichever finished last
+    clobbering the other's objects. A load already running against the
+    first (now orphaned) object kept mutating it — including setting it to
+    LOADED once the real worker came up healthy — invisibly to
+    get_state()/_load_model, which only ever saw the second object. Net
+    effect in production: the real worker loaded and reserved its own VRAM
+    correctly, but ModelManager's visible state for it stayed stuck at
+    error/unloaded, so the model started rejecting its own future requests
+    with insufficient_vram forever, even though it was healthy and serving."""
+    wp = make_worker_pool_with_mock()
+    mm = ModelManager(wp)
+    model_id = "llama_cpp/race-model::abc123"
+
+    release = asyncio.Event()
+
+    async def _slow_fingerprint(*args, **kwargs):
+        await release.wait()
+        return (None, None, None)
+
+    with patch.object(
+        mm, "_extract_llama_cpp_fingerprint", new=AsyncMock(side_effect=_slow_fingerprint)
+    ):
+        task_a = asyncio.create_task(
+            mm.add_model(model_id=model_id, backend_type="llama_cpp", persist=False)
+        )
+        task_b = asyncio.create_task(
+            mm.add_model(model_id=model_id, backend_type="llama_cpp", persist=False)
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release.set()
+        state_a, state_b = await asyncio.gather(task_a, task_b)
+
+    assert state_a is state_b
+    assert mm._states[model_id] is state_a
+    assert mm._load_locks[model_id] is not None
 
 
 @pytest.mark.asyncio

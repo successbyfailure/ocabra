@@ -28,6 +28,10 @@ def make_gpu_manager(free_by_gpu: dict[int, int]):
     gm = AsyncMock()
     gm.get_all_states = AsyncMock(return_value=states)
     gm.get_free_vram = AsyncMock(side_effect=lambda i: free_by_gpu[i])
+    # has_service_lock is a plain sync method on the real GPUManager; left
+    # unset it inherits AsyncMock's default (a coroutine), which is always
+    # truthy and makes every GPU look locked.
+    gm.has_service_lock = MagicMock(return_value=False)
     return gm
 
 
@@ -53,6 +57,10 @@ def make_gpu_manager_with_totals(free_by_gpu: dict[int, int], total_by_gpu: dict
     gm = AsyncMock()
     gm.get_all_states = AsyncMock(return_value=states)
     gm.get_free_vram = AsyncMock(side_effect=lambda i: free_by_gpu[i])
+    # has_service_lock is a plain sync method on the real GPUManager; left
+    # unset it inherits AsyncMock's default (a coroutine), which is always
+    # truthy and makes every GPU look locked.
+    gm.has_service_lock = MagicMock(return_value=False)
     return gm
 
 
@@ -402,3 +410,29 @@ async def test_load_enabled_schedules_reads_db_rows():
 
     assert [row.action for row in evictions] == ["evict_all"]
     assert [row.action for row in reloads] == ["reload"]
+
+
+@pytest.mark.asyncio
+async def test_vllm_headroom_rejects_gpu_whose_own_utilization_budget_is_below_need():
+    """GPU0 has enough *raw* free VRAM for the model, but at its configured
+    ``gpu_memory_utilization`` vLLM would only ever reserve less than the
+    model's known size on that card — approving it anyway (because raw
+    free memory alone looked sufficient) would hand vLLM a GPU where its
+    own memory-pool ceiling can't fit what we already know it needs.
+    GPU1 has a lower total but its utilization budget comfortably covers
+    the need, so it must be picked instead.
+    """
+    gm = make_gpu_manager_with_totals(
+        free_by_gpu={0: 9000, 1: 20000},
+        total_by_gpu={0: 10000, 1: 24000},
+    )
+    scheduler = GPUScheduler(gm)
+
+    result = await scheduler.find_gpu_for_model(
+        8500,
+        preferred_gpu=0,
+        enforce_vllm_headroom=True,
+        vllm_gpu_memory_utilization=0.8,
+    )
+
+    assert result == [1]

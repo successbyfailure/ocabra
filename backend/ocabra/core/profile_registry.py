@@ -107,6 +107,13 @@ class ProfileRegistry:
         await session.commit()
         await session.refresh(alias)
         self._aliases[alias_id] = alias
+        # ``profile`` is the long-lived cached instance in ``self._profiles``,
+        # not the one ``session`` just touched — its ``aliases`` relationship
+        # was eagerly loaded once at registry startup and never gets
+        # invalidated by later writes through a different session. Without
+        # this, a GET right after create/delete serves the stale list until
+        # the next restart repopulates the cache from the DB.
+        profile.aliases.append(alias)
         return alias
 
     async def delete_alias(self, session: AsyncSession, alias_id: str) -> None:
@@ -116,6 +123,9 @@ class ProfileRegistry:
         await session.delete(alias)
         await session.commit()
         self._aliases.pop(alias_id, None)
+        profile = self._profiles.get(alias.profile_id)
+        if profile is not None:
+            profile.aliases = [a for a in profile.aliases if a.alias_id != alias_id]
 
     async def list_by_model(self, base_model_id: str) -> list[ModelProfile]:
         """Return all profiles for a given base model."""
@@ -707,7 +717,7 @@ class ProfileRegistry:
         "vllm": "llm", "llama_cpp": "llm", "sglang": "llm",
         "tensorrt_llm": "llm", "bitnet": "llm", "ollama": "llm",
         "whisper": "stt", "vibeasr": "stt", "tts": "tts", "voxtral": "tts",
-        "chatterbox": "tts", "diffusers": "image", "acestep": "music",
+        "chatterbox": "tts", "piper": "tts", "diffusers": "image", "acestep": "music",
     }
 
     async def ensure_default_profiles(self, session: AsyncSession) -> int:

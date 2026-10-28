@@ -35,7 +35,7 @@ KV_DTYPES: dict[str, tuple[float, str | None, str]] = {
 }
 
 # Backends that don't have a context-scaling KV cache (encoders, diffusion, TTS).
-_NON_KV_BACKENDS = {"whisper", "vibeasr", "diffusers", "tts", "chatterbox", "comfyui", "a1111"}
+_NON_KV_BACKENDS = {"whisper", "vibeasr", "diffusers", "tts", "chatterbox", "piper", "comfyui", "a1111"}
 
 
 class ArchResolution:
@@ -198,7 +198,14 @@ def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> d
 
     if backend in ("llama_cpp", "bitnet"):
         sect = merged.setdefault("llama_cpp", {})
-        sect["ctx_size"] = ctx
+        # ``ctx`` (plan["effective_context"]) is the PER-SLOT context —
+        # vram_planner.max_context_tokens already divided the fitting budget
+        # by ``slots`` to get it. But llama-server's own ``--ctx-size`` is the
+        # TOTAL pool, which it then divides by ``--parallel`` internally to
+        # get n_ctx_slot. Passing the per-slot value straight through as
+        # ctx_size double-divides it — each slot would end up with
+        # ctx/slots tokens instead of ctx. Multiply back out here.
+        sect["ctx_size"] = ctx * slots
         sect["parallel_slots"] = slots
         ct = plan.get("llama_cache_type")
         if ct and ct != "f16":

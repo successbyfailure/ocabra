@@ -210,6 +210,7 @@ async def set_gpu_power(
                     raise HTTPException(
                         status_code=503,
                         detail=f"Cannot set power limit: {nvml_exc}. Ensure hw-monitor is running.",
+                        headers={"Retry-After": "10"},
                     )
 
             # hw-monitor applies asynchronously over Redis. Poll the live NVML
@@ -288,6 +289,7 @@ async def set_gpu_power(
                     "service may be down or not subscribed to Redis. The setting "
                     "was saved and will be retried on the next reapply."
                 ),
+                headers={"Retry-After": "15"},
             )
 
         return {

@@ -56,6 +56,13 @@ class ModelMemoryEstimateRequest(BaseModel):
     run_probe: bool = False
 
 
+class MaintenanceToggle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    run_probe: bool = False
+
+
 @router.get(
     "/models",
     summary="List all models",
@@ -78,6 +85,7 @@ async def list_models(
     mm = request.app.state.model_manager
     await _sync_ollama_inventory(mm)
     states = await mm.list_states()
+    states = await _overlay_loaded_derived_state(mm, states)
     ollama_sizes = await _get_ollama_sizes_bytes()
 
     federation_manager = getattr(request.app.state, "federation_manager", None)
@@ -608,6 +616,32 @@ async def unload_model(
     return updated.to_dict()
 
 
+@router.post(
+    "/models/{model_id:path}/maintenance",
+    summary="Pause or resume new requests for a model",
+    description=(
+        "While enabled, every new request for this model (and any of its derived "
+        "``::<hash>`` worker keys) is rejected with 503 instead of being admitted — "
+        "e.g. to free the GPU for manual benchmarking without real traffic contending "
+        "for it. Requests already in flight when the window opens are not affected. "
+        "In-memory only; does not survive an API restart."
+    ),
+    responses={404: {"description": "Model not found"}},
+)
+async def set_model_maintenance(
+    model_id: str,
+    body: MaintenanceToggle,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    mm.set_maintenance(model_id, body.enabled)
+    return {"model_id": model_id, "maintenance": body.enabled}
+
+
 @router.patch(
     "/models/{model_id:path}",
     summary="Update model configuration",
@@ -672,7 +706,10 @@ async def update_model(
     summary="Estimate model memory requirements",
     description=(
         "Compute a VRAM estimate for the model under the given configuration. "
-        "Uses heuristic sizing by default; set run_probe=true for a runtime validation (vLLM only)."
+        "llama.cpp models get a deterministic estimate from vram_planner.py "
+        "(same architecture/KV/rs_cache/MTP-overhead model the runtime-presets "
+        "panel uses, so both panels always agree); other backends fall back to "
+        "a generic heuristic. Set run_probe=true for a runtime validation (vLLM only)."
     ),
     responses={404: {"description": "Model not found"}},
 )
@@ -1139,93 +1176,220 @@ def _estimate_llama_cpp_memory(
     heuristic_mb: int,
     total_vram_mb: int | None,
 ) -> dict[str, Any]:
-    """Sprint 17.2 — deterministic GGUF VRAM estimator for llama.cpp models.
+    """Deterministic GGUF VRAM estimator for llama.cpp models.
 
-    Falls back to the legacy heuristic when the GGUF file cannot be located or
-    parsed (e.g. only-on-disk via Ollama, or remote model). The legacy probe
-    remains the source for everything else.
+    Shares its architecture/KV/rs_cache/MTP-draft-overhead math with
+    ``vram_planner.py`` — the same module the scheduler's pre-load admission
+    check and the runtime-presets panel use — so this "Memoria y contexto"
+    panel and the rest of the UI never disagree about the same model. Falls
+    back to the legacy heuristic when the GGUF file cannot be located or
+    parsed (e.g. only-on-disk via Ollama, or remote model) or when the
+    configured ``gpu_layers`` is 0 (CPU-only, nothing to size on the GPU).
     """
-    from ocabra.core.llama_cpp_estimator import estimate_vram_safe
+    from ocabra.core.model_manager_helpers import (
+        _LLAMA_CPP_DEFAULT_DRAFT_N_MAX,
+        _LLAMA_CPP_SPEC_TYPES_NEEDING_RS_ROLLBACK,
+    )
     from ocabra.schemas.backend_load import LlamaCppLoadConfig
+
+    def _fallback_to_heuristic(notes: list[str], *, status: str = "ok", warning: str | None = None) -> dict[str, Any]:
+        estimate.update(
+            {
+                "estimated_weights_mb": heuristic_mb or None,
+                "fits_current_gpu": (
+                    heuristic_mb <= total_vram_mb
+                    if total_vram_mb is not None and heuristic_mb > 0
+                    else None
+                ),
+                "status": status,
+                "warning": warning,
+                "notes": notes,
+            }
+        )
+        return estimate
 
     nested = extra_config.get("llama_cpp") if isinstance(extra_config, dict) else None
     payload = nested if isinstance(nested, dict) else {}
     try:
         load_config = LlamaCppLoadConfig.model_validate(payload)
     except Exception as exc:  # noqa: BLE001 — surface as warning, keep estimate
-        estimate.update(
-            {
-                "estimated_weights_mb": heuristic_mb or None,
-                "fits_current_gpu": (
-                    heuristic_mb <= total_vram_mb
-                    if total_vram_mb is not None and heuristic_mb > 0
-                    else None
-                ),
-                "status": "warning",
-                "warning": f"Configuración llama.cpp inválida: {exc}",
-                "notes": ["Estimación heurística (config inválida)."],
-            }
+        return _fallback_to_heuristic(
+            ["Estimación heurística (config inválida)."],
+            status="warning",
+            warning=f"Configuración llama.cpp inválida: {exc}",
         )
-        return estimate
 
     gguf_path = _resolve_extra_config_path(extra_config, "model_path") or _resolve_local_model_path(
         state.backend_model_id
     )
     gguf_file: Path | None = None
     if gguf_path is not None:
-        if gguf_path.is_file() and gguf_path.suffix == ".gguf":
+        if gguf_path.is_file():
+            # model_path points straight at the weights file — trust it
+            # regardless of extension. Ollama's blob store names files by
+            # content hash ("sha256-<hash>", no ".gguf" suffix) when
+            # llama_cpp reuses weights pulled through Ollama.
             gguf_file = gguf_path
         elif gguf_path.is_dir():
             ggufs = sorted(gguf_path.rglob("*.gguf"))
             if ggufs:
                 gguf_file = max(ggufs, key=lambda p: p.stat().st_size)
 
-    breakdown = estimate_vram_safe(str(gguf_file), load_config) if gguf_file is not None else None
+    arch = vp.arch_from_gguf(str(gguf_file)) if gguf_file is not None else None
+    if arch is None or gguf_file is None:
+        return _fallback_to_heuristic(["Estimación heurística: GGUF no encontrado o no parseable."])
 
-    if breakdown is None:
-        # Couldn't locate / parse — degrade gracefully to the legacy heuristic.
-        estimate.update(
-            {
-                "estimated_weights_mb": heuristic_mb or None,
-                "fits_current_gpu": (
-                    heuristic_mb <= total_vram_mb
-                    if total_vram_mb is not None and heuristic_mb > 0
-                    else None
-                ),
-                "notes": [
-                    "Estimación heurística: GGUF no encontrado o no parseable.",
-                ],
-            }
+    gpu_layers = load_config.gpu_layers if load_config.gpu_layers is not None else settings.llama_cpp_gpu_layers
+    if gpu_layers <= 0:
+        return _fallback_to_heuristic(["Estimación heurística: gpu_layers=0 (modelo en CPU)."])
+
+    ctx_size = int(load_config.ctx_size or settings.llama_cpp_ctx_size)
+    parallel_slots = max(1, load_config.parallel_slots or settings.llama_cpp_parallel_slots)
+    kv_dtype_bytes = vp.kv_dtype_bytes_for_cache_type(load_config.cache_type_k or load_config.cache_type_v)
+
+    rs_rollback_snapshots = 0
+    if load_config.speculative is not None:
+        spec_type = (load_config.speculative.spec_type or "").lower()
+        if spec_type in _LLAMA_CPP_SPEC_TYPES_NEEDING_RS_ROLLBACK:
+            rs_rollback_snapshots = (
+                load_config.speculative.draft_n
+                if load_config.speculative.draft_n is not None
+                else _LLAMA_CPP_DEFAULT_DRAFT_N_MAX
+            )
+
+    file_size_mb = gguf_file.stat().st_size / (1024 * 1024)
+    total_layers = max(1, arch.layers)
+    offloaded = max(0, min(gpu_layers, total_layers))
+    frac = offloaded / total_layers
+    weights_mb = file_size_mb * frac
+    kv_arch = (
+        arch
+        if offloaded == total_layers
+        else vp.ModelArch(
+            offloaded, arch.n_kv_heads, arch.key_length, arch.value_length,
+            arch.hidden_size, arch.context_length, arch.weight_dtype_bytes,
+            int(arch.kv_elements_per_token_override * frac) if arch.kv_elements_per_token_override else 0,
+            arch.rs_cache_mb_per_slot * frac,
+            arch.fixed_load_overhead_mb * frac,
         )
-        return estimate
+    )
+    draft_overhead_mb = (
+        vp.mtp_draft_overhead_mb(parallel_slots) if rs_rollback_snapshots > 0 else 0.0
+    )
+    rs_mb = vp.rs_cache_vram_mb(kv_arch, slots=parallel_slots, rollback_snapshots=rs_rollback_snapshots)
+    fixed_mb = vp.fixed_overhead_vram_mb(kv_arch)
+    kv_mb = vp.kv_vram_mb(kv_arch, max(1, ctx_size), kv_dtype_bytes)
+    overhead_mb = vp.DEFAULT_OVERHEAD_MB + draft_overhead_mb
+    total_mb = int(weights_mb + kv_mb + rs_mb + fixed_mb + overhead_mb)
 
-    bytes_per_mb = 1024 * 1024
-    weights_mb = max(1, breakdown["model_bytes"] // bytes_per_mb)
-    kv_mb = max(0, breakdown["kv_bytes"] // bytes_per_mb)
-    compute_mb = max(0, breakdown["compute_buffer_bytes"] // bytes_per_mb)
-    total_mb = max(1, breakdown["total_bytes"] // bytes_per_mb)
+    estimated_max_context_length = None
+    if total_vram_mb is not None:
+        estimated_max_context_length = vp.max_context_tokens(
+            total_vram_mb,
+            weights_mb,
+            kv_arch,
+            slots=parallel_slots,
+            kv_dtype_bytes=kv_dtype_bytes,
+            overhead_mb=overhead_mb,
+            rs_rollback_snapshots=rs_rollback_snapshots,
+        ) or None
 
     notes = [
-        "Estimación determinística desde el header GGUF (Sprint 17.2).",
-        f"Desglose en MB — pesos: {weights_mb} · KV: {kv_mb} · compute: {compute_mb} · total: {total_mb}.",
+        "Estimación determinística desde el header GGUF (arquitectura, KV cache, "
+        "rs_cache híbrido y overhead de draft MTP, cuando aplica).",
+        f"Desglose en MB — pesos: {int(weights_mb)} · KV: {int(kv_mb)}"
+        + (f" · rs_cache: {int(rs_mb)}" if rs_mb else "")
+        + (f" · overhead fijo: {int(fixed_mb)}" if fixed_mb else "")
+        + (f" · overhead MTP: {int(draft_overhead_mb)}" if draft_overhead_mb else "")
+        + f" · overhead base: {vp.DEFAULT_OVERHEAD_MB} · total: {total_mb}.",
     ]
     if load_config.cache_type_k or load_config.cache_type_v:
         notes.append(
             "KV cache cuantizado: K="
             f"{load_config.cache_type_k or 'f16'} · V={load_config.cache_type_v or 'f16'}."
         )
+    if rs_rollback_snapshots > 0:
+        notes.append(
+            f"Decodificación especulativa autoreferente ({load_config.speculative.spec_type}): "
+            f"reserva adicional de rs_cache y buffer de draft para {rs_rollback_snapshots} tokens."
+        )
 
     estimate.update(
         {
-            "estimated_weights_mb": weights_mb,
-            "estimated_kv_cache_mb": kv_mb,
+            "estimated_weights_mb": int(weights_mb),
+            "estimated_kv_cache_mb": int(kv_mb),
+            "estimated_max_context_length": estimated_max_context_length,
             "model_loading_memory_mb": total_mb,
             "fits_current_gpu": (total_mb <= total_vram_mb if total_vram_mb is not None else None),
-            "source": "heuristic",
+            "source": "gguf_header",
             "notes": notes,
         }
     )
     return estimate
+
+
+async def _overlay_loaded_derived_state(mm, states: list) -> list:
+    """Roll a loaded derived worker's live status onto its base catalog entry.
+
+    Runtime presets load a per-request-size derived worker key
+    (``base_model_id::<hash>``), not the base ``model_id`` itself — see
+    ``ModelManager.add_model``/``_load_model``. ``list_states()`` (no
+    ``include_derived``) only returns canonical/persisted entries, so the
+    base entry's own ``status`` stays ``configured`` forever even while its
+    derived worker is actively loaded and serving. The dashboard ("Modelos
+    activos") and ``/v1/models``-adjacent UI read exactly this list, so a
+    model could be resident and consuming real VRAM while the UI insists
+    nothing is loaded. Reproduced live 2026-10-26: qwen3.8:27b showing
+    "Sin modelos cargados" while GPU1 sat at 95% util / 17.7GB used.
+
+    Overlays only the runtime-facing fields (status, current_gpu,
+    vram_used_mb, loaded_at, last_request_at, worker_info) from the most
+    recently loaded derived sibling; identity/config fields (model_id,
+    display_name, capabilities, extra_config, ...) stay the base entry's own.
+    """
+    import dataclasses
+    from datetime import UTC, datetime
+
+    from ocabra.core.model_manager import ModelStatus
+
+    min_dt = datetime.min.replace(tzinfo=UTC)
+    all_states = await mm.list_states(include_derived=True)
+    loaded_derived_by_base: dict[str, Any] = {}
+    for candidate in all_states:
+        if candidate.status != ModelStatus.LOADED:
+            continue
+        base_id, sep, _suffix = candidate.model_id.partition("::")
+        if not sep:
+            continue
+        existing = loaded_derived_by_base.get(base_id)
+        if existing is None or (candidate.loaded_at or min_dt) > (existing.loaded_at or min_dt):
+            loaded_derived_by_base[base_id] = candidate
+
+    overlaid = []
+    for state in states:
+        derived = loaded_derived_by_base.get(state.model_id) if state.status != ModelStatus.LOADED else None
+        if derived is None:
+            overlaid.append(state)
+            continue
+        overlaid.append(
+            dataclasses.replace(
+                state,
+                status=derived.status,
+                current_gpu=derived.current_gpu,
+                vram_used_mb=derived.vram_used_mb,
+                loaded_at=derived.loaded_at,
+                last_request_at=derived.last_request_at or state.last_request_at,
+                worker_info=derived.worker_info,
+                # The derived worker's capabilities reflect what the live
+                # process actually supports (probed from its real chat
+                # template — see llama_cpp_backend._template_caps) — the
+                # base entry's own cached capabilities are stale defaults
+                # from before it was ever loaded.
+                capabilities=derived.capabilities,
+                error_message=None,
+            )
+        )
+    return overlaid
 
 
 async def _serialize_model_state(
@@ -1509,13 +1673,22 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
 def _resolve_extra_config_path(extra_config: dict | None, *keys: str) -> Path | None:
     if not isinstance(extra_config, dict):
         return None
-    models_dir = Path(settings.models_dir or "/data/models")
+    allowed_bases = [Path(settings.models_dir or "/data/models")]
+    if settings.ollama_shared_models_dir:
+        allowed_bases.append(Path(settings.ollama_shared_models_dir))
+    # llama.cpp stores its load options — including model_path — nested
+    # under extra_config["llama_cpp"], not at the top level like other
+    # backends' extra_config. Check both so GGUF weights reused from
+    # Ollama's blob store (hence the extra allowed base above, outside
+    # models_dir) still resolve for size/memory-estimate lookups.
+    nested = extra_config.get("llama_cpp")
+    nested = nested if isinstance(nested, dict) else {}
     for key in keys:
-        raw = extra_config.get(key)
+        raw = extra_config.get(key) or nested.get(key)
         if not raw or not isinstance(raw, str):
             continue
         path = Path(raw)
-        if path.exists() and _is_path_within_base(path, models_dir):
+        if path.exists() and any(_is_path_within_base(path, base) for base in allowed_bases):
             return path
     return None
 

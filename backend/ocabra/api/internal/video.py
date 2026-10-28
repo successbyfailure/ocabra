@@ -82,6 +82,7 @@ async def upscale_video(
                 raise HTTPException(
                     status_code=503,
                     detail=f"Upscaler worker unavailable for model '{worker_key}'",
+                    headers={"Retry-After": "10"},
                 )
 
             try:
@@ -105,6 +106,7 @@ async def upscale_video(
                 raise HTTPException(
                     status_code=503,
                     detail=f"Upscaler worker unavailable for model '{worker_key}'",
+                    headers={"Retry-After": "10"},
                 ) from exc
             except httpx.HTTPStatusError as exc:
                 # El worker ya devuelve un detalle útil (p. ej. 507 por VRAM):

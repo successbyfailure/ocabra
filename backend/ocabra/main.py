@@ -444,6 +444,7 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.mageflow_backend import MageFlowBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.ollama_backend import OllamaBackend
+    from ocabra.backends.piper_backend import PiperBackend
     from ocabra.backends.sglang_backend import SGLangBackend
     from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
@@ -465,6 +466,7 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("vibeasr", VibeAsrBackend())
     worker_pool.register_backend("tts", TTSBackend())
     worker_pool.register_backend("chatterbox", ChatterboxBackend())
+    worker_pool.register_backend("piper", PiperBackend())
     worker_pool.register_backend("upscaler", UpscalerBackend())
     worker_pool.register_backend("flashvsr", FlashVSRBackend())
     worker_pool.register_backend("voxtral", VoxtralBackend())
@@ -790,7 +792,7 @@ Consulta `GET /v1/models` para ver los modelos disponibles.
 |-----------|----------|----------|
 | **Chat / Completions** | `/v1/chat/completions` | vllm, sglang, llama_cpp, ollama, bitnet, tensorrt_llm |
 | **Embeddings** | `/v1/embeddings` | vllm, sglang, llama_cpp, ollama |
-| **Text-to-Speech** | `/v1/audio/speech` | tts (Kokoro, Bark, Qwen3-TTS), chatterbox, voxtral |
+| **Text-to-Speech** | `/v1/audio/speech` | tts (Kokoro, Bark, Qwen3-TTS), chatterbox, voxtral, piper |
 | **Speech-to-Text** | `/v1/audio/transcriptions` | whisper (faster-whisper, Whisper) |
 | **Generacion de imagenes** | `/v1/images/generations` | diffusers |
 | **Generacion de musica** | `/v1/audio/generate` | acestep |

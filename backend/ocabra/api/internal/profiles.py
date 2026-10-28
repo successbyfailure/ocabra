@@ -6,6 +6,7 @@ import asyncio
 import shutil
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -13,7 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.core.profile_registry import ProfileRegistry
-from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
+from ocabra.core.runtime_preset_capacity import (
+    resolve_profile_runtime_capacities,
+    runtime_capacity_cache,
+)
 from ocabra.database import AsyncSessionLocal
 from ocabra.schemas.profiles import (
     ProfileAliasCreate,
@@ -53,7 +57,11 @@ MAX_ASSET_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
 def _get_registry(request: Request) -> ProfileRegistry:
     registry = getattr(request.app.state, "profile_registry", None)
     if registry is None:
-        raise HTTPException(status_code=503, detail="Profile registry not available")
+        raise HTTPException(
+            status_code=503,
+            detail="Profile registry not available",
+            headers={"Retry-After": "5"},
+        )
     return registry
 
 
@@ -223,6 +231,64 @@ async def resolve_runtime_presets(
         RuntimePresetResolutionOut.model_validate(row).model_dump(mode="json")
         for row in rows
     ]
+
+
+@router.post(
+    "/profiles/{profile_id}/runtime-presets/preview",
+    summary="Preview a draft runtime preset's capacity",
+    description=(
+        "Resolve a NOT-YET-SAVED preset (any field from the create payload) "
+        "against current model/GPU capacity — for live estimation in the "
+        "editor, before the admin commits to creating or updating a preset."
+    ),
+    responses={404: {"description": "Profile or base model not found"}},
+)
+async def preview_runtime_preset(
+    profile_id: str,
+    body: RuntimePresetCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Resolve a draft preset without persisting it, reusing the same
+    no-side-effect capacity resolver as the saved-preset endpoint above —
+    just fed a throwaway one-preset "profile" built from the request body
+    instead of what's in the database."""
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+    if profile.profile_kind != "execution" or profile.base_model_id is None:
+        raise HTTPException(status_code=400, detail="Routers do not have runtime presets")
+    model_manager = request.app.state.model_manager
+    state = await model_manager.get_state(profile.base_model_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Base model '{profile.base_model_id}' not found",
+        )
+    gpu_manager = model_manager.gpu_manager
+    gpu_states = await gpu_manager.get_all_states() if gpu_manager is not None else []
+
+    draft_preset = SimpleNamespace(
+        preset_key=body.preset_key or "preview",
+        context_mode=body.context_mode,
+        context_tokens=body.context_tokens,
+        parallelism=body.parallelism,
+        kv_cache_dtype=body.kv_cache_dtype,
+        placement_policy=body.placement_policy,
+        preferred_gpus=body.preferred_gpus,
+        priority=0,
+    )
+    draft_profile = SimpleNamespace(
+        base_model_id=profile.base_model_id,
+        load_overrides=profile.load_overrides,
+        runtime_policy=profile.runtime_policy,
+        runtime_presets=[draft_preset],
+    )
+    rows = await resolve_profile_runtime_capacities(draft_profile, state, gpu_states)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Could not resolve preview")
+    return RuntimePresetResolutionOut.model_validate(rows[0]).model_dump(mode="json")
 
 
 @router.post(

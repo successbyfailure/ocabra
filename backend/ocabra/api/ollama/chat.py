@@ -213,13 +213,13 @@ async def chat(
 
     started_ns = time.monotonic_ns()
     result = await worker_pool.forward_request(worker_key, "/v1/chat/completions", vllm_body)
-    message = _extract_chat_message(result)
+    message = _extract_chat_ollama_message(result)
     total_duration = time.monotonic_ns() - started_ns
     usage = result.get("usage") or {}
     return {
         "model": ollama_model,
         "created_at": now_iso_z(),
-        "message": {"role": "assistant", "content": message},
+        "message": message,
         "done": True,
         "total_duration": total_duration,
         "load_duration": 0,
@@ -229,10 +229,66 @@ async def chat(
     }
 
 
+def _normalize_messages_for_backend(messages: list) -> list:
+    """Coerce ``content: null`` to ``content: ""`` on every message.
+
+    OpenAI-style clients routinely send ``content: null`` for an assistant
+    message that only carries ``tool_calls`` (that's the documented OpenAI
+    shape). gemma4's llama.cpp chat template hard-crashes the worker process
+    — not a clean error, the whole llama-server process dies — when it
+    renders a historical assistant message shaped that way. Confirmed via
+    direct reproduction against the worker on 2026-10-27: identical message
+    with ``content: ""`` renders fine; ``content: null`` kills the process.
+    Harmless for every other model, so apply unconditionally rather than
+    gating on backend/model to avoid re-growing a backend-specific special
+    case here.
+    """
+    out = []
+    for raw in messages or []:
+        if not isinstance(raw, dict):
+            out.append(raw)
+            continue
+        msg = dict(raw)
+        if msg.get("content") is None:
+            msg["content"] = ""
+        if isinstance(msg.get("tool_calls"), list):
+            msg["tool_calls"] = [_normalize_tool_call_for_backend(tc) for tc in msg["tool_calls"]]
+        out.append(msg)
+    return out
+
+
+def _normalize_tool_call_for_backend(tool_call: object) -> object:
+    """Backfill the OpenAI-required ``type``/stringified-``arguments`` shape
+    on a historical ``tool_calls`` entry before forwarding it upstream.
+
+    We hand clients Ollama-native tool_calls (``{"function": {...}}``, no
+    ``type``, ``arguments`` as a plain object — see
+    ``_openai_tool_calls_to_ollama``). A client that echoes that exact
+    message back as conversation history on the next turn (standard
+    multi-turn tool-loop behavior) sends it straight through
+    ``_build_vllm_chat_body`` unmodified — and llama-server's OpenAI-
+    compatible endpoint rejects it outright: ``Failed to parse messages:
+    Missing tool call type``. Confirmed live 2026-10-27 via a real Home
+    Assistant conversation (``intent__HassTurnOn``) using the diagnostic
+    logging added for the earlier content:null crash.
+    """
+    if not isinstance(tool_call, dict):
+        return tool_call
+    out = dict(tool_call)
+    out.setdefault("type", "function")
+    function = out.get("function")
+    if isinstance(function, dict):
+        function = dict(function)
+        if isinstance(function.get("arguments"), dict):
+            function["arguments"] = json.dumps(function["arguments"])
+        out["function"] = function
+    return out
+
+
 def _build_vllm_chat_body(payload: dict, model_id: str, stream: bool) -> dict:
     body: dict = {
         "model": model_id,
-        "messages": payload.get("messages", []),
+        "messages": _normalize_messages_for_backend(payload.get("messages", [])),
         "stream": stream,
     }
 
@@ -264,16 +320,28 @@ async def _stream_chat(
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
     eval_count = 0
+    # OpenAI streams tool_calls incrementally (one delta per `index`, name
+    # arriving once then `arguments` trickling in character by character) —
+    # accumulate by index and only emit the assembled calls once, in the
+    # final `done` chunk, matching how Ollama's own /api/chat reports them
+    # (attached to the completed message, never streamed token-by-token
+    # themselves).
+    tool_calls_acc: dict[int, dict] = {}
 
     async for payload in iter_sse_payloads(
         worker_pool.forward_stream(model_id, "/v1/chat/completions", body)
     ):
         if payload == "[DONE]":
             total_duration = time.monotonic_ns() - started_ns
+            done_message: dict = {"role": "assistant", "content": ""}
+            if tool_calls_acc:
+                done_message["tool_calls"] = _openai_tool_calls_to_ollama(
+                    [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+                )
             done_payload = {
                 "model": ollama_model,
                 "created_at": now_iso_z(),
-                "message": {"role": "assistant", "content": ""},
+                "message": done_message,
                 "done": True,
                 "total_duration": total_duration,
                 "load_duration": 0,
@@ -297,6 +365,16 @@ async def _stream_chat(
             continue
 
         delta = choices[0].get("delta") or {}
+
+        for tc_delta in delta.get("tool_calls") or []:
+            idx = tc_delta.get("index", 0)
+            entry = tool_calls_acc.setdefault(idx, {"function": {"name": "", "arguments": ""}})
+            fn_delta = tc_delta.get("function") or {}
+            if fn_delta.get("name"):
+                entry["function"]["name"] = fn_delta["name"]
+            if fn_delta.get("arguments"):
+                entry["function"]["arguments"] += fn_delta["arguments"]
+
         token = str(delta.get("content") or "")
         if token == "":
             continue
@@ -310,12 +388,45 @@ async def _stream_chat(
         yield (json.dumps(chunk) + "\n").encode("utf-8")
 
 
-def _extract_chat_message(payload: dict) -> str:
+def _openai_tool_calls_to_ollama(tool_calls: list[dict] | None) -> list[dict]:
+    """Convert OpenAI-shaped ``tool_calls`` to Ollama's ``/api/chat`` shape.
+
+    OpenAI (and llama-server/vLLM's OpenAI-compatible endpoints) encode
+    ``function.arguments`` as a JSON *string*; Ollama's native clients expect
+    it as a plain object. Dropping this conversion is why tool calls appeared
+    to "not work" for non-ollama backends: the HTTP request succeeded and the
+    backend generated a correct tool call, but it never survived translation
+    back into the Ollama response shape (see gpu-bench README, 2026-10-27).
+    """
+    out: list[dict] = []
+    for call in tool_calls or []:
+        function = call.get("function") or {}
+        name = function.get("name")
+        if not name:
+            continue
+        raw_args = function.get("arguments")
+        if isinstance(raw_args, str):
+            try:
+                arguments = json.loads(raw_args) if raw_args else {}
+            except json.JSONDecodeError:
+                arguments = {}
+        elif isinstance(raw_args, dict):
+            arguments = raw_args
+        else:
+            arguments = {}
+        out.append({"function": {"name": name, "arguments": arguments}})
+    return out
+
+
+def _extract_chat_ollama_message(payload: dict) -> dict:
     choices = payload.get("choices") or []
     if not choices:
-        return ""
+        return {"role": "assistant", "content": ""}
     message = choices[0].get("message") or {}
-    return str(message.get("content") or "")
+    out: dict = {"role": "assistant", "content": str(message.get("content") or "")}
+    if message.get("tool_calls"):
+        out["tool_calls"] = _openai_tool_calls_to_ollama(message["tool_calls"])
+    return out
 
 
 # ── Agent dispatch (Ollama adapter) ──────────────────────────────
@@ -333,7 +444,12 @@ def _ollama_messages_to_openai(messages: list[dict]) -> list[dict]:
         if not isinstance(raw, dict):
             continue
         role = raw.get("role")
-        content = raw.get("content", "")
+        # ``.get("content", "")`` only applies its default when the key is
+        # absent — an explicit ``content: null`` (the OpenAI-standard shape
+        # for a tool_calls-only assistant message) passes straight through
+        # as None. See _normalize_messages_for_backend for why that crashes
+        # gemma4's llama.cpp worker when replayed in history.
+        content = raw.get("content") or ""
         images = raw.get("images") or []
         msg: dict = {"role": role}
         if images:
@@ -352,7 +468,7 @@ def _ollama_messages_to_openai(messages: list[dict]) -> list[dict]:
         else:
             msg["content"] = content
         if raw.get("tool_calls"):
-            msg["tool_calls"] = raw["tool_calls"]
+            msg["tool_calls"] = [_normalize_tool_call_for_backend(tc) for tc in raw["tool_calls"]]
         if raw.get("tool_call_id"):
             msg["tool_call_id"] = raw["tool_call_id"]
         out.append(msg)
@@ -364,7 +480,7 @@ def _openai_response_to_ollama(payload: dict, ollama_model: str) -> dict:
     msg_dict = (payload.get("choices") or [{}])[0].get("message") or {}
     out_msg: dict = {"role": "assistant", "content": msg_dict.get("content") or ""}
     if msg_dict.get("tool_calls"):
-        out_msg["tool_calls"] = msg_dict["tool_calls"]
+        out_msg["tool_calls"] = _openai_tool_calls_to_ollama(msg_dict["tool_calls"])
     usage = payload.get("usage") or {}
     return {
         "model": ollama_model,
@@ -404,7 +520,11 @@ async def _dispatch_agent_ollama(
 
     registry = getattr(request.app.state, "mcp_registry", None) or get_mcp_registry()
     if registry is None:
-        raise HTTPException(status_code=503, detail="MCP registry not available")
+        raise HTTPException(
+            status_code=503,
+            detail="MCP registry not available",
+            headers={"Retry-After": "5"},
+        )
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)

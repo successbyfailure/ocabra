@@ -588,5 +588,6 @@ def _get_manager(request: Request):
         raise HTTPException(
             status_code=503,
             detail="TrtllmCompileManager not initialised",
+            headers={"Retry-After": "5"},
         )
     return manager

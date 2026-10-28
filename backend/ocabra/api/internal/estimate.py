@@ -67,7 +67,11 @@ async def estimate_request(
         request.app.state, "duration_estimator", None
     )
     if estimator is None:
-        raise HTTPException(status_code=503, detail="Duration estimator not ready yet")
+        raise HTTPException(
+            status_code=503,
+            detail="Duration estimator not ready yet",
+            headers={"Retry-After": "5"},
+        )
 
     # Resolve the model_id + currently_loaded state. We deliberately allow
     # both a profile_id and a canonical model_id (backend/name) so clients

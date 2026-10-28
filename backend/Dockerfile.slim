@@ -71,13 +71,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # vLLM 0.19+ pulls flashinfer, which JIT-compiles attention kernels at
 # runtime via nvcc on hybrid-arch models (Mamba/attention). Without nvcc
 # the engine crashes the first prefill with "Could not find nvcc".
-# cuda-nvcc-12-4 alone is ~200 MB, plus dev headers ~120 MB.
+# cuda-nvcc-13-0 alone is ~200 MB, plus dev headers ~120 MB. Pinned to
+# match the CUDA 13.0 wheels (torch==*+cu130) the vLLM backend venv
+# installs — flashinfer's JIT build rejects flags (e.g. --compress-mode)
+# that an older nvcc toolchain doesn't recognize. Bump this in lockstep
+# with whatever cuNN torch build vLLM's venv ends up on.
+#
+# libcublas-dev-13-0: the llama_cpp backend's BackendInstaller build
+# (scripts/install_llama_cpp.sh) links ggml-cuda against CUDA::cublas —
+# nvcc alone doesn't provide that, cmake fails at the link step with
+# "Target ggml-cuda links to CUDA::cublas but the target was not found"
+# without the matching cublas dev package installed system-wide.
 RUN curl -fsSL -o /tmp/cuda-keyring.deb \
         https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
     && dpkg -i /tmp/cuda-keyring.deb \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        cuda-nvcc-12-4 \
+        cuda-nvcc-13-0 \
+        libcublas-dev-13-0 \
     && rm -rf /var/lib/apt/lists/* /tmp/cuda-keyring.deb
 ENV CUDA_HOME=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:${PATH}

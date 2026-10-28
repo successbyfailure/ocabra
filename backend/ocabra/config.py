@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.2.0"
+    app_version: str = "0.9.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     # "not_installed" and the UI surfaces the install button.
     backends_fat_image: bool = True
     max_temperature_c: int = 88
+    # Thermal throttle: when a GPU hits max_temperature_c, cut its power limit
+    # by gpu_throttle_power_reduction_pct for at least gpu_throttle_cooldown_s,
+    # then restore once it has cooled gpu_throttle_recovery_margin_c below the
+    # threshold (not just once the cooldown timer expires — avoids an
+    # immediate re-trigger if it's still hot). Off by default: this changes
+    # live GPU behaviour, so it's opt-in. The reduction is never persisted to
+    # gpu_power_settings — it's a transient runtime override of whatever cap
+    # is currently configured, restored automatically on recovery.
+    gpu_throttle_enabled: bool = False
+    gpu_throttle_power_reduction_pct: int = 20
+    gpu_throttle_cooldown_s: int = 300
+    gpu_throttle_recovery_margin_c: int = 5
     hf_cache_dir: str = "/data/hf_cache"
     ai_models_root: str = "/docker/ai-models"
     hf_token: str = ""
@@ -85,6 +97,19 @@ class Settings(BaseSettings):
     # Hard cap on any single drain wait (pressure_eviction). Even if the
     # estimator says "80 minutes remaining", we never wait more than this.
     max_drain_timeout_s: int = 900
+
+    # Circuit breaker for a worker whose process has died but oCabra has no
+    # way to detect or kill it directly (notably Ollama: it manages its own
+    # llama-server subprocess and oCabra never even learns its PID). Without
+    # this, every request keeps queueing behind a worker that just failed the
+    # same way seconds ago, each paying the full upstream timeout before
+    # failing too. After this many consecutive failures that look like a
+    # dead runner (5xx whose body matches a known "backend process died"
+    # marker), fail fast with 503 instead of hitting the network again.
+    worker_circuit_breaker_threshold: int = 3
+    # After the cooldown, allow one probe request through (half-open) to see
+    # if the worker recovered — e.g. Ollama auto-restarted the runner.
+    worker_circuit_breaker_cooldown_s: int = 30
 
     # How often the estimator refreshes its per-model calibration from
     # request_stats. Longer = less DB load, more staleness. 30 min is
@@ -215,6 +240,16 @@ class Settings(BaseSettings):
     # so 32 only rejects genuine floods (runaway loops) while leaving real bursts
     # (a couple of agentic users, batched embeddings) untouched.
     max_inflight_per_model: int = 32
+    # The flat cap above ignores how many requests a worker can actually run
+    # at once. A single-slot llama.cpp/Ollama worker can still accept requests
+    # up to the flat 32 — each extra one just adds to a serial queue with no
+    # rejection, so a burst against a 1-slot model promises everyone several
+    # minutes of silent waiting instead of a prompt 429. Scale the effective
+    # cap by the model's real concurrency (``_runtime.parallelism``, same
+    # value /stats/recent uses for queue position): effective = min(flat cap,
+    # slots * this). 1 slot -> 4 in flight before 429; an 8-slot vLLM worker
+    # still gets up to the full 32.
+    max_queued_per_slot: int = 4
     # SGLang
     sglang_python_bin: str = "/opt/sglang-venv/bin/python"
     sglang_server_module: str = "sglang.launch_server"
@@ -227,6 +262,8 @@ class Settings(BaseSettings):
     # Chatterbox TTS
     chatterbox_python_bin: str = "/opt/chatterbox-venv/bin/python"
     chatterbox_model_name: str = "ResembleAI/chatterbox-turbo"
+    # Piper TTS (CPU-only VITS, fast-lane voice assistant path)
+    piper_python_bin: str = "/opt/piper-venv/bin/python"
     # Voxtral TTS (vllm-omni)
     voxtral_python_bin: str = "/opt/voxtral-venv/bin/python"
     voxtral_startup_timeout_s: int = 300
@@ -294,6 +331,16 @@ class Settings(BaseSettings):
     diffusers_allow_tf32: bool = True
     vram_buffer_mb: int = 512
     vram_pressure_threshold_pct: float = 90.0
+    # hw-monitor (separate service, ``hw-monitor/hw_monitor.py``) only
+    # persists one gpu_stats row every PERSIST_INTERVAL_POLLS * POLL_INTERVAL_S
+    # seconds (defaults 30 * 2 = 60s) — it polls NVML more often but doesn't
+    # write every poll. The aggregator's "covered hours" query caps each
+    # inter-sample gap at this value so a monitor outage doesn't inflate
+    # coverage; keep it a bit above the real persist interval (not equal to
+    # it) so normal jitter between consecutive samples isn't itself treated
+    # as a gap — 2026-10-26: this was hardcoded to 30s while the real
+    # interval was 60s, silently halving every coverage/activity/kWh figure.
+    gpu_stats_expected_interval_s: int = 90
     # 11.1: Proactive VRAM eviction threshold (fraction 0.0-1.0).
     # When used VRAM exceeds this fraction, the VRAM watchdog evicts LRU
     # models. Default 0.96 — vLLM is configured per-model with

@@ -38,16 +38,29 @@ RuntimeType = Literal["cuda", "rocm", "vulkan", "cpu"]
 
 
 class SpeculativeConfig(BaseModel):
-    """Speculative decoding parameters (Sprint 17.4).
+    """Speculative decoding parameters (Sprint 17.4, self-speculative MTP added later).
 
-    The draft model must be a llama.cpp-compatible GGUF with the same
-    tokenizer (``vocab_size``, ``bos_id``, ``eos_id``) as the target model.
+    Either ``spec_type`` or ``draft_model_id`` (or both) must be set — they're
+    independent, not a pair. Self-speculative modes (``draft-mtp`` and
+    friends, e.g. Qwen3.5/3.8) draft from a ``nextn`` block baked into the
+    main GGUF and need no separate draft model; other ``--spec-type`` values
+    (``draft-simple``, ``draft-eagle3``, ...) may still pair with an external
+    ``draft_model_id`` GGUF, which must share the target's tokenizer
+    (``vocab_size``, ``bos_id``, ``eos_id``).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    draft_model_id: str = Field(
-        description="Canonical model_id of the draft (smaller) model.",
+    spec_type: str | None = Field(
+        default=None,
+        description=(
+            "llama-server --spec-type value, e.g. 'draft-mtp' for self-"
+            "speculative decoding from the target GGUF's own nextn block."
+        ),
+    )
+    draft_model_id: str | None = Field(
+        default=None,
+        description="Canonical model_id of an external draft (smaller) model.",
     )
     draft_n: int | None = Field(
         default=None,
@@ -61,6 +74,15 @@ class SpeculativeConfig(BaseModel):
         default=None,
         description="Minimum acceptance probability for drafts (--draft-p-min).",
     )
+
+    @model_validator(mode="after")
+    def _validate_has_a_draft_source(self) -> SpeculativeConfig:
+        if not self.spec_type and not self.draft_model_id:
+            raise ValueError(
+                "speculative config needs spec_type (self-speculative, e.g. "
+                "'draft-mtp') and/or draft_model_id (external draft GGUF)"
+            )
+        return self
 
 
 class LlamaCppLoadConfig(BaseModel):
@@ -113,6 +135,12 @@ class LlamaCppLoadConfig(BaseModel):
     parallel_slots: int | None = Field(default=None, ge=1)
     cont_batching: bool | None = None
     keep_alive_seconds: int | None = Field(default=None, ge=0)
+
+    # Multimodal projector (--mmproj) for vision-capable GGUFs (e.g. gemma4's
+    # clip/gemma4v projector). Same resolution rules as
+    # ``speculative.draft_model_id``: a direct file path, or a canonical
+    # model_id looked up under ``settings.models_dir``.
+    mmproj_model_id: str | None = None
 
     @model_validator(mode="after")
     def _validate_cache_type_v_requires_flash_attn(self) -> LlamaCppLoadConfig:

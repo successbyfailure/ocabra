@@ -11,6 +11,7 @@ from ocabra.stats.collector import (
     StatsMiddleware,
     _classify_request_kind,
     _extract_error_message,
+    _extract_generation_ms,
     _extract_last_payload_from_stream,
     _extract_response_payload_and_rebuild,
     _extract_stream_error,
@@ -48,6 +49,25 @@ def test_extract_usage_tokens_audio_transcription_payload() -> None:
     )
     assert input_tokens == 0
     assert output_tokens == 4
+
+
+def test_extract_generation_ms_from_llama_cpp_timings() -> None:
+    """2026-10-27 tok/s bug: duration_ms includes queue wait, so dividing
+    output_tokens by it understates real throughput under contention. The
+    llama_cpp backend's own response reports pure generation time directly —
+    use it instead when present."""
+    assert _extract_generation_ms({"timings": {"predicted_ms": 839.827}}) == 839
+
+
+def test_extract_generation_ms_from_ollama_eval_duration_nanoseconds() -> None:
+    # 2_500_000_000 ns = 2500 ms
+    assert _extract_generation_ms({"eval_duration": 2_500_000_000}) == 2500
+
+
+def test_extract_generation_ms_none_when_backend_does_not_report_it() -> None:
+    assert _extract_generation_ms({"usage": {"completion_tokens": 5}}) is None
+    assert _extract_generation_ms(None) is None
+    assert _extract_generation_ms({"timings": {}}) is None
 
 
 def test_extract_error_message_preserves_openai_detail() -> None:
@@ -141,6 +161,43 @@ async def test_resolve_inflight_model_id_maps_profile_to_worker_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_inflight_model_id_follows_hidden_alias() -> None:
+    """Regression test: a hidden compatibility alias (e.g. the client-facing
+    name "gemma4:26b" after it was migrated to the "gemma4:26b-llamacpp"
+    profile) isn't itself a profile_id, so registry.get() alone misses it.
+    Without resolve_alias() as a fallback, stats attribution fell through to
+    a backend_model_id string match further down and mis-blamed every
+    request on the OLD backend even though it was actually served by the
+    new one — found 2026-10-27 debugging a report that looked like a broken
+    router but was actually just wrong stats."""
+    new_profile = SimpleNamespace(
+        profile_id="gemma4:26b-llamacpp",
+        base_model_id="llama_cpp/gemma4-26b",
+        load_overrides={},
+        enabled=True,
+        is_default=True,
+    )
+    registry = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        resolve_alias=AsyncMock(return_value=(new_profile, None)),
+        list_by_model=AsyncMock(return_value=[]),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                profile_registry=registry,
+                model_manager=None,
+            )
+        )
+    )
+
+    resolved = await _resolve_inflight_model_id(request, "gemma4:26b")
+
+    assert resolved is not None
+    assert resolved.startswith("llama_cpp/gemma4-26b")
+
+
+@pytest.mark.asyncio
 async def test_record_realtime_request_reuses_attributed_stats_path() -> None:
     auth_user = SimpleNamespace(username="makespace", api_key_name="voice-client")
     websocket = SimpleNamespace(
@@ -185,6 +242,7 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
     )
     model_manager = MagicMock()
     model_manager.try_begin_request.return_value = "request-id"
+    model_manager.is_in_maintenance.return_value = False
     app.state.model_manager = model_manager
 
     @app.post("/v1/chat/completions")
@@ -216,6 +274,43 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
         "ollama/gemma:12b",
         "request-id",
     )
+
+
+def test_stats_middleware_returns_503_when_model_is_in_maintenance() -> None:
+    """A model under maintenance must reject new requests with 503 before
+    ever calling try_begin_request — no admission, no load, no contention
+    for whatever's using the GPU for manual testing."""
+    app = FastAPI()
+    profile = SimpleNamespace(
+        profile_id="gemma-public",
+        base_model_id="ollama/gemma:12b",
+        load_overrides=None,
+        enabled=True,
+        is_default=True,
+    )
+    app.state.profile_registry = SimpleNamespace(
+        get=AsyncMock(return_value=profile),
+        list_by_model=AsyncMock(return_value=[profile]),
+    )
+    model_manager = MagicMock()
+    model_manager.is_in_maintenance.return_value = True
+    app.state.model_manager = model_manager
+
+    @app.post("/v1/chat/completions")
+    async def _unreachable() -> None:
+        raise AssertionError("maintenance check must short-circuit before the endpoint")
+
+    app.add_middleware(StatsMiddleware)
+
+    with patch("ocabra.stats.collector._record_stat", new=AsyncMock()):
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/v1/chat/completions",
+            json={"model": "gemma-public", "messages": []},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "model_maintenance"
+    model_manager.try_begin_request.assert_not_called()
 
 
 def test_stats_middleware_records_in_band_sse_error_status() -> None:

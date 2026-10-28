@@ -19,6 +19,7 @@ from ocabra.backends.base import (
     WorkerInfo,
 )
 from ocabra.config import settings
+from ocabra.core import vram_planner as vp
 from ocabra.core.backend_installer import read_backend_metadata, venv_nvidia_ld_library_path
 
 logger = structlog.get_logger(__name__)
@@ -253,19 +254,34 @@ class LlamaCppBackend(BackendInterface):
         # --- Sprint 17.4 — speculative decoding + concurrency ---
         speculative = options.get("speculative")
         if isinstance(speculative, dict):
+            # "draft-mtp" self-speculates from a nextn block baked into the
+            # main GGUF (e.g. Qwen3.5/3.8) — no separate draft model needed.
+            # Other --spec-type values (draft-simple, draft-eagle3, ...) may
+            # still pair with --model-draft below.
+            spec_type = speculative.get("spec_type")
+            if spec_type:
+                cmd.extend(["--spec-type", str(spec_type)])
             draft_id = speculative.get("draft_model_id")
             if draft_id:
                 draft_path = self._resolve_draft_model_path(str(draft_id))
                 cmd.extend(["--model-draft", str(draft_path)])
+            if draft_id or spec_type:
                 draft_n = speculative.get("draft_n")
                 if draft_n is not None:
-                    cmd.extend(["--draft-max", str(int(draft_n))])
+                    # --draft-max/--draft-min were removed upstream; the
+                    # draft_n/draft_min config keys are kept for backward
+                    # compatibility with existing extra_config entries.
+                    cmd.extend(["--spec-draft-n-max", str(int(draft_n))])
                 draft_min = speculative.get("draft_min")
                 if draft_min is not None:
-                    cmd.extend(["--draft-min", str(int(draft_min))])
+                    cmd.extend(["--spec-draft-n-min", str(int(draft_min))])
                 draft_p_min = speculative.get("draft_p_min")
                 if draft_p_min is not None:
-                    cmd.extend(["--draft-p-min", str(float(draft_p_min))])
+                    cmd.extend(["--spec-draft-p-min", str(float(draft_p_min))])
+
+        if options.get("mmproj_model_id"):
+            mmproj_path = self._resolve_mmproj_path(str(options["mmproj_model_id"]))
+            cmd.extend(["--mmproj", str(mmproj_path)])
 
         if options.get("parallel_slots") is not None:
             cmd.extend(["--parallel", str(int(options["parallel_slots"]))])
@@ -375,22 +391,43 @@ class LlamaCppBackend(BackendInterface):
         embeddings = bool(options.get("embedding")) or any(
             token in normalized for token in ("embed", "embedding", "bge", "e5")
         )
-        vision = any(token in normalized for token in ("llava", "vision", "minicpmv", "vl"))
+        vision = bool(options.get("mmproj_model_id")) or any(
+            token in normalized for token in ("llava", "vision", "minicpmv", "vl")
+        )
         reasoning = any(
             token in normalized
             for token in (
                 "deepseek-r1", "deepseek-v3", "qwen3", "qwq", "-r1", "reason",
-                "cyberagent", "nemotron", "magistral", "cogito", "thinking",
+                "cyberagent", "nemotron", "magistral", "cogito", "thinking", "gemma4",
             )
         )
         tools = not embeddings and any(
-            token in normalized for token in ("llama", "mistral", "mixtral", "qwen", "tool")
+            token in normalized for token in ("llama", "mistral", "mixtral", "qwen", "tool", "gemma")
         )
         # Prefer the loaded model's actual chat template over the name heuristic.
         tcaps = await self._template_caps(model_id)
         if tcaps is not None:
             tools = tcaps["tools"] and not embeddings
             reasoning = tcaps["reasoning"]
+        # native_context_length is the architectural ceiling (e.g. 262144 for
+        # gemma4) read straight from the GGUF header — independent of
+        # context_length, which is just the currently-configured --ctx-size
+        # launch value and changes every time a different runtime preset is
+        # applied. Without this, the frontend falls back to treating
+        # context_length as both (see BackendCapabilities.native_context_length
+        # docstring), so the UI's "native" column ends up showing whatever
+        # preset ctx_size happened to be active at last load.
+        native_context_length = 0
+        model_file = options.get("model_file")
+        if not model_file:
+            try:
+                model_file = str(self._resolve_model_file(model_id, options))
+            except FileNotFoundError:
+                model_file = None
+        if model_file:
+            arch = await asyncio.to_thread(vp.arch_from_gguf, model_file)
+            if arch is not None and arch.context_length > 0:
+                native_context_length = arch.context_length
         return BackendCapabilities(
             chat=not embeddings,
             completion=True,
@@ -400,6 +437,7 @@ class LlamaCppBackend(BackendInterface):
             reasoning=reasoning,
             streaming=True,
             context_length=int(options.get("ctx_size", settings.llama_cpp_ctx_size)),
+            native_context_length=native_context_length,
         )
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
@@ -533,6 +571,9 @@ class LlamaCppBackend(BackendInterface):
             ),
             # --- Sprint 17.4 ---
             "speculative": self._get_option(extra_config, "speculative", None),
+            "mmproj_model_id": self._normalize_str(
+                self._get_option(extra_config, "mmproj_model_id", None)
+            ),
             "runtime": self._get_option(extra_config, "runtime", None),
             "parallel_slots": self._to_int_or_none(
                 self._get_option(extra_config, "parallel_slots", settings.llama_cpp_parallel_slots)
@@ -841,3 +882,14 @@ class LlamaCppBackend(BackendInterface):
         if direct.is_file():
             return direct
         return self._resolve_model_file(draft_model_id, {})
+
+    def _resolve_mmproj_path(self, mmproj_model_id: str) -> Path:
+        """Resolve a multimodal projector model_id into a local GGUF path.
+
+        Same two-step strategy as ``_resolve_draft_model_path``: a direct
+        file path wins, otherwise fall back to the canonical model_id lookup.
+        """
+        direct = Path(mmproj_model_id)
+        if direct.is_file():
+            return direct
+        return self._resolve_model_file(mmproj_model_id, {})

@@ -501,7 +501,11 @@ async def _dispatch_agent(
 
     registry = getattr(request.app.state, "mcp_registry", None) or get_mcp_registry()
     if registry is None:
-        raise HTTPException(status_code=503, detail="MCP registry not available")
+        raise HTTPException(
+            status_code=503,
+            detail="MCP registry not available",
+            headers={"Retry-After": "5"},
+        )
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)

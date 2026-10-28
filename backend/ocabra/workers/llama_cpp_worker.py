@@ -42,11 +42,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--override-tensor", default=None)
     # --- Sprint 17.4 — speculative decoding + concurrent slots ---
     parser.add_argument("--model-draft", default=None)
-    parser.add_argument("--draft-max", type=int, default=None)
-    parser.add_argument("--draft-min", type=int, default=None)
-    parser.add_argument("--draft-p-min", type=float, default=None)
+    parser.add_argument("--spec-type", default=None)
+    parser.add_argument("--spec-draft-n-max", type=int, default=None)
+    parser.add_argument("--spec-draft-n-min", type=int, default=None)
+    parser.add_argument("--spec-draft-p-min", type=float, default=None)
     parser.add_argument("--parallel", type=int, default=None)
     parser.add_argument("--cont-batching", action="store_true")
+    # Multimodal projector (vision). See backend_load.py's
+    # LlamaCppLoadConfig.mmproj_model_id docstring for resolution rules.
+    parser.add_argument("--mmproj", default=None)
     # Chat template override forwarded to llama-server. Accepts built-in names
     # (llama3, llama2, chatml, mistral, gemma, …) or a full Jinja string. Needed
     # for GGUFs that ship without a baked ``tokenizer.chat_template`` — see the
@@ -55,8 +59,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def build_command(args: argparse.Namespace) -> list[str]:
     cmd = [
         args.server_bin,
         "--model",
@@ -83,13 +86,25 @@ def main() -> None:
         # flag consumes the next arg as its value and aborts). Older builds
         # accepted the bare form; "on" is understood by both.
         cmd.extend(["--flash-attn", "on"])
-    if args.mlock:
-        cmd.append("--mlock")
     if args.embedding:
         cmd.append("--embedding")
     # --- Sprint 17.1 (Tier 1) flags ---
-    if args.no_mmap:
-        cmd.append("--no-mmap")
+    # Current llama-server dropped the separate --mlock/--no-mmap boolean
+    # flags in favour of a single --load-mode {auto,none,mmap,mlock,
+    # mmap+mlock,dio} — passing the old bare flags now aborts with
+    # "error: invalid argument: --mlock". Map the two old booleans onto the
+    # new mode: mlock alone means "no mmap, keep locked in RAM" in the new
+    # scheme, so it must combine with --no-mmap's intent, not replace it.
+    if args.mlock and args.no_mmap:
+        load_mode = "mlock"
+    elif args.mlock:
+        load_mode = "mmap+mlock"
+    elif args.no_mmap:
+        load_mode = "none"
+    else:
+        load_mode = None
+    if load_mode is not None:
+        cmd.extend(["--load-mode", load_mode])
     if args.seed is not None:
         cmd.extend(["--seed", str(args.seed)])
     if args.no_kv_offload:
@@ -118,19 +133,29 @@ def main() -> None:
     # --- Sprint 17.4 ---
     if args.model_draft:
         cmd.extend(["--model-draft", args.model_draft])
-    if args.draft_max is not None:
-        cmd.extend(["--draft-max", str(args.draft_max)])
-    if args.draft_min is not None:
-        cmd.extend(["--draft-min", str(args.draft_min)])
-    if args.draft_p_min is not None:
-        cmd.extend(["--draft-p-min", str(args.draft_p_min)])
+    if args.spec_type:
+        cmd.extend(["--spec-type", args.spec_type])
+    if args.spec_draft_n_max is not None:
+        cmd.extend(["--spec-draft-n-max", str(args.spec_draft_n_max)])
+    if args.spec_draft_n_min is not None:
+        cmd.extend(["--spec-draft-n-min", str(args.spec_draft_n_min)])
+    if args.spec_draft_p_min is not None:
+        cmd.extend(["--spec-draft-p-min", str(args.spec_draft_p_min)])
     if args.parallel is not None:
         cmd.extend(["--parallel", str(args.parallel)])
     if args.cont_batching:
         cmd.append("--cont-batching")
+    if args.mmproj:
+        cmd.extend(["--mmproj", args.mmproj])
     if args.chat_template:
         cmd.extend(["--chat-template", args.chat_template])
 
+    return cmd
+
+
+def main() -> None:
+    args = parse_args()
+    cmd = build_command(args)
     os.execvpe(args.server_bin, cmd, os.environ.copy())
 
 

@@ -13,6 +13,7 @@ KNOWN_BACKEND_TYPES = {
     "vibeasr",
     "tts",
     "chatterbox",
+    "piper",
     "voxtral",
     "ollama",
     "upscaler",

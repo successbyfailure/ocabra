@@ -252,3 +252,120 @@ async def test_forward_stream_raises_on_http_error(pool, monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         async for _chunk in pool.forward_stream("test/model", "/v1/chat/completions", {}):
             pass
+
+
+def _make_post_client(status_code: int, body: bytes):
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = status_code
+            self._request = httpx.Request("POST", "http://x/")
+
+        def raise_for_status(self) -> None:
+            if 400 <= self.status_code:
+                raise httpx.HTTPStatusError(
+                    "error",
+                    request=self._request,
+                    response=httpx.Response(
+                        self.status_code, request=self._request, content=body
+                    ),
+                )
+
+        def json(self):
+            return {"ok": True}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url: str, json: dict):
+            return _FakeResponse()
+
+    return _FakeAsyncClient
+
+
+def _register_worker(pool, model_id: str = "test/model") -> None:
+    from ocabra.backends.base import WorkerInfo
+
+    pool.set_worker(
+        model_id,
+        WorkerInfo(
+            backend_type="mock",
+            model_id=model_id,
+            gpu_indices=[0],
+            port=18043,
+            pid=321,
+            vram_used_mb=0,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_forward_request_trips_circuit_breaker_on_repeated_dead_backend_errors(
+    pool, monkeypatch
+):
+    """A worker that fails the same "process died" way several times in a
+    row should get fast-failed instead of accepting (and timing out on)
+    another request against a process that's already gone."""
+    monkeypatch.setattr(config.settings, "worker_circuit_breaker_threshold", 2)
+    monkeypatch.setattr(
+        "ocabra.core.worker_pool.httpx.AsyncClient",
+        _make_post_client(500, b"llama-server process no longer running: unknown"),
+    )
+    _register_worker(pool)
+
+    for _ in range(2):
+        with pytest.raises(httpx.HTTPStatusError):
+            await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+    from ocabra.core.worker_pool import WorkerDegradedError
+
+    with pytest.raises(WorkerDegradedError):
+        await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+
+@pytest.mark.asyncio
+async def test_forward_request_does_not_trip_breaker_on_unrelated_errors(pool, monkeypatch):
+    """An ordinary request-specific 5xx (bad prompt, transient OOM on one
+    call) must not be treated as evidence the worker process died — only
+    the known "dead runner" error patterns should count."""
+    monkeypatch.setattr(config.settings, "worker_circuit_breaker_threshold", 2)
+    monkeypatch.setattr(
+        "ocabra.core.worker_pool.httpx.AsyncClient",
+        _make_post_client(500, b'{"error": "context length exceeded"}'),
+    )
+    _register_worker(pool)
+
+    for _ in range(5):
+        with pytest.raises(httpx.HTTPStatusError):
+            await pool.forward_request("test/model", "/v1/chat/completions", {})
+    # Still raises the real HTTPStatusError, never the breaker.
+
+
+@pytest.mark.asyncio
+async def test_forward_request_breaker_resets_after_worker_replaced(pool, monkeypatch):
+    """Reloading a model installs a fresh worker; a prior worker's failure
+    history must not haunt the new process."""
+    monkeypatch.setattr(config.settings, "worker_circuit_breaker_threshold", 1)
+    monkeypatch.setattr(
+        "ocabra.core.worker_pool.httpx.AsyncClient",
+        _make_post_client(500, b"llama-server process no longer running: unknown"),
+    )
+    _register_worker(pool)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+    from ocabra.core.worker_pool import WorkerDegradedError
+
+    with pytest.raises(WorkerDegradedError):
+        await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+    _register_worker(pool)  # simulates a reload installing a fresh worker
+    with pytest.raises(httpx.HTTPStatusError):
+        await pool.forward_request("test/model", "/v1/chat/completions", {})

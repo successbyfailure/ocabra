@@ -50,6 +50,7 @@ def _get_registry(request: Request) -> MCPRegistry:
         raise HTTPException(
             status_code=503,
             detail="MCP registry is not available on this node",
+            headers={"Retry-After": "5"},
         )
     return reg
 

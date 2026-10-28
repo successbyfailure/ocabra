@@ -76,6 +76,7 @@ FAMILY_DEFAULT_S: dict[str, dict[str, float]] = {
     "tts":          {"p50":  2.0, "p95":  10.0},
     "voxtral":      {"p50":  4.0, "p95":  20.0},
     "chatterbox":   {"p50":  2.0, "p95":  10.0},
+    "piper":        {"p50":  0.3, "p95":   2.0},
     "diffusers":    {"p50": 15.0, "p95":  60.0},
     "mage":         {"p50": 15.0, "p95":  60.0},
     "acestep":      {"p50": 240.0, "p95": 900.0},
@@ -178,6 +179,7 @@ _WORK_UNIT_EXTRACTORS: dict[str, tuple[str, "callable[[dict], float | None]"]] =
     # backend counts phonemes or graphemes internally.
     "tts":        ("text_chars",      lambda m: _pos_float(m.get("text_chars"))),
     "chatterbox": ("text_chars",      lambda m: _pos_float(m.get("text_chars"))),
+    "piper":      ("text_chars",      lambda m: _pos_float(m.get("text_chars"))),
     # Diffusion image gen: megapixel-steps (steps × output MP). Single-image
     # diffusion is roughly a constant time per denoising step per megapixel.
     "diffusers":  ("mp_steps",        lambda m: _mp_steps(m)),

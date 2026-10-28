@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pynvml
 import structlog
 
 from ocabra.config import settings
-from ocabra.redis_client import get_key, publish, set_key
+from ocabra.redis_client import get_key, publish, publish_system_alert, set_key
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +43,20 @@ class GPUManager:
         self._running: bool = False
         self._hw_monitor_active: bool = False
         self._nvml_available: bool = False
+
+        # Thermal throttle — attributes are mutated live by the /ocabra/config
+        # PATCH handler (same pattern as max_temperature_c below), not just
+        # read once at startup.
+        self.max_temperature_c: int = settings.max_temperature_c
+        self.gpu_throttle_enabled: bool = settings.gpu_throttle_enabled
+        self.gpu_throttle_power_reduction_pct: int = settings.gpu_throttle_power_reduction_pct
+        self.gpu_throttle_cooldown_s: int = settings.gpu_throttle_cooldown_s
+        self.gpu_throttle_recovery_margin_c: int = settings.gpu_throttle_recovery_margin_c
+        # gpu_index -> {"triggered_at": monotonic, "original_limit_w": float}
+        # Presence of a key means that GPU is currently throttled. Runtime-only
+        # — never written to gpu_power_settings, so a restart restores the
+        # user's configured cap, not whatever reduced value was live.
+        self._throttled: dict[int, dict] = {}
 
     async def start(self) -> None:
         try:
@@ -236,6 +251,7 @@ class GPUManager:
                     )
                     self._states[i] = state
                     states.append(asdict(state))
+                    await self._check_thermal_throttle(i, state)
 
                 if redis_used != self._hw_monitor_active:
                     self._hw_monitor_active = redis_used
@@ -285,6 +301,86 @@ class GPUManager:
         except (KeyError, TypeError) as exc:
             logger.warning("redis_gpu_state_parse_error", index=index, error=str(exc))
             return None
+
+    async def _check_thermal_throttle(self, index: int, state: GPUState) -> None:
+        """Cut a GPU's power limit when it overheats, restore it once it cools.
+
+        Trigger: ``temperature_c >= max_temperature_c`` and not already
+        throttled → cut ``power_limit_w`` by ``gpu_throttle_power_reduction_pct``
+        via the same ``gpu:set_power_limit`` pubsub the manual power-limit API
+        uses (hw-monitor applies it — the api container itself can't).
+
+        Recovery: only once *both* ``gpu_throttle_cooldown_s`` has elapsed
+        *and* the GPU has cooled to at least ``gpu_throttle_recovery_margin_c``
+        below the threshold. Cooldown alone would restore full power the
+        instant the timer expires even if still hot, immediately re-triggering
+        — a flip-flop loop instead of a stable reduced state.
+        """
+        if not self.gpu_throttle_enabled:
+            if index in self._throttled:
+                # Feature disabled mid-throttle — don't leave a GPU stuck at a
+                # reduced cap with no way back except a manual power-limit call.
+                await self._restore_power_limit(index, reason="throttle_disabled")
+            return
+
+        throttle = self._throttled.get(index)
+
+        if throttle is None:
+            if state.temperature_c >= self.max_temperature_c and state.power_limit_w > 0:
+                reduction = max(0, min(100, self.gpu_throttle_power_reduction_pct))
+                reduced_w = state.power_limit_w * (1 - reduction / 100)
+                self._throttled[index] = {
+                    "triggered_at": time.monotonic(),
+                    "original_limit_w": state.power_limit_w,
+                }
+                await publish(
+                    "gpu:set_power_limit",
+                    {"gpu_index": index, "limit_w": round(reduced_w)},
+                )
+                logger.warning(
+                    "gpu_thermal_throttle_triggered",
+                    gpu_index=index,
+                    temperature_c=state.temperature_c,
+                    threshold_c=self.max_temperature_c,
+                    original_limit_w=state.power_limit_w,
+                    reduced_limit_w=round(reduced_w),
+                )
+                await publish_system_alert(
+                    "warning",
+                    f"GPU {index} ({state.name}) alcanzó {state.temperature_c:.0f}°C "
+                    f"(umbral {self.max_temperature_c}°C) — power limit recortado de "
+                    f"{state.power_limit_w:.0f}W a {round(reduced_w)}W durante al menos "
+                    f"{self.gpu_throttle_cooldown_s}s.",
+                )
+            return
+
+        elapsed_s = time.monotonic() - throttle["triggered_at"]
+        if elapsed_s < self.gpu_throttle_cooldown_s:
+            return
+        recovery_ceiling_c = self.max_temperature_c - self.gpu_throttle_recovery_margin_c
+        if state.temperature_c <= recovery_ceiling_c:
+            await self._restore_power_limit(index, reason="cooled_down")
+
+    async def _restore_power_limit(self, index: int, *, reason: str) -> None:
+        throttle = self._throttled.pop(index, None)
+        if throttle is None:
+            return
+        original_w = throttle["original_limit_w"]
+        await publish(
+            "gpu:set_power_limit",
+            {"gpu_index": index, "limit_w": round(original_w)},
+        )
+        logger.info(
+            "gpu_thermal_throttle_recovered",
+            gpu_index=index,
+            reason=reason,
+            restored_limit_w=round(original_w),
+        )
+        await publish_system_alert(
+            "info",
+            f"GPU {index} recuperado — power limit restaurado a {round(original_w)}W "
+            f"({reason}).",
+        )
 
     def get_state_nowait(self, index: int) -> GPUState | None:
         """Return the most recently cached GPU state without awaiting the poll loop."""

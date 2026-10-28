@@ -286,6 +286,33 @@ def test_load_config_validator_rejects_quantized_v_without_flash_attn() -> None:
     assert cfg.cache_type_v == "q4_0"
 
 
+def test_speculative_config_accepts_self_speculative_mtp_without_draft_model_id() -> None:
+    """2026-10-27 bug: the schema required draft_model_id and forbade
+    spec_type as an unknown field, so qwen3.8:27b's real production config
+    (`{"spec_type": "draft-mtp"}`, self-speculative — no external draft
+    GGUF, the backend has read spec_type correctly since Sprint 17.4, see
+    llama_cpp_backend.py) failed Pydantic validation on every single
+    memory-estimate/preset-preview call for this model, silently falling
+    back to a 'config inválida' warning + the crude heuristic estimate."""
+    from ocabra.schemas.backend_load import LlamaCppLoadConfig, SpeculativeConfig
+
+    cfg = LlamaCppLoadConfig(speculative={"spec_type": "draft-mtp"})
+    assert cfg.speculative is not None
+    assert cfg.speculative.spec_type == "draft-mtp"
+    assert cfg.speculative.draft_model_id is None
+
+    # External draft model (no self-speculation) still works too.
+    cfg2 = SpeculativeConfig(draft_model_id="some/draft-model")
+    assert cfg2.spec_type is None
+
+
+def test_speculative_config_rejects_neither_spec_type_nor_draft_model_id() -> None:
+    from ocabra.schemas.backend_load import SpeculativeConfig
+
+    with pytest.raises(ValueError, match="spec_type"):
+        SpeculativeConfig()
+
+
 # ---------------------------------------------------------------------------
 # Sprint 17.3 — Multi-GPU + MoE CPU offload
 # Sprint 17.4 — Speculative decoding + runtime alterno + concurrent slots
@@ -458,11 +485,146 @@ async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
     args = list(create_proc.await_args.args)
     assert "--model-draft" in args
     assert str(draft) in args
-    assert "--draft-max" in args and args[args.index("--draft-max") + 1] == "8"
-    assert "--draft-min" in args and args[args.index("--draft-min") + 1] == "2"
-    assert "--draft-p-min" in args
+    assert "--spec-draft-n-max" in args and args[args.index("--spec-draft-n-max") + 1] == "8"
+    assert "--spec-draft-n-min" in args and args[args.index("--spec-draft-n-min") + 1] == "2"
+    assert "--spec-draft-p-min" in args
     assert "--parallel" in args and args[args.index("--parallel") + 1] == "4"
     assert "--cont-batching" in args
+
+
+@pytest.mark.asyncio
+async def test_load_passes_self_contained_mtp_spec_type(tmp_path: Path) -> None:
+    """spec_type alone (no draft_model_id) self-speculates from a nextn block
+    baked into the main GGUF — no --model-draft should be added."""
+    target = tmp_path / "target.gguf"
+    target.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    extra_config = {
+        "llama_cpp": {
+            "speculative": {
+                "spec_type": "draft-mtp",
+                "draft_n": 4,
+            },
+        }
+    }
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        await backend.load("target", [1], port=18046, extra_config=extra_config)
+
+    args = list(create_proc.await_args.args)
+    assert "--model-draft" not in args
+    assert "--spec-type" in args and args[args.index("--spec-type") + 1] == "draft-mtp"
+    assert "--spec-draft-n-max" in args and args[args.index("--spec-draft-n-max") + 1] == "4"
+
+
+@pytest.mark.asyncio
+async def test_load_passes_mmproj_flag(tmp_path: Path) -> None:
+    """2026-10-27: vision support (gemma4:26b's clip/gemma4v projector) was
+    entirely unimplemented — extra_config had nowhere to put a --mmproj
+    path. Validated live against the real gemma4:26b GGUFs (external
+    draft-mtp model + mmproj together) before adding this."""
+    target = tmp_path / "target.gguf"
+    target.write_bytes(b"GGUF" * 1024)
+    draft = tmp_path / "draft.gguf"
+    draft.write_bytes(b"GGUF" * 256)
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    extra_config = {
+        "llama_cpp": {
+            "speculative": {
+                "spec_type": "draft-mtp",
+                "draft_model_id": str(draft),
+            },
+            "mmproj_model_id": str(mmproj),
+        }
+    }
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        await backend.load("target", [1], port=18047, extra_config=extra_config)
+
+    args = list(create_proc.await_args.args)
+    assert "--mmproj" in args and args[args.index("--mmproj") + 1] == str(mmproj)
+    assert "--model-draft" in args and args[args.index("--model-draft") + 1] == str(draft)
+    assert "--spec-type" in args and args[args.index("--spec-type") + 1] == "draft-mtp"
+
+
+@pytest.mark.asyncio
+async def test_get_capabilities_reports_vision_when_mmproj_configured() -> None:
+    backend = LlamaCppBackend()
+    backend._model_configs["gemma4-26b"] = {"mmproj_model_id": "/data/mmproj.gguf"}
+
+    caps = await backend.get_capabilities("gemma4-26b")
+
+    assert caps.vision is True
+
+
+def _write_minimal_gguf(path: Path, context_length: int) -> None:
+    import struct
+
+    kv = {
+        "general.architecture": "testarch",
+        "testarch.block_count": 1,
+        "testarch.attention.head_count": 1,
+        "testarch.embedding_length": 1,
+        "testarch.context_length": context_length,
+    }
+    out = bytearray()
+    out += b"GGUF"
+    out += struct.pack("<I", 3)
+    out += struct.pack("<Q", 0)
+    out += struct.pack("<Q", len(kv))
+    for key, value in kv.items():
+        key_bytes = key.encode("utf-8")
+        out += struct.pack("<Q", len(key_bytes)) + key_bytes
+        if isinstance(value, str):
+            out += struct.pack("<I", 8)
+            val_bytes = value.encode("utf-8")
+            out += struct.pack("<Q", len(val_bytes)) + val_bytes
+        else:
+            out += struct.pack("<I", 4) + struct.pack("<I", int(value))
+    path.write_bytes(bytes(out))
+
+
+@pytest.mark.asyncio
+async def test_get_capabilities_reports_native_context_from_gguf(tmp_path: Path) -> None:
+    """native_context_length is the GGUF's architectural ceiling, independent
+    of whatever --ctx-size preset happens to be configured right now — it
+    must NOT collapse to the (much smaller) currently-configured ctx_size."""
+    model_file = tmp_path / "model.gguf"
+    _write_minimal_gguf(model_file, context_length=262144)
+    backend = LlamaCppBackend()
+    backend._model_configs["gemma4-26b"] = {
+        "ctx_size": 32768,
+        "model_file": str(model_file),
+    }
+
+    caps = await backend.get_capabilities("gemma4-26b")
+
+    assert caps.context_length == 32768
+    assert caps.native_context_length == 262144
+
+
+@pytest.mark.asyncio
+async def test_get_capabilities_native_context_falls_back_to_zero_when_unresolvable() -> None:
+    backend = LlamaCppBackend()
+    backend._model_configs["never-loaded"] = {"ctx_size": 8192}
+
+    caps = await backend.get_capabilities("never-loaded")
+
+    assert caps.native_context_length == 0
 
 
 @pytest.mark.asyncio

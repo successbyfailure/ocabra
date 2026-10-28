@@ -90,6 +90,7 @@ def _openai_error(
     param: str | None = None,
     code: str | None = None,
     status_code: int = 400,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -101,6 +102,7 @@ def _openai_error(
                 "code": code,
             }
         },
+        headers=headers,
     )
 
 
@@ -129,14 +131,13 @@ async def _wait_for_unloading_transition(
         if current.status != ModelStatus.UNLOADING:
             return current
 
-    exc = _openai_error(
+    raise _openai_error(
         f"Model '{model_id}' did not finish unloading in time.",
         "server_error",
         code="model_transition_timeout",
         status_code=503,
+        headers={"Retry-After": "2"},
     )
-    exc.headers = {"Retry-After": "2"}
-    raise exc
 
 
 def get_model_manager(request: Request) -> ModelManager:
@@ -222,6 +223,7 @@ def get_profile_registry(request: Request) -> ProfileRegistry:
             "server_error",
             code="service_unavailable",
             status_code=503,
+            headers={"Retry-After": "5"},
         )
     return registry
 
@@ -628,6 +630,46 @@ OCABRA_MODEL_HEADERS: dict = {
 }
 
 
+#: Shared by every 503/429 ``responses`` entry below — ``Retry-After`` is
+#: only present on genuinely transient failures (worker still loading,
+#: registry not ready yet, circuit breaker, at-capacity). Permanent/config
+#: failures (bad router target, federation disabled, a model stuck in
+#: ``ModelStatus.ERROR``) return the same status codes without this header.
+RETRY_AFTER_HEADER_DOC: dict = {
+    "Retry-After": {
+        "description": (
+            "Seconds to wait before retrying. Present only when the "
+            "failure is transient (model/worker loading, registry warming "
+            "up post-restart, circuit breaker cooldown, at-capacity). "
+            "Absent for permanent/config failures — retrying won't help."
+        ),
+        "schema": {"type": "integer"},
+    },
+}
+
+#: Reused across every OpenAI-compatible endpoint that loads a model
+#: on-demand — 503 covers "model/worker not available yet" (transient, see
+#: ``RETRY_AFTER_HEADER_DOC``), 429 covers the per-worker concurrency cap.
+LOAD_FAILURE_RESPONSES_DOC: dict = {
+    429: {
+        "description": (
+            "The resolved worker is already at its concurrency cap "
+            "(``model_at_capacity``) — admission control rejected this "
+            "request rather than queue it indefinitely."
+        ),
+        "headers": RETRY_AFTER_HEADER_DOC,
+    },
+    503: {
+        "description": (
+            "Model/worker not available (still loading, failed to load, "
+            "or an internal registry isn't ready yet post-restart). See "
+            "``Retry-After`` below for whether retrying makes sense."
+        ),
+        "headers": RETRY_AFTER_HEADER_DOC,
+    },
+}
+
+
 STREAMING_LOAD_RESPONSE_DOC: dict = {
     200: {
         "description": (
@@ -650,6 +692,7 @@ STREAMING_LOAD_RESPONSE_DOC: dict = {
         ),
         "headers": OCABRA_MODEL_HEADERS,
     },
+    **LOAD_FAILURE_RESPONSES_DOC,
 }
 
 
@@ -665,6 +708,7 @@ NON_STREAMING_LOAD_RESPONSE_DOC: dict = {
         ),
         "headers": OCABRA_MODEL_HEADERS,
     },
+    **LOAD_FAILURE_RESPONSES_DOC,
 }
 
 
@@ -1035,6 +1079,7 @@ async def _do_ensure_loaded(
                 "server_error",
                 code="model_load_failed",
                 status_code=503,
+                headers={"Retry-After": "10"},
             ) from exc
 
         state = await model_manager.get_state(model_id)
@@ -1057,12 +1102,20 @@ async def _do_ensure_loaded(
                 "server_error",
                 code="model_load_timeout",
                 status_code=503,
+                headers={"Retry-After": "10"},
             )
 
     detail_suffix = ""
     if state and state.error_message:
         detail_suffix = f" detail: {state.error_message}"
 
+    # A model stuck in ERROR needs a human to look at it (bad weights, repeated
+    # crash, etc.) — retrying on a timer won't help, so skip the hint there.
+    # Any other non-terminal status (CONFIGURED, UNLOADING, ...) is a normal
+    # transitional state a short wait can resolve.
+    retry_headers = (
+        None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
+    )
     raise _openai_error(
         (
             f"Model '{model_id}' is not available "
@@ -1071,6 +1124,7 @@ async def _do_ensure_loaded(
         "server_error",
         code="model_unavailable",
         status_code=503,
+        headers=retry_headers,
     )
 
 
@@ -1172,6 +1226,7 @@ async def ensure_loaded(
                 "server_error",
                 code="model_load_failed",
                 status_code=503,
+                headers={"Retry-After": "10"},
             ) from exc
 
         state = await model_manager.get_state(resolved_model_id)
@@ -1193,12 +1248,17 @@ async def ensure_loaded(
             "server_error",
             code="model_load_timeout",
             status_code=503,
+            headers={"Retry-After": "10"},
         )
 
     detail_suffix = ""
     if state and state.error_message:
         detail_suffix = f" detail: {state.error_message}"
 
+    # See the twin ensure_worker_loaded() site above for why ERROR skips the hint.
+    retry_headers = (
+        None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
+    )
     raise _openai_error(
         (
             f"Model '{resolved_model_id}' is not available "
@@ -1207,6 +1267,7 @@ async def ensure_loaded(
         "server_error",
         code="model_unavailable",
         status_code=503,
+        headers=retry_headers,
     )
 
 
@@ -1387,10 +1448,13 @@ def stream_error_details(exc: Exception) -> tuple[str, str]:
     the worker's JSON error message in the SSE envelope and encode its status
     class in a stable oCabra code for request statistics.
     """
-    from ocabra.core.worker_pool import InferenceTimeoutError
+    from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
     if isinstance(exc, InferenceTimeoutError):
         return str(exc), "generation_timeout"
+
+    if isinstance(exc, WorkerDegradedError):
+        return str(exc), "worker_degraded"
 
     if not isinstance(exc, httpx.HTTPStatusError):
         return str(exc), "stream_error"
