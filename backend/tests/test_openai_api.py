@@ -1617,6 +1617,8 @@ class TestBackendAgnosticRouting:
                 "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
                 "messages": [{"role": "user", "content": "Hi"}],
             },
+            user_key="anonymous",
+            slots=1,
         )
 
     def test_completions_routes_for_llama_cpp_backend(self):
@@ -1651,6 +1653,8 @@ class TestBackendAgnosticRouting:
                 "model": state.backend_model_id,
                 "prompt": "Hello",
             },
+            user_key="anonymous",
+            slots=1,
         )
 
     def test_embeddings_routes_for_tensorrt_backend(self):
@@ -1686,6 +1690,129 @@ class TestBackendAgnosticRouting:
                 "input": "hola",
             },
         )
+
+
+class TestFairnessGateWiring:
+    """/v1/chat/completions and /v1/completions must pass user_key/slots
+    through to the worker pool so the fair-share admission gate
+    (core/fair_slot_gate.py) can round-robin between users — same wiring
+    as /api/chat and /api/generate, see gpu-bench README 2026-10-28."""
+
+    def test_chat_completions_forwards_fairness_user_key_and_slots(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="llama_cpp/qwen3.8-27b",
+            backend_model_id="qwen3.8-27b",
+            display_name="Qwen3.8 27b",
+            backend_type="llama_cpp",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+            extra_config={"_runtime": {"parallelism": 3}},
+        )
+        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": state.model_id, "messages": [{"role": "user", "content": "Hi"}]},
+        )
+
+        assert resp.status_code == 200
+        assert app.state.worker_pool.forward_request.await_args.kwargs["user_key"] == "anonymous"
+        assert app.state.worker_pool.forward_request.await_args.kwargs["slots"] == 3
+
+    def test_completions_forwards_fairness_user_key_and_slots(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="llama_cpp/qwen3.8-27b",
+            backend_model_id="qwen3.8-27b",
+            display_name="Qwen3.8 27b",
+            backend_type="llama_cpp",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(completion=True, streaming=True),
+            extra_config={"_runtime": {"parallelism": 2}},
+        )
+        app = _make_app(model_state=state, worker_result={"object": "text_completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/completions",
+            json={"model": state.model_id, "prompt": "Hello"},
+        )
+
+        assert resp.status_code == 200
+        assert app.state.worker_pool.forward_request.await_args.kwargs["user_key"] == "anonymous"
+        assert app.state.worker_pool.forward_request.await_args.kwargs["slots"] == 2
+
+    def test_stream_chat_with_load_acquires_fairness_slot_only_after_load(self):
+        """The cold-load SSE path must not pass user_key to the load step
+        itself (there's no gate call during loading — see the docstring on
+        _stream_chat_with_load) but must pass it to the forward_stream call
+        once the model is actually loaded and generation starts."""
+        import asyncio
+
+        from ocabra.api.openai.chat import _stream_chat_with_load
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        loaded_state = ModelState(
+            model_id="llama_cpp/qwen3.8-27b",
+            backend_model_id="qwen3.8-27b",
+            display_name="Qwen3.8 27b",
+            backend_type="llama_cpp",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(chat=True, streaming=True),
+            extra_config={"_runtime": {"parallelism": 4}},
+        )
+
+        model_manager = MagicMock()
+        model_manager.get_state = AsyncMock(return_value=None)
+        model_manager.get_expected_load_seconds = AsyncMock(return_value=None)
+
+        worker_pool = MagicMock()
+        worker_pool.forward_stream = MagicMock(return_value=_async_gen([b"data: [DONE]\n\n"]))
+
+        profile = _make_test_profile(profile_id="qwen3.8-27b", base_model_id="llama_cpp/qwen3.8-27b")
+
+        async def _fake_ensure_worker_loaded(*args, **kwargs):
+            return loaded_state
+
+        with patch(
+            "ocabra.api.openai.chat.ensure_worker_loaded",
+            side_effect=_fake_ensure_worker_loaded,
+        ):
+            async def _drain():
+                chunks = []
+                async for chunk in _stream_chat_with_load(
+                    model_manager=model_manager,
+                    worker_pool=worker_pool,
+                    profile=profile,
+                    worker_key=loaded_state.model_id,
+                    load_overrides=None,
+                    preferred_gpu=None,
+                    load_policy=None,
+                    required_tokens=None,
+                    body={"messages": [{"role": "user", "content": "Hi"}]},
+                    content_kinds=set(),
+                    user_key="luis",
+                ):
+                    chunks.append(chunk)
+                return chunks
+
+            asyncio.run(_drain())
+
+        worker_pool.forward_stream.assert_called_once()
+        kwargs = worker_pool.forward_stream.call_args.kwargs
+        assert kwargs["user_key"] == "luis"
+        assert kwargs["slots"] == 4
+
 
 class TestModelErrorRecovery:
     def test_error_state_triggers_reload_attempt(self):

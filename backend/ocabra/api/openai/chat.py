@@ -38,6 +38,8 @@ from ._deps import (
     build_model_status_headers,
     check_capability,
     ensure_worker_loaded,
+    fairness_slots,
+    fairness_user_key,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
@@ -273,6 +275,7 @@ async def chat_completions(
                     required_tokens=runtime_plan.required_tokens,
                     body=body,
                     content_kinds=_content_kinds,
+                    user_key=fairness_user_key(user),
                 ),
                 media_type="text/event-stream",
                 headers=headers,
@@ -304,10 +307,18 @@ async def chat_completions(
 
     merged_body = merge_profile_defaults(profile, body)
     worker_key = state.model_id
+    user_key = fairness_user_key(user)
+    slots = fairness_slots(state)
 
     if stream:
         return StreamingResponse(
-            _stream_chat(worker_pool, worker_key, to_backend_body(state, merged_body)),
+            _stream_chat(
+                worker_pool,
+                worker_key,
+                to_backend_body(state, merged_body),
+                user_key=user_key,
+                slots=slots,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -317,6 +328,8 @@ async def chat_completions(
             worker_key,
             "/v1/chat/completions",
             to_backend_body(state, merged_body),
+            user_key=user_key,
+            slots=slots,
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
@@ -335,10 +348,18 @@ def _sse_error(message: str, code: str) -> bytes:
     return f"data: {payload}\n\n".encode() + b"data: [DONE]\n\n"
 
 
-async def _stream_chat(worker_pool, model_id: str, body: dict):
+async def _stream_chat(
+    worker_pool,
+    model_id: str,
+    body: dict,
+    user_key: str | None = None,
+    slots: int = 1,
+):
     """Yield SSE chunks from the resolved model worker."""
     try:
-        async for chunk in worker_pool.forward_stream(model_id, "/v1/chat/completions", body):
+        async for chunk in worker_pool.forward_stream(
+            model_id, "/v1/chat/completions", body, user_key=user_key, slots=slots
+        ):
             yield chunk
     except Exception as e:
         message, code = stream_error_details(e)
@@ -361,8 +382,16 @@ async def _stream_chat_with_load(
     required_tokens: int | None,
     body: dict,
     content_kinds: set[str],
+    user_key: str | None = None,
 ):
     """SSE generator that triggers the model load lazily.
+
+    The fair-share slot (see ``fair_slot_gate.py``) is only acquired once the
+    model is actually loaded and generation is about to start — the cold load
+    itself is already serialized by the model manager's own per-worker load
+    lock, so every concurrent caller waits on that one load regardless of
+    user, and holding a generation slot across it would gate on the wrong
+    resource.
 
     Flushes HTTP response headers (including ``X-Ocabra-Expected-Wait-Seconds``)
     plus a JSON-bearing SSE comment with the load status before blocking. When
@@ -449,9 +478,10 @@ async def _stream_chat_with_load(
 
     merged_body = merge_profile_defaults(profile, body)
     backend_body = to_backend_body(state, merged_body)
+    slots = fairness_slots(state)
     try:
         async for chunk in worker_pool.forward_stream(
-            worker_key, "/v1/chat/completions", backend_body
+            worker_key, "/v1/chat/completions", backend_body, user_key=user_key, slots=slots
         ):
             yield chunk
     except Exception as exc:
