@@ -558,6 +558,37 @@ def test_build_vllm_chat_body_normalizes_historical_tool_calls() -> None:
     assert tc["function"]["arguments"] == '{"a": 1}'
 
 
+def test_chat_non_streaming_forwards_fairness_user_key_and_slots() -> None:
+    """Wiring check for the fair-share admission gate (2026-10-28 design):
+    chat() must pass user_key/slots through to forward_request so the
+    worker pool can actually gate on them — without this the gate class
+    exists but nothing ever engages it."""
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    model_state = ModelState(
+        model_id="meta-llama/Llama-3.2-3B-Instruct",
+        display_name="Llama 3.2 3B",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
+        extra_config={"_runtime": {"parallelism": 3}},
+    )
+    app = _make_app(model_state=model_state, worker_result={"choices": [{"message": {"content": "ok"}}]})
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/chat",
+        json={"model": "llama3.2:3b", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+    )
+
+    assert resp.status_code == 200
+    called = app.state.worker_pool.forward_request.await_args
+    assert called.kwargs["user_key"] == "anonymous"  # _make_app's admin ctx has no user_id/username
+    assert called.kwargs["slots"] == 3
+
+
 def test_chat_non_streaming_surfaces_done_reason() -> None:
     """Regression test: /api/chat never set done_reason for any backend
     other than native Ollama (which passes it through untouched), so a

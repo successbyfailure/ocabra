@@ -16,6 +16,8 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     check_capability,
     ensure_loaded,
+    fairness_slots,
+    fairness_user_key,
     get_federation_manager,
     get_model_manager,
     get_profile_registry,
@@ -203,16 +205,20 @@ async def chat(
         return await worker_pool.forward_request(worker_key, "/api/chat", upstream_body)
 
     vllm_body = _build_vllm_chat_body(merged_body, state.backend_model_id, stream)
+    user_key = fairness_user_key(user)
+    slots = fairness_slots(state)
 
     if stream:
         return StreamingResponse(
-            _stream_chat(worker_pool, worker_key, ollama_model, vllm_body),
+            _stream_chat(worker_pool, worker_key, ollama_model, vllm_body, user_key, slots),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     started_ns = time.monotonic_ns()
-    result = await worker_pool.forward_request(worker_key, "/v1/chat/completions", vllm_body)
+    result = await worker_pool.forward_request(
+        worker_key, "/v1/chat/completions", vllm_body, user_key=user_key, slots=slots
+    )
     message = _extract_chat_ollama_message(result)
     total_duration = time.monotonic_ns() - started_ns
     usage = result.get("usage") or {}
@@ -317,6 +323,8 @@ async def _stream_chat(
     model_id: str,
     ollama_model: str,
     body: dict,
+    user_key: str | None = None,
+    slots: int = 1,
 ) -> AsyncIterator[bytes]:
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
@@ -331,7 +339,9 @@ async def _stream_chat(
     tool_calls_acc: dict[int, dict] = {}
 
     async for payload in iter_sse_payloads(
-        worker_pool.forward_stream(model_id, "/v1/chat/completions", body)
+        worker_pool.forward_stream(
+            model_id, "/v1/chat/completions", body, user_key=user_key, slots=slots
+        )
     ):
         if payload == "[DONE]":
             total_duration = time.monotonic_ns() - started_ns

@@ -1271,6 +1271,38 @@ async def ensure_loaded(
     )
 
 
+def fairness_user_key(user: UserContext) -> str:
+    """Identity key for the per-worker fair-share admission gate
+    (``ocabra.core.fair_slot_gate``). Prefers the stable user_id; falls
+    back to username, then a shared "anonymous" bucket when auth is
+    disabled (``REQUIRE_API_KEY_*=false``) — every anonymous caller then
+    fair-shares as a single "user", which is strictly better than no
+    fairness at all but can't tell two anonymous callers apart.
+    """
+    return user.user_id or user.username or "anonymous"
+
+
+def fairness_slots(state: ModelState) -> int:
+    """How many requests this model's worker can run concurrently, for
+    sizing the fair-share gate. Reads the resolved runtime preset's
+    parallelism (``_runtime.parallelism`` — the coordinator always sets
+    this in extra_config right before a load, see
+    ``runtime_coordinator.py``); models that never go through the preset
+    system (e.g. a plain Ollama registration with no use_case block) fall
+    back to 1, which just makes the gate a strict one-at-a-time fair
+    queue — correct, if conservative, for a backend whose real
+    concurrency oCabra doesn't track.
+    """
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    runtime_meta = extra.get("_runtime")
+    if isinstance(runtime_meta, dict):
+        try:
+            return max(1, int(runtime_meta.get("parallelism") or 1))
+        except (TypeError, ValueError):
+            return 1
+    return 1
+
+
 def check_capability(state: ModelState, capability: str, endpoint: str) -> None:
     """Raise 400 if the model lacks the required capability."""
     if not getattr(state.capabilities, capability, False):

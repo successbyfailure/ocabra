@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import patch
 
 import httpx
@@ -369,3 +370,88 @@ async def test_forward_request_breaker_resets_after_worker_replaced(pool, monkey
     _register_worker(pool)  # simulates a reload installing a fresh worker
     with pytest.raises(httpx.HTTPStatusError):
         await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+
+def _make_controllable_post_client(dispatch_log: list[str]):
+    """Fake httpx.AsyncClient whose .post() blocks until the test explicitly
+    releases it (via the returned per-call asyncio.Event), so a test can
+    orchestrate overlapping in-flight requests deterministically instead of
+    racing real async scheduling."""
+
+    release_events: dict[int, asyncio.Event] = {}
+    call_index = {"n": 0}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url: str, json: dict):
+            idx = call_index["n"]
+            call_index["n"] += 1
+            event = asyncio.Event()
+            release_events[idx] = event
+            dispatch_log.append(f"start:{json.get('_tag')}")
+            await event.wait()
+            dispatch_log.append(f"end:{json.get('_tag')}")
+            return _FakeResponse()
+
+    return _FakeAsyncClient, release_events
+
+
+@pytest.mark.asyncio
+async def test_forward_request_fair_gate_interleaves_two_users_on_one_slot(pool, monkeypatch):
+    """End-to-end regression test for the fair-share admission gate
+    (2026-10-28 design discussion): with slots=1, if alice has a backlog
+    queued and bob arrives after alice's first request already started,
+    bob must be served on the round right after whatever of alice's work
+    was already queued ahead of him — not after her entire backlog."""
+    dispatch_log: list[str] = []
+    fake_client_cls, release_events = _make_controllable_post_client(dispatch_log)
+    monkeypatch.setattr("ocabra.core.worker_pool.httpx.AsyncClient", fake_client_cls)
+    _register_worker(pool)
+
+    async def call(tag: str, user_key: str):
+        await pool.forward_request(
+            "test/model",
+            "/v1/chat/completions",
+            {"_tag": tag},
+            user_key=user_key,
+            slots=1,
+        )
+
+    alice1 = asyncio.ensure_future(call("alice-1", "alice"))
+    await asyncio.sleep(0.01)  # let alice-1 actually dispatch (start:alice-1 logged)
+    assert dispatch_log == ["start:alice-1"]
+
+    alice2 = asyncio.ensure_future(call("alice-2", "alice"))
+    bob1 = asyncio.ensure_future(call("bob-1", "bob"))
+    await asyncio.sleep(0.01)  # both queued behind alice-1; neither dispatched yet
+    assert dispatch_log == ["start:alice-1"]
+
+    release_events[0].set()  # finish alice-1
+    await alice1
+    await asyncio.sleep(0.01)
+    assert dispatch_log == ["start:alice-1", "end:alice-1", "start:alice-2"]
+
+    release_events[1].set()  # finish alice-2
+    await alice2
+    await asyncio.sleep(0.01)
+    assert dispatch_log[-1] == "start:bob-1"
+
+    release_events[2].set()
+    await bob1

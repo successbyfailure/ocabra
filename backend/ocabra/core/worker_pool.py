@@ -10,6 +10,7 @@ import structlog
 
 from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
+from ocabra.core.fair_slot_gate import WorkerPoolFairGates
 
 logger = structlog.get_logger(__name__)
 
@@ -421,6 +422,11 @@ class WorkerPool:
         # Circuit breaker bookkeeping — see WorkerDegradedError.
         self._consecutive_failures: dict[str, int] = {}
         self._last_failure_at: dict[str, float] = {}
+        # Per-worker fair-share admission — see fair_slot_gate.py. Only
+        # engaged when a caller passes user_key/slots to forward_request /
+        # forward_stream; callers that don't (embeddings, images, internal
+        # proxying, ...) dispatch exactly as before.
+        self._fair_gates = WorkerPoolFairGates()
 
     def _check_circuit_breaker(self, model_id: str) -> None:
         failures = self._consecutive_failures.get(model_id, 0)
@@ -517,7 +523,22 @@ class WorkerPool:
     def release_port(self, port: int) -> None:
         self._used_ports.discard(port)
 
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
+    async def forward_request(
+        self,
+        model_id: str,
+        path: str,
+        body: dict,
+        *,
+        user_key: str | None = None,
+        slots: int = 1,
+    ) -> Any:
+        if user_key is not None:
+            gate = self._fair_gates.get(model_id, slots)
+            async with gate.slot(user_key):
+                return await self._forward_request_unfair(model_id, path, body)
+        return await self._forward_request_unfair(model_id, path, body)
+
+    async def _forward_request_unfair(self, model_id: str, path: str, body: dict) -> Any:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
@@ -586,7 +607,25 @@ class WorkerPool:
             )
         return result
 
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
+    async def forward_stream(
+        self,
+        model_id: str,
+        path: str,
+        body: dict,
+        *,
+        user_key: str | None = None,
+        slots: int = 1,
+    ) -> AsyncIterator[bytes]:
+        if user_key is None:
+            async for chunk in self._forward_stream_unfair(model_id, path, body):
+                yield chunk
+            return
+        gate = self._fair_gates.get(model_id, slots)
+        async with gate.slot(user_key):
+            async for chunk in self._forward_stream_unfair(model_id, path, body):
+                yield chunk
+
+    async def _forward_stream_unfair(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
