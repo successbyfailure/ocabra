@@ -31,7 +31,7 @@ from ._shared import (
     iter_sse_payloads,
     now_iso_z,
 )
-from .chat import _native_backend_model_name
+from .chat import _extract_finish_reason, _native_backend_model_name
 
 router = APIRouter()
 
@@ -205,6 +205,7 @@ async def generate(
         "created_at": now_iso,
         "response": text,
         "done": True,
+        "done_reason": _extract_finish_reason(result),
         "total_duration": total_duration,
         "load_duration": 0,
         "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
@@ -239,6 +240,7 @@ async def _stream_generate(
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
     eval_count = 0
+    finish_reason: str | None = None
 
     async for payload in iter_sse_payloads(
         worker_pool.forward_stream(model_id, "/v1/completions", body)
@@ -250,6 +252,7 @@ async def _stream_generate(
                 "created_at": now_iso_z(),
                 "response": "",
                 "done": True,
+                "done_reason": finish_reason,
                 "total_duration": total_duration,
                 "load_duration": 0,
                 "prompt_eval_count": prompt_eval_count,
@@ -270,6 +273,9 @@ async def _stream_generate(
         choices = payload.get("choices") or []
         if not choices:
             continue
+
+        if choices[0].get("finish_reason"):
+            finish_reason = choices[0]["finish_reason"]
 
         token = str(choices[0].get("text") or "")
         if token == "":

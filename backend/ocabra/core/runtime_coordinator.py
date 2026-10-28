@@ -8,6 +8,7 @@ from typing import Any
 
 import structlog
 
+from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key
 
 logger = structlog.get_logger(__name__)
@@ -76,12 +77,15 @@ def estimate_request_token_budget(body: dict[str, Any]) -> int:
     options = body.get("options") if isinstance(body.get("options"), dict) else {}
     output_value = body.get(
         "max_completion_tokens",
-        body.get("max_tokens", options.get("num_predict", 4096)),
+        body.get(
+            "max_tokens",
+            options.get("num_predict", settings.runtime_preset_default_output_reservation_tokens),
+        ),
     )
     try:
         reserved_output = max(1, int(output_value))
     except (TypeError, ValueError):
-        reserved_output = 4096
+        reserved_output = settings.runtime_preset_default_output_reservation_tokens
     estimated = max(1, prompt_estimate + reserved_output)
     try:
         requested_context = max(0, int(options.get("num_ctx") or 0))

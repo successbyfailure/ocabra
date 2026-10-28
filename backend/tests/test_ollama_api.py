@@ -556,3 +556,62 @@ def test_build_vllm_chat_body_normalizes_historical_tool_calls() -> None:
     tc = body["messages"][0]["tool_calls"][0]
     assert tc["type"] == "function"
     assert tc["function"]["arguments"] == '{"a": 1}'
+
+
+def test_chat_non_streaming_surfaces_done_reason() -> None:
+    """Regression test: /api/chat never set done_reason for any backend
+    other than native Ollama (which passes it through untouched), so a
+    client had no way to tell a normal completion from one truncated by
+    max_tokens or by running out of context — both looked identical
+    (done: true, no hint). OpenAI's finish_reason maps 1:1 onto Ollama's
+    done_reason vocabulary (stop/length/tool_calls)."""
+    worker_result = {
+        "choices": [{"message": {"role": "assistant", "content": "partial..."}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    app = _make_app(worker_result=worker_result)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/chat",
+        json={"model": "llama3.2:3b", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["done_reason"] == "length"
+
+
+def test_chat_stream_surfaces_done_reason_in_final_chunk() -> None:
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    model_state = ModelState(
+        model_id="meta-llama/Llama-3.2-3B-Instruct",
+        display_name="Llama 3.2 3B",
+        backend_type="vllm",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, completion=True, embeddings=True, streaming=True),
+    )
+    app = _make_app(model_state=model_state)
+    app.state.worker_pool.forward_stream = MagicMock(
+        return_value=_async_gen(
+            [
+                b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+        )
+    )
+
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"model": "llama3.2:3b", "messages": [{"role": "user", "content": "hello"}], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line for line in resp.iter_lines() if line]
+
+    payloads = [json.loads(line) for line in lines]
+    assert payloads[-1]["done_reason"] == "length"

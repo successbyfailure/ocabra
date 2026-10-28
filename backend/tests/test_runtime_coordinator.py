@@ -91,6 +91,24 @@ def test_estimate_ollama_budget_uses_num_predict_without_num_ctx() -> None:
     assert estimate_request_token_budget(body) > 12_000
 
 
+def test_estimate_budget_output_reservation_defaults_to_configurable_setting(monkeypatch) -> None:
+    """A client that sets no max_tokens/max_completion_tokens/num_predict
+    gets settings.runtime_preset_default_output_reservation_tokens reserved
+    for output, not a hardcoded value — lets an operator raise or lower how
+    aggressively uncapped requests push toward larger (more expensive)
+    presets, per user request 2026-10-28."""
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "runtime_preset_default_output_reservation_tokens", 777)
+    body = {"messages": [{"role": "user", "content": "hola"}]}
+
+    budget = estimate_request_token_budget(body)
+
+    assert budget >= 777
+    monkeypatch.setattr(settings, "runtime_preset_default_output_reservation_tokens", 55_000)
+    assert estimate_request_token_budget(body) >= 55_000
+
+
 @pytest.mark.asyncio
 async def test_default_runtime_is_selected_for_normal_request(monkeypatch) -> None:
     profile = _profile()

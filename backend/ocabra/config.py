@@ -250,6 +250,16 @@ class Settings(BaseSettings):
     # slots * this). 1 slot -> 4 in flight before 429; an 8-slot vLLM worker
     # still gets up to the full 32.
     max_queued_per_slot: int = 4
+    # How many output tokens to assume a request will need, for sizing
+    # runtime-preset selection (estimate_request_token_budget), when the
+    # client doesn't set max_tokens/max_completion_tokens/num_predict.
+    # Purely a capacity-planning estimate — it does NOT cap actual
+    # generation (that stays request.max_tokens or unbounded); it only
+    # decides how big a context window to reserve/escalate to. Too low and
+    # an unbounded response risks running out of the picked preset's
+    # context mid-generation; too high and every uncapped request pushes
+    # toward a larger (more expensive to load) preset than it may need.
+    runtime_preset_default_output_reservation_tokens: int = 4096
     # SGLang
     sglang_python_bin: str = "/opt/sglang-venv/bin/python"
     sglang_server_module: str = "sglang.launch_server"

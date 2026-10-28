@@ -221,6 +221,7 @@ async def chat(
         "created_at": now_iso_z(),
         "message": message,
         "done": True,
+        "done_reason": _extract_finish_reason(result),
         "total_duration": total_duration,
         "load_duration": 0,
         "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
@@ -320,6 +321,7 @@ async def _stream_chat(
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
     eval_count = 0
+    finish_reason: str | None = None
     # OpenAI streams tool_calls incrementally (one delta per `index`, name
     # arriving once then `arguments` trickling in character by character) —
     # accumulate by index and only emit the assembled calls once, in the
@@ -343,6 +345,7 @@ async def _stream_chat(
                 "created_at": now_iso_z(),
                 "message": done_message,
                 "done": True,
+                "done_reason": finish_reason,
                 "total_duration": total_duration,
                 "load_duration": 0,
                 "prompt_eval_count": prompt_eval_count,
@@ -363,6 +366,9 @@ async def _stream_chat(
         choices = payload.get("choices") or []
         if not choices:
             continue
+
+        if choices[0].get("finish_reason"):
+            finish_reason = choices[0]["finish_reason"]
 
         delta = choices[0].get("delta") or {}
 
@@ -429,6 +435,19 @@ def _extract_chat_ollama_message(payload: dict) -> dict:
     return out
 
 
+def _extract_finish_reason(payload: dict) -> str | None:
+    """OpenAI's ``finish_reason`` ("stop"/"length"/"tool_calls"/...) maps
+    directly onto Ollama's ``done_reason`` — same vocabulary, different key.
+    Without this, a response truncated by max_tokens or by running out of
+    context looks identical to a normal completion to any Ollama client
+    checking ``done_reason``, which is the one signal they have to tell
+    "finished" from "got cut off, maybe ask for more"."""
+    choices = payload.get("choices") or []
+    if not choices:
+        return None
+    return choices[0].get("finish_reason")
+
+
 # ── Agent dispatch (Ollama adapter) ──────────────────────────────
 
 
@@ -487,6 +506,7 @@ def _openai_response_to_ollama(payload: dict, ollama_model: str) -> dict:
         "created_at": now_iso_z(),
         "message": out_msg,
         "done": True,
+        "done_reason": _extract_finish_reason(payload),
         "total_duration": 0,
         "load_duration": 0,
         "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
