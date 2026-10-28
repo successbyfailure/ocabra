@@ -32,6 +32,7 @@ export const useModelStore = create<ModelStore>((set) => ({
               preferredGpu: null,
               currentGpu: [],
               vramUsedMb: 0,
+              ramUsedMb: 0,
               diskSizeBytes: null,
               capabilities: {
                 chat: false,

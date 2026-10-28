@@ -670,6 +670,7 @@ function toModelState(raw: unknown): ModelState {
       ? ((data.current_gpu ?? data.currentGpu) as unknown[]).map((gpu) => Number(gpu))
       : [],
     vramUsedMb: Number(data.vram_used_mb ?? data.vramUsedMb ?? 0),
+    ramUsedMb: Number(data.ram_used_mb ?? data.ramUsedMb ?? 0),
     diskSizeBytes:
       data.disk_size_bytes == null && data.diskSizeBytes == null
         ? null

@@ -10,6 +10,7 @@ from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
+import psutil
 import sqlalchemy as sa
 import structlog
 
@@ -69,6 +70,11 @@ class ModelState:
     preferred_gpu: int | None = None
     current_gpu: list[int] = field(default_factory=list)
     vram_used_mb: int = 0
+    # Host RAM (RSS of the worker process), measured once right after a
+    # CPU-only load (current_gpu == []) the same way vram_used_mb is: a
+    # static snapshot, not continuously polled. Backends that run on GPU
+    # leave this at 0 — vram_used_mb is the number that matters for them.
+    ram_used_mb: int = 0
     capabilities: BackendCapabilities = field(default_factory=BackendCapabilities)
     last_request_at: datetime | None = None
     loaded_at: datetime | None = None
@@ -113,6 +119,7 @@ class ModelState:
             "preferred_gpu": self.preferred_gpu,
             "current_gpu": self.current_gpu,
             "vram_used_mb": self.vram_used_mb,
+            "ram_used_mb": self.ram_used_mb,
             "capabilities": self.capabilities.to_dict(),
             "last_request_at": (
                 self.last_request_at.isoformat() if self.last_request_at else None
@@ -154,6 +161,24 @@ class ActiveRequest:
     # and lets Ollama/vLLM abort the generation. Only set for middleware
     # callers; in-process begin_request paths leave it None.
     task: Any = None
+
+
+async def _measure_process_ram_mb(pid: int) -> int:
+    """Best-effort RSS (resident set size) of a worker process, in MB.
+
+    Used for CPU-only backends (no GPU VRAM to report) — mirrors how
+    ``vram_used_mb`` is a one-time snapshot taken right after load, not a
+    continuously live value. Never raises: a dead/inaccessible PID just
+    means "unknown" (0), not a load failure.
+    """
+
+    def _read() -> int:
+        try:
+            return int(psutil.Process(pid).memory_info().rss / (1024 * 1024))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return 0
+
+    return await asyncio.to_thread(_read)
 
 
 class ModelManager:
@@ -1510,6 +1535,11 @@ class ModelManager:
                                 worker_info.vram_used_mb, vram_needed
                             )
                             state.vram_used_mb = effective_vram_mb
+                            state.ram_used_mb = (
+                                await _measure_process_ram_mb(worker_info.pid)
+                                if not actual_gpu_indices
+                                else 0
+                            )
                             state.capabilities = capabilities
                             state.status = ModelStatus.LOADED
                             state.loaded_at = datetime.now(UTC)
@@ -2152,6 +2182,7 @@ class ModelManager:
             state.status = ModelStatus.UNLOADED
             state.current_gpu = []
             state.vram_used_mb = 0
+            state.ram_used_mb = 0
             state.worker_info = None
             state.loaded_at = None
             await self._publish_event(model_id, "status_changed")
@@ -2607,6 +2638,7 @@ class ModelManager:
                 state.status = ModelStatus.UNLOADED
                 state.current_gpu = []
                 state.vram_used_mb = 0
+                state.ram_used_mb = 0
                 state.worker_info = None
                 state.loaded_at = None
                 state.error_message = None

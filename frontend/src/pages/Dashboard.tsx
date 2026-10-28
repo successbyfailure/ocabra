@@ -879,9 +879,13 @@ export function Dashboard() {
                     <ModelStatusBadge status={model.status} />
                     <LoadPolicyBadge policy={model.loadPolicy} />
                     <span className="rounded-md bg-muted px-2 py-0.5">
-                      GPU {model.currentGpu.join(", ") || "-"}
+                      GPU {model.currentGpu.join(", ") || (model.ramUsedMb > 0 ? "CPU" : "-")}
                     </span>
-                    <span>{model.vramUsedMb.toLocaleString()} MB</span>
+                    {model.ramUsedMb > 0 ? (
+                      <span>{model.ramUsedMb.toLocaleString()} MB RAM</span>
+                    ) : (
+                      <span>{model.vramUsedMb.toLocaleString()} MB</span>
+                    )}
                     {slots != null && (
                       <span className="rounded-md bg-muted px-2 py-0.5">
                         {slots} slot{slots === 1 ? "" : "s"} · {formatTokenCount(ctx)} ctx

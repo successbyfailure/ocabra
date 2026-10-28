@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1261,8 +1262,12 @@ class _PiperStyleBackend(BackendInterface):
             backend_type="piper",
             model_id=model_id,
             gpu_indices=[],
+            # The test process's own PID — guaranteed to exist with a real,
+            # non-zero RSS, so tests can assert ram_used_mb actually reflects
+            # a psutil measurement rather than a dead/fake PID silently
+            # resolving to the "unknown" (0) fallback.
             port=kwargs.get("port", 0),
-            pid=4322,
+            pid=os.getpid(),
             vram_used_mb=0,
         )
 
@@ -1321,6 +1326,11 @@ async def test_piper_backend_is_cpu_only_and_skips_gpu_admission():
     assert state.status == ModelStatus.LOADED
     assert state.current_gpu == []
     scheduler.find_gpu_for_model.assert_not_called()
+    # CPU-only: oCabra should measure the worker process's real RAM (RSS)
+    # instead of leaving memory usage unreported like the vram_used_mb=0
+    # it already correctly shows.
+    assert state.ram_used_mb > 0
+    assert state.vram_used_mb == 0
 
 
 @pytest.mark.asyncio
@@ -1362,6 +1372,7 @@ async def test_load_never_substitutes_scheduler_gpu_for_an_empty_worker_report()
     scheduler.find_gpu_for_model.assert_awaited()
     assert backend.received_gpu_indices == [1]
     assert state.current_gpu == []
+    assert state.ram_used_mb > 0
 
 
 @pytest.mark.asyncio
@@ -1436,6 +1447,7 @@ async def test_bitnet_gpu_layers_uses_extra_config_for_scheduling():
 
     assert state.status == ModelStatus.LOADED
     assert state.current_gpu == [1]
+    assert state.ram_used_mb == 0
     scheduler.find_gpu_for_model.assert_awaited_once_with(
         200,
         None,

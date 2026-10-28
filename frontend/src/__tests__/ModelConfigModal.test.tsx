@@ -50,6 +50,7 @@ describe("ModelConfigModal", () => {
           preferredGpu: null,
           currentGpu: [],
           vramUsedMb: 0,
+          ramUsedMb: 0,
           diskSizeBytes: null,
           capabilities: {
             chat: true,
@@ -143,6 +144,7 @@ describe("ModelConfigModal", () => {
           preferredGpu: null,
           currentGpu: [],
           vramUsedMb: 0,
+          ramUsedMb: 0,
           diskSizeBytes: null,
           capabilities: {
             chat: true,
@@ -206,6 +208,7 @@ describe("ModelConfigModal", () => {
           preferredGpu: null,
           currentGpu: [],
           vramUsedMb: 0,
+          ramUsedMb: 0,
           diskSizeBytes: null,
           capabilities: {
             chat: true,
@@ -280,6 +283,7 @@ describe("ModelConfigModal", () => {
           preferredGpu: null,
           currentGpu: [],
           vramUsedMb: 0,
+          ramUsedMb: 0,
           diskSizeBytes: null,
           capabilities: {
             chat: true,

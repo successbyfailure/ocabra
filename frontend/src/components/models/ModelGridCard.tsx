@@ -118,7 +118,16 @@ export function ModelGridCard({
   const context = getModelContextSummary(model)
   const profiles = model.profiles ?? []
   const profileCount = profiles.length
-  const gpuLabel = model.currentGpu.length > 0 ? model.currentGpu.join(", ") : (model.preferredGpu ?? null)
+  // A model only has ramUsedMb > 0 once it's actually gone through a
+  // CPU-only load (see _measure_process_ram_mb in model_manager.py) — an
+  // unloaded GPU-capable model also has currentGpu == [], so that alone
+  // can't distinguish "runs on CPU" from "not loaded right now".
+  const isCpuOnly = model.ramUsedMb > 0 && model.currentGpu.length === 0
+  const gpuLabel = isCpuOnly
+    ? "CPU"
+    : model.currentGpu.length > 0
+      ? model.currentGpu.join(", ")
+      : (model.preferredGpu ?? null)
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-primary/40">
@@ -168,7 +177,11 @@ export function ModelGridCard({
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-x-3 gap-y-2 rounded-md bg-muted/30 p-2.5">
         <Stat label="GPU" value={gpuLabel != null ? String(gpuLabel) : "-"} />
-        <Stat label="VRAM" value={`${model.vramUsedMb.toLocaleString()} MB`} />
+        {isCpuOnly ? (
+          <Stat label="RAM" value={`${model.ramUsedMb.toLocaleString()} MB`} />
+        ) : (
+          <Stat label="VRAM" value={`${model.vramUsedMb.toLocaleString()} MB`} />
+        )}
         {category === "chat" ? (
           <>
             <Stat label="Ctx nativo" value={formatTokenCount(context.nativeContext)} />

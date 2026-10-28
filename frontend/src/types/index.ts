@@ -109,6 +109,7 @@ export interface ModelState {
   preferredGpu: number | null
   currentGpu: number[]
   vramUsedMb: number
+  ramUsedMb: number
   diskSizeBytes: number | null
   capabilities: ModelCapabilities
   lastRequestAt: string | null

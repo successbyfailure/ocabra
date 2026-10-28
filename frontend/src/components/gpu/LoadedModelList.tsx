@@ -55,6 +55,9 @@ export function LoadedModelList({
                     </span>
                   ))}
                 {m.vramUsedMb > 0 && <span className="tabular-nums text-muted-foreground">{gb(m.vramUsedMb)} GB</span>}
+                {m.ramUsedMb > 0 && (
+                  <span className="tabular-nums text-muted-foreground">{gb(m.ramUsedMb)} GB RAM</span>
+                )}
               </span>
             </div>
             {rt && (
