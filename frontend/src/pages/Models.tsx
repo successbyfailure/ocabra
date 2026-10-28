@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
@@ -477,25 +478,27 @@ export function Models() {
           description="Prueba a ampliar los criterios de búsqueda o elige otra categoría."
         />
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {filtered.map(({ model, category }) => (
-            <ModelGridCard
-              key={model.modelId}
-              model={model}
-              category={category}
-              busy={busyModelId === model.modelId}
-              onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
-              onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
-              onTogglePin={(item) => void togglePin(item)}
-              onConfigure={(item) => setConfigModel(item)}
-              onDelete={(item) => setDeleteModel(item)}
-              onCompile={(item) => setCompileModel(item)}
-              onUpdate={(item) => void handleUpdateModel(item)}
-              onEditProfile={openProfileModal}
-              onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
-            />
-          ))}
-        </div>
+        <Tooltip.Provider delayDuration={300}>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {filtered.map(({ model, category }) => (
+              <ModelGridCard
+                key={model.modelId}
+                model={model}
+                category={category}
+                busy={busyModelId === model.modelId}
+                onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
+                onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
+                onTogglePin={(item) => void togglePin(item)}
+                onConfigure={(item) => setConfigModel(item)}
+                onDelete={(item) => setDeleteModel(item)}
+                onCompile={(item) => setCompileModel(item)}
+                onUpdate={(item) => void handleUpdateModel(item)}
+                onEditProfile={openProfileModal}
+                onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
+              />
+            ))}
+          </div>
+        </Tooltip.Provider>
       )}
 
       {error && (
