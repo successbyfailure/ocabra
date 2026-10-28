@@ -223,7 +223,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
           </button>
 
           {!collapsed && (
-            <span className="block text-xs text-muted-foreground px-3">v0.5.0</span>
+            <span className="block text-xs text-muted-foreground px-3">v{__APP_VERSION__}</span>
           )}
         </div>
       </aside>

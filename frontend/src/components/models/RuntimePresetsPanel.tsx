@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { api } from "@/api/client"
 import { formatTokenCount } from "@/lib/modelContext"
 import type {
+  GPUState,
   ModelProfile,
   RuntimePolicy,
   RuntimePresetBenchmark,
@@ -49,13 +50,6 @@ function formatContext(preset: RuntimePreset): string {
   return tokens >= 1024 && tokens % 1024 === 0 ? `${tokens / 1024}k` : tokens.toLocaleString()
 }
 
-function parseGpuList(value: string): number[] | null {
-  if (!value.trim()) return null
-  const values = value.split(",").map((part) => Number(part.trim()))
-  if (values.some((item) => !Number.isInteger(item) || item < 0)) return null
-  return [...new Set(values)]
-}
-
 function presetToForm(preset: RuntimePreset): RuntimePresetCreate {
   return {
     presetKey: preset.presetKey,
@@ -74,18 +68,85 @@ function presetToForm(preset: RuntimePreset): RuntimePresetCreate {
   }
 }
 
+function LivePreviewPanel({
+  loading,
+  preview,
+  gpus,
+}: {
+  loading: boolean
+  preview: RuntimePresetResolution | null
+  gpus: GPUState[]
+}) {
+  if (loading && !preview) {
+    return (
+      <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+        Calculando capacidad…
+      </div>
+    )
+  }
+  if (!preview) return null
+
+  const requested = preview.requestedContext ?? 0
+  const ceiling = preview.hardwareMax ?? 0
+  // How much of the per-slot budget the requested context would use — the
+  // bar fills past 100% visually only in color (clamped width), since an
+  // overflow is exactly the "doesn't fit" case the color already flags.
+  const fraction = ceiling > 0 ? Math.min(1, requested / ceiling) : 0
+  const overflow = ceiling > 0 && requested > ceiling
+  const barColor = !preview.fits || overflow
+    ? "bg-red-500"
+    : fraction > 0.85
+      ? "bg-amber-500"
+      : "bg-emerald-500"
+  const gpuNames = preview.targetGpus
+    .map((index) => gpus.find((gpu) => gpu.index === index)?.name ?? `GPU ${index}`)
+    .join(" + ")
+
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 text-xs ${
+        preview.fits ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"
+      }`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium">
+          {preview.fits ? "Cabe" : "No cabe"} · {formatTokenCount(preview.effectiveContext)} efectivos
+          {preview.targetGpus.length > 0 && ` en ${gpuNames}`}
+          {preview.effectiveParallelism > 1 && ` · p${preview.effectiveParallelism}`}
+        </span>
+        <span className="text-muted-foreground">
+          {loading ? "actualizando…" : `máx ${formatTokenCount(ceiling)}/slot`}
+        </span>
+      </div>
+      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={`h-full transition-all ${barColor}`}
+          style={{ width: `${Math.max(4, fraction * 100)}%` }}
+        />
+      </div>
+      {preview.warnings.map((warning) => (
+        <div key={warning} className="mt-1 text-[10px] text-amber-300">
+          {warning}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function RuntimePresetsPanel({ profile, onChanged }: Props) {
   const [presets, setPresets] = useState(profile.runtimePresets)
   const [policy, setPolicy] = useState(profile.runtimePolicy ?? DEFAULT_POLICY)
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const [form, setForm] = useState<RuntimePresetCreate>(EMPTY_PRESET)
-  const [gpuText, setGpuText] = useState("")
   const [busy, setBusy] = useState(false)
   const [policyOpen, setPolicyOpen] = useState(false)
   const [resolutions, setResolutions] = useState<Record<string, RuntimePresetResolution>>({})
   const [resolving, setResolving] = useState(false)
   const [benchmarking, setBenchmarking] = useState<string | null>(null)
   const [benchmarks, setBenchmarks] = useState<Record<string, RuntimePresetBenchmark>>({})
+  const [gpus, setGpus] = useState<GPUState[]>([])
+  const [livePreview, setLivePreview] = useState<RuntimePresetResolution | null>(null)
+  const [livePreviewLoading, setLivePreviewLoading] = useState(false)
 
   const refresh = async () => {
     setPresets(await api.profiles.listRuntimePresets(profile.profileId))
@@ -108,24 +169,69 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
     void Promise.all([
       api.profiles.listRuntimePresets(profile.profileId),
       api.profiles.resolveRuntimePresets(profile.profileId),
-    ]).then(([nextPresets, rows]) => {
+      api.gpus.list(),
+    ]).then(([nextPresets, rows, gpuList]) => {
       setPresets(nextPresets)
       setResolutions(Object.fromEntries(rows.map((row) => [row.presetKey, row])))
+      setGpus(gpuList)
     }).catch((error) => {
       toast.error(error instanceof Error ? error.message : "No se pudieron cargar los presets")
     })
   }, [profile.profileId, profile.runtimePolicy])
 
+  // Live estimation: resolve the in-progress draft against real GPU/model
+  // capacity as the admin edits, instead of save -> "Calcular capacidad" ->
+  // discover it doesn't fit -> edit -> save again.
+  useEffect(() => {
+    if (editingKey === null) {
+      setLivePreview(null)
+      return
+    }
+    if (form.contextMode === "fixed" && (!form.contextTokens || form.contextTokens < 1)) {
+      setLivePreview(null)
+      return
+    }
+    if (form.placementPolicy !== "auto" && !form.preferredGpus?.length) {
+      setLivePreview(null)
+      return
+    }
+    let cancelled = false
+    setLivePreviewLoading(true)
+    const timer = window.setTimeout(() => {
+      void api.profiles
+        .previewRuntimePreset(profile.profileId, form)
+        .then((result) => {
+          if (!cancelled) setLivePreview(result)
+        })
+        .catch(() => {
+          if (!cancelled) setLivePreview(null)
+        })
+        .finally(() => {
+          if (!cancelled) setLivePreviewLoading(false)
+        })
+    }, 400)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [editingKey, profile.profileId, form])
+
+  const toggleGpu = (index: number) => {
+    const current = form.preferredGpus ?? []
+    const next = current.includes(index)
+      ? current.filter((value) => value !== index)
+      : [...current, index].sort((a, b) => a - b)
+    setForm({ ...form, preferredGpus: next.length ? next : null })
+  }
+
   const startCreate = () => {
     setEditingKey("")
     setForm({ ...EMPTY_PRESET, isDefault: presets.length === 0 })
-    setGpuText("")
   }
 
   const startEdit = (preset: RuntimePreset) => {
     setEditingKey(preset.presetKey)
     setForm(presetToForm(preset))
-    setGpuText(preset.preferredGpus?.join(", ") ?? "")
   }
 
   const createSuggested = async () => {
@@ -152,12 +258,11 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
   }
 
   const savePreset = async () => {
-    const preferredGpus = parseGpuList(gpuText)
     if (form.contextMode === "fixed" && (!form.contextTokens || form.contextTokens < 1)) {
       toast.error("El contexto fijo debe ser mayor que cero")
       return
     }
-    if (form.placementPolicy !== "auto" && !preferredGpus?.length) {
+    if (form.placementPolicy !== "auto" && !form.preferredGpus?.length) {
       toast.error("Indica al menos una GPU para esta política de colocación")
       return
     }
@@ -166,7 +271,7 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
       const payload: RuntimePresetCreate = {
         ...form,
         contextTokens: form.contextMode === "max" ? null : form.contextTokens,
-        preferredGpus: form.placementPolicy === "auto" ? null : preferredGpus,
+        preferredGpus: form.placementPolicy === "auto" ? null : form.preferredGpus,
       }
       if (editingKey) {
         const { presetKey: _ignored, ...update } = payload
@@ -324,9 +429,38 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
             <label className="text-xs">KV cache<select value={form.kvCacheDtype} onChange={(event) => setForm({ ...form, kvCacheDtype: event.target.value as RuntimePresetCreate["kvCacheDtype"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5">{(["q8", "fp8", "q4", "fp16", "bf16"] as const).map((value) => <option key={value}>{value}</option>)}</select></label>
             <label className="text-xs">Ejecución<select value={form.executionPolicy} onChange={(event) => setForm({ ...form, executionPolicy: event.target.value as RuntimePresetCreate["executionPolicy"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5"><option value="auto">Auto</option><option value="local">Local</option><option value="remote">Remoto</option></select></label>
             <label className="text-xs">Colocación<select value={form.placementPolicy} onChange={(event) => setForm({ ...form, placementPolicy: event.target.value as RuntimePresetCreate["placementPolicy"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5"><option value="auto">Auto</option><option value="preferred">Preferida</option><option value="forced">Forzada</option></select></label>
-            <label className="text-xs">GPU (índices)<input value={gpuText} disabled={form.placementPolicy === "auto"} onChange={(event) => setGpuText(event.target.value)} placeholder="1 o 0, 1" className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 disabled:opacity-50" /></label>
             <label className="text-xs">Carga<select value={form.loadPolicy} onChange={(event) => setForm({ ...form, loadPolicy: event.target.value as RuntimePresetCreate["loadPolicy"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5"><option value="on_demand">Bajo demanda</option><option value="warm">Warm</option></select></label>
           </div>
+
+          <div className={form.placementPolicy === "auto" ? "opacity-50" : ""}>
+            <span className="text-xs">GPU</span>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {gpus.map((gpu) => {
+                const selected = form.preferredGpus?.includes(gpu.index) ?? false
+                return (
+                  <button
+                    key={gpu.index}
+                    type="button"
+                    disabled={form.placementPolicy === "auto"}
+                    onClick={() => toggleGpu(gpu.index)}
+                    className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors disabled:cursor-not-allowed ${
+                      selected
+                        ? "border-blue-500/60 bg-blue-500/15 text-blue-200"
+                        : "border-border hover:bg-muted"
+                    }`}
+                  >
+                    GPU {gpu.index} · {gpu.name} ({(gpu.totalVramMb / 1024).toFixed(0)}GB)
+                  </button>
+                )
+              })}
+              {gpus.length === 0 && (
+                <span className="text-[11px] text-muted-foreground">Sin GPUs detectadas</span>
+              )}
+            </div>
+          </div>
+
+          <LivePreviewPanel loading={livePreviewLoading} preview={livePreview} gpus={gpus} />
+
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={form.enabled} disabled={form.isDefault} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /> Activo</label>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setEditingKey(null)} className="flex items-center gap-1 rounded border border-border px-2 py-1.5 text-xs hover:bg-muted"><X size={13} /> Cancelar</button>

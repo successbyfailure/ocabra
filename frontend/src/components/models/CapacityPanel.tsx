@@ -32,7 +32,7 @@ function readUseCase(extra?: BackendExtraConfig): { context: string; slots: numb
   }
 }
 
-function Chip({ label, value }: { label: string; value: string }) {
+export function Chip({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border bg-muted/40 px-2.5 py-1.5">
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>

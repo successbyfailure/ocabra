@@ -1,41 +1,39 @@
 import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
-import { ModelCard } from "@/components/models/ModelCard"
+import { ModelGridCard } from "@/components/models/ModelGridCard"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { ProfileModal } from "@/components/models/ProfileModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
-import { getModelContextSummary } from "@/lib/modelContext"
+import {
+  categorizeModel,
+  getModelContextSummary,
+  MODEL_CATEGORY_LABELS,
+  MODEL_CATEGORY_ORDER,
+  type ModelCategory,
+} from "@/lib/modelContext"
 import { useBackendsStore } from "@/stores/backendsStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
-import { Loader2, RefreshCw, Search } from "lucide-react"
+import { ArrowDown, ArrowUp, Loader2, RefreshCw, Search } from "lucide-react"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { SkeletonList } from "@/components/common/Skeleton"
 import { StyledSelect } from "@/components/common/StyledSelect"
 import type { BackendExtraConfig, BackendType, LoadPolicy, ModelProfile, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
-
-function inferType(model: ModelState): "llm" | "image" | "audio" | "pooling" {
-  if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
-  if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
-  if (model.capabilities.pooling || model.capabilities.embeddings) return "pooling"
-  return "llm"
-}
 
 export function Models() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<ModelStatus | "all">("all")
-  const [typeFilter, setTypeFilter] = useState<"all" | "llm" | "image" | "audio" | "pooling">("all")
+  const [categoryTab, setCategoryTab] = useState<ModelCategory>("chat")
   const [backendFilter, setBackendFilter] = useState<BackendType | "all">("all")
   const [gpuFilter, setGpuFilter] = useState<string>("all")
   const [sortKey, setSortKey] = useState<
-    "name" | "type" | "backend" | "policy" | "gpu" | "ctxNative" | "ctxConfig" | "io" | "vram" | "size" | "status"
+    "name" | "backend" | "policy" | "gpu" | "ctxNative" | "ctxConfig" | "io" | "vram" | "size" | "status"
   >("name")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc")
   const [busyModelId, setBusyModelId] = useState<string | null>(null)
@@ -120,12 +118,17 @@ export function Models() {
     }
   }, [setGpus, setModels, fetchBackends])
 
-  const filtered = useMemo(() => {
-    const visible = modelList
+  // Every model annotated with its category + derived sort fields, filtered
+  // by everything EXCEPT the active category tab — this is what the tab
+  // counts are computed from, so switching tabs doesn't make the other
+  // counts jump around.
+  const matchingOtherFilters = useMemo(() => {
+    return modelList
       .map((model) => {
         const context = getModelContextSummary(model)
         return {
           model,
+          category: categorizeModel(model),
           context,
           modelGpu: model.currentGpu[0] ?? model.preferredGpu,
           ioTokens: Math.max(context.maxInputTokens ?? 0, context.maxOutputTokens ?? 0),
@@ -136,16 +139,26 @@ export function Models() {
           model.displayName.toLowerCase().includes(query.toLowerCase()) ||
           model.modelId.toLowerCase().includes(query.toLowerCase())
         const matchesStatus = statusFilter === "all" || model.status === statusFilter
-        const matchesType = typeFilter === "all" || inferType(model) === typeFilter
         const matchesBackend = backendFilter === "all" || model.backendType === backendFilter
         const matchesGpu = gpuFilter === "all" || String(modelGpu) === gpuFilter
-        return matchesQuery && matchesStatus && matchesType && matchesBackend && matchesGpu
+        return matchesQuery && matchesStatus && matchesBackend && matchesGpu
       })
+  }, [backendFilter, gpuFilter, modelList, query, statusFilter])
+
+  const categoryCounts = useMemo(() => {
+    const counts = new Map<ModelCategory, number>()
+    for (const { category } of matchingOtherFilters) {
+      counts.set(category, (counts.get(category) ?? 0) + 1)
+    }
+    return counts
+  }, [matchingOtherFilters])
+
+  const filtered = useMemo(() => {
+    const visible = matchingOtherFilters.filter(({ category }) => category === categoryTab)
 
     visible.sort((left, right) => {
       const byKey: Record<typeof sortKey, string | number> = {
         name: left.model.displayName.toLowerCase(),
-        type: inferType(left.model),
         backend: left.model.backendType,
         policy: left.model.loadPolicy,
         gpu: left.modelGpu ?? -1,
@@ -158,7 +171,6 @@ export function Models() {
       }
       const otherByKey: Record<typeof sortKey, string | number> = {
         name: right.model.displayName.toLowerCase(),
-        type: inferType(right.model),
         backend: right.model.backendType,
         policy: right.model.loadPolicy,
         gpu: right.modelGpu ?? -1,
@@ -177,18 +189,7 @@ export function Models() {
     })
 
     return visible
-  }, [backendFilter, gpuFilter, modelList, query, sortDir, sortKey, statusFilter, typeFilter])
-
-  const toggleSort = (
-    key: "name" | "type" | "backend" | "policy" | "gpu" | "ctxNative" | "ctxConfig" | "io" | "vram" | "size" | "status",
-  ) => {
-    if (sortKey === key) {
-      setSortDir((current) => (current === "asc" ? "desc" : "asc"))
-      return
-    }
-    setSortKey(key)
-    setSortDir("asc")
-  }
+  }, [categoryTab, matchingOtherFilters, sortDir, sortKey])
 
   const runAction = async (modelId: string, action: () => Promise<void>) => {
     setBusyModelId(modelId)
@@ -355,7 +356,7 @@ export function Models() {
         )
       })()}
 
-      <div className="grid gap-2 rounded-lg border border-border bg-card p-3 md:grid-cols-4">
+      <div className="grid gap-2 rounded-lg border border-border bg-card p-3 md:grid-cols-5">
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
@@ -381,18 +382,32 @@ export function Models() {
           ]}
         />
 
-        <StyledSelect
-          value={typeFilter}
-          onValueChange={(v) => setTypeFilter(v as "all" | "llm" | "image" | "audio" | "pooling")}
-          className="w-full"
-          options={[
-            { value: "all", label: "Tipo: todos" },
-            { value: "llm", label: "llm" },
-            { value: "pooling", label: "pooling" },
-            { value: "image", label: "image" },
-            { value: "audio", label: "audio" },
-          ]}
-        />
+        <div className="flex items-center gap-1.5">
+          <StyledSelect
+            value={sortKey}
+            onValueChange={(v) => setSortKey(v as typeof sortKey)}
+            className="w-full"
+            options={[
+              { value: "name", label: "Ordenar: nombre" },
+              { value: "status", label: "Ordenar: status" },
+              { value: "vram", label: "Ordenar: VRAM" },
+              { value: "gpu", label: "Ordenar: GPU" },
+              { value: "policy", label: "Ordenar: policy" },
+              { value: "backend", label: "Ordenar: backend" },
+              { value: "ctxNative", label: "Ordenar: ctx nativo" },
+              { value: "ctxConfig", label: "Ordenar: ctx config" },
+              { value: "size", label: "Ordenar: tamaño" },
+            ]}
+          />
+          <button
+            type="button"
+            onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+            className="shrink-0 rounded-md border border-border p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+            title={sortDir === "asc" ? "Ascendente" : "Descendente"}
+          >
+            {sortDir === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+          </button>
+        </div>
 
         <StyledSelect
           value={backendFilter}
@@ -418,139 +433,69 @@ export function Models() {
         />
       </div>
 
+      {/* Category tabs */}
+      <div className="flex flex-wrap gap-1.5 border-b border-border pb-px">
+        {MODEL_CATEGORY_ORDER.map((cat) => {
+          const count = categoryCounts.get(cat) ?? 0
+          const active = categoryTab === cat
+          return (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setCategoryTab(cat)}
+              disabled={count === 0 && !active}
+              className={`flex items-center gap-1.5 rounded-t-md border-b-2 px-3 py-2 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                active
+                  ? "border-primary text-foreground font-medium"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {MODEL_CATEGORY_LABELS[cat]}
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-xs ${
+                  active ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"
+                }`}
+              >
+                {count}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
       {!loading && (
         <p className="text-xs text-muted-foreground" aria-live="polite">
-          {filtered.length === modelList.length
-            ? `${modelList.length} modelo${modelList.length !== 1 ? "s" : ""}`
-            : `${filtered.length} de ${modelList.length} modelo${modelList.length !== 1 ? "s" : ""} con los filtros aplicados`}
+          {filtered.length} modelo{filtered.length !== 1 ? "s" : ""} en {MODEL_CATEGORY_LABELS[categoryTab].toLowerCase()}
         </p>
       )}
 
       {loading ? (
         <SkeletonList count={5} />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          title="Sin modelos con esos filtros"
+          description="Prueba a ampliar los criterios de búsqueda o elige otra categoría."
+        />
       ) : (
-        <Tooltip.Provider delayDuration={300}>
-          <div className="overflow-x-auto rounded-lg border border-border bg-card">
-            <table className="min-w-full text-left">
-              <thead className="bg-muted/40 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2" aria-sort={sortKey === "name" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
-                    <button type="button" onClick={() => toggleSort("name")} className="flex items-center gap-1 hover:text-foreground">
-                      Nombre {sortKey === "name" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2" aria-sort={sortKey === "type" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
-                    <button type="button" onClick={() => toggleSort("type")} className="hover:text-foreground">
-                      Tipo {sortKey === "type" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2 hidden lg:table-cell">
-                    <button type="button" onClick={() => toggleSort("backend")} className="hover:text-foreground">
-                      Backend {sortKey === "backend" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2">
-                    <Tooltip.Root>
-                      <Tooltip.Trigger asChild>
-                        <button type="button" onClick={() => toggleSort("policy")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
-                          Policy {sortKey === "policy" && (sortDir === "asc" ? "↑" : "↓")}
-                        </button>
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md" sideOffset={4}>
-                          <strong>pin</strong>: siempre cargado · <strong>warm</strong>: cargado preventivamente · <strong>on_demand</strong>: carga al primer uso
-                          <Tooltip.Arrow className="fill-border" />
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  </th>
-                  <th className="px-3 py-2">
-                    <button type="button" onClick={() => toggleSort("gpu")} className="hover:text-foreground">
-                      GPU {sortKey === "gpu" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2 hidden xl:table-cell">
-                    <Tooltip.Root>
-                      <Tooltip.Trigger asChild>
-                        <button type="button" onClick={() => toggleSort("ctxNative")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
-                          Ctx Nativo {sortKey === "ctxNative" && (sortDir === "asc" ? "↑" : "↓")}
-                        </button>
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md max-w-xs" sideOffset={4}>
-                          Longitud de contexto máxima soportada por el modelo base (desde los pesos/arquitectura).
-                          <Tooltip.Arrow className="fill-border" />
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  </th>
-                  <th className="px-3 py-2 hidden xl:table-cell">
-                    <Tooltip.Root>
-                      <Tooltip.Trigger asChild>
-                        <button type="button" onClick={() => toggleSort("ctxConfig")} className="hover:text-foreground underline decoration-dashed underline-offset-2">
-                          Ctx Config {sortKey === "ctxConfig" && (sortDir === "asc" ? "↑" : "↓")}
-                        </button>
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md max-w-xs" sideOffset={4}>
-                          Longitud de contexto configurada para este deployment (puede ser menor que el nativo para ahorrar VRAM).
-                          <Tooltip.Arrow className="fill-border" />
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  </th>
-                  <th className="px-3 py-2 hidden xl:table-cell">
-                    <button type="button" onClick={() => toggleSort("io")} className="hover:text-foreground">
-                      Input / Output {sortKey === "io" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2">
-                    <button type="button" onClick={() => toggleSort("vram")} className="hover:text-foreground">
-                      VRAM {sortKey === "vram" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2 hidden lg:table-cell">
-                    <button type="button" onClick={() => toggleSort("size")} className="hover:text-foreground">
-                      Tamaño {sortKey === "size" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2">
-                    <button type="button" onClick={() => toggleSort("status")} className="hover:text-foreground">
-                      Status {sortKey === "status" && (sortDir === "asc" ? "↑" : "↓")}
-                    </button>
-                  </th>
-                  <th className="px-3 py-2 text-center">Perfiles</th>
-                  <th className="px-3 py-2">Acciones</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(({ model }) => (
-                  <ModelCard
-                    key={model.modelId}
-                    model={model}
-                    busy={busyModelId === model.modelId}
-                    onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
-                    onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
-                    onTogglePin={(item) => void togglePin(item)}
-                    onConfigure={(item) => setConfigModel(item)}
-                    onDelete={(item) => setDeleteModel(item)}
-                    onCompile={(item) => setCompileModel(item)}
-                    onUpdate={(item) => void handleUpdateModel(item)}
-                    onEditProfile={openProfileModal}
-                    onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
-                  />
-                ))}
-              </tbody>
-            </table>
-            {filtered.length === 0 && (
-              <EmptyState
-                title="Sin modelos con esos filtros"
-                description="Prueba a ampliar los criterios de búsqueda."
-                className="rounded-none border-0 border-t"
-              />
-            )}
-          </div>
-        </Tooltip.Provider>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {filtered.map(({ model, category }) => (
+            <ModelGridCard
+              key={model.modelId}
+              model={model}
+              category={category}
+              busy={busyModelId === model.modelId}
+              onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
+              onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
+              onTogglePin={(item) => void togglePin(item)}
+              onConfigure={(item) => setConfigModel(item)}
+              onDelete={(item) => setDeleteModel(item)}
+              onCompile={(item) => setCompileModel(item)}
+              onUpdate={(item) => void handleUpdateModel(item)}
+              onEditProfile={openProfileModal}
+              onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
+            />
+          ))}
+        </div>
       )}
 
       {error && (

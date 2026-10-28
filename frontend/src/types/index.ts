@@ -61,8 +61,15 @@ export type BackendType =
   | "bitnet"
   | "acestep"
   | "diffusers"
+  | "mage"
   | "whisper"
+  | "vibeasr"
   | "tts"
+  | "chatterbox"
+  | "piper"
+  | "upscaler"
+  | "flashvsr"
+  | "voxtral"
   | "ollama"
   | "tensorrt_llm"
   | "llama_cpp"
@@ -254,7 +261,7 @@ export interface ModelMemoryEstimate {
   tensorParallelSize: number | null
   fitsCurrentGpu: boolean | null
   enginePresent: boolean | null
-  source: "heuristic" | "runtime_probe"
+  source: "heuristic" | "runtime_probe" | "gguf_header"
   status: "ok" | "warning" | "error"
   warning: string | null
   notes: string[]
@@ -476,6 +483,10 @@ export interface ServerConfig {
   modelsDir: string
   downloadDir: string
   maxTemperatureC: number
+  gpuThrottleEnabled: boolean
+  gpuThrottlePowerReductionPct: number
+  gpuThrottleCooldownS: number
+  gpuThrottleRecoveryMarginC: number
   vllmGpuMemoryUtilization: number
   vllmMaxNumSeqs: number | null
   vllmMaxNumBatchedTokens: number | null

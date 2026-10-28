@@ -228,6 +228,7 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
     next.llama_cpp = {
       gpuLayers: toNumberOrNull(llamaCppSource, "gpu_layers", "gpuLayers"),
       ctxSize: toNumberOrNull(llamaCppSource, "ctx_size", "ctxSize"),
+      parallelSlots: toNumberOrNull(llamaCppSource, "parallel_slots", "parallelSlots"),
       flashAttn: Boolean(llamaCppSource.flash_attn ?? llamaCppSource.flashAttn),
       embedding: Boolean(llamaCppSource.embedding),
       cacheTypeK: (cacheK ?? null) as LlamaCppConfig["cacheTypeK"],
@@ -855,6 +856,10 @@ function toServerConfig(raw: unknown): ServerConfig {
     modelsDir: String(data.modelsDir ?? "/models"),
     downloadDir: String(data.downloadDir ?? "/models/downloads"),
     maxTemperatureC: Number(data.maxTemperatureC ?? 88),
+    gpuThrottleEnabled: Boolean(data.gpuThrottleEnabled),
+    gpuThrottlePowerReductionPct: Number(data.gpuThrottlePowerReductionPct ?? 20),
+    gpuThrottleCooldownS: Number(data.gpuThrottleCooldownS ?? 300),
+    gpuThrottleRecoveryMarginC: Number(data.gpuThrottleRecoveryMarginC ?? 5),
     vllmGpuMemoryUtilization: Number(data.vllmGpuMemoryUtilization ?? data.vllm_gpu_memory_utilization ?? 0.85),
     vllmMaxNumSeqs:
       data.vllmMaxNumSeqs == null && data.vllm_max_num_seqs == null
@@ -1509,6 +1514,18 @@ export const api = {
           "POST",
           `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}/benchmark`,
           { cold_start: coldStart },
+        ),
+      ),
+
+    previewRuntimePreset: async (
+      profileId: string,
+      data: RuntimePresetCreate,
+    ): Promise<RuntimePresetResolution> =>
+      toRuntimePresetResolution(
+        await request<unknown>(
+          "POST",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/preview`,
+          fromRuntimePreset(data),
         ),
       ),
 

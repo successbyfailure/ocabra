@@ -17,7 +17,7 @@ import {
   getWritableExtraConfig,
 } from "@/lib/modelContext"
 import { ScheduleEditor } from "@/components/models/ScheduleEditor"
-import { CapacityPanel } from "@/components/models/CapacityPanel"
+import { CapacityPanel, Chip } from "@/components/models/CapacityPanel"
 import { RuntimePresetsPanel } from "@/components/models/RuntimePresetsPanel"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useIsAdmin } from "@/hooks/useAuth"
@@ -48,6 +48,13 @@ interface ModelConfigModalProps {
 
 const VLLM_GPU_MEMORY_UTILIZATION_PRESETS = [0.75, 0.8, 0.85, 0.9, 0.92, 0.95]
 const VLLM_MAX_NUM_SEQS_PRESETS = [1, 2, 4, 8, 12, 16, 24, 32]
+
+const MEMORY_ESTIMATE_SOURCE_LABELS: Record<ModelMemoryEstimate["source"], string> = {
+  gguf_header: "header GGUF",
+  runtime_probe: "probe de runtime",
+  heuristic: "heurística",
+}
+const mbToGb = (mb: number) => (mb / 1024).toFixed(1)
 
 const VLLM_ROOT_KEYS = [
   "model_impl",
@@ -1040,82 +1047,92 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               >
                 <div className="space-y-3 text-sm">
                   {(estimatingMemory || probingMemory) && (
-                    <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                    <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
                       {probingMemory ? "Ejecutando validación real del engine..." : "Recalculando estimación..."}
                     </div>
                   )}
-                  {memoryEstimate && (
-                    <>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                          {`GPU objetivo: ${memoryEstimate.gpuIndex ?? "-"} · total ${memoryEstimate.totalVramMb ?? "-"} MB · libre ${memoryEstimate.freeVramMb ?? "-"} MB`}
-                        </div>
-                        <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                          {`fuente=${memoryEstimate.source} · estado=${memoryEstimate.status}`}
-                          {memoryEstimate.budgetVramMb != null ? ` · budget ${memoryEstimate.budgetVramMb} MB` : ""}
-                        </div>
-                      </div>
+                  {memoryEstimate && (() => {
+                    const usedMb =
+                      memoryEstimate.modelLoadingMemoryMb ??
+                      memoryEstimate.estimatedEngineMbPerGpu ??
+                      memoryEstimate.estimatedWeightsMb
+                    const capMb = memoryEstimate.totalVramMb
+                    const fraction = usedMb != null && capMb ? Math.min(1, usedMb / capMb) : 0
+                    const barColor =
+                      memoryEstimate.fitsCurrentGpu === false
+                        ? "bg-red-500"
+                        : fraction > 0.85
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                    return (
+                      <>
+                        {usedMb != null && capMb != null && (
+                          <div
+                            className={`rounded-md border px-3 py-2 text-xs ${
+                              memoryEstimate.fitsCurrentGpu === false
+                                ? "border-red-500/30 bg-red-500/5"
+                                : "border-emerald-500/30 bg-emerald-500/5"
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-medium">
+                                {memoryEstimate.fitsCurrentGpu === false ? "No cabe" : "Cabe"} en GPU #{memoryEstimate.gpuIndex ?? "-"}
+                              </span>
+                              <span className="text-muted-foreground">
+                                {mbToGb(usedMb)} / {mbToGb(capMb)} GB
+                              </span>
+                            </div>
+                            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                              <div
+                                className={`h-full transition-all ${barColor}`}
+                                style={{ width: `${Math.max(4, fraction * 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
 
-                      <div className="grid gap-3 md:grid-cols-2">
-                        {memoryEstimate.estimatedWeightsMb != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`pesos estimados: ${memoryEstimate.estimatedWeightsMb} MB`}
-                          </div>
-                        )}
-                        {memoryEstimate.estimatedEngineMbPerGpu != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`engine estimado por GPU: ${memoryEstimate.estimatedEngineMbPerGpu} MB`}
-                          </div>
-                        )}
-                        {memoryEstimate.modelLoadingMemoryMb != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`memoria real al cargar pesos: ${memoryEstimate.modelLoadingMemoryMb} MB`}
-                          </div>
-                        )}
-                        {memoryEstimate.estimatedKvCacheMb != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`KV cache estimada/real: ${memoryEstimate.estimatedKvCacheMb} MB`}
-                          </div>
-                        )}
-                        {memoryEstimate.requestedContextLength != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`contexto pedido: ${formatTokenCount(memoryEstimate.requestedContextLength)}`}
-                          </div>
-                        )}
-                        {memoryEstimate.estimatedMaxContextLength != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`contexto maximo estimado por engine: ${formatTokenCount(memoryEstimate.estimatedMaxContextLength)}`}
-                          </div>
-                        )}
-                        {memoryEstimate.maximumConcurrency != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`concurrencia maxima aproximada: ${memoryEstimate.maximumConcurrency.toFixed(2)}x`}
-                          </div>
-                        )}
-                        {memoryEstimate.enginePresent != null && (
-                          <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                            {`engine presente: ${memoryEstimate.enginePresent ? "sí" : "no"}`}
-                          </div>
-                        )}
-                      </div>
-
-                      {memoryEstimate.fitsCurrentGpu != null && (
-                        <p className={memoryEstimate.fitsCurrentGpu ? "text-xs text-emerald-300" : "text-xs text-amber-300"}>
-                          {memoryEstimate.fitsCurrentGpu
-                            ? "La configuración parece razonable para la GPU objetivo según la estimación disponible."
-                            : "La configuración parece demasiado ajustada para la GPU objetivo; conviene reducir contexto o paralelismo."}
-                        </p>
-                      )}
-                      {memoryEstimate.warning && <p className="text-xs text-amber-300">{memoryEstimate.warning}</p>}
-                      {memoryEstimate.notes.length > 0 && (
-                        <div className="space-y-1 text-xs text-muted-foreground">
-                          {memoryEstimate.notes.map((note, index) => (
-                            <p key={`memory-note-${index}`}>{note}</p>
-                          ))}
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                          {memoryEstimate.estimatedWeightsMb != null && (
+                            <Chip label="Pesos" value={`${mbToGb(memoryEstimate.estimatedWeightsMb)} GB`} />
+                          )}
+                          {memoryEstimate.estimatedEngineMbPerGpu != null && (
+                            <Chip label="Engine/GPU" value={`${mbToGb(memoryEstimate.estimatedEngineMbPerGpu)} GB`} />
+                          )}
+                          {memoryEstimate.estimatedKvCacheMb != null && (
+                            <Chip label="KV cache" value={`${memoryEstimate.estimatedKvCacheMb} MB`} />
+                          )}
+                          {memoryEstimate.requestedContextLength != null && (
+                            <Chip label="Contexto pedido" value={formatTokenCount(memoryEstimate.requestedContextLength)} />
+                          )}
+                          {memoryEstimate.estimatedMaxContextLength != null && (
+                            <Chip label="Contexto máximo" value={formatTokenCount(memoryEstimate.estimatedMaxContextLength)} />
+                          )}
+                          {memoryEstimate.maximumConcurrency != null && (
+                            <Chip label="Concurrencia máx." value={`${memoryEstimate.maximumConcurrency.toFixed(2)}x`} />
+                          )}
+                          {memoryEstimate.budgetVramMb != null && (
+                            <Chip label="Budget VRAM" value={`${mbToGb(memoryEstimate.budgetVramMb)} GB`} />
+                          )}
+                          {memoryEstimate.enginePresent != null && (
+                            <Chip label="Engine presente" value={memoryEstimate.enginePresent ? "sí" : "no"} />
+                          )}
                         </div>
-                      )}
-                    </>
-                  )}
+
+                        <div className="text-[11px] text-muted-foreground">
+                          {`fuente: ${MEMORY_ESTIMATE_SOURCE_LABELS[memoryEstimate.source]} · estado: ${memoryEstimate.status}`}
+                        </div>
+
+                        {memoryEstimate.warning && <p className="text-xs text-amber-300">{memoryEstimate.warning}</p>}
+                        {memoryEstimate.notes.length > 0 && (
+                          <div className="space-y-1 text-xs text-muted-foreground">
+                            {memoryEstimate.notes.map((note, index) => (
+                              <p key={`memory-note-${index}`}>{note}</p>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )
+                  })()}
                   {memoryEstimateError && <p className="text-xs text-amber-300">{memoryEstimateError}</p>}
                   <div>
                     <button

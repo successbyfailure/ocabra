@@ -316,9 +316,10 @@ describe("ModelConfigModal", () => {
       />,
     )
 
-    await screen.findByText(/Prevision de memoria/i)
-    await screen.findByText(/pesos estimados: 18000 MB/i)
-    await screen.findByText(/contexto maximo estimado por engine: 7.8k/i)
+    await screen.findByText(/Estimación por probe \(runtime\)/i)
+    await screen.findByText("17.6 GB")
+    await screen.findByText("Contexto máximo")
+    expect(screen.getAllByText("7.8k").length).toBeGreaterThan(0)
 
     await act(async () => {
       fireEvent.click(screen.getByText(/Validar con engine/i))

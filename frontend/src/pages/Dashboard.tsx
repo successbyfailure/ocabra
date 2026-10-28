@@ -27,6 +27,12 @@ import { GpuCard } from "@/components/gpu/GpuCard"
 import { LoadedModelList } from "@/components/gpu/LoadedModelList"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
+import {
+  formatTokenCount,
+  getLlamaCppConfig,
+  getModelContextSummary,
+  getVllmConfig,
+} from "@/lib/modelContext"
 import { useIsModelManager } from "@/hooks/useAuth"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import { useDownloadStore } from "@/stores/downloadStore"
@@ -859,6 +865,9 @@ export function Dashboard() {
         <div className="space-y-3">
           {activeModels.map((model) => {
             const act = activity[model.modelId]
+            const slots =
+              getLlamaCppConfig(model)?.parallelSlots ?? getVllmConfig(model)?.maxNumSeqs ?? null
+            const ctx = getModelContextSummary(model).configuredContext
             return (
               <div
                 key={model.modelId}
@@ -873,6 +882,11 @@ export function Dashboard() {
                       GPU {model.currentGpu.join(", ") || "-"}
                     </span>
                     <span>{model.vramUsedMb.toLocaleString()} MB</span>
+                    {slots != null && (
+                      <span className="rounded-md bg-muted px-2 py-0.5">
+                        {slots} slot{slots === 1 ? "" : "s"} · {formatTokenCount(ctx)} ctx
+                      </span>
+                    )}
                     {act && act.inFlight > 0 && (() => {
                       const slots = act.slots ?? act.inFlight
                       const processing = Math.min(act.inFlight, slots)

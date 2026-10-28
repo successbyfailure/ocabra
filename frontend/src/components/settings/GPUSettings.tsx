@@ -188,6 +188,10 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
   const [vramPressureThresholdPct, setVramPressureThresholdPct] = useState(config.vramPressureThresholdPct)
   const [maxTemperatureC, setMaxTemperatureC] = useState(config.maxTemperatureC)
   const [maxInflightPerModel, setMaxInflightPerModel] = useState(config.maxInflightPerModel)
+  const [gpuThrottleEnabled, setGpuThrottleEnabled] = useState(config.gpuThrottleEnabled)
+  const [gpuThrottlePowerReductionPct, setGpuThrottlePowerReductionPct] = useState(config.gpuThrottlePowerReductionPct)
+  const [gpuThrottleCooldownS, setGpuThrottleCooldownS] = useState(config.gpuThrottleCooldownS)
+  const [gpuThrottleRecoveryMarginC, setGpuThrottleRecoveryMarginC] = useState(config.gpuThrottleRecoveryMarginC)
 
   useEffect(() => {
     setDefaultGpuIndex(config.defaultGpuIndex)
@@ -198,6 +202,10 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     setVramPressureThresholdPct(config.vramPressureThresholdPct)
     setMaxTemperatureC(config.maxTemperatureC)
     setMaxInflightPerModel(config.maxInflightPerModel)
+    setGpuThrottleEnabled(config.gpuThrottleEnabled)
+    setGpuThrottlePowerReductionPct(config.gpuThrottlePowerReductionPct)
+    setGpuThrottleCooldownS(config.gpuThrottleCooldownS)
+    setGpuThrottleRecoveryMarginC(config.gpuThrottleRecoveryMarginC)
   }, [
     config.defaultGpuIndex,
     config.idleEvictionCheckIntervalSeconds,
@@ -207,6 +215,10 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     config.pressureEvictionDrainTimeoutSeconds,
     config.vramBufferMb,
     config.vramPressureThresholdPct,
+    config.gpuThrottleEnabled,
+    config.gpuThrottlePowerReductionPct,
+    config.gpuThrottleCooldownS,
+    config.gpuThrottleRecoveryMarginC,
   ])
 
   const save = async () => {
@@ -220,6 +232,10 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
         vramPressureThresholdPct,
         maxTemperatureC,
         maxInflightPerModel,
+        gpuThrottleEnabled,
+        gpuThrottlePowerReductionPct,
+        gpuThrottleCooldownS,
+        gpuThrottleRecoveryMarginC,
       })
       toast.success("GPU settings guardadas")
     } catch {
@@ -326,6 +342,59 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
         </label>
+      </div>
+
+      <div className="space-y-2 rounded-md border border-border/60 p-3">
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={gpuThrottleEnabled}
+            onChange={(event) => setGpuThrottleEnabled(event.target.checked)}
+          />
+          Throttle térmico automático
+        </label>
+        <span className="block text-xs text-muted-foreground/80">
+          Al superar la temperatura máxima de arriba, recorta el power limit de esa GPU durante un
+          tiempo mínimo, y solo lo restaura cuando además se haya enfriado por debajo del margen de
+          recuperación (evita que oscile entre recortar y restaurar).
+        </span>
+        <div className="grid gap-2 md:grid-cols-3">
+          <label className="text-sm text-muted-foreground">
+            Recorte de potencia (%)
+            <input
+              type="number"
+              min={1}
+              max={90}
+              disabled={!gpuThrottleEnabled}
+              value={gpuThrottlePowerReductionPct}
+              onChange={(event) => setGpuThrottlePowerReductionPct(Number(event.target.value))}
+              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
+            />
+          </label>
+          <label className="text-sm text-muted-foreground">
+            Cooldown mínimo (s)
+            <input
+              type="number"
+              min={10}
+              disabled={!gpuThrottleEnabled}
+              value={gpuThrottleCooldownS}
+              onChange={(event) => setGpuThrottleCooldownS(Number(event.target.value))}
+              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
+            />
+          </label>
+          <label className="text-sm text-muted-foreground">
+            Margen de recuperación (C)
+            <input
+              type="number"
+              min={1}
+              max={20}
+              disabled={!gpuThrottleEnabled}
+              value={gpuThrottleRecoveryMarginC}
+              onChange={(event) => setGpuThrottleRecoveryMarginC(Number(event.target.value))}
+              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
+            />
+          </label>
+        </div>
       </div>
 
       <button

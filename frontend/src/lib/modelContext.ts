@@ -156,3 +156,43 @@ export function formatTokenCount(value: number | null): string {
   }
   return String(value)
 }
+
+export type ModelCategory = "chat" | "embeddings" | "image" | "tts" | "stt" | "music" | "video" | "other"
+
+export const MODEL_CATEGORY_ORDER: ModelCategory[] = [
+  "chat",
+  "embeddings",
+  "image",
+  "tts",
+  "stt",
+  "music",
+  "video",
+  "other",
+]
+
+export const MODEL_CATEGORY_LABELS: Record<ModelCategory, string> = {
+  chat: "Chat",
+  embeddings: "Embeddings",
+  image: "Imagen",
+  tts: "TTS",
+  stt: "STT",
+  music: "Música",
+  video: "Video",
+  other: "Otros",
+}
+
+// Capability-first, backendType as a fallback for backends the capability
+// flags don't fully cover yet (e.g. video upscalers — BackendCapabilities
+// has video_upscaling server-side but it isn't wired through to the
+// frontend ModelCapabilities type).
+export function categorizeModel(model: ModelState): ModelCategory {
+  const c = model.capabilities
+  if (c.audioTranscription) return "stt"
+  if (c.tts) return "tts"
+  if (c.musicGeneration) return "music"
+  if (c.imageGeneration || c.imageEditing) return "image"
+  if (model.backendType === "upscaler" || model.backendType === "flashvsr") return "video"
+  if (c.embeddings || c.pooling || c.rerank || c.classification || c.score) return "embeddings"
+  if (c.chat || c.completion) return "chat"
+  return "other"
+}
