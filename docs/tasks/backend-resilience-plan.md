@@ -410,6 +410,32 @@ La migración del routing hardcodeado a routing por capability es trabajo futuro
 
 ## 11.4 — Busy timeout / health watchdog
 
+**Actualización 2026-10-25 — implementación real, parcial, desplegada.**
+Un incidente de producción (worker Ollama colgado en self-speculative MTP,
+bloqueando la carga de otro modelo durante 12+ minutos sin ningún error
+visible) forzó una versión concreta de este bloque, más acotada que el plan
+original de abajo pero ya en producción con tests:
+- Timeout agregado (`asyncio.wait_for`) en `_backend_load_gate` — un load
+  atascado detrás de otro falla con `TimeoutError` → 503, en vez de colgar
+  para siempre. (`model_manager.py::_acquire_load_gate`)
+- Cap de admisión escalado por `_runtime.parallelism` en vez de un flat 32
+  (`model_manager.py::effective_inflight_cap`).
+- Circuit breaker en `worker_pool.py`: 3 fallos 5xx consecutivos con patrón
+  "proceso murió" → `WorkerDegradedError` → 503 inmediato 30s, sin volver a
+  golpear la red.
+- Nuevo: modo mantenimiento por modelo (`POST /ocabra/models/{id}/maintenance`)
+  — pausa peticiones nuevas con 503 sin tocar las ya en curso, para pruebas
+  manuales sin tráfico real contendiendo por la GPU.
+
+Lo que el plan original de abajo pedía y **no** se hizo todavía: tracking
+de timestamp por request individual, acción activa sobre una request que
+excede su propio timeout (lo de arriba actúa sobre el *load*, no sobre
+una generación ya en curso), y el watchdog loop en background descrito en
+11.1/11.4. Sigue pendiente si se quiere la versión completa.
+
+Detalle completo, bug real encontrado (`routing_targets` JSONB) y matriz de
+pruebas en `/home/makespace/gpu-bench/README.md` (sesión 2026-10-25).
+
 ### Contexto: qué existe hoy
 
 - `model_manager._in_flight: dict[str, int]` cuenta requests activas por modelo.

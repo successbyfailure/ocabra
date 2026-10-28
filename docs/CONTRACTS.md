@@ -1008,8 +1008,15 @@ real entre tarjetas no está soportado por el camino de Ollama. Para modelos
 cuyo contexto nativo (``runtime_policy.max_context_tokens``) no cabe en la
 GPU más grande disponible, el preset ``max`` queda deshabilitado hasta que
 se añada un pool compartido o soporte explícito de ``OLLAMA_SCHED_SPREAD``.
-A fecha de 2026-10-20 esto afecta a: ``gemma4:26b``, ``qwen3.8:27b``,
-``qwen3.8:27b-abliterated``, ``qwen3-coder:30b``, ``nemotron-3-nano:30b``.
+A fecha de 2026-10-27 esto afecta a los modelos que siguen en Ollama:
+``qwen3:8b``, ``qwen3-vl:8b``, ``gemma4:12b``, ``qwen3.8:27b-abliterated``,
+``qwen3-coder:30b``, ``nemotron-3-nano:30b``. ``gemma4:26b`` y
+``qwen3.8:27b`` ya NO están afectados — ambos migraron al backend
+``llama_cpp`` nativo (self-speculative MTP, soporte de visión vía mmproj
+para gemma4), que sí soporta split real multi-GPU (``tensor_split``), así
+que su preset ``max`` reparte entre ambas tarjetas sin la limitación de
+Ollama. Ver `gpu-bench` en la máquina de desarrollo para el detalle de
+ambas migraciones.
 
 **Margen de seguridad del budget KV.** ``max_context_tokens`` aplica un
 ``DEFAULT_KV_SAFETY_FACTOR=0.90`` al presupuesto (``free - weights -

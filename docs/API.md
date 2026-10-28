@@ -393,6 +393,7 @@ API interna para gestion del servidor. Usada por el dashboard web.
 | POST | `/ocabra/models/{model_id}/load` | Cargar modelo en GPU |
 | POST | `/ocabra/models/{model_id}/unload` | Descargar modelo de GPU |
 | POST | `/ocabra/models/{model_id}/memory-estimate` | Estimar VRAM necesaria |
+| POST | `/ocabra/models/{model_id}/maintenance` | Pausar/reanudar peticiones nuevas (503) sin afectar las ya en curso — para pruebas manuales sin tráfico real contendiendo por la GPU. En memoria, no persiste tras un restart. |
 
 **POST /ocabra/models** — Registrar modelo
 ```json
@@ -843,8 +844,18 @@ Eventos emitidos (JSON):
 | 403 | Sin permisos (rol insuficiente o modelo no accesible) |
 | 404 | Modelo/perfil/recurso no encontrado |
 | 422 | Validacion fallida (Pydantic) |
+| 429 | Worker al limite de concurrencia (`model_at_capacity`) |
 | 500 | Error interno del servidor |
-| 503 | Modelo no cargado / worker no disponible |
+| 503 | Modelo no cargado / worker no disponible / registro aun no listo |
+
+**`Retry-After`**: las condiciones transitorias (worker cargando o aun no
+disponible, registro interno no listo tras el arranque, circuit breaker,
+modo mantenimiento, `model_at_capacity`) incluyen un header `Retry-After`
+(segundos) indicando cuanto esperar antes de reintentar. Las condiciones
+permanentes/de configuracion (router sin destino valido, federacion
+desactivada, o un modelo que quedo en estado `error` tras un intento de
+recarga) **no** lo incluyen — reintentar no las resuelve, hace falta
+corregir la configuracion o que alguien revise el worker.
 
 Formato de error OpenAI-compatible (`/v1/*`):
 ```json

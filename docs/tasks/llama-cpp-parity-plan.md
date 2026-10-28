@@ -2,7 +2,7 @@
 
 **Bloque del roadmap:** 17 (4 sprints)
 **Owner del esquema compartido:** Sprint 17.1
-**Última actualización:** 2026-05-05
+**Última actualización:** 2026-10-27 (nota de "superseded" sobre `llama_cpp_estimator.py`; el resto del documento sigue describiendo el plan original de 2026-05-05)
 
 ## Objetivo
 
@@ -101,10 +101,10 @@ trivial.
 | `batch_size` | `--batch-size N` | base |
 | `ubatch_size` | `--ubatch-size N` | base |
 | `threads` | `--threads N` | base |
-| `flash_attn=True` | `--flash-attn` | base |
-| `mlock=True` | `--mlock` | base |
+| `flash_attn=True` | `--flash-attn on` | base |
+| `mlock=True` | `--load-mode mmap+mlock` (ver nota 2026-10-25 abajo) | base |
 | `embedding=True` | `--embedding` | base |
-| `mmap=False` | `--no-mmap` | 17.1 |
+| `mmap=False` | `--load-mode none` (ver nota 2026-10-25 abajo) | 17.1 |
 | `seed` | `--seed N` | 17.1 |
 | `no_kv_offload=True` | `--no-kv-offload` | 17.1 |
 | `rope_freq_base` | `--rope-freq-base F` | 17.1 |
@@ -118,11 +118,43 @@ trivial.
 | `n_cpu_moe` | `--n-cpu-moe N` | 17.3 |
 | `override_tensor` | `--override-tensor STR` | 17.3 |
 | `speculative.draft_model_id` | `--model-draft PATH` | 17.4 |
-| `speculative.draft_n` | `--draft-max N` | 17.4 |
-| `speculative.draft_min` | `--draft-min N` | 17.4 |
-| `speculative.draft_p_min` | `--draft-p-min F` | 17.4 |
+| `speculative.draft_n` | `--spec-draft-n-max N` (renombrado, ver nota abajo) | 17.4 |
+| `speculative.draft_min` | `--spec-draft-n-min N` (renombrado, ver nota abajo) | 17.4 |
+| `speculative.draft_p_min` | `--spec-draft-p-min F` | 17.4 |
+| `speculative.spec_type` | `--spec-type STR` (p.ej. `draft-mtp`) | 17.4 |
 | `parallel_slots` | `--parallel N` | 17.4 |
 | `cont_batching=True` | `--cont-batching` | 17.4 |
+| `mmproj_model_id` | `--mmproj PATH` (visión; añadido fuera de los 4 sprints originales, ver nota 2026-10-27 abajo) | — |
+
+**Nota 2026-10-25 — modernización del backend + hallazgos de CLI:**
+El backend `llama_cpp` se reconstruyó desde `ggml-org/llama.cpp` master
+(el build anterior era de abril 2026). Dos cambios de CLI reales entre esa
+versión y la actual, ya corregidos en código (`llama_cpp_worker.py`):
+- `--draft-max`/`--draft-min` → renombrados a `--spec-draft-n-max`/
+  `--spec-draft-n-min` (ya corregido antes de hoy).
+- `--mlock`/`--no-mmap` (flags booleanos sueltos) → unificados en un único
+  `--load-mode {auto,none,mmap,mlock,mmap+mlock,dio}`. Pasar el flag viejo
+  ahora aborta con `error: invalid argument: --mlock`. `llama_cpp_worker.py`
+  traduce internamente; la interfaz `extra_config.llama_cpp.{mlock,mmap}`
+  no cambia de cara a quien registra el modelo.
+
+**Self-contained MTP — antes bloqueado, ahora funciona.** El build de abril
+rechazaba `--spec-type draft-mtp` sin `--model-draft` con
+`"unknown speculative decoding type without draft model"` incluso con los
+tensores `nextn` embebidos en el GGUF (ver `gpu-bench/README.md`). Con el
+build de hoy, el mismo GGUF (`qwen3.8:27b`, blob de Ollama) carga y sirve
+inferencia real con MTP self-speculative activo — confirmado vía
+`draft_n`/`draft_n_accepted` en la respuesta de `/v1/chat/completions`
+(26/36 tokens de borrador aceptados). Probado solo en CPU (sin contender
+por la GPU de producción); pendiente validar rendimiento real en GPU.
+
+**Nota 2026-10-27 — soporte de visión (`mmproj`), fuera del plan original.**
+Ningún sprint de este plan cubría multimodal; se añadió end-to-end
+(schema, `_build_options()`, worker, heurística de `BackendCapabilities.vision`)
+al migrar `gemma4:26b` a este backend, que necesita su projector `gemma4v`
+para servir imágenes. Mismo patrón de resolución que
+`speculative.draft_model_id` (ruta directa o model_id canónico vía
+`_resolve_mmproj_path()`). Detalle completo en `gpu-bench/README.md`.
 
 ## Sprints
 
@@ -186,6 +218,16 @@ trivial.
 - Ampliar endpoint `POST /ocabra/models/{model_id}/memory-estimate`
   (api/internal/models.py:331) para usar el nuevo estimador cuando el backend
   sea llama.cpp; mantener el probe genérico actual como fallback.
+
+  > **Superseded (2026-10-27):** este módulo se construyó tal cual el plan,
+  > pero quedó como un segundo estimador desincronizado de `vram_planner.py`
+  > (sin arquitecturas híbridas SSM/SWA, sin rs_cache, sin overhead de draft
+  > MTP) — causa directa de que los números de "Memoria y contexto" no
+  > cuadraran entre paneles. Borrado y `_estimate_llama_cpp_memory()`
+  > reescrito sobre `vram_planner.py` (`arch_from_gguf` +
+  > `plan_llama_cpp_vram_mb` + `max_context_tokens`), que ya es la única
+  > fuente de verdad para VRAM de llama.cpp en todo el backend. Detalle en
+  > `gpu-bench/README.md` y memoria del agente.
 
 **Scope frontend:**
 - En `ModelConfigModal.tsx` añadir dos selects (`cache_type_k`, `cache_type_v`)
