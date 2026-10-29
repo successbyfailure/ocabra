@@ -21,6 +21,12 @@ class RuntimePolicy(BaseModel):
     small_requests_extend_large_ttl: bool = False
     remote_warm_threshold_seconds: int = Field(default=10, ge=0, le=3600)
     max_context_tokens: int | None = Field(default=None, gt=0)
+    # Overrides settings.runtime_preset_default_output_reservation_tokens for
+    # this profile only — see estimate_request_token_budget() /
+    # plan_profile_runtime(). Reasoning-heavy profiles (gemma4, qwen3.8) need
+    # more than the global default reserves, since reasoning_content counts
+    # against the same budget as the final answer.
+    default_output_reservation_tokens: int | None = Field(default=None, gt=0)
 
 
 class RuntimePresetCreate(BaseModel):
