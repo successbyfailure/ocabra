@@ -67,7 +67,51 @@ def _build_update_request(state) -> tuple[DownloadCreateRequest | None, str | No
             None,
         )
 
-    if backend_type in {"vllm", "sglang", "diffusers", "whisper", "vibeasr", "tts", "chatterbox", "piper", "voxtral", "transformers"}:
+    if backend_type == "piper":
+        # Piper voices never go through DownloadManager at all — the worker
+        # fetches/caches them itself via hf_hub_download() on first load
+        # (workers/piper_worker.py:_download_voice_file), which already does
+        # its own "only re-fetch if changed" check. Treating the voice name
+        # as an HF repo_id (the generic branch below) 404s every time:
+        # "es_ES-davefx-medium" is a filename pattern inside the shared
+        # rhasspy/piper-voices repo, not a repo of its own. Reproduced live
+        # 2026-10-29 via /ocabra/models/update-all.
+        piper_cfg = extra.get("piper") if isinstance(extra, dict) else None
+        if isinstance(piper_cfg, dict) and piper_cfg.get("onnx_path"):
+            return None, "local-only Piper voice (custom onnx_path, no remote source)"
+        return (
+            None,
+            "Piper voices refresh automatically from cache when the worker "
+            "next loads; not updatable via the download queue",
+        )
+
+    if backend_type == "vibeasr":
+        # model_id stores the repo with "/" flattened to "--" for local
+        # directory naming (vibeasr_backend.py:flat_id) — un-flatten before
+        # using it as an actual HF repo_id, or hf_hub_download 404s on the
+        # literal flattened string. Reproduced live 2026-10-29.
+        repo_id = repo_id.replace("--", "/")
+        return (
+            DownloadCreateRequest(source="huggingface", model_ref=repo_id, artifact=artifact),
+            None,
+        )
+
+    if backend_type == "diffusers":
+        diffusers_cfg = extra.get("diffusers") if isinstance(extra, dict) else None
+        gguf_path = (
+            diffusers_cfg.get("gguf_transformer_path")
+            if isinstance(diffusers_cfg, dict)
+            else None
+        )
+        if gguf_path:
+            # Custom-assembled pipeline (GGUF transformer from one repo +
+            # a separate text encoder from another) — the model_id is a
+            # local alias, not a real HF repo_id, so the generic branch
+            # below 404s. No single coherent remote source to re-pull from.
+            # Reproduced live 2026-10-29 (qwen-image-2.1, qwen-image-edit-plus).
+            return None, "custom-assembled diffusers pipeline (no single remote source)"
+
+    if backend_type in {"vllm", "sglang", "diffusers", "whisper", "tts", "chatterbox", "voxtral", "transformers"}:
         return (
             DownloadCreateRequest(source="huggingface", model_ref=repo_id, artifact=artifact),
             None,
