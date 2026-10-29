@@ -416,10 +416,12 @@ def _make_controllable_post_client(dispatch_log: list[str]):
 @pytest.mark.asyncio
 async def test_forward_request_fair_gate_interleaves_two_users_on_one_slot(pool, monkeypatch):
     """End-to-end regression test for the fair-share admission gate
-    (2026-10-28 design discussion): with slots=1, if alice has a backlog
-    queued and bob arrives after alice's first request already started,
-    bob must be served on the round right after whatever of alice's work
-    was already queued ahead of him — not after her entire backlog."""
+    (2026-10-28 design discussion, strict-alternation follow-up): with
+    slots=1, if alice has a backlog queued and bob arrives after alice's
+    first request already started, bob must be served on the very next
+    free slot — ahead of alice's already-queued next request — because
+    alice has already been served once and bob hasn't been served at
+    all."""
     dispatch_log: list[str] = []
     fake_client_cls, release_events = _make_controllable_post_client(dispatch_log)
     monkeypatch.setattr("ocabra.core.worker_pool.httpx.AsyncClient", fake_client_cls)
@@ -446,12 +448,12 @@ async def test_forward_request_fair_gate_interleaves_two_users_on_one_slot(pool,
     release_events[0].set()  # finish alice-1
     await alice1
     await asyncio.sleep(0.01)
-    assert dispatch_log == ["start:alice-1", "end:alice-1", "start:alice-2"]
+    assert dispatch_log == ["start:alice-1", "end:alice-1", "start:bob-1"]
 
-    release_events[1].set()  # finish alice-2
-    await alice2
+    release_events[1].set()  # finish bob-1
+    await bob1
     await asyncio.sleep(0.01)
-    assert dispatch_log[-1] == "start:bob-1"
+    assert dispatch_log[-1] == "start:alice-2"
 
     release_events[2].set()
-    await bob1
+    await alice2

@@ -9,9 +9,14 @@ a second user's request then queues behind the *entire* backlog, not just
 whatever was already running.
 
 :class:`FairSlotGate` sits in front of that: oCabra holds pending requests
-itself and hands out the ``slots`` concurrency budget in round-robin order
-across distinct ``user_key``s, so a second user is interleaved with the
-first's backlog instead of being stuck behind all of it. A new user only
+itself and hands out the ``slots`` concurrency budget to whichever
+``user_key`` with pending work has gone longest without being served —
+strict alternation, not FIFO-by-arrival. A user who already burned through
+several free, uncontested slots never keeps precedence over a user who
+hasn't been served at all yet, even if the first user's next request was
+technically queued earlier (2026-10-28 design discussion: "las peticiones
+de multiples usuarios se vayan alternando en los slots disponibles,
+independientemente de que uno haya mandado una rafaga"). A new user only
 ever waits for the already-*running* work currently holding the slots to
 finish (unavoidable — nothing can preempt a request mid-flight) — never for
 an active user's entire remaining queue.
@@ -31,15 +36,16 @@ from typing import AsyncIterator
 
 
 class FairSlotGate:
-    """Admits up to ``slots`` concurrent callers; waiters are released in
-    round-robin order across ``user_key``s, not strict arrival order.
+    """Admits up to ``slots`` concurrent callers; waiters are released to
+    whichever ``user_key`` with pending work has gone longest without being
+    served — least-recently-served-first, not arrival-order FIFO.
 
     Every acquire — even one that could be granted immediately — goes
     through the same queue-and-dispatch path. That uniformity is what
-    makes the round-robin fair: there's no special-cased "fast path" that
-    would let a user's first request skip the rotation and let their
-    *next* request effectively cut in line ahead of someone who arrived
-    in between.
+    makes the alternation strict: there's no special-cased "fast path"
+    that would let a user's first request skip the bookkeeping and let
+    their *next* request effectively cut in line ahead of someone who
+    arrived in between.
     """
 
     def __init__(self, slots: int) -> None:
@@ -47,19 +53,34 @@ class FairSlotGate:
         self._in_flight = 0
         # user_key -> queue of not-yet-granted waiters for that user.
         self._queues: dict[str, deque[asyncio.Future]] = {}
-        # Round-robin order of user_keys that currently have >=1 queued
-        # (not-yet-granted) waiter. The user at index 0 is served next.
-        self._order: deque[str] = deque()
+        # Dispatch priority key per user_key: (0, first_seen_seq) for a
+        # user who has NEVER been granted a slot, (1, last_served_seq)
+        # once they have. The leading 0/1 guarantees a never-served user
+        # always outranks one who's already been served at least once,
+        # regardless of how the raw sequence numbers compare — a user who
+        # burned through several free/uncontested slots must never keep
+        # precedence over one who hasn't been served at all. Within each
+        # tier, the lower sequence number (arrived earlier / served
+        # longer ago) wins.
+        self._first_seen: dict[str, int] = {}
+        self._last_served: dict[str, int] = {}
+        self._seq = 0
         self._lock = asyncio.Lock()
+
+    def _priority_key(self, user_key: str) -> tuple[int, int]:
+        if user_key in self._last_served:
+            return (1, self._last_served[user_key])
+        return (0, self._first_seen.get(user_key, 0))
 
     async def acquire(self, user_key: str) -> None:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         async with self._lock:
+            if user_key not in self._first_seen:
+                self._first_seen[user_key] = self._seq
+                self._seq += 1
             queue = self._queues.setdefault(user_key, deque())
             queue.append(fut)
-            if len(queue) == 1:
-                self._order.append(user_key)
             self._dispatch_locked()
         try:
             await fut
@@ -83,28 +104,21 @@ class FairSlotGate:
                             pass
                         if not queue:
                             self._queues.pop(user_key, None)
-                            try:
-                                self._order.remove(user_key)
-                            except ValueError:
-                                pass
             raise
 
     def _dispatch_locked(self) -> None:
         """Grant queued waiters while slots are free. Caller holds ``_lock``."""
-        while self._in_flight < self.slots and self._order:
-            user_key = self._order[0]
-            queue = self._queues.get(user_key)
-            if not queue:
-                self._order.popleft()
-                continue
+        while self._in_flight < self.slots:
+            candidates = [uk for uk, q in self._queues.items() if q]
+            if not candidates:
+                break
+            user_key = min(candidates, key=self._priority_key)
+            queue = self._queues[user_key]
             fut = queue.popleft()
-            if queue:
-                # This user still has more queued — cycle them to the back
-                # so the NEXT free slot goes to someone else first.
-                self._order.rotate(-1)
-            else:
-                self._order.popleft()
+            if not queue:
                 self._queues.pop(user_key, None)
+            self._last_served[user_key] = self._seq
+            self._seq += 1
             self._in_flight += 1
             if not fut.done():
                 fut.set_result(None)
