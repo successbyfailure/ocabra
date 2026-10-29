@@ -525,6 +525,34 @@ Convención sugerida: `32k` / `64k` (default, `warm`) / `128k` / `max` (modo
 `contextMode="max"` → el coordinator calcula el tope que cabe en la GPU
 objetivo). Perfiles LLM típicos: cuatro presets por perfil.
 
+**Cómo se calcula "el contexto solicitado"** (`estimate_request_token_budget`
+en `runtime_coordinator.py`) — importante porque no es solo el tamaño del
+prompt:
+
+```
+contexto_solicitado = tokens_estimados_del_prompt + reserva_de_salida
+```
+
+`reserva_de_salida` es `max_completion_tokens` / `max_tokens` (OpenAI) o
+`options.num_predict` (Ollama) si el cliente los manda; **si no los manda**,
+cae a un valor fijo y global —
+`runtime_preset_default_output_reservation_tokens` (actualmente **4096
+tokens**) — igual para todos los perfiles, razonen o no.
+
+Esto importa para modelos con razonamiento visible (gemma4, qwen3.8): el
+`reasoning_content` cuenta contra el mismo presupuesto de salida que la
+respuesta final. Una petición sin `max_tokens` que necesite razonar 20k+
+tokens antes de responder puede agotar el preset elegido (p. ej. 64k) y
+cortar con `finish_reason: "length"` y `content` vacío — **no porque el
+contexto no se "ampliara", sino porque la reserva de 4096 nunca iba a cubrir
+ese razonamiento** y el sistema no tiene forma de saber cuánto va a razonar
+un modelo antes de que ocurra. Dos formas de evitarlo desde el cliente:
+
+- Pasar `max_tokens` (o `num_predict`) con un valor generoso — sustituye
+  directamente la reserva de 4096 y empuja la selección a un preset mayor.
+- Forzar un preset explícito con `ocabra.context_preset` (ver abajo),
+  bypaseando la estimación por completo.
+
 **POST `/ocabra/profiles/{profile_id}/runtime-presets`**:
 
 ```json

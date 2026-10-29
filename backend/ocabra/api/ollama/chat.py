@@ -61,6 +61,15 @@ async def chat(
 
     Request fields include model, messages, stream, and options.
     Streaming responses are translated from OpenAI SSE to Ollama NDJSON.
+
+    **Context window auto-sizing**: same mechanism as `/v1/chat/completions`
+    — the runtime preset is picked from `prompt_tokens + output_reservation`,
+    where `output_reservation` comes from `options.num_predict` if set,
+    otherwise a fixed 4096-token default shared by every model. For
+    reasoning models this can truncate the response (`done_reason: "length"`,
+    empty `content`) if the model reasons longer than that default covers.
+    Set `options.num_predict` generously, or force a preset with
+    `"ocabra": {"context_preset": "<key>"}`. See docs/API.md.
     """
     body = await request.json()
     ollama_model = str(body.get("model", ""))

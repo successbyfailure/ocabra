@@ -76,6 +76,19 @@ async def chat_completions(
 
     The `model` field accepts a **profile_id** (recommended) or a canonical model_id.
     Models are loaded on demand if not already in GPU.
+
+    **Context window auto-sizing**: when the target profile has runtime
+    presets, the server estimates the needed context as
+    `prompt_tokens + output_reservation` and picks the smallest enabled
+    preset that covers it. `output_reservation` comes from `max_tokens` /
+    `max_completion_tokens` if you send them; otherwise it falls back to a
+    small fixed default (4096 tokens) for every model. For
+    reasoning models, `reasoning_content` counts against that same budget —
+    if you don't pass `max_tokens` and the model reasons for longer than the
+    default reservation covers, the response can get cut (`finish_reason:
+    "length"`) with empty `content`. Send a generous `max_tokens`, or force
+    a specific preset with `"ocabra": {"context_preset": "<key>"}` in the
+    request body.
     """
     body = await request.json()
     model_id: str = body.get("model", "")
