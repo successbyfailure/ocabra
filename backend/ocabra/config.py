@@ -96,7 +96,13 @@ class Settings(BaseSettings):
 
     # Hard cap on any single drain wait (pressure_eviction). Even if the
     # estimator says "80 minutes remaining", we never wait more than this.
-    max_drain_timeout_s: int = 900
+    # 2026-10-29: raised 900->1800 — gemma4:26b (22GB) and qwen3.8:27b
+    # (18.7GB) together need 40.7GB, more than GPU1's 24GB, so whenever both
+    # have real concurrent traffic one has to wait for the other. Observed
+    # real sessions up to ~19min (1136s) that session; the old 900s (15min)
+    # cap gave up and returned a clean 409 before some of those genuinely
+    # would have finished and freed the GPU on their own.
+    max_drain_timeout_s: int = 1800
 
     # Circuit breaker for a worker whose process has died but oCabra has no
     # way to detect or kill it directly (notably Ollama: it manages its own
@@ -226,7 +232,12 @@ class Settings(BaseSettings):
     llama_cpp_flash_attn: bool = False
     llama_cpp_mlock: bool = True
     llama_cpp_embeddings: bool = False
-    llama_cpp_startup_timeout_s: int = 30
+    # 2026-10-29: raised 30->60 — under host CPU/memory contention (several
+    # heavy workers competing, observed swap usage up to ~41GB that session)
+    # a cold load occasionally needed slightly more than 30s to become
+    # healthy; a retry right after typically succeeded within the same
+    # window, suggesting borderline timing rather than a genuinely stuck load.
+    llama_cpp_startup_timeout_s: int = 60
     # Concurrency: with cont_batching, a llama.cpp worker serves parallel_slots
     # requests at once (the KV cache / ctx_size is shared across slots, so each
     # slot gets ctx_size/parallel_slots). Default 1 (full context, no extra VRAM);
