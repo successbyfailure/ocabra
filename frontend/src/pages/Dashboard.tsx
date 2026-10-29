@@ -865,8 +865,21 @@ export function Dashboard() {
         <div className="space-y-3">
           {activeModels.map((model) => {
             const act = activity[model.modelId]
+            // Prefer the live active-preset slot count (act.slots, computed
+            // server-side from the loaded derived worker's real
+            // _runtime.parallelism) over the base profile's static
+            // extra_config.llama_cpp.parallelSlots — that field reflects
+            // whatever preset was configured originally, not necessarily
+            // the one currently loaded (runtime presets create a derived
+            // worker whose own _runtime block is deliberately NOT overlaid
+            // onto the base entry's extra_config, see
+            // _overlay_loaded_derived_state). Mismatched badges ("1 slot"
+            // next to "1/3 procesando") reported live 2026-10-29.
             const slots =
-              getLlamaCppConfig(model)?.parallelSlots ?? getVllmConfig(model)?.maxNumSeqs ?? null
+              act?.slots ??
+              getLlamaCppConfig(model)?.parallelSlots ??
+              getVllmConfig(model)?.maxNumSeqs ??
+              null
             const ctx = getModelContextSummary(model).configuredContext
             return (
               <div

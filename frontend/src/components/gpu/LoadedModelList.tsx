@@ -79,7 +79,16 @@ export function LoadedModelList({
               </div>
             )}
             {act?.requests?.map((r) => {
-              const stalled = r.outputTokensEstimate != null && r.lastActivitySecondsAgo >= STALL_SECONDS
+              // Not gated on outputTokensEstimate != null — a huge prompt
+              // (tool definitions the input estimate doesn't count — see
+              // ``_count_input_tokens``) can legitimately sit in prompt-eval
+              // for a long time with no output yet, and *that* phase is
+              // exactly where "hung or just slow?" is hardest to tell from
+              // elapsed time alone. Reported live 2026-10-29: "esperando
+              // salida" showed no timing at all, so a genuinely silent
+              // connection looked identical to one still receiving bytes.
+              const stalled = r.lastActivitySecondsAgo >= STALL_SECONDS
+              const neverActive = r.lastActivitySecondsAgo >= r.elapsedSeconds - 0.05
               return (
                 <div
                   key={r.requestId}
@@ -93,9 +102,9 @@ export function LoadedModelList({
                     {r.tokensPerSecond != null ? ` · ${r.tokensPerSecond} t/s` : ""}
                     {stalled
                       ? ` · sin actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`
-                      : r.outputTokensEstimate != null
-                        ? ` · hace ${fmtAge(r.lastActivitySecondsAgo)}`
-                        : ""}
+                      : neverActive
+                        ? ` · sin respuesta del worker aún`
+                        : ` · actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`}
                   </span>
                 </div>
               )
