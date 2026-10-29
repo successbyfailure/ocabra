@@ -168,18 +168,25 @@ que acepta `"low"`, `"medium"`, `"high"` o `"off"` (sinónimos: `none`,
 **Tope duro de razonamiento (`reasoning_budget`)** — solo para modelos
 llama.cpp nativos (gemma4:26b, qwen3.8:27b). A diferencia de
 `reasoning_effort` (una pista que la plantilla puede ignorar),
-en teoría `reasoning_budget` es un **límite duro en tokens**: al agotarse,
-llama-server debería cortar el razonamiento y forzar la respuesta final.
+`reasoning_budget` es un **límite duro en tokens**: al agotarse,
+llama-server corta el razonamiento y fuerza la respuesta final —
+garantiza que `content` nunca llega vacío.
 
-⚠️ **Verificado en vivo 2026-10-29 (build `b1-74bca39`): el campo se
-reenvía al body pero el servidor no lo respeta por petición** — una
-petición con `reasoning_budget: 200` razonó igualmente miles de tokens,
-sin cortarse. `reasoning_effort` sí funciona (confirmado: `"low"` redujo el
-razonamiento de ~16.600 a ~4.700 caracteres en la misma pregunta) — usad
-ese como palanca real por ahora. `reasoning_budget` queda documentado y
-cableado (no rompe nada, se ignora) para cuando la build de llama.cpp lo
-soporte, o como candidato a flag de arranque por perfil en vez de por
-petición.
+**Verificado en vivo 2026-10-29 (build `b1-74bca39`) contra qwen3.8:27b**:
+`reasoning_budget: 200` → 674 caracteres de razonamiento (en vez de los
+~16.600 sin límite) y `finish_reason: "stop"` limpio, en 29s en vez de
+varios minutos. oCabra traduce `reasoning_budget` al campo real que
+espera llama-server, `reasoning_budget_tokens` — **no son el mismo
+nombre** (una primera implementación reenvió `reasoning_budget` tal cual,
+que el servidor ignoraba en silencio; el nombre correcto se confirmó
+leyendo las cadenas de `libllama-server-impl.so`). Por defecto el
+servidor no tiene límite (`-1`, sin restricción), que fue la causa del
+incidente de truncamiento 2026-10-29. Silenciosamente ignorado en otros
+backends.
+
+```json
+{"model": "gemma4:26b", "messages": [...], "reasoning_budget": 8192}
+```
 
 ```json
 {"model": "gemma4:26b", "messages": [...], "reasoning_effort": "low"}
@@ -584,6 +591,22 @@ un modelo antes de que ocurra. Dos formas de evitarlo desde el cliente:
   directamente la reserva de 4096 y empuja la selección a un preset mayor.
 - Forzar un preset explícito con `ocabra.context_preset` (ver abajo),
   bypaseando la estimación por completo.
+- Limitar el razonamiento con `reasoning_effort` (ver sección dedicada) o
+  `reasoning_budget` (tope duro, solo llama.cpp nativo).
+
+**Esto puede seguir pasando aunque ajustes lo anterior** — ninguna
+estimación por adelantado es infalible (un modelo puede razonar más de lo
+previsto en un caso puntual). `finish_reason: "length"` es parte del
+contrato estándar de OpenAI y **el cliente debe comprobarlo siempre**, no
+asumir que `content` viene relleno. Concretamente para modelos con
+razonamiento visible: `finish_reason == "length"` con `content` vacío (no
+con un párrafo cortado a mitad de frase) significa específicamente que el
+presupuesto se agotó **durante el razonamiento**, antes de escribir nada
+de la respuesta final — distinto del truncamiento clásico donde `content`
+sí tiene texto, solo que incompleto. Un cliente robusto debe: comprobar
+`finish_reason`, y si es `"length"` con `content` vacío, reintentar con
+`max_tokens` mayor y/o `reasoning_effort` más bajo, no mostrar una
+respuesta vacía al usuario final sin más.
 
 **POST `/ocabra/profiles/{profile_id}/runtime-presets`**:
 

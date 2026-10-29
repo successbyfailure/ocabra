@@ -71,7 +71,10 @@ async def chat(
     reasoning models this can truncate the response (`done_reason: "length"`,
     empty `content`) if the model reasons longer than that default covers.
     Set `options.num_predict` generously, or force a preset with
-    `"ocabra": {"context_preset": "<key>"}`. See docs/API.md.
+    `"ocabra": {"context_preset": "<key>"}`. Clients must always check
+    `done_reason` — `"length"` with empty `content` means the budget ran
+    out during reasoning before any answer was written; don't render that
+    as-is, retry with a bigger budget. See docs/API.md.
     """
     body = await request.json()
     ollama_model = str(body.get("model", ""))

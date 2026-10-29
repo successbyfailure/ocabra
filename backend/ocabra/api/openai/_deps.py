@@ -1441,8 +1441,7 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
 
 def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
     """Translate oCabra's ``reasoning_budget`` extension into llama-server's
-    native per-request field of the same name (mirrors its
-    ``--reasoning-budget`` CLI flag: a hard token cap on thinking — when
+    native per-request field — a hard token cap on thinking — when
     exhausted, llama.cpp cuts reasoning short and forces the final answer,
     unlike ``reasoning_effort`` which is only a soft hint the chat template
     may ignore).
@@ -1454,16 +1453,17 @@ def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
     ``content`` empty. No native equivalent on other backends — silently
     dropped there, same pattern as ``reasoning_effort``.
 
-    CAVEAT verified live the same day against the installed build
-    (b1-74bca39): the field is forwarded but NOT honored per-request by this
-    llama-server build — a request with ``reasoning_budget=200`` still
-    reasoned for thousands of tokens. ``reasoning_effort`` IS confirmed
-    effective (same prompt: "low" cut reasoning from ~16.6k to ~4.7k chars).
-    Kept wired anyway (harmless no-op) for whenever the binary gains
-    per-request support, or as a stepping stone to wiring it as a
-    per-profile launch-time flag instead (same family as ``gpu_layers`` /
-    ``ctx_size`` in ``extra_config.llama_cpp`` — a true launch-time
-    ``--reasoning-budget`` would actually be enforced).
+    The wire key is ``reasoning_budget_tokens``, NOT ``reasoning_budget`` —
+    confirmed by reading the strings in ``libllama-server-impl.so`` (the
+    CLI flag ``--reasoning-budget`` doesn't map 1:1 to its own JSON key; the
+    binary groups it with ``thinking_budget_tokens``,
+    ``reasoning_budget_start_tag`` etc., all suffixed ``_tokens``/``_tag``).
+    An initial implementation forwarded the CLI-flag-shaped name
+    (``reasoning_budget``) directly, which the server silently ignored — a
+    request with budget=200 still reasoned for thousands of tokens. Fixed
+    and verified live the same day: budget=200 against qwen3.8:27b produced
+    674 chars of reasoning and a clean ``finish_reason: "stop"`` (vs. ~16.6k
+    chars / several minutes unconstrained).
     """
     raw = payload.pop("reasoning_budget", None)
     if raw is None:
@@ -1473,7 +1473,7 @@ def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
     except (TypeError, ValueError):
         return
     if getattr(state, "backend_type", "") == "llama_cpp":
-        payload.setdefault("reasoning_budget", budget)
+        payload.setdefault("reasoning_budget_tokens", budget)
 
 
 def to_backend_body(state: ModelState, body: dict) -> dict:

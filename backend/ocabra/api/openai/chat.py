@@ -87,9 +87,16 @@ async def chat_completions(
     reasoning models, `reasoning_content` counts against that same budget —
     if you don't pass `max_tokens` and the model reasons for longer than the
     default reservation covers, the response can get cut (`finish_reason:
-    "length"`) with empty `content`. Send a generous `max_tokens`, or force
-    a specific preset with `"ocabra": {"context_preset": "<key>"}` in the
-    request body.
+    "length"`) with empty `content`. Send a generous `max_tokens`, cap
+    reasoning with `reasoning_effort`/`reasoning_budget`, or force a
+    specific preset with `"ocabra": {"context_preset": "<key>"}`.
+
+    **Clients must always check `finish_reason`** — no upfront estimate is
+    foolproof. `finish_reason == "length"` with an EMPTY `content` (as
+    opposed to a `content` that just got cut mid-sentence) specifically
+    means the budget ran out during reasoning, before any of the final
+    answer was written. Don't render an empty response to the end user;
+    retry with a larger `max_tokens` and/or a lower `reasoning_effort`.
     """
     body = await request.json()
     model_id: str = body.get("model", "")

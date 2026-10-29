@@ -54,16 +54,15 @@ class ChatCompletionRequest(BaseModel):
         None,
         description=(
             "Hard token cap on thinking, for llama.cpp-native models only "
-            "(e.g. gemma4:26b, qwen3.8:27b) — mirrors llama-server's "
-            "`--reasoning-budget`. In theory, forces the model to cut "
-            "reasoning short once the cap is hit, unlike `reasoning_effort` "
-            "(a soft hint the chat template may ignore). WARNING: verified "
-            "live 2026-10-29 against the installed llama.cpp build "
-            "(b1-74bca39) — this field is forwarded but NOT honored "
-            "per-request; a request with reasoning_budget=200 still reasoned "
-            "for thousands of tokens. Use `reasoning_effort` instead, which "
-            "IS confirmed effective. No native equivalent on other "
-            "backends — silently ignored there."
+            "(e.g. gemma4:26b, qwen3.8:27b). Forces the model to cut "
+            "reasoning short once the cap is hit and write the final "
+            "answer, unlike `reasoning_effort` (a soft hint the chat "
+            "template may ignore) — guarantees non-empty `content`. "
+            "Verified live 2026-10-29 against qwen3.8:27b: budget=200 "
+            "produced 674 chars of reasoning and a clean `finish_reason: "
+            "\"stop\"` (vs ~16.6k chars unconstrained). Server default is "
+            "unrestricted (-1) if you don't set this. No native "
+            "equivalent on other backends — silently ignored there."
         ),
     )
     response_format: dict | None = Field(

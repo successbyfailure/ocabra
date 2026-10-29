@@ -270,11 +270,17 @@ def test_to_backend_body_vllm_leaves_thinking_on_by_default() -> None:
 
 class TestLlamaCppReasoningControls:
     """gemma4:26b / qwen3.8:27b run on the native llama_cpp backend.
-    llama-server accepts 'reasoning_effort' and 'reasoning_budget' directly
-    as per-request JSON body fields (mirroring its own --reasoning-effort /
-    --reasoning-budget CLI flags) — no reshaping needed, just forward them.
-    2026-10-29: previously silently dropped, so neither model had any way to
-    cap how long a client's request could make it think before answering."""
+    llama-server accepts 'reasoning_effort' directly as a per-request JSON
+    body field (mirroring its own --reasoning-effort CLI flag). oCabra's
+    'reasoning_budget' client-facing field translates to the server's own
+    'reasoning_budget_tokens' wire key — NOT a 1:1 name mirror of the CLI
+    flag; confirmed by reading libllama-server-impl.so's strings after an
+    initial implementation that forwarded 'reasoning_budget' verbatim was
+    silently ignored (verified live: budget=200 still reasoned for
+    thousands of tokens). With the correct key, live verification showed
+    budget=200 -> 674 chars of reasoning, finish_reason 'stop'.
+    2026-10-29: previously silently dropped entirely, so neither model had
+    any way to cap how long a client's request could make it think."""
 
     def test_reasoning_effort_level_forwarded_directly(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
@@ -298,7 +304,7 @@ class TestLlamaCppReasoningControls:
         assert payload["reasoning"] == "off"
         assert "reasoning_effort" not in payload
 
-    def test_reasoning_budget_forwarded_directly(self) -> None:
+    def test_reasoning_budget_forwarded_as_reasoning_budget_tokens(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
 
         payload = to_backend_body(
@@ -306,7 +312,8 @@ class TestLlamaCppReasoningControls:
             {"model": "gemma4:26b", "reasoning_budget": 8192, "messages": []},
         )
 
-        assert payload["reasoning_budget"] == 8192
+        assert payload["reasoning_budget_tokens"] == 8192
+        assert "reasoning_budget" not in payload
 
     def test_reasoning_budget_dropped_for_backends_without_native_support(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
@@ -317,6 +324,7 @@ class TestLlamaCppReasoningControls:
         )
 
         assert "reasoning_budget" not in payload
+        assert "reasoning_budget_tokens" not in payload
 
     def test_reasoning_budget_non_numeric_is_dropped_not_forwarded(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
@@ -327,6 +335,7 @@ class TestLlamaCppReasoningControls:
         )
 
         assert "reasoning_budget" not in payload
+        assert "reasoning_budget_tokens" not in payload
 
     def test_no_reasoning_fields_means_no_injection(self) -> None:
         """Default behaviour (nothing set) must stay untouched — the server's
@@ -339,6 +348,7 @@ class TestLlamaCppReasoningControls:
 
         assert "reasoning_effort" not in payload
         assert "reasoning_budget" not in payload
+        assert "reasoning_budget_tokens" not in payload
         assert "reasoning" not in payload
 
 
