@@ -14,9 +14,6 @@ interface ModelOption {
   displayName: string
 }
 
-const TTS_BACKENDS = new Set(["tts", "chatterbox", "voxtral"])
-const STT_BACKENDS = new Set(["whisper"])
-
 export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
   const [logLevel, setLogLevel] = useState(config.logLevel)
   const [energyCostEurKwh, setEnergyCostEurKwh] = useState(config.energyCostEurKwh)
@@ -36,15 +33,21 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
   }, [config.energyCostEurKwh, config.idleTimeoutSeconds, config.logLevel, config.realtimeDefaultSttModel, config.realtimeDefaultTtsModel])
 
   useEffect(() => {
+    // Filter by the model's real capabilities rather than a hardcoded
+    // backend-type allowlist — reproduced live 2026-10-29: the old
+    // TTS_BACKENDS set ("tts", "chatterbox", "voxtral") missed "piper"
+    // entirely (the only TTS backend actually installed in this
+    // environment), so the dropdown always had zero options regardless
+    // of what was configured; STT_BACKENDS similarly missed "vibeasr".
     api.models.list().then((models) => {
       setSttModels(
         models
-          .filter((m) => STT_BACKENDS.has(m.backendType))
+          .filter((m) => m.capabilities?.audioTranscription)
           .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId }))
       )
       setTtsModels(
         models
-          .filter((m) => TTS_BACKENDS.has(m.backendType))
+          .filter((m) => m.capabilities?.tts)
           .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId }))
       )
     }).catch(() => {})
