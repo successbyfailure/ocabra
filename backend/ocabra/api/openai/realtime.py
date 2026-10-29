@@ -79,6 +79,45 @@ async def _authenticate_ws(websocket: WebSocket) -> UserContext | None:
     return None
 
 
+async def resolve_realtime_model_id(
+    model: str,
+    *,
+    profile_registry,
+    model_manager,
+    router_resolver: object | None = None,
+) -> str | None:
+    """Map the ``model`` query parameter to a canonical model id.
+
+    Profiles resolve to their base model; *router* profiles (no ``base_model_id`` of their own)
+    are resolved through the :class:`RouterResolver` like the REST endpoints do; anything else
+    falls back to a legacy id/backend-id match. Returns ``None`` when nothing loadable is found.
+    """
+    profile = await profile_registry.get(model)
+    if profile and profile.enabled:
+        if profile.base_model_id is not None:
+            return profile.base_model_id
+        if router_resolver is not None and router_resolver.is_router(profile):
+            try:
+                picked = await router_resolver.pick(profile, request_body=None)
+            except Exception as exc:  # noqa: BLE001 - includes NoRoutableTargetError
+                logger.warning("realtime_router_pick_failed", model=model, error=str(exc))
+                return None
+            target = await profile_registry.get(picked.target_profile_id)
+            if target is not None and target.base_model_id is not None:
+                return target.base_model_id
+        return None
+    if "/" not in model:
+        # Not a profile and not a canonical id — try legacy fallback
+        states = await model_manager.list_states()
+        match = next(
+            (s for s in states if s.backend_model_id == model or s.model_id == model),
+            None,
+        )
+        if match:
+            return match.model_id
+    return model
+
+
 @router.websocket("/realtime")
 async def realtime_ws(
     websocket: WebSocket,
@@ -124,19 +163,28 @@ async def realtime_ws(
     profile_registry = websocket.app.state.profile_registry
 
     # Resolve profile_id → canonical model_id (same as REST endpoints)
-    resolved_model_id = model
-    profile = await profile_registry.get(model)
-    if profile and profile.enabled:
-        resolved_model_id = profile.base_model_id
-    elif "/" not in model:
-        # Not a profile and not a canonical id — try legacy fallback
-        states = await model_manager.list_states()
-        match = next(
-            (s for s in states if s.backend_model_id == model or s.model_id == model),
-            None,
+    resolved_model_id = await resolve_realtime_model_id(
+        model,
+        profile_registry=profile_registry,
+        model_manager=model_manager,
+        router_resolver=getattr(websocket.app.state, "router_resolver", None),
+    )
+    if resolved_model_id is None:
+        # A router with no routable target (or a profile without a base model) used to start a
+        # session with model=None that waited for an LLM forever. Fail loudly instead.
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "model_not_found",
+                    "message": f"Model '{model}' does not resolve to a loadable model",
+                    "param": "model",
+                },
+            }
         )
-        if match:
-            resolved_model_id = match.model_id
+        await websocket.close(code=1008, reason="Model not resolvable")
+        return
 
     async def _record_realtime(**kwargs: object) -> None:
         try:
