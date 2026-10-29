@@ -178,6 +178,7 @@ async def transcriptions(
         model_manager,
         profile_registry,
         user=user,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
     )
     check_capability(state, "audio_transcription", "audio transcription")
@@ -318,6 +319,8 @@ async def list_voices(
         model_manager,
         profile_registry,
         user=user,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
+        request_state=request.state,
     )
     check_capability(state, "tts", "text-to-speech")
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
@@ -405,6 +408,7 @@ async def speech(
         model_manager,
         profile_registry,
         user=user,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
     )
     check_capability(state, "tts", "text-to-speech")
@@ -550,6 +554,7 @@ async def generate_music(
         model_manager,
         profile_registry,
         user=user,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
     )
     check_capability(state, "music_generation", "music generation")
