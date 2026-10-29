@@ -226,6 +226,15 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
       | null
       | undefined
     next.llama_cpp = {
+      // Spread the raw source first so fields this parser doesn't know
+      // about (model_path, speculative, mmproj_model_id, disabled_gpus,
+      // ...) survive the round-trip instead of being silently dropped —
+      // reproduced live 2026-10-29: this rebuild used to replace the whole
+      // object with only the 7 fields below, so any save from the Models
+      // UI wiped llama_cpp.model_path and broke context-capacity planning
+      // for every subsequent request. The explicit fields below still
+      // normalize/override with typed values.
+      ...(llamaCppSource as unknown as LlamaCppConfig),
       gpuLayers: toNumberOrNull(llamaCppSource, "gpu_layers", "gpuLayers"),
       ctxSize: toNumberOrNull(llamaCppSource, "ctx_size", "ctxSize"),
       parallelSlots: toNumberOrNull(llamaCppSource, "parallel_slots", "parallelSlots"),

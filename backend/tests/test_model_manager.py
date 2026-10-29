@@ -602,6 +602,46 @@ async def test_update_config_applies_whitelisted_fields(model_manager):
 
 
 @pytest.mark.asyncio
+async def test_update_config_deep_merges_extra_config_preserving_unmentioned_fields(
+    model_manager,
+):
+    """2026-10-29 incident: the Models UI only knows about its own form
+    fields (gpuLayers, ctxSize, ...) and has no notion of backend-managed
+    fields like llama_cpp.model_path. A PATCH that only touches the known
+    fields must not wipe model_path — reproduced live against
+    qwen3.8:27b, which lost model_path this way and broke context-capacity
+    planning for every subsequent request."""
+    state = await add_test_model(model_manager)
+    state.extra_config = {
+        "llama_cpp": {
+            "model_path": "/data/models/real-weights.gguf",
+            "gpu_layers": 99,
+            "ctx_size": 32768,
+        },
+        "registry_metadata": {"source": "huggingface"},
+    }
+
+    await model_manager.update_config(
+        "test/model",
+        {
+            "extra_config": {
+                "llama_cpp": {
+                    "gpuLayers": 99,
+                    "ctxSize": 65536,
+                    "flashAttn": True,
+                },
+            },
+        },
+    )
+
+    assert state.extra_config["llama_cpp"]["model_path"] == "/data/models/real-weights.gguf"
+    assert state.extra_config["llama_cpp"]["gpu_layers"] == 99
+    assert state.extra_config["llama_cpp"]["ctxSize"] == 65536
+    assert state.extra_config["llama_cpp"]["flashAttn"] is True
+    assert state.extra_config["registry_metadata"] == {"source": "huggingface"}
+
+
+@pytest.mark.asyncio
 async def test_pressure_eviction_prefers_on_demand_then_warm_then_pin(worker_pool):
     mm = ModelManager(worker_pool)
 

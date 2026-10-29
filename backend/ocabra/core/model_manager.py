@@ -40,6 +40,29 @@ def _to_camel_key(value: str) -> str:
     )
 
 
+def _deep_merge_dicts(base: dict, patch: dict) -> dict:
+    """Recursively merge ``patch`` into a copy of ``base``.
+
+    A nested dict value is merged key-by-key rather than replaced wholesale;
+    any other value (scalar, list, None) overwrites. Keys present in
+    ``base`` but absent from ``patch`` are preserved. This is what keeps a
+    partial ``extra_config`` PATCH (e.g. the Models UI, which only knows
+    about its own form fields) from wiping backend-managed nested fields
+    like ``llama_cpp.model_path`` that were never part of the payload —
+    reproduced live 2026-10-29: saving qwen3.8:27b's config from the UI
+    silently dropped ``model_path``, breaking context-capacity planning for
+    every subsequent request until a worker reload.
+    """
+    merged = dict(base)
+    for key, value in patch.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class ModelStatus(str, Enum):
     DISCOVERED = "discovered"
     CONFIGURED = "configured"
@@ -2795,7 +2818,8 @@ class ModelManager:
                         elif key == "auto_reload":
                             setattr(cfg, key, bool(val))
                         elif key == "extra_config":
-                            setattr(cfg, key, val or {})
+                            existing_extra = cfg.extra_config if isinstance(cfg.extra_config, dict) else {}
+                            setattr(cfg, key, _deep_merge_dicts(existing_extra, val or {}))
                         else:
                             setattr(cfg, key, val)
                     await session.commit()
@@ -2808,7 +2832,8 @@ class ModelManager:
             elif key == "auto_reload":
                 setattr(state, key, bool(val))
             elif key == "extra_config":
-                setattr(state, key, val or {})
+                existing_extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+                setattr(state, key, _deep_merge_dicts(existing_extra, val or {}))
             else:
                 setattr(state, key, val)
 
