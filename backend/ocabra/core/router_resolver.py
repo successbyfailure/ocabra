@@ -3,12 +3,16 @@
 Bloque 20 — Etapa 6.
 
 A router profile has a ``routing_targets`` list (ordered ``profile_id``
-strings). When a client asks for the router, the resolver walks that list
-and returns the first candidate that satisfies the current constraints:
+strings). When a client asks for the router, the resolver runs two passes
+over that list:
 
-    1. Already LOADED, not saturated, not held by a live Realtime session.
-    2. UNLOADED but loadable without disrupting a busy neighbour.
-    3. The estimator says it's still cheaper than the next candidate.
+    1. Warm scan: is ANYTHING in the list already LOADED (not held by a
+       live Realtime session)? The first such hit wins, regardless of its
+       position in the list — an already-hot target is always cheaper than
+       a cold start on a higher-priority one.
+    2. Cold start: only if nothing in the list is loaded, walk it again in
+       priority order and take the first target that can load without
+       disrupting a busy neighbour.
 
 Every decision produces a ``reason`` string that lands both in the
 audit-trail sent to the client (via the attribution banner in Playground)
@@ -130,13 +134,23 @@ class RouterResolver:
     ) -> ResolvedTarget:
         """Walk the router's ``routing_targets`` and pick the best one now.
 
-        The rule is simple and predictable:
-          1. A LOADED target always wins (session veto aside). Adding this
-             request to its queue is strictly cheaper than paying a cold
-             start on a fallback + potentially evicting the primary.
-          2. An UNLOADED/CONFIGURED/ERROR target is accepted only if
-             loading it here would not disrupt a busy neighbour — that is
-             the only case the fallback list is meant to handle.
+        Two-pass rule (2026-10-29 — previously a single pass only asked "would
+        loading THIS target disrupt a busy neighbour", never "is a lower-
+        priority target in my own list already warm". Reproduced in
+        production: a Realtime session evicted the router's #1 target to
+        make room for its own STT worker, then the router's very next REST
+        request tried to reload that #1 target instead of just using the #2
+        target, which had been sitting there warm the entire time):
+
+          1. Scan ALL targets, in list order, for one that is already
+             LOADED (session veto aside). The first hit wins — warm beats
+             priority order, no matter how far down the list it is. Adding
+             this request to a hot worker's queue is strictly cheaper than
+             any cold start.
+          2. Only if NOTHING in the list is currently loaded, walk the list
+             again and cold-start the first target whose load would not
+             disrupt a busy neighbour — this is the priority order the
+             operator configured for the "nothing is warm" case.
 
         Context/runtime capacity is resolved before availability so a router
         never selects a hot target that cannot cover the incoming request.
@@ -152,7 +166,11 @@ class RouterResolver:
         visited: set[str] = {router.profile_id}
 
         target_ids = list(router.routing_targets or [])
-        last_resort: ResolvedTarget | None = None
+
+        # Pass 1 also resolves each target's registry entry / runtime plan /
+        # state once — ``resolved`` carries that over to pass 2 so neither
+        # is computed twice regardless of which pass ends up picking it.
+        resolved: list[tuple["ModelProfile", object, object]] = []  # (target, runtime_plan, state)
 
         for target_id in target_ids:
             if target_id in visited:
@@ -175,22 +193,24 @@ class RouterResolver:
                 continue
 
             # Nested router? Resolve it recursively — the visited set
-            # carries the cycle guard across levels.
+            # carries the cycle guard across levels. A nested router commits
+            # to its own decision immediately (warm-or-cold); it is not
+            # folded into this level's warm-scan, since it already ran one
+            # of its own.
             if self.is_router(target):
                 try:
                     nested = await self.pick(target, request_body=request_body)
                 except RoutingLoopError:
                     audit.append(CandidateAudit(target_id, "loop"))
                     continue
-                if nested.reason != "no_immediate_winner":
-                    audit.append(CandidateAudit(target_id, f"nested:{nested.reason}"))
-                    return ResolvedTarget(
-                        target_profile_id=nested.target_profile_id,
-                        base_model_id=nested.base_model_id,
-                        load_overrides=nested.load_overrides,
-                        reason=nested.reason,
-                        considered=audit + nested.considered,
-                    )
+                audit.append(CandidateAudit(target_id, f"nested:{nested.reason}"))
+                return ResolvedTarget(
+                    target_profile_id=nested.target_profile_id,
+                    base_model_id=nested.base_model_id,
+                    load_overrides=nested.load_overrides,
+                    reason=nested.reason,
+                    considered=audit + nested.considered,
+                )
 
             if not target.base_model_id:
                 audit.append(CandidateAudit(target_id, "invalid_target"))
@@ -208,23 +228,12 @@ class RouterResolver:
             state = await self._model_manager.get_state(worker_key)
             if state is None and worker_key != target.base_model_id:
                 state = await self._model_manager.get_state(target.base_model_id)
-            candidate = ResolvedTarget(
-                target_profile_id=target.profile_id,
-                base_model_id=target.base_model_id,
-                load_overrides=runtime_plan.load_overrides,
-                reason="forced_fallback",
-                considered=list(audit),
-            )
-            if last_resort is None:
-                last_resort = candidate
 
-            # 1) Loaded and unreserved → always pick, no matter how busy.
-            # The router's purpose is "give me a working model"; if the
-            # primary is hot, adding this request to its queue is strictly
-            # cheaper than paying a cold start on a fallback + potentially
-            # evicting the primary's workers to make room. The fallback
-            # exists for the case "primary can't load because the GPU is
-            # busy with other tasks", not "primary is loaded and serving".
+            # 1) Loaded and unreserved → always wins over EVERY other target
+            # in the list, warm or not. The router's purpose is "give me a
+            # working model"; if something in the list is hot, adding this
+            # request to its queue is strictly cheaper than paying a cold
+            # start elsewhere + potentially evicting a neighbour to make room.
             if state is not None and state.status == ModelStatus.LOADED:
                 if self._session_registry is not None and self._session_registry.has_active_session_holding(
                     worker_key
@@ -247,13 +256,32 @@ class RouterResolver:
                     considered=audit,
                 )
 
+            audit.append(CandidateAudit(target_id, "not_loaded"))
+            resolved.append((target, runtime_plan, state))
+
+        # Pass 2: nothing anywhere in the list is currently loaded — only
+        # now does cold-start priority order (the order the operator typed
+        # ``routing_targets`` in) take over.
+        last_resort: ResolvedTarget | None = None
+        for target, runtime_plan, state in resolved:
+            worker_key = runtime_plan.worker_key
+            candidate = ResolvedTarget(
+                target_profile_id=target.profile_id,
+                base_model_id=target.base_model_id,
+                load_overrides=runtime_plan.load_overrides,
+                reason="forced_fallback",
+                considered=list(audit),
+            )
+            if last_resort is None:
+                last_resort = candidate
+
             # 2) Reserved by session even though unloaded — shouldn't happen
             # in practice (unload releases the registry entry) but guard
             # anyway so we don't accidentally hit a stale hold.
             if self._session_registry is not None and self._session_registry.has_active_session_holding(
                 worker_key
             ):
-                audit.append(CandidateAudit(target_id, "session_veto"))
+                audit.append(CandidateAudit(target.profile_id, "session_veto"))
                 continue
 
             # 3a) Preferred GPU reserved by an external service (Hunyuan,
@@ -268,7 +296,7 @@ class RouterResolver:
                 and state.preferred_gpu is not None
                 and self._gpu_manager.has_service_lock(state.preferred_gpu)
             ):
-                audit.append(CandidateAudit(target_id, "gpu_reserved_by_service"))
+                audit.append(CandidateAudit(target.profile_id, "gpu_reserved_by_service"))
                 continue
 
             # 3) Unloaded / configured / error. Only accept if loading here
@@ -284,20 +312,10 @@ class RouterResolver:
             # its first target — reproduced in production 2026-09-15.
             router_self_mask: tuple[str, ...] = (router.base_model_id,) if router.base_model_id else ()
             if self._model_manager.any_busy_worker_except(worker_key, also_exclude=router_self_mask):
-                audit.append(CandidateAudit(target_id, "load_would_disrupt_busy"))
+                audit.append(CandidateAudit(target.profile_id, "load_would_disrupt_busy"))
                 continue
 
-            audit.append(CandidateAudit(target_id, "loadable"))
-            candidate = ResolvedTarget(
-                target_profile_id=target.profile_id,
-                base_model_id=target.base_model_id,
-                load_overrides=target.load_overrides,
-                reason="loadable_no_disruption",
-                considered=list(audit),
-            )
-            # Only keep the FIRST loadable candidate as the winner — the
-            # ordering of ``routing_targets`` expresses the operator's
-            # preference among functionally equivalent fallbacks.
+            audit.append(CandidateAudit(target.profile_id, "loadable"))
             logger.info(
                 "router_resolver_picked",
                 router=router.profile_id,
@@ -305,7 +323,13 @@ class RouterResolver:
                 reason="loadable_no_disruption",
                 considered=[(a.target_profile_id, a.outcome) for a in audit],
             )
-            return candidate
+            return ResolvedTarget(
+                target_profile_id=target.profile_id,
+                base_model_id=target.base_model_id,
+                load_overrides=runtime_plan.load_overrides,
+                reason="loadable_no_disruption",
+                considered=list(audit),
+            )
 
         # Nothing was immediately available. Use the first otherwise viable
         # target so routing remains deterministic, but never fall back to a

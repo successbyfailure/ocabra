@@ -143,6 +143,33 @@ class TestBasicResolution:
         assert result.reason == "loadable_no_disruption"
 
     @pytest.mark.asyncio
+    async def test_lower_priority_warm_target_beats_higher_priority_cold_one(self):
+        """Reproduced in production 2026-10-29: a Realtime session evicted
+        the router's #1 target (t1) to load its own STT worker, then the
+        router's very next REST request walked the list and — under the
+        old single-pass rule — tried to reload t1 instead of just using t2,
+        which was sitting there warm the whole time (t1 was 'not loaded',
+        and nothing was 'busy' by the disruption check at that instant, so
+        the old code judged t1 'safe to cold-start').
+
+        The two-pass rule: scan the WHOLE list for anything warm first.
+        t1 UNLOADED, t2 LOADED → t2 wins, no attempt to touch t1 at all."""
+        router = _FakeProfile("g", "llama_cpp/base", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "llama_cpp/gemma4-26b")
+        t2 = _FakeProfile("t2", "llama_cpp/qwen3.8-27b")
+        resolver, _, _ = _make_resolver(
+            router, t1, t2,
+            states={
+                "llama_cpp/gemma4-26b": _FakeState(_Status.UNLOADED),
+                "llama_cpp/qwen3.8-27b": _FakeState(_Status.LOADED),
+            },
+            busy=set(),  # nothing busy — the old code would've cold-started t1 here
+        )
+        result = await resolver.pick(router)
+        assert result.target_profile_id == "t2"
+        assert result.reason == "primary_loaded"
+
+    @pytest.mark.asyncio
     async def test_no_target_survives_returns_no_immediate_winner(self):
         """A router never falls through to a fictitious base model."""
         router = _FakeProfile("g", "vllm/base", routing_targets=["missing1", "missing2"])
