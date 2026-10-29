@@ -1385,6 +1385,14 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
     - **Ollama ≥0.5**: translated to the native ``think`` field
       (``True`` for low/medium/high — Ollama has a single on/off switch —
       and ``False`` for off/none/disabled).
+    - **llama.cpp (native)**: ``llama-server`` accepts ``reasoning_effort``
+      ('low'/'medium'/'high', mirroring its ``--reasoning-effort`` CLI flag)
+      and ``reasoning`` ('on'/'off'/'auto', mirroring ``--reasoning``)
+      directly as per-request JSON body fields — forwarded as-is, no
+      reshaping needed. 2026-10-29: previously silently dropped here, so
+      gemma4/qwen3.8 (both llama_cpp) had zero way to cap how much a client
+      could make them think, even though llama-server itself always
+      supported it per-request.
     - **Everything else**: silently dropped — no-op for backends with no
       native reasoning control.
 
@@ -1424,6 +1432,37 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
         # Ollama passes unknown top-level keys to the chat template so the
         # same key still works.
         payload.setdefault("think", enabled)
+    elif backend == "llama_cpp":
+        if enabled:
+            payload.setdefault("reasoning_effort", value)
+        else:
+            payload.setdefault("reasoning", "off")
+
+
+def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
+    """Translate oCabra's ``reasoning_budget`` extension into llama-server's
+    native per-request field of the same name (mirrors its
+    ``--reasoning-budget`` CLI flag: a hard token cap on thinking — when
+    exhausted, llama.cpp cuts reasoning short and forces the final answer,
+    unlike ``reasoning_effort`` which is only a soft hint the chat template
+    may ignore).
+
+    2026-10-29: added after a production incident where gemma4 (llama_cpp,
+    no budget cap at all — ``--reasoning-budget`` defaults to -1,
+    unrestricted) reasoned for 28k+ tokens on an uncapped request and burned
+    through the entire context preset before writing an answer, leaving
+    ``content`` empty. No native equivalent on other backends — silently
+    dropped there, same pattern as ``reasoning_effort``.
+    """
+    raw = payload.pop("reasoning_budget", None)
+    if raw is None:
+        return
+    try:
+        budget = int(raw)
+    except (TypeError, ValueError):
+        return
+    if getattr(state, "backend_type", "") == "llama_cpp":
+        payload.setdefault("reasoning_budget", budget)
 
 
 def to_backend_body(state: ModelState, body: dict) -> dict:
@@ -1440,6 +1479,7 @@ def to_backend_body(state: ModelState, body: dict) -> dict:
         else:
             payload["stream_options"] = {"include_usage": True}
     _apply_reasoning_effort(state, payload)
+    _apply_reasoning_budget(state, payload)
     _apply_thinking_controls(state, payload)
     return payload
 

@@ -198,6 +198,21 @@ def _vllm_state():
     )
 
 
+def _llama_cpp_state():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id="llama_cpp/gemma4-26b",
+        backend_model_id="gemma4-26b",
+        display_name="Gemma 4 26B (llama.cpp nativo)",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.WARM,
+        capabilities=BackendCapabilities(chat=True, streaming=True, reasoning=True),
+    )
+
+
 def test_to_backend_body_ollama_never_injects_reasoning_knobs() -> None:
     # Ollama's /v1 can't disable reasoning via params (a string `reasoning`
     # 400s upstream); oCabra must not inject any knob and must drop the
@@ -251,6 +266,80 @@ def test_to_backend_body_vllm_leaves_thinking_on_by_default() -> None:
     payload = to_backend_body(_vllm_state(), {"model": "vllm/demo", "messages": []})
 
     assert "chat_template_kwargs" not in payload
+
+
+class TestLlamaCppReasoningControls:
+    """gemma4:26b / qwen3.8:27b run on the native llama_cpp backend.
+    llama-server accepts 'reasoning_effort' and 'reasoning_budget' directly
+    as per-request JSON body fields (mirroring its own --reasoning-effort /
+    --reasoning-budget CLI flags) — no reshaping needed, just forward them.
+    2026-10-29: previously silently dropped, so neither model had any way to
+    cap how long a client's request could make it think before answering."""
+
+    def test_reasoning_effort_level_forwarded_directly(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _llama_cpp_state(),
+            {"model": "gemma4:26b", "reasoning_effort": "low", "messages": []},
+        )
+
+        assert payload["reasoning_effort"] == "low"
+        assert "reasoning" not in payload
+
+    def test_reasoning_effort_off_translates_to_reasoning_off(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _llama_cpp_state(),
+            {"model": "gemma4:26b", "reasoning_effort": "off", "messages": []},
+        )
+
+        assert payload["reasoning"] == "off"
+        assert "reasoning_effort" not in payload
+
+    def test_reasoning_budget_forwarded_directly(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _llama_cpp_state(),
+            {"model": "gemma4:26b", "reasoning_budget": 8192, "messages": []},
+        )
+
+        assert payload["reasoning_budget"] == 8192
+
+    def test_reasoning_budget_dropped_for_backends_without_native_support(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _ollama_state(),
+            {"model": "gemma4:26b", "reasoning_budget": 8192, "messages": []},
+        )
+
+        assert "reasoning_budget" not in payload
+
+    def test_reasoning_budget_non_numeric_is_dropped_not_forwarded(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _llama_cpp_state(),
+            {"model": "gemma4:26b", "reasoning_budget": "not-a-number", "messages": []},
+        )
+
+        assert "reasoning_budget" not in payload
+
+    def test_no_reasoning_fields_means_no_injection(self) -> None:
+        """Default behaviour (nothing set) must stay untouched — the server's
+        own --reasoning-budget default (-1, unrestricted) still applies."""
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _llama_cpp_state(), {"model": "gemma4:26b", "messages": []}
+        )
+
+        assert "reasoning_effort" not in payload
+        assert "reasoning_budget" not in payload
+        assert "reasoning" not in payload
 
 
 # ---------------------------------------------------------------------------

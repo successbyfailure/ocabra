@@ -43,9 +43,24 @@ class ChatCompletionRequest(BaseModel):
             "`high` (`off`/`none`/`disabled` also accepted to turn thinking off). "
             "oCabra translates the value per backend: vLLM gets it as "
             "`extra_body.chat_template_kwargs.reasoning_effort`, Ollama ≥0.5 "
-            "receives `think: 'low'|'medium'|'high'|False`, and backends with "
-            "no native control ignore it. Non-reasoning models silently accept "
+            "receives `think: 'low'|'medium'|'high'|False`, llama.cpp-native "
+            "models (e.g. gemma4:26b, qwen3.8:27b) get it forwarded directly "
+            "as `reasoning_effort`/`reasoning: 'off'`, and backends with no "
+            "native control ignore it. Non-reasoning models silently accept "
             "the field."
+        ),
+    )
+    reasoning_budget: int | None = Field(
+        None,
+        description=(
+            "Hard token cap on thinking, for llama.cpp-native models only "
+            "(e.g. gemma4:26b, qwen3.8:27b) — mirrors llama-server's "
+            "`--reasoning-budget`. Unlike `reasoning_effort` (a soft hint the "
+            "chat template may ignore), this forces the model to cut "
+            "reasoning short and write the final answer once the cap is hit, "
+            "guaranteeing non-empty `content`. No native equivalent on other "
+            "backends — silently ignored there. Server default is "
+            "unrestricted (-1) if you don't set this."
         ),
     )
     response_format: dict | None = Field(

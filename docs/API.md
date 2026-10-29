@@ -158,10 +158,25 @@ que acepta `"low"`, `"medium"`, `"high"` o `"off"` (sinónimos: `none`,
 | vLLM | `extra_body.chat_template_kwargs.reasoning_effort = <value>` |
 | Ollama ≥0.5 | `think: true` (low/medium/high) o `think: false` (off) |
 | Ollama 0.4 | aceptado y traducido, pero el upstream lo ignora de momento (ollama/ollama#15288) |
+| llama.cpp nativo (gemma4:26b, qwen3.8:27b) | `reasoning_effort = <value>` directo (low/medium/high), o `reasoning: "off"` para desactivarlo — llama-server acepta ambos campos tal cual, sin reshaping |
 | Otros | silenciosamente ignorado |
 
 ```json
 {"model": "qwen3.8:27b", "messages": [...], "reasoning_effort": "off"}
+```
+
+**Tope duro de razonamiento (`reasoning_budget`)** — solo para modelos
+llama.cpp nativos (gemma4:26b, qwen3.8:27b). A diferencia de
+`reasoning_effort` (una pista que la plantilla puede ignorar),
+`reasoning_budget` es un **límite duro en tokens**: al agotarse,
+llama-server corta el razonamiento y fuerza la respuesta final — garantiza
+que `content` nunca llega vacío. Por defecto el servidor no tiene límite
+(`-1`, sin restricción), que fue la causa del incidente de truncamiento
+2026-10-29 (ver sección de runtime presets más abajo). Silenciosamente
+ignorado en otros backends.
+
+```json
+{"model": "gemma4:26b", "messages": [...], "reasoning_budget": 8192}
 ```
 
 **Observabilidad de tokens**. El response trae los campos OpenAI estándar
