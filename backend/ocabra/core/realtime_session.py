@@ -209,6 +209,8 @@ class RealtimeSession:
         llm_load_overrides: dict | None = None,
         llm_preferred_gpu: int | None = None,
         llm_load_policy: str | None = None,
+        profile_registry: Any | None = None,
+        router_resolver: Any | None = None,
     ) -> None:
         from ocabra.config import settings
 
@@ -261,7 +263,12 @@ class RealtimeSession:
         self._conversation_id: str | None = None
         # Last assigned global speaker, used for short/embedding-less segments.
         self._last_speaker: str | None = None
-        # Apply server-configured defaults for STT/TTS models
+        # Apply server-configured defaults for STT/TTS models. These may name a
+        # router profile (e.g. "recomendado-stt") rather than a loadable model —
+        # resolved once in ``_resolve_stt_tts_defaults()`` at the top of ``run()``
+        # (not here: that resolution is async and ``__init__`` can't await it).
+        self._profile_registry = profile_registry
+        self._router_resolver = router_resolver
         self.stt_model_id: str | None = (
             model_id if transcription_only else (settings.realtime_default_stt_model or None)
         )
@@ -417,6 +424,44 @@ class RealtimeSession:
                 error=str(exc),
             )
 
+    async def _resolve_stt_tts_defaults(self) -> None:
+        """Resolve the configured STT/TTS defaults to concrete, loadable model ids.
+
+        ``settings.realtime_default_stt_model``/``realtime_default_tts_model`` may
+        name a router profile (no ``base_model_id`` of its own) instead of a plain
+        model id — mirrors how the LLM target is resolved once at connect via
+        ``resolve_realtime_model_id()`` in ``ocabra.api.openai.realtime``: a known
+        profile resolves to its base model, a router profile is resolved through
+        the ``RouterResolver``, and anything else (a literal model/backend id, or
+        an unknown string) passes through unchanged. Runs once here, not per-turn
+        — same scope as the LLM path, which doesn't re-pick mid-session either.
+
+        No-op when no ``profile_registry`` was injected (e.g. direct construction
+        in tests) or when a default isn't configured, preserving prior behaviour.
+        """
+        if self._profile_registry is None:
+            return
+        from ocabra.api.openai.realtime import resolve_realtime_model_id
+
+        if self.stt_model_id:
+            resolved = await resolve_realtime_model_id(
+                self.stt_model_id,
+                profile_registry=self._profile_registry,
+                model_manager=self._model_manager,
+                router_resolver=self._router_resolver,
+            )
+            if resolved is not None:
+                self.stt_model_id = resolved
+        if self.tts_model_id:
+            resolved = await resolve_realtime_model_id(
+                self.tts_model_id,
+                profile_registry=self._profile_registry,
+                model_manager=self._model_manager,
+                router_resolver=self._router_resolver,
+            )
+            if resolved is not None:
+                self.tts_model_id = resolved
+
     # ── Public entry point ──────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -483,6 +528,10 @@ class RealtimeSession:
             finally:
                 await self._unregister_workers()
             return
+
+        # Resolve the configured STT/TTS defaults (profile id, router profile
+        # id, or literal model id) before anything below reads them.
+        await self._resolve_stt_tts_defaults()
 
         # Mark models that are already loaded as ready
         if self._worker_pool.get_worker(self.llm_worker_key):

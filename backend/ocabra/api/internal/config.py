@@ -126,12 +126,18 @@ class ServerConfigPatch(BaseModel):
     realtime_default_stt_model: str | None = Field(
         default=None,
         alias="realtimeDefaultSttModel",
-        description="Default STT model for Realtime API sessions (profile_id or model_id)",
+        description=(
+            "Default STT model for Realtime API sessions "
+            "(profile_id, router profile_id, or literal model_id)"
+        ),
     )
     realtime_default_tts_model: str | None = Field(
         default=None,
         alias="realtimeDefaultTtsModel",
-        description="Default TTS model for Realtime API sessions (profile_id or model_id)",
+        description=(
+            "Default TTS model for Realtime API sessions "
+            "(profile_id, router profile_id, or literal model_id)"
+        ),
     )
     federation_enabled: bool | None = Field(
         default=None,

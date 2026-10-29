@@ -199,13 +199,14 @@ async def realtime_ws(
     worker_pool = websocket.app.state.worker_pool
     model_manager = websocket.app.state.model_manager
     profile_registry = websocket.app.state.profile_registry
+    router_resolver = getattr(websocket.app.state, "router_resolver", None)
 
     # Resolve profile_id → canonical model_id (same as REST endpoints)
     resolved_model_id = await resolve_realtime_model_id(
         model,
         profile_registry=profile_registry,
         model_manager=model_manager,
-        router_resolver=getattr(websocket.app.state, "router_resolver", None),
+        router_resolver=router_resolver,
     )
     if resolved_model_id is None:
         # A router with no routable target (or a profile without a base model) used to start a
@@ -257,6 +258,8 @@ async def realtime_ws(
         llm_load_overrides=llm_load_overrides,
         llm_preferred_gpu=llm_preferred_gpu,
         llm_load_policy=llm_load_policy,
+        profile_registry=profile_registry,
+        router_resolver=router_resolver,
     )
     # Bloque 20 — wire the SessionRegistry so the scheduler and router know
     # this session is holding its workers. Missing registry means the app

@@ -51,6 +51,21 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
           .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId }))
       )
     }).catch(() => {})
+    // Router profiles (e.g. "recomendado-stt") have no base_model_id of their
+    // own, so they never show up in api.models.list() — the realtime session
+    // now resolves them through the RouterResolver at connect time (same as
+    // the LLM target), so they belong in these dropdowns too. " · router"
+    // suffix follows the " · <metadata>" label convention used elsewhere in
+    // this app (e.g. GpuCard, LoadedModelList) instead of inventing a new one.
+    api.profiles.listAll().then((profiles) => {
+      const toOption = (p: (typeof profiles)[number]): ModelOption => ({
+        modelId: p.profileId,
+        displayName: `${p.displayName || p.profileId} · router`,
+      })
+      const routers = profiles.filter((p) => p.profileKind === "router")
+      setSttModels((prev) => [...prev, ...routers.filter((p) => p.category === "stt").map(toOption)])
+      setTtsModels((prev) => [...prev, ...routers.filter((p) => p.category === "tts").map(toOption)])
+    }).catch(() => {})
   }, [])
 
   const save = async () => {

@@ -10,13 +10,17 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn()
 })
 
-const { modelsList } = vi.hoisted(() => ({ modelsList: vi.fn() }))
+const { modelsList, profilesListAll } = vi.hoisted(() => ({
+  modelsList: vi.fn(),
+  profilesListAll: vi.fn(),
+}))
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 vi.mock("@/api/client", () => ({
   api: {
     models: { list: modelsList },
+    profiles: { listAll: profilesListAll },
   },
 }))
 
@@ -56,6 +60,7 @@ describe("GeneralSettings realtime STT/TTS model lists", () => {
         capabilities: { tts: false, audioTranscription: false },
       },
     ])
+    profilesListAll.mockResolvedValue([])
 
     render(<GeneralSettings config={CONFIG} onSave={vi.fn()} />)
 
@@ -70,5 +75,68 @@ describe("GeneralSettings realtime STT/TTS model lists", () => {
       expect(screen.getByText("Whisper Large v3 Turbo")).toBeTruthy()
     })
     expect(screen.getByText("VibeASR")).toBeTruthy()
+  })
+
+  it("merges router profiles into the STT/TTS dropdowns, badged with ' · router' (routers have no base_model_id so api.models.list() never returns them)", async () => {
+    modelsList.mockResolvedValue([
+      {
+        modelId: "whisper/openai/whisper-large-v3-turbo",
+        displayName: "Whisper Large v3 Turbo",
+        backendType: "whisper",
+        capabilities: { tts: false, audioTranscription: true },
+      },
+    ])
+    profilesListAll.mockResolvedValue([
+      {
+        profileId: "recomendado-stt",
+        profileKind: "router",
+        baseModelId: null,
+        displayName: "Recomendado STT",
+        category: "stt",
+      },
+      {
+        profileId: "recomendado-tts",
+        profileKind: "router",
+        baseModelId: null,
+        displayName: "Recomendado TTS",
+        category: "tts",
+      },
+      {
+        profileId: "some-llm-router",
+        profileKind: "router",
+        baseModelId: null,
+        displayName: "Some LLM Router",
+        category: "llm",
+      },
+      {
+        profileId: "whisper-exec",
+        profileKind: "execution",
+        baseModelId: "whisper/openai/whisper-large-v3-turbo",
+        displayName: "Whisper exec profile",
+        category: "stt",
+      },
+    ])
+
+    render(<GeneralSettings config={CONFIG} onSave={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(profilesListAll).toHaveBeenCalled()
+    })
+
+    const sttTrigger = screen.getByText("Modelo STT (Whisper)").parentElement!.querySelector("button")!
+    sttTrigger.click()
+    await waitFor(() => {
+      expect(screen.getByText("Recomendado STT · router")).toBeTruthy()
+    })
+    // Only the matching-category router shows up in STT, not the LLM router
+    // or the TTS router.
+    expect(screen.queryByText("Some LLM Router · router")).toBeNull()
+    expect(screen.queryByText("Recomendado TTS · router")).toBeNull()
+
+    const ttsTrigger = screen.getByText("Modelo TTS").parentElement!.querySelector("button")!
+    ttsTrigger.click()
+    await waitFor(() => {
+      expect(screen.getByText("Recomendado TTS · router")).toBeTruthy()
+    })
   })
 })
