@@ -10,10 +10,12 @@ from ocabra.core.worker_pool import InferenceTimeoutError
 from ocabra.stats.collector import (
     StatsMiddleware,
     _classify_request_kind,
+    _count_input_tokens,
     _extract_error_message,
     _extract_generation_ms,
     _extract_last_payload_from_stream,
     _extract_response_payload_and_rebuild,
+    _extract_speculative_stats,
     _extract_stream_error,
     _extract_usage_tokens,
     _resolve_inflight_model_id,
@@ -74,6 +76,105 @@ class TestStreamOutputTokensReasoningVisibility:
             body, "application/x-ndjson", include_reasoning=True
         )
         assert result == 3
+
+
+class TestCountInputTokensIncludesTools:
+    """2026-10-29 — reproduced live: a Home Assistant request's live-progress
+    card showed '~128 tok entrada' while the real prompt (confirmed via the
+    preset selector's own required_tokens) was 18,240 — _count_input_tokens
+    only looked at messages[].content, never tools. Tool-heavy clients are
+    exactly the ones a reviewer most needs an honest size for."""
+
+    def test_tools_words_are_counted(self) -> None:
+        payload = {
+            "messages": [{"role": "user", "content": "hola"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "turn_on_light",
+                        "description": "Turns on a light in a given room of the house",
+                        "parameters": {"room": {"type": "string"}},
+                    },
+                }
+            ],
+        }
+        with_tools = _count_input_tokens(payload, "chat")
+        without_tools = _count_input_tokens(
+            {"messages": payload["messages"]}, "chat"
+        )
+        assert with_tools > without_tools
+
+    def test_no_tools_field_is_unaffected(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "hola mundo"}]}
+        assert _count_input_tokens(payload, "chat") == 2
+
+    def test_empty_tools_list_is_unaffected(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "hola mundo"}], "tools": []}
+        assert _count_input_tokens(payload, "chat") == 2
+
+    def test_completion_kind_still_ignores_tools(self) -> None:
+        """Only chat/ollama_chat carry a 'tools' field in practice; completion
+        kind keeps its own prompt-only estimate unchanged."""
+        payload = {"prompt": "hola mundo", "tools": [{"function": {"name": "x"}}]}
+        assert _count_input_tokens(payload, "completion") == 2
+
+
+class TestExtractSpeculativeStats:
+    """2026-10-29 — persisted so a future 'this model feels slow' question
+    can be answered from history instead of needing a perfectly uncontended
+    live moment to test (which real GPU1 contention made impossible to get
+    the day this was added — see gpu-bench/README.md)."""
+
+    def test_reads_draft_and_speed_fields_from_timings(self) -> None:
+        payload = {
+            "timings": {
+                "draft_n": 16,
+                "draft_n_accepted": 13,
+                "predicted_per_second": 82.4,
+                "prompt_per_second": 410.2,
+            }
+        }
+        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
+            payload
+        )
+        assert draft_n == 16
+        assert draft_n_accepted == 13
+        assert predicted_tps == 82.4
+        assert prompt_tps == 410.2
+
+    def test_non_speculative_model_has_no_draft_fields(self) -> None:
+        """A normal (non-self-speculative) llama.cpp load still reports
+        predicted_per_second/prompt_per_second, just no draft_n."""
+        payload = {"timings": {"predicted_per_second": 34.1, "prompt_per_second": 900.0}}
+        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
+            payload
+        )
+        assert draft_n is None
+        assert draft_n_accepted is None
+        assert predicted_tps == 34.1
+        assert prompt_tps == 900.0
+
+    def test_missing_timings_block_returns_all_none(self) -> None:
+        assert _extract_speculative_stats({"usage": {"completion_tokens": 5}}) == (
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_none_payload_returns_all_none(self) -> None:
+        assert _extract_speculative_stats(None) == (None, None, None, None)
+
+    def test_non_numeric_values_are_dropped_not_raised(self) -> None:
+        payload = {"timings": {"draft_n": "not-a-number", "predicted_per_second": None}}
+        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
+            payload
+        )
+        assert draft_n is None
+        assert draft_n_accepted is None
+        assert predicted_tps is None
+        assert prompt_tps is None
 
 
 def test_extract_usage_tokens_openai_payload() -> None:

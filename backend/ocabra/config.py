@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     # giving more margin than the bare original for the common case.
     max_drain_timeout_s: int = 600
 
+    # Verbose per-sample VRAM/utilization logging during a model load (see
+    # ModelManager._monitor_load_vram_progress). The stalled-load warning
+    # itself is always on; this flag only controls the noisy per-sample
+    # trace used to confirm/refute the host-memory-pressure mlock() theory
+    # from 2026-10-27. Default True while that theory is unconfirmed — flip
+    # to False once it's resolved, this is debug-only and safe to disable.
+    debug_log_load_vram_samples: bool = True
+
     # Circuit breaker for a worker whose process has died but oCabra has no
     # way to detect or kill it directly (notably Ollama: it manages its own
     # llama-server subprocess and oCabra never even learns its PID). Without

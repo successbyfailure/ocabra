@@ -20,6 +20,7 @@ from starlette.types import ASGIApp
 
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key
+from ocabra.core.runtime_coordinator import _text_size
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 
@@ -206,7 +207,15 @@ _TEXT_GEN_KINDS = {"chat", "completion", "ollama_chat", "ollama_generate"}
 
 def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int | None:
     """Approx input tokens (~word count) from the request, for text-gen kinds whose
-    streamed response lacked a usage payload."""
+    streamed response lacked a usage payload.
+
+    Includes ``tools`` (function-calling schemas), same as the context-preset
+    estimator (``estimate_request_token_budget`` / ``_text_size`` in
+    runtime_coordinator.py). 2026-10-29: without this, a tool-heavy request
+    (e.g. Home Assistant's large function schemas) showed as "~128 tok
+    entrada" live while the real prompt — confirmed via the preset
+    selector's own ``required_tokens`` — was 18,240. That gap made a request
+    legitimately busy on a huge prompt look suspiciously idle."""
     if not isinstance(request_payload, dict):
         return None
     if request_kind in ("chat", "ollama_chat"):
@@ -221,6 +230,8 @@ def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int 
                 for part in content:
                     if isinstance(part, dict) and isinstance(part.get("text"), str):
                         total += len(part["text"].split())
+        _tools_chars, tools_words = _text_size(request_payload.get("tools"))
+        total += tools_words
         return total or None
     if request_kind in ("completion", "ollama_generate"):
         return _approx_text_tokens(request_payload.get("prompt"))
@@ -439,6 +450,47 @@ def _extract_generation_ms(payload: dict | None) -> int | None:
         except (TypeError, ValueError):
             pass
     return None
+
+
+def _extract_speculative_stats(
+    payload: dict | None,
+) -> tuple[int | None, int | None, float | None, float | None]:
+    """(draft_n, draft_n_accepted, predicted_per_second, prompt_per_second)
+    straight from llama-server's own ``timings`` block — see RequestStat's
+    draft_n/draft_n_accepted/predicted_tokens_per_second/
+    prompt_tokens_per_second docstrings for why these are persisted.
+    Only llama.cpp reports any of this; everything else returns all-None.
+    """
+    if not isinstance(payload, dict):
+        return None, None, None, None
+    timings = payload.get("timings")
+    if not isinstance(timings, dict):
+        return None, None, None, None
+
+    def _int(key: str) -> int | None:
+        value = timings.get(key)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _float(key: str) -> float | None:
+        value = timings.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return (
+        _int("draft_n"),
+        _int("draft_n_accepted"),
+        _float("predicted_per_second"),
+        _float("prompt_per_second"),
+    )
 
 
 def _extract_error_message(payload: dict | None, status_code: int) -> str | None:
@@ -825,6 +877,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
                             last_payload, request_kind, request_payload
                         )
                         generation_ms = _extract_generation_ms(last_payload)
+                        draft_n, draft_n_accepted, predicted_tps, prompt_tps = (
+                            _extract_speculative_stats(last_payload)
+                        )
                         # Streaming without a usage payload (e.g. no stream_options.
                         # include_usage): approximate from the streamed content and
                         # the request so the row isn't left as "—".
@@ -852,6 +907,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 cached_tokens=cached_tok,
                                 reasoning_tokens=reason_tok,
                                 generation_ms=generation_ms,
+                                draft_n=draft_n,
+                                draft_n_accepted=draft_n_accepted,
+                                predicted_tokens_per_second=predicted_tps,
+                                prompt_tokens_per_second=prompt_tps,
                                 work_size_meta=work_size_meta,
                                 via_router_profile_id=via_router_profile_id,
                             )
@@ -884,6 +943,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 response_payload, request_kind=request_kind, request_payload=request_payload
             )
             generation_ms = _extract_generation_ms(response_payload)
+            draft_n, draft_n_accepted, predicted_tps, prompt_tps = (
+                _extract_speculative_stats(response_payload)
+            )
             # Transcription output: JSON formats are proxied above; for non-JSON
             # (srt/vtt/text) count words from the raw body. Empty/silence → 0
             # (not "—") so the row is consistent.
@@ -918,6 +980,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     cached_tokens=cached_tok,
                     reasoning_tokens=reason_tok,
                     generation_ms=generation_ms,
+                    draft_n=draft_n,
+                    draft_n_accepted=draft_n_accepted,
+                    predicted_tokens_per_second=predicted_tps,
+                    prompt_tokens_per_second=prompt_tps,
                     work_size_meta=work_size_meta,
                     via_router_profile_id=via_router,
                 )
@@ -1169,6 +1235,10 @@ async def _record_stat(
     cached_tokens: int | None = None,
     reasoning_tokens: int | None = None,
     generation_ms: int | None = None,
+    draft_n: int | None = None,
+    draft_n_accepted: int | None = None,
+    predicted_tokens_per_second: float | None = None,
+    prompt_tokens_per_second: float | None = None,
 ) -> None:
     """Write a RequestStat row to the database and update Prometheus counters."""
     try:
@@ -1285,6 +1355,10 @@ async def _record_stat(
                 started_at=started_at,
                 duration_ms=int(duration_ms),
                 generation_ms=generation_ms,
+                draft_n=draft_n,
+                draft_n_accepted=draft_n_accepted,
+                predicted_tokens_per_second=predicted_tokens_per_second,
+                prompt_tokens_per_second=prompt_tokens_per_second,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_tokens=cached_tokens,

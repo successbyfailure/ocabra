@@ -442,6 +442,203 @@ class TestLiveRequestProgress:
         model_manager.update_request_progress("does-not-exist", output_tokens_estimate=10)
 
 
+class TestGetLoadPhase:
+    """2026-10-29 — distinguishes cold-load / eviction-wait / already-loaded
+    so the 'esperando salida' indicator can say *why* instead of an
+    undifferentiated wait that looks identical whether the worker is
+    starting, blocked on a busy neighbour, or just processing a huge
+    prompt. Added after repeatedly having to grep docker logs by hand to
+    tell these apart during gemma4<->qwen3.8 contention investigations."""
+
+    @pytest.mark.asyncio
+    async def test_loaded_model_is_ready(self, model_manager):
+        model_id = "test/model"
+        await add_test_model(model_manager, model_id=model_id)
+        model_manager._states[model_id].status = ModelStatus.LOADED
+
+        assert model_manager.get_load_phase(model_id) == ("ready", None)
+
+    @pytest.mark.asyncio
+    async def test_loading_model_reports_loading_phase(self, model_manager):
+        model_id = "test/model"
+        await add_test_model(model_manager, model_id=model_id)
+        model_manager._states[model_id].status = ModelStatus.LOADING
+
+        assert model_manager.get_load_phase(model_id) == ("loading", None)
+
+    @pytest.mark.asyncio
+    async def test_eviction_wait_reports_the_model_being_evicted(self, model_manager):
+        model_id = "test/model"
+        await add_test_model(model_manager, model_id=model_id)
+        model_manager._states[model_id].status = ModelStatus.LOADING
+        model_manager._eviction_wait_for[model_id] = "other/busy-model"
+
+        phase, waiting_on = model_manager.get_load_phase(model_id)
+        assert phase == "waiting_for_gpu"
+        assert waiting_on == "other/busy-model"
+
+    @pytest.mark.asyncio
+    async def test_eviction_wait_takes_priority_over_plain_loading(self, model_manager):
+        """A model mid-drain-wait is technically still LOADING too — the
+        more specific 'waiting_for_gpu' phase must win so the UI doesn't
+        under-report what's actually blocking it."""
+        model_id = "test/model"
+        await add_test_model(model_manager, model_id=model_id)
+        model_manager._states[model_id].status = ModelStatus.LOADING
+        model_manager._eviction_wait_for[model_id] = "other/busy-model"
+
+        phase, _ = model_manager.get_load_phase(model_id)
+        assert phase == "waiting_for_gpu"
+
+    def test_unknown_model_id_is_ready_not_an_error(self, model_manager):
+        """No state tracked at all (e.g. a stale/derived key that already
+        unloaded) must not raise — defaults to 'ready' so the caller falls
+        through to its own prompt-eval/generating distinction."""
+        assert model_manager.get_load_phase("nonexistent/model") == ("ready", None)
+
+
+class TestMonitorLoadVramProgress:
+    """2026-10-29 — concurrent watchdog for `backend.load()`, added after a
+    live incident where a cold load sat at 256MB VRAM / 0% GPU util for
+    minutes under host memory pressure with nothing in the UI distinguishing
+    it from a normal slow load. `asyncio.sleep` is monkeypatched to resolve
+    instantly so these tests don't take real wall-clock seconds; the monitor
+    is always cancelled externally (mirrors how `_load_model` uses it)."""
+
+    @staticmethod
+    def _patch_fast_sleep(monkeypatch, model_manager_module):
+        """Replaces asyncio.sleep(5) with a real asyncio.sleep(0) so the
+        monitor's loop runs many iterations within the test's wall-clock
+        budget instead of the real 5s per sample — while still genuinely
+        yielding to the event loop each iteration (an AsyncMock that
+        resolves without a real await point would spin the loop into a
+        busy-loop that starves the test's own timeout)."""
+        real_sleep = asyncio.sleep
+
+        async def _fast_sleep(_seconds):
+            await real_sleep(0)
+
+        monkeypatch.setattr(model_manager_module.asyncio, "sleep", _fast_sleep)
+
+    async def _run_briefly(self, model_manager, model_id, gpu_indices):
+        task = asyncio.create_task(
+            model_manager._monitor_load_vram_progress(model_id, gpu_indices)
+        )
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(task, timeout=0.2)
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_warns_when_vram_and_utilization_stay_flat(
+        self, model_manager, monkeypatch
+    ):
+        import ocabra.core.model_manager as model_manager_module
+        from ocabra.core.gpu_manager import GPUState
+
+        self._patch_fast_sleep(monkeypatch, model_manager_module)
+        flat_state = GPUState(
+            index=0,
+            name="RTX 3060",
+            total_vram_mb=12_000,
+            free_vram_mb=11_700,
+            used_vram_mb=256,
+            utilization_pct=0,
+            temperature_c=40,
+            power_draw_w=50,
+            power_limit_w=170,
+            locked_vram_mb=0,
+        )
+        gpu_manager = AsyncMock()
+        gpu_manager.get_state = AsyncMock(return_value=flat_state)
+        model_manager._gpu_manager = gpu_manager
+        log_mock = MagicMock()
+        monkeypatch.setattr(model_manager_module, "logger", log_mock)
+
+        await self._run_briefly(model_manager, "test/stalled-model", [0])
+
+        warnings = [
+            c for c in log_mock.warning.call_args_list if c.args[0] == "model_load_appears_stalled"
+        ]
+        assert warnings, "expected a model_load_appears_stalled warning"
+        assert warnings[0].kwargs["model_id"] == "test/stalled-model"
+
+    @pytest.mark.asyncio
+    async def test_does_not_warn_when_vram_keeps_growing(
+        self, model_manager, monkeypatch
+    ):
+        import ocabra.core.model_manager as model_manager_module
+        from ocabra.core.gpu_manager import GPUState
+
+        self._patch_fast_sleep(monkeypatch, model_manager_module)
+        counter = {"used_mb": 0}
+
+        async def _growing_state(_idx):
+            counter["used_mb"] += 500
+            return GPUState(
+                index=0,
+                name="RTX 3090",
+                total_vram_mb=24_576,
+                free_vram_mb=24_000 - counter["used_mb"],
+                used_vram_mb=counter["used_mb"],
+                utilization_pct=0,
+                temperature_c=40,
+                power_draw_w=50,
+                power_limit_w=350,
+                locked_vram_mb=0,
+            )
+
+        gpu_manager = AsyncMock()
+        gpu_manager.get_state = AsyncMock(side_effect=_growing_state)
+        model_manager._gpu_manager = gpu_manager
+        log_mock = MagicMock()
+        monkeypatch.setattr(model_manager_module, "logger", log_mock)
+
+        await self._run_briefly(model_manager, "test/healthy-model", [0])
+
+        warnings = [
+            c for c in log_mock.warning.call_args_list if c.args[0] == "model_load_appears_stalled"
+        ]
+        assert not warnings
+
+    @pytest.mark.asyncio
+    async def test_per_sample_logging_follows_debug_flag(
+        self, model_manager, monkeypatch
+    ):
+        import ocabra.core.model_manager as model_manager_module
+        from ocabra.config import settings
+        from ocabra.core.gpu_manager import GPUState
+
+        self._patch_fast_sleep(monkeypatch, model_manager_module)
+        monkeypatch.setattr(settings, "debug_log_load_vram_samples", False)
+        state = GPUState(
+            index=0,
+            name="RTX 3060",
+            total_vram_mb=12_000,
+            free_vram_mb=11_700,
+            used_vram_mb=256,
+            utilization_pct=0,
+            temperature_c=40,
+            power_draw_w=50,
+            power_limit_w=170,
+            locked_vram_mb=0,
+        )
+        gpu_manager = AsyncMock()
+        gpu_manager.get_state = AsyncMock(return_value=state)
+        model_manager._gpu_manager = gpu_manager
+        log_mock = MagicMock()
+        monkeypatch.setattr(model_manager_module, "logger", log_mock)
+
+        await self._run_briefly(model_manager, "test/quiet-model", [0])
+
+        samples = [
+            c for c in log_mock.info.call_args_list if c.args[0] == "llama_cpp_load_vram_sample"
+        ]
+        assert not samples, "per-sample logging must be off when the debug flag is False"
+
+
 @pytest.mark.asyncio
 async def test_try_begin_request_scales_cap_up_for_multi_slot_worker(
     model_manager, monkeypatch

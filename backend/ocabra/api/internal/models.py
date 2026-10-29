@@ -322,11 +322,24 @@ async def get_models_activity(
             # by elapsed time before that is meaningless, not just zero.
             requests_detail: list[dict] = []
             for key in keys:
+                if not requests_by_key.get(key):
+                    continue
+                # Same phase for every request piled up behind the same
+                # worker_key — computed once per key, not per request.
+                load_phase, waiting_on = mm.get_load_phase(key)
                 for req in requests_by_key.get(key, ()):
                     elapsed_s = max(0.0, now_ts - req.started_at)
                     tokens_per_second = None
                     if req.output_tokens_estimate and elapsed_s > 0:
                         tokens_per_second = round(req.output_tokens_estimate / elapsed_s, 1)
+                    if load_phase == "loading":
+                        phase = "loading"
+                    elif load_phase == "waiting_for_gpu":
+                        phase = "waiting_for_gpu"
+                    elif req.output_tokens_estimate is None:
+                        phase = "prompt_eval"
+                    else:
+                        phase = "generating"
                     requests_detail.append({
                         "requestId": req.request_id,
                         "username": req.username,
@@ -337,6 +350,8 @@ async def get_models_activity(
                         "lastActivitySecondsAgo": round(
                             max(0.0, now_ts - (req.last_activity_at or req.started_at)), 1
                         ),
+                        "phase": phase,
+                        "waitingOnModelId": waiting_on,
                     })
             activity[state.model_id] = {
                 "inFlight": count,

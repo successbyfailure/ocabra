@@ -407,6 +407,46 @@ async def get_performance_stats(
         tokens_ps = (tokens_for_rate / ms_for_rate * 1000) if ms_for_rate else 0.0
         req_per_min = (n * 60000 / total_duration_ms) if total_duration_ms else 0.0
 
+        # Self-speculative decoding (--spec-type draft-mtp) health, straight
+        # from the engine's own timings block — see RequestStat.draft_n's
+        # docstring. A dropping acceptance ratio is the most direct
+        # explanation for "this model feels slower than before" on a
+        # self-MTP load (gemma4:26b, qwen3.8:27b): it degrades generation
+        # speed roughly proportionally, and unlike generic contention this
+        # shows up even in an otherwise-uncontended request.
+        # getattr(..., None): rows from before this field existed (older
+        # DB rows pre-migration, or test fixtures) may not carry the
+        # attribute at all, not just None.
+        draft_n_total = sum(
+            int(getattr(r, "draft_n", None) or 0) for r in model_rows
+        )
+        draft_n_accepted_total = sum(
+            int(getattr(r, "draft_n_accepted", None) or 0) for r in model_rows
+        )
+        draft_acceptance_rate = (
+            round(draft_n_accepted_total / draft_n_total, 3) if draft_n_total else None
+        )
+        predicted_tps_samples = [
+            float(getattr(r, "predicted_tokens_per_second", None) or 0)
+            for r in model_rows
+            if getattr(r, "predicted_tokens_per_second", None)
+        ]
+        prompt_tps_samples = [
+            float(getattr(r, "prompt_tokens_per_second", None) or 0)
+            for r in model_rows
+            if getattr(r, "prompt_tokens_per_second", None)
+        ]
+        avg_predicted_tps = (
+            round(sum(predicted_tps_samples) / len(predicted_tps_samples), 2)
+            if predicted_tps_samples
+            else None
+        )
+        avg_prompt_tps = (
+            round(sum(prompt_tps_samples) / len(prompt_tps_samples), 2)
+            if prompt_tps_samples
+            else None
+        )
+
         request_kinds = sorted({(r.request_kind or "other") for r in model_rows})
         backend_type = next(
             (r.backend_type for r in model_rows if r.backend_type),
@@ -427,6 +467,9 @@ async def get_performance_stats(
                 "p95LatencyMs": _percentile(sorted(durations), 95),
                 "requestsPerMinute": round(req_per_min, 2),
                 "tokensPerSecond": round(tokens_ps, 2),
+                "draftAcceptanceRate": draft_acceptance_rate,
+                "avgPredictedTokensPerSecond": avg_predicted_tps,
+                "avgPromptTokensPerSecond": avg_prompt_tps,
                 "totalInputTokens": int(sum(in_tokens)),
                 "totalOutputTokens": int(sum(out_tokens)),
                 "tokenizedRequests": int(tokenized_requests),

@@ -733,3 +733,104 @@ class TestModelsActivityLiveProgress:
         [req_detail] = result["activity"][model_id]["requests"]
         assert req_detail["outputTokensEstimate"] is None
         assert req_detail["tokensPerSecond"] is None
+
+
+class TestModelsActivityLoadPhase:
+    """2026-10-29 — /ocabra/models/activity now tags each in-flight request
+    with *why* it's still waiting (phase: loading / waiting_for_gpu /
+    prompt_eval / generating), not just an undifferentiated 'no output yet'.
+    Reproduced live: a request stuck on a huge (~18k token) prompt that
+    _count_input_tokens undercounted as '~128 tok' looked identical to a
+    genuine hang without this."""
+
+    @pytest.mark.asyncio
+    async def test_phase_is_loading_while_the_worker_is_starting(self) -> None:
+        from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
+        from ocabra.core.worker_pool import WorkerPool
+
+        mm = ModelManager(WorkerPool())
+        model_id = "ollama/test-model"
+        mm._persisted_model_ids.add(model_id)
+        mm._states[model_id] = ModelState(
+            model_id=model_id, display_name=model_id, backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADING,
+        )
+        mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
+        )
+        result = await models_api.get_models_activity(fake_request, _user=None)
+
+        [req_detail] = result["activity"][model_id]["requests"]
+        assert req_detail["phase"] == "loading"
+        assert req_detail["waitingOnModelId"] is None
+
+    @pytest.mark.asyncio
+    async def test_phase_is_waiting_for_gpu_during_eviction_drain_wait(self) -> None:
+        from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
+        from ocabra.core.worker_pool import WorkerPool
+
+        mm = ModelManager(WorkerPool())
+        model_id = "ollama/test-model"
+        mm._persisted_model_ids.add(model_id)
+        mm._states[model_id] = ModelState(
+            model_id=model_id, display_name=model_id, backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADING,
+        )
+        mm._eviction_wait_for[model_id] = "ollama/other-busy-model"
+        mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
+        )
+        result = await models_api.get_models_activity(fake_request, _user=None)
+
+        [req_detail] = result["activity"][model_id]["requests"]
+        assert req_detail["phase"] == "waiting_for_gpu"
+        assert req_detail["waitingOnModelId"] == "ollama/other-busy-model"
+
+    @pytest.mark.asyncio
+    async def test_phase_is_prompt_eval_when_loaded_but_no_output_yet(self) -> None:
+        from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
+        from ocabra.core.worker_pool import WorkerPool
+
+        mm = ModelManager(WorkerPool())
+        model_id = "ollama/test-model"
+        mm._persisted_model_ids.add(model_id)
+        mm._states[model_id] = ModelState(
+            model_id=model_id, display_name=model_id, backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADED,
+        )
+        mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=18240)
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
+        )
+        result = await models_api.get_models_activity(fake_request, _user=None)
+
+        [req_detail] = result["activity"][model_id]["requests"]
+        assert req_detail["phase"] == "prompt_eval"
+
+    @pytest.mark.asyncio
+    async def test_phase_is_generating_once_output_tokens_have_streamed(self) -> None:
+        from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
+        from ocabra.core.worker_pool import WorkerPool
+
+        mm = ModelManager(WorkerPool())
+        model_id = "ollama/test-model"
+        mm._persisted_model_ids.add(model_id)
+        mm._states[model_id] = ModelState(
+            model_id=model_id, display_name=model_id, backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADED,
+        )
+        request_id = mm.try_begin_request(model_id, max_inflight=32)
+        mm.update_request_progress(request_id, output_tokens_estimate=50)
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
+        )
+        result = await models_api.get_models_activity(fake_request, _user=None)
+
+        [req_detail] = result["activity"][model_id]["requests"]
+        assert req_detail["phase"] == "generating"

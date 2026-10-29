@@ -563,6 +563,8 @@ export interface RequestStats {
   series: { timestamp: string; count: number }[]
 }
 
+export type RequestLoadPhase = "loading" | "waiting_for_gpu" | "prompt_eval" | "generating"
+
 export interface ActiveRequestProgress {
   requestId: string
   username?: string | null
@@ -571,6 +573,8 @@ export interface ActiveRequestProgress {
   outputTokensEstimate: number | null
   tokensPerSecond: number | null
   lastActivitySecondsAgo: number
+  phase: RequestLoadPhase
+  waitingOnModelId: string | null
 }
 
 export interface ModelActivity {

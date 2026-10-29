@@ -79,16 +79,33 @@ export function LoadedModelList({
               </div>
             )}
             {act?.requests?.map((r) => {
-              // Not gated on outputTokensEstimate != null — a huge prompt
-              // (tool definitions the input estimate doesn't count — see
-              // ``_count_input_tokens``) can legitimately sit in prompt-eval
+              // Phase comes straight from the backend (ModelManager.get_load_phase)
+              // instead of being inferred from outputTokensEstimate — a huge
+              // prompt (tool definitions the input estimate doesn't count —
+              // see _count_input_tokens) can legitimately sit in prompt-eval
               // for a long time with no output yet, and *that* phase is
               // exactly where "hung or just slow?" is hardest to tell from
               // elapsed time alone. Reported live 2026-10-29: "esperando
-              // salida" showed no timing at all, so a genuinely silent
-              // connection looked identical to one still receiving bytes.
-              const stalled = r.lastActivitySecondsAgo >= STALL_SECONDS
+              // salida" showed no timing at all and didn't distinguish a
+              // cold load, an eviction wait, or a huge prompt — all three
+              // looked identical.
+              const stalled =
+                (r.phase === "prompt_eval" || r.phase === "generating") &&
+                r.lastActivitySecondsAgo >= STALL_SECONDS
               const neverActive = r.lastActivitySecondsAgo >= r.elapsedSeconds - 0.05
+              let statusLabel: string
+              if (r.phase === "loading") {
+                statusLabel = "cargando modelo…"
+              } else if (r.phase === "waiting_for_gpu") {
+                statusLabel = r.waitingOnModelId
+                  ? `esperando a que libere GPU ${r.waitingOnModelId}`
+                  : "esperando a que se libere la GPU"
+              } else if (r.phase === "prompt_eval") {
+                statusLabel = "procesando prompt…"
+              } else {
+                statusLabel = r.outputTokensEstimate != null ? `${r.outputTokensEstimate} tok` : "generando…"
+              }
+              const showStallSuffix = r.phase === "prompt_eval" || r.phase === "generating"
               return (
                 <div
                   key={r.requestId}
@@ -98,13 +115,14 @@ export function LoadedModelList({
                   <span className="truncate tabular-nums">
                     {r.username ? `${r.username} · ` : ""}
                     {r.inputTokensEstimate != null ? `~${r.inputTokensEstimate} tok entrada · ` : ""}
-                    {r.outputTokensEstimate != null ? `${r.outputTokensEstimate} tok` : "esperando salida"}
-                    {r.tokensPerSecond != null ? ` · ${r.tokensPerSecond} t/s` : ""}
-                    {stalled
-                      ? ` · sin actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`
-                      : neverActive
-                        ? ` · sin respuesta del worker aún`
-                        : ` · actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`}
+                    {statusLabel}
+                    {r.phase === "generating" && r.tokensPerSecond != null ? ` · ${r.tokensPerSecond} t/s` : ""}
+                    {showStallSuffix &&
+                      (stalled
+                        ? ` · sin actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`
+                        : neverActive
+                          ? ` · sin respuesta del worker aún`
+                          : ` · actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`)}
                   </span>
                 </div>
               )

@@ -34,6 +34,28 @@ class RequestStat(Base):
     # out ~5 during a congested window despite the engine doing 50-80+ in
     # isolation — see gpu-bench/README.md.
     generation_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # llama.cpp self-speculative decoding (--spec-type draft-mtp and
+    # friends) stats, straight from timings.draft_n / timings.draft_n_accepted
+    # in the engine's own response. NULL for non-speculative loads and for
+    # backends that don't report it (everything except llama.cpp). The
+    # acceptance ratio (draft_n_accepted / draft_n) is the single number
+    # that explains most of a self-MTP model's real-world tok/s — when it
+    # drops, generation slows roughly proportionally. Added 2026-10-29 after
+    # being unable to confirm live whether qwen3.8:27b's self-MTP acceptance
+    # had regressed from an earlier ~80 tok/s baseline to ~33-35 tok/s —
+    # with nothing persisted, the only way to check was catching a perfectly
+    # uncontended moment to test live, which the same day's GPU1 contention
+    # made impossible. See gpu-bench/README.md.
+    draft_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    draft_n_accepted: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Pure decode/prompt-eval speed (tokens/sec) as computed by the engine
+    # itself (timings.predicted_per_second / timings.prompt_per_second) —
+    # independent of queueing/contention, unlike output_tokens/duration_ms.
+    # prompt_per_second in particular is the only direct signal that a long
+    # "no output yet" stretch is genuine large-prompt processing rather than
+    # a hang (see the live-progress phase work in model_manager.py).
+    predicted_tokens_per_second: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prompt_tokens_per_second: Mapped[float | None] = mapped_column(Float, nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     # Subset of ``input_tokens`` that hit the backend's prompt cache

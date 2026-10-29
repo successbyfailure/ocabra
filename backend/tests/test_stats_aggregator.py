@@ -283,3 +283,129 @@ async def test_performance_stats_tokens_per_second_prefers_generation_ms(
     # (60 + 20) tokens / (1000 + 2000) ms * 1000 = 26.67 tok/s — NOT
     # (60 + 20) / (10000 + 2000) * 1000 = 6.67 tok/s, the old (wrong) number.
     assert summary["tokensPerSecond"] == pytest.approx(26.67, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_performance_stats_exposes_draft_acceptance_and_engine_speed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-10-29 — added after being unable to confirm live whether
+    qwen3.8:27b's self-MTP acceptance rate had regressed from an earlier
+    ~80 tok/s baseline (measured ~33-35 tok/s that day, but real GPU1
+    contention made it impossible to catch a clean, uncontended moment to
+    verify why). draftAcceptanceRate = sum(draft_n_accepted)/sum(draft_n)
+    across all rows — the single number that most directly explains a
+    self-MTP model's real-world tok/s."""
+    row_a = SimpleNamespace(
+        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
+        request_kind="chat", duration_ms=1000, generation_ms=1000,
+        input_tokens=10, output_tokens=60, error=None, status_code=200,
+        draft_n=16, draft_n_accepted=13,
+        predicted_tokens_per_second=80.0, prompt_tokens_per_second=400.0,
+    )
+    row_b = SimpleNamespace(
+        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
+        request_kind="chat", duration_ms=1000, generation_ms=1000,
+        input_tokens=10, output_tokens=40, error=None, status_code=200,
+        draft_n=20, draft_n_accepted=7,
+        predicted_tokens_per_second=34.0, prompt_tokens_per_second=380.0,
+    )
+    # Non-speculative row (plain llama.cpp load, no draft_n at all) — must
+    # not pollute the acceptance-rate denominator with a phantom 0/0.
+    row_c = SimpleNamespace(
+        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
+        request_kind="chat", duration_ms=1000, generation_ms=1000,
+        input_tokens=10, output_tokens=20, error=None, status_code=200,
+        draft_n=None, draft_n_accepted=None,
+        predicted_tokens_per_second=None, prompt_tokens_per_second=None,
+    )
+
+    class _FakeResult:
+        def __init__(self, rows: list) -> None:
+            self._rows = rows
+
+        def scalars(self) -> "_FakeResult":
+            return self
+
+        def all(self) -> list:
+            return self._rows
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, _query):
+            self.calls += 1
+            rows = [row_a, row_b, row_c] if self.calls == 1 else []
+            return _FakeResult(rows)
+
+    fake_session = _FakeSession()
+
+    class _FakeSessionFactory:
+        async def __aenter__(self) -> _FakeSession:
+            return fake_session
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
+
+    payload = await aggregator.get_performance_stats(model_id="llama_cpp/qwen3.8-27b")
+
+    summary = payload["byModel"][0]
+    # (13 + 7) accepted / (16 + 20) drafted = 0.556
+    assert summary["draftAcceptanceRate"] == pytest.approx(0.556, abs=0.001)
+    assert summary["avgPredictedTokensPerSecond"] == pytest.approx(57.0, abs=0.01)
+    assert summary["avgPromptTokensPerSecond"] == pytest.approx(390.0, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_performance_stats_speculative_fields_are_none_without_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-llama.cpp model (or rows predating this field) must show None,
+    not 0 or a crash — 0 would misleadingly read as '0% acceptance'."""
+    row = SimpleNamespace(
+        model_id="ollama/mistral:7b", backend_type="ollama",
+        request_kind="chat", duration_ms=1000, generation_ms=None,
+        input_tokens=10, output_tokens=20, error=None, status_code=200,
+        draft_n=None, draft_n_accepted=None,
+        predicted_tokens_per_second=None, prompt_tokens_per_second=None,
+    )
+
+    class _FakeResult:
+        def __init__(self, rows: list) -> None:
+            self._rows = rows
+
+        def scalars(self) -> "_FakeResult":
+            return self
+
+        def all(self) -> list:
+            return self._rows
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, _query):
+            self.calls += 1
+            rows = [row] if self.calls == 1 else []
+            return _FakeResult(rows)
+
+    fake_session = _FakeSession()
+
+    class _FakeSessionFactory:
+        async def __aenter__(self) -> _FakeSession:
+            return fake_session
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
+
+    payload = await aggregator.get_performance_stats(model_id="ollama/mistral:7b")
+
+    summary = payload["byModel"][0]
+    assert summary["draftAcceptanceRate"] is None
+    assert summary["avgPredictedTokensPerSecond"] is None
+    assert summary["avgPromptTokensPerSecond"] is None

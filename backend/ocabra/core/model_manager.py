@@ -257,6 +257,15 @@ class ModelManager:
         # <service> termine" instead of those requests looking like nothing
         # is happening for minutes at a time.
         self._service_gpu_waiters: dict[str, str] = {}
+        # model_id -> model_id it's currently drain-waiting to evict (see
+        # _assign_gpus_for_load's pressure_eviction_drain_wait). Surfaced via
+        # /ocabra/models/activity so the live-progress card can say "esperando
+        # a que <X> libere la GPU" instead of an undifferentiated "esperando
+        # salida" that looks identical to a genuine hang. 2026-10-29 — added
+        # after repeatedly having to grep docker logs by hand to tell apart
+        # cold-load / prompt-eval / GPU-eviction-wait during gemma4<->qwen3.8
+        # contention investigations that day.
+        self._eviction_wait_for: dict[str, str] = {}
         self._timeout_counts: dict[str, int] = {}  # model_id -> timeout count
         self._busy_watchdog_task: asyncio.Task | None = None
         self._vram_watchdog_task: asyncio.Task | None = None
@@ -506,6 +515,84 @@ class ModelManager:
                 return
             req.output_tokens_estimate = output_tokens_estimate
             req.last_activity_at = time.time()
+
+    def get_load_phase(self, model_id: str) -> tuple[str, str | None]:
+        """Current load phase for ``model_id``, for the live-progress UI's
+        "esperando salida" indicator — distinguishes a cold load, waiting to
+        evict a busy neighbour, or an actually-loaded worker just still
+        processing a request.
+
+        Returns ``(phase, detail)`` where ``phase`` is one of:
+          - ``"loading"``: worker process starting / health-checking.
+          - ``"waiting_for_gpu"``: blocked in pressure-eviction drain-wait;
+            ``detail`` is the model_id it's waiting to evict.
+          - ``"ready"``: the worker is LOADED — any further wait is request
+            processing (prompt-eval or generation), not a loading phase.
+
+        2026-10-29: added after repeatedly having to grep docker logs by
+        hand during gemma4<->qwen3.8 contention investigations to tell a
+        cold load apart from an eviction wait apart from a huge prompt
+        still being evaluated — all three looked identical as "esperando
+        salida" with nothing but elapsed time to go on.
+        """
+        evicting = self._eviction_wait_for.get(model_id)
+        if evicting:
+            return "waiting_for_gpu", evicting
+        state = self._states.get(model_id)
+        if state is not None and state.status == ModelStatus.LOADING:
+            return "loading", None
+        return "ready", None
+
+    async def _monitor_load_vram_progress(
+        self, model_id: str, gpu_indices: list[int]
+    ) -> None:
+        """Runs concurrently with a `backend.load()` call, sampling VRAM/
+        utilization every 5s on the GPUs the load is targeting. Warns once
+        if VRAM stops growing AND utilization stays near 0% for ~15s+ while
+        the load is still in progress — the exact pattern observed live on
+        2026-10-27 (VRAM pinned at 256MB, 0% GPU util, high host CPU),
+        suspected host-memory-pressure mlock() stall on a large mmap region
+        but never confirmed. Cancelled by the caller once `backend.load()`
+        returns, success or failure — a plain concurrent task, not a
+        correctness gate.
+        """
+        last_used_mb: dict[int, int] = {}
+        stall_samples = 0
+        warned = False
+        while True:
+            await asyncio.sleep(5)
+            stalled_this_round = True
+            for idx in gpu_indices:
+                try:
+                    gpu_state = await self._gpu_manager.get_state(idx)
+                except Exception:  # noqa: BLE001
+                    stalled_this_round = False
+                    continue
+                if settings.debug_log_load_vram_samples:
+                    logger.info(
+                        "llama_cpp_load_vram_sample",
+                        model_id=model_id,
+                        gpu_index=idx,
+                        used_vram_mb=gpu_state.used_vram_mb,
+                        utilization_pct=gpu_state.utilization_pct,
+                    )
+                grew = gpu_state.used_vram_mb > last_used_mb.get(idx, 0)
+                last_used_mb[idx] = gpu_state.used_vram_mb
+                if grew or gpu_state.utilization_pct > 5:
+                    stalled_this_round = False
+            if stalled_this_round:
+                stall_samples += 1
+            else:
+                stall_samples = 0
+            if stall_samples >= 3 and not warned:
+                warned = True
+                logger.warning(
+                    "model_load_appears_stalled",
+                    model_id=model_id,
+                    gpu_indices=gpu_indices,
+                    used_vram_mb=last_used_mb,
+                    stalled_seconds=stall_samples * 5,
+                )
 
     def active_requests_snapshot(self) -> list[ActiveRequest]:
         """Copy of currently in-flight requests — for surfacing "processing,
@@ -1578,13 +1665,28 @@ class ModelManager:
                                                 target_gpu = alt_gpu
                                                 break
                                 backend_gpu_indices = [target_gpu]
-                            worker_info = await backend.load(
-                                state.backend_model_id,
-                                backend_gpu_indices,
-                                port=assigned_port,
-                                extra_config=effective_extra,
-                                load_policy=state.load_policy.value,
+                            monitor_task = (
+                                asyncio.create_task(
+                                    self._monitor_load_vram_progress(
+                                        model_id, backend_gpu_indices
+                                    )
+                                )
+                                if backend_gpu_indices and self._gpu_manager
+                                else None
                             )
+                            try:
+                                worker_info = await backend.load(
+                                    state.backend_model_id,
+                                    backend_gpu_indices,
+                                    port=assigned_port,
+                                    extra_config=effective_extra,
+                                    load_policy=state.load_policy.value,
+                                )
+                            finally:
+                                if monitor_task is not None:
+                                    monitor_task.cancel()
+                                    with suppress(asyncio.CancelledError):
+                                        await monitor_task
                             backend_loaded = True
                             capabilities = await backend.get_capabilities(
                                 state.backend_model_id
@@ -2116,10 +2218,14 @@ class ModelManager:
                         evicting_model_id=candidate_id,
                         drain_timeout_s=drain_timeout_s,
                     )
-                    for _ in range(drain_timeout_s * 2):
-                        if not self.is_busy(candidate_id):
-                            break
-                        await asyncio.sleep(0.5)
+                    self._eviction_wait_for[model_id] = candidate_id
+                    try:
+                        for _ in range(drain_timeout_s * 2):
+                            if not self.is_busy(candidate_id):
+                                break
+                            await asyncio.sleep(0.5)
+                    finally:
+                        self._eviction_wait_for.pop(model_id, None)
                     if self.is_busy(candidate_id):
                         logger.warning(
                             "pressure_eviction_drain_timeout_skip",
