@@ -356,11 +356,31 @@ class ModelManager:
         waiting instead of a prompt 429. Looks up the same
         ``_runtime.parallelism`` value ``/stats/recent`` uses for queue
         position; models without that metadata are treated as 1 slot.
+
+        That 1-slot fallback assumes a generative model with a handful of
+        KV-cache slots, which doesn't hold for single-pass encoder models
+        (embeddings/pooling/rerank/classification/score) — they have no
+        per-slot KV cache to exhaust and Ollama/vLLM genuinely serve many of
+        these concurrently. Reproduced live 2026-10-29: an anonymous caller
+        fired ~15 parallel embedding requests at qwen3-embedding:8b (no
+        ``_runtime`` metadata recorded, model was unloaded) and ~91 got
+        rejected with 429 against a cap of only 4. For these, skip the
+        per-slot scaling entirely and use the flat ``max_inflight`` ceiling.
         """
         if max_inflight <= 0:
             return max_inflight
         canonical = model_id.split("::", 1)[0]
         state = self._states.get(canonical) or self._states.get(model_id)
+        if state is not None and state.capabilities is not None:
+            caps = state.capabilities
+            if (
+                caps.embeddings
+                or caps.pooling
+                or caps.rerank
+                or caps.classification
+                or caps.score
+            ):
+                return max_inflight
         slots = 1
         if state is not None:
             meta = (

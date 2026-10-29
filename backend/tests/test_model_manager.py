@@ -419,6 +419,34 @@ def test_effective_inflight_cap_disabled_when_max_inflight_is_zero(model_manager
     assert model_manager.effective_inflight_cap("test/model", 0) == 0
 
 
+@pytest.mark.asyncio
+async def test_effective_inflight_cap_skips_slot_scaling_for_embedding_models(
+    model_manager, monkeypatch
+):
+    """2026-10-29 incident: an embedding model with no ``_runtime`` metadata
+    fell back to the generative-model default of 1 slot, capping it at just
+    4 concurrent requests (1 slot * max_queued_per_slot) — a burst of ~15
+    parallel embedding calls got mostly rejected with 429. Embeddings/
+    pooling/rerank/classification/score are single-pass encoders with no
+    per-slot KV cache to exhaust, so they should get the full flat
+    max_inflight ceiling instead of the generative-model fallback."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = "test/embedding-model"
+    state = await add_test_model(model_manager, model_id=model_id)
+    state.capabilities = BackendCapabilities(embeddings=True)
+    # No _runtime metadata recorded — would fall back to slots=1 for a
+    # generative model, capping at 1 * 4 = 4.
+
+    assert model_manager.effective_inflight_cap(model_id, 32) == 32
+
+    results = [
+        model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(32)
+    ]
+    assert results.count(None) == 0
+
+    assert model_manager.try_begin_request(model_id, max_inflight=32) is None
+
+
 def test_maintenance_toggle_covers_derived_worker_keys(model_manager):
     canonical = "ollama/qwen3.8:27b"
     derived = f"{canonical}::abc123"
