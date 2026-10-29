@@ -563,10 +563,21 @@ export interface RequestStats {
   series: { timestamp: string; count: number }[]
 }
 
+export interface ActiveRequestProgress {
+  requestId: string
+  username?: string | null
+  elapsedSeconds: number
+  inputTokensEstimate: number | null
+  outputTokensEstimate: number | null
+  tokensPerSecond: number | null
+  lastActivitySecondsAgo: number
+}
+
 export interface ModelActivity {
   inFlight: number
   oldestSeconds: number
   slots?: number | null
+  requests?: ActiveRequestProgress[]
 }
 
 export interface ModelActivityMap {

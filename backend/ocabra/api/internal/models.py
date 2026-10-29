@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,10 @@ async def get_models_activity(
     snapshot = mm.inflight_snapshot()
     ages = mm.active_request_ages()
     sources = mm.activity_sources()
+    now_ts = time.time()
+    requests_by_key: dict[str, list] = {}
+    for req in mm.active_requests_snapshot():
+        requests_by_key.setdefault(req.model_id, []).append(req)
     # ``list_states()`` (sin include_derived) devuelve solo los canónicos,
     # pero ``begin_request`` registra con el worker-key derivado del
     # preset activo (``ollama/qwen3.8:27b::<hash>``). Para que el badge
@@ -311,11 +316,34 @@ async def get_models_activity(
             if slots is None:
                 cap = int(getattr(settings, "max_inflight_per_model", 0) or 0)
                 slots = cap if cap > 0 else None
+            # Per-request progress for the "is this hung or still working"
+            # indicator on the model/GPU card (2026-10-29). ``tokensPerSecond``
+            # is None until at least one output token has streamed — division
+            # by elapsed time before that is meaningless, not just zero.
+            requests_detail: list[dict] = []
+            for key in keys:
+                for req in requests_by_key.get(key, ()):
+                    elapsed_s = max(0.0, now_ts - req.started_at)
+                    tokens_per_second = None
+                    if req.output_tokens_estimate and elapsed_s > 0:
+                        tokens_per_second = round(req.output_tokens_estimate / elapsed_s, 1)
+                    requests_detail.append({
+                        "requestId": req.request_id,
+                        "username": req.username,
+                        "elapsedSeconds": round(elapsed_s, 1),
+                        "inputTokensEstimate": req.input_tokens_estimate,
+                        "outputTokensEstimate": req.output_tokens_estimate,
+                        "tokensPerSecond": tokens_per_second,
+                        "lastActivitySecondsAgo": round(
+                            max(0.0, now_ts - (req.last_activity_at or req.started_at)), 1
+                        ),
+                    })
             activity[state.model_id] = {
                 "inFlight": count,
                 "oldestSeconds": round(oldest, 1),
                 "sources": source_counts,
                 "slots": slots,
+                "requests": requests_detail,
             }
     return {
         "activity": activity,

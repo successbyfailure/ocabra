@@ -667,3 +667,69 @@ def test_estimate_llama_cpp_memory_falls_back_to_heuristic_when_cpu_only(tmp_pat
 
     assert result["estimated_weights_mb"] is None
     assert "CPU" in result["notes"][0]
+
+
+class TestModelsActivityLiveProgress:
+    """2026-10-29 — /ocabra/models/activity now includes per-request live
+    progress (input/output token estimates, last-activity age) so the
+    model/GPU card can distinguish a slow request from a hung one."""
+
+    @pytest.mark.asyncio
+    async def test_activity_includes_per_request_progress(self) -> None:
+        from ocabra.core.model_manager import LoadPolicy, ModelManager
+        from ocabra.core.worker_pool import WorkerPool
+
+        mm = ModelManager(WorkerPool())
+        model_id = "ollama/test-model"
+        mm._persisted_model_ids.add(model_id)
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name=model_id,
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+        )
+        request_id = mm.try_begin_request(
+            model_id, max_inflight=32, input_tokens_estimate=500
+        )
+        mm.update_request_progress(request_id, output_tokens_estimate=120)
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
+        )
+        result = await models_api.get_models_activity(fake_request, _user=None)
+
+        entry = result["activity"][model_id]
+        assert entry["inFlight"] == 1
+        [req_detail] = entry["requests"]
+        assert req_detail["requestId"] == request_id
+        assert req_detail["inputTokensEstimate"] == 500
+        assert req_detail["outputTokensEstimate"] == 120
+        assert req_detail["tokensPerSecond"] is not None
+        assert req_detail["lastActivitySecondsAgo"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_tokens_per_second_is_none_before_any_output_token(self) -> None:
+        """Division by elapsed time before any token has streamed would be
+        misleading (reads as 0 t/s, indistinguishable from 'stalled')."""
+        from ocabra.core.model_manager import LoadPolicy, ModelManager
+        from ocabra.core.worker_pool import WorkerPool
+
+        mm = ModelManager(WorkerPool())
+        model_id = "ollama/test-model"
+        mm._persisted_model_ids.add(model_id)
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name=model_id,
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+        )
+        mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
+        )
+        result = await models_api.get_models_activity(fake_request, _user=None)
+
+        [req_detail] = result["activity"][model_id]["requests"]
+        assert req_detail["outputTokensEstimate"] is None
+        assert req_detail["tokensPerSecond"] is None

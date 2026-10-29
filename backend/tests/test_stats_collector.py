@@ -18,6 +18,7 @@ from ocabra.stats.collector import (
     _extract_usage_tokens,
     _resolve_inflight_model_id,
     _stream_error_status,
+    _stream_output_tokens,
     record_realtime_request,
 )
 
@@ -26,6 +27,53 @@ def test_classify_request_kind_known_paths() -> None:
     assert _classify_request_kind("/v1/chat/completions") == "chat"
     assert _classify_request_kind("/v1/audio/transcriptions") == "audio_transcription"
     assert _classify_request_kind("/api/generate") == "ollama_generate"
+
+
+class TestStreamOutputTokensReasoningVisibility:
+    """2026-10-29 — verified live that a reasoning model's entire thinking
+    phase was invisible to the live-progress counter (model/GPU card showed
+    outputTokensEstimate: null for 25+ seconds of active work) because the
+    default behaviour only counts delta.content, never delta.reasoning_content
+    / message.thinking. include_reasoning=True (used only by the live-
+    progress tee, not the persisted request_stats row) fixes that without
+    changing what "output_tokens" means in the stats the user already
+    relies on."""
+
+    def test_sse_reasoning_only_delta_is_invisible_by_default(self) -> None:
+        body = (
+            b'data: {"choices":[{"delta":{"reasoning_content":"pensando mucho"}}]}\n\n'
+        )
+        assert _stream_output_tokens(body, "text/event-stream") is None
+
+    def test_sse_reasoning_delta_counted_when_requested(self) -> None:
+        body = (
+            b'data: {"choices":[{"delta":{"reasoning_content":"pensando mucho rato"}}]}\n\n'
+        )
+        result = _stream_output_tokens(
+            body, "text/event-stream", include_reasoning=True
+        )
+        assert result == 3
+
+    def test_sse_content_and_reasoning_both_counted(self) -> None:
+        body = (
+            b'data: {"choices":[{"delta":{"reasoning_content":"pensando"}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"hola mundo"}}]}\n\n'
+        )
+        result = _stream_output_tokens(
+            body, "text/event-stream", include_reasoning=True
+        )
+        assert result == 3
+
+    def test_ndjson_thinking_only_is_invisible_by_default(self) -> None:
+        body = b'{"message":{"thinking":"pensando mucho"}}\n'
+        assert _stream_output_tokens(body, "application/x-ndjson") is None
+
+    def test_ndjson_thinking_counted_when_requested(self) -> None:
+        body = b'{"message":{"thinking":"pensando mucho rato"}}\n'
+        result = _stream_output_tokens(
+            body, "application/x-ndjson", include_reasoning=True
+        )
+        assert result == 3
 
 
 def test_extract_usage_tokens_openai_payload() -> None:

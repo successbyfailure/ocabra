@@ -227,9 +227,21 @@ def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int 
     return None
 
 
-def _stream_output_tokens(body: bytes, content_type: str) -> int | None:
+def _stream_output_tokens(
+    body: bytes, content_type: str, *, include_reasoning: bool = False
+) -> int | None:
     """Approx output tokens (~word count) from the streamed content deltas, used when
-    a streaming response carried no usage payload."""
+    a streaming response carried no usage payload.
+
+    ``include_reasoning``: also count ``delta.reasoning_content`` words, not
+    just ``delta.content``. Off by default — the persisted ``output_tokens``
+    stat should keep meaning "final answer length", not "final answer +
+    thinking". The live-progress tee (model/GPU card) passes True: for a
+    reasoning model, the entire thinking phase is otherwise invisible —
+    tested live 2026-10-29, a qwen3.8:27b request sat at
+    ``outputTokensEstimate: null`` through 25+ seconds of active reasoning
+    because none of it had reached ``content`` yet.
+    """
     if not body:
         return None
     text = body.decode("utf-8", errors="ignore")
@@ -252,6 +264,11 @@ def _stream_output_tokens(body: bytes, content_type: str) -> int | None:
                 if isinstance(content, str) and content:
                     words += len(content.split())
                     found = True
+                if include_reasoning and isinstance(delta, dict):
+                    reasoning = delta.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        words += len(reasoning.split())
+                        found = True
     elif "ndjson" in content_type:
         for line in text.splitlines():
             line = line.strip()
@@ -268,6 +285,11 @@ def _stream_output_tokens(body: bytes, content_type: str) -> int | None:
             if isinstance(content, str) and content:
                 words += len(content.split())
                 found = True
+            if include_reasoning and isinstance(msg, dict):
+                thinking = msg.get("thinking")
+                if isinstance(thinking, str) and thinking:
+                    words += len(thinking.split())
+                    found = True
     return words if found else None
 
 
@@ -528,6 +550,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 # resolved worker key so the UI can show the friendly name
                 # instead of ``ollama/qwen3.8:27b::<hash>``.
                 profile_id=requested_model_id,
+                # Approximate, available immediately (exact prompt_tokens
+                # isn't known until the backend responds) — same heuristic
+                # used for the completed-request row further down.
+                input_tokens_estimate=_count_input_tokens(request_payload, request_kind),
             )
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
@@ -751,12 +777,28 @@ class StatsMiddleware(BaseHTTPMiddleware):
             async def tee_and_record():
                 chunks: list[bytes] = []
                 error_msg: str | None = None
+                last_progress_at = 0.0
                 try:
                     async for chunk in original_iterator:
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8")
                         chunks.append(chunk)
                         yield chunk
+                        # Live progress for the model/GPU card "is this hung
+                        # or still working" indicator (2026-10-29). Throttled
+                        # to ~2/s — re-parsing the whole accumulated body on
+                        # every chunk would be O(n^2) over a long stream.
+                        if mm and inflight_request_id:
+                            now_mono = time.monotonic()
+                            if now_mono - last_progress_at >= 0.5:
+                                last_progress_at = now_mono
+                                out_tok = _stream_output_tokens(
+                                    b"".join(chunks), content_type, include_reasoning=True
+                                )
+                                mm.update_request_progress(
+                                    inflight_request_id,
+                                    output_tokens_estimate=out_tok,
+                                )
                 except Exception as exc:
                     error_msg = str(exc)
                     raise

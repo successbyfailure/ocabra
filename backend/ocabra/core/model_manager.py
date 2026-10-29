@@ -184,6 +184,21 @@ class ActiveRequest:
     # and lets Ollama/vLLM abort the generation. Only set for middleware
     # callers; in-process begin_request paths leave it None.
     task: Any = None
+    # Live progress, for the "is this hung or still working" UI signal
+    # (2026-10-29). ``input_tokens_estimate`` is a word-count approximation
+    # from the request body (exact prompt_tokens isn't known until the
+    # backend responds) — same heuristic as ``_count_input_tokens`` in
+    # stats/collector.py, computed once at admission.
+    # ``output_tokens_estimate``/``last_activity_at`` are updated by the
+    # streaming tee in stats/collector.py (``tee_and_record``) as chunks
+    # arrive, throttled to ~2/s — NOT updated for non-streaming requests
+    # (there's nothing to tee until the single response body is complete).
+    # A ``last_activity_at`` that stops advancing while ``started_at`` keeps
+    # aging is the actual "hung" signal; the token count alone can't tell
+    # the difference between "slow" and "stuck".
+    input_tokens_estimate: int | None = None
+    output_tokens_estimate: int | None = None
+    last_activity_at: float = 0.0
 
 
 async def _measure_process_ram_mb(pid: int) -> int:
@@ -423,6 +438,7 @@ class ModelManager:
         username: str | None = None,
         api_key_name: str | None = None,
         profile_id: str | None = None,
+        input_tokens_estimate: int | None = None,
     ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
@@ -449,16 +465,19 @@ class ModelManager:
                 owning_task = asyncio.current_task()
             except RuntimeError:
                 owning_task = None
+            now = time.time()
             self._active_requests[request_id] = ActiveRequest(
                 request_id=request_id,
                 model_id=model_id,
-                started_at=time.time(),
+                started_at=now,
                 source=source,
                 user_id=user_id,
                 username=username,
                 api_key_name=api_key_name,
                 profile_id=profile_id,
                 task=owning_task,
+                input_tokens_estimate=input_tokens_estimate,
+                last_activity_at=now,
             )
         # Bloque 20 — track start on the estimator so
         # ``in_flight_remaining`` returns useful numbers for the dynamic
@@ -472,6 +491,21 @@ class ModelManager:
     def inflight_count(self, model_id: str) -> int:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0)
+
+    def update_request_progress(
+        self, request_id: str, *, output_tokens_estimate: int | None
+    ) -> None:
+        """Called from the streaming tee (stats/collector.py:tee_and_record)
+        as response chunks arrive, throttled to a few times per second. A
+        no-op if the request already finished (cancelled/evicted) between
+        the throttle check and this call — there's nothing left to update.
+        """
+        with self._in_flight_lock:
+            req = self._active_requests.get(request_id)
+            if req is None:
+                return
+            req.output_tokens_estimate = output_tokens_estimate
+            req.last_activity_at = time.time()
 
     def active_requests_snapshot(self) -> list[ActiveRequest]:
         """Copy of currently in-flight requests — for surfacing "processing,

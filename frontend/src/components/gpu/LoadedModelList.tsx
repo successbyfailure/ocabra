@@ -3,6 +3,10 @@ import { BackendBadge } from "@/components/models/BackendBadge"
 
 const gb = (mb: number) => (mb / 1024).toFixed(1)
 const fmtAge = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}m${Math.round(s % 60)}s` : `${Math.round(s)}s`)
+// A request stalls much faster than the overall "stuck" threshold (5min by
+// default) would catch — no new output tokens for 15s is already a strong
+// hung signal while total elapsed time is still well within "normal".
+const STALL_SECONDS = 15
 
 function ollamaName(modelId: string): string {
   return modelId.startsWith("ollama/") ? modelId.slice("ollama/".length) : modelId
@@ -74,6 +78,28 @@ export function LoadedModelList({
                 </span>
               </div>
             )}
+            {act?.requests?.map((r) => {
+              const stalled = r.outputTokensEstimate != null && r.lastActivitySecondsAgo >= STALL_SECONDS
+              return (
+                <div
+                  key={r.requestId}
+                  className={`mt-1 flex items-center gap-1.5 truncate text-[10px] ${stalled ? "text-red-500" : "text-muted-foreground"}`}
+                >
+                  <span className={`h-1 w-1 shrink-0 rounded-full ${stalled ? "bg-red-500" : "bg-emerald-500 animate-pulse"}`} />
+                  <span className="truncate tabular-nums">
+                    {r.username ? `${r.username} · ` : ""}
+                    {r.inputTokensEstimate != null ? `~${r.inputTokensEstimate} tok entrada · ` : ""}
+                    {r.outputTokensEstimate != null ? `${r.outputTokensEstimate} tok` : "esperando salida"}
+                    {r.tokensPerSecond != null ? ` · ${r.tokensPerSecond} t/s` : ""}
+                    {stalled
+                      ? ` · sin actividad hace ${fmtAge(r.lastActivitySecondsAgo)}`
+                      : r.outputTokensEstimate != null
+                        ? ` · hace ${fmtAge(r.lastActivitySecondsAgo)}`
+                        : ""}
+                  </span>
+                </div>
+              )
+            })}
           </div>
         )
       })}

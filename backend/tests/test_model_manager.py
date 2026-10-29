@@ -395,6 +395,53 @@ async def test_try_begin_request_scales_cap_down_for_single_slot_worker(
     assert accepted[:4] != [None, None, None, None]
 
 
+class TestLiveRequestProgress:
+    """2026-10-29 — model/GPU card now shows per-request progress (input
+    tokens estimate, output tokens streamed so far, last-activity age) so an
+    operator can tell a genuinely slow request from a hung one instead of
+    just watching elapsed time climb."""
+
+    @pytest.mark.asyncio
+    async def test_input_tokens_estimate_is_stored_at_admission(self, model_manager):
+        model_id = "test/model"
+        await add_test_model(model_manager, model_id=model_id)
+
+        request_id = model_manager.try_begin_request(
+            model_id, max_inflight=32, input_tokens_estimate=1234
+        )
+
+        [active] = model_manager.active_requests_snapshot()
+        assert active.request_id == request_id
+        assert active.input_tokens_estimate == 1234
+        assert active.output_tokens_estimate is None
+        assert active.last_activity_at > 0
+
+    @pytest.mark.asyncio
+    async def test_update_request_progress_sets_output_tokens_and_bumps_activity(
+        self, model_manager
+    ):
+        model_id = "test/model"
+        await add_test_model(model_manager, model_id=model_id)
+        request_id = model_manager.try_begin_request(model_id, max_inflight=32)
+        [before] = model_manager.active_requests_snapshot()
+        first_activity = before.last_activity_at
+
+        await asyncio.sleep(0.01)
+        model_manager.update_request_progress(request_id, output_tokens_estimate=42)
+
+        [after] = model_manager.active_requests_snapshot()
+        assert after.output_tokens_estimate == 42
+        assert after.last_activity_at > first_activity
+
+    @pytest.mark.asyncio
+    async def test_update_request_progress_is_a_noop_for_unknown_request_id(
+        self, model_manager
+    ):
+        """The request may have already finished (cancelled/evicted) between
+        the tee's throttle check and the update call — must not raise."""
+        model_manager.update_request_progress("does-not-exist", output_tokens_estimate=10)
+
+
 @pytest.mark.asyncio
 async def test_try_begin_request_scales_cap_up_for_multi_slot_worker(
     model_manager, monkeypatch
