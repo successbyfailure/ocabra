@@ -65,7 +65,9 @@ async def chat(
     **Context window auto-sizing**: same mechanism as `/v1/chat/completions`
     — the runtime preset is picked from `prompt_tokens + output_reservation`,
     where `output_reservation` comes from `options.num_predict` if set,
-    otherwise a fixed 4096-token default shared by every model. For
+    otherwise the target profile's own
+    `runtime_policy.default_output_reservation_tokens` if configured, else a
+    global 4096-token default. For
     reasoning models this can truncate the response (`done_reason: "length"`,
     empty `content`) if the model reasons longer than that default covers.
     Set `options.num_predict` generously, or force a preset with

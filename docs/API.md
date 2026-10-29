@@ -535,9 +535,20 @@ contexto_solicitado = tokens_estimados_del_prompt + reserva_de_salida
 
 `reserva_de_salida` es `max_completion_tokens` / `max_tokens` (OpenAI) o
 `options.num_predict` (Ollama) si el cliente los manda; **si no los manda**,
-cae a un valor fijo y global —
+cae a `runtime_policy.default_output_reservation_tokens` del perfil si está
+configurado, y si no a un valor fijo y global —
 `runtime_preset_default_output_reservation_tokens` (actualmente **4096
-tokens**) — igual para todos los perfiles, razonen o no.
+tokens**).
+
+Perfiles con razonamiento visible (gemma4, qwen3.8, qwen3.8-abliterated)
+tienen `runtime_policy.default_output_reservation_tokens = 16384` para que
+una petición sin `max_tokens` no se trunque por una reserva pensada para
+modelos que no razonan. Para ajustarlo en un perfil:
+
+```json
+PATCH /ocabra/profiles/{profile_id}
+{"runtime_policy": {"default_output_reservation_tokens": 16384}}
+```
 
 Esto importa para modelos con razonamiento visible (gemma4, qwen3.8): el
 `reasoning_content` cuenta contra el mismo presupuesto de salida que la

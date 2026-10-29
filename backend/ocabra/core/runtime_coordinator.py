@@ -53,13 +53,31 @@ def _text_size(value: Any) -> tuple[int, int]:
     return chars, words
 
 
-def estimate_request_token_budget(body: dict[str, Any]) -> int:
+def estimate_request_token_budget(
+    body: dict[str, Any], *, default_output_reservation: int | None = None
+) -> int:
     """Conservatively estimate prompt plus reserved output tokens.
 
     Exact tokenization is model-specific and may require loading tokenizer code.
     The estimator uses both character and word bounds with headroom, then adds
     the client's complete output reservation. It intentionally rounds upward.
+
+    ``default_output_reservation`` overrides the global
+    ``settings.runtime_preset_default_output_reservation_tokens`` fallback —
+    used by callers that know this profile's own
+    ``runtime_policy.default_output_reservation_tokens`` (see
+    ``plan_profile_runtime``). 2026-10-29: a single global 4096-token default
+    for every model, reasoning or not, meant a client that didn't pass
+    ``max_tokens`` against a heavy-reasoning profile (gemma4, qwen3.8) could
+    burn its entire reservation on ``reasoning_content`` and get cut with
+    ``finish_reason: "length"`` and empty ``content`` — the preset system
+    had no way to know it needed more room than the global default assumed.
     """
+    default_reservation = (
+        default_output_reservation
+        if default_output_reservation is not None
+        else settings.runtime_preset_default_output_reservation_tokens
+    )
 
     if isinstance(body.get("messages"), list):
         source: Any = body["messages"]
@@ -79,13 +97,13 @@ def estimate_request_token_budget(body: dict[str, Any]) -> int:
         "max_completion_tokens",
         body.get(
             "max_tokens",
-            options.get("num_predict", settings.runtime_preset_default_output_reservation_tokens),
+            options.get("num_predict", default_reservation),
         ),
     )
     try:
         reserved_output = max(1, int(output_value))
     except (TypeError, ValueError):
-        reserved_output = settings.runtime_preset_default_output_reservation_tokens
+        reserved_output = default_reservation
     estimated = max(1, prompt_estimate + reserved_output)
     try:
         requested_context = max(0, int(options.get("num_ctx") or 0))
@@ -169,7 +187,17 @@ async def plan_profile_runtime(
         raise ContextCapacityError("profile has no enabled runtime preset that fits")
 
     body = request_body or {}
-    required_tokens = estimate_request_token_budget(body)
+    policy = profile.runtime_policy if isinstance(profile.runtime_policy, dict) else {}
+    raw_reservation = policy.get("default_output_reservation_tokens")
+    try:
+        default_output_reservation = (
+            int(raw_reservation) if raw_reservation is not None else None
+        )
+    except (TypeError, ValueError):
+        default_output_reservation = None
+    required_tokens = estimate_request_token_budget(
+        body, default_output_reservation=default_output_reservation
+    )
     explicit_key = _requested_preset_key(body)
     loaded_keys: set[str] = set()
     for runtime_state in await model_manager.list_states(include_derived=True):
@@ -193,7 +221,6 @@ async def plan_profile_runtime(
         chosen = explicit
         reason = "explicit"
     else:
-        policy = profile.runtime_policy if isinstance(profile.runtime_policy, dict) else {}
         selected = select_runtime_preset(
             candidates,
             required_tokens=required_tokens,

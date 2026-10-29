@@ -109,6 +109,20 @@ def test_estimate_budget_output_reservation_defaults_to_configurable_setting(mon
     assert estimate_request_token_budget(body) >= 55_000
 
 
+def test_default_output_reservation_param_overrides_the_global_setting(monkeypatch) -> None:
+    """2026-10-29: a per-profile override (runtime_policy.default_output_
+    reservation_tokens, see plan_profile_runtime) must win over the global
+    setting — this is what lets reasoning-heavy profiles (gemma4, qwen3.8)
+    reserve more room by default without raising it for every other model."""
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "runtime_preset_default_output_reservation_tokens", 4_096)
+    body = {"messages": [{"role": "user", "content": "hola"}]}
+
+    assert estimate_request_token_budget(body) < 16_384
+    assert estimate_request_token_budget(body, default_output_reservation=16_384) >= 16_384
+
+
 @pytest.mark.asyncio
 async def test_default_runtime_is_selected_for_normal_request(monkeypatch) -> None:
     profile = _profile()
@@ -176,6 +190,46 @@ async def test_loaded_max_is_reused_for_small_request(monkeypatch) -> None:
 
     assert plan.preset_key == "max"
     assert plan.selection_reason == "loaded"
+
+
+@pytest.mark.asyncio
+async def test_profile_output_reservation_override_pushes_to_a_bigger_preset(monkeypatch) -> None:
+    """A profile with runtime_policy.default_output_reservation_tokens set
+    reserves that much output by default — even for a tiny prompt with no
+    max_tokens — instead of the global 4096 fallback. Verified end-to-end
+    through plan_profile_runtime (not just the estimator in isolation):
+    without the override the tiny prompt fits '64k'; with a large enough
+    override it no longer does and 'max' is selected instead."""
+    profile = _profile()
+    profile.runtime_policy = {
+        "selection": "prefer_loaded",
+        "default_output_reservation_tokens": 100_000,
+    }
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="ollama",
+        status=SimpleNamespace(value="configured"),
+        extra_config={},
+    )
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=[])),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(return_value=_capacity_rows()),
+    )
+
+    # No max_tokens at all — this is exactly the "client forgot to set it"
+    # case that truncated gemma4's reasoning output in production.
+    plan = await plan_profile_runtime(
+        profile,
+        manager,
+        {"messages": [{"role": "user", "content": "hola"}]},
+    )
+
+    assert plan.preset_key == "max"
 
 
 @pytest.mark.asyncio
