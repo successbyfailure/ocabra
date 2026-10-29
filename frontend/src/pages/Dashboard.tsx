@@ -7,6 +7,9 @@ import { MiniTrends } from "@/components/gpu/MiniTrends"
 import { METRIC, tempColor } from "@/components/gpu/metrics"
 import {
   Activity,
+  AudioLines,
+  Binary,
+  Bot,
   Boxes,
   ChevronDown,
   ChevronRight,
@@ -14,14 +17,20 @@ import {
   Download,
   Gauge,
   Globe,
+  Image as ImageIcon,
   MemoryStick,
+  MessageSquare,
   Network,
+  Radio,
   Sparkles,
+  Volume2,
+  X,
   Zap,
 } from "lucide-react"
 import { agentStatsApi } from "@/api/agents"
 import type { AgentStatRow } from "@/types/agents"
 import { api } from "@/api/client"
+import { BackendBadge } from "@/components/models/BackendBadge"
 import { EmptyState } from "@/components/common/EmptyState"
 import { GpuCard } from "@/components/gpu/GpuCard"
 import { LoadedModelList } from "@/components/gpu/LoadedModelList"
@@ -57,6 +66,37 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}k`
   return String(n)
+}
+
+/* ─── Request kind → icon/label/color, for "Últimas peticiones" ─── */
+const REQUEST_KIND_META: Record<string, { icon: React.ElementType; label: string; className: string }> = {
+  chat: { icon: MessageSquare, label: "chat", className: "border-sky-500/30 bg-sky-500/10 text-sky-300" },
+  ollama_chat: { icon: MessageSquare, label: "ollama chat", className: "border-sky-500/30 bg-sky-500/10 text-sky-300" },
+  completion: { icon: MessageSquare, label: "completion", className: "border-sky-500/30 bg-sky-500/10 text-sky-300" },
+  ollama_generate: { icon: MessageSquare, label: "generate", className: "border-sky-500/30 bg-sky-500/10 text-sky-300" },
+  embedding: { icon: Binary, label: "embedding", className: "border-violet-500/30 bg-violet-500/10 text-violet-300" },
+  ollama_embedding: { icon: Binary, label: "embedding", className: "border-violet-500/30 bg-violet-500/10 text-violet-300" },
+  rerank: { icon: Binary, label: "rerank", className: "border-violet-500/30 bg-violet-500/10 text-violet-300" },
+  image_generation: { icon: ImageIcon, label: "imagen", className: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300" },
+  audio_transcription: { icon: AudioLines, label: "transcripción", className: "border-amber-500/30 bg-amber-500/10 text-amber-300" },
+  tts: { icon: Volume2, label: "tts", className: "border-amber-500/30 bg-amber-500/10 text-amber-300" },
+  realtime_session: { icon: Radio, label: "realtime", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },
+  realtime_chat: { icon: Radio, label: "realtime chat", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },
+  realtime_transcription: { icon: Radio, label: "realtime stt", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },
+  realtime_tts: { icon: Radio, label: "realtime tts", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },
+  agent_hop: { icon: Bot, label: "agent", className: "border-orange-500/30 bg-orange-500/10 text-orange-300" },
+}
+const DEFAULT_KIND_META = { icon: MessageSquare, label: "otro", className: "border-border bg-muted/50 text-muted-foreground" }
+
+function RequestKindBadge({ kind }: { kind: string | null | undefined }) {
+  const meta = (kind && REQUEST_KIND_META[kind]) || { ...DEFAULT_KIND_META, label: kind || "—" }
+  const Icon = meta.icon
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${meta.className}`}>
+      <Icon size={11} />
+      {meta.label}
+    </span>
+  )
 }
 
 function formatLoadedAgo(totalSeconds: number): string {
@@ -445,126 +485,137 @@ function RecentRequestsSection() {
       ) : data.requests.length === 0 ? (
         <EmptyState title="Sin peticiones recientes" description="Las peticiones apareceran aqui cuando se procesen." />
       ) : (
-        <div className="overflow-auto rounded-lg border border-border">
-          <table className="min-w-full divide-y divide-border text-sm">
-            <thead className="bg-muted/50">
-              <tr>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Hora</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Modelo</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Tipo</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Duracion</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario / API key</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Estado</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border bg-card">
-              {data.requests.map((req) => {
-                const hora = new Date(req.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-                if (req.inFlight) {
-                  const elapsed = req.elapsedMs != null ? `${Math.round(req.elapsedMs / 1000)}s` : "—"
-                  const remaining = req.estimatedRemainingMs != null ? `~${Math.round(req.estimatedRemainingMs / 1000)}s restantes` : null
-                  const queueWait = req.queueWaitEstimateMs != null ? `~${Math.round(req.queueWaitEstimateMs / 1000)}s en cola` : null
-                  const isQueued = req.queued === true
-                  const durationCell = isQueued
-                    ? queueWait ?? "en cola"
-                    : remaining ?? `⏱ ${elapsed}`
-                  const durationTitle = isQueued
-                    ? `Posición ${(req.queuePosition ?? 0) + 1} de la cola${queueWait ? ` · ${queueWait}` : ""}`
-                    : `Lleva ${elapsed}${remaining ? ` · ${remaining}` : ""}`
+        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+          <div className="overflow-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-muted/30">
+                <tr>
+                  <th className="px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Hora</th>
+                  <th className="px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Modelo</th>
+                  <th className="px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Tipo</th>
+                  <th className="px-3.5 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Duración</th>
+                  <th className="px-3.5 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Tokens</th>
+                  <th className="px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Usuario / API key</th>
+                  <th className="px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Estado</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {data.requests.map((req) => {
+                  const hora = new Date(req.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                  if (req.inFlight) {
+                    const elapsed = req.elapsedMs != null ? `${Math.round(req.elapsedMs / 1000)}s` : "—"
+                    const remaining = req.estimatedRemainingMs != null ? `~${Math.round(req.estimatedRemainingMs / 1000)}s restantes` : null
+                    const queueWait = req.queueWaitEstimateMs != null ? `~${Math.round(req.queueWaitEstimateMs / 1000)}s en cola` : null
+                    const isQueued = req.queued === true
+                    const durationCell = isQueued
+                      ? queueWait ?? "en cola"
+                      : remaining ?? `⏱ ${elapsed}`
+                    const durationTitle = isQueued
+                      ? `Posición ${(req.queuePosition ?? 0) + 1} de la cola${queueWait ? ` · ${queueWait}` : ""}`
+                      : `Lleva ${elapsed}${remaining ? ` · ${remaining}` : ""}`
+                    return (
+                      <tr key={req.id} className={`transition-colors ${isQueued ? "bg-amber-500/5 hover:bg-amber-500/10" : "bg-sky-500/5 hover:bg-sky-500/10"}`}>
+                        <td className="px-3.5 py-2.5 font-mono text-xs text-muted-foreground">{hora}</td>
+                        <td className="px-3.5 py-2.5 max-w-[10rem] truncate font-medium" title={req.modelId}>{req.modelId}</td>
+                        <td className="px-3.5 py-2.5">
+                          <span className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${isQueued ? "border-amber-500/30 bg-amber-500/10 text-amber-300" : "border-sky-500/30 bg-sky-500/10 text-sky-300"}`}>
+                            {isQueued ? <>en cola <span className="opacity-75">#{(req.queuePosition ?? 0) + 1 - (req.slots ?? 0)}</span></> : "procesando"}
+                          </span>
+                        </td>
+                        <td className={`px-3.5 py-2.5 text-right tabular-nums ${isQueued ? "text-amber-300" : "text-sky-300"}`} title={durationTitle}>
+                          {durationCell}
+                        </td>
+                        <td className="px-3.5 py-2.5 text-right text-muted-foreground">—</td>
+                        <td className="px-3.5 py-2.5">
+                          <div className={req.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>
+                            {req.username ?? "anónimo"}
+                          </div>
+                          {req.apiKeyName && (
+                            <div className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/70" title={`API key: ${req.apiKeyName}`}>
+                              🔑 {req.apiKeyName}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-3.5 py-2.5 text-xs font-medium">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 ${isQueued ? "border-amber-500/40 bg-amber-500/15 text-amber-200" : "border-sky-500/40 bg-sky-500/15 text-sky-200"}`}>
+                              <span className={`h-1.5 w-1.5 rounded-full animate-pulse ${isQueued ? "bg-amber-400" : "bg-sky-400"}`} />
+                              {isQueued ? "En cola" : "En vuelo"}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (!window.confirm(`Cancelar la petición en curso a ${req.modelId}?`)) return
+                                try {
+                                  await api.stats.cancelRequest(req.id)
+                                  toast.success("Petición cancelada")
+                                  void load()
+                                } catch (err) {
+                                  toast.error(err instanceof Error ? err.message : "No se pudo cancelar")
+                                }
+                              }}
+                              className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] font-medium text-red-300 transition-colors hover:border-red-500/50 hover:bg-red-500/20"
+                              title="Cancelar esta petición"
+                            >
+                              <X size={11} />
+                              Cancelar
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  }
+                  const isError = Boolean(req.error) || (req.statusCode != null && req.statusCode >= 400)
+                  const statusBadgeClass = isError
+                    ? "border-red-500/40 bg-red-500/15 text-red-200"
+                    : req.statusCode != null
+                      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
+                      : "border-border bg-muted/50 text-muted-foreground"
+                  const statusLabel = req.error ? `Error: ${req.error.substring(0, 40)}` : req.statusCode != null ? String(req.statusCode) : "—"
                   return (
-                    <tr key={req.id} className={isQueued ? "bg-amber-500/5 hover:bg-amber-500/10" : "bg-sky-500/5 hover:bg-sky-500/10"}>
-                      <td className="px-3 py-2 font-mono text-xs">{hora}</td>
-                      <td className="px-3 py-2 max-w-[10rem] truncate" title={req.modelId}>{req.modelId}</td>
-                      <td className="px-3 py-2 text-muted-foreground">
-                        {isQueued ? (
-                          <span>en cola <span className="text-[11px] opacity-75">(#{(req.queuePosition ?? 0) + 1 - (req.slots ?? 0)})</span></span>
-                        ) : "procesando"}
+                    <tr key={req.id} className={`transition-colors hover:bg-muted/30${req.error ? " bg-red-500/5" : ""}`}>
+                      <td className="px-3.5 py-2.5 font-mono text-xs text-muted-foreground">{hora}</td>
+                      <td className="px-3.5 py-2.5 max-w-[10rem] truncate font-medium" title={req.modelId}>{req.modelId}</td>
+                      <td className="px-3.5 py-2.5">
+                        <RequestKindBadge kind={req.requestKind ?? req.backendType} />
                       </td>
-                      <td className={`px-3 py-2 text-right tabular-nums ${isQueued ? "text-amber-300" : "text-sky-300"}`} title={durationTitle}>
-                        {durationCell}
+                      <td className="px-3.5 py-2.5 text-right tabular-nums text-muted-foreground">{req.durationMs != null ? `${req.durationMs} ms` : "—"}</td>
+                      <td className="px-3.5 py-2.5 text-right tabular-nums text-muted-foreground">
+                        {req.inputTokens != null || req.outputTokens != null
+                          ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}` : "—"}
                       </td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">—</td>
-                      <td className="px-3 py-2">
+                      <td className="px-3.5 py-2.5">
                         <div className={req.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>
                           {req.username ?? "anónimo"}
                         </div>
                         {req.apiKeyName && (
-                          <div className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/70" title={`API key: ${req.apiKeyName}`}>
+                          <div
+                            className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/70"
+                            title={`API key: ${req.apiKeyName}`}
+                          >
                             🔑 {req.apiKeyName}
                           </div>
                         )}
-                      </td>
-                      <td className={`px-3 py-2 text-xs font-medium ${isQueued ? "text-amber-300" : "text-sky-300"}`}>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="inline-flex items-center gap-1">
-                            <span className={`h-2 w-2 rounded-full animate-pulse ${isQueued ? "bg-amber-400" : "bg-sky-400"}`} />
-                            {isQueued ? "En cola" : "En vuelo"}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              if (!window.confirm(`Cancelar la petición en curso a ${req.modelId}?`)) return
-                              try {
-                                await api.stats.cancelRequest(req.id)
-                                toast.success("Petición cancelada")
-                                void load()
-                              } catch (err) {
-                                toast.error(err instanceof Error ? err.message : "No se pudo cancelar")
-                              }
-                            }}
-                            className="rounded border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium text-red-200 hover:bg-red-500/20"
-                            title="Cancelar esta petición"
+                        {!req.username && (req.clientAddr || req.userAgent) && (
+                          <div
+                            className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/50"
+                            title={req.userAgent ?? undefined}
                           >
-                            ✕ Cancelar
-                          </button>
-                        </div>
+                            {req.clientAddr ?? "?"}{req.userAgent ? ` · ${req.userAgent}` : ""}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3.5 py-2.5" title={req.error ?? undefined}>
+                        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusBadgeClass}`}>
+                          {statusLabel}
+                        </span>
                       </td>
                     </tr>
                   )
-                }
-                const statusColor =
-                  req.error ? "text-red-400"
-                  : req.statusCode != null && req.statusCode < 400 ? "text-emerald-400"
-                  : "text-muted-foreground"
-                const statusLabel = req.error ? `Error: ${req.error.substring(0, 40)}` : req.statusCode != null ? String(req.statusCode) : "—"
-                return (
-                  <tr key={req.id} className={`hover:bg-muted/30 transition-colors${req.error ? " bg-red-500/5" : ""}`}>
-                    <td className="px-3 py-2 font-mono text-xs">{hora}</td>
-                    <td className="px-3 py-2 max-w-[10rem] truncate" title={req.modelId}>{req.modelId}</td>
-                    <td className="px-3 py-2 text-muted-foreground">{req.requestKind ?? req.backendType ?? "—"}</td>
-                    <td className="px-3 py-2 text-right">{req.durationMs != null ? `${req.durationMs} ms` : "—"}</td>
-                    <td className="px-3 py-2 text-right">
-                      {req.inputTokens != null || req.outputTokens != null
-                        ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}` : "—"}
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className={req.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>
-                        {req.username ?? "anónimo"}
-                      </div>
-                      {req.apiKeyName && (
-                        <div
-                          className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/70"
-                          title={`API key: ${req.apiKeyName}`}
-                        >
-                          🔑 {req.apiKeyName}
-                        </div>
-                      )}
-                      {!req.username && (req.clientAddr || req.userAgent) && (
-                        <div
-                          className="max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground/50"
-                          title={req.userAgent ?? undefined}
-                        >
-                          {req.clientAddr ?? "?"}{req.userAgent ? ` · ${req.userAgent}` : ""}
-                        </div>
-                      )}
-                    </td>
-                    <td className={`px-3 py-2 text-xs font-medium ${statusColor}`} title={req.error ?? undefined}>{statusLabel}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </Section>
@@ -884,14 +935,18 @@ export function Dashboard() {
             return (
               <div
                 key={model.modelId}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-border/80 hover:bg-muted/20"
               >
-                <div className="space-y-1 min-w-0">
-                  <p className="font-medium truncate">{model.displayName}</p>
+                <div className="space-y-1.5 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <BackendBadge backendType={model.backendType} />
+                    <p className="truncate text-[14.5px] font-semibold tracking-tight">{model.displayName}</p>
+                  </div>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <ModelStatusBadge status={model.status} />
                     <LoadPolicyBadge policy={model.loadPolicy} />
-                    <span className="rounded-md bg-muted px-2 py-0.5">
+                    <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+                      <Cpu size={11} />
                       GPU {model.currentGpu.join(", ") || (model.ramUsedMb > 0 ? "CPU" : "-")}
                     </span>
                     {model.ramUsedMb > 0 ? (
@@ -944,8 +999,9 @@ export function Dashboard() {
                   <button
                     type="button"
                     onClick={() => void unloadModel(model.modelId)}
-                    className="rounded-md border border-red-500/40 px-3 py-1 text-sm text-red-200 hover:bg-red-500/20"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 px-3 py-1 text-xs font-medium text-red-300 transition-colors hover:border-red-500/50 hover:bg-red-500/15"
                   >
+                    <X size={13} />
                     Descargar
                   </button>
                 )}
@@ -956,10 +1012,10 @@ export function Dashboard() {
           {activeServices.map((service) => (
             <div
               key={service.serviceId}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-border/80 hover:bg-muted/20"
             >
               <div className="space-y-1 min-w-0">
-                <p className="font-medium truncate">{service.displayName}</p>
+                <p className="truncate text-[14.5px] font-semibold tracking-tight">{service.displayName}</p>
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span className="inline-flex items-center rounded-full border border-sky-500/40 bg-sky-500/20 px-2.5 py-0.5 text-xs font-medium text-sky-200">
                     Servicio
@@ -970,7 +1026,8 @@ export function Dashboard() {
                       {service.queueDepth > 0 && ` +${service.queueDepth}`}
                     </span>
                   )}
-                  <span className="rounded-md bg-muted px-2 py-0.5">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+                    <Cpu size={11} />
                     GPU {service.preferredGpu ?? "-"}
                   </span>
                   <span>
@@ -985,8 +1042,9 @@ export function Dashboard() {
               <button
                 type="button"
                 onClick={() => void unloadService(service.serviceId)}
-                className="rounded-md border border-red-500/40 px-3 py-1 text-sm text-red-200 hover:bg-red-500/20"
+                className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 px-3 py-1 text-xs font-medium text-red-300 transition-colors hover:border-red-500/50 hover:bg-red-500/15"
               >
+                <X size={13} />
                 Descargar
               </button>
             </div>
