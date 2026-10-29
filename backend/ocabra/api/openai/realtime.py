@@ -118,6 +118,44 @@ async def resolve_realtime_model_id(
     return model
 
 
+async def resolve_realtime_llm_runtime_plan(
+    base_model_id: str,
+    *,
+    profile_registry,
+    model_manager,
+) -> tuple[str, dict | None, int | None, str | None]:
+    """Resolve the worker key a realtime session should actually load/call.
+
+    ``base_model_id`` (from :func:`resolve_realtime_model_id`) names the
+    profile's canonical model, not the specific preset-derived worker a
+    multi-preset backend (llama_cpp/vllm/sglang) serves it under — REST
+    endpoints resolve that via ``plan_profile_runtime`` before loading.
+    Without this, a realtime session loaded the bare base id as its own
+    separate, untracked worker instance, orphaned from whatever preset
+    instance REST traffic was already using — on a single GPU that doesn't
+    fit both, so each new realtime session evicted the other and cold-
+    started again. Reproduced live 2026-10-29.
+
+    Returns ``(worker_key, load_overrides, preferred_gpu, load_policy)``.
+    Falls back to ``(base_model_id, None, None, None)`` — today's prior
+    behaviour — for profiles without runtime presets or if anything in
+    this resolution fails; never raises.
+    """
+    try:
+        from ocabra.core.runtime_coordinator import plan_profile_runtime
+
+        candidates = await profile_registry.list_by_model(base_model_id)
+        profile = next((p for p in candidates if p.is_default), None) or (
+            candidates[0] if candidates else None
+        )
+        if profile is not None and getattr(profile, "runtime_presets", None):
+            plan = await plan_profile_runtime(profile, model_manager, None)
+            return plan.worker_key, plan.load_overrides, plan.preferred_gpu, plan.load_policy
+    except Exception as exc:  # noqa: BLE001 — never block a session on this
+        logger.warning("realtime_runtime_plan_failed", model_id=base_model_id, error=str(exc))
+    return base_model_id, None, None, None
+
+
 @router.websocket("/realtime")
 async def realtime_ws(
     websocket: WebSocket,
@@ -186,6 +224,16 @@ async def realtime_ws(
         await websocket.close(code=1008, reason="Model not resolvable")
         return
 
+    llm_worker_key, llm_load_overrides, llm_preferred_gpu, llm_load_policy = (
+        (resolved_model_id, None, None, None)
+        if intent.strip().lower() == "transcription"
+        else await resolve_realtime_llm_runtime_plan(
+            resolved_model_id,
+            profile_registry=profile_registry,
+            model_manager=model_manager,
+        )
+    )
+
     async def _record_realtime(**kwargs: object) -> None:
         try:
             await record_realtime_request(websocket, **kwargs)  # type: ignore[arg-type]
@@ -205,6 +253,10 @@ async def realtime_ws(
         user=user,
         transcription_only=(intent.strip().lower() == "transcription"),
         request_recorder=_record_realtime,
+        llm_worker_key=llm_worker_key,
+        llm_load_overrides=llm_load_overrides,
+        llm_preferred_gpu=llm_preferred_gpu,
+        llm_load_policy=llm_load_policy,
     )
     # Bloque 20 — wire the SessionRegistry so the scheduler and router know
     # this session is holding its workers. Missing registry means the app
@@ -220,7 +272,13 @@ async def realtime_ws(
         try:
             from ocabra.backends.whisper_backend import _should_enable_diarization
 
-            overrides = (profile.load_overrides if profile else None) or {}
+            # Bug in the pre-existing router-resolution refactor: ``profile``
+            # was a local variable inside resolve_realtime_model_id(), not in
+            # scope here — this `except Exception: pass` silently swallowed
+            # the resulting NameError on every transcription-only session,
+            # so diarization auto-detection never actually ran. Re-fetch it.
+            stt_profile = await profile_registry.get(model)
+            overrides = (stt_profile.load_overrides if stt_profile else None) or {}
             if _should_enable_diarization(model, overrides):
                 session._stt_diarize = True  # noqa: SLF001
         except Exception:  # noqa: BLE001 — never block the session on this

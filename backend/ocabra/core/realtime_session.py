@@ -205,11 +205,32 @@ class RealtimeSession:
         user: UserContext | None = None,
         transcription_only: bool = False,
         request_recorder: Callable[..., Awaitable[None]] | None = None,
+        llm_worker_key: str | None = None,
+        llm_load_overrides: dict | None = None,
+        llm_preferred_gpu: int | None = None,
+        llm_load_policy: str | None = None,
     ) -> None:
         from ocabra.config import settings
 
         self.ws = ws
         self.llm_model_id = model_id
+        # The actual worker instance to load/call for the LLM role. Profiles
+        # with multiple runtime presets (most llama_cpp/vllm/sglang chat
+        # models) are served under a preset-derived key like
+        # "llama_cpp/gemma4-26b::<hash>" — REST endpoints resolve this via
+        # plan_profile_runtime() before loading. Without it, every realtime
+        # session loaded the bare base_model_id as its own separate,
+        # untracked worker instance, orphaned from whatever preset instance
+        # REST traffic was already using — on a single GPU that doesn't fit
+        # both, so each new session evicted the other and cold-started again.
+        # Reproduced live 2026-10-29: 3 consecutive realtime sessions for the
+        # same model each spawned a brand new llama-server process. Defaults
+        # to the bare model_id for profiles without presets (unchanged
+        # behaviour) or if runtime-plan resolution fails for any reason.
+        self.llm_worker_key = llm_worker_key or model_id
+        self._llm_load_overrides = llm_load_overrides
+        self._llm_preferred_gpu = llm_preferred_gpu
+        self._llm_load_policy = llm_load_policy
         # Transcription-only mode (OpenAI Realtime transcription session,
         # ?intent=transcription): audio -> VAD -> Whisper -> transcript events,
         # no LLM/TTS and no response generation. ``model`` is the STT model.
@@ -314,7 +335,7 @@ class RealtimeSession:
         if self._session_registry is None:
             return
         workers: list[str] = []
-        for worker_id in (self.stt_model_id, self.llm_model_id, self.tts_model_id):
+        for worker_id in (self.stt_model_id, self.llm_worker_key, self.tts_model_id):
             if worker_id and worker_id not in workers:
                 workers.append(worker_id)
         if not workers:
@@ -464,7 +485,7 @@ class RealtimeSession:
             return
 
         # Mark models that are already loaded as ready
-        if self._worker_pool.get_worker(self.llm_model_id):
+        if self._worker_pool.get_worker(self.llm_worker_key):
             self._llm_ready.set()
         if not self.tts_model_id or self._worker_pool.get_worker(self.tts_model_id):
             self._tts_ready.set()
@@ -533,39 +554,67 @@ class RealtimeSession:
         finally:
             await self._unregister_workers()
 
-    async def _load_model_with_progress(self, role: str, model_id: str | None) -> bool:
+    async def _load_model_with_progress(
+        self,
+        role: str,
+        model_id: str | None,
+        *,
+        worker_key: str | None = None,
+        load_overrides: dict | None = None,
+        preferred_gpu: int | None = None,
+        load_policy: str | None = None,
+    ) -> bool:
         """Load a single model, sending progress events. Returns True if ready.
 
         Safe to call concurrently for the same model — model_manager.load()
         holds a per-model lock so the second caller waits for the first.
+
+        ``worker_key`` lets a role resolve to a preset-derived worker instead
+        of the bare ``model_id`` (see ``ensure_worker_loaded`` and the
+        ``llm_worker_key`` docstring on ``__init__``) — today only the LLM
+        role uses this; STT/TTS backends have no runtime-preset system to go
+        through, so they default to ``worker_key == model_id``.
         """
         if not model_id:
             return False
-        if self._worker_pool.get_worker(model_id):
+        key = worker_key or model_id
+        if self._worker_pool.get_worker(key):
             return True
         try:
-            state = await self._model_manager.get_state(model_id)
-            if not state:
+            state = await self._model_manager.get_state(key)
+            if not state and key == model_id:
                 await self._send_error(
                     f"Model '{model_id}' ({role}) not configured", "model_not_found"
                 )
                 return False
-            if state.status.value == "loaded":
+            if state and state.status.value == "loaded":
                 return True
 
-            logger.info("realtime_cold_start_loading", model_id=model_id, role=role)
+            logger.info("realtime_cold_start_loading", model_id=key, role=role)
             await self._send_event(
                 "session.loading",
                 model=model_id,
                 role=role,
-                message=f"Loading {role}: {state.display_name or model_id}",
+                message=f"Loading {role}: {(state.display_name if state else None) or model_id}",
             )
-            await self._model_manager.load(model_id)
-            logger.info("realtime_cold_start_loaded", model_id=model_id, role=role)
+            if key != model_id:
+                from ocabra.api.openai._deps import ensure_worker_loaded
+
+                await ensure_worker_loaded(
+                    self._model_manager,
+                    model_id,
+                    key,
+                    load_overrides,
+                    preferred_gpu=preferred_gpu,
+                    load_policy=load_policy,
+                )
+            else:
+                await self._model_manager.load(key)
+            logger.info("realtime_cold_start_loaded", model_id=key, role=role)
             return True
         except Exception as exc:
             logger.warning(
-                "realtime_auto_load_failed", model_id=model_id, role=role, error=str(exc)
+                "realtime_auto_load_failed", model_id=key, role=role, error=str(exc)
             )
             await self._send_error(
                 f"Failed to load {role} model '{model_id}': {exc}", "model_load_error"
@@ -576,7 +625,14 @@ class RealtimeSession:
         """Background task: load LLM, TTS, optionally STT after session starts."""
 
         async def _load_llm():
-            ok = await self._load_model_with_progress("llm", self.llm_model_id)
+            ok = await self._load_model_with_progress(
+                "llm",
+                self.llm_model_id,
+                worker_key=self.llm_worker_key,
+                load_overrides=self._llm_load_overrides,
+                preferred_gpu=self._llm_preferred_gpu,
+                load_policy=self._llm_load_policy,
+            )
             if ok:
                 self._llm_ready.set()
 
@@ -817,7 +873,7 @@ class RealtimeSession:
         if self._native_audio_input is not None:
             return self._native_audio_input
         try:
-            state = await self._model_manager.get_state(self.llm_model_id)
+            state = await self._model_manager.get_state(self.llm_worker_key)
         except Exception:
             state = None
         caps = getattr(state, "capabilities", None) if state else None
@@ -836,7 +892,7 @@ class RealtimeSession:
         if self._native_audio_output is not None:
             return self._native_audio_output
         try:
-            state = await self._model_manager.get_state(self.llm_model_id)
+            state = await self._model_manager.get_state(self.llm_worker_key)
         except Exception:
             state = None
         caps = getattr(state, "capabilities", None) if state else None
@@ -1636,30 +1692,42 @@ class RealtimeSession:
         output_tokens = 0
         line_buf = b""
         try:
-            worker = self._worker_pool.get_worker(self.llm_model_id)
+            worker = self._worker_pool.get_worker(self.llm_worker_key)
             if not worker:
                 try:
-                    await self._model_manager.load(self.llm_model_id)
-                    worker = self._worker_pool.get_worker(self.llm_model_id)
+                    if self.llm_worker_key != self.llm_model_id:
+                        from ocabra.api.openai._deps import ensure_worker_loaded
+
+                        await ensure_worker_loaded(
+                            self._model_manager,
+                            self.llm_model_id,
+                            self.llm_worker_key,
+                            self._llm_load_overrides,
+                            preferred_gpu=self._llm_preferred_gpu,
+                            load_policy=self._llm_load_policy,
+                        )
+                    else:
+                        await self._model_manager.load(self.llm_worker_key)
+                    worker = self._worker_pool.get_worker(self.llm_worker_key)
                 except Exception as exc:
                     status_code = 503
                     error_message = str(exc)
                     logger.warning(
                         "realtime_llm_load_failed",
-                        model_id=self.llm_model_id,
+                        model_id=self.llm_worker_key,
                         error=error_message,
                     )
                 if not worker:
                     status_code = 503
                     error_message = error_message or "LLM worker unavailable"
-                    logger.warning("realtime_llm_worker_missing", model_id=self.llm_model_id)
+                    logger.warning("realtime_llm_worker_missing", model_id=self.llm_worker_key)
                     return
 
-            state = await self._model_manager.get_state(self.llm_model_id)
+            state = await self._model_manager.get_state(self.llm_worker_key)
             if not state:
                 status_code = 503
                 error_message = "LLM state unavailable"
-                logger.warning("realtime_llm_state_missing", model_id=self.llm_model_id)
+                logger.warning("realtime_llm_state_missing", model_id=self.llm_worker_key)
                 return
 
             backend_model_id = state.backend_model_id or self.llm_model_id
@@ -1670,7 +1738,7 @@ class RealtimeSession:
             }
 
             async for chunk in self._worker_pool.forward_stream(
-                self.llm_model_id, "/v1/chat/completions", body
+                self.llm_worker_key, "/v1/chat/completions", body
             ):
                 if self._cancel_event.is_set():
                     status_code = 499

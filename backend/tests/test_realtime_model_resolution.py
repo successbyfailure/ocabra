@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ocabra.api.openai.realtime import resolve_realtime_model_id
+from ocabra.api.openai.realtime import (
+    resolve_realtime_llm_runtime_plan,
+    resolve_realtime_model_id,
+)
 
 
 def _registry(profiles: dict) -> MagicMock:
@@ -86,3 +89,85 @@ async def test_canonical_id_is_kept_as_is() -> None:
         "vllm/org/model", profile_registry=_registry({}), model_manager=MagicMock()
     )
     assert resolved == "vllm/org/model"
+
+
+# ── LLM worker-key resolution (2026-10-29) ──────────────────────────────
+#
+# Reproduced live: a realtime session loaded the bare base_model_id as its
+# own separate worker, orphaned from whatever preset-derived instance REST
+# traffic (/v1/chat/completions) was already using for the same profile —
+# on a single GPU that doesn't fit both, every new realtime session evicted
+# the other and cold-started again. resolve_realtime_llm_runtime_plan()
+# resolves the same preset-aware worker_key REST endpoints use.
+
+
+def _profile_registry_with_profiles(profiles: list) -> MagicMock:
+    registry = MagicMock()
+    registry.list_by_model = AsyncMock(return_value=profiles)
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_profile_without_runtime_presets_falls_back_to_base_model_id() -> None:
+    profile = SimpleNamespace(profile_id="ollama/qwen3:8b", is_default=True, runtime_presets=[])
+    registry = _profile_registry_with_profiles([profile])
+
+    worker_key, load_overrides, preferred_gpu, load_policy = await resolve_realtime_llm_runtime_plan(
+        "ollama/qwen3:8b", profile_registry=registry, model_manager=MagicMock()
+    )
+
+    assert worker_key == "ollama/qwen3:8b"
+    assert load_overrides is None
+    assert preferred_gpu is None
+    assert load_policy is None
+
+
+@pytest.mark.asyncio
+async def test_multi_preset_profile_resolves_through_plan_profile_runtime() -> None:
+    profile = SimpleNamespace(
+        profile_id="gemma4:26b-llamacpp", is_default=True, runtime_presets=[object()]
+    )
+    registry = _profile_registry_with_profiles([profile])
+    fake_plan = SimpleNamespace(
+        worker_key="llama_cpp/gemma4-26b::02e08fbd7161",
+        load_overrides={"llama_cpp": {"ctx_size": 65536}},
+        preferred_gpu=1,
+        load_policy="on_demand",
+    )
+
+    with patch(
+        "ocabra.core.runtime_coordinator.plan_profile_runtime",
+        new=AsyncMock(return_value=fake_plan),
+    ):
+        worker_key, load_overrides, preferred_gpu, load_policy = await resolve_realtime_llm_runtime_plan(
+            "llama_cpp/gemma4-26b", profile_registry=registry, model_manager=MagicMock()
+        )
+
+    assert worker_key == "llama_cpp/gemma4-26b::02e08fbd7161"
+    assert load_overrides == {"llama_cpp": {"ctx_size": 65536}}
+    assert preferred_gpu == 1
+    assert load_policy == "on_demand"
+
+
+@pytest.mark.asyncio
+async def test_runtime_plan_failure_falls_back_to_base_model_id_instead_of_raising() -> None:
+    registry = MagicMock()
+    registry.list_by_model = AsyncMock(side_effect=RuntimeError("boom"))
+
+    worker_key, load_overrides, preferred_gpu, load_policy = await resolve_realtime_llm_runtime_plan(
+        "llama_cpp/gemma4-26b", profile_registry=registry, model_manager=MagicMock()
+    )
+
+    assert worker_key == "llama_cpp/gemma4-26b"
+    assert (load_overrides, preferred_gpu, load_policy) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_no_matching_profile_falls_back_to_base_model_id() -> None:
+    registry = _profile_registry_with_profiles([])
+
+    worker_key, *_rest = await resolve_realtime_llm_runtime_plan(
+        "llama_cpp/orphan-model", profile_registry=registry, model_manager=MagicMock()
+    )
+
+    assert worker_key == "llama_cpp/orphan-model"
