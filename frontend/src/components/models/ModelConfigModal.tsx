@@ -110,7 +110,7 @@ const LLAMA_CPP_ROOT_KEYS = [
 const LLAMA_KV_CACHE_TYPES = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"] as const
 const BITNET_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn"]
 const TENSORRT_LLM_ROOT_KEYS = ["max_batch_size", "context_length", "trust_remote_code"]
-const WHISPER_ROOT_KEYS = ["diarization_enabled", "diarization_model_id"]
+const WHISPER_ROOT_KEYS = ["diarization_enabled", "diarization_model_id", "num_workers"]
 
 function FieldHint({ children }: { children: ReactNode }) {
   return <p className="mt-1 text-xs text-muted-foreground">{children}</p>
@@ -341,6 +341,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
 
   const [whisperDiarizationEnabled, setWhisperDiarizationEnabled] = useState(false)
   const [whisperDiarizationModelId, setWhisperDiarizationModelId] = useState("")
+  const [whisperNumWorkers, setWhisperNumWorkers] = useState("5")
   const [memoryEstimate, setMemoryEstimate] = useState<ModelMemoryEstimate | null>(null)
   const [memoryEstimateError, setMemoryEstimateError] = useState<string | null>(null)
   const [estimatingMemory, setEstimatingMemory] = useState(false)
@@ -496,6 +497,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     setWhisperDiarizationModelId(
       whisper?.diarizationModelId == null ? "" : String(whisper.diarizationModelId),
     )
+    setWhisperNumWorkers(whisper?.numWorkers == null ? "5" : String(whisper.numWorkers))
     // Re-hidratar si cambia el modelo o aparece/desaparece una GPU. Depender de
     // la referencia completa `gpus` reiniciaba el formulario cada ~2s con los
     // broadcasts; ignorarla del todo dejaba un split erróneo si llegaba tarde.
@@ -830,6 +832,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           diarizationEnabled: whisperDiarizationEnabled,
           diarizationModelId:
             whisperDiarizationModelId.trim() === "" ? null : whisperDiarizationModelId.trim(),
+          numWorkers: whisperNumWorkers.trim() === "" ? null : Number(whisperNumWorkers),
         },
         WHISPER_ROOT_KEYS,
       )
@@ -2229,7 +2232,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
             {model?.backendType === "whisper" && (
               <FieldSection
                 title="Whisper Runtime"
-                description="La única configuración per-model con impacto claro aquí es la diarización."
+                description="Diarización y paralelismo (num_workers) de CTranslate2."
               >
                 <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                   <input
@@ -2248,6 +2251,22 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     className="w-full rounded-md border border-border bg-background px-3 py-2"
                   />
                   <FieldHint>Déjalo vacío para usar el modelo por defecto del servidor.</FieldHint>
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block text-muted-foreground">num_workers</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={whisperNumWorkers}
+                    onChange={(event) => setWhisperNumWorkers(event.target.value)}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  />
+                  <FieldHint>
+                    Peticiones concurrentes que CTranslate2 puede procesar a la vez. Los pesos se
+                    comparten entre workers (barato en VRAM), pero el límite real es de cómputo: con
+                    large-v3-turbo en una RTX 3060 medimos ~14 workers como el punto en que cada
+                    petición deja de ir a tiempo real. 5 deja margen cómodo por defecto.
+                  </FieldHint>
                 </label>
               </FieldSection>
             )}

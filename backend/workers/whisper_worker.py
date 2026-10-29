@@ -14,6 +14,13 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 DEFAULT_DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-3.1"
+# CTranslate2 shares model weights across workers on the same device — extra
+# workers cost ~tens-to-low-hundreds of MB each (measured empirically), not a
+# full model copy. Compute is the real limit, not VRAM: on an RTX 3060 with
+# large-v3-turbo (int8), ~14 workers was the point where per-request latency
+# crossed real-time (RTF~1.0); 5 keeps comfortable headroom (RTF~0.3-0.4)
+# without needing per-deployment tuning before anyone measures their own case.
+DEFAULT_NUM_WORKERS = 5
 
 
 class WhisperRuntime:
@@ -29,6 +36,7 @@ class WhisperRuntime:
         self.diarization_pipeline: Any = None
         self.diarization_error: str | None = None
         self.embedding_inference: Any = None  # pyannote speaker-embedding model (lazy)
+        self.num_workers: int = DEFAULT_NUM_WORKERS
 
 
 runtime = WhisperRuntime()
@@ -39,11 +47,13 @@ def create_app(
     gpu_indices: list[int],
     diarize_default: bool = False,
     diarization_model_id: str = DEFAULT_DIARIZATION_MODEL_ID,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> FastAPI:
     runtime.model_id = model_id
     runtime.gpu_indices = gpu_indices
     runtime.diarize_default = diarize_default
     runtime.diarization_model_id = diarization_model_id
+    runtime.num_workers = num_workers
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -58,6 +68,7 @@ def create_app(
                 runtime.model_id,
                 runtime.device,
                 runtime.compute_type,
+                runtime.num_workers,
             )
             runtime.error = None
 
@@ -99,6 +110,7 @@ def create_app(
                 "gpu_indices": runtime.gpu_indices,
                 "device": runtime.device,
                 "compute_type": runtime.compute_type,
+                "num_workers": runtime.num_workers,
                 "loaded": runtime.model is not None,
                 "error": runtime.error,
                 "diarize_default": runtime.diarize_default,
@@ -182,6 +194,7 @@ def create_app(
                         runtime.model_id,
                         "cpu",
                         "int8",
+                        runtime.num_workers,
                     )
                     runtime.device = "cpu"
                     runtime.compute_type = "int8"
@@ -286,8 +299,11 @@ def _is_nemo_model_id(model_id: str) -> bool:
     return candidate.exists() and candidate.is_file() and candidate.suffix.lower() == ".nemo"
 
 
-def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
+def _create_whisper_model(
+    model_id: str, device: str, compute_type: str, num_workers: int = DEFAULT_NUM_WORKERS
+) -> Any:
     if _is_nemo_model_id(model_id):
+        # NeMo models don't go through CTranslate2 — no multi-worker concept here.
         return _create_nemo_model(model_id=model_id, device=device)
 
     from faster_whisper import WhisperModel
@@ -296,6 +312,7 @@ def _create_whisper_model(model_id: str, device: str, compute_type: str) -> Any:
         model_id,
         device=device,
         compute_type=compute_type,
+        num_workers=max(1, num_workers),
     )
 
 
@@ -991,6 +1008,7 @@ def main() -> None:
     parser.add_argument("--gpu-indices", default="")
     parser.add_argument("--diarize", action="store_true")
     parser.add_argument("--diarization-model-id", default=DEFAULT_DIARIZATION_MODEL_ID)
+    parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS)
     args = parser.parse_args()
 
     gpu_indices = [int(item) for item in args.gpu_indices.split(",") if item.strip()]
@@ -999,6 +1017,7 @@ def main() -> None:
         gpu_indices,
         diarize_default=bool(args.diarize),
         diarization_model_id=args.diarization_model_id,
+        num_workers=args.num_workers,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

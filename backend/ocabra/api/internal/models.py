@@ -294,13 +294,22 @@ async def get_models_activity(
                     source_counts[source] = max(
                         source_counts.get(source, 0), source_count
                     )
-            # Concurrency the backend will actually serve in parallel. Prefer
-            # the ``_runtime.parallelism`` set by the coordinator (reflects
-            # the active preset); fall back to the admission cap. Clients
-            # render ``processing = min(count, slots)`` and
-            # ``queued = max(0, count - slots)``.
-            # Preferir el ``parallelism`` del derivado cargado (preset
-            # activo) sobre el del canonical o el cap global.
+            # Concurrency the backend will actually serve in parallel. Only
+            # ``_runtime.parallelism`` (set by the coordinator, reflects the
+            # active preset) is a real measure of that — it's set for
+            # backends with genuine concurrent-slot serving (llama.cpp,
+            # vLLM). Backends with no such concept (e.g. whisper, which just
+            # thread-offloads via asyncio.to_thread with no managed slot
+            # pool) leave this ``None``.
+            #
+            # ``settings.max_inflight_per_model`` used to be the fallback
+            # here, but that's an admission-control ceiling ("reject with
+            # 429 past this many queued"), not a measure of how many run
+            # concurrently — conflating the two showed e.g. whisper models
+            # as "1/32 procesando" (32 = the default cap), implying 32-way
+            # parallelism that doesn't exist. Leaving ``slots=None`` lets
+            # clients render an honest "N en curso" instead of a fabricated
+            # ratio (found live 2026-10-30 chasing exactly that "32").
             slots: int | None = runtime_by_canonical.get(state.model_id) or None
             if slots is None:
                 runtime_meta = (
@@ -313,9 +322,6 @@ async def get_models_activity(
                         slots = int(runtime_meta.get("parallelism") or 0) or None
                     except (TypeError, ValueError):
                         slots = None
-            if slots is None:
-                cap = int(getattr(settings, "max_inflight_per_model", 0) or 0)
-                slots = cap if cap > 0 else None
             # Per-request progress for the "is this hung or still working"
             # indicator on the model/GPU card (2026-10-29). ``tokensPerSecond``
             # is None until at least one output token has streamed — division

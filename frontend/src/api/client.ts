@@ -267,10 +267,14 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
 
   const whisperRaw = isRecord(data.whisper) ? data.whisper : {}
   const whisperSource = isRecord(data.whisper) ? whisperRaw : data
-  if (isRecord(data.whisper) || hasAnyKey(whisperSource, ["diarization_enabled", "diarization_model_id"])) {
+  if (
+    isRecord(data.whisper) ||
+    hasAnyKey(whisperSource, ["diarization_enabled", "diarization_model_id", "num_workers"])
+  ) {
     next.whisper = {
       diarizationEnabled: Boolean(whisperSource.diarization_enabled ?? whisperSource.diarizationEnabled),
       diarizationModelId: (whisperSource.diarization_model_id ?? whisperSource.diarizationModelId ?? null) as string | null,
+      numWorkers: toNumberOrNull(whisperSource, "num_workers", "numWorkers"),
     }
   }
 

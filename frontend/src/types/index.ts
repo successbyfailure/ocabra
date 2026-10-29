@@ -244,6 +244,7 @@ export interface TensorRTLLMConfig {
 export interface WhisperConfig {
   diarizationEnabled?: boolean
   diarizationModelId?: string | null
+  numWorkers?: number | null
 }
 
 export interface ModelMemoryEstimate {

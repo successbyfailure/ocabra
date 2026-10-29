@@ -960,11 +960,29 @@ export function Dashboard() {
                       </span>
                     )}
                     {act && act.inFlight > 0 && (() => {
-                      const slots = act.slots ?? act.inFlight
-                      const processing = Math.min(act.inFlight, slots)
-                      const queued = Math.max(0, act.inFlight - slots)
                       const oldestLabel = `${Math.round(act.oldestSeconds)}s`
                       const stuck = act.oldestSeconds > stuckThreshold
+                      // act.slots is null for backends with no managed
+                      // concurrent-slot pool (e.g. whisper — see
+                      // get_models_activity). Don't fabricate a ratio against
+                      // inFlight (that showed e.g. "1/32 procesando" using
+                      // the admission-control cap as if it were real
+                      // parallelism, found live 2026-10-30) — show a plain
+                      // "N en curso" count instead.
+                      const slots = act.slots
+                      const processing = slots != null ? Math.min(act.inFlight, slots) : act.inFlight
+                      const queued = slots != null ? Math.max(0, act.inFlight - slots) : 0
+                      const label =
+                        slots != null
+                          ? `${processing}/${slots} procesando`
+                          : `${act.inFlight} en curso`
+                      const title =
+                        slots != null
+                          ? `Procesando ${processing}/${slots} slot${slots === 1 ? "" : "s"}` +
+                            (queued > 0 ? `, ${queued} encolada${queued === 1 ? "" : "s"}` : "") +
+                            ` · petición más antigua ${oldestLabel}`
+                          : `${act.inFlight} petición${act.inFlight === 1 ? "" : "es"} en curso ` +
+                            `(backend sin pool de slots gestionado) · petición más antigua ${oldestLabel}`
                       return (
                         <span
                           className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${
@@ -974,14 +992,10 @@ export function Dashboard() {
                                 ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
                                 : "border-sky-500/40 bg-sky-500/15 text-sky-200"
                           }`}
-                          title={
-                            `Procesando ${processing}/${slots} slot${slots === 1 ? "" : "s"}` +
-                            (queued > 0 ? `, ${queued} encolada${queued === 1 ? "" : "s"}` : "") +
-                            ` · petición más antigua ${oldestLabel}`
-                          }
+                          title={title}
                         >
                           <span className="h-2 w-2 rounded-full bg-current animate-pulse" />
-                          {processing}/{slots} procesando
+                          {label}
                           {queued > 0 && <span>· {queued} encoladas</span>}
                           <span className="opacity-75">· {oldestLabel}</span>
                         </span>

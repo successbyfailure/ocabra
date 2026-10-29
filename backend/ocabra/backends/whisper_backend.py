@@ -49,6 +49,11 @@ OPENAI_TO_FASTER_MODEL_ID = {
 }
 DEFAULT_DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-3.1"
 DIARIZATION_OVERHEAD_MB = 1200
+# CTranslate2 shares model weights across workers on the same GPU — extra
+# workers are cheap (~tens-to-low-hundreds of MB each, measured empirically),
+# not a full model copy. 5 leaves comfortable real-time headroom (RTF~0.3-0.4
+# measured for large-v3-turbo on an RTX 3060) without per-deployment tuning.
+DEFAULT_NUM_WORKERS = 5
 WORKER_PATH = Path(__file__).resolve().parents[2] / "workers" / "whisper_worker.py"
 
 
@@ -174,6 +179,7 @@ class WhisperBackend(BackendInterface):
         worker_model_id = _resolve_worker_model_id(model_id, extra_config)
         diarization_enabled = _should_enable_diarization(model_id, extra_config)
         diarization_model_id = _resolve_diarization_model_id(extra_config)
+        num_workers = _resolve_num_workers(extra_config)
 
         env = os.environ.copy()
         env.update(kwargs.get("env", {}))
@@ -218,6 +224,8 @@ class WhisperBackend(BackendInterface):
             str(port),
             "--gpu-indices",
             ",".join(str(i) for i in gpu_indices),
+            "--num-workers",
+            str(num_workers),
         ]
         if diarization_enabled:
             args.extend(["--diarize", "--diarization-model-id", diarization_model_id])
@@ -474,6 +482,15 @@ def _resolve_diarization_model_id(extra_config: dict) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return DEFAULT_DIARIZATION_MODEL_ID
+
+
+def _resolve_num_workers(extra_config: dict) -> int:
+    value = _get_whisper_option(extra_config, "num_workers")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_NUM_WORKERS
+    return parsed if parsed > 0 else DEFAULT_NUM_WORKERS
 
 
 def _get_whisper_option(extra_config: dict, key: str) -> Any:
