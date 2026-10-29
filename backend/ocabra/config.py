@@ -96,13 +96,18 @@ class Settings(BaseSettings):
 
     # Hard cap on any single drain wait (pressure_eviction). Even if the
     # estimator says "80 minutes remaining", we never wait more than this.
-    # 2026-10-29: raised 900->1800 — gemma4:26b (22GB) and qwen3.8:27b
-    # (18.7GB) together need 40.7GB, more than GPU1's 24GB, so whenever both
-    # have real concurrent traffic one has to wait for the other. Observed
-    # real sessions up to ~19min (1136s) that session; the old 900s (15min)
-    # cap gave up and returned a clean 409 before some of those genuinely
-    # would have finished and freed the GPU on their own.
-    max_drain_timeout_s: int = 1800
+    # 2026-10-29: tried raising 900->1800 after observing real sessions up
+    # to ~19min (1136s) — gemma4:26b (22GB) + qwen3.8:27b (18.7GB) together
+    # exceed GPU1's 24GB, so one has to wait for the other whenever both
+    # have real concurrent traffic. Walked back the same day: during the
+    # wait the client's HTTP connection gets zero bytes — no SSE event,
+    # nothing — so most client-side timeouts (commonly 60s-5min) fire long
+    # before a 1800s server wait ever pays off, and a client that *does*
+    # wait that long gets a worse experience than a fast, clear 409 with
+    # Retry-After it could act on. Settled below the original 900 (not back
+    # up at 1800) so genuinely-contended admission fails faster, while still
+    # giving more margin than the bare original for the common case.
+    max_drain_timeout_s: int = 600
 
     # Circuit breaker for a worker whose process has died but oCabra has no
     # way to detect or kill it directly (notably Ollama: it manages its own
