@@ -18,6 +18,9 @@ from typing import Any
 from ocabra.core.model_manager_helpers import (
     _resolve_rs_rollback_snapshots,
     estimate_vllm_vram_from_config,
+    resolve_llama_cpp_gpu_layers,
+    resolve_llama_cpp_option,
+    snake_to_camel,
 )
 from ocabra.core.vram_planner import DEFAULT_OVERHEAD_MB
 
@@ -556,3 +559,63 @@ class TestResolveRsRollbackSnapshots:
             extra_config={"llama_cpp": {"speculative": {"spec_type": "draft"}}},
         )
         assert _resolve_rs_rollback_snapshots(state) == 0
+
+
+class TestResolveLlamaCppOptionAcceptsCamelCase:
+    """Reproduced in production 2026-10-29: qwen3.8-27b's extra_config was
+    saved via the frontend's PATCH write path, which persists camelCase
+    (``gpuLayers``), while gemma4-26b's was saved snake_case (``gpu_layers``).
+    ``resolve_llama_cpp_option`` only checked the literal snake_case key, so
+    for qwen3.8-27b it silently missed ``gpuLayers`` and fell back to the
+    global default (``settings.llama_cpp_gpu_layers`` = 0) — making the
+    admission gate think a fully GPU-offloaded model was CPU-only and skip
+    VRAM checks/eviction entirely, while the real subprocess (built by
+    ``LlamaCppBackend._get_option``, which DOES accept camelCase) still
+    requested full GPU offload. The two readers must never disagree again."""
+
+    def test_snake_to_camel_matches_backend_s_own_conversion(self) -> None:
+        assert snake_to_camel("gpu_layers") == "gpuLayers"
+        assert snake_to_camel("cache_type_k") == "cacheTypeK"
+        assert snake_to_camel("ctx_size") == "ctxSize"
+        assert snake_to_camel("flash_attn") == "flashAttn"
+
+    def test_camel_case_only_config_resolves_via_snake_case_key(self) -> None:
+        state = _FakeState(
+            backend_model_id="qwen3.8-27b",
+            extra_config={"llama_cpp": {"gpuLayers": 99}},
+        )
+        assert resolve_llama_cpp_option(state, "gpu_layers", 0) == 99
+
+    def test_gpu_layers_resolves_to_99_not_the_zero_default(self) -> None:
+        """The exact incident: a camelCase-only qwen3.8-27b config must not
+        resolve gpu_layers to the global CPU-only default of 0."""
+        state = _FakeState(
+            backend_model_id="qwen3.8-27b",
+            extra_config={"llama_cpp": {"gpuLayers": 99}},
+        )
+        assert resolve_llama_cpp_gpu_layers(state, default_gpu_layers=0) == 99
+
+    def test_snake_case_config_still_resolves_unaffected(self) -> None:
+        """gemma4-26b's config (snake_case) must keep working exactly as
+        before — this isn't a one-sided fix that breaks the other format."""
+        state = _FakeState(
+            backend_model_id="gemma4-26b",
+            extra_config={"llama_cpp": {"gpu_layers": 99}},
+        )
+        assert resolve_llama_cpp_gpu_layers(state, default_gpu_layers=0) == 99
+
+    def test_snake_case_key_takes_priority_when_both_present(self) -> None:
+        state = _FakeState(
+            backend_model_id="x",
+            extra_config={"llama_cpp": {"gpu_layers": 42, "gpuLayers": 99}},
+        )
+        assert resolve_llama_cpp_option(state, "gpu_layers", 0) == 42
+
+    def test_falls_back_to_default_when_neither_spelling_present(self) -> None:
+        state = _FakeState(backend_model_id="x", extra_config={"llama_cpp": {}})
+        assert resolve_llama_cpp_option(state, "gpu_layers", 0) == 0
+
+    def test_top_level_camel_case_also_resolves(self) -> None:
+        """Not nested under 'llama_cpp' — some paths store options flat."""
+        state = _FakeState(backend_model_id="x", extra_config={"gpuLayers": 99})
+        assert resolve_llama_cpp_option(state, "gpu_layers", 0) == 99

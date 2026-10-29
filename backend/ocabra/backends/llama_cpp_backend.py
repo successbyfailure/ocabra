@@ -21,6 +21,7 @@ from ocabra.backends.base import (
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
 from ocabra.core.backend_installer import read_backend_metadata, venv_nvidia_ld_library_path
+from ocabra.core.model_manager_helpers import snake_to_camel
 
 logger = structlog.get_logger(__name__)
 
@@ -607,9 +608,11 @@ class LlamaCppBackend(BackendInterface):
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
         # Accept both snake_case (canonical schema) and camelCase (frontend
         # write path) so persisted state from either side resolves correctly.
-        camel_key = "".join(
-            part.capitalize() if index else part for index, part in enumerate(key.split("_"))
-        )
+        # ``snake_to_camel`` is shared with ``resolve_llama_cpp_option`` in
+        # model_manager_helpers.py — the admission/eviction path reads the
+        # same extra_config and must never silently disagree with this one
+        # again (see that function's docstring for the incident this caused).
+        camel_key = snake_to_camel(key)
         nested = extra_config.get("llama_cpp")
         if isinstance(nested, dict):
             if key in nested:

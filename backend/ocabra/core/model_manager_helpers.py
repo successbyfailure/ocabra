@@ -141,15 +141,43 @@ def estimate_bitnet_vram_from_config(
     return int(model_vram_mb * min(gpu_layers, total_layers) / total_layers)
 
 
+def snake_to_camel(key: str) -> str:
+    """``gpu_layers`` -> ``gpuLayers``. Shared by every llama.cpp option
+    reader so the accepted key spellings can never drift apart again.
+
+    2026-10-29: ``resolve_llama_cpp_option`` only checked the literal
+    snake_case key while ``LlamaCppBackend._get_option`` (which actually
+    builds the subprocess CLI args) also accepted camelCase — the frontend's
+    PATCH write path saves camelCase. Any model configured through the UI
+    (e.g. qwen3.8-27b: ``gpuLayers``, not ``gpu_layers``) silently resolved
+    to ``default_gpu_layers`` here, which defaults to 0 — so the admission
+    gate treated a fully GPU-offloaded model as CPU-only and skipped VRAM
+    checks/eviction entirely, while the real process still requested full
+    GPU offload. Reproduced in production: qwen3.8-27b's llama-server
+    started with no VRAM admitted for it, fought silently for whatever was
+    actually free, and got stuck with no CUDA context at all when there
+    wasn't enough.
+    """
+    parts = key.split("_")
+    return "".join(part.capitalize() if i else part for i, part in enumerate(parts))
+
+
 def resolve_llama_cpp_option(state, key: str, default):
     """Read a llama.cpp option from ``extra_config['llama_cpp'][key]`` or the
-    top level (accepting snake_case), mirroring the backend's own resolution."""
+    top level, accepting both snake_case and camelCase — mirrors
+    ``LlamaCppBackend._get_option`` exactly (see ``snake_to_camel``)."""
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    camel_key = snake_to_camel(key)
     nested = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else None
-    if nested and key in nested:
-        return nested[key]
+    if isinstance(nested, dict):
+        if key in nested:
+            return nested[key]
+        if camel_key in nested:
+            return nested[camel_key]
     if key in extra:
         return extra[key]
+    if camel_key in extra:
+        return extra[camel_key]
     return default
 
 
