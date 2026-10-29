@@ -1453,6 +1453,17 @@ def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
     through the entire context preset before writing an answer, leaving
     ``content`` empty. No native equivalent on other backends — silently
     dropped there, same pattern as ``reasoning_effort``.
+
+    CAVEAT verified live the same day against the installed build
+    (b1-74bca39): the field is forwarded but NOT honored per-request by this
+    llama-server build — a request with ``reasoning_budget=200`` still
+    reasoned for thousands of tokens. ``reasoning_effort`` IS confirmed
+    effective (same prompt: "low" cut reasoning from ~16.6k to ~4.7k chars).
+    Kept wired anyway (harmless no-op) for whenever the binary gains
+    per-request support, or as a stepping stone to wiring it as a
+    per-profile launch-time flag instead (same family as ``gpu_layers`` /
+    ``ctx_size`` in ``extra_config.llama_cpp`` — a true launch-time
+    ``--reasoning-budget`` would actually be enforced).
     """
     raw = payload.pop("reasoning_budget", None)
     if raw is None:

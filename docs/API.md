@@ -168,15 +168,21 @@ que acepta `"low"`, `"medium"`, `"high"` o `"off"` (sinónimos: `none`,
 **Tope duro de razonamiento (`reasoning_budget`)** — solo para modelos
 llama.cpp nativos (gemma4:26b, qwen3.8:27b). A diferencia de
 `reasoning_effort` (una pista que la plantilla puede ignorar),
-`reasoning_budget` es un **límite duro en tokens**: al agotarse,
-llama-server corta el razonamiento y fuerza la respuesta final — garantiza
-que `content` nunca llega vacío. Por defecto el servidor no tiene límite
-(`-1`, sin restricción), que fue la causa del incidente de truncamiento
-2026-10-29 (ver sección de runtime presets más abajo). Silenciosamente
-ignorado en otros backends.
+en teoría `reasoning_budget` es un **límite duro en tokens**: al agotarse,
+llama-server debería cortar el razonamiento y forzar la respuesta final.
+
+⚠️ **Verificado en vivo 2026-10-29 (build `b1-74bca39`): el campo se
+reenvía al body pero el servidor no lo respeta por petición** — una
+petición con `reasoning_budget: 200` razonó igualmente miles de tokens,
+sin cortarse. `reasoning_effort` sí funciona (confirmado: `"low"` redujo el
+razonamiento de ~16.600 a ~4.700 caracteres en la misma pregunta) — usad
+ese como palanca real por ahora. `reasoning_budget` queda documentado y
+cableado (no rompe nada, se ignora) para cuando la build de llama.cpp lo
+soporte, o como candidato a flag de arranque por perfil en vez de por
+petición.
 
 ```json
-{"model": "gemma4:26b", "messages": [...], "reasoning_budget": 8192}
+{"model": "gemma4:26b", "messages": [...], "reasoning_effort": "low"}
 ```
 
 **Observabilidad de tokens**. El response trae los campos OpenAI estándar
