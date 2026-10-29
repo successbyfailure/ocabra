@@ -133,6 +133,11 @@ export function GenerationServicesSettings({
           grace: config.hunyuanGenerationGracePeriodS,
           gpu: config.hunyuanPreferredGpu,
         },
+        trellis2: {
+          idle: config.trellis2IdleUnloadSeconds,
+          grace: config.trellis2GenerationGracePeriodS,
+          gpu: config.trellis2PreferredGpu,
+        },
         comfyui: {
           idle: config.comfyuiIdleUnloadSeconds,
           grace: config.comfyuiGenerationGracePeriodS,
@@ -154,7 +159,7 @@ export function GenerationServicesSettings({
           gpu: config.unslothPreferredGpu,
         },
         threshold: config.generationGpuUtilThresholdPct,
-      }) as LocalState,
+      }),
     [config],
   )
   const [state, setState] = useState<LocalState>(initial)
