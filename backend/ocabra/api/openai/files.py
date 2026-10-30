@@ -35,7 +35,7 @@ from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
 router = APIRouter(tags=["OpenAI Files"])
 logger = structlog.get_logger(__name__)
 
-VALID_PURPOSES = {"batch", "batch_output", "user_data"}
+VALID_PURPOSES = {"batch", "batch_output", "user_data", "batch_input_audio"}
 MAX_FILE_BYTES = 512 * 1024 * 1024  # 512MB cap
 
 

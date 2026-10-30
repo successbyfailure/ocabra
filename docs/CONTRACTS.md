@@ -527,9 +527,13 @@ Eventos emitidos por el servidor (JSON):
 
 ```
 POST   /v1/files                     → FileObject
-  form: file (multipart), purpose: "batch"|"batch_output"|"user_data"
+  form: file (multipart), purpose: "batch"|"batch_output"|"user_data"|"batch_input_audio"
   Sube un fichero al almacenamiento interno. Para batches, el fichero
-  debe ser JSONL con propósito "batch".
+  debe ser JSONL con propósito "batch". "batch_input_audio" (extensión
+  oCabra) es para el audio que una línea de lote hacia
+  /v1/audio/transcriptions referencia por file_id — ver 5.9.
+  Nota: "batch_error" y "batch_artifact" también existen como purpose pero
+  los crea el propio BatchProcessor internamente, nunca este endpoint.
 
 GET    /v1/files                     → {object: "list", data: [FileObject]}
   query: purpose? (filtro opcional), limit? (1-10000, default 100)
@@ -565,12 +569,23 @@ POST   /v1/batches                   → BatchObject
   body: {
     input_file_id: "file-<uuid>",
     endpoint: "/v1/chat/completions"|"/v1/embeddings"|"/v1/completions"|
-              "/v1/images/generations"|"/v1/audio/speech",
+              "/v1/images/generations"|"/v1/audio/speech"|
+              "/v1/audio/transcriptions",
     completion_window: "24h",
     metadata?: dict
   }
   Crea un batch job. El fichero de input debe ser JSONL con purpose="batch".
   Cada línea: {"custom_id": str, "method": "POST", "url": str, "body": dict}
+
+  endpoint="/v1/audio/transcriptions" (extensión oCabra, no estándar
+  OpenAI — el endpoint real es multipart, no cabe en una línea JSON):
+  body debe llevar {file_id: "file-<uuid>", model, language?, ...} en vez
+  de audio inline; file_id debe referenciar un fichero propio con
+  purpose="batch_input_audio" subido antes por POST /v1/files, o la
+  creación del batch se rechaza (400, code="missing_file_id"|
+  "invalid_file_id", con el número de línea). batch_processor reconstruye
+  la petición multipart real a partir de esa referencia en tiempo de
+  despacho.
 
 GET    /v1/batches                   → {object: "list", data: [BatchObject]}
   query: after? (cursor pagination), limit? (1-100, default 20)

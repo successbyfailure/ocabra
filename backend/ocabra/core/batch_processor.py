@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import secrets
 import time
 import uuid
@@ -649,7 +650,6 @@ class BatchProcessor:
             "X-Gateway-Token": self._token,
             "X-Internal-User-Id": user_id,
             "X-Internal-Request-Origin": "batch",
-            "Content-Type": "application/json",
         }
         if api_key_name:
             headers["X-Internal-Key-Name"] = api_key_name
@@ -659,13 +659,73 @@ class BatchProcessor:
             int(settings.batch_request_timeout_seconds),
             int(settings.inference_request_timeout_seconds) + 30,
         )
+
+        multipart_error = None
+        files_kw: dict[str, Any] | None = None
+        data_kw: dict[str, Any] | None = None
+        json_kw: dict[str, Any] | None = body
+        if endpoint == "/v1/audio/transcriptions":
+            # oCabra extension (2026-10-30): the real endpoint takes
+            # multipart/form-data with a binary file, not JSON — the batch
+            # line carries a file_id (pre-uploaded via /v1/files,
+            # purpose="batch_input_audio") instead of inline audio. Rebuild
+            # the real multipart request from that reference here.
+            json_kw = None
+            raw_file_id = str(body.pop("file_id", ""))
+            audio_id = raw_file_id[5:] if raw_file_id.startswith("file-") else raw_file_id
+            try:
+                async with AsyncSessionLocal() as session:
+                    audio_file = await session.get(OpenAIFile, uuid.UUID(audio_id))
+            except ValueError:
+                audio_file = None
+            if audio_file is None:
+                multipart_error = {
+                    "code": "invalid_file_id",
+                    "message": f"body.file_id '{raw_file_id}' does not reference an uploaded file",
+                }
+            else:
+                audio_path = Path(audio_file.storage_path)
+                if not audio_path.exists():
+                    multipart_error = {
+                        "code": "file_not_found",
+                        "message": "Referenced audio file content missing on disk",
+                    }
+                else:
+                    content_type = mimetypes.guess_type(audio_file.filename)[0] or "application/octet-stream"
+                    files_kw = {"file": (audio_file.filename, audio_path.read_bytes(), content_type)}
+                    # dict value = list means "repeat this field" to httpx's
+                    # MultipartStream (same idiom as encode_urlencoded_data) —
+                    # matches what transcriptions() reads via
+                    # form.getlist("timestamp_granularities[]"). A plain
+                    # list/tuple passed as the whole `data=` argument instead
+                    # of a dict silently takes httpx's deprecated
+                    # "data=<raw bytes>" compat path and produces a SYNC
+                    # stream — reproduced live 2026-10-30 ("Attempted to send
+                    # a sync request with an AsyncClient instance").
+                    data_kw = {}
+                    for key, value in body.items():
+                        if value is None:
+                            continue
+                        if key == "timestamp_granularities" and isinstance(value, list):
+                            data_kw["timestamp_granularities[]"] = [str(v) for v in value]
+                        else:
+                            data_kw[key] = str(value)
+
+        if multipart_error is not None:
+            return None, 400, multipart_error
+
         try:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://batch-processor.local",
                 timeout=dispatch_timeout_s,
             ) as client:
-                response = await client.post(endpoint, json=body, headers=headers)
+                if files_kw is not None:
+                    response = await client.post(endpoint, files=files_kw, data=data_kw, headers=headers)
+                else:
+                    response = await client.post(
+                        endpoint, json=json_kw, headers={**headers, "Content-Type": "application/json"}
+                    )
         except Exception as exc:
             return None, 500, {
                 "code": "internal_error",

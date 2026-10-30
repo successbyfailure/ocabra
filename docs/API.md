@@ -398,14 +398,17 @@ presión — úsalos para todo lo que pueda esperar.
 
 Endpoints soportados dentro de un lote: `/v1/chat/completions`,
 `/v1/embeddings`, `/v1/completions`, `/v1/images/generations`,
-`/v1/audio/speech`. `completion_window` solo admite `"24h"` por ahora.
+`/v1/audio/speech`, `/v1/audio/transcriptions`. `completion_window` solo
+admite `"24h"` por ahora.
 
-**No soportado**: `/v1/audio/transcriptions` y `/v1/images/edits` — ambos
-necesitan subir un fichero binario (audio/imagen) en la propia petición
-(`multipart/form-data`), que no cabe en el modelo de "una línea JSON por
-petición" del formato JSONL de entrada. La API real de Batches de OpenAI
-tiene la misma limitación por el mismo motivo — no es una carencia
-particular de oCabra.
+**No soportado**: `/v1/images/edits` — necesita subir una imagen binaria en
+la propia petición (`multipart/form-data`), que no cabe en el modelo de "una
+línea JSON por petición" del formato JSONL de entrada. La API real de
+Batches de OpenAI tiene la misma limitación con todo lo que requiere subir
+un binario — por eso tampoco soporta `/v1/audio/transcriptions` ni
+`/v1/images/edits`. oCabra sí soporta transcripciones en lote, pero como
+**extensión propia, fuera del estándar OpenAI** (ver más abajo) — no es algo
+que un cliente/SDK oficial de OpenAI sepa construir.
 
 Cada línea del JSONL de entrada:
 ```json
@@ -432,6 +435,24 @@ siempre:
 ```
 `/v1/images/generations` **no** necesita este tratamiento — su respuesta ya
 es JSON puro (`b64_json` o `url`), igual que chat.
+
+**Transcripciones en lote (`/v1/audio/transcriptions`) — extensión oCabra,
+no estándar OpenAI.** El endpoint real recibe el audio como
+`multipart/form-data`, que no cabe en una línea JSON. En su lugar:
+
+1. Sube el audio por separado con `POST /v1/files`, `purpose=batch_input_audio`.
+2. En la línea del lote, pon su `file_id` en el `body` en vez de enviar el
+   audio — el resto de campos (`model`, `language`, `response_format`,
+   `prompt`, `temperature`, `diarize`, `timestamp_granularities`, ...) son
+   los mismos que acepta el endpoint real:
+```json
+{"custom_id": "req-1", "method": "POST", "url": "/v1/audio/transcriptions", "body": {"file_id": "file-...", "model": "whisper-large-v3-turbo", "language": "es"}}
+```
+`batch_processor` reconstruye internamente la petición multipart real a
+partir de esa referencia. Si el `file_id` falta, no existe, no es tuyo, o no
+tiene `purpose=batch_input_audio`, el lote se rechaza entero en la creación
+(`POST /v1/batches` devuelve 400 con el número de línea exacto), igual que
+cualquier otro error de validación del JSONL de entrada.
 
 Ciclo de estados: `validating` → `in_progress` → `finalizing` →
 `completed` (o `failed`/`cancelled`/`expired`). `request_counts` en la

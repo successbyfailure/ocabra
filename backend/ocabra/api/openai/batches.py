@@ -33,7 +33,17 @@ ALLOWED_ENDPOINTS = {
     "/v1/completions",
     "/v1/images/generations",
     "/v1/audio/speech",
+    "/v1/audio/transcriptions",
 }
+
+# oCabra extension (2026-10-30), NOT part of the OpenAI Batches spec: the
+# real /v1/audio/transcriptions endpoint takes multipart/form-data with a
+# binary file, which doesn't fit a JSON line. Batch lines targeting it
+# reference an already-uploaded file instead of inlining audio — upload it
+# first via POST /v1/files with purpose="batch_input_audio", then put its
+# file_id in the line's body. batch_processor._dispatch() builds the real
+# multipart request from that reference at execution time.
+_BATCH_INPUT_AUDIO_PURPOSE = "batch_input_audio"
 
 
 class BatchCreateBody(BaseModel):
@@ -133,6 +143,37 @@ async def create_batch(
                         "code": "endpoint_mismatch",
                         "message": f"Line url '{obj.get('url')}' does not match batch endpoint",
                     })
+                    continue
+                if body.endpoint == "/v1/audio/transcriptions":
+                    line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
+                    audio_file_id = line_body.get("file_id")
+                    if not audio_file_id:
+                        validation_errors.append({
+                            "line": line_no,
+                            "code": "missing_file_id",
+                            "message": "body.file_id is required for /v1/audio/transcriptions "
+                            "lines (oCabra extension — upload the audio first via POST "
+                            "/v1/files with purpose='batch_input_audio')",
+                        })
+                        continue
+                    try:
+                        audio_file_uuid = uuid.UUID(
+                            str(audio_file_id)[5:] if str(audio_file_id).startswith("file-") else str(audio_file_id)
+                        )
+                        audio_file = await session.get(OpenAIFile, audio_file_uuid)
+                    except ValueError:
+                        audio_file = None
+                    if (
+                        audio_file is None
+                        or (audio_file.user_id != user_uuid and not user.is_admin)
+                        or audio_file.purpose != _BATCH_INPUT_AUDIO_PURPOSE
+                    ):
+                        validation_errors.append({
+                            "line": line_no,
+                            "code": "invalid_file_id",
+                            "message": f"body.file_id '{audio_file_id}' is not a file you own "
+                            f"with purpose='{_BATCH_INPUT_AUDIO_PURPOSE}'",
+                        })
 
         if request_total == 0:
             raise HTTPException(status_code=400, detail={"error": {
