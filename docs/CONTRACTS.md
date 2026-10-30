@@ -274,6 +274,13 @@ Nota OpenAI `/v1/*`: el campo `model` acepta `model_id` canónico y también `ba
 GET    /ocabra/models/{model_id}         → ModelState
 POST   /ocabra/models/{model_id}/load    → ModelState
 POST   /ocabra/models/{model_id}/unload  → ModelState
+  Unload con el model_id canónico de un perfil con runtime presets (2026-10-30):
+  el worker realmente cargado vive en una clave derivada (`model_id::<hash>`,
+  ver ModelManager.add_model/_load_model), nunca en la canónica directamente —
+  unload() detecta esto y redirige a todos los derivados actualmente cargados
+  en vez de hacer no-op silencioso (comportamiento previo, encontrado en vivo
+  recuperando un worker colgado: la llamada devolvía 200 "unloaded" sin tocar
+  el proceso real).
 POST   /ocabra/models/{model_id}/memory-estimate → ModelMemoryEstimate
   body: {
     preferred_gpu?: int|null,
@@ -1090,6 +1097,25 @@ Flash-Attention workspace, scratch de Ollama/llama.cpp, chunked prefill).
 Sin esto el planner reportaba ``fits=True`` para 262k en 24 GB cuando
 Ollama lo rechazaba con HTTP 500. vLLM no lo necesita porque ya reserva
 VRAM via ``gpu_memory_utilization``.
+
+**Pool KV unificado de llama.cpp.** ``extra_config.llama_cpp`` admite cuatro
+campos opcionales y tri-state; si no aparecen, oCabra conserva el comportamiento
+por defecto del build fijado:
+
+```python
+{
+    "kv_unified": True,              # --kv-unified / --no-kv-unified
+    "kv_unified_per_slot": 32768,    # límite por secuencia, >= 1
+    "cache_ram_mib": 0,              # -1 sin límite, 0 desactivada, >0 MiB
+    "cache_idle_slots": False,       # --cache-idle-slots / --no-cache-idle-slots
+}
+```
+
+El backend acepta tanto ``snake_case`` como ``camelCase`` por compatibilidad
+con la UI. Estos campos configuran ``llama-server`` al crear el runtime; no
+autorizan una mutación en caliente. Durante el spike inicial se usarán
+``cache_ram_mib=0`` y ``cache_idle_slots=False`` para que la prompt cache no
+interfiera con las pruebas de aislamiento del pool unificado.
 
 Endpoints internos:
 

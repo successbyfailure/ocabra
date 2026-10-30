@@ -2445,7 +2445,32 @@ class ModelManager:
 
     async def unload(self, model_id: str, reason: str = "manual") -> None:
         state = self._states.get(model_id)
-        if not state or state.status != ModelStatus.LOADED:
+        if not state:
+            return
+        if state.status != ModelStatus.LOADED:
+            # Runtime presets load a derived worker key (``model_id::<hash>``,
+            # see add_model/_load_model), never the canonical id itself — the
+            # canonical entry's own status can sit at CONFIGURED/UNLOADED
+            # forever while a derived sibling is the one actually resident
+            # (same split _overlay_loaded_derived_state already patches for
+            # display in api/internal/models.py). Unlike that display-only
+            # fix, this one is load-bearing: calling unload() with the
+            # canonical id used to silently no-op here, so anyone recovering
+            # a hung worker (no_op → stuck worker never actually killed)
+            # had to already know the derived key by heart. Reproduced live
+            # 2026-10-30 during the "Luis gemma4 hang" recovery. Redirect to
+            # every currently-loaded derived sibling instead of just the
+            # canonical key — "unload this model" should mean exactly that,
+            # regardless of which preset(s) happen to be resident.
+            if "::" not in model_id:
+                derived_loaded = [
+                    sibling_id
+                    for sibling_id, sibling in self._states.items()
+                    if sibling.status == ModelStatus.LOADED
+                    and sibling_id.startswith(f"{model_id}::")
+                ]
+                for sibling_id in derived_loaded:
+                    await self.unload(sibling_id, reason=reason)
             return
 
         state.status = ModelStatus.UNLOADING

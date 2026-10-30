@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,18 @@ _SHUTDOWN_TIMEOUT_S = 20
 _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_worker.py"
 _VALID_SPLIT_MODES = {"layer", "row", "none"}
 _VALID_SPLIT_STRATEGIES = {"evenly", "favor_main"}
+
+
+def _worker_log_path(model_id: str) -> str:
+    safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
+    return f"/tmp/llama-cpp-worker-{safe}.log"
+
+
+@dataclass
+class _LlamaCppWorker:
+    process: asyncio.subprocess.Process
+    port: int
+    log_file: Any  # open file handle, stdout/stderr target — see load()
 
 
 def _compose_visible_devices(
@@ -125,7 +138,7 @@ class LlamaCppBackend(BackendInterface):
         )
 
     def __init__(self, gpu_manager: Any | None = None) -> None:
-        self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
+        self._processes: dict[str, _LlamaCppWorker] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
         self._gpu_manager = gpu_manager
 
@@ -233,6 +246,14 @@ class LlamaCppBackend(BackendInterface):
             cmd.extend(["--cache-type-k", str(options["cache_type_k"])])
         if options.get("cache_type_v"):
             cmd.extend(["--cache-type-v", str(options["cache_type_v"])])
+        if options["kv_unified"] is not None:
+            cmd.append("--kv-unified" if options["kv_unified"] else "--no-kv-unified")
+        if options["kv_unified_per_slot"] is not None:
+            cmd.extend(["--kv-unified-per-slot", str(options["kv_unified_per_slot"])])
+        if options["cache_ram_mib"] is not None:
+            cmd.extend(["--cache-ram", str(options["cache_ram_mib"])])
+        if options["cache_idle_slots"] is not None:
+            cmd.append("--cache-idle-slots" if options["cache_idle_slots"] else "--no-cache-idle-slots")
 
         # Multi-GPU + MoE flags (Sprint 17.3). All optional; only forwarded
         # when the user actually configured them.
@@ -309,13 +330,30 @@ class LlamaCppBackend(BackendInterface):
             port=port,
             gpu_layers=options["gpu_layers"],
         )
+        # stdout/stderr go to a real file, NOT asyncio.subprocess.PIPE.
+        # Nothing was ever draining those pipes after startup (only a
+        # one-shot 0.3s stderr peek on a crashed *startup*, never during
+        # normal serving) — llama-server logs per-request/per-slot info by
+        # default, and once the kernel pipe buffer (~64KB) fills up, the
+        # next write() blocks the server process, wedging the entire
+        # continuous-batching loop while /health keeps answering (it's a
+        # separate, cheap code path) — alive, healthy-looking, zero GPU
+        # util, every in-flight generation stuck until the 1500s timeout.
+        # Prime suspect for the long-unconfirmed "Luis gemma4 hang"
+        # (2026-10-25 on, recurred 2026-10-30): reproduced today — a
+        # worker hung mid-serving, SIGTERM timed out, only SIGKILL worked,
+        # exactly the profile of a process blocked in a write() syscall it
+        # can't be interrupted out of. Mirrors the pattern already used in
+        # piper_backend.py.
+        log_path = _worker_log_path(model_id)
+        log_file = open(log_path, "ab")  # noqa: SIM115 — lives for the worker's lifetime, closed in _kill_process
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
         )
-        self._processes[model_id] = (process, port)
+        self._processes[model_id] = _LlamaCppWorker(process=process, port=port, log_file=log_file)
 
         try:
             await self._wait_for_startup(
@@ -345,12 +383,11 @@ class LlamaCppBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             return False
-        process, port = entry
-        if process.returncode is not None:
+        if entry.process.returncode is not None:
             return False
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                response = await client.get(f"http://127.0.0.1:{port}/health")
+                response = await client.get(f"http://127.0.0.1:{entry.port}/health")
             return response.status_code == 200
         except Exception:
             return False
@@ -368,7 +405,7 @@ class LlamaCppBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             return None
-        _, port = entry
+        port = entry.port
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(f"http://127.0.0.1:{port}/props")
@@ -484,7 +521,7 @@ class LlamaCppBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No llama.cpp worker for model '{model_id}'")
-        _, port = entry
+        port = entry.port
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
             response.raise_for_status()
@@ -494,7 +531,7 @@ class LlamaCppBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No llama.cpp worker for model '{model_id}'")
-        _, port = entry
+        port = entry.port
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream(
                 "POST", f"http://127.0.0.1:{port}{path}", json=body
@@ -552,6 +589,16 @@ class LlamaCppBackend(BackendInterface):
             # Sprint 17.2 — KV cache quantization (None = use llama-server default)
             "cache_type_k": self._get_option(extra_config, "cache_type_k", None),
             "cache_type_v": self._get_option(extra_config, "cache_type_v", None),
+            "kv_unified": self._to_bool_or_none(self._get_option(extra_config, "kv_unified", None)),
+            "kv_unified_per_slot": self._to_int_or_none(
+                self._get_option(extra_config, "kv_unified_per_slot", None)
+            ),
+            "cache_ram_mib": self._to_int_or_none(
+                self._get_option(extra_config, "cache_ram_mib", None)
+            ),
+            "cache_idle_slots": self._to_bool_or_none(
+                self._get_option(extra_config, "cache_idle_slots", None)
+            ),
             # Multi-GPU + MoE (Sprint 17.3). All optional.
             "main_gpu": self._to_int_or_none(self._get_option(extra_config, "main_gpu", None)),
             "tensor_split": self._normalize_tensor_split(
@@ -603,6 +650,10 @@ class LlamaCppBackend(BackendInterface):
                 "cache_type_v != 'f16' requires flash_attn=True (llama.cpp only "
                 "supports quantized V cache when flash attention is enabled)."
             )
+        if options["kv_unified_per_slot"] is not None and options["kv_unified_per_slot"] < 1:
+            raise ValueError("kv_unified_per_slot must be at least 1")
+        if options["cache_ram_mib"] is not None and options["cache_ram_mib"] < -1:
+            raise ValueError("cache_ram_mib must be -1 or greater")
         return options
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
@@ -658,10 +709,10 @@ class LlamaCppBackend(BackendInterface):
         url = f"http://127.0.0.1:{port}/health"
         while asyncio.get_running_loop().time() < deadline:
             entry = self._processes.get(model_id)
-            if entry and entry[0].returncode is not None:
-                rc = entry[0].returncode
-                stderr_tail = await self._read_stderr_tail(entry[0])
-                suffix = f" stderr={stderr_tail}" if stderr_tail else ""
+            if entry and entry.process.returncode is not None:
+                rc = entry.process.returncode
+                log_tail = self._read_log_tail(model_id)
+                suffix = f" log_tail={log_tail}" if log_tail else ""
                 if rc in {-signal.SIGKILL, 137}:
                     raise MemoryError(
                         f"llama.cpp worker for '{model_id}' was OOM-killed (rc={rc}).{suffix}"
@@ -685,40 +736,57 @@ class LlamaCppBackend(BackendInterface):
         entry = self._processes.pop(model_id, None)
         if not entry:
             return
-        process, _ = entry
+        process = entry.process
         if process.returncode is not None:
+            entry.log_file.close()
             return
 
         if graceful:
             try:
                 process.terminate()
                 await asyncio.wait_for(process.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
+                entry.log_file.close()
                 return
             except (TimeoutError, ProcessLookupError):
-                logger.warning("llama_cpp_sigterm_timeout", model_id=model_id)
+                # A worker that doesn't respond to SIGTERM within the
+                # graceful window is the "alive, healthy-looking, but
+                # wedged" state this log-to-file fix targets (see the
+                # comment in load()) — capture whatever it last wrote
+                # before force-killing it, since this is exactly the
+                # moment that evidence matters most and used to be lost.
+                logger.warning(
+                    "llama_cpp_sigterm_timeout",
+                    model_id=model_id,
+                    log_tail=self._read_log_tail(model_id),
+                )
 
         try:
             process.kill()
             await process.wait()
         except ProcessLookupError:
             pass
+        finally:
+            entry.log_file.close()
 
-    async def _read_stderr_tail(
-        self, process: asyncio.subprocess.Process, limit: int = 4000
-    ) -> str:
-        if process.stderr is None:
-            return ""
+    def _read_log_tail(self, model_id: str, limit: int = 4000) -> str:
+        """Best-effort tail of the worker's combined stdout+stderr log file
+        (see ``_worker_log_path`` / ``load()``) — a separate read handle on
+        the same path, since the write handle stays open append-only for
+        the worker's whole lifetime.
+        """
         try:
-            data = await asyncio.wait_for(process.stderr.read(), timeout=0.3)
-        except Exception:
+            path = _worker_log_path(model_id)
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > limit:
+                    f.seek(size - limit)
+                data = f.read()
+        except OSError:
             return ""
         if not data:
             return ""
         text = data.decode("utf-8", errors="replace").strip()
-        if len(text) <= limit:
-            return text
-        half = limit // 2
-        return f"{text[:half]}\n...[truncated]...\n{text[-half:]}"
+        return text if len(text) <= limit else text[-limit:]
 
     def _to_int_or_none(self, value: Any) -> int | None:
         if value is None:
