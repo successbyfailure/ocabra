@@ -28,7 +28,7 @@ export const useModelStore = create<ModelStore>((set) => ({
               backendType: "vllm",
               status: "configured",
               loadPolicy: "on_demand",
-              autoReload: false,
+              pinPermanent: false,
               preferredGpu: null,
               currentGpu: [],
               vramUsedMb: 0,

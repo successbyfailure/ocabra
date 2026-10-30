@@ -43,7 +43,6 @@ class RuntimePresetCreate(BaseModel):
     placement_policy: Literal["auto", "preferred", "forced"] = "auto"
     preferred_gpus: list[int] | None = None
     execution_policy: Literal["auto", "local", "remote"] = "auto"
-    load_policy: Literal["warm", "on_demand"] = "on_demand"
     enabled: bool = True
     is_default: bool = False
     priority: int = Field(default=100, ge=0)
@@ -87,7 +86,6 @@ class RuntimePresetUpdate(BaseModel):
     placement_policy: Literal["auto", "preferred", "forced"] | None = None
     preferred_gpus: list[int] | None = None
     execution_policy: Literal["auto", "local", "remote"] | None = None
-    load_policy: Literal["warm", "on_demand"] | None = None
     enabled: bool | None = None
     is_default: bool | None = None
     priority: int | None = Field(default=None, ge=0)
@@ -118,7 +116,6 @@ class RuntimePresetOut(BaseModel):
     placement_policy: str
     preferred_gpus: list[int] | None = None
     execution_policy: str
-    load_policy: str
     enabled: bool
     is_default: bool
     priority: int

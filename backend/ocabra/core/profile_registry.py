@@ -416,7 +416,6 @@ class ProfileRegistry:
                         else None
                     ),
                     execution_policy=preset.execution_policy,
-                    load_policy=preset.load_policy,
                     enabled=preset.enabled,
                     is_default=preset.is_default,
                     priority=preset.priority,
@@ -508,7 +507,6 @@ class ProfileRegistry:
             "placement_policy": preset.placement_policy,
             "preferred_gpus": preset.preferred_gpus,
             "execution_policy": preset.execution_policy,
-            "load_policy": preset.load_policy,
             "enabled": preset.enabled,
             "is_default": preset.is_default,
             "priority": preset.priority,

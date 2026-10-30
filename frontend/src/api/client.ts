@@ -551,7 +551,6 @@ function toRuntimePreset(raw: unknown): RuntimePreset {
     executionPolicy: String(
       data.execution_policy ?? data.executionPolicy ?? "auto",
     ) as RuntimePreset["executionPolicy"],
-    loadPolicy: String(data.load_policy ?? data.loadPolicy ?? "on_demand") as RuntimePreset["loadPolicy"],
     enabled: Boolean(data.enabled ?? true),
     isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
     priority: Number(data.priority ?? 100),
@@ -571,7 +570,6 @@ function fromRuntimePreset(data: RuntimePresetCreate | RuntimePresetUpdate): Rec
     ...(data.placementPolicy !== undefined && { placement_policy: data.placementPolicy }),
     ...(data.preferredGpus !== undefined && { preferred_gpus: data.preferredGpus }),
     ...(data.executionPolicy !== undefined && { execution_policy: data.executionPolicy }),
-    ...(data.loadPolicy !== undefined && { load_policy: data.loadPolicy }),
     ...(data.enabled !== undefined && { enabled: data.enabled }),
     ...(data.isDefault !== undefined && { is_default: data.isDefault }),
     ...(data.priority !== undefined && { priority: data.priority }),
@@ -682,7 +680,7 @@ function toModelState(raw: unknown): ModelState {
     backendType: String(data.backend_type ?? data.backendType ?? "vllm") as ModelState["backendType"],
     status: String(data.status ?? "configured") as ModelState["status"],
     loadPolicy: String(data.load_policy ?? data.loadPolicy ?? "on_demand") as ModelState["loadPolicy"],
-    autoReload: Boolean(data.auto_reload ?? data.autoReload),
+    pinPermanent: Boolean(data.pin_permanent ?? data.pinPermanent),
     preferredGpu: (data.preferred_gpu ?? data.preferredGpu ?? null) as number | null,
     currentGpu: Array.isArray(data.current_gpu ?? data.currentGpu)
       ? ((data.current_gpu ?? data.currentGpu) as unknown[]).map((gpu) => Number(gpu))
@@ -731,7 +729,7 @@ function toDownloadJob(raw: unknown): DownloadJob {
       ? {
           displayName: registerConfigRaw.display_name as string | undefined,
           loadPolicy: (registerConfigRaw.load_policy ?? "on_demand") as "pin" | "warm" | "on_demand",
-          autoReload: Boolean(registerConfigRaw.auto_reload),
+          pinPermanent: Boolean(registerConfigRaw.pin_permanent),
           preferredGpu: (registerConfigRaw.preferred_gpu ?? null) as number | null,
           extraConfig: isRecord(registerConfigRaw.extra_config)
             ? (registerConfigRaw.extra_config as { vllm?: import("@/types").VLLMConfig })

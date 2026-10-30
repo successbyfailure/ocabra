@@ -40,7 +40,7 @@ interface ModelConfigModalProps {
   onSave: (modelId: string, patch: {
     loadPolicy: LoadPolicy
     preferredGpu: number | null
-    autoReload: boolean
+    pinPermanent: boolean
     schedules: EvictionSchedule[]
     extraConfig?: BackendExtraConfig
   }) => Promise<void>
@@ -250,7 +250,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
 
   const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand")
   const [preferredGpu, setPreferredGpu] = useState<number | null>(null)
-  const [autoReload, setAutoReload] = useState(false)
+  const [pinPermanent, setPinPermanent] = useState(false)
   const [schedules, setSchedules] = useState<EvictionSchedule[]>([])
   // When a use case is configured it becomes the source of truth for context /
   // parallelism / KV — the matching raw runtime fields below are then read-only.
@@ -370,7 +370,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
     if (!model) return
     setLoadPolicy(model.loadPolicy)
     setPreferredGpu(model.preferredGpu)
-    setAutoReload(model.autoReload)
+    setPinPermanent(model.pinPermanent)
     setSchedules(model.schedules ?? [])
     setUseCaseActive(Boolean((model.extraConfig as Record<string, unknown> | undefined)?.use_case))
 
@@ -889,7 +889,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
       const savePromise = onSave(model.modelId, {
         loadPolicy,
         preferredGpu,
-        autoReload,
+        pinPermanent,
         schedules,
         extraConfig: buildExtraConfig(),
       })
@@ -964,7 +964,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
             )}
             <FieldSection
               title="General"
-              description="Politica de carga, afinidad de GPU y recarga automatica."
+              description="Politica de carga y afinidad de GPU."
             >
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="block text-sm">
@@ -978,7 +978,11 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <option value="warm">warm</option>
                     <option value="on_demand">on_demand</option>
                   </select>
-                  <FieldHint>`pin` intenta dejarlo cargado; `on_demand` prioriza liberar recursos.</FieldHint>
+                  <FieldHint>
+                    `pin` se precarga al arrancar el servidor y se recarga solo en cuanto hay hueco
+                    tras un desalojo; `warm` solo carga con la primera petición pero no se recarga
+                    solo; `on_demand` además se descarga por inactividad.
+                  </FieldHint>
                 </label>
 
                 <label className="block text-sm">
@@ -999,14 +1003,16 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 </label>
               </div>
 
-              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={autoReload}
-                  onChange={(event) => setAutoReload(event.target.checked)}
-                />
-                auto reload tras eviction por presion
-              </label>
+              {loadPolicy === "pin" && (
+                <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={pinPermanent}
+                    onChange={(event) => setPinPermanent(event.target.checked)}
+                  />
+                  Pin permanente (nunca desalojar, ni como último recurso)
+                </label>
+              )}
             </FieldSection>
 
             {model && ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(model.backendType) && (() => {

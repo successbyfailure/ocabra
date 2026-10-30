@@ -105,7 +105,12 @@ export interface ModelState {
   backendType: BackendType
   status: ModelStatus
   loadPolicy: LoadPolicy
-  autoReload: boolean
+  /** Only meaningful when loadPolicy === "pin". False (default, "soft pin"):
+   * preloaded at startup, never evicted by the routine LRU pass, but still
+   * evictable as an absolute last resort under VRAM pressure (and reloads
+   * automatically once room frees up). True ("hard pin"): excluded from
+   * that last-resort path too — only an explicit admin unload moves it. */
+  pinPermanent: boolean
   preferredGpu: number | null
   currentGpu: number[]
   vramUsedMb: number
@@ -353,7 +358,7 @@ export interface HFVLLMSupport {
 export interface ModelPatchRequest {
   loadPolicy?: LoadPolicy
   preferredGpu?: number | null
-  autoReload?: boolean
+  pinPermanent?: boolean
   displayName?: string
   schedules?: EvictionSchedule[]
   extraConfig?: BackendExtraConfig
@@ -375,7 +380,7 @@ export interface DownloadJob {
   registerConfig?: {
     displayName?: string
     loadPolicy?: LoadPolicy
-    autoReload?: boolean
+    pinPermanent?: boolean
     preferredGpu?: number | null
     extraConfig?: BackendExtraConfig
   } | null
@@ -1044,7 +1049,6 @@ export interface RuntimePreset {
   placementPolicy: "auto" | "preferred" | "forced"
   preferredGpus: number[] | null
   executionPolicy: "auto" | "local" | "remote"
-  loadPolicy: "warm" | "on_demand"
   enabled: boolean
   isDefault: boolean
   priority: number
@@ -1089,7 +1093,6 @@ export interface RuntimePresetCreate {
   placementPolicy: RuntimePreset["placementPolicy"]
   preferredGpus?: number[] | null
   executionPolicy: RuntimePreset["executionPolicy"]
-  loadPolicy: RuntimePreset["loadPolicy"]
   enabled?: boolean
   isDefault?: boolean
   priority?: number

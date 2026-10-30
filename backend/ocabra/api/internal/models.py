@@ -32,7 +32,7 @@ class ModelPatch(BaseModel):
     display_name: str | None = Field(default=None, alias="displayName")
     backend_type: str | None = Field(default=None, alias="backendType")
     load_policy: str | None = Field(default=None, alias="loadPolicy")
-    auto_reload: bool | None = Field(default=None, alias="autoReload")
+    pin_permanent: bool | None = Field(default=None, alias="pinPermanent")
     preferred_gpu: int | None = Field(default=None, alias="preferredGpu")
     vram_estimate_mb: int | None = Field(default=None, alias="vramEstimateMb")
     extra_config: dict | None = Field(default=None, alias="extraConfig")
@@ -44,7 +44,7 @@ class AddModelRequest(BaseModel):
     backend_type: str
     display_name: str | None = None
     load_policy: str = "on_demand"
-    auto_reload: bool = False
+    pin_permanent: bool = False
     preferred_gpu: int | None = None
     extra_config: dict | None = None
 
@@ -602,7 +602,7 @@ async def add_model(
             backend_type=body.backend_type,
             display_name=body.display_name,
             load_policy=body.load_policy,
-            auto_reload=body.auto_reload,
+            pin_permanent=body.pin_permanent,
             preferred_gpu=body.preferred_gpu,
             extra_config=body.extra_config,
         )

@@ -267,7 +267,7 @@ export function Models() {
     patch: {
       loadPolicy: LoadPolicy
       preferredGpu: number | null
-      autoReload: boolean
+      pinPermanent: boolean
       schedules: ModelState["schedules"]
       extraConfig?: BackendExtraConfig
     },
@@ -276,7 +276,7 @@ export function Models() {
       await api.models.patch(modelId, {
         loadPolicy: patch.loadPolicy,
         preferredGpu: patch.preferredGpu,
-        autoReload: patch.autoReload,
+        pinPermanent: patch.pinPermanent,
         schedules: patch.schedules,
         extraConfig: patch.extraConfig,
       })

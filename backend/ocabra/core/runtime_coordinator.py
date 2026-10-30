@@ -304,11 +304,21 @@ async def plan_profile_runtime(
     }
     worker_key = compute_worker_key(profile.base_model_id, overrides)
     preferred_gpu = chosen.gpu_indices[0] if len(chosen.gpu_indices) == 1 else None
+    # load_policy lives on the base model (ModelConfig), not per-preset
+    # (2026-10-30 — presets used to carry their own load_policy, which
+    # unconditionally overrode the base model's: setting a model to "pin"
+    # had no real effect once a request resolved through a profile, since
+    # every preset defaulted to "warm"/"on_demand" and that value always
+    # won). Only the DEFAULT preset for a profile inherits the base model's
+    # residency policy; any other preset (a request that needed a bigger
+    # context than usual) is always on_demand — a one-off excursion outside
+    # the steady-state configuration shouldn't become pinned/warm residency.
+    worker_load_policy = state.load_policy.value if chosen.is_default else "on_demand"
     return RuntimePlan(
         worker_key=worker_key,
         load_overrides=overrides,
         preferred_gpu=preferred_gpu,
-        load_policy=preset.load_policy,
+        load_policy=worker_load_policy,
         preset_key=preset.preset_key,
         runtime_key=chosen.runtime_key,
         effective_context=chosen.effective_context,

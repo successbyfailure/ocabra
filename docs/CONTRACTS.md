@@ -159,9 +159,22 @@ class ModelStatus(str, Enum):
     ERROR = "error"
 
 class LoadPolicy(str, Enum):
-    PIN = "pin"             # Siempre cargado, inmune a idle eviction
-    WARM = "warm"           # Cargado bajo demanda, no baja por idle
-    ON_DEMAND = "on_demand" # Cargado bajo demanda, baja por idle
+    PIN = "pin"             # Precargado al arranque, inmune a idle eviction,
+                            # excluido del desalojo educado por presión de VRAM
+                            # (_get_eviction_candidates). Si pin_permanent=False
+                            # (default, "soft pin") sigue siendo el último
+                            # recurso en _get_pressure_eviction_candidates
+                            # cuando no hay ninguna otra forma de hacer sitio,
+                            # y se recarga solo en cuanto vuelve a haber VRAM
+                            # libre. pin_permanent=True ("hard pin") lo excluye
+                            # también de esa vía — solo se mueve por unload
+                            # administrativo explícito o un schedule evict_all.
+    WARM = "warm"           # Cargado bajo demanda (no se precarga al arranque),
+                            # no baja por idle, candidato normal de desalojo
+                            # LRU por presión de VRAM. Nunca se recarga solo
+                            # tras un desalojo — espera a la siguiente petición.
+    ON_DEMAND = "on_demand" # Cargado bajo demanda, baja por idle, primera
+                            # prioridad de desalojo por presión de VRAM.
 
 @dataclass
 class ModelState:
@@ -172,7 +185,7 @@ class ModelState:
     backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     status: ModelStatus
     load_policy: LoadPolicy
-    auto_reload: bool           # Recargar automáticamente tras eviction
+    pin_permanent: bool         # Solo aplica si load_policy == PIN — ver arriba
     preferred_gpu: int | None   # None = usa el default del servidor
     current_gpu: list[int]      # GPUs actuales (puede ser más de una)
     vram_used_mb: int
@@ -270,9 +283,9 @@ POST   /ocabra/models/{model_id}/memory-estimate → ModelMemoryEstimate
 PATCH  /ocabra/models/{model_id}         → ModelState
   body: {
     load_policy?: "pin"|"warm"|"on_demand",
+    pin_permanent?: bool,
     preferred_gpu?: int|null,
     idle_timeout_seconds?: int|null,
-    auto_reload?: bool,
     display_name?: str,
     extra_config?: dict
   }
@@ -281,7 +294,7 @@ DELETE /ocabra/models/{model_id}         → {"ok": true, "deleted_path": str|nu
 
 `ModelState` REST payload:
 - `model_id`, `backend_model_id`, `display_name`, `backend_type`
-- `status`, `load_policy`, `auto_reload`, `preferred_gpu`, `current_gpu`, `vram_used_mb`
+- `status`, `load_policy`, `pin_permanent`, `preferred_gpu`, `current_gpu`, `vram_used_mb`
 - `capabilities`, `last_request_at`, `loaded_at`, `error_message`, `extra_config`
 - `disk_size_bytes` se añade en `/ocabra/models` y `/ocabra/models/{model_id}` cuando se puede estimar
 
@@ -403,7 +416,7 @@ POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]
 - `modelsDir` proviene de `MODELS_DIR` y es de solo lectura en runtime
 - `downloadDir` y `maxTemperatureC` siguen como overrides de proceso en `request.app.state.config_overrides`
 - `globalSchedules` se traduce internamente a dos filas por ventana en `eviction_schedules`: una acción `evict_all` al inicio y una acción `reload` al final
-- `check_schedule_reloads()` exige `auto_reload=True` además de `pin`/`warm`
+- `check_schedule_reloads()` recarga cualquier modelo `pin`/`warm` que un schedule `reload` apunte (sin flag de opt-in por modelo — el propio schedule ya es el opt-in; el checkbox `auto_reload` que existía antes se eliminó el 2026-10-30)
 - `GET /ocabra/config` y `PATCH /ocabra/config` usan claves camelCase; no hay fallback legacy a snake_case o `localStorage`.
 
 ### 5.7 Servicios interactivos
@@ -426,16 +439,18 @@ PATCH /ocabra/services/{service_id}/runtime → ServiceState
 POST /ocabra/services/{service_id}/unload → ServiceState
 POST /ocabra/services/{service_id}/ensure_vram → { ok: bool, gpu_indices?: int[], detail?: str }
   body: { vram_needed_mb: int, suppress_reload_seconds?: int = 0 }
-  Evicts on-demand/warm inference models (never PIN) on el preferred_gpu del
-  servicio hasta liberar vram_needed_mb, reusando la misma cascada de
-  pressure-eviction que un load normal (ModelManager.ensure_vram_free). Pensado
-  para que servicios que gestionan su propia VRAM fuera del scheduler de oCabra
-  (Hunyuan, TRELLIS.2) lo llamen justo antes de cargar su pipeline — de otro
-  modo nunca disparan evicción por sí mismos.
-  suppress_reload_seconds evita que un modelo WARM evictado se auto-recargue
-  (el watcher normal de auto_reload lo intenta a los ~30s) mientras el servicio
-  todavía está generando — usar un valor cercano al peor caso de duración de
-  una generación del servicio.
+  Evicts on-demand/warm/soft-pin inference models (nunca hard-pin,
+  pin_permanent=True) on el preferred_gpu del servicio hasta liberar
+  vram_needed_mb, reusando la misma cascada de pressure-eviction que un load
+  normal (ModelManager.ensure_vram_free — ver _get_pressure_eviction_candidates
+  para el orden de prioridad). Pensado para que servicios que gestionan su
+  propia VRAM fuera del scheduler de oCabra (Hunyuan, TRELLIS.2) lo llamen
+  justo antes de cargar su pipeline — de otro modo nunca disparan evicción
+  por sí mismos.
+  suppress_reload_seconds evita que un modelo PIN evictado se auto-recargue
+  (el watcher normal lo intenta a los ~30s) mientras el servicio todavía está
+  generando — usar un valor cercano al peor caso de duración de una
+  generación del servicio.
 
   Además, tras evictar, este endpoint reserva la VRAM liberada vía
   GPUManager.lock_vram (ServiceManager.reserve_gpu_vram), reutilizando la misma
@@ -689,7 +704,7 @@ model_configs (
   display_name  TEXT,
   backend_type  TEXT NOT NULL,
   load_policy   TEXT NOT NULL DEFAULT 'on_demand',
-  auto_reload   BOOLEAN DEFAULT false,
+  pin_permanent BOOLEAN NOT NULL DEFAULT false,  -- solo aplica si load_policy='pin'
   preferred_gpu INTEGER,
   extra_config  JSONB,          -- parámetros específicos del backend
   created_at    TIMESTAMPTZ,
@@ -994,7 +1009,6 @@ class ProfileRuntimePreset(Base):
     placement_policy: str       # "auto" | "preferred" | "forced"
     preferred_gpus: list[int] | None
     execution_policy: str       # "auto" | "local" | "remote"
-    load_policy: str            # "warm" | "on_demand"
     enabled: bool
     is_default: bool
     priority: int
@@ -1013,6 +1027,14 @@ Restricciones:
   administración.
 - La configuración que identifica un runner se canonicaliza en un
   ``runtime_key`` independiente del nombre visible del preset.
+- Los presets **no** tienen ``load_policy`` propio (se quitó el 2026-10-30 —
+  antes tenía uno y pisaba silenciosamente el del modelo base en cuanto se
+  resolvía una petición vía perfil, haciendo que marcar el modelo base como
+  ``pin`` no tuviera efecto real). ``RuntimeCoordinator.plan_profile_runtime``
+  calcula el ``load_policy`` efectivo del worker derivado como el del modelo
+  base **solo si** el preset elegido es el ``is_default``; cualquier otro
+  preset (una excursión puntual a más contexto del habitual) siempre carga
+  como ``on_demand``, independientemente de la política del modelo base.
 
 El perfil conserva además una política de selección JSONB:
 

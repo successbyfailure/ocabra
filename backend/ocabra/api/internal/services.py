@@ -20,7 +20,7 @@ class ServicePatch(BaseModel):
 
 class EnsureVramRequest(BaseModel):
     vram_needed_mb: int
-    # Holds off the normal auto_reload watcher on any evicted WARM model for this
+    # Holds off the pressure-reload watcher on any evicted PIN model for this
     # many seconds, so it doesn't reload itself mid-generation and re-fill the GPU.
     # 0 = no hold (default pressure-eviction behaviour: may reload within ~30s).
     suppress_reload_seconds: int = 0

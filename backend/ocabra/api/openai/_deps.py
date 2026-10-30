@@ -1002,7 +1002,7 @@ async def _ensure_worker_loaded(
             backend_type=base_state.backend_type,
             display_name=f"{base_state.display_name} (override)",
             load_policy=load_policy or base_state.load_policy.value,
-            auto_reload=base_state.auto_reload,
+            pin_permanent=base_state.pin_permanent,
             preferred_gpu=(
                 preferred_gpu if preferred_gpu is not None else base_state.preferred_gpu
             ),

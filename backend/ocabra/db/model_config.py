@@ -27,7 +27,13 @@ class ModelConfig(Base):
     display_name: Mapped[str | None] = mapped_column(String(512))
     backend_type: Mapped[str] = mapped_column(String(64), nullable=False)
     load_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="on_demand")
-    auto_reload: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Only meaningful when load_policy == "pin". False (default, "soft pin"):
+    # preloaded at startup, immune to idle-timeout and routine LRU eviction,
+    # but still evictable as an absolute last resort when nothing else can
+    # free enough VRAM (see ModelManager._get_pressure_eviction_candidates).
+    # True ("hard pin"): excluded from that last-resort path too — never
+    # evicted by anything except an explicit admin unload (2026-10-30).
+    pin_permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     preferred_gpu: Mapped[int | None] = mapped_column(Integer)
     extra_config: Mapped[dict | None] = mapped_column(JSONB)
     # GGUF tokenizer fingerprint (Sprint 17.4) — populated by the local scanner
@@ -187,7 +193,6 @@ class ProfileRuntimePreset(Base):
     placement_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     preferred_gpus: Mapped[list[int] | None] = mapped_column(JSONB)
     execution_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
-    load_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="on_demand")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)

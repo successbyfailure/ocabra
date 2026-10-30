@@ -326,7 +326,7 @@ class DownloadManager:
                 display_name=register_config.get("display_name")
                 or backend_model_id,
                 load_policy=register_config.get("load_policy", "on_demand"),
-                auto_reload=bool(register_config.get("auto_reload", False)),
+                pin_permanent=bool(register_config.get("pin_permanent", False)),
                 preferred_gpu=register_config.get("preferred_gpu"),
                 extra_config=extra_config or None,
             )

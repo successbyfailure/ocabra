@@ -89,7 +89,9 @@ class ModelState:
     backend_model_id: str = ""
     status: ModelStatus = ModelStatus.CONFIGURED
     load_policy: LoadPolicy = LoadPolicy.ON_DEMAND
-    auto_reload: bool = False
+    # Only meaningful for LoadPolicy.PIN — see ocabra.db.model_config.ModelConfig
+    # for the full soft-pin/hard-pin definition.
+    pin_permanent: bool = False
     preferred_gpu: int | None = None
     current_gpu: list[int] = field(default_factory=list)
     vram_used_mb: int = 0
@@ -107,9 +109,10 @@ class ModelState:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # Set by ModelManager.ensure_vram_free (services evicting on their own
-    # behalf, e.g. Hunyuan/TRELLIS.2) to hold off the normal pressure-eviction
-    # auto_reload watcher — otherwise a WARM model evicted for a multi-minute
-    # service generation just reloads itself 30s later and re-fills the GPU.
+    # behalf, e.g. Hunyuan/TRELLIS.2) to hold off the pressure-eviction
+    # reload watcher (PIN only, see _watch_and_reload) — otherwise a PIN
+    # model evicted for a multi-minute service generation just reloads
+    # itself 30s later and re-fills the GPU.
     reload_suppressed_until: datetime | None = None
 
 
@@ -138,7 +141,7 @@ class ModelState:
             "backend_type": self.backend_type,
             "status": self.status.value,
             "load_policy": self.load_policy.value,
-            "auto_reload": self.auto_reload,
+            "pin_permanent": self.pin_permanent,
             "preferred_gpu": self.preferred_gpu,
             "current_gpu": self.current_gpu,
             "vram_used_mb": self.vram_used_mb,
@@ -1295,7 +1298,7 @@ class ModelManager:
                 display_name=cfg.display_name or backend_model_id,
                 backend_type=str(cfg.backend_type or "").strip().lower(),
                 load_policy=LoadPolicy(cfg.load_policy),
-                auto_reload=cfg.auto_reload,
+                pin_permanent=cfg.pin_permanent,
                 preferred_gpu=cfg.preferred_gpu,
                 extra_config=cfg.extra_config or {},
                 created_at=cfg.created_at,
@@ -2039,13 +2042,15 @@ class ModelManager:
     ) -> list[int]:
         """Evict on-demand/warm models (and evictable services) on ``preferred_gpu``
         until ``vram_needed_mb`` is free, reusing the same pressure-eviction cascade
-        as a normal model load. Never evicts PIN-policy models. Intended for external
-        interactive services (Hunyuan, TRELLIS.2, ...) to call before loading their
-        own pipeline, since those services load VRAM outside of oCabra's own
+        as a normal model load (on_demand/warm/soft-pin, in that priority order —
+        see ``_get_pressure_eviction_candidates``). Never evicts hard-pin
+        (``pin_permanent=True``) models. Intended for external interactive
+        services (Hunyuan, TRELLIS.2, ...) to call before loading their own
+        pipeline, since those services load VRAM outside of oCabra's own
         scheduler and would otherwise never trigger eviction on their behalf.
 
-        ``suppress_reload_seconds`` holds off the normal auto_reload watcher on any
-        WARM model evicted here — otherwise it reloads itself ~30s later (as soon as
+        ``suppress_reload_seconds`` holds off the pressure-reload watcher on any
+        PIN model evicted here — otherwise it reloads itself ~30s later (as soon as
         the scheduler sees free VRAM again) and re-fills the GPU mid-generation,
         since a service generation can run for several minutes. Set this to roughly
         the service's worst-case generation time.
@@ -2354,6 +2359,15 @@ class ModelManager:
             raise last_exc from initial_exc
 
     def _get_pressure_eviction_candidates(self, requested_model_id: str) -> list[str]:
+        """Last-resort eviction order when the polite LRU pass
+        (``_get_eviction_candidates``, which excludes ALL pin) finds no
+        candidate and a new load genuinely has nowhere else to go.
+
+        Soft-pin (``pin_permanent=False``, the default) is still a
+        candidate here — lowest priority, evicted only if nothing else can
+        free the VRAM. Hard-pin (``pin_permanent=True``) is excluded even
+        from this path: the only way to move it is an explicit admin unload.
+        """
         policy_order = {
             LoadPolicy.ON_DEMAND: 0,
             LoadPolicy.WARM: 1,
@@ -2366,6 +2380,7 @@ class ModelManager:
             for state in self._states.values()
             if state.model_id != requested_model_id
             and state.status == ModelStatus.LOADED
+            and not state.pin_permanent
             # Bloque 20 — a Realtime session's LLM/STT/TTS workers are
             # invisible to pressure eviction. Ripping them out mid-turn
             # kills the WebSocket in a way the client can't recover from.
@@ -2462,7 +2477,16 @@ class ModelManager:
             self._notify_event_listeners("unload", state)
             logger.info("model_unloaded", model_id=model_id, reason=reason)
 
-            if reason == "pressure" and state.auto_reload:
+            # PIN means "always loaded": if it got pushed out under VRAM
+            # pressure (only possible for soft-pin — see
+            # _get_pressure_eviction_candidates), reclaim the GPU the moment
+            # there's room again instead of waiting for the next client
+            # request. WARM/ON_DEMAND never do this — losing a WARM model to
+            # pressure is the eviction working as intended, not something to
+            # immediately undo (2026-10-30: this used to be a separate
+            # per-model ``auto_reload`` checkbox; folded into load_policy
+            # itself since the checkbox had no use case independent of it).
+            if reason == "pressure" and state.load_policy == LoadPolicy.PIN:
                 self._create_background_task(
                     self._watch_and_reload(model_id),
                     task_name=f"watch-and-reload:{model_id}",
@@ -2566,7 +2590,7 @@ class ModelManager:
         )
         while not self._stopped and model_id in self._states:
             state = self._states.get(model_id)
-            if not state or not state.auto_reload:
+            if not state or state.load_policy != LoadPolicy.PIN:
                 return
             if state.status != ModelStatus.UNLOADED:
                 return
@@ -2587,7 +2611,7 @@ class ModelManager:
                 return
             await asyncio.sleep(30)
             state = self._states.get(model_id)
-            if not state or not state.auto_reload or state.status != ModelStatus.UNLOADED:
+            if not state or state.load_policy != LoadPolicy.PIN or state.status != ModelStatus.UNLOADED:
                 return
             if state.reload_suppressed_until and datetime.now(UTC) < state.reload_suppressed_until:
                 continue
@@ -2957,7 +2981,7 @@ class ModelManager:
         backend_type: str,
         display_name: str | None = None,
         load_policy: str = "on_demand",
-        auto_reload: bool = False,
+        pin_permanent: bool = False,
         preferred_gpu: int | None = None,
         extra_config: dict | None = None,
         *,
@@ -2998,7 +3022,7 @@ class ModelManager:
                     display_name=display_name or backend_model_id,
                     backend_type=normalized_backend,
                     load_policy=load_policy,
-                    auto_reload=auto_reload,
+                    pin_permanent=pin_permanent,
                     preferred_gpu=preferred_gpu,
                     extra_config=extra_config,
                     vocab_size=vocab_size,
@@ -3014,7 +3038,7 @@ class ModelManager:
             display_name=display_name or backend_model_id,
             backend_type=normalized_backend,
             load_policy=LoadPolicy(load_policy),
-            auto_reload=auto_reload,
+            pin_permanent=pin_permanent,
             preferred_gpu=preferred_gpu,
             extra_config=extra_config or {},
         )
@@ -3064,7 +3088,7 @@ class ModelManager:
         allowed_fields = {
             "display_name",
             "load_policy",
-            "auto_reload",
+            "pin_permanent",
             "preferred_gpu",
             "extra_config",
         }
@@ -3086,7 +3110,7 @@ class ModelManager:
                             setattr(cfg, key, LoadPolicy(val).value)
                         elif key == "preferred_gpu":
                             setattr(cfg, key, int(val) if val is not None else None)
-                        elif key == "auto_reload":
+                        elif key == "pin_permanent":
                             setattr(cfg, key, bool(val))
                         elif key == "extra_config":
                             existing_extra = cfg.extra_config if isinstance(cfg.extra_config, dict) else {}
@@ -3100,7 +3124,7 @@ class ModelManager:
                 setattr(state, key, LoadPolicy(val))
             elif key == "preferred_gpu":
                 setattr(state, key, int(val) if val is not None else None)
-            elif key == "auto_reload":
+            elif key == "pin_permanent":
                 setattr(state, key, bool(val))
             elif key == "extra_config":
                 existing_extra = state.extra_config if isinstance(state.extra_config, dict) else {}

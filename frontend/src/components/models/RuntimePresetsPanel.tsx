@@ -38,7 +38,6 @@ const EMPTY_PRESET: RuntimePresetCreate = {
   placementPolicy: "auto",
   preferredGpus: null,
   executionPolicy: "auto",
-  loadPolicy: "on_demand",
   enabled: true,
   isDefault: false,
   priority: 100,
@@ -61,7 +60,6 @@ function presetToForm(preset: RuntimePreset): RuntimePresetCreate {
     placementPolicy: preset.placementPolicy,
     preferredGpus: preset.preferredGpus,
     executionPolicy: preset.executionPolicy,
-    loadPolicy: preset.loadPolicy,
     enabled: preset.enabled,
     isDefault: preset.isDefault,
     priority: preset.priority,
@@ -389,8 +387,14 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
                   </span>
                   <span className="text-[11px] text-muted-foreground">KV {preset.kvCacheDtype}</span>
                   <span className="text-[11px] text-muted-foreground">{preset.executionPolicy}</span>
-                  {preset.isDefault && <span className="rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-300">Predeterminado</span>}
-                  {preset.loadPolicy === "warm" && <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">Warm</span>}
+                  {preset.isDefault && (
+                    <span
+                      className="rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-300"
+                      title="El preset por defecto hereda la load policy del modelo base; cualquier otro preset siempre carga on_demand"
+                    >
+                      Predeterminado
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-1">
                   {preset.enabled && <button type="button" disabled={busy || benchmarking !== null} onClick={() => void benchmarkPreset(preset)} className="rounded border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-40" title="Descarga este runtime, mide carga en frío y generación">{benchmarking === preset.presetKey ? "Midiendo…" : "Medir frío"}</button>}
@@ -429,8 +433,11 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
             <label className="text-xs">KV cache<select value={form.kvCacheDtype} onChange={(event) => setForm({ ...form, kvCacheDtype: event.target.value as RuntimePresetCreate["kvCacheDtype"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5">{(["q8", "fp8", "q4", "fp16", "bf16"] as const).map((value) => <option key={value}>{value}</option>)}</select></label>
             <label className="text-xs">Ejecución<select value={form.executionPolicy} onChange={(event) => setForm({ ...form, executionPolicy: event.target.value as RuntimePresetCreate["executionPolicy"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5"><option value="auto">Auto</option><option value="local">Local</option><option value="remote">Remoto</option></select></label>
             <label className="text-xs">Colocación<select value={form.placementPolicy} onChange={(event) => setForm({ ...form, placementPolicy: event.target.value as RuntimePresetCreate["placementPolicy"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5"><option value="auto">Auto</option><option value="preferred">Preferida</option><option value="forced">Forzada</option></select></label>
-            <label className="text-xs">Carga<select value={form.loadPolicy} onChange={(event) => setForm({ ...form, loadPolicy: event.target.value as RuntimePresetCreate["loadPolicy"] })} className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5"><option value="on_demand">Bajo demanda</option><option value="warm">Warm</option></select></label>
           </div>
+          <p className="text-[11px] text-muted-foreground">
+            La política de carga (pin/warm/on_demand) se configura en el modelo base, no por preset —
+            el preset marcado "Predeterminado" la hereda; cualquier otro preset siempre carga on_demand.
+          </p>
 
           <div className={form.placementPolicy === "auto" ? "opacity-50" : ""}>
             <span className="text-xs">GPU</span>
