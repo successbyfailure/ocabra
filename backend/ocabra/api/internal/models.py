@@ -322,6 +322,13 @@ async def get_models_activity(
                         slots = int(runtime_meta.get("parallelism") or 0) or None
                     except (TypeError, ValueError):
                         slots = None
+            # Piper has no preset ladder to populate _runtime.parallelism
+            # from, but it DOES have a real, declared concurrency ceiling
+            # (settings.piper_parallelism, same value effective_inflight_cap
+            # admits against) — unlike whisper above, this one is an actual
+            # admission-relevant number, not a fabricated ratio (2026-10-30).
+            if slots is None and state.backend_type == "piper":
+                slots = max(1, int(settings.piper_parallelism))
             # Per-request progress for the "is this hung or still working"
             # indicator on the model/GPU card (2026-10-29). ``tokensPerSecond``
             # is None until at least one output token has streamed — division

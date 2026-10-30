@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.17.0"
+    app_version: str = "0.18.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -274,6 +274,17 @@ class Settings(BaseSettings):
     # slots * this). 1 slot -> 4 in flight before 429; an 8-slot vLLM worker
     # still gets up to the full 32.
     max_queued_per_slot: int = 4
+    # Piper has no runtime-preset ladder (no context/KV-cache tradeoff like
+    # llama.cpp/vLLM), so it never gets a ``_runtime.parallelism`` value —
+    # effective_inflight_cap() would otherwise fall back to the generic
+    # 1-slot assumption (cap=4) meant for KV-cache generative models. Piper
+    # requests are cheap (sub-250ms TTFB, CPU-only ONNX inference via
+    # asyncio.to_thread) and genuinely run several in parallel, so give it
+    # its own declared slot count instead: cap = min(max_inflight_per_model,
+    # piper_parallelism * max_queued_per_slot) = min(32, 4*4) = 16 by
+    # default — the 5th+ concurrent request queues behind Piper's own
+    # thread pool rather than getting an immediate 429 (2026-10-30).
+    piper_parallelism: int = 4
     # How many output tokens to assume a request will need, for sizing
     # runtime-preset selection (estimate_request_token_budget), when the
     # client doesn't set max_tokens/max_completion_tokens/num_predict.

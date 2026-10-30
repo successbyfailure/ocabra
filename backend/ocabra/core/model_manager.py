@@ -438,7 +438,12 @@ class ModelManager:
             ):
                 return max_inflight
         slots = 1
-        if state is not None:
+        if state is not None and state.backend_type == "piper":
+            # No runtime-preset ladder to populate _runtime.parallelism from
+            # (see settings.piper_parallelism) — declare it directly instead
+            # of falling back to the generic 1-slot assumption.
+            slots = max(1, int(settings.piper_parallelism))
+        elif state is not None:
             meta = (
                 state.extra_config.get("_runtime")
                 if isinstance(state.extra_config, dict)

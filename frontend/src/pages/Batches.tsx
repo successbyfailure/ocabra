@@ -1,19 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import * as Tabs from "@radix-ui/react-tabs"
 import {
   AlertCircle,
   Ban,
-  CheckCircle2,
-  Clock,
   Download,
   FileAudio,
   ListChecks,
   Loader2,
   Plus,
   RefreshCw,
+  RotateCcw,
   Upload,
   User,
   X,
-  XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
@@ -92,6 +91,66 @@ function fmtTs(ts: number | null): string {
   return new Date(ts * 1000).toLocaleString()
 }
 
+function batchDurationMs(batch: OpenAIBatchJob): number | null {
+  const startTs = batch.in_progress_at ?? batch.created_at
+  const endTs = batch.completed_at ?? batch.failed_at ?? batch.expired_at ?? batch.cancelled_at
+  if (startTs == null || endTs == null) return null
+  return (endTs - startTs) * 1000
+}
+
+interface PendingTotals {
+  count: number
+  totalRequests: number
+  totalCompleted: number
+}
+
+function pendingTotals(batches: OpenAIBatchJob[]): PendingTotals {
+  return batches.reduce(
+    (acc, b) => ({
+      count: acc.count + 1,
+      totalRequests: acc.totalRequests + b.request_counts.total,
+      totalCompleted: acc.totalCompleted + b.request_counts.completed,
+    }),
+    { count: 0, totalRequests: 0, totalCompleted: 0 },
+  )
+}
+
+interface CompletedTotals {
+  count: number
+  totalRequests: number
+  totalTokens: number
+  totalDurationMs: number
+}
+
+function completedTotals(batches: OpenAIBatchJob[]): CompletedTotals {
+  return batches.reduce(
+    (acc, b) => ({
+      count: acc.count + 1,
+      totalRequests: acc.totalRequests + b.request_counts.total,
+      totalTokens: acc.totalTokens + b.total_tokens,
+      totalDurationMs: acc.totalDurationMs + (batchDurationMs(b) ?? 0),
+    }),
+    { count: 0, totalRequests: 0, totalTokens: 0, totalDurationMs: 0 },
+  )
+}
+
+interface FailedTotals {
+  count: number
+  byStatus: Record<string, number>
+  lostRequests: number
+}
+
+function failedTotals(batches: OpenAIBatchJob[]): FailedTotals {
+  return batches.reduce(
+    (acc, b) => {
+      acc.byStatus[b.status] = (acc.byStatus[b.status] ?? 0) + 1
+      acc.lostRequests += b.request_counts.total - b.request_counts.completed
+      return acc
+    },
+    { count: batches.length, byStatus: {} as Record<string, number>, lostRequests: 0 },
+  )
+}
+
 export function Batches() {
   const [batches, setBatches] = useState<OpenAIBatchJob[]>([])
   const [loading, setLoading] = useState(false)
@@ -99,6 +158,7 @@ export function Batches() {
   const [showCreate, setShowCreate] = useState(false)
   const [detailBatch, setDetailBatch] = useState<OpenAIBatchJob | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState("pending")
 
   const refresh = async () => {
     setLoading(true)
@@ -140,6 +200,30 @@ export function Batches() {
       await refresh()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Error cancelando el lote")
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  // Resubmit the same input file as a brand-new batch — the simplest safe
+  // retry (OpenAI's Batches spec has no "retry" verb either). Lines that
+  // already succeeded run again too; the alternative (replay only the
+  // custom_ids that failed) would need building a filtered JSONL client-side
+  // from the error file, which isn't worth the complexity for something
+  // that — per the 2026-10-30 audit — has never actually happened in
+  // production yet.
+  const retryBatch = async (batch: OpenAIBatchJob) => {
+    setBusyId(batch.id)
+    try {
+      const created = await api.batches.create({
+        inputFileId: batch.input_file_id,
+        endpoint: batch.endpoint,
+      })
+      toast.success(`Reintentado como ${created.id}`)
+      setActiveTab("pending")
+      await refresh()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Error reintentando el lote")
     } finally {
       setBusyId(null)
     }
@@ -191,35 +275,83 @@ export function Batches() {
         </div>
       )}
 
-      {pending.length > 0 && (
-        <BatchSection
-          title="Pendientes"
-          icon={<Clock size={14} />}
-          batches={pending}
-          busyId={busyId}
-          onCancel={cancelBatch}
-          onDetail={setDetailBatch}
-        />
-      )}
-      {completedBatches.length > 0 && (
-        <BatchSection
-          title="Terminadas"
-          icon={<CheckCircle2 size={14} />}
-          batches={completedBatches}
-          busyId={busyId}
-          onCancel={cancelBatch}
-          onDetail={setDetailBatch}
-        />
-      )}
-      {failedBatches.length > 0 && (
-        <BatchSection
-          title="Fallidas"
-          icon={<XCircle size={14} />}
-          batches={failedBatches}
-          busyId={busyId}
-          onCancel={cancelBatch}
-          onDetail={setDetailBatch}
-        />
+      {batches.length > 0 && (
+        <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
+          <Tabs.List className="flex border-b border-border" aria-label="Estado de los lotes">
+            <Tabs.Trigger value="pending" className={tabTriggerClass(activeTab, "pending")}>
+              En curso
+              <TabCountBadge n={pending.length} />
+            </Tabs.Trigger>
+            <Tabs.Trigger value="completed" className={tabTriggerClass(activeTab, "completed")}>
+              Completadas
+              <TabCountBadge n={completedBatches.length} />
+            </Tabs.Trigger>
+            <Tabs.Trigger value="failed" className={tabTriggerClass(activeTab, "failed")}>
+              Fallidas
+              <TabCountBadge n={failedBatches.length} />
+            </Tabs.Trigger>
+          </Tabs.List>
+
+          <Tabs.Content value="pending" className="pt-4">
+            <PendingSummary totals={pendingTotals(pending)} />
+            {pending.length === 0 ? (
+              <EmptyTab text="No hay lotes en curso." />
+            ) : (
+              <div className="grid gap-3">
+                {pending.map((batch) => (
+                  <BatchCard
+                    key={batch.id}
+                    batch={batch}
+                    busy={busyId === batch.id}
+                    onCancel={() => cancelBatch(batch.id)}
+                    onRetry={() => retryBatch(batch)}
+                    onDetail={() => setDetailBatch(batch)}
+                  />
+                ))}
+              </div>
+            )}
+          </Tabs.Content>
+
+          <Tabs.Content value="completed" className="pt-4">
+            <CompletedSummary totals={completedTotals(completedBatches)} />
+            {completedBatches.length === 0 ? (
+              <EmptyTab text="Todavía no se ha completado ningún lote." />
+            ) : (
+              <div className="grid gap-3">
+                {completedBatches.map((batch) => (
+                  <BatchCard
+                    key={batch.id}
+                    batch={batch}
+                    busy={busyId === batch.id}
+                    onCancel={() => cancelBatch(batch.id)}
+                    onRetry={() => retryBatch(batch)}
+                    onDetail={() => setDetailBatch(batch)}
+                  />
+                ))}
+              </div>
+            )}
+          </Tabs.Content>
+
+          <Tabs.Content value="failed" className="pt-4">
+            <FailedSummary totals={failedTotals(failedBatches)} />
+            {failedBatches.length === 0 ? (
+              <EmptyTab text="Ningún lote ha fallado, expirado o sido cancelado." />
+            ) : (
+              <div className="grid gap-3">
+                {failedBatches.map((batch) => (
+                  <BatchCard
+                    key={batch.id}
+                    batch={batch}
+                    busy={busyId === batch.id}
+                    onCancel={() => cancelBatch(batch.id)}
+                    onRetry={() => retryBatch(batch)}
+                    onDetail={() => setDetailBatch(batch)}
+                  />
+                ))}
+              </div>
+            )}
+          </Tabs.Content>
+        </Tabs.Root>
       )}
 
       {showCreate && (
@@ -239,37 +371,81 @@ export function Batches() {
   )
 }
 
-interface BatchSectionProps {
-  title: string
-  icon: ReactNode
-  batches: OpenAIBatchJob[]
-  busyId: string | null
-  onCancel: (batchId: string) => void
-  onDetail: (batch: OpenAIBatchJob) => void
+function tabTriggerClass(activeTab: string, value: string): string {
+  return `flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-t-md border-b-2 transition-colors ${
+    activeTab === value
+      ? "border-primary text-foreground"
+      : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+  }`
 }
 
-function BatchSection({ title, icon, batches, busyId, onCancel, onDetail }: BatchSectionProps) {
+function TabCountBadge({ n }: { n: number }) {
   return (
-    <div>
-      <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-muted-foreground">
-        {icon}
-        {title}
-        <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] tabular-nums">
-          {batches.length}
-        </span>
-      </h2>
-      <div className="grid gap-3">
-        {batches.map((batch) => (
-          <BatchCard
-            key={batch.id}
-            batch={batch}
-            busy={busyId === batch.id}
-            onCancel={() => onCancel(batch.id)}
-            onDetail={() => onDetail(batch)}
-          />
-        ))}
-      </div>
+    <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] tabular-nums">
+      {n}
+    </span>
+  )
+}
+
+function EmptyTab({ text }: { text: string }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+      {text}
     </div>
+  )
+}
+
+function SummaryBar({ items }: { items: { label: string; value: string }[] }) {
+  return (
+    <div className="mb-3 flex flex-wrap gap-4 rounded-md border border-border/60 bg-muted/10 px-3 py-2 text-xs">
+      {items.map((item) => (
+        <div key={item.label}>
+          <span className="text-muted-foreground">{item.label}: </span>
+          <span className="font-medium tabular-nums">{item.value}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function PendingSummary({ totals }: { totals: PendingTotals }) {
+  if (totals.count === 0) return null
+  return (
+    <SummaryBar
+      items={[
+        { label: "Lotes", value: String(totals.count) },
+        { label: "Peticiones", value: `${totals.totalCompleted}/${totals.totalRequests}` },
+      ]}
+    />
+  )
+}
+
+function CompletedSummary({ totals }: { totals: CompletedTotals }) {
+  if (totals.count === 0) return null
+  return (
+    <SummaryBar
+      items={[
+        { label: "Lotes", value: String(totals.count) },
+        { label: "Peticiones", value: totals.totalRequests.toLocaleString() },
+        { label: "Tokens", value: totals.totalTokens.toLocaleString() },
+        { label: "Tiempo total de proceso", value: fmtDuration(totals.totalDurationMs) },
+      ]}
+    />
+  )
+}
+
+function FailedSummary({ totals }: { totals: FailedTotals }) {
+  if (totals.count === 0) return null
+  const breakdown = Object.entries(totals.byStatus)
+    .map(([status, n]) => `${n} ${status}`)
+    .join(", ")
+  return (
+    <SummaryBar
+      items={[
+        { label: "Lotes", value: `${totals.count} (${breakdown})` },
+        { label: "Peticiones no completadas", value: String(totals.lostRequests) },
+      ]}
+    />
   )
 }
 
@@ -277,22 +453,20 @@ function BatchCard({
   batch,
   busy,
   onCancel,
+  onRetry,
   onDetail,
 }: {
   batch: OpenAIBatchJob
   busy: boolean
   onCancel: () => void
+  onRetry: () => void
   onDetail: () => void
 }) {
   const isPending = PENDING_STATUSES.includes(batch.status)
   const isCompleted = batch.status === "completed"
   const isFailed = FAILED_STATUSES.includes(batch.status)
   const eta = isPending ? estimateRemainingMs(batch) : null
-  const startTs = batch.in_progress_at ?? batch.created_at
-  const totalDurationMs =
-    isCompleted && batch.completed_at != null && startTs != null
-      ? (batch.completed_at - startTs) * 1000
-      : null
+  const totalDurationMs = isCompleted ? batchDurationMs(batch) : null
   const reasons = isFailed ? errorMessages(batch.errors) : []
 
   return (
@@ -329,6 +503,12 @@ function BatchCard({
                 · {eta != null ? `~${fmtDuration(eta)} restantes` : "estimando…"}
               </span>
             )}
+            {isFailed && batch.request_counts.total - batch.request_counts.completed > 0 && (
+              <span className="text-muted-foreground">
+                {" "}
+                · {batch.request_counts.total - batch.request_counts.completed} nunca se completaron
+              </span>
+            )}
           </div>
           {reasons.length > 0 && (
             <div className="mt-1.5 flex items-start gap-1.5 rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-xs text-destructive">
@@ -354,6 +534,18 @@ function BatchCard({
             >
               {busy ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />}
               Cancelar
+            </button>
+          )}
+          {isFailed && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onRetry}
+              title="Vuelve a mandar el mismo fichero de entrada como un lote nuevo"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+              Reintentar
             </button>
           )}
         </div>
