@@ -131,6 +131,7 @@ class RouterResolver:
         router: "ModelProfile",
         *,
         request_body: dict | None = None,
+        exclude_session_id: str | None = None,
     ) -> ResolvedTarget:
         """Walk the router's ``routing_targets`` and pick the best one now.
 
@@ -199,7 +200,9 @@ class RouterResolver:
             # of its own.
             if self.is_router(target):
                 try:
-                    nested = await self.pick(target, request_body=request_body)
+                    nested = await self.pick(
+                        target, request_body=request_body, exclude_session_id=exclude_session_id
+                    )
                 except RoutingLoopError:
                     audit.append(CandidateAudit(target_id, "loop"))
                     continue
@@ -236,7 +239,7 @@ class RouterResolver:
             # start elsewhere + potentially evicting a neighbour to make room.
             if state is not None and state.status == ModelStatus.LOADED:
                 if self._session_registry is not None and self._session_registry.has_active_session_holding(
-                    worker_key
+                    worker_key, exclude_session_id=exclude_session_id
                 ):
                     audit.append(CandidateAudit(target_id, "session_veto"))
                     continue
@@ -279,7 +282,7 @@ class RouterResolver:
             # in practice (unload releases the registry entry) but guard
             # anyway so we don't accidentally hit a stale hold.
             if self._session_registry is not None and self._session_registry.has_active_session_holding(
-                worker_key
+                worker_key, exclude_session_id=exclude_session_id
             ):
                 audit.append(CandidateAudit(target.profile_id, "session_veto"))
                 continue

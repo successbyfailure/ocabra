@@ -476,6 +476,64 @@ errores con `error.code = "batch_expired"`.
 
 ---
 
+## Realtime API (`/v1/realtime`)
+
+WebSocket bidireccional de voz, compatible con el protocolo Realtime de
+OpenAI. Pipeline: audio -> Whisper STT -> LLM (streaming) -> TTS -> audio.
+
+```
+WS /v1/realtime?model=<llm_id>&intent=&conversation_id=&num_speakers=
+```
+
+Auth: `Authorization: Bearer <key>` en el handshake, o `?api_key=` como
+query param (los navegadores no pueden fijar headers en `new WebSocket()`).
+
+Eventos de cliente: `session.update`, `input_audio_buffer.{append,commit,clear}`,
+`response.{create,cancel}`, `conversation.item.{create,truncate,delete}`.
+
+**Tools/function-calling** (2026-10-30): `tools`/`tool_choice` se configuran
+en `session.update` (o por turno, dentro de `response.create.response`) con
+el shape plano estándar de Realtime:
+```json
+{"type": "function", "name": "get_weather", "description": "...", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
+```
+Los deltas de la llamada llegan como `response.function_call_arguments.delta`/
+`.done`; `response.done.response.output` incluye el item
+`{"type": "function_call", "call_id", "name", "arguments"}`. Para cerrar el
+ciclo: ejecuta la función y manda
+`conversation.item.create` con
+`{"type": "function_call_output", "call_id": "...", "output": "..."}`
+seguido de un nuevo `response.create`.
+
+**Mensajes de solo texto**: la única forma de meter texto en la conversación
+sin pasar por audio es `conversation.item.create` con
+`{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "..."}]}`.
+
+**Barge-in**: si el VAD detecta que el usuario empieza a hablar mientras el
+asistente sigue respondiendo, la respuesta en curso se cancela automáticamente
+(`response.done` con `status: "cancelled"`) — igual que el comportamiento por
+defecto de `server_vad` en la API real de OpenAI.
+
+**Extensiones propias de oCabra** (clientes estrictos de OpenAI las ignoran,
+no rompen el protocolo):
+- `tts_model` en `session.update` — modelo TTS a usar (acepta un profile_id
+  o un router).
+- `input_audio_routing: "auto"|"native"|"stt"` — fuerza el camino de audio de
+  entrada.
+- `reasoning_budget` (solo backends llama.cpp nativos) — tope duro de tokens
+  de razonamiento. Por defecto `300` (`REALTIME_DEFAULT_REASONING_BUDGET`,
+  override por sesión vía `session.update`) — un modelo thinking sin límite
+  es la palanca de latencia más grande en modo voz; medido en vivo:
+  capar a 200 tokens bajó un turno de qwen3.8:27b de varios minutos a ~29s.
+  Manda `reasoning_budget: null` explícito para desactivar el límite.
+- `reasoning_effort` — igual que en `/v1/chat/completions`.
+
+`conversation.item.truncate` se confirma (`conversation.item.truncated`) pero
+es un no-op — esta implementación no guarda un buffer de audio reproducible
+por item, así que no hay nada que truncar a nivel de audio.
+
+---
+
 ## Ollama Compatible API (`/api`)
 
 API compatible con el protocolo de Ollama. Clientes como `ollama-python` funcionan directamente.

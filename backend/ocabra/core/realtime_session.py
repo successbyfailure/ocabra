@@ -4,7 +4,14 @@ RealtimeSession — Core session manager for the OpenAI Realtime API WebSocket.
 Coordinates the pipeline: audio buffer -> Whisper STT -> LLM streaming -> TTS -> audio out.
 Emits protocol-compliant server events over the WebSocket connection.
 
-Tool calls are not yet implemented (documented as future work).
+Tool/function calling is supported (2026-10-30): ``session.update``/
+``response.create`` accept ``tools``/``tool_choice``, streamed tool-call
+deltas are surfaced as ``response.function_call_arguments.delta``/``.done``,
+and a client closes the loop with ``conversation.item.create``
+(``type: "function_call_output"``) + a follow-up ``response.create``.
+``conversation.item.create``/``.truncate``/``.delete`` are also handled —
+the former is also the only way to inject a text-only user message (no
+audio) into a session.
 """
 
 from __future__ import annotations
@@ -150,6 +157,40 @@ def _new_response_id() -> str:
     return f"resp_{uuid.uuid4().hex[:24]}"
 
 
+def _realtime_tools_to_chat_format(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Realtime-API-shaped tool defs to the chat/completions shape.
+
+    The two OpenAI API surfaces disagree on tool shape: Realtime's
+    ``session.update.tools`` entries are FLAT —
+    ``{"type": "function", "name", "description", "parameters"}`` — while
+    ``/v1/chat/completions`` (what the LLM backend actually receives, via
+    ``to_backend_body``) expects them NESTED —
+    ``{"type": "function", "function": {"name", "description", "parameters"}}``.
+    Forwarding the flat shape straight through silently breaks tool-calling
+    (confirmed live 2026-10-30: curling the backend directly with the nested
+    shape worked — ``finish_reason: "tool_calls"`` with a correct call — the
+    exact same request with the flat Realtime shape instead got back empty
+    content, no tool call, because the backend's tools param didn't parse).
+    Tolerant of a client sending the nested shape anyway (passes through).
+    """
+    converted = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if isinstance(tool.get("function"), dict):
+            converted.append(tool)  # already chat-completions shaped
+            continue
+        converted.append({
+            "type": tool.get("type", "function"),
+            "function": {
+                "name": tool.get("name"),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters", {}),
+            },
+        })
+    return converted
+
+
 def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = _INPUT_SAMPLE_RATE) -> bytes:
     """Wrap raw PCM16LE bytes in a WAV container."""
     buf = io.BytesIO()
@@ -286,6 +327,30 @@ class RealtimeSession:
         self.modalities: list[str] = ["text", "audio"]
         self.input_audio_format = "pcm16"
         self.output_audio_format = "pcm16"
+
+        # Generation params (2026-10-30) — session.update/response.create can
+        # set these; previously the LLM call was a bare {model, messages,
+        # stream} body that silently dropped every one of them. ``tools``
+        # follows the standard OpenAI Realtime shape
+        # ([{"type": "function", "name", "description", "parameters"}]);
+        # empty list = no tool use, matching "tools" being omitted entirely
+        # in a plain chat/completions request.
+        self.tools: list[dict[str, Any]] = []
+        self.tool_choice: str | dict[str, Any] = "auto"
+        self.temperature: float | None = None
+        self.max_response_output_tokens: int | None = None
+        # oCabra extensions (not in the OpenAI Realtime spec, same pattern as
+        # ``tts_model``/``input_audio_routing`` already are) — reasoning_budget
+        # defaults ON (not None) specifically because an uncapped thinking
+        # model is the single biggest latency lever in voice mode: the
+        # documented 2026-10-29 truncation incident was caused by exactly
+        # this (llama-server's reasoning has no limit, -1, unless told
+        # otherwise) and a 2026-10-29 test on this same stack showed capping
+        # it at 200 tokens cut a qwen3.8:27b turn from "several minutes" to
+        # 29s. A client can still opt out by sending reasoning_budget: null
+        # explicitly in session.update.
+        self.reasoning_effort: str | None = None
+        self.reasoning_budget: int | None = settings.realtime_default_reasoning_budget or None
 
         self._worker_pool = worker_pool
         self._model_manager = model_manager
@@ -449,6 +514,7 @@ class RealtimeSession:
                 profile_registry=self._profile_registry,
                 model_manager=self._model_manager,
                 router_resolver=self._router_resolver,
+                exclude_session_id=self._session_id,
             )
             if resolved is not None:
                 self.stt_model_id = resolved
@@ -458,6 +524,7 @@ class RealtimeSession:
                 profile_registry=self._profile_registry,
                 model_manager=self._model_manager,
                 router_resolver=self._router_resolver,
+                exclude_session_id=self._session_id,
             )
             if resolved is not None:
                 self.tts_model_id = resolved
@@ -478,6 +545,19 @@ class RealtimeSession:
         STT/TTS default appeared to work (it resolved once in ``run()``) but
         every session actually tried to load a worker keyed by the router's
         profile id, which has no ``base_model_id``/backend and can't load.
+
+        ``exclude_session_id`` passed down to the router pick matters MORE
+        here than in ``_resolve_stt_tts_defaults`` — by the time
+        ``session.update`` arrives, ``_register_workers()`` has already run,
+        so this session now holds its own STT/TTS worker reservation. Without
+        excluding it, the router's "prefer already loaded" scan vetoes the
+        very model this session just warmed (sees it as "held by an active
+        session" — itself) and falls through to picking a DIFFERENT,
+        genuinely cold target instead. Reproduced live 2026-10-30: a router
+        STT selection flashed a ~1s "loading" card on every session open —
+        this self-veto, not a real reload — and, as a bonus, pointed
+        ``self.stt_model_id`` at a different model than what Phase 1 already
+        loaded, wasting that warm worker and keying a second one.
         """
         if self._profile_registry is None or not raw:
             return raw
@@ -488,6 +568,7 @@ class RealtimeSession:
             profile_registry=self._profile_registry,
             model_manager=self._model_manager,
             router_resolver=self._router_resolver,
+            exclude_session_id=self._session_id,
         )
         return resolved if resolved is not None else raw
 
@@ -741,6 +822,9 @@ class RealtimeSession:
             "input_audio_buffer.clear": self._handle_audio_clear,
             "response.create": self._handle_response_create,
             "response.cancel": self._handle_response_cancel,
+            "conversation.item.create": self._handle_conversation_item_create,
+            "conversation.item.truncate": self._handle_conversation_item_truncate,
+            "conversation.item.delete": self._handle_conversation_item_delete,
         }
 
         handler = handlers.get(event_type)
@@ -773,6 +857,28 @@ class RealtimeSession:
             self.input_audio_format = session_cfg["input_audio_format"]
         if "output_audio_format" in session_cfg:
             self.output_audio_format = session_cfg["output_audio_format"]
+
+        # Generation params (2026-10-30). ``tools``/``tool_choice`` are
+        # standard OpenAI Realtime fields; ``reasoning_effort``/
+        # ``reasoning_budget`` are oCabra extensions living in the same
+        # message (unknown fields are ignored by strict OpenAI clients, same
+        # pattern as ``tts_model``/``input_audio_routing`` below). Presence
+        # -checked (``in session_cfg``), not truthiness-checked, so a client
+        # can explicitly send e.g. ``reasoning_budget: null`` to opt out of
+        # the server default set in ``__init__``.
+        if "tools" in session_cfg:
+            self.tools = session_cfg["tools"] if isinstance(session_cfg["tools"], list) else []
+        if "tool_choice" in session_cfg:
+            self.tool_choice = session_cfg["tool_choice"]
+        if "temperature" in session_cfg:
+            self.temperature = session_cfg["temperature"]
+        if "max_response_output_tokens" in session_cfg:
+            value = session_cfg["max_response_output_tokens"]
+            self.max_response_output_tokens = None if value == "inf" else value
+        if "reasoning_effort" in session_cfg:
+            self.reasoning_effort = session_cfg["reasoning_effort"]
+        if "reasoning_budget" in session_cfg:
+            self.reasoning_budget = session_cfg["reasoning_budget"]
 
         # STT model / language / prompt from input_audio_transcription (OpenAI standard)
         iat = session_cfg.get("input_audio_transcription")
@@ -877,6 +983,14 @@ class RealtimeSession:
         if self.vad_enabled:
             vad_event = self._vad.process_chunk(pcm_bytes, _INPUT_SAMPLE_RATE)
             if vad_event == VadEvent.SPEECH_STARTED:
+                # Barge-in (2026-10-30): real speech detected while the
+                # assistant is still mid-response — interrupt it immediately
+                # rather than letting it talk over the user, matching
+                # OpenAI's default server_vad behavior. Previously this only
+                # emitted the event; the in-progress response kept running
+                # to completion regardless of the user already talking.
+                if self._response_task and not self._response_task.done():
+                    await self._cancel_current_response()
                 await self._send_event(
                     "input_audio_buffer.speech_started",
                     audio_start_ms=self._buffer_duration_ms(),
@@ -917,22 +1031,111 @@ class RealtimeSession:
         if self.audio_buffer:
             await self._commit_audio_only()
 
-        # Allow override instructions/conversation in the response.create payload
+        # Allow overriding instructions and generation params for just this
+        # one response (2026-10-30: previously only ``instructions`` was
+        # read here — ``tools``/``tool_choice``/``temperature``/
+        # ``max_response_output_tokens`` sent in the real spec's per-turn
+        # ``response`` object were silently dropped).
         create_cfg = message.get("response", {})
         instructions_override = create_cfg.get("instructions")
+        response_overrides = {
+            key: create_cfg[key]
+            for key in (
+                "tools",
+                "tool_choice",
+                "temperature",
+                "max_response_output_tokens",
+                "reasoning_effort",
+                "reasoning_budget",
+            )
+            if key in create_cfg
+        }
 
-        await self._generate_response(instructions_override=instructions_override)
+        await self._generate_response(
+            instructions_override=instructions_override,
+            response_overrides=response_overrides or None,
+        )
 
     async def _handle_response_cancel(self, message: dict[str, Any]) -> None:
         """Handle response.cancel — cancel an in-progress response."""
-        self._cancel_event.set()
-        if self._response_task and not self._response_task.done():
-            self._response_task.cancel()
-            try:
-                await self._response_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await self._cancel_current_response()
         self._response_task = None
+
+    async def _handle_conversation_item_create(self, message: dict[str, Any]) -> None:
+        """Handle conversation.item.create — inject an item into the history.
+
+        Added 2026-10-30; previously unhandled entirely (fell through to
+        "Unknown event type"). Two cases matter here:
+
+        - A text-only user message (``type: "message"``) — the ONLY way a
+          client can put something in the conversation without it being
+          transcribed audio; without this handler a text-capable Realtime
+          client had no way to say anything at all.
+        - A tool result (``type: "function_call_output"``) — how the client
+          feeds a function's return value back in after executing a tool
+          call from a previous ``response.done``. Required for the
+          tools/function-calling round trip to actually close the loop.
+        """
+        item = message.get("item", {})
+        item_type = item.get("type")
+        item_id = item.get("id") or _new_item_id()
+
+        if item_type == "function_call_output":
+            call_id = item.get("call_id")
+            output = item.get("output", "")
+            self.conversation.append(
+                {"id": item_id, "role": "tool", "tool_call_id": call_id, "content": str(output)}
+            )
+            await self._send_event(
+                "conversation.item.created",
+                item={
+                    "id": item_id,
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                },
+            )
+        elif item_type == "message":
+            role = item.get("role", "user")
+            content_parts = item.get("content", [])
+            text = "".join(
+                str(part.get("text", ""))
+                for part in content_parts
+                if isinstance(part, dict) and part.get("type") in ("input_text", "text")
+            )
+            self.conversation.append({"id": item_id, "role": role, "content": text})
+            await self._send_event(
+                "conversation.item.created",
+                item={"id": item_id, "type": "message", "role": role, "content": content_parts},
+            )
+        else:
+            await self._send_error(
+                f"Unsupported conversation.item.create type: {item_type!r}",
+                "unsupported_item_type",
+            )
+
+    async def _handle_conversation_item_truncate(self, message: dict[str, Any]) -> None:
+        """Handle conversation.item.truncate — acknowledge only.
+
+        This session doesn't keep a separately replayable audio buffer per
+        conversation item (TTS audio is streamed straight out, not stored),
+        so there's nothing to actually truncate at the audio level. Still
+        ack with the matching event — a client doing standard barge-in
+        bookkeeping sends this right after interrupting and would otherwise
+        get "Unknown event type" for routine behavior.
+        """
+        await self._send_event(
+            "conversation.item.truncated",
+            item_id=message.get("item_id"),
+            content_index=message.get("content_index", 0),
+            audio_end_ms=message.get("audio_end_ms", 0),
+        )
+
+    async def _handle_conversation_item_delete(self, message: dict[str, Any]) -> None:
+        """Handle conversation.item.delete — remove an item from history."""
+        item_id = message.get("item_id")
+        self.conversation = [entry for entry in self.conversation if entry.get("id") != item_id]
+        await self._send_event("conversation.item.deleted", item_id=item_id)
 
     # ── Pipeline helpers ────────────────────────────────────────────────
 
@@ -1057,7 +1260,7 @@ class RealtimeSession:
 
         transcript = result["text"]
         if transcript:
-            self.conversation.append({"role": "user", "content": transcript})
+            self.conversation.append({"id": item_id, "role": "user", "content": transcript})
         await self._send_event(
             "conversation.item.input_audio_transcription.completed",
             item_id=item_id,
@@ -1098,6 +1301,7 @@ class RealtimeSession:
             audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
             self.conversation.append(
                 {
+                    "id": item_id,
                     "role": "user",
                     "content": [
                         {
@@ -1136,7 +1340,7 @@ class RealtimeSession:
         transcript = await self._transcribe(pcm_data)
 
         if transcript:
-            self.conversation.append({"role": "user", "content": transcript})
+            self.conversation.append({"id": item_id, "role": "user", "content": transcript})
             await self._send_event(
                 "conversation.item.created",
                 item={
@@ -1152,12 +1356,10 @@ class RealtimeSession:
                 },
             )
 
-    async def _generate_response(
-        self,
-        instructions_override: str | None = None,
-    ) -> None:
-        """Run the LLM -> TTS pipeline and stream results back."""
-        # Cancel any previous response
+    async def _cancel_current_response(self) -> None:
+        """Cancel the in-progress response task, if any. Shared by the
+        explicit ``response.cancel`` handler and barge-in (speech detected
+        while the assistant is still talking)."""
         self._cancel_event.set()
         if self._response_task and not self._response_task.done():
             self._response_task.cancel()
@@ -1166,13 +1368,25 @@ class RealtimeSession:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    async def _generate_response(
+        self,
+        instructions_override: str | None = None,
+        response_overrides: dict[str, Any] | None = None,
+    ) -> None:
+        """Run the LLM -> TTS pipeline and stream results back."""
+        await self._cancel_current_response()
+
         self._cancel_event = asyncio.Event()
         self._response_task = asyncio.create_task(
-            self._run_pipeline(instructions_override),
+            self._run_pipeline(instructions_override, response_overrides),
             name="realtime-pipeline",
         )
 
-    async def _run_pipeline(self, instructions_override: str | None = None) -> None:
+    async def _run_pipeline(
+        self,
+        instructions_override: str | None = None,
+        response_overrides: dict[str, Any] | None = None,
+    ) -> None:
         """Execute the full STT -> LLM -> TTS pipeline."""
         response_id = _new_response_id()
         output_item_id = _new_item_id()
@@ -1233,35 +1447,89 @@ class RealtimeSession:
             full_text = ""
             sentence_buffer = ""
             audio_sent = False
+            # index -> accumulated tool call fragments (id/name arrive once,
+            # on the first fragment for that index; arguments stream in
+            # pieces, same shape OpenAI's own chat/completions streaming
+            # uses for tool_calls — see _stream_llm's docstring).
+            tool_calls_acc: dict[int, dict[str, Any]] = {}
+            tool_call_item_ids: dict[int, str] = {}
 
-            async for text_chunk in self._stream_llm(messages):
+            async for event in self._stream_llm(messages, response_overrides=response_overrides):
                 if self._cancel_event.is_set():
                     break
 
-                full_text += text_chunk
+                if event["type"] == "content":
+                    text_chunk = event["text"]
+                    full_text += text_chunk
 
-                # Send text transcript delta
-                await self._send_event(
-                    "response.audio_transcript.delta",
-                    response_id=response_id,
-                    item_id=output_item_id,
-                    content_index=0,
-                    delta=text_chunk,
-                )
+                    await self._send_event(
+                        "response.audio_transcript.delta",
+                        response_id=response_id,
+                        item_id=output_item_id,
+                        content_index=0,
+                        delta=text_chunk,
+                    )
 
-                # Buffer text and send TTS for complete sentences
-                sentence_buffer += text_chunk
-                sentences = _split_sentences(sentence_buffer)
+                    # Buffer text and send TTS for complete sentences
+                    sentence_buffer += text_chunk
+                    sentences = _split_sentences(sentence_buffer)
 
-                if len(sentences) > 1:
-                    # All but the last are complete sentences
-                    for sentence in sentences[:-1]:
-                        if self._cancel_event.is_set():
-                            break
-                        if tts_enabled:
-                            await self._synthesize_and_send(sentence, response_id, output_item_id)
-                            audio_sent = True
-                    sentence_buffer = sentences[-1]
+                    if len(sentences) > 1:
+                        # All but the last are complete sentences
+                        for sentence in sentences[:-1]:
+                            if self._cancel_event.is_set():
+                                break
+                            if tts_enabled:
+                                await self._synthesize_and_send(sentence, response_id, output_item_id)
+                                audio_sent = True
+                        sentence_buffer = sentences[-1]
+
+                elif event["type"] == "tool_call_delta":
+                    idx = event["index"]
+                    acc = tool_calls_acc.get(idx)
+                    if acc is None:
+                        # First fragment for this index — id/name are only
+                        # sent once, here.
+                        call_id = event.get("id") or f"call_{uuid.uuid4().hex[:24]}"
+                        name = event.get("name") or ""
+                        acc = {"id": call_id, "name": name, "arguments": ""}
+                        tool_calls_acc[idx] = acc
+                        call_item_id = _new_item_id()
+                        tool_call_item_ids[idx] = call_item_id
+                        await self._send_event(
+                            "response.output_item.added",
+                            response_id=response_id,
+                            output_index=idx,
+                            item={
+                                "id": call_item_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                            },
+                        )
+                        await self._send_event(
+                            "conversation.item.created",
+                            item={
+                                "id": call_item_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                            },
+                        )
+                    args_delta = event.get("arguments_delta") or ""
+                    if args_delta:
+                        acc["arguments"] += args_delta
+                        await self._send_event(
+                            "response.function_call_arguments.delta",
+                            response_id=response_id,
+                            item_id=tool_call_item_ids[idx],
+                            call_id=acc["id"],
+                            delta=args_delta,
+                        )
+
+                elif event["type"] == "finish":
+                    pass  # finish_reason available for logging only today
 
             # Flush remaining text
             if sentence_buffer.strip() and not self._cancel_event.is_set():
@@ -1270,9 +1538,55 @@ class RealtimeSession:
                     audio_sent = True
 
             if not self._cancel_event.is_set():
+                output_items: list[dict[str, Any]] = []
+
                 # Add assistant message to conversation
                 if full_text:
-                    self.conversation.append({"role": "assistant", "content": full_text})
+                    self.conversation.append(
+                        {"id": output_item_id, "role": "assistant", "content": full_text}
+                    )
+                    output_items.append({
+                        "id": output_item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "audio", "transcript": full_text}],
+                    })
+
+                # Finalize any tool calls: tell the client, and persist an
+                # assistant message carrying tool_calls (standard OpenAI chat
+                # shape) so the next turn's history is coherent once the
+                # client answers with conversation.item.create
+                # (function_call_output) + response.create.
+                if tool_calls_acc:
+                    assistant_tool_calls = []
+                    for idx in sorted(tool_calls_acc):
+                        acc = tool_calls_acc[idx]
+                        await self._send_event(
+                            "response.function_call_arguments.done",
+                            response_id=response_id,
+                            item_id=tool_call_item_ids[idx],
+                            call_id=acc["id"],
+                            name=acc["name"],
+                            arguments=acc["arguments"],
+                        )
+                        assistant_tool_calls.append({
+                            "id": acc["id"],
+                            "type": "function",
+                            "function": {"name": acc["name"], "arguments": acc["arguments"]},
+                        })
+                        output_items.append({
+                            "id": tool_call_item_ids[idx],
+                            "type": "function_call",
+                            "call_id": acc["id"],
+                            "name": acc["name"],
+                            "arguments": acc["arguments"],
+                        })
+                    self.conversation.append({
+                        "id": output_item_id,
+                        "role": "assistant",
+                        "content": full_text or None,
+                        "tool_calls": assistant_tool_calls,
+                    })
 
                 # Send completion events
                 await self._send_event(
@@ -1297,19 +1611,7 @@ class RealtimeSession:
                     response={
                         "id": response_id,
                         "status": "completed",
-                        "output": [
-                            {
-                                "id": output_item_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "audio",
-                                        "transcript": full_text,
-                                    }
-                                ],
-                            }
-                        ],
+                        "output": output_items,
                         "usage": {
                             "total_tokens": 0,  # TODO: get real usage from LLM
                             "input_tokens": 0,
@@ -1752,15 +2054,37 @@ class RealtimeSession:
 
     # ── LLM streaming ───────────────────────────────────────────────────
 
-    async def _stream_llm(self, messages: list[dict[str, Any]]) -> AsyncIteratorWrapper:
-        """Stream text from the LLM via the shared chat-completions pipeline.
+    async def _stream_llm(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_overrides: dict[str, Any] | None = None,
+    ) -> AsyncIteratorWrapper:
+        """Stream the LLM response via the shared chat-completions pipeline.
 
         Routes through :meth:`WorkerPool.forward_stream` so the same code path
         as ``/v1/chat/completions`` is reused (Ollama URL resolution, reasoning
         field normalisation, Langfuse tracing). Native-audio LLMs receive the
         message verbatim — including ``input_audio`` content parts.
 
-        Yields text content deltas.
+        ``to_backend_body`` — the SAME translation chat.py/completions.py use
+        — is reused here too (2026-10-30; previously this hand-built a bare
+        ``{model, messages, stream}`` body, silently dropping every
+        generation param a client could set: temperature, max_tokens, tools,
+        reasoning_effort, reasoning_budget). Reusing it means Realtime
+        inherits the backend-specific reasoning_effort/reasoning_budget/
+        thinking-disable translation for free instead of reimplementing it.
+
+        Yields dicts tagged by ``type``:
+          - ``{"type": "content", "text": str}`` — a text delta.
+          - ``{"type": "tool_call_delta", "index": int, "id": str|None,
+            "name": str|None, "arguments_delta": str}`` — a fragment of a
+            streamed tool call; ``id``/``name`` are only present on the first
+            fragment for a given ``index`` (matches OpenAI's own streaming
+            tool-call shape).
+          - ``{"type": "finish", "reason": str|None}`` — end of this
+            response's stream (``finish_reason`` from the backend, e.g.
+            ``"stop"``/``"tool_calls"``/``"length"``).
         """
         started_at = datetime.now(UTC)
         started_monotonic = time.monotonic()
@@ -1769,6 +2093,7 @@ class RealtimeSession:
         input_tokens = _message_word_count(messages)
         output_tokens = 0
         line_buf = b""
+        tool_call_names: dict[int, str] = {}  # index -> name, for stats/logging only
         try:
             worker = self._worker_pool.get_worker(self.llm_worker_key)
             if not worker:
@@ -1808,12 +2133,23 @@ class RealtimeSession:
                 logger.warning("realtime_llm_state_missing", model_id=self.llm_worker_key)
                 return
 
-            backend_model_id = state.backend_model_id or self.llm_model_id
-            body = {
-                "model": backend_model_id,
-                "messages": messages,
-                "stream": True,
-            }
+            from ocabra.api.openai._deps import to_backend_body
+
+            raw_body: dict[str, Any] = {"messages": messages, "stream": True}
+            gen = {**self._generation_defaults(), **(response_overrides or {})}
+            if gen.get("temperature") is not None:
+                raw_body["temperature"] = gen["temperature"]
+            if gen.get("max_response_output_tokens") is not None:
+                raw_body["max_tokens"] = gen["max_response_output_tokens"]
+            if gen.get("reasoning_effort") is not None:
+                raw_body["reasoning_effort"] = gen["reasoning_effort"]
+            if gen.get("reasoning_budget") is not None:
+                raw_body["reasoning_budget"] = gen["reasoning_budget"]
+            tools = gen.get("tools")
+            if tools:
+                raw_body["tools"] = _realtime_tools_to_chat_format(tools)
+                raw_body["tool_choice"] = gen.get("tool_choice") or "auto"
+            body = to_backend_body(state, raw_body)
 
             async for chunk in self._worker_pool.forward_stream(
                 self.llm_worker_key, "/v1/chat/completions", body
@@ -1842,7 +2178,23 @@ class RealtimeSession:
                     content = delta.get("content")
                     if content:
                         output_tokens += len(content.split())
-                        yield content
+                        yield {"type": "content", "text": content}
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        fn = tc.get("function") or {}
+                        name = fn.get("name")
+                        if name:
+                            tool_call_names[idx] = name
+                        yield {
+                            "type": "tool_call_delta",
+                            "index": idx,
+                            "id": tc.get("id"),
+                            "name": name,
+                            "arguments_delta": fn.get("arguments") or "",
+                        }
+                    finish_reason = choices[0].get("finish_reason")
+                    if finish_reason:
+                        yield {"type": "finish", "reason": finish_reason}
         except asyncio.CancelledError:
             status_code = 499
             error_message = "Realtime request cancelled"
@@ -1965,7 +2317,12 @@ class RealtimeSession:
 
         Conversation entries may carry either plain ``content`` strings (STT
         path) or a list of OpenAI-style content parts (native-audio path —
-        ``input_audio``). Both forms are forwarded verbatim.
+        ``input_audio``). Both forms are forwarded verbatim. Each entry also
+        carries an ``id`` (used for ``conversation.item.delete``/matching
+        SSE events to their item) that must NOT reach the backend chat
+        endpoint — stripped here, not at append time, so the rest of the
+        session code can keep treating ``self.conversation`` entries as
+        plain chat messages with one extra key.
         """
         messages: list[dict[str, Any]] = []
 
@@ -1973,8 +2330,21 @@ class RealtimeSession:
         if instructions:
             messages.append({"role": "system", "content": instructions})
 
-        messages.extend(self.conversation)
+        messages.extend({k: v for k, v in entry.items() if k != "id"} for entry in self.conversation)
         return messages
+
+    def _generation_defaults(self) -> dict[str, Any]:
+        """Session-level generation params, as a plain dict so
+        ``_stream_llm`` can merge per-turn ``response.create`` overrides on
+        top with ``{**defaults, **overrides}`` without a dozen ``if``s."""
+        return {
+            "temperature": self.temperature,
+            "max_response_output_tokens": self.max_response_output_tokens,
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_budget": self.reasoning_budget,
+            "tools": self.tools,
+            "tool_choice": self.tool_choice,
+        }
 
     def _buffer_duration_ms(self) -> int:
         """Calculate the duration of the audio buffer in milliseconds."""
@@ -2004,8 +2374,13 @@ class RealtimeSession:
                 if self.vad_enabled
                 else None
             ),
-            "tools": [],  # Tool calls not yet implemented
-            "tool_choice": "none",
+            "tools": self.tools,
+            "tool_choice": self.tool_choice,
+            "temperature": self.temperature,
+            "max_response_output_tokens": self.max_response_output_tokens,
+            # oCabra extensions (standard clients ignore unknown fields):
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_budget": self.reasoning_budget,
             "input_audio_routing": self._input_audio_routing,
             "transcribe_user_audio": self._transcribe_user_audio,
         }

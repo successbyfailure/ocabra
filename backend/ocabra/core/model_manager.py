@@ -311,6 +311,38 @@ class ModelManager:
         finally:
             self._backend_load_gate.release()
 
+    @asynccontextmanager
+    async def _acquire_model_load_lock(self, model_id: str):
+        """Acquire this model's own load lock with the same bounded wait
+        ``_acquire_load_gate`` already has for the cross-backend gate — see
+        that docstring for the failure mode this prevents.
+
+        Confirmed live 2026-10-30: a llama.cpp worker process came up and
+        grabbed VRAM but never answered its own health check, past every
+        bounded sub-step inside the load sequence (the backend's own
+        ``_wait_for_startup`` timeout, ``_acquire_load_gate``'s bound) —
+        something left the coroutine holding THIS model's lock stuck
+        regardless. Every subsequent load of the SAME model then queued on
+        a bare ``asyncio.Lock()`` with no timeout at all, forever — no
+        error, no 503, nothing logged. Only a full process restart (which
+        resets every in-memory asyncio lock) cleared it. Bounding this one
+        the same way turns that into a catchable, retryable timeout instead.
+        """
+        lock = self._load_locks.setdefault(model_id, asyncio.Lock())
+        try:
+            await asyncio.wait_for(
+                lock.acquire(), timeout=max(1, int(settings.max_drain_timeout_s))
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for '{model_id}'s own load lock — a previous "
+                "load/unload of this model appears stuck"
+            ) from exc
+        try:
+            yield
+        finally:
+            lock.release()
+
     def begin_request(self, model_id: str, *, source: str = "api") -> str:
         """Mark one request as in-flight. Returns request_id."""
         request_id = self.try_begin_request(model_id, max_inflight=0, source=source)
@@ -1406,9 +1438,8 @@ class ModelManager:
         self, model_id: str, force_gpu: int | None = None
     ) -> "ModelState":
         state = self._states[model_id]
-        lock = self._load_locks.setdefault(model_id, asyncio.Lock())
 
-        async with lock:
+        async with self._acquire_model_load_lock(model_id):
             if state.status == ModelStatus.LOADED:
                 return state
 

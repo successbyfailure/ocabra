@@ -112,15 +112,32 @@ class SessionRegistry:
 
     # ── Read side ────────────────────────────────────────────
 
-    def has_active_session_holding(self, worker_key: str) -> bool:
+    def has_active_session_holding(
+        self, worker_key: str, *, exclude_session_id: str | None = None
+    ) -> bool:
         """Router / pressure_eviction consumer. Fast path with no lock —
         the reverse index is fine to read racily; the worst case is a stale
-        True/False for a millisecond, which never matters."""
+        True/False for a millisecond, which never matters.
+
+        ``exclude_session_id`` — a session re-resolving its OWN router
+        selection (e.g. a Realtime session's ``session.update`` re-sending
+        the same STT router id the session already resolved and loaded at
+        connect time) must not veto the model it already holds; without
+        this a session's own reservation on the worker it just warmed made
+        the router "forget" it was warm and fall through to picking a
+        different, genuinely cold target. Reproduced live 2026-10-30:
+        picking a router STT model showed a ~1s "loading" card on every
+        session open even though a target was already loaded — self-veto.
+        Other callers (pressure_eviction, a different session's router pick)
+        omit this and get the original behaviour unchanged.
+        """
         holders = self._by_worker.get(worker_key)
         if not holders:
             return False
         max_idle = int(settings.session_max_idle_s)
         for sid in holders:
+            if sid == exclude_session_id:
+                continue
             session = self._by_id.get(sid)
             if session is None:
                 continue

@@ -85,12 +85,18 @@ async def resolve_realtime_model_id(
     profile_registry,
     model_manager,
     router_resolver: object | None = None,
+    exclude_session_id: str | None = None,
 ) -> str | None:
     """Map the ``model`` query parameter to a canonical model id.
 
     Profiles resolve to their base model; *router* profiles (no ``base_model_id`` of their own)
     are resolved through the :class:`RouterResolver` like the REST endpoints do; anything else
     falls back to a legacy id/backend-id match. Returns ``None`` when nothing loadable is found.
+
+    ``exclude_session_id`` — pass the CALLING Realtime session's own id so a
+    re-resolution (e.g. ``session.update`` resending the same router STT
+    model right after connect) doesn't veto the worker that session itself
+    already holds (see ``SessionRegistry.has_active_session_holding``).
     """
     profile = await profile_registry.get(model)
     if profile and profile.enabled:
@@ -98,7 +104,9 @@ async def resolve_realtime_model_id(
             return profile.base_model_id
         if router_resolver is not None and router_resolver.is_router(profile):
             try:
-                picked = await router_resolver.pick(profile, request_body=None)
+                picked = await router_resolver.pick(
+                    profile, request_body=None, exclude_session_id=exclude_session_id
+                )
             except Exception as exc:  # noqa: BLE001 - includes NoRoutableTargetError
                 logger.warning("realtime_router_pick_failed", model=model, error=str(exc))
                 return None
@@ -175,17 +183,28 @@ async def realtime_ws(
     Protocol:
         Client events: session.update, input_audio_buffer.append,
             input_audio_buffer.commit, input_audio_buffer.clear,
-            response.create, response.cancel.
+            response.create, response.cancel, conversation.item.create,
+            conversation.item.truncate, conversation.item.delete.
         Server events: session.created, session.updated,
             input_audio_buffer.speech_started, input_audio_buffer.speech_stopped,
             input_audio_buffer.committed, conversation.item.created,
-            response.created, response.audio.delta, response.audio.done,
+            conversation.item.truncated, conversation.item.deleted,
+            response.created, response.output_item.added,
+            response.audio.delta, response.audio.done,
             response.audio_transcript.delta, response.audio_transcript.done,
-            response.done, error.
+            response.function_call_arguments.delta,
+            response.function_call_arguments.done, response.done, error.
 
     Note:
-        Tool calls are not yet implemented. The ``tools`` and ``tool_choice``
-        fields in session.update are accepted but ignored.
+        Tool/function calling is supported: set ``tools``/``tool_choice`` via
+        session.update or per-turn in response.create's ``response`` object.
+        After a ``response.done`` whose output includes a
+        ``type: "function_call"`` item, execute the function and send
+        ``conversation.item.create`` with
+        ``{"type": "function_call_output", "call_id": ..., "output": ...}``
+        followed by a new ``response.create`` to continue.
+        ``conversation.item.truncate`` is acknowledged but a no-op — this
+        session doesn't keep a separately replayable per-item audio buffer.
     """
     # Authenticate before accepting the WebSocket
     user = await _authenticate_ws(websocket)

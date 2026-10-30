@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.14.1"
+    app_version: str = "0.15.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -398,6 +398,17 @@ class Settings(BaseSettings):
     # Realtime API defaults (STT/TTS models for /v1/realtime sessions)
     realtime_default_stt_model: str = ""
     realtime_default_tts_model: str = ""
+    realtime_default_reasoning_budget: int = Field(
+        default=300,
+        ge=0,
+        description="Default reasoning_budget (oCabra extension, llama.cpp-native "
+        "models only) applied to every Realtime session unless a client "
+        "overrides it via session.update. 0 disables the default (no cap) — "
+        "a client can still set an explicit value per session. An uncapped "
+        "thinking model is the single biggest latency lever in voice mode: "
+        "200 tokens cut a qwen3.8:27b turn from several minutes to ~29s in "
+        "the 2026-10-29 test that led to this default.",
+    )
 
     # 11.4: Busy timeout for individual requests
     inference_request_timeout_seconds: int = Field(
