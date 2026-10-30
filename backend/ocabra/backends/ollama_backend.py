@@ -207,6 +207,21 @@ class OllamaBackend(BackendInterface):
             endpoint_url=endpoint,
         )
 
+    def note_resident_endpoint(self, model_id: str, endpoint_url: str) -> None:
+        """Record which pool a model is actually running on, learned from
+        inventory discovery (``discover_resident_models``) rather than from
+        this backend's own ``load()`` call. Models adopted via the periodic
+        inventory sync never go through ``load()``, so without this
+        ``_model_endpoints`` stays empty for them and a later ``unload()``
+        (when the caller doesn't separately know/pass ``endpoint_url``, e.g.
+        ``health_check`` or any ``backend.unload()`` call site that doesn't
+        thread ``state.worker_info.endpoint_url`` through) silently falls
+        back to the default pool instead of the one actually holding it
+        (2026-10-30).
+        """
+        self._model_endpoints[model_id] = endpoint_url
+        self._loaded.add(model_id)
+
     async def unload(self, model_id: str, *, endpoint_url: str | None = None) -> None:
         endpoint = endpoint_url or self._model_endpoints.get(
             model_id, settings.ollama_base_url.rstrip("/")

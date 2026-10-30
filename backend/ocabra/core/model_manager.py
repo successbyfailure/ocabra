@@ -1195,6 +1195,9 @@ class ModelManager:
                 vram_used_mb=item["vram_mb"],
                 endpoint_url=item["pool_url"],
             )
+            note_resident = getattr(backend, "note_resident_endpoint", None)
+            if callable(note_resident) and item["pool_url"]:
+                note_resident(state.backend_model_id, item["pool_url"])
             state.worker_info = worker_info
             state.current_gpu = item["pool_gpus"]
             state.vram_used_mb = item["vram_mb"]
@@ -2866,11 +2869,15 @@ class ModelManager:
         installed_model_ids: list[str],
         loaded_model_ids: list[str] | None = None,
         loaded_vram_mb: dict[str, int] | None = None,
+        loaded_pool_url: dict[str, str] | None = None,
     ) -> int:
         added = await self.sync_ollama_models(installed_model_ids)
         installed_set = {model_id.strip() for model_id in installed_model_ids if model_id.strip()}
         loaded_set = {model_id.strip() for model_id in (loaded_model_ids or []) if model_id.strip()}
         loaded_vram_map = {k.strip(): int(v) for k, v in (loaded_vram_mb or {}).items() if k and str(k).strip()}
+        loaded_pool_url_map = {
+            k.strip(): v for k, v in (loaded_pool_url or {}).items() if k and str(k).strip() and v
+        }
         parsed = urlparse(settings.ollama_base_url)
         ollama_port = int(parsed.port or 11434)
         changed: list[str] = []
@@ -2896,6 +2903,17 @@ class ModelManager:
             if backend_model_id in loaded_set:
                 loaded_vram = max(0, int(loaded_vram_map.get(backend_model_id, 0)))
                 inferred_gpus = gpu_map.get(backend_model_id, [])
+                # Which pool actually holds this model — see the 2026-10-30
+                # comment in main.py's _ollama_inventory_loop for why this
+                # matters: without it, ModelManager.unload() (which only
+                # trusts state.worker_info.endpoint_url) falls back to the
+                # default pool and silently fails to unload a model resident
+                # on a non-default one (e.g. ollama-3060).
+                endpoint_url = loaded_pool_url_map.get(backend_model_id) or None
+                if endpoint_url and ollama_backend is not None:
+                    note_resident = getattr(ollama_backend, "note_resident_endpoint", None)
+                    if callable(note_resident):
+                        note_resident(backend_model_id, endpoint_url)
                 if state.status != ModelStatus.LOADED:
                     state.status = ModelStatus.LOADED
                     state.loaded_at = state.loaded_at or datetime.now(UTC)
@@ -2917,6 +2935,7 @@ class ModelManager:
                         port=ollama_port,
                         pid=0,
                         vram_used_mb=loaded_vram,
+                        endpoint_url=endpoint_url,
                     )
                     self._worker_pool.set_worker(model_id, state.worker_info)
                     changed.append(model_id)
@@ -2931,6 +2950,8 @@ class ModelManager:
                         state.worker_info.vram_used_mb = loaded_vram
                         if inferred_gpus:
                             state.worker_info.gpu_indices = inferred_gpus
+                        if endpoint_url:
+                            state.worker_info.endpoint_url = endpoint_url
                 continue
 
             if state.status in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}:

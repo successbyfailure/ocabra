@@ -186,8 +186,21 @@ async def _ollama_inventory_loop(
             loaded_vram_mb = {
                 item["name"]: max(0, int(item.get("vram_mb", 0))) for item in resident
             }
+            # 2026-10-30 — which POOL a resident model is actually on, not
+            # just that it's loaded somewhere. Without this, ModelManager
+            # .unload() falls back to the default pool's endpoint (it only
+            # trusts state.worker_info.endpoint_url, which this loop used to
+            # leave unset) — an unload request for a model resident on e.g.
+            # ollama-3060 silently landed on the wrong daemon and did
+            # nothing, while Ollama kept the real instance alive under its
+            # own keep_alive. Reproduced live: unloading qwen3-embedding:8b
+            # returned "unloaded" from oCabra but `ollama ps` on the 3060
+            # pool still showed it resident with UNTIL=Forever.
+            loaded_pool_url = {
+                item["name"]: str(item.get("pool_url") or "") for item in resident
+            }
             added = await model_manager.sync_ollama_inventory(
-                installed, loaded, loaded_vram_mb
+                installed, loaded, loaded_vram_mb, loaded_pool_url
             )
             # Auto-create default profiles for newly discovered models
             if added and profile_registry:
