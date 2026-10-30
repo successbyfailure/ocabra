@@ -165,14 +165,26 @@ async def _ollama_inventory_loop(
     logger.info("ollama_inventory_loop_started", interval_s=interval_s)
     while not stop_event.is_set():
         try:
+            # Installed catalog: all configured Ollama pools share the same
+            # model storage on this host, so the default pool's view is
+            # representative — only the LOADED/resident side genuinely
+            # differs per pool.
             installed = await registry.list_installed()
-            loaded_details = await registry.list_loaded_details()
-            loaded = [d["name"] for d in loaded_details]
-            # size_vram (bytes) → MB so the scheduler can size Ollama models for
-            # eviction and attribute them to their GPU(s).
+            # 2026-10-30 — residency must be discovered across EVERY
+            # configured pool (discover_ollama_resident_models), not just the
+            # default OLLAMA_BASE_URL this loop used to poll alone. A model
+            # resident on a non-default pool (e.g. ollama-3060) got adopted
+            # correctly once at startup by _reconcile_ollama_state (which IS
+            # pool-aware) — then this loop, seeing it absent from its own
+            # single-pool /api/ps, demoted it back to UNLOADED ~60s later
+            # (ollama_inventory_loaded_grace_s) every single cycle, forever.
+            # Reproduced live: qwen3-embedding:8b sat warm and serving on
+            # ollama-3060 the whole time while /ocabra/models reported it
+            # unloaded with 0 VRAM.
+            resident = await model_manager.discover_ollama_resident_models()
+            loaded = [item["name"] for item in resident]
             loaded_vram_mb = {
-                d["name"]: max(0, int(d.get("size_vram", 0)) // (1024 * 1024))
-                for d in loaded_details
+                item["name"]: max(0, int(item.get("vram_mb", 0))) for item in resident
             }
             added = await model_manager.sync_ollama_inventory(
                 installed, loaded, loaded_vram_mb

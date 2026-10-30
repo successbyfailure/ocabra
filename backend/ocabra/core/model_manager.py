@@ -2811,6 +2811,27 @@ class ModelManager:
             added += 1
         return added
 
+    async def discover_ollama_resident_models(self) -> list[dict[str, Any]]:
+        """Thin public wrapper around the Ollama backend's
+        ``discover_resident_models()`` (queries every configured pool's own
+        ``/api/ps``, not just the default ``OLLAMA_BASE_URL``) — exposed here
+        so callers outside this module (the periodic inventory loop in
+        ``main.py``) don't need to reach into ``self._worker_pool`` directly.
+        Returns ``[]`` if the Ollama backend isn't registered.
+        """
+        try:
+            backend = await self._worker_pool.get_backend("ollama")
+        except KeyError:
+            return []
+        discover = getattr(backend, "discover_resident_models", None)
+        if not callable(discover):
+            return []
+        try:
+            return await discover()
+        except Exception as exc:  # noqa: BLE001 — never break the caller's loop
+            logger.warning("ollama_resident_discovery_failed", error=str(exc))
+            return []
+
     async def sync_ollama_inventory(
         self,
         installed_model_ids: list[str],
