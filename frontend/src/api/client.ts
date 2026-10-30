@@ -1031,6 +1031,23 @@ function toFederationTestResult(raw: unknown): FederationTestResult {
   }
 }
 
+// FastAPI's HTTPException(detail=...) always wraps the response as
+// {"detail": <value>}. oCabra's own /ocabra/* endpoints raise with a plain
+// string detail, but the OpenAI-compatible /v1/* endpoints (batches, files,
+// chat, ...) raise with detail={"error": {"message": ...}} to match the
+// OpenAI error shape — unwrap both so callers never do `new Error(object)`
+// (which renders as the literal string "[object Object]" in a toast).
+function extractErrorMessage(err: unknown): string | undefined {
+  if (!isRecord(err)) return undefined
+  const detail = err.detail
+  if (typeof detail === "string") return detail
+  if (isRecord(detail) && isRecord(detail.error) && typeof detail.error.message === "string") {
+    return detail.error.message
+  }
+  if (isRecord(err.error) && typeof err.error.message === "string") return err.error.message
+  return undefined
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -1050,7 +1067,7 @@ async function request<T>(
       useAuthStore.getState().setUser(null)
     }
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? res.statusText)
+    throw new Error(extractErrorMessage(err) ?? res.statusText)
   }
   if (res.status === 204) {
     return undefined as T
@@ -1804,7 +1821,7 @@ export const api = {
       const res = await fetch(`${BASE}/v1/files`, { method: "POST", body: form })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.error?.message ?? err.detail ?? res.statusText)
+        throw new Error(extractErrorMessage(err) ?? res.statusText)
       }
       return res.json() as Promise<OpenAIFileObject>
     },
