@@ -39,33 +39,43 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
     // entirely (the only TTS backend actually installed in this
     // environment), so the dropdown always had zero options regardless
     // of what was configured; STT_BACKENDS similarly missed "vibeasr".
-    api.models.list().then((models) => {
-      setSttModels(
-        models
-          .filter((m) => m.capabilities?.audioTranscription)
-          .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId }))
-      )
-      setTtsModels(
-        models
-          .filter((m) => m.capabilities?.tts)
-          .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId }))
-      )
-    }).catch(() => {})
-    // Router profiles (e.g. "recomendado-stt") have no base_model_id of their
-    // own, so they never show up in api.models.list() — the realtime session
-    // now resolves them through the RouterResolver at connect time (same as
-    // the LLM target), so they belong in these dropdowns too. " · router"
-    // suffix follows the " · <metadata>" label convention used elsewhere in
-    // this app (e.g. GpuCard, LoadedModelList) instead of inventing a new one.
-    api.profiles.listAll().then((profiles) => {
-      const toOption = (p: (typeof profiles)[number]): ModelOption => ({
-        modelId: p.profileId,
-        displayName: `${p.displayName || p.profileId} · router`,
-      })
-      const routers = profiles.filter((p) => p.profileKind === "router")
-      setSttModels((prev) => [...prev, ...routers.filter((p) => p.category === "stt").map(toOption)])
-      setTtsModels((prev) => [...prev, ...routers.filter((p) => p.category === "tts").map(toOption)])
-    }).catch(() => {})
+    //
+    // Router profiles (e.g. "recomendado-stt") have no base_model_id of
+    // their own, so they never show up in api.models.list() — the realtime
+    // session now resolves them through the RouterResolver at connect time
+    // (same as the LLM target), so they belong in these dropdowns too.
+    // Both requests are awaited together and the merged lists are set once
+    // each — reproduced live 2026-10-30: firing these as two independent
+    // effects, each with its own plain setSttModels(...)/setTtsModels(...),
+    // meant whichever promise resolved LAST overwrote whatever the other
+    // had already set. profiles.listAll() (a small query) routinely beat
+    // models.list(), so the router option got appended and then immediately
+    // wiped out the moment the plain-models response landed — the dropdown
+    // never showed it even though the fetch/merge logic itself was correct.
+    Promise.all([api.models.list().catch(() => []), api.profiles.listAll().catch(() => [])]).then(
+      ([models, profiles]) => {
+        const toOption = (p: (typeof profiles)[number]): ModelOption => ({
+          modelId: p.profileId,
+          // " · router" suffix follows the " · <metadata>" label convention
+          // used elsewhere in this app (e.g. GpuCard, LoadedModelList)
+          // instead of inventing a new one.
+          displayName: `${p.displayName || p.profileId} · router`,
+        })
+        const routers = profiles.filter((p) => p.profileKind === "router")
+        setSttModels([
+          ...models
+            .filter((m) => m.capabilities?.audioTranscription)
+            .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId })),
+          ...routers.filter((p) => p.category === "stt").map(toOption),
+        ])
+        setTtsModels([
+          ...models
+            .filter((m) => m.capabilities?.tts)
+            .map((m) => ({ modelId: m.modelId, displayName: m.displayName || m.modelId })),
+          ...routers.filter((p) => p.category === "tts").map(toOption),
+        ])
+      }
+    )
   }, [])
 
   const save = async () => {
