@@ -228,6 +228,7 @@ async def completions(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    queue_state = worker_pool.peek_queue_state(worker_key) if not is_batch else None
     try:
         result = await worker_pool.forward_request(
             worker_key,
@@ -246,6 +247,10 @@ async def completions(
     resp_headers = await ocabra_response_headers(
         request, model_manager, worker_key, profile.base_model_id
     )
+    if queue_state is not None and queue_state["saturated"]:
+        resp_headers["X-Ocabra-Slot-Queue-Saturated"] = "1"
+        resp_headers["X-Ocabra-Slot-In-Flight"] = str(queue_state["in_flight"])
+        resp_headers["X-Ocabra-Slot-Count"] = str(queue_state["slots"])
     return JSONResponse(content=result, headers=resp_headers)
 
 

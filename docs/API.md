@@ -71,6 +71,9 @@ pagó una carga en frío).
 | `X-Ocabra-Load-Duration-Ms` | junto a `Was-Cold-Start` | Tiempo real que el request esperó al load, en milisegundos |
 | `X-Ocabra-Router` | routers | `profile_id` del router al que el cliente apuntó |
 | `X-Ocabra-Router-Target` | routers | `profile_id` del target que finalmente sirvió la petición |
+| `X-Ocabra-Slot-Queue-Saturated` | no-streaming, cuando la petición esperó | `1` si al llegar la petición todos los slots de concurrencia del worker estaban ocupados |
+| `X-Ocabra-Slot-In-Flight` | junto a `Queue-Saturated` | Peticiones en vuelo en ese worker en el momento de llegar |
+| `X-Ocabra-Slot-Count` | junto a `Queue-Saturated` | Slots de concurrencia configurados para ese worker |
 
 Ademas, en respuestas SSE (`stream=true`) el servidor intercala comentarios
 oCabra-aware con el mismo shape:
@@ -402,22 +405,35 @@ Cada línea del JSONL de entrada:
 {"custom_id": "req-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "qwen3.8:27b", "messages": [...]}}
 ```
 
-El fichero de salida (`output_file_id`) trae, por línea:
+El fichero de salida (`output_file_id`) trae, por línea, solo las peticiones
+que tuvieron éxito:
 ```json
 {"id": "batch_req_...", "custom_id": "req-1", "response": {"status_code": 200, "body": {...}}, "error": null}
 ```
 
+Los fallos van a un fichero separado (`error_file_id`), mismo formato con
+`response: null` y `error` relleno — `error_file_id` solo aparece cuando hubo
+al menos un fallo, igual que en la API real de OpenAI.
+
 Ciclo de estados: `validating` → `in_progress` → `finalizing` →
 `completed` (o `failed`/`cancelled`/`expired`). `request_counts` en la
 respuesta trae `total`/`completed`/`failed` y se actualiza mientras el
-lote progresa — útil para hacer polling de avance sin reprocesar nada.
+lote progresa — útil para hacer polling de avance sin reprocesar nada. Un
+lote cuyo `completion_window` (24h) se agota pasa a `expired` conservando
+los resultados parciales que ya tuviera en `output_file_id`/`error_file_id`
+— las líneas que nunca llegaron a despacharse se registran en el fichero de
+errores con `error.code = "batch_expired"`.
 
-> Nota de diseño (2026-10-30): el procesamiento de lotes todavía no prioriza
-> entre lotes y sesiones interactivas que compiten por el mismo modelo —
-> está en desarrollo un mecanismo para que el tráfico interactivo tenga
-> siempre preferencia sobre un lote en curso. Mientras tanto, un lote
-> grande puede tardar más de lo esperado si hay tráfico interactivo pesado
-> en el mismo modelo.
+> Prioridad frente a tráfico interactivo (2026-10-30): el procesamiento de
+> lotes **sí** prioriza a las sesiones interactivas. Cuando una petición
+> interactiva necesita un slot o un modelo ocupado por trabajo de lote,
+> puede cancelar esa petición del lote (según `batchPreemptMode` en
+> `/ocabra/config`, panel "Prioridad") en vez de hacer esperar al usuario.
+> Una línea cancelada así se reintenta sola dentro del mismo lote, no se
+> cuenta como fallo — solo aparece como `error_type=batch_priority_preempted`
+> en el fichero de errores si se agotan los reintentos (p.ej. saturación
+> sostenida). Resuelve también targets de router (`profile_kind=router`)
+> para esta lógica, no solo modelos directos.
 
 ---
 
