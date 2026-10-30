@@ -222,7 +222,7 @@ Implementado:
 
 Implementado:
 - **OpenAI Files API** (`/v1/files` · `POST`/`GET`/`DELETE`, `GET /v1/files/{id}/content`) con almacenamiento en disco (`/data/openai_files`, volumen `./data/openai_files`). Tabla `openai_files`.
-- **OpenAI Batches API** (`/v1/batches` · `POST`/`GET`/`cancel`) con tabla `openai_batches` y migración `0016`. Soporta `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
+- **OpenAI Batches API** (`/v1/batches` · `POST`/`GET`/`cancel`) con tabla `openai_batches` y migración `0016`. Soporta `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech` (añadidos 2026-10-30; `/v1/audio/transcriptions` e `/v1/images/edits` no son viables — necesitan subir un binario en la petición, incompatible con una línea JSON por petición). Respuestas no-JSON (TTS) se guardan como fichero aparte (`purpose="batch_artifact"`) referenciado por `file_id` en vez de ir inline.
 - **BatchProcessor** (`backend/ocabra/core/batch_processor.py`): loop en background, dispatch in-process vía `httpx.ASGITransport`, impersonación del owner con `X-Gateway-Token` + `X-Internal-User-Id` (añadido soporte en `_deps_auth.py`). Concurrencia configurable (`batch_max_concurrency=4`), poll cada `batch_poll_interval_seconds=5`; el timeout efectivo por petición es `max(batch_request_timeout_seconds, inference_request_timeout_seconds + 30)`.
 - **Fix ACL `/ocabra/models`**: ahora filtra por `accessible_model_ids` para usuarios no-admin (igual que `/v1/models`). Verificado con usuario de grupo limitado: 1 modelo visible vs. todos antes.
 - Smoke test e2e: upload JSONL → create batch → procesado completo con output JSONL descargable vía Files API.

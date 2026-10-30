@@ -397,8 +397,15 @@ presión — úsalos para todo lo que pueda esperar.
 | POST | `/v1/batches/{id}/cancel` | Cancelar un lote |
 
 Endpoints soportados dentro de un lote: `/v1/chat/completions`,
-`/v1/embeddings`, `/v1/completions`. `completion_window` solo admite
-`"24h"` por ahora.
+`/v1/embeddings`, `/v1/completions`, `/v1/images/generations`,
+`/v1/audio/speech`. `completion_window` solo admite `"24h"` por ahora.
+
+**No soportado**: `/v1/audio/transcriptions` y `/v1/images/edits` — ambos
+necesitan subir un fichero binario (audio/imagen) en la propia petición
+(`multipart/form-data`), que no cabe en el modelo de "una línea JSON por
+petición" del formato JSONL de entrada. La API real de Batches de OpenAI
+tiene la misma limitación por el mismo motivo — no es una carencia
+particular de oCabra.
 
 Cada línea del JSONL de entrada:
 ```json
@@ -414,6 +421,17 @@ que tuvieron éxito:
 Los fallos van a un fichero separado (`error_file_id`), mismo formato con
 `response: null` y `error` relleno — `error_file_id` solo aparece cuando hubo
 al menos un fallo, igual que en la API real de OpenAI.
+
+**Respuestas binarias (`/v1/audio/speech`)**: TTS no devuelve JSON, devuelve
+el audio crudo — no cabe inline en el JSONL de salida. En su lugar, el
+`body` de la respuesta referencia un fichero nuevo (`purpose:
+"batch_artifact"`), descargable por el `GET /v1/files/{id}/content` de
+siempre:
+```json
+{"id": "batch_req_...", "custom_id": "req-1", "response": {"status_code": 200, "body": {"file_id": "file-...", "bytes": 94252, "content_type": "audio/wav"}}, "error": null}
+```
+`/v1/images/generations` **no** necesita este tratamiento — su respuesta ya
+es JSON puro (`b64_json` o `url`), igual que chat.
 
 Ciclo de estados: `validating` → `in_progress` → `finalizing` →
 `completed` (o `failed`/`cancelled`/`expired`). `request_counts` en la

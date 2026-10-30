@@ -683,13 +683,51 @@ class BatchProcessor:
             error_payload.setdefault("code", f"http_{response.status_code}")
             return None, response.status_code, error_payload
 
+        content_type = response.headers.get("content-type", "")
+        if "json" in content_type.split(";")[0]:
+            try:
+                payload = response.json()
+            except Exception as exc:
+                return None, response.status_code, {
+                    "code": "invalid_response",
+                    "message": f"Worker returned non-JSON response: {exc}",
+                }
+            return payload, response.status_code, None
+
+        # Binary artifact (e.g. /v1/audio/speech returns raw audio bytes,
+        # not JSON) — can't inline it in the batch's output JSONL the way a
+        # chat/embeddings/images response fits. Save it as its own file and
+        # reference it by file_id instead, reusing the same Files API the
+        # rest of the Batches output already relies on; the client downloads
+        # it via GET /v1/files/{id}/content like any other file.
+        raw_bytes = response.content
+        artifact_uuid = uuid.uuid4()
+        storage_dir = Path(settings.openai_files_dir)
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = storage_dir / f"{artifact_uuid}"
         try:
-            payload = response.json()
+            artifact_path.write_bytes(raw_bytes)
+            async with AsyncSessionLocal() as session:
+                session.add(OpenAIFile(
+                    id=artifact_uuid,
+                    user_id=uuid.UUID(user_id),
+                    filename=f"batch_artifact_{artifact_uuid}",
+                    bytes=len(raw_bytes),
+                    purpose="batch_artifact",
+                    storage_path=str(artifact_path),
+                    status="processed",
+                ))
+                await session.commit()
         except Exception as exc:
-            return None, response.status_code, {
-                "code": "invalid_response",
-                "message": f"Worker returned non-JSON response: {exc}",
+            return None, 500, {
+                "code": "artifact_write_failed",
+                "message": f"Failed to persist binary response: {exc}",
             }
+        payload = {
+            "file_id": f"file-{artifact_uuid}",
+            "bytes": len(raw_bytes),
+            "content_type": content_type.split(";")[0] or "application/octet-stream",
+        }
         return payload, response.status_code, None
 
     @staticmethod

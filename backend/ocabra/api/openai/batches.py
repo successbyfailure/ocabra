@@ -27,7 +27,13 @@ from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
 router = APIRouter(tags=["OpenAI Batches"])
 logger = structlog.get_logger(__name__)
 
-ALLOWED_ENDPOINTS = {"/v1/chat/completions", "/v1/embeddings", "/v1/completions"}
+ALLOWED_ENDPOINTS = {
+    "/v1/chat/completions",
+    "/v1/embeddings",
+    "/v1/completions",
+    "/v1/images/generations",
+    "/v1/audio/speech",
+}
 
 
 class BatchCreateBody(BaseModel):

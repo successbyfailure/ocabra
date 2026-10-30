@@ -564,7 +564,8 @@ DELETE /v1/files/{file_id}           → {id, object: "file", deleted: true}
 POST   /v1/batches                   → BatchObject
   body: {
     input_file_id: "file-<uuid>",
-    endpoint: "/v1/chat/completions"|"/v1/embeddings"|"/v1/completions",
+    endpoint: "/v1/chat/completions"|"/v1/embeddings"|"/v1/completions"|
+              "/v1/images/generations"|"/v1/audio/speech",
     completion_window: "24h",
     metadata?: dict
   }
@@ -586,7 +587,7 @@ POST   /v1/batches/{batch_id}/cancel → BatchObject
   "id": "batch_<uuid>",
   "object": "batch",
   "endpoint": "/v1/chat/completions",
-  "status": "validating|in_progress|finalizing|completed|failed|cancelled|cancelling",
+  "status": "validating|in_progress|finalizing|completed|failed|cancelled|cancelling|expired",
   "input_file_id": "file-<uuid>",
   "output_file_id": "file-<uuid>|null",
   "error_file_id": "file-<uuid>|null",
@@ -595,21 +596,48 @@ POST   /v1/batches/{batch_id}/cancel → BatchObject
   "created_at": unix_ts,
   "in_progress_at": unix_ts|null,
   "completed_at": unix_ts|null,
+  "expired_at": unix_ts|null,
   "expires_at": unix_ts|null,
   "metadata": dict|null
 }
 ```
 
-Formato JSONL de salida (output_file_id):
+Formato JSONL de salida (`output_file_id` — solo éxitos; `error_file_id` —
+solo fallos, `null` si no hubo ninguno):
 ```json
 {"id": "batch_req_<uuid>", "custom_id": "req1", "response": {"status_code": 200, "request_id": "...", "body": {...}}, "error": null}
 ```
+
+Respuestas no-JSON (`/v1/audio/speech` devuelve audio binario, no JSON):
+el `body` de la respuesta no lleva el audio inline — referencia un fichero
+aparte subido con `purpose="batch_artifact"`, descargable por el mismo
+`GET /v1/files/{id}/content`:
+```json
+{"id": "batch_req_<uuid>", "custom_id": "req1", "response": {"status_code": 200, "request_id": "...", "body": {"file_id": "file-<uuid>", "bytes": 94252, "content_type": "audio/wav"}}, "error": null}
+```
+`/v1/images/generations` no necesita este tratamiento — su respuesta ya es
+JSON puro (`b64_json` o `url` según `response_format`), igual que chat.
+
+Un lote cuyo `completion_window` vence pasa a `status: "expired"`
+conservando los resultados parciales ya escritos; las líneas nunca
+despachadas se registran en `error_file_id` con `error.code="batch_expired"`.
+
+Prioridad frente a tráfico interactivo: una petición interactiva puede
+cancelar una línea de lote en curso para liberar un slot/modelo (ver
+`batchPreemptMode` en `/ocabra/config`) — la línea se reintenta sola dentro
+del mismo batch, no cuenta como fallo a menos que se agoten los reintentos
+(`error.code="batch_priority_preempted"`).
 
 Configuración:
 - `OPENAI_FILES_DIR` — directorio de almacenamiento (default `/data/openai_files`)
 - `BATCH_MAX_CONCURRENCY` — peticiones concurrentes por batch (default 4)
 - `BATCH_REQUEST_TIMEOUT_SECONDS` — timeout por petición (default 600)
 - `BATCH_POLL_INTERVAL_SECONDS` — intervalo de polling del procesador (default 5)
+- `BATCH_PRIORITY_ENABLED`, `BATCH_PREEMPT_MODE` (`never`|`instant`|`conditional`),
+  `BATCH_PREEMPT_MIN_ELAPSED_S`, `BATCH_PREEMPT_GRACE_S`, `BATCH_FREE_SLOTS_PCT`,
+  `BATCH_RESUME_COOLDOWN_SLOTS_S`, `BATCH_RESUME_COOLDOWN_EVICTION_S`,
+  `BATCH_INTER_JOB_COOLDOWN_S` — prioridad frente a interactivo (ver panel
+  "Prioridad" en Settings)
 
 ---
 
