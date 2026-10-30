@@ -172,6 +172,7 @@ async def recent_requests(
 
     mm = getattr(request.app.state, "model_manager", None)
     estimator = getattr(request.app.state, "duration_estimator", None)
+    wp = getattr(request.app.state, "worker_pool", None)
     in_flight_rows: list[dict] = []
     if mm is not None:
         now = time.time()
@@ -237,9 +238,27 @@ async def recent_requests(
             canonical = (row.get("workerKey") or row["modelId"]).split("::", 1)[0]
             grouped.setdefault(canonical, []).append(idx)
         p50_cache: dict[str, float | None] = {}
+
+        def _queue_sort_key(idx: int) -> tuple[int, tuple[int, int, int], int]:
+            # 2026-10-30 — this used to be pure "oldest elapsed = processing
+            # first", which is only an approximation of what FairSlotGate
+            # actually does (least-recently-served-first across distinct
+            # users, not arrival order) — under real multi-user contention
+            # it could show the wrong row as "processing". Peek the gate's
+            # REAL priority key for this row's user when one exists; fall
+            # back to the old elapsed-time heuristic (tagged so it still
+            # sorts consistently) when there's no live gate for this
+            # worker — e.g. a backend that never threads user_key/slots.
+            row = in_flight_rows[idx]
+            worker_key = row.get("workerKey") or row["modelId"]
+            user_key = row.get("userId") or row.get("username") or "anonymous"
+            prio = wp.peek_gate_priority(worker_key, user_key) if wp is not None else None
+            if prio is not None:
+                return (0, prio, -row["elapsedMs"])
+            return (1, (0, 0, 0), -row["elapsedMs"])
+
         for canonical, indices in grouped.items():
-            # Más viejas primero (elapsedMs mayor = empezaron antes).
-            indices.sort(key=lambda i: -in_flight_rows[i]["elapsedMs"])
+            indices.sort(key=_queue_sort_key)
             slots = slots_by_canonical.get(canonical) or 1
             processing_slice = indices[:slots]
             max_remaining_ms = 0

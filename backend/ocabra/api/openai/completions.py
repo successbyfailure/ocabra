@@ -27,6 +27,7 @@ from ._deps import (
     get_model_manager,
     get_openai_user,
     get_profile_registry,
+    is_batch_origin_request,
     keepalive_until_done,
     lookup_profile,
     merge_profile_defaults,
@@ -211,6 +212,7 @@ async def completions(
     worker_key = state.model_id
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
+    is_batch = is_batch_origin_request(request)
 
     if stream:
         return StreamingResponse(
@@ -220,6 +222,7 @@ async def completions(
                 to_backend_body(state, merged_body),
                 user_key=user_key,
                 slots=slots,
+                is_batch=is_batch,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -232,6 +235,7 @@ async def completions(
             to_backend_body(state, merged_body),
             user_key=user_key,
             slots=slots,
+            is_batch=is_batch,
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
@@ -256,10 +260,20 @@ async def _stream_completions(
     body: dict,
     user_key: str | None = None,
     slots: int = 1,
+    is_batch: bool = False,
 ):
     try:
+        if user_key is not None:
+            queue_state = worker_pool.peek_queue_state(model_id)
+            if queue_state is not None and queue_state["saturated"]:
+                yield sse_ocabra_event(
+                    "slot_queued",
+                    model_id=model_id,
+                    in_flight=queue_state["in_flight"],
+                    slots=queue_state["slots"],
+                )
         async for chunk in worker_pool.forward_stream(
-            model_id, "/v1/completions", body, user_key=user_key, slots=slots
+            model_id, "/v1/completions", body, user_key=user_key, slots=slots, is_batch=is_batch
         ):
             yield chunk
     except Exception as e:
@@ -357,6 +371,15 @@ async def _stream_completions_with_load(
     backend_body = to_backend_body(state, merged_body)
     slots = fairness_slots(state)
     try:
+        if user_key is not None:
+            queue_state = worker_pool.peek_queue_state(worker_key)
+            if queue_state is not None and queue_state["saturated"]:
+                yield sse_ocabra_event(
+                    "slot_queued",
+                    model_id=worker_key,
+                    in_flight=queue_state["in_flight"],
+                    slots=queue_state["slots"],
+                )
         async for chunk in worker_pool.forward_stream(
             worker_key, "/v1/completions", backend_body, user_key=user_key, slots=slots
         ):

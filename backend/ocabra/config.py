@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.11.0"
+    app_version: str = "0.12.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -584,6 +584,71 @@ class Settings(BaseSettings):
     )
     batch_poll_interval_seconds: int = Field(
         default=5, ge=2, description="How often the batch processor polls for pending batches."
+    )
+
+    # Batch vs. interactive priority (2026-10-30 design). Batches never get
+    # the next free slot ahead of a waiting interactive caller (see
+    # FairSlotGate's is_batch tiering) regardless of these knobs — they only
+    # govern the more drastic case: slots already saturated by batch work.
+    batch_priority_enabled: bool = Field(
+        default=True,
+        description="Master switch for batch-vs-interactive prioritization. "
+        "Flip to False to fall back to plain FIFO fairness with no preemption.",
+    )
+    batch_preempt_mode: str = Field(
+        default="conditional",
+        description="How to handle an in-flight batch request when an "
+        "interactive caller needs its slot/model and nothing is free: "
+        "'never' (let it run, interactive just queues), 'instant' (always "
+        "cancel it immediately), 'conditional' (cancel unless it has already "
+        "run past batch_preempt_min_elapsed_s AND has less than "
+        "batch_preempt_grace_s left, per DurationEstimator.in_flight_remaining).",
+    )
+    batch_preempt_min_elapsed_s: float = Field(
+        default=300.0,
+        ge=0,
+        description="Conditional mode: only grant the 'let it finish' grace to "
+        "batch requests that have ALREADY run at least this long — avoids "
+        "special-casing short tasks where killing+retrying is nearly free.",
+    )
+    batch_preempt_grace_s: float = Field(
+        default=10.0,
+        ge=0,
+        description="Conditional mode: if the batch request's estimated "
+        "remaining time is under this, let it finish instead of killing it.",
+    )
+    batch_free_slots_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="When all of a worker's slots are held by batch requests "
+        "and an interactive caller needs one, fraction of the saturated slots "
+        "to target for preemption (per batch_preempt_mode). 1.0 = free "
+        "everything running; 0.5 = free half.",
+    )
+    batch_resume_cooldown_slots_s: float = Field(
+        default=120.0,
+        ge=0,
+        description="After a slot-only preemption (model stays loaded, just "
+        "cancelled a generation) fires on a worker, suppress new batch "
+        "dispatch to that worker for this long.",
+    )
+    batch_resume_cooldown_eviction_s: float = Field(
+        default=300.0,
+        ge=0,
+        description="After a full model eviction triggered by interactive "
+        "priority fires on a worker, suppress new batch dispatch to that "
+        "worker for this long — longer than the slot cooldown because a "
+        "reload is far more expensive than losing one generation.",
+    )
+    batch_inter_job_cooldown_s: float = Field(
+        default=0.0,
+        ge=0,
+        description="Pause this long between one batch job finishing and the "
+        "next pending one starting — unrelated to interactive priority, just "
+        "lets the server/GPUs breathe between back-to-back long-running "
+        "batch jobs instead of pegging them continuously. 0 = disabled "
+        "(batches start back-to-back, pre-2026-10-30 behavior).",
     )
 
     # Profile resolution

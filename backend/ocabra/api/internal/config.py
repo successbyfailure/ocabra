@@ -150,6 +150,32 @@ class ServerConfigPatch(BaseModel):
         description="Human-readable name for this node in the federation",
     )
 
+    # ── Batch-vs-interactive priority (2026-10-30) ──────────────────────
+    batch_priority_enabled: bool | None = Field(default=None, alias="batchPriorityEnabled")
+    batch_preempt_mode: str | None = Field(
+        default=None,
+        alias="batchPreemptMode",
+        description="'never' | 'instant' | 'conditional'",
+    )
+    batch_preempt_min_elapsed_s: float | None = Field(
+        default=None, alias="batchPreemptMinElapsedS", ge=0
+    )
+    batch_preempt_grace_s: float | None = Field(
+        default=None, alias="batchPreemptGraceS", ge=0
+    )
+    batch_free_slots_pct: float | None = Field(
+        default=None, alias="batchFreeSlotsPct", ge=0.0, le=1.0
+    )
+    batch_resume_cooldown_slots_s: float | None = Field(
+        default=None, alias="batchResumeCooldownSlotsS", ge=0
+    )
+    batch_resume_cooldown_eviction_s: float | None = Field(
+        default=None, alias="batchResumeCooldownEvictionS", ge=0
+    )
+    batch_inter_job_cooldown_s: float | None = Field(
+        default=None, alias="batchInterJobCooldownS", ge=0
+    )
+
     # ── Generation services (Hunyuan, ComfyUI, A1111, ACE-Step, Unsloth) ───
     # Hot config: idle unload, generation grace, preferred GPU.
     hunyuan_idle_unload_seconds: int | None = Field(default=None, alias="hunyuanIdleUnloadSeconds")
@@ -287,6 +313,14 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
         "federationEnabled": settings.federation_enabled,
         "federationNodeName": settings.federation_node_name,
+        "batchPriorityEnabled": settings.batch_priority_enabled,
+        "batchPreemptMode": settings.batch_preempt_mode,
+        "batchPreemptMinElapsedS": settings.batch_preempt_min_elapsed_s,
+        "batchPreemptGraceS": settings.batch_preempt_grace_s,
+        "batchFreeSlotsPct": settings.batch_free_slots_pct,
+        "batchResumeCooldownSlotsS": settings.batch_resume_cooldown_slots_s,
+        "batchResumeCooldownEvictionS": settings.batch_resume_cooldown_eviction_s,
+        "batchInterJobCooldownS": settings.batch_inter_job_cooldown_s,
         "hunyuanIdleUnloadSeconds": settings.hunyuan_idle_unload_seconds,
         "hunyuanGenerationGracePeriodS": settings.hunyuan_generation_grace_period_s,
         "hunyuanPreferredGpu": settings.hunyuan_preferred_gpu,
@@ -578,6 +612,29 @@ async def patch_config(
             if fm is not None:
                 await fm.stop()
                 request.app.state.federation_manager = None
+
+    if "batch_preempt_mode" in payload:
+        mode = str(payload["batch_preempt_mode"])
+        if mode not in ("never", "instant", "conditional"):
+            raise HTTPException(
+                status_code=400,
+                detail="batchPreemptMode must be one of: never, instant, conditional",
+            )
+        settings.batch_preempt_mode = mode
+        await _persist("batch_preempt_mode", mode)
+    for field_name, caster in (
+        ("batch_priority_enabled", bool),
+        ("batch_preempt_min_elapsed_s", float),
+        ("batch_preempt_grace_s", float),
+        ("batch_free_slots_pct", float),
+        ("batch_resume_cooldown_slots_s", float),
+        ("batch_resume_cooldown_eviction_s", float),
+        ("batch_inter_job_cooldown_s", float),
+    ):
+        if field_name in payload:
+            value = caster(payload[field_name])
+            setattr(settings, field_name, value)
+            await _persist(field_name, value)
 
     if "download_dir" in payload:
         settings.download_dir = str(payload["download_dir"])

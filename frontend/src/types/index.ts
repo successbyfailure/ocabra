@@ -518,6 +518,14 @@ export interface ServerConfig {
   realtimeDefaultTtsModel: string
   federationEnabled: boolean
   federationNodeName: string
+  batchPriorityEnabled: boolean
+  batchPreemptMode: "never" | "instant" | "conditional"
+  batchPreemptMinElapsedS: number
+  batchPreemptGraceS: number
+  batchFreeSlotsPct: number
+  batchResumeCooldownSlotsS: number
+  batchResumeCooldownEvictionS: number
+  batchInterJobCooldownS: number
   hunyuanIdleUnloadSeconds: number
   hunyuanGenerationGracePeriodS: number
   hunyuanPreferredGpu: number

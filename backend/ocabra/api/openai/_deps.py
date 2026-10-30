@@ -1271,6 +1271,26 @@ async def ensure_loaded(
     )
 
 
+def is_batch_origin_request(request: Request) -> bool:
+    """True when this call was dispatched by the batch processor
+    (``ocabra.core.batch_processor``), not a real client.
+
+    The batch processor calls back into this same app over
+    ``httpx.ASGITransport`` carrying the trusted ``X-Gateway-Token`` (the
+    same mechanism ``get_current_user`` already uses to impersonate the
+    batch owner, see ``_deps_auth.py``) plus a dedicated origin header.
+    Only trust the origin header when the gateway token actually matches —
+    an external caller can send any header it likes, but can't forge
+    ``settings.gateway_service_token``.
+    """
+    from ocabra.config import settings
+
+    gw_token = request.headers.get("X-Gateway-Token", "")
+    if not gw_token or not settings.gateway_service_token or gw_token != settings.gateway_service_token:
+        return False
+    return request.headers.get("X-Internal-Request-Origin", "") == "batch"
+
+
 def fairness_user_key(user: UserContext) -> str:
     """Identity key for the per-worker fair-share admission gate
     (``ocabra.core.fair_slot_gate``). Prefers the stable user_id; falls

@@ -462,6 +462,35 @@ class RealtimeSession:
             if resolved is not None:
                 self.tts_model_id = resolved
 
+    async def _resolve_model_id_or_keep(self, raw: str) -> str:
+        """Resolve a client-supplied model id the same way the connect-time
+        defaults are resolved (``_resolve_stt_tts_defaults``) — a router
+        profile id passes through ``RouterResolver``, a plain profile id
+        resolves to its base model, anything else (or no profile_registry
+        injected) passes through unchanged.
+
+        Needed because ``session.update`` (``_handle_session_update``)
+        assigns ``stt_model_id``/``tts_model_id`` directly from whatever the
+        client sends — and the Playground resends the configured default on
+        every ``ws.onopen``, which, before this fix, clobbered the already
+        -resolved router target back to the raw unresolvable router profile
+        id. Found live 2026-10-30: selecting a router as the Realtime
+        STT/TTS default appeared to work (it resolved once in ``run()``) but
+        every session actually tried to load a worker keyed by the router's
+        profile id, which has no ``base_model_id``/backend and can't load.
+        """
+        if self._profile_registry is None or not raw:
+            return raw
+        from ocabra.api.openai.realtime import resolve_realtime_model_id
+
+        resolved = await resolve_realtime_model_id(
+            raw,
+            profile_registry=self._profile_registry,
+            model_manager=self._model_manager,
+            router_resolver=self._router_resolver,
+        )
+        return resolved if resolved is not None else raw
+
     # ── Public entry point ──────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -749,7 +778,7 @@ class RealtimeSession:
         iat = session_cfg.get("input_audio_transcription")
         if isinstance(iat, dict):
             if "model" in iat:
-                self.stt_model_id = iat["model"]
+                self.stt_model_id = await self._resolve_model_id_or_keep(iat["model"])
             if iat.get("language"):
                 self._stt_language = str(iat["language"])
             if iat.get("prompt"):
@@ -770,7 +799,7 @@ class RealtimeSession:
 
         # TTS model (extension: not in official API, but useful for oCabra)
         if "tts_model" in session_cfg:
-            self.tts_model_id = session_cfg["tts_model"]
+            self.tts_model_id = await self._resolve_model_id_or_keep(session_cfg["tts_model"])
 
         # oCabra extension: explicit input-audio routing override. Auto by
         # default — picks native when the LLM advertises ``audio_input``.

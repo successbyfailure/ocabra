@@ -916,6 +916,16 @@ class ModelManager:
         pre-B20 behaviour for tests and degraded startup."""
         self._duration_estimator = estimator
 
+    def set_batch_priority(self, coordinator) -> None:
+        """Late-bind the BatchPriorityCoordinator (2026-10-30) so pressure
+        eviction can tell a batch-serving candidate apart from one serving
+        real interactive traffic, and apply a short, bounded drain wait for
+        the former instead of the full dynamic ``remaining + 15s`` grace —
+        a batch line has no human waiting on it, so cutting it short to
+        free VRAM for an interactive load is the right trade. Missing
+        coordinator falls back to the pre-existing behaviour unchanged."""
+        self._batch_priority = coordinator
+
     def mark_request_start(self, worker_key: str) -> None:
         """Bridge for the worker_pool: notify the estimator when a request
         starts on ``worker_key`` so ``in_flight_remaining`` returns useful
@@ -2198,40 +2208,84 @@ class ModelManager:
                 # Session-held candidates were already filtered by
                 # _get_pressure_eviction_candidates (Etapa 4 veto).
                 if self.is_busy(candidate_id):
-                    drain_timeout_s = static_drain_timeout_s
                     estimator = getattr(self, "_duration_estimator", None)
-                    if estimator is not None:
-                        try:
-                            remaining = estimator.in_flight_remaining(
-                                candidate_id, model_id=candidate_id
-                            )
-                        except Exception:  # noqa: BLE001
-                            remaining = None
-                        if remaining is not None and remaining > 0:
-                            drain_timeout_s = min(
-                                max_drain_timeout_s,
-                                int(remaining) + 15,
-                            )
-                    logger.info(
-                        "pressure_eviction_drain_wait",
-                        requested_model_id=model_id,
-                        evicting_model_id=candidate_id,
-                        drain_timeout_s=drain_timeout_s,
-                    )
-                    self._eviction_wait_for[model_id] = candidate_id
-                    try:
-                        for _ in range(drain_timeout_s * 2):
-                            if not self.is_busy(candidate_id):
-                                break
-                            await asyncio.sleep(0.5)
-                    finally:
-                        self._eviction_wait_for.pop(model_id, None)
-                    if self.is_busy(candidate_id):
-                        logger.warning(
-                            "pressure_eviction_drain_timeout_skip",
-                            evicting_model_id=candidate_id,
+                    batch_priority = getattr(self, "_batch_priority", None)
+                    # 2026-10-30 — a candidate serving ONLY batch traffic has
+                    # no human waiting on it: actively preempt it (per
+                    # batch_preempt_mode) instead of passively waiting out
+                    # the full dynamic remaining+15s grace meant for
+                    # interactive-vs-interactive contention.
+                    if (
+                        batch_priority is not None
+                        and settings.batch_priority_enabled
+                        and batch_priority.has_batch_activity(candidate_id)
+                    ):
+                        n_cancelled = await batch_priority.preempt_now(
+                            candidate_id, estimator=estimator
                         )
-                        continue  # skip — still busy, try next candidate
+                        logger.info(
+                            "pressure_eviction_batch_preempt",
+                            requested_model_id=model_id,
+                            evicting_model_id=candidate_id,
+                            cancelled=n_cancelled,
+                        )
+                        self._eviction_wait_for[model_id] = candidate_id
+                        try:
+                            # Cancellation propagates fast (closes the
+                            # upstream connection, see worker_pool.py); a
+                            # couple of seconds is plenty of slack for it to
+                            # actually land before we give up and move on.
+                            for _ in range(10):
+                                if not self.is_busy(candidate_id):
+                                    break
+                                await asyncio.sleep(0.5)
+                        finally:
+                            self._eviction_wait_for.pop(model_id, None)
+                        if self.is_busy(candidate_id):
+                            logger.warning(
+                                "pressure_eviction_batch_preempt_timeout_skip",
+                                evicting_model_id=candidate_id,
+                            )
+                            continue
+                        # Eviction's cooldown supersedes the shorter one
+                        # ``preempt_now`` already set for a plain slot-steal
+                        # — a model reload is far costlier than losing one
+                        # generation, so batch waits longer before retrying.
+                        batch_priority.mark_cooldown(candidate_id, kind="eviction")
+                    else:
+                        drain_timeout_s = static_drain_timeout_s
+                        if estimator is not None:
+                            try:
+                                remaining = estimator.in_flight_remaining(
+                                    candidate_id, model_id=candidate_id
+                                )
+                            except Exception:  # noqa: BLE001
+                                remaining = None
+                            if remaining is not None and remaining > 0:
+                                drain_timeout_s = min(
+                                    max_drain_timeout_s,
+                                    int(remaining) + 15,
+                                )
+                        logger.info(
+                            "pressure_eviction_drain_wait",
+                            requested_model_id=model_id,
+                            evicting_model_id=candidate_id,
+                            drain_timeout_s=drain_timeout_s,
+                        )
+                        self._eviction_wait_for[model_id] = candidate_id
+                        try:
+                            for _ in range(drain_timeout_s * 2):
+                                if not self.is_busy(candidate_id):
+                                    break
+                                await asyncio.sleep(0.5)
+                        finally:
+                            self._eviction_wait_for.pop(model_id, None)
+                        if self.is_busy(candidate_id):
+                            logger.warning(
+                                "pressure_eviction_drain_timeout_skip",
+                                evicting_model_id=candidate_id,
+                            )
+                            continue  # skip — still busy, try next candidate
 
                 logger.info(
                     "pressure_eviction_attempt",

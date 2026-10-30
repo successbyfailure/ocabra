@@ -51,34 +51,65 @@ class FairSlotGate:
     def __init__(self, slots: int) -> None:
         self.slots = max(1, int(slots))
         self._in_flight = 0
+        # How many of the currently-in-flight occupants are batch-origin —
+        # tracked separately so callers (preemption logic) can tell "every
+        # slot is held, and all of them are batch" from "every slot is held
+        # by real interactive traffic" without walking a task registry.
+        self._in_flight_batch = 0
         # user_key -> queue of not-yet-granted waiters for that user.
         self._queues: dict[str, deque[asyncio.Future]] = {}
-        # Dispatch priority key per user_key: (0, first_seen_seq) for a
-        # user who has NEVER been granted a slot, (1, last_served_seq)
-        # once they have. The leading 0/1 guarantees a never-served user
-        # always outranks one who's already been served at least once,
-        # regardless of how the raw sequence numbers compare — a user who
-        # burned through several free/uncontested slots must never keep
-        # precedence over one who hasn't been served at all. Within each
-        # tier, the lower sequence number (arrived earlier / served
-        # longer ago) wins.
+        # Whether the longest-waiting future per user_key is batch-origin —
+        # needed at dispatch time to update ``_in_flight_batch`` and to feed
+        # the priority key below.
+        self._is_batch: dict[asyncio.Future, bool] = {}
+        # Dispatch priority key per user_key: (batch_tier, served_tier, seq).
+        # batch_tier is 0 for interactive, 1 for batch-origin — batch NEVER
+        # wins the next free slot while an interactive caller is waiting,
+        # regardless of serve history (2026-10-30 batch-vs-interactive
+        # priority design). Within a tier: (0, first_seen_seq) for a user
+        # who has NEVER been granted a slot, (1, last_served_seq) once they
+        # have — a never-served user always outranks one already served at
+        # least once, so nobody keeps precedence after burning through a
+        # free/uncontested run. Within that, the lower sequence number
+        # (arrived earlier / served longer ago) wins.
         self._first_seen: dict[str, int] = {}
         self._last_served: dict[str, int] = {}
         self._seq = 0
         self._lock = asyncio.Lock()
 
-    def _priority_key(self, user_key: str) -> tuple[int, int]:
+    def _priority_key(self, user_key: str, *, is_batch: bool) -> tuple[int, int, int]:
+        batch_tier = 1 if is_batch else 0
         if user_key in self._last_served:
-            return (1, self._last_served[user_key])
-        return (0, self._first_seen.get(user_key, 0))
+            return (batch_tier, 1, self._last_served[user_key])
+        return (batch_tier, 0, self._first_seen.get(user_key, 0))
 
-    async def acquire(self, user_key: str) -> None:
+    def peek_priority(self, user_key: str, *, is_batch: bool = False) -> tuple[int, int, int]:
+        """Read-only priority key for ``user_key`` as of right now — same
+        ordering ``_dispatch_locked`` would use, without registering
+        anything. For display/diagnostics (e.g. the admin dashboard's
+        recent-requests queue estimate) that want to show the gate's REAL
+        least-recently-served-first order instead of guessing from request
+        timestamps alone.
+        """
+        return self._priority_key(user_key, is_batch=is_batch)
+
+    def batch_holds_all_slots(self) -> bool:
+        """True when every currently-occupied slot is batch-origin.
+
+        Used by callers upstream to decide whether an arriving interactive
+        request needs active preemption (nothing will free up naturally any
+        time soon) rather than just waiting its turn.
+        """
+        return self._in_flight >= self.slots and self._in_flight_batch >= self._in_flight
+
+    async def acquire(self, user_key: str, *, is_batch: bool = False) -> None:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         async with self._lock:
             if user_key not in self._first_seen:
                 self._first_seen[user_key] = self._seq
                 self._seq += 1
+            self._is_batch[fut] = is_batch
             queue = self._queues.setdefault(user_key, deque())
             queue.append(fut)
             self._dispatch_locked()
@@ -94,8 +125,11 @@ class FairSlotGate:
             async with self._lock:
                 if fut.done() and not fut.cancelled():
                     self._in_flight -= 1
+                    if self._is_batch.pop(fut, False):
+                        self._in_flight_batch -= 1
                     self._dispatch_locked()
                 else:
+                    self._is_batch.pop(fut, None)
                     queue = self._queues.get(user_key)
                     if queue is not None:
                         try:
@@ -112,7 +146,10 @@ class FairSlotGate:
             candidates = [uk for uk, q in self._queues.items() if q]
             if not candidates:
                 break
-            user_key = min(candidates, key=self._priority_key)
+            user_key = min(
+                candidates,
+                key=lambda uk: self._priority_key(uk, is_batch=self._is_batch.get(self._queues[uk][0], False)),
+            )
             queue = self._queues[user_key]
             fut = queue.popleft()
             if not queue:
@@ -120,6 +157,12 @@ class FairSlotGate:
             self._last_served[user_key] = self._seq
             self._seq += 1
             self._in_flight += 1
+            # Consumed once the dispatch decision is made — leaving it in
+            # the dict after this would leak one entry per ever-dispatched
+            # future for the gate's lifetime.
+            dispatched_is_batch = self._is_batch.pop(fut, False)
+            if dispatched_is_batch:
+                self._in_flight_batch += 1
             if not fut.done():
                 fut.set_result(None)
             else:
@@ -127,19 +170,23 @@ class FairSlotGate:
                 # we just handed out was never actually claimed; give it
                 # back and keep dispatching.
                 self._in_flight -= 1
+                if dispatched_is_batch:
+                    self._in_flight_batch -= 1
 
-    async def release(self) -> None:
+    async def release(self, *, is_batch: bool = False) -> None:
         async with self._lock:
             self._in_flight = max(0, self._in_flight - 1)
+            if is_batch:
+                self._in_flight_batch = max(0, self._in_flight_batch - 1)
             self._dispatch_locked()
 
     @asynccontextmanager
-    async def slot(self, user_key: str) -> AsyncIterator[None]:
-        await self.acquire(user_key)
+    async def slot(self, user_key: str, *, is_batch: bool = False) -> AsyncIterator[None]:
+        await self.acquire(user_key, is_batch=is_batch)
         try:
             yield
         finally:
-            await self.release()
+            await self.release(is_batch=is_batch)
 
 
 class WorkerPoolFairGates:
@@ -164,3 +211,8 @@ class WorkerPoolFairGates:
             gate = FairSlotGate(slots)
             self._gates[worker_key] = gate
         return gate
+
+    def peek(self, worker_key: str) -> FairSlotGate | None:
+        """Non-creating lookup — for read-only diagnostics that must never
+        instantiate a gate for a worker that isn't actually using fairness."""
+        return self._gates.get(worker_key)

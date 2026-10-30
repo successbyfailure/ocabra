@@ -21,6 +21,7 @@ import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
 import { LiteLLMSettings } from "@/components/settings/LiteLLMSettings"
+import { PrioritySettings } from "@/components/settings/PrioritySettings"
 import { RoutingSettings } from "@/components/settings/RoutingSettings"
 import { StorageSettings } from "@/components/settings/StorageSettings"
 import type { GPUState, LocalModel, ServerConfig } from "@/types"
@@ -77,6 +78,14 @@ const EMPTY_CONFIG: ServerConfig = {
   realtimeDefaultTtsModel: "",
   federationEnabled: false,
   federationNodeName: "",
+  batchPriorityEnabled: true,
+  batchPreemptMode: "conditional",
+  batchPreemptMinElapsedS: 300,
+  batchPreemptGraceS: 10,
+  batchFreeSlotsPct: 1,
+  batchResumeCooldownSlotsS: 120,
+  batchResumeCooldownEvictionS: 300,
+  batchInterJobCooldownS: 0,
   hunyuanIdleUnloadSeconds: 300,
   hunyuanGenerationGracePeriodS: 120,
   hunyuanPreferredGpu: 1,
@@ -250,6 +259,7 @@ export function Settings() {
           <Tabs.Content value="routing">
             <div className="grid gap-4">
               <RoutingSettings config={config} onSave={savePatch} />
+              <PrioritySettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
 

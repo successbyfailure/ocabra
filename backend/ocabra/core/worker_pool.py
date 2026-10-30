@@ -427,6 +427,16 @@ class WorkerPool:
         # forward_stream; callers that don't (embeddings, images, internal
         # proxying, ...) dispatch exactly as before.
         self._fair_gates = WorkerPoolFairGates()
+        # Batch-vs-interactive priority (2026-10-30) — optional, set by
+        # main.py at startup. None means the feature is simply inert: the
+        # fair gate still deprioritizes is_batch=True on new admissions, but
+        # nothing ever preempts an already-running batch request.
+        self._batch_priority: Any | None = None
+        self._duration_estimator: Any | None = None
+
+    def set_batch_priority(self, coordinator: Any, duration_estimator: Any | None = None) -> None:
+        self._batch_priority = coordinator
+        self._duration_estimator = duration_estimator
 
     def _check_circuit_breaker(self, model_id: str) -> None:
         failures = self._consecutive_failures.get(model_id, 0)
@@ -437,6 +447,38 @@ class WorkerPool:
             raise WorkerDegradedError(model_id, failures)
         # Cooldown elapsed: let one probe request through (half-open) instead
         # of tripping forever on a worker that may have already recovered.
+
+    def peek_queue_state(self, model_id: str) -> dict[str, Any] | None:
+        """Read-only snapshot of a worker's fair-share gate — ``None`` when
+        no gate exists yet (nothing has used fairness on this worker).
+
+        Used to tell a streaming client it's about to wait for a slot
+        before blocking on it, same spirit as the existing model-load
+        ``X-Ocabra-Expected-Wait-Seconds``/``model_loading`` SSE signal —
+        that one only covers a cold model load; this covers the fair-share
+        admission queue on an already-loaded model, which previously had
+        zero client-visible signal (confirmed 2026-10-30: the connection
+        just blocks silently, even when the wait is ~20s+).
+        """
+        gate = self._fair_gates.peek(model_id)
+        if gate is None:
+            return None
+        return {
+            "in_flight": gate._in_flight,
+            "slots": gate.slots,
+            "saturated": gate._in_flight >= gate.slots,
+        }
+
+    def peek_gate_priority(
+        self, model_id: str, user_key: str, *, is_batch: bool = False
+    ) -> tuple[int, int, int] | None:
+        """Read-only priority peek for diagnostics — returns ``None`` when
+        no gate exists for ``model_id`` yet (nothing has used fairness on
+        it), rather than creating one just to answer a stats query."""
+        gate = self._fair_gates.peek(model_id)
+        if gate is None:
+            return None
+        return gate.peek_priority(user_key, is_batch=is_batch)
 
     def _record_forward_failure(self, model_id: str) -> None:
         self._consecutive_failures[model_id] = self._consecutive_failures.get(model_id, 0) + 1
@@ -523,6 +565,34 @@ class WorkerPool:
     def release_port(self, port: int) -> None:
         self._used_ports.discard(port)
 
+    async def _preempt_batch_if_saturated(self, model_id: str, gate, is_batch: bool) -> None:
+        """An interactive caller is about to wait on a gate every slot of
+        which is held by batch-origin work — nothing will free up on its
+        own soon. Ask the coordinator to cancel enough of it per policy
+        before we start waiting, instead of just queueing behind it (see
+        ``batch_priority.py`` for the measured motivation: with all slots
+        saturated, a new request waits almost the full remaining duration
+        of whatever finishes first).
+        """
+        if is_batch or self._batch_priority is None:
+            return
+        saturated = gate.batch_holds_all_slots()
+        logger.info(
+            "batch_priority_check",
+            model_id=model_id,
+            in_flight=gate._in_flight,
+            in_flight_batch=gate._in_flight_batch,
+            slots=gate.slots,
+            saturated=saturated,
+        )
+        if not saturated:
+            return
+        try:
+            n = await self._batch_priority.preempt_now(model_id, estimator=self._duration_estimator)
+            logger.info("batch_priority_preempt_result", model_id=model_id, cancelled=n)
+        except Exception:  # noqa: BLE001 — never let priority logic break a real request
+            logger.exception("batch_priority_preempt_failed", model_id=model_id)
+
     async def forward_request(
         self,
         model_id: str,
@@ -531,10 +601,12 @@ class WorkerPool:
         *,
         user_key: str | None = None,
         slots: int = 1,
+        is_batch: bool = False,
     ) -> Any:
         if user_key is not None:
             gate = self._fair_gates.get(model_id, slots)
-            async with gate.slot(user_key):
+            await self._preempt_batch_if_saturated(model_id, gate, is_batch)
+            async with gate.slot(user_key, is_batch=is_batch):
                 return await self._forward_request_unfair(model_id, path, body)
         return await self._forward_request_unfair(model_id, path, body)
 
@@ -615,13 +687,15 @@ class WorkerPool:
         *,
         user_key: str | None = None,
         slots: int = 1,
+        is_batch: bool = False,
     ) -> AsyncIterator[bytes]:
         if user_key is None:
             async for chunk in self._forward_stream_unfair(model_id, path, body):
                 yield chunk
             return
         gate = self._fair_gates.get(model_id, slots)
-        async with gate.slot(user_key):
+        await self._preempt_batch_if_saturated(model_id, gate, is_batch)
+        async with gate.slot(user_key, is_batch=is_batch):
             async for chunk in self._forward_stream_unfair(model_id, path, body):
                 yield chunk
 

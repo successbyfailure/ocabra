@@ -72,7 +72,7 @@ pagó una carga en frío).
 | `X-Ocabra-Router` | routers | `profile_id` del router al que el cliente apuntó |
 | `X-Ocabra-Router-Target` | routers | `profile_id` del target que finalmente sirvió la petición |
 
-Ademas, en respuestas SSE (`stream=true`) el servidor intercala dos comentarios
+Ademas, en respuestas SSE (`stream=true`) el servidor intercala comentarios
 oCabra-aware con el mismo shape:
 
 ```
@@ -81,12 +81,23 @@ oCabra-aware con el mismo shape:
 
 : {"event": "ocabra.model_ready", "model_id": "...", "worker_key": "...",
    "load_duration_ms": 11820, "was_cold_start": true}
+
+: {"event": "ocabra.slot_queued", "model_id": "...", "in_flight": 3, "slots": 3}
 ```
 
 Las líneas empiezan con `:` (comentario SSE) para no romper parsers estrictos
 tipo OpenAI SDK; los oCabra-aware pueden extraer el JSON tras el `:`. Si el
 load falla después de haber flusheado headers, el error viaja como
 `data: {"error": ...}` en el mismo stream (no como HTTP status).
+
+`ocabra.slot_queued` (2026-10-30) es distinto de `model_loading`: cubre la
+cola de admisión de un modelo que **ya está cargado** pero tiene todos sus
+slots de concurrencia ocupados (ver `FairSlotGate`), algo que antes no tenía
+ninguna señal — el cliente simplemente veía la conexión bloqueada. Solo se
+emite cuando la petición realmente va a esperar (`in_flight >= slots` en el
+momento de encolar); no da la posición exacta en cola (el gate alterna por
+usuario con menos servicio primero, no es FIFO estricto) pero sí avisa de
+que la espera es real y aproximadamente cuántos slots/peticiones hay delante.
 
 **POST /v1/chat/completions**
 ```json
@@ -359,6 +370,54 @@ Capabilities relevantes en `/v1/models/{id}`:
 - `image_generation` — soporta text-to-image (`/v1/images/generations`).
 - `image_editing` — soporta img2img o edición prompt-based (`/v1/images/edits`).
   Un modelo puede tener uno, otro, ambos o ninguno según el pipeline del backend.
+
+---
+
+## Batches API (`/v1/batches`)
+
+API compatible con el formato OpenAI Batches. **Es el método recomendado
+para cualquier carga que no sea una sesión interactiva con alguien
+esperando la respuesta** — automatizaciones, transcripciones largas,
+backfills, generación masiva de datos, agentes que lanzan ráfagas de
+peticiones sin un humano mirando la pantalla. Las peticiones síncronas
+(`/v1/chat/completions`, etc.) compiten por los mismos slots de GPU que el
+resto de usuarios; una automatización que manda miles de peticiones por
+esa vía puede saturar un modelo y degradar la latencia de quien sí está
+esperando en tiempo real. Los lotes se procesan en segundo plano sin esa
+presión — úsalos para todo lo que pueda esperar.
+
+| Method | Endpoint | Descripcion |
+|--------|----------|-------------|
+| POST | `/v1/batches` | Crear un lote a partir de un fichero JSONL (`input_file_id`, subido antes via `/v1/files`) |
+| GET | `/v1/batches/{id}` | Consultar estado de un lote |
+| GET | `/v1/batches` | Listar lotes del usuario (paginado, `after`/`limit`) |
+| POST | `/v1/batches/{id}/cancel` | Cancelar un lote |
+
+Endpoints soportados dentro de un lote: `/v1/chat/completions`,
+`/v1/embeddings`, `/v1/completions`. `completion_window` solo admite
+`"24h"` por ahora.
+
+Cada línea del JSONL de entrada:
+```json
+{"custom_id": "req-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "qwen3.8:27b", "messages": [...]}}
+```
+
+El fichero de salida (`output_file_id`) trae, por línea:
+```json
+{"id": "batch_req_...", "custom_id": "req-1", "response": {"status_code": 200, "body": {...}}, "error": null}
+```
+
+Ciclo de estados: `validating` → `in_progress` → `finalizing` →
+`completed` (o `failed`/`cancelled`/`expired`). `request_counts` en la
+respuesta trae `total`/`completed`/`failed` y se actualiza mientras el
+lote progresa — útil para hacer polling de avance sin reprocesar nada.
+
+> Nota de diseño (2026-10-30): el procesamiento de lotes todavía no prioriza
+> entre lotes y sesiones interactivas que compiten por el mismo modelo —
+> está en desarrollo un mecanismo para que el tráfico interactivo tenga
+> siempre preferencia sobre un lote en curso. Mientras tanto, un lote
+> grande puede tardar más de lo esperado si hay tráfico interactivo pesado
+> en el mismo modelo.
 
 ---
 

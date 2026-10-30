@@ -24,6 +24,18 @@ def _normalize_window(
         to_dt = datetime.now(timezone.utc)
     if from_dt is None:
         from_dt = to_dt - timedelta(hours=24)
+    # Callers (including plain `curl` against the public API, not just the
+    # frontend) may pass a bare ISO datetime with no offset, e.g.
+    # ``datetime.utcnow().isoformat()``. FastAPI parses that into a naive
+    # datetime, which then can't be compared against the tz-aware
+    # ``recorded_at``/``started_at`` columns (TypeError: can't compare
+    # offset-naive and offset-aware datetimes) — found live 2026-10-30 via
+    # /ocabra/stats/energy. Treat a naive input as UTC rather than rejecting
+    # it or crashing downstream.
+    if from_dt.tzinfo is None:
+        from_dt = from_dt.replace(tzinfo=timezone.utc)
+    if to_dt.tzinfo is None:
+        to_dt = to_dt.replace(tzinfo=timezone.utc)
     return from_dt, to_dt
 
 

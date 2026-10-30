@@ -928,6 +928,24 @@ function toServerConfig(raw: unknown): ServerConfig {
     realtimeDefaultTtsModel: String(data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? ""),
     federationEnabled: Boolean(data.federationEnabled ?? data.federation_enabled ?? false),
     federationNodeName: String(data.federationNodeName ?? data.federation_node_name ?? ""),
+    batchPriorityEnabled: Boolean(data.batchPriorityEnabled ?? data.batch_priority_enabled ?? true),
+    batchPreemptMode: (String(
+      data.batchPreemptMode ?? data.batch_preempt_mode ?? "conditional",
+    ) as ServerConfig["batchPreemptMode"]),
+    batchPreemptMinElapsedS: Number(
+      data.batchPreemptMinElapsedS ?? data.batch_preempt_min_elapsed_s ?? 300,
+    ),
+    batchPreemptGraceS: Number(data.batchPreemptGraceS ?? data.batch_preempt_grace_s ?? 10),
+    batchFreeSlotsPct: Number(data.batchFreeSlotsPct ?? data.batch_free_slots_pct ?? 1),
+    batchResumeCooldownSlotsS: Number(
+      data.batchResumeCooldownSlotsS ?? data.batch_resume_cooldown_slots_s ?? 120,
+    ),
+    batchResumeCooldownEvictionS: Number(
+      data.batchResumeCooldownEvictionS ?? data.batch_resume_cooldown_eviction_s ?? 300,
+    ),
+    batchInterJobCooldownS: Number(
+      data.batchInterJobCooldownS ?? data.batch_inter_job_cooldown_s ?? 0,
+    ),
     hunyuanIdleUnloadSeconds: Number(data.hunyuanIdleUnloadSeconds ?? data.hunyuan_idle_unload_seconds ?? 300),
     hunyuanGenerationGracePeriodS: Number(data.hunyuanGenerationGracePeriodS ?? data.hunyuan_generation_grace_period_s ?? 120),
     hunyuanPreferredGpu: Number(data.hunyuanPreferredGpu ?? data.hunyuan_preferred_gpu ?? 1),

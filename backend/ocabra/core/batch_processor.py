@@ -3,7 +3,10 @@
 Polls the ``openai_batches`` table and processes ``validating`` and
 ``in_progress`` batches. Each request inside a batch is dispatched as an
 in-process call (via ASGI transport) to the same FastAPI app, impersonating
-the batch owner via ``X-Gateway-Token`` + ``X-Internal-User-Id`` headers.
+the batch owner via ``X-Gateway-Token`` + ``X-Internal-User-Id`` headers,
+tagged ``X-Internal-Request-Origin: batch`` so the fair-share gate and the
+batch-vs-interactive priority coordinator (``batch_priority.py``) can tell
+this traffic apart from a real client hitting the same endpoint.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -32,8 +36,9 @@ logger = structlog.get_logger(__name__)
 class BatchProcessor:
     """Drains ``validating`` and ``in_progress`` batches in the background."""
 
-    def __init__(self, app: FastAPI):
+    def __init__(self, app: FastAPI, coordinator: Any | None = None):
         self._app = app
+        self._coordinator = coordinator
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -90,20 +95,37 @@ class BatchProcessor:
                 ).order_by(OpenAIBatch.created_at)
             )).scalars().all()
 
-        for batch in pending:
+        cooldown_s = max(0.0, float(settings.batch_inter_job_cooldown_s))
+        for i, batch in enumerate(pending):
             if self._stop.is_set():
                 return
+            ran_a_job = False
             try:
                 if batch.status == "validating":
                     await self._mark_in_progress(batch.id)
                     await self._process_batch(batch.id)
+                    ran_a_job = True
                 elif batch.status == "in_progress":
                     await self._process_batch(batch.id)
+                    ran_a_job = True
                 elif batch.status == "cancelling":
                     await self._finalize_cancellation(batch.id)
             except Exception as exc:
                 logger.exception("batch_processing_error", batch_id=str(batch.id), error=str(exc))
                 await self._mark_failed(batch.id, str(exc))
+
+            # Let the server breathe between back-to-back long-running batch
+            # jobs — unrelated to interactive priority, just avoids pegging
+            # the GPUs continuously across consecutive big batches. Only
+            # worth sleeping if there's another job queued right behind this
+            # one in the same tick; otherwise the next poll interval already
+            # provides the gap.
+            if ran_a_job and cooldown_s > 0 and i + 1 < len(pending) and not self._stop.is_set():
+                logger.info("batch_inter_job_cooldown", seconds=cooldown_s)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=cooldown_s)
+                except TimeoutError:
+                    pass
 
     async def _mark_in_progress(self, batch_id: uuid.UUID) -> None:
         async with AsyncSessionLocal() as session:
@@ -157,11 +179,42 @@ class BatchProcessor:
                     api_key_name = row[0]
             endpoint = batch.endpoint
 
+            # 2026-10-30 — crash-survival watermark. Persist the output file's
+            # identity on the batch row BEFORE any dispatch happens, instead
+            # of only at completion. A process restart mid-batch (container
+            # redeploy, OOM, etc.) then resumes against the SAME output file
+            # path and skips whatever's already in it, rather than starting
+            # a brand-new output file and silently orphaning the previous
+            # partial one while redispatching everything from line 0 (the
+            # original, documented limitation of this processor).
+            is_resume = batch.output_file_id is not None
+            if is_resume:
+                output_uuid = batch.output_file_id
+            else:
+                output_uuid = uuid.uuid4()
+                session.add(OpenAIFile(
+                    id=output_uuid,
+                    user_id=batch.user_id,
+                    filename=f"batch_{batch.id}_output.jsonl",
+                    bytes=0,
+                    purpose="batch_output",
+                    storage_path=str(Path(settings.openai_files_dir) / f"{output_uuid}"),
+                    status="processing",
+                ))
+                # Flush the INSERT before the UPDATE that references it —
+                # SQLAlchemy doesn't know these two are related (plain scalar
+                # FK column, no relationship()), so without this the unit of
+                # work can flush the batch UPDATE first and the FK rejects
+                # it (reproduced live 2026-10-30). Same guard the original
+                # finalize-time code already had; just needed here too now
+                # that this runs before dispatch, not only after.
+                await session.flush()
+                batch.output_file_id = output_uuid
+                await session.commit()
+
         if not input_path.exists():
             raise RuntimeError("Input file content missing on disk")
 
-        # Prepare output file on disk
-        output_uuid = uuid.uuid4()
         storage_dir = Path(settings.openai_files_dir)
         storage_dir.mkdir(parents=True, exist_ok=True)
         output_path = storage_dir / f"{output_uuid}"
@@ -174,29 +227,93 @@ class BatchProcessor:
         with input_path.open("r", encoding="utf-8") as f:
             lines = [line.rstrip("\n") for line in f if line.strip()]
 
-        # Skip already-processed lines on resume by counting (best-effort: we
-        # don't persist per-line progress, so on resume we re-run unfinished
-        # work; simplification accepted given the workload size).
+        def _custom_id_for(idx: int, line: str) -> str:
+            try:
+                obj = json.loads(line)
+            except Exception:  # noqa: BLE001
+                return f"req_{idx}"
+            return (isinstance(obj, dict) and obj.get("custom_id")) or f"req_{idx}"
+
         results_lock = asyncio.Lock()
         completed = 0
         failed = 0
+        done_custom_ids: set[str] = set()
+        if is_resume and output_path.exists():
+            with output_path.open("r", encoding="utf-8") as f:
+                for out_line in f:
+                    out_line = out_line.strip()
+                    if not out_line:
+                        continue
+                    try:
+                        rec = json.loads(out_line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    cid = rec.get("custom_id")
+                    if cid:
+                        done_custom_ids.add(cid)
+                    if rec.get("error") is not None:
+                        failed += 1
+                    else:
+                        completed += 1
+            logger.info(
+                "batch_resumed_from_watermark",
+                batch_id=str(batch_id),
+                already_done=len(done_custom_ids),
+                total_lines=len(lines),
+            )
 
-        # Open output for append (so resume semantics still produce one file)
-        out_handle = output_path.open("w", encoding="utf-8")
+        # Open for append — on a fresh batch the file doesn't exist yet (this
+        # creates it); on resume it continues the same file instead of
+        # truncating what crash-survival just recovered.
+        out_handle = output_path.open("a", encoding="utf-8")
 
         cancelled = False
+        coordinator = self._coordinator
+        profile_registry = getattr(self._app.state, "profile_registry", None)
+        # Memoized profile_id -> base_model_id resolution for the priority
+        # coordinator's registry key only (NOT used for the real dispatch,
+        # which still sends the user's original ``model`` field untouched).
+        # Covers the common case — a plain profile_id, same resolution
+        # chat.py/completions.py do via ``profile_registry.get()``. Does NOT
+        # resolve router profiles to their actual per-request target (that
+        # only exists at RouterResolver.pick() time, inside the dispatch
+        # itself) — a batch line aimed at a router profile_id still won't
+        # match the coordinator's registry; known limitation, not solved
+        # here to avoid duplicating router resolution logic.
+        _model_key_cache: dict[str, str] = {}
 
-        async def _process_line(idx: int, line: str) -> None:
+        async def _coordinator_key(raw_model: str) -> str:
+            if raw_model in _model_key_cache:
+                return _model_key_cache[raw_model]
+            resolved = raw_model
+            if profile_registry is not None:
+                try:
+                    profile = await profile_registry.get(raw_model)
+                    if profile is not None:
+                        resolved = profile.base_model_id
+                except Exception:  # noqa: BLE001 — coordinator key only, never block dispatch
+                    resolved = raw_model
+            _model_key_cache[raw_model] = resolved
+            return resolved
+
+        async def _process_line(idx: int, line: str) -> bool:
+            """Returns True once the line is fully resolved (success or a
+            permanent error written to the output file). Returns False when
+            it needs another attempt — skipped because its target model is
+            in a post-preemption cooldown, or killed mid-flight by
+            interactive priority (see ``batch_priority.py``) — the caller
+            requeues it instead of treating it as a failure.
+            """
             nonlocal completed, failed, cancelled
             if cancelled:
-                return
+                return True
             async with sem:
                 if cancelled:
-                    return
+                    return True
                 # Check cancellation before each line
                 if await self._is_cancelling(batch_id):
                     cancelled = True
-                    return
+                    return True
                 try:
                     obj = json.loads(line)
                 except Exception as exc:
@@ -209,17 +326,54 @@ class BatchProcessor:
                     async with results_lock:
                         out_handle.write(json.dumps(record) + "\n")
                         failed += 1
-                    return
+                    return True
 
                 custom_id = obj.get("custom_id") or f"req_{idx}"
                 body = obj.get("body") or {}
+                # Key for the priority coordinator — resolved from whatever
+                # the user wrote in ``model`` (bare model_id or profile_id)
+                # to the same base_model_id chat.py/completions.py land on.
+                # BatchPriorityCoordinator additionally strips any
+                # ``::<hash>`` runtime-preset suffix on both sides (the real
+                # worker_key is e.g. ``llama_cpp/qwen3.8-27b::781a0367a8ba``)
+                # so this doesn't need to predict the active preset. Doesn't
+                # cover router profiles (their real per-request target only
+                # exists inside RouterResolver.pick() at dispatch time) —
+                # known, documented limitation.
+                target_model = await _coordinator_key(str(body.get("model") or ""))
 
-                response_payload, status_code, error_payload = await self._dispatch(
-                    endpoint=endpoint,
-                    body=body,
-                    user_id=user_id,
-                    api_key_name=api_key_name,
-                )
+                if coordinator is not None and target_model and coordinator.in_cooldown(target_model):
+                    return False
+
+                handle = None
+                if coordinator is not None and target_model:
+                    handle = await coordinator.register(
+                        target_model, asyncio.current_task(), batch_id=str(batch_id), line_idx=idx
+                    )
+                    logger.info(
+                        "batch_priority_registered",
+                        target_model=target_model,
+                        batch_id=str(batch_id),
+                        line_idx=idx,
+                        handle=handle,
+                    )
+                try:
+                    response_payload, status_code, error_payload = await self._dispatch(
+                        endpoint=endpoint,
+                        body=body,
+                        user_id=user_id,
+                        api_key_name=api_key_name,
+                    )
+                except asyncio.CancelledError:
+                    # Preempted to free a slot/model for a waiting
+                    # interactive caller — not a real failure. Swallow it
+                    # here (the task itself tolerates being cancelled; see
+                    # BatchPriorityCoordinator.preempt_now) and let the
+                    # caller retry the line once the cooldown lifts.
+                    return False
+                finally:
+                    if handle is not None:
+                        await coordinator.unregister(target_model, handle)
 
                 record: dict[str, Any] = {
                     "id": f"batch_req_{uuid.uuid4()}",
@@ -241,6 +395,7 @@ class BatchProcessor:
                     async with results_lock:
                         out_handle.write(json.dumps(record) + "\n")
                         completed += 1
+                return True
 
         # Periodic checkpoint so the user can see progress
         async def _checkpoint() -> None:
@@ -258,10 +413,52 @@ class BatchProcessor:
 
         checkpoint_task = asyncio.create_task(_checkpoint(), name=f"batch-{batch_id}-checkpoint")
 
+        # Lines skipped (cooldown) or killed (preemption) come back here for
+        # another attempt rather than being written as permanent failures.
+        # Bounded by wall clock, not a pass count: a fixed pass cap sized for
+        # the slot cooldown (120s default) can run out almost exactly as a
+        # longer eviction cooldown (300s default) is still active — caught
+        # live 2026-10-30 (a real eviction fired mid-test and very nearly hit
+        # this). Give comfortable headroom above whichever cooldown is
+        # configured longest, since both are user-configurable settings.
+        _REQUEUE_BACKOFF_S = 5.0
+        requeue_deadline = time.monotonic() + max(
+            settings.batch_resume_cooldown_slots_s,
+            settings.batch_resume_cooldown_eviction_s,
+        ) + 60.0
+
         try:
-            await asyncio.gather(*(
-                _process_line(idx, line) for idx, line in enumerate(lines)
-            ))
+            pending_indices = [
+                idx for idx, line in enumerate(lines)
+                if _custom_id_for(idx, line) not in done_custom_ids
+            ]
+            while pending_indices and not cancelled and time.monotonic() < requeue_deadline:
+                results = await asyncio.gather(*(
+                    _process_line(idx, lines[idx]) for idx in pending_indices
+                ))
+                pending_indices = [
+                    idx for idx, done in zip(pending_indices, results) if not done
+                ]
+                if pending_indices and not cancelled:
+                    await asyncio.sleep(_REQUEUE_BACKOFF_S)
+
+            if pending_indices and not cancelled:
+                logger.warning(
+                    "batch_requeue_exhausted",
+                    batch_id=str(batch_id),
+                    remaining=len(pending_indices),
+                )
+                for idx in pending_indices:
+                    record = self._error_record(
+                        custom_id=None,
+                        status_code=503,
+                        error_type="batch_priority_preempted",
+                        message="Repeatedly preempted to free capacity for interactive "
+                        "traffic and gave up retrying within this batch run.",
+                    )
+                    async with results_lock:
+                        out_handle.write(json.dumps(record) + "\n")
+                        failed += 1
         finally:
             checkpoint_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -277,8 +474,14 @@ class BatchProcessor:
             if cancelled or batch.status == "cancelling":
                 batch.status = "cancelled"
                 batch.cancelled_at = datetime.now(UTC)
-                # Clean up partial output
+                # Clean up the partial output — both the file on disk and
+                # the placeholder OpenAIFile row created early for the
+                # crash-survival watermark (ON DELETE SET NULL on the FK).
                 output_path.unlink(missing_ok=True)
+                output_record = await session.get(OpenAIFile, output_uuid)
+                if output_record is not None:
+                    await session.delete(output_record)
+                batch.output_file_id = None
                 batch.request_completed = completed
                 batch.request_failed = failed
                 await session.commit()
@@ -288,19 +491,14 @@ class BatchProcessor:
             batch.request_completed = completed
             batch.request_failed = failed
 
+            # The OpenAIFile row for this output already exists (created
+            # before dispatch for the crash-survival watermark) — update it
+            # in place rather than inserting a second row under the same id.
             output_size = output_path.stat().st_size if output_path.exists() else 0
-            output_record = OpenAIFile(
-                id=output_uuid,
-                user_id=batch.user_id,
-                filename=f"batch_{batch.id}_output.jsonl",
-                bytes=output_size,
-                purpose="batch_output",
-                storage_path=str(output_path),
-                status="processed",
-            )
-            session.add(output_record)
-            await session.flush()  # ensure openai_files row exists before FK reference
-            batch.output_file_id = output_uuid
+            output_record = await session.get(OpenAIFile, output_uuid)
+            if output_record is not None:
+                output_record.bytes = output_size
+                output_record.status = "processed"
             batch.status = "completed"
             batch.completed_at = datetime.now(UTC)
             await session.commit()
@@ -332,6 +530,7 @@ class BatchProcessor:
         headers = {
             "X-Gateway-Token": self._token,
             "X-Internal-User-Id": user_id,
+            "X-Internal-Request-Origin": "batch",
             "Content-Type": "application/json",
         }
         if api_key_name:

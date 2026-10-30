@@ -687,10 +687,23 @@ async def lifespan(app: FastAPI):
 
     logger.info("vllm_backend_registered")
 
+    # Batch-vs-interactive priority coordinator (2026-10-30 design) — tracks
+    # in-flight batch-origin requests per worker so an arriving interactive
+    # caller can preempt a saturated batch instead of queueing behind it.
+    # See fair_slot_gate.py (admission priority) + batch_priority.py
+    # (active preemption + cooldowns) for the two halves of the mechanism.
+    from ocabra.core.batch_priority import BatchPriorityCoordinator
+
+    batch_priority = BatchPriorityCoordinator()
+    app.state.batch_priority = batch_priority
+    worker_pool.set_batch_priority(batch_priority, duration_estimator)
+    model_manager.set_batch_priority(batch_priority)
+    logger.info("batch_priority_coordinator_ready")
+
     # OpenAI Batches API processor
     from ocabra.core.batch_processor import BatchProcessor
 
-    batch_processor = BatchProcessor(app)
+    batch_processor = BatchProcessor(app, coordinator=batch_priority)
     await batch_processor.start()
     app.state.batch_processor = batch_processor
     logger.info("batch_processor_ready")
