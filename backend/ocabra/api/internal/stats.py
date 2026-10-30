@@ -425,6 +425,55 @@ async def stats_by_model(
 
 
 @router.get(
+    "/stats/batch-vs-interactive",
+    summary="Batches API vs. direct request volume",
+    description="Request totals, errors, tokens and cost split between Batches "
+    "API traffic and direct (interactive) calls, plus a daily series — "
+    "validates whether the batch-vs-interactive priority mechanism and the "
+    "'move non-interactive workloads to batches' recommendation are actually "
+    "being adopted.",
+)
+async def stats_batch_vs_interactive(
+    from_dt: datetime | None = Query(None, alias="from"),
+    to_dt: datetime | None = Query(None, alias="to"),
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return batch-vs-interactive request stats.
+
+    Returns:
+        { batch: {...summary...}, interactive: {...summary...},
+          dailySeries: [{ date, batch, interactive }] }
+    """
+    from ocabra.stats.aggregator import get_batch_vs_interactive_stats
+    return await get_batch_vs_interactive_stats(from_dt, to_dt)
+
+
+@router.get(
+    "/stats/batch-priority-status",
+    summary="Batch preemption/cooldown live status",
+    description="Snapshot of the batch-vs-interactive priority coordinator: "
+    "total preemptions so far, workers currently in a resume cooldown, and "
+    "the most recent preemption events — lets the UI show whether the "
+    "mechanism is actually doing anything, not just that it's configured.",
+)
+async def stats_batch_priority_status(
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return the current BatchPriorityCoordinator snapshot.
+
+    Returns:
+        { totalPreemptions, activeCooldowns: [{ workerKey, kind,
+          remainingSeconds }], recentEvents: [{ type, workerKey, batchId,
+          lineIdx, elapsedSeconds, mode, secondsAgo }] }
+    """
+    coordinator = getattr(request.app.state, "batch_priority", None)
+    if coordinator is None:
+        return {"totalPreemptions": 0, "activeCooldowns": [], "recentEvents": []}
+    return coordinator.status()
+
+
+@router.get(
     "/stats/my",
     summary="Own user stats",
     description="Return overview statistics filtered to the currently authenticated user's requests.",

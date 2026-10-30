@@ -32,7 +32,7 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class _BatchTask:
-    task: "asyncio.Task[object]"
+    task: asyncio.Task[object]
     batch_id: str
     line_idx: int
     started_at: float = field(default_factory=time.monotonic)
@@ -45,7 +45,43 @@ class BatchPriorityCoordinator:
         self._by_worker: dict[str, dict[int, _BatchTask]] = {}
         self._next_handle = 0
         self._cooldown_until: dict[str, float] = {}
+        self._cooldown_kind: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # Visibility (2026-10-30) — in-memory only, resets on restart like
+        # everything else here; just enough to show "is this mechanism doing
+        # anything" in the UI without building a persisted events table for
+        # numbers we're still calibrating against real traffic.
+        self._total_preemptions = 0
+        self._recent_events: list[dict[str, object]] = []
+        self._max_recent_events = 50
+
+    def _record_event(self, **fields: object) -> None:
+        self._recent_events.append({"at": time.monotonic(), **fields})
+        if len(self._recent_events) > self._max_recent_events:
+            self._recent_events = self._recent_events[-self._max_recent_events:]
+
+    def status(self) -> dict[str, object]:
+        """Snapshot for the admin UI: current cooldowns, recent preemption
+        events, running totals. All timestamps are seconds-from-now (not
+        wall clock) since the internal clock is ``time.monotonic()``."""
+        now = time.monotonic()
+        cooldowns = [
+            {
+                "workerKey": key,
+                "kind": self._cooldown_kind.get(key, "slot"),
+                "remainingSeconds": round(max(0.0, until - now), 1),
+            }
+            for key, until in self._cooldown_until.items()
+            if until > now
+        ]
+        return {
+            "totalPreemptions": self._total_preemptions,
+            "activeCooldowns": cooldowns,
+            "recentEvents": [
+                {**event, "secondsAgo": round(now - event["at"], 1)}
+                for event in reversed(self._recent_events)
+            ],
+        }
 
     @staticmethod
     def _canonical(worker_key: str) -> str:
@@ -67,7 +103,7 @@ class BatchPriorityCoordinator:
     # ── Registration (called by the batch processor around each dispatch) ──
 
     async def register(
-        self, worker_key: str, task: "asyncio.Task[object]", *, batch_id: str, line_idx: int
+        self, worker_key: str, task: asyncio.Task[object], *, batch_id: str, line_idx: int
     ) -> int:
         key = self._canonical(worker_key)
         async with self._lock:
@@ -99,6 +135,7 @@ class BatchPriorityCoordinator:
         )
         until = time.monotonic() + max(0.0, float(seconds))
         self._cooldown_until[key] = max(until, self._cooldown_until.get(key, 0.0))
+        self._cooldown_kind[key] = kind
         logger.info(
             "batch_priority_cooldown_started",
             worker_key=key,
@@ -176,6 +213,15 @@ class BatchPriorityCoordinator:
                     continue  # let it finish — cheaper than killing it this close to done
             entry.task.cancel()
             cancelled += 1
+            self._total_preemptions += 1
+            self._record_event(
+                type="preempted",
+                workerKey=worker_key,
+                batchId=entry.batch_id,
+                lineIdx=entry.line_idx,
+                elapsedSeconds=round(elapsed, 1),
+                mode=mode,
+            )
             logger.info(
                 "batch_priority_preempted",
                 worker_key=worker_key,

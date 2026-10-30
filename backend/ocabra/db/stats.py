@@ -115,6 +115,11 @@ class RequestStat(Base):
     )
     runtime_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     effective_context: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # True when this request was dispatched by BatchProcessor (identified via
+    # the X-Internal-Request-Origin: batch header, see
+    # ocabra.api.openai._deps.is_batch_origin_request) rather than a direct
+    # client call — lets stats distinguish batch vs interactive load.
+    is_batch: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
 
 class GpuStat(Base):

@@ -814,6 +814,45 @@ export interface FederationStats {
   byNode: { nodeId: string; count: number; avgDurationMs: number }[]
 }
 
+export interface BatchVsInteractiveSummary {
+  totalRequests: number
+  totalErrors: number
+  avgDurationMs: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  totalEnergyWh: number
+  estimatedCostUsd: number
+}
+
+export interface BatchVsInteractiveStats {
+  batch: BatchVsInteractiveSummary
+  interactive: BatchVsInteractiveSummary
+  dailySeries: { date: string; batch: number; interactive: number }[]
+}
+
+export interface BatchPriorityCooldown {
+  workerKey: string
+  kind: string
+  remainingSeconds: number
+}
+
+export interface BatchPriorityEvent {
+  type: string
+  workerKey: string
+  batchId: string
+  lineIdx: number
+  elapsedSeconds: number
+  mode: string
+  secondsAgo: number
+}
+
+export interface BatchPriorityStatus {
+  totalPreemptions: number
+  activeCooldowns: BatchPriorityCooldown[]
+  recentEvents: BatchPriorityEvent[]
+}
+
 export interface ServerPower {
   cpuPowerW: number | null
   cpuTempC: number | null
@@ -1176,6 +1215,58 @@ export interface FederationTestResult {
   latency_ms: number | null
   error?: string
   node_info?: Record<string, unknown>
+}
+
+export type BatchEndpoint =
+  | "/v1/chat/completions"
+  | "/v1/embeddings"
+  | "/v1/completions"
+  | "/v1/images/generations"
+  | "/v1/audio/speech"
+  | "/v1/audio/transcriptions"
+
+export type BatchStatus =
+  | "validating"
+  | "in_progress"
+  | "finalizing"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "cancelling"
+  | "cancelled"
+
+export interface OpenAIBatchJob {
+  id: string
+  object: "batch"
+  endpoint: BatchEndpoint
+  errors: unknown
+  input_file_id: string
+  completion_window: string
+  status: BatchStatus
+  output_file_id: string | null
+  error_file_id: string | null
+  created_at: number | null
+  in_progress_at: number | null
+  expires_at: number | null
+  finalizing_at: number | null
+  completed_at: number | null
+  failed_at: number | null
+  expired_at: number | null
+  cancelling_at: number | null
+  cancelled_at: number | null
+  request_counts: { total: number; completed: number; failed: number }
+  metadata: Record<string, unknown> | null
+}
+
+export interface OpenAIFileObject {
+  id: string
+  object: "file"
+  bytes: number
+  created_at: number
+  filename: string
+  purpose: string
+  status: string
+  status_details: string | null
 }
 
 // Backend modules (Bloque 15) — re-exported for convenience.

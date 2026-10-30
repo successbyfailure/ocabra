@@ -971,6 +971,8 @@ Servicios externos con UI propia (ComfyUI, A1111, Hunyuan3D, ACE-Step).
 | GET | `/ocabra/stats/by-group` | Stats por grupo |
 | GET | `/ocabra/stats/my` | Mis stats |
 | GET | `/ocabra/stats/my-group` | Stats de mi grupo |
+| GET | `/ocabra/stats/batch-vs-interactive` | Volumen, errores, tokens y coste separados entre trafico de Batches API y llamadas directas, mas una serie diaria |
+| GET | `/ocabra/stats/batch-priority-status` | Snapshot en vivo del coordinador de prioridad: preempciones totales, cooldowns activos por worker, eventos recientes |
 
 Query params comunes: `from` (ISO), `to` (ISO), `model_id`
 

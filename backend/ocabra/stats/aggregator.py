@@ -634,6 +634,67 @@ async def get_stats_by_model(
     return {"byModel": summaries}
 
 
+async def get_batch_vs_interactive_stats(
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Request volume split between Batches API traffic and direct
+    (interactive) calls — validates whether the "move non-interactive
+    workloads to batches" recommendation (2026-10-30) is actually being
+    adopted, and gives the batch-vs-interactive priority mechanism's
+    cost/throughput trade-off a number instead of a guess.
+    """
+    from_dt, to_dt = _normalize_window(from_dt, to_dt)
+
+    async with AsyncSessionLocal() as session:
+        q = sa.select(RequestStat).where(
+            RequestStat.started_at >= from_dt,
+            RequestStat.started_at <= to_dt,
+        )
+        rows = (await session.execute(q)).scalars().all()
+
+    def _summary(bucket_rows: list) -> dict:
+        n = len(bucket_rows)
+        durations = [max(0, int(r.duration_ms or 0)) for r in bucket_rows]
+        errors = sum(
+            1 for r in bucket_rows
+            if r.error or (r.status_code is not None and r.status_code >= 400)
+        )
+        total_input = sum(max(0, int(r.input_tokens or 0)) for r in bucket_rows)
+        total_output = sum(max(0, int(r.output_tokens or 0)) for r in bucket_rows)
+        return {
+            "totalRequests": n,
+            "totalErrors": errors,
+            "avgDurationMs": int(sum(durations) / n) if n else 0,
+            "totalInputTokens": total_input,
+            "totalOutputTokens": total_output,
+            "totalTokens": total_input + total_output,
+            "totalEnergyWh": round(sum(r.energy_wh or 0 for r in bucket_rows), 2),
+            "estimatedCostUsd": round(estimate_cost_for_rows(bucket_rows), 4),
+        }
+
+    batch_rows = [r for r in rows if r.is_batch]
+    interactive_rows = [r for r in rows if not r.is_batch]
+
+    # Daily series (UTC day bucket) for a stacked/line chart — raw counts
+    # are enough to show adoption trend over time, not trying to also
+    # break out tokens/cost per day here.
+    daily: dict[str, dict[str, int]] = defaultdict(lambda: {"batch": 0, "interactive": 0})
+    for row in rows:
+        day_key = row.started_at.date().isoformat()
+        daily[day_key]["batch" if row.is_batch else "interactive"] += 1
+    series = [
+        {"date": day, "batch": counts["batch"], "interactive": counts["interactive"]}
+        for day, counts in sorted(daily.items())
+    ]
+
+    return {
+        "batch": _summary(batch_rows),
+        "interactive": _summary(interactive_rows),
+        "dailySeries": series,
+    }
+
+
 async def get_recent_requests(limit: int = 20) -> dict:
     """Return the most recent N requests with user/group info."""
     from ocabra.db.auth import Group, User

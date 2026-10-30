@@ -17,6 +17,7 @@ import { ApiKeyPanel } from "@/components/stats/ApiKeyPanel"
 import { FederationPanel } from "@/components/stats/FederationPanel"
 import { AgentsPanel } from "@/components/stats/AgentsPanel"
 import { RoutingPanel } from "@/components/stats/RoutingPanel"
+import { BatchPriorityPanel } from "@/components/stats/BatchPriorityPanel"
 import type {
   ByApiKeyStats,
   ByGroupStats,
@@ -602,6 +603,11 @@ export function Stats() {
               </Tabs.Trigger>
             )}
             {isManagerOrAdmin && (
+              <Tabs.Trigger value="batches" className={tabTriggerClass("batches")}>
+                Lotes
+              </Tabs.Trigger>
+            )}
+            {isManagerOrAdmin && (
               <Tabs.Trigger value="routing" className={tabTriggerClass("routing")}>
                 Routing
               </Tabs.Trigger>
@@ -679,6 +685,12 @@ export function Stats() {
             {isManagerOrAdmin && hasFederation && (
               <Tabs.Content value="federation">
                 <FederationPanel data={federationStats} />
+              </Tabs.Content>
+            )}
+
+            {isManagerOrAdmin && (
+              <Tabs.Content value="batches">
+                <BatchPriorityPanel from={params.from} to={params.to} />
               </Tabs.Content>
             )}
 

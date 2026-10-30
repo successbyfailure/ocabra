@@ -21,6 +21,7 @@ import { Sessions } from "@/pages/Sessions"
 import { Routers } from "@/pages/Routers"
 import { Profiles } from "@/pages/Profiles"
 import { Services } from "@/pages/Services"
+import { Batches } from "@/pages/Batches"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -50,6 +51,14 @@ export default function App() {
                 <Route path="/logs" element={<Logs />} />
 
                 {/* model_manager+ only */}
+                <Route
+                  path="/batches"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <Batches />
+                    </ProtectedRoute>
+                  }
+                />
                 <Route
                   path="/explore"
                   element={

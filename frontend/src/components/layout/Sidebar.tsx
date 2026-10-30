@@ -21,6 +21,7 @@ import {
   GitBranch,
   Layers3,
   Wand2,
+  ListChecks,
 } from "lucide-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { clsx } from "clsx"
@@ -58,6 +59,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/engines",   label: "Engines",    icon: Cpu,            minRole: "model_manager" },
   { to: "/explore",   label: "Explore",    icon: Search,         minRole: "model_manager" },
   { to: "/playground",label: "Playground", icon: MessageSquare },
+  { to: "/batches",   label: "Lotes",      icon: ListChecks,     minRole: "model_manager" },
   { to: "/stats",     label: "Stats",      icon: BarChart2 },
   { to: "/logs",      label: "Logs",       icon: ScrollText },
   { to: "/api-keys",  label: "API Keys",   icon: Key },
