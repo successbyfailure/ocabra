@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 import httpx
@@ -215,17 +216,34 @@ async def completions(
     is_batch = is_batch_origin_request(request)
 
     if stream:
+        backend_body = to_backend_body(state, merged_body)
+        stream_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        queue_state = worker_pool.peek_queue_state(worker_key) if user_key is not None else None
+        if queue_state is not None and queue_state["saturated"]:
+            return StreamingResponse(
+                _stream_completions_queued(
+                    worker_pool, worker_key, backend_body, user_key, slots, is_batch
+                ),
+                media_type="text/event-stream",
+                headers=stream_headers,
+            )
+        gen = worker_pool.forward_stream(
+            worker_key, "/v1/completions", backend_body,
+            user_key=user_key, slots=slots, is_batch=is_batch,
+        )
+        first_chunk, first_exc = await _peek_first_chunk(gen)
+        if first_exc is not None:
+            if isinstance(first_exc, httpx.HTTPStatusError):
+                raise_upstream_http_error(first_exc)
+            message, code = stream_error_details(first_exc)
+            raise HTTPException(
+                status_code=502,
+                detail={"error": {"message": message, "type": "server_error", "code": code}},
+            )
         return StreamingResponse(
-            _stream_completions(
-                worker_pool,
-                worker_key,
-                to_backend_body(state, merged_body),
-                user_key=user_key,
-                slots=slots,
-                is_batch=is_batch,
-            ),
+            _stream_completions_from(gen, first_chunk),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers=stream_headers,
         )
 
     queue_state = worker_pool.peek_queue_state(worker_key) if not is_batch else None
@@ -259,27 +277,64 @@ def _sse_error(message: str, code: str) -> bytes:
     return f"data: {payload}\n\n".encode() + b"data: [DONE]\n\n"
 
 
-async def _stream_completions(
+async def _stream_completions_queued(
     worker_pool,
     model_id: str,
     body: dict,
-    user_key: str | None = None,
-    slots: int = 1,
-    is_batch: bool = False,
-):
+    user_key: str | None,
+    slots: int,
+    is_batch: bool,
+) -> AsyncIterator[bytes]:
+    """Fallback for an already-saturated fair-share queue — see the
+    identical rationale on ``ocabra.api.openai.chat._stream_chat_queued``.
+    """
     try:
-        if user_key is not None:
-            queue_state = worker_pool.peek_queue_state(model_id)
-            if queue_state is not None and queue_state["saturated"]:
-                yield sse_ocabra_event(
-                    "slot_queued",
-                    model_id=model_id,
-                    in_flight=queue_state["in_flight"],
-                    slots=queue_state["slots"],
-                )
+        queue_state = worker_pool.peek_queue_state(model_id)
+        if queue_state is not None and queue_state["saturated"]:
+            yield sse_ocabra_event(
+                "slot_queued",
+                model_id=model_id,
+                in_flight=queue_state["in_flight"],
+                slots=queue_state["slots"],
+            )
         async for chunk in worker_pool.forward_stream(
             model_id, "/v1/completions", body, user_key=user_key, slots=slots, is_batch=is_batch
         ):
+            yield chunk
+    except Exception as e:
+        message, code = stream_error_details(e)
+        error_payload = json.dumps(
+            {"error": {"message": message, "type": "server_error", "code": code}}
+        )
+        yield f"data: {error_payload}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+
+async def _peek_first_chunk(
+    gen: AsyncIterator[bytes],
+) -> tuple[bytes | None, Exception | None]:
+    """See ``ocabra.api.openai.chat._peek_first_chunk`` — same fix, same
+    reason (2026-10-30): a rejected streaming request must not come back
+    as HTTP 200 with an in-band SSE error when the rejection is already
+    known before anything has been sent to the client.
+    """
+    try:
+        first_chunk = await gen.__anext__()
+        return first_chunk, None
+    except StopAsyncIteration:
+        return None, None
+    except Exception as exc:  # noqa: BLE001 — any first-attempt failure is eligible for a real status
+        return None, exc
+
+
+async def _stream_completions_from(
+    gen: AsyncIterator[bytes],
+    first_chunk: bytes | None,
+) -> AsyncIterator[bytes]:
+    try:
+        if first_chunk is not None:
+            yield first_chunk
+        async for chunk in gen:
             yield chunk
     except Exception as e:
         message, code = stream_error_details(e)

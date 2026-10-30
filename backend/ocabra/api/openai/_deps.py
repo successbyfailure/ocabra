@@ -1496,6 +1496,46 @@ def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
         payload.setdefault("reasoning_budget_tokens", budget)
 
 
+def _normalize_tool_call_entry(tool_call: object) -> object:
+    """Backfill the OpenAI-required ``type``/stringified-``arguments`` shape
+    on a ``tool_calls`` entry before forwarding it to a strict backend.
+
+    Mirrors ``ocabra.api.ollama.chat._normalize_tool_call_for_backend`` —
+    same fix, same root cause (llama-server's OpenAI-compatible endpoint
+    rejects outright with "Missing tool call type" if a historical
+    ``tool_calls`` entry omits ``type`` or has ``arguments`` as a parsed
+    object instead of a JSON string), applied here defensively for
+    OpenAI-compatible callers too: found live 2026-10-30 via an external
+    agent hitting /v1/chat/completions directly against
+    ``llama_cpp/gemma4-26b`` with exactly this shape.
+    """
+    if not isinstance(tool_call, dict):
+        return tool_call
+    out = dict(tool_call)
+    out.setdefault("type", "function")
+    function = out.get("function")
+    if isinstance(function, dict):
+        function = dict(function)
+        if isinstance(function.get("arguments"), dict):
+            function["arguments"] = json.dumps(function["arguments"])
+        out["function"] = function
+    return out
+
+
+def _normalize_messages_for_backend(messages: object) -> object:
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    for raw in messages:
+        if not isinstance(raw, dict) or not isinstance(raw.get("tool_calls"), list):
+            out.append(raw)
+            continue
+        msg = dict(raw)
+        msg["tool_calls"] = [_normalize_tool_call_entry(tc) for tc in msg["tool_calls"]]
+        out.append(msg)
+    return out
+
+
 def to_backend_body(state: ModelState, body: dict) -> dict:
     """Copy request payload and normalize model field to backend-native model id."""
     payload = dict(body)
@@ -1503,6 +1543,8 @@ def to_backend_body(state: ModelState, body: dict) -> dict:
     # leak into strict OpenAI-compatible upstreams.
     payload.pop("ocabra", None)
     payload["model"] = state.backend_model_id
+    if "messages" in payload:
+        payload["messages"] = _normalize_messages_for_backend(payload["messages"])
     if payload.get("stream") is True:
         stream_options = payload.get("stream_options")
         if isinstance(stream_options, dict):

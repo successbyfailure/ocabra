@@ -89,9 +89,22 @@ oCabra-aware con el mismo shape:
 ```
 
 Las líneas empiezan con `:` (comentario SSE) para no romper parsers estrictos
-tipo OpenAI SDK; los oCabra-aware pueden extraer el JSON tras el `:`. Si el
-load falla después de haber flusheado headers, el error viaja como
-`data: {"error": ...}` en el mismo stream (no como HTTP status).
+tipo OpenAI SDK; los oCabra-aware pueden extraer el JSON tras el `:`.
+
+**Status code de un rechazo en streaming (2026-10-30)**: `/v1/chat/completions`
+y `/v1/completions` con `stream=true` ahora piden el primer chunk al backend
+*antes* de devolver la `StreamingResponse` — si el backend rechaza la
+petición de entrada (body inválido, modelo no soporta algo, etc.) y **nada**
+se ha mandado aún al cliente, oCabra responde con un HTTP 4xx/5xx real y
+`{"error": {...}}` en el body, igual que la vía no-streaming. Solo cuando
+headers ya se flushearon de verdad (carga en frío con `model_loading` ya
+emitido, o un fallo a mitad de la generación) el error viaja como
+`data: {"error": ...}` dentro del stream con el HTTP status ya fijado en 200
+— inevitable en ese caso, pero ya no es el comportamiento por defecto para
+un rechazo inmediato. Antes de este fix, *todo* rechazo en streaming volvía
+como 200 + error en banda, indistinguible de una respuesta vacía para un
+cliente OpenAI-estándar que mira el status antes de parsear — reportado por
+un agente externo contra `llama_cpp/gemma4-26b`.
 
 `ocabra.slot_queued` (2026-10-30) es distinto de `model_loading`: cubre la
 cola de admisión de un modelo que **ya está cargado** pero tiene todos sus
