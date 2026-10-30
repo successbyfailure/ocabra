@@ -1255,7 +1255,9 @@ export interface OpenAIBatchJob {
   cancelling_at: number | null
   cancelled_at: number | null
   request_counts: { total: number; completed: number; failed: number }
+  total_tokens: number
   metadata: Record<string, unknown> | null
+  user: { id: string; username: string | null }
 }
 
 export interface OpenAIFileObject {

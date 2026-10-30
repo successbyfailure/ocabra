@@ -454,6 +454,14 @@ tiene `purpose=batch_input_audio`, el lote se rechaza entero en la creación
 (`POST /v1/batches` devuelve 400 con el número de línea exacto), igual que
 cualquier otro error de validación del JSONL de entrada.
 
+**Campos extra (oCabra, no estándar OpenAI)**: cada batch trae además
+`total_tokens` (suma de `usage.total_tokens` de las líneas con éxito — 0
+para endpoints que no devuelven `usage`, como imágenes/audio) y `user`
+(`{"id", "username"}`, quién lo mandó). `GET /v1/batches` devuelve solo los
+lotes propios para un usuario normal, pero **todos** los lotes de **todos**
+los usuarios para `model_manager`/`system_admin` — igual que el resto de la
+UI de gestión (`/batches` en el frontend está gateada a `model_manager`+).
+
 Ciclo de estados: `validating` → `in_progress` → `finalizing` →
 `completed` (o `failed`/`cancelled`/`expired`). `request_counts` en la
 respuesta trae `total`/`completed`/`failed` y se actualiza mientras el

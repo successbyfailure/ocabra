@@ -295,6 +295,7 @@ class BatchProcessor:
         results_lock = asyncio.Lock()
         completed = 0
         failed = 0
+        total_tokens = 0
         done_custom_ids: set[str] = set()
         if is_resume:
             for path, is_error_file in ((output_path, False), (error_path, True)):
@@ -316,6 +317,7 @@ class BatchProcessor:
                             failed += 1
                         else:
                             completed += 1
+                            total_tokens += self._extract_tokens(rec)
             logger.info(
                 "batch_resumed_from_watermark",
                 batch_id=str(batch_id),
@@ -383,7 +385,7 @@ class BatchProcessor:
             interactive priority (see ``batch_priority.py``) — the caller
             requeues it instead of treating it as a failure.
             """
-            nonlocal completed, failed, cancelled
+            nonlocal completed, failed, cancelled, total_tokens
             if cancelled:
                 return True
             async with sem:
@@ -471,6 +473,7 @@ class BatchProcessor:
                     async with results_lock:
                         out_handle.write(json.dumps(record) + "\n")
                         completed += 1
+                        total_tokens += self._extract_tokens(record)
                 return True
 
         # Periodic checkpoint so the user can see progress
@@ -478,13 +481,14 @@ class BatchProcessor:
             while not cancelled:
                 await asyncio.sleep(5)
                 async with results_lock:
-                    c, f = completed, failed
+                    c, f, t = completed, failed, total_tokens
                 async with AsyncSessionLocal() as s:
                     b = await s.get(OpenAIBatch, batch_id)
                     if b is None or b.status != "in_progress":
                         return
                     b.request_completed = c
                     b.request_failed = f
+                    b.total_tokens = t
                     await s.commit()
 
         checkpoint_task = asyncio.create_task(_checkpoint(), name=f"batch-{batch_id}-checkpoint")
@@ -584,12 +588,14 @@ class BatchProcessor:
                 batch.error_file_id = None
                 batch.request_completed = completed
                 batch.request_failed = failed
+                batch.total_tokens = total_tokens
                 await session.commit()
                 return
 
             batch.finalizing_at = datetime.now(UTC)
             batch.request_completed = completed
             batch.request_failed = failed
+            batch.total_tokens = total_tokens
 
             # The OpenAIFile rows for output/error already exist (created
             # before dispatch for the crash-survival watermark) — update in
@@ -627,6 +633,25 @@ class BatchProcessor:
                 completed=completed,
                 failed=failed,
             )
+
+    @staticmethod
+    def _extract_tokens(record: dict[str, Any]) -> int:
+        """Pull ``usage.total_tokens`` out of a successful output-file record,
+        if the endpoint returns one (chat/completions, completions,
+        embeddings do; images/audio generally don't — 0 in that case)."""
+        response = record.get("response")
+        if not isinstance(response, dict):
+            return 0
+        body = response.get("body")
+        if not isinstance(body, dict):
+            return 0
+        usage = body.get("usage")
+        if not isinstance(usage, dict):
+            return 0
+        try:
+            return int(usage.get("total_tokens") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     async def _is_cancelling(self, batch_id: uuid.UUID) -> bool:
         async with AsyncSessionLocal() as session:

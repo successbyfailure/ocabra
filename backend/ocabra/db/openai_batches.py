@@ -87,6 +87,11 @@ class OpenAIBatch(Base):
     request_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Sum of response.usage.total_tokens across successful lines (chat/
+    # completions/embeddings return this; images/audio don't, so it stays 0
+    # for batches targeting those endpoints) — oCabra extension, not part of
+    # the OpenAI Batches response shape.
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     batch_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -128,5 +133,6 @@ class OpenAIBatch(Base):
                 "completed": self.request_completed,
                 "failed": self.request_failed,
             },
+            "total_tokens": self.total_tokens,
             "metadata": self.batch_metadata,
         }

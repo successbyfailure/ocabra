@@ -41,6 +41,7 @@ import {
   getLlamaCppConfig,
   getModelContextSummary,
   getVllmConfig,
+  getWhisperConfig,
 } from "@/lib/modelContext"
 import { useIsModelManager } from "@/hooks/useAuth"
 import { useWebSocket } from "@/hooks/useWebSocket"
@@ -931,6 +932,13 @@ export function Dashboard() {
               getLlamaCppConfig(model)?.parallelSlots ??
               getVllmConfig(model)?.maxNumSeqs ??
               null
+            // Whisper has no slot-admission pool (see the act.slots===null
+            // comment below) — its real concurrency is CTranslate2's
+            // num_workers, a different knob with no context-length concept.
+            // Surfaced separately so it doesn't silently vanish from the
+            // card the way it did before num_workers was configurable
+            // (2026-10-30).
+            const whisperWorkers = slots == null ? getWhisperConfig(model)?.numWorkers ?? null : null
             const ctx = getModelContextSummary(model).configuredContext
             return (
               <div
@@ -957,6 +965,11 @@ export function Dashboard() {
                     {slots != null && (
                       <span className="rounded-md bg-muted px-2 py-0.5">
                         {slots} slot{slots === 1 ? "" : "s"} · {formatTokenCount(ctx)} ctx
+                      </span>
+                    )}
+                    {whisperWorkers != null && (
+                      <span className="rounded-md bg-muted px-2 py-0.5" title="num_workers de CTranslate2">
+                        {whisperWorkers} worker{whisperWorkers === 1 ? "" : "s"}
                       </span>
                     )}
                     {act && act.inFlight > 0 && (() => {

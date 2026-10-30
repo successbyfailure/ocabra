@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlertCircle,
   Ban,
+  CheckCircle2,
+  Clock,
   Download,
   FileAudio,
   ListChecks,
@@ -9,7 +11,9 @@ import {
   Plus,
   RefreshCw,
   Upload,
+  User,
   X,
+  XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
@@ -25,6 +29,45 @@ const ENDPOINTS: { value: BatchEndpoint; label: string }[] = [
 ]
 
 const CANCELLABLE: BatchStatus[] = ["validating", "in_progress", "finalizing"]
+const PENDING_STATUSES: BatchStatus[] = ["validating", "in_progress", "finalizing", "cancelling"]
+const FAILED_STATUSES: BatchStatus[] = ["failed", "expired", "cancelled"]
+
+function errorMessages(errors: unknown): string[] {
+  if (!errors || typeof errors !== "object") return []
+  const data = (errors as Record<string, unknown>).data
+  if (!Array.isArray(data)) return []
+  return data.map((e) =>
+    typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).message === "string"
+      ? String((e as Record<string, unknown>).message)
+      : JSON.stringify(e),
+  )
+}
+
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return "<1s"
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  if (m < 60) return `${m}m ${rem}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
+}
+
+/** Elapsed-time-per-completed-request, projected over what's left — a
+ * live estimate, not a committed SLA (DurationEstimator's per-model history
+ * would be more precise but isn't exposed per-batch; this is transparent
+ * about being a rough projection, which is what the "estimación" framing
+ * in the UI promises). */
+function estimateRemainingMs(batch: OpenAIBatchJob): number | null {
+  const startedAt = batch.in_progress_at
+  const { completed, total } = batch.request_counts
+  const remaining = total - completed - batch.request_counts.failed
+  if (!startedAt || completed <= 0 || remaining <= 0) return null
+  const elapsedMs = Date.now() - startedAt * 1000
+  const avgMsPerRequest = elapsedMs / completed
+  return avgMsPerRequest * remaining
+}
 
 function statusPill(status: BatchStatus) {
   const map: Record<BatchStatus, string> = {
@@ -75,6 +118,19 @@ export function Batches() {
     const handle = window.setInterval(() => void refresh(), 10_000)
     return () => window.clearInterval(handle)
   }, [])
+
+  const pending = useMemo(
+    () => batches.filter((b) => PENDING_STATUSES.includes(b.status)),
+    [batches],
+  )
+  const completedBatches = useMemo(
+    () => batches.filter((b) => b.status === "completed"),
+    [batches],
+  )
+  const failedBatches = useMemo(
+    () => batches.filter((b) => FAILED_STATUSES.includes(b.status)),
+    [batches],
+  )
 
   const cancelBatch = async (batchId: string) => {
     setBusyId(batchId)
@@ -135,52 +191,36 @@ export function Batches() {
         </div>
       )}
 
-      <div className="grid gap-3">
-        {batches.map((batch) => (
-          <div key={batch.id} className="rounded-lg border border-border bg-card p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <code className="font-mono text-sm font-semibold">{batch.id}</code>
-                  {statusPill(batch.status)}
-                  <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    {batch.endpoint}
-                  </span>
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  creado {fmtTs(batch.created_at)} · expira {fmtTs(batch.expires_at)}
-                </div>
-                <div className="mt-1 text-xs">
-                  {batch.request_counts.completed}/{batch.request_counts.total} completadas
-                  {batch.request_counts.failed > 0 && (
-                    <span className="text-destructive"> · {batch.request_counts.failed} fallidas</span>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDetailBatch(batch)}
-                  className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted"
-                >
-                  Ver detalle
-                </button>
-                {CANCELLABLE.includes(batch.status) && (
-                  <button
-                    type="button"
-                    disabled={busyId === batch.id}
-                    onClick={() => void cancelBatch(batch.id)}
-                    className="inline-flex items-center gap-1 rounded-md border border-destructive/40 px-2.5 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
-                  >
-                    {busyId === batch.id ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />}
-                    Cancelar
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
+      {pending.length > 0 && (
+        <BatchSection
+          title="Pendientes"
+          icon={<Clock size={14} />}
+          batches={pending}
+          busyId={busyId}
+          onCancel={cancelBatch}
+          onDetail={setDetailBatch}
+        />
+      )}
+      {completedBatches.length > 0 && (
+        <BatchSection
+          title="Terminadas"
+          icon={<CheckCircle2 size={14} />}
+          batches={completedBatches}
+          busyId={busyId}
+          onCancel={cancelBatch}
+          onDetail={setDetailBatch}
+        />
+      )}
+      {failedBatches.length > 0 && (
+        <BatchSection
+          title="Fallidas"
+          icon={<XCircle size={14} />}
+          batches={failedBatches}
+          busyId={busyId}
+          onCancel={cancelBatch}
+          onDetail={setDetailBatch}
+        />
+      )}
 
       {showCreate && (
         <CreateBatchModal
@@ -195,6 +235,129 @@ export function Batches() {
       {detailBatch && (
         <BatchDetailModal batch={detailBatch} onClose={() => setDetailBatch(null)} />
       )}
+    </div>
+  )
+}
+
+interface BatchSectionProps {
+  title: string
+  icon: ReactNode
+  batches: OpenAIBatchJob[]
+  busyId: string | null
+  onCancel: (batchId: string) => void
+  onDetail: (batch: OpenAIBatchJob) => void
+}
+
+function BatchSection({ title, icon, batches, busyId, onCancel, onDetail }: BatchSectionProps) {
+  return (
+    <div>
+      <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-muted-foreground">
+        {icon}
+        {title}
+        <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] tabular-nums">
+          {batches.length}
+        </span>
+      </h2>
+      <div className="grid gap-3">
+        {batches.map((batch) => (
+          <BatchCard
+            key={batch.id}
+            batch={batch}
+            busy={busyId === batch.id}
+            onCancel={() => onCancel(batch.id)}
+            onDetail={() => onDetail(batch)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function BatchCard({
+  batch,
+  busy,
+  onCancel,
+  onDetail,
+}: {
+  batch: OpenAIBatchJob
+  busy: boolean
+  onCancel: () => void
+  onDetail: () => void
+}) {
+  const isPending = PENDING_STATUSES.includes(batch.status)
+  const isCompleted = batch.status === "completed"
+  const isFailed = FAILED_STATUSES.includes(batch.status)
+  const eta = isPending ? estimateRemainingMs(batch) : null
+  const startTs = batch.in_progress_at ?? batch.created_at
+  const totalDurationMs =
+    isCompleted && batch.completed_at != null && startTs != null
+      ? (batch.completed_at - startTs) * 1000
+      : null
+  const reasons = isFailed ? errorMessages(batch.errors) : []
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <code className="font-mono text-sm font-semibold">{batch.id}</code>
+            {statusPill(batch.status)}
+            <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              {batch.endpoint}
+            </span>
+          </div>
+          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <User size={11} />
+            {batch.user.username ?? "usuario eliminado"}
+            <span>· creado {fmtTs(batch.created_at)}</span>
+          </div>
+          <div className="mt-1 text-xs">
+            {batch.request_counts.completed}/{batch.request_counts.total} completadas
+            {batch.request_counts.failed > 0 && (
+              <span className="text-destructive"> · {batch.request_counts.failed} fallidas</span>
+            )}
+            {isCompleted && (
+              <span className="text-muted-foreground">
+                {" "}
+                · {totalDurationMs != null ? fmtDuration(totalDurationMs) : "—"}
+                {batch.total_tokens > 0 && ` · ${batch.total_tokens.toLocaleString()} tokens`}
+              </span>
+            )}
+            {isPending && (
+              <span className="text-muted-foreground">
+                {" "}
+                · {eta != null ? `~${fmtDuration(eta)} restantes` : "estimando…"}
+              </span>
+            )}
+          </div>
+          {reasons.length > 0 && (
+            <div className="mt-1.5 flex items-start gap-1.5 rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-xs text-destructive">
+              <AlertCircle size={12} className="mt-0.5 shrink-0" />
+              <span>{reasons.join("; ")}</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onDetail}
+            className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted"
+          >
+            Ver detalle
+          </button>
+          {CANCELLABLE.includes(batch.status) && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onCancel}
+              className="inline-flex items-center gap-1 rounded-md border border-destructive/40 px-2.5 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />}
+              Cancelar
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -440,14 +603,23 @@ function BatchDetailModal({ batch, onClose }: { batch: OpenAIBatchJob; onClose: 
               {statusPill(batch.status)}
             </h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              {batch.endpoint} · {batch.request_counts.completed}/{batch.request_counts.total} completadas
+              {batch.endpoint} · {batch.user.username ?? "usuario eliminado"} ·{" "}
+              {batch.request_counts.completed}/{batch.request_counts.total} completadas
               {batch.request_counts.failed > 0 && `, ${batch.request_counts.failed} fallidas`}
+              {batch.total_tokens > 0 && `, ${batch.total_tokens.toLocaleString()} tokens`}
             </p>
           </div>
           <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted">
             <X size={16} />
           </button>
         </div>
+
+        {errorMessages(batch.errors).length > 0 && (
+          <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <AlertCircle size={16} className="mt-0.5 shrink-0" />
+            <span>{errorMessages(batch.errors).join("; ")}</span>
+          </div>
+        )}
 
         <div className="mb-3 flex items-center gap-2">
           {batch.output_file_id && (

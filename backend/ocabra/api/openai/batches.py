@@ -17,11 +17,13 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import get_openai_user
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
+from ocabra.db.auth import User
 from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
 
 router = APIRouter(tags=["OpenAI Batches"])
@@ -51,6 +53,23 @@ class BatchCreateBody(BaseModel):
     endpoint: str
     completion_window: str = "24h"
     metadata: dict[str, Any] | None = None
+
+
+def _is_manager_or_admin(user: UserContext) -> bool:
+    """model_manager and system_admin both get cross-user visibility into
+    the Batches UI (list/cancel other users' batches) — matches the
+    frontend's /batches page, which is gated at minRole="model_manager",
+    not just system_admin like ``user.is_admin`` alone would allow."""
+    return user.role in ("model_manager", "system_admin")
+
+
+async def _with_username(session: AsyncSession, batch: OpenAIBatch) -> dict[str, Any]:
+    d = batch.to_openai_dict()
+    username = (await session.execute(
+        select(User.username).where(User.id == batch.user_id)
+    )).scalar_one_or_none()
+    d["user"] = {"id": str(batch.user_id), "username": username}
+    return d
 
 
 def _strip_id(prefixed: str, prefix: str) -> uuid.UUID:
@@ -225,7 +244,7 @@ async def create_batch(
         if processor is not None:
             processor.notify()
 
-        return batch.to_openai_dict()
+        return await _with_username(session, batch)
 
 
 @router.get("/batches/{batch_id}", summary="Retrieve a batch")
@@ -241,12 +260,14 @@ async def retrieve_batch(
                 "message": f"No such batch: '{batch_id}'",
                 "type": "invalid_request_error",
             }})
-        if not user.is_admin and (user.user_id is None or batch.user_id != uuid.UUID(user.user_id)):
+        if not _is_manager_or_admin(user) and (
+            user.user_id is None or batch.user_id != uuid.UUID(user.user_id)
+        ):
             raise HTTPException(status_code=404, detail={"error": {
                 "message": f"No such batch: '{batch_id}'",
                 "type": "invalid_request_error",
             }})
-        return batch.to_openai_dict()
+        return await _with_username(session, batch)
 
 
 @router.get("/batches", summary="List batches")
@@ -257,15 +278,18 @@ async def list_batches(
 ) -> dict:
     if user.user_id is None:
         return {"object": "list", "data": [], "first_id": None, "last_id": None, "has_more": False}
+    manager_or_admin = _is_manager_or_admin(user)
     async with AsyncSessionLocal() as session:
-        stmt = select(OpenAIBatch).where(OpenAIBatch.user_id == uuid.UUID(user.user_id))
+        stmt = select(OpenAIBatch)
+        if not manager_or_admin:
+            stmt = stmt.where(OpenAIBatch.user_id == uuid.UUID(user.user_id))
         if after:
             cursor = await session.get(OpenAIBatch, _strip_id(after, "batch_"))
             if cursor is not None:
                 stmt = stmt.where(OpenAIBatch.created_at < cursor.created_at)
         stmt = stmt.order_by(desc(OpenAIBatch.created_at)).limit(limit)
         rows = (await session.execute(stmt)).scalars().all()
-        data = [r.to_openai_dict() for r in rows]
+        data = [await _with_username(session, r) for r in rows]
         return {
             "object": "list",
             "data": data,
@@ -284,7 +308,7 @@ async def cancel_batch(
     async with AsyncSessionLocal() as session:
         batch = await session.get(OpenAIBatch, batch_uuid)
         if batch is None or (
-            not user.is_admin
+            not _is_manager_or_admin(user)
             and (user.user_id is None or batch.user_id != uuid.UUID(user.user_id))
         ):
             raise HTTPException(status_code=404, detail={"error": {
@@ -292,14 +316,14 @@ async def cancel_batch(
                 "type": "invalid_request_error",
             }})
         if batch.status in ("completed", "failed", "expired", "cancelled"):
-            return batch.to_openai_dict()
+            return await _with_username(session, batch)
         if batch.status == "cancelling":
-            return batch.to_openai_dict()
+            return await _with_username(session, batch)
         batch.status = "cancelling"
         batch.cancelling_at = datetime.now(UTC)
         await session.commit()
         await session.refresh(batch)
-        return batch.to_openai_dict()
+        return await _with_username(session, batch)
 
 
 _ = settings  # keep import for forward-compat config use
