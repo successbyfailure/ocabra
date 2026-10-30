@@ -4,6 +4,7 @@ import asyncio
 import os
 import signal
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,18 @@ _DEFAULT_TOTAL_LAYERS = 32
 # Bonsai/PrismML models ship GPU-first (Q1_0_g128 hybrid-attention kernels for
 # CUDA/Metal), so default to offloading every layer instead of the CPU-first
 # default used by Microsoft's pretuned LUT kernels.
+
+
+def _worker_log_path(model_id: str) -> str:
+    safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
+    return f"/tmp/bitnet-worker-{safe}.log"
+
+
+@dataclass
+class _BitnetWorker:
+    process: asyncio.subprocess.Process
+    port: int
+    log_file: Any  # open file handle, stdout/stderr target — see load()
 
 
 class BitnetBackend(BackendInterface):
@@ -72,7 +85,7 @@ class BitnetBackend(BackendInterface):
         )
 
     def __init__(self) -> None:
-        self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
+        self._processes: dict[str, _BitnetWorker] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
 
     @staticmethod
@@ -232,13 +245,20 @@ class BitnetBackend(BackendInterface):
             gpu_layers=options["gpu_layers"],
             runtime="prismml" if is_prismml else "microsoft",
         )
+        # stdout/stderr go to a real file, not PIPE — see the identical,
+        # live-confirmed fix + rationale in llama_cpp_backend.py (2026-10-30):
+        # nothing ever drained these pipes during normal serving, so a
+        # chatty-enough worker can fill the kernel pipe buffer and block on
+        # its own write(), wedging the server while /health keeps answering.
+        log_path = _worker_log_path(model_id)
+        log_file = open(log_path, "ab")  # noqa: SIM115 — lives for the worker's lifetime, closed in _kill_process
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
         )
-        self._processes[model_id] = (proc, port)
+        self._processes[model_id] = _BitnetWorker(process=proc, port=port, log_file=log_file)
 
         try:
             await self._wait_for_startup(
@@ -266,7 +286,7 @@ class BitnetBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             return False
-        proc, port = entry
+        proc, port = entry.process, entry.port
         if proc.returncode is not None:
             return False
         try:
@@ -333,7 +353,7 @@ class BitnetBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No BitNet worker for model '{model_id}'")
-        _, port = entry
+        port = entry.port
         url = f"http://127.0.0.1:{port}{path}"
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(url, json=body)
@@ -344,7 +364,7 @@ class BitnetBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No BitNet worker for model '{model_id}'")
-        _, port = entry
+        port = entry.port
         url = f"http://127.0.0.1:{port}{path}"
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, json=body) as response:
@@ -441,10 +461,10 @@ class BitnetBackend(BackendInterface):
 
         while asyncio.get_event_loop().time() < deadline:
             entry = self._processes.get(model_id)
-            if entry and entry[0].returncode is not None:
-                rc = entry[0].returncode
-                stderr_tail = await self._read_stderr_tail(entry[0])
-                suffix = f" stderr={stderr_tail}" if stderr_tail else ""
+            if entry and entry.process.returncode is not None:
+                rc = entry.process.returncode
+                log_tail = self._read_log_tail(model_id)
+                suffix = f" log_tail={log_tail}" if log_tail else ""
                 if rc == -signal.SIGKILL or rc == 137:
                     raise MemoryError(
                         f"BitNet process for '{model_id}' OOM-killed (rc={rc}).{suffix}"
@@ -468,37 +488,48 @@ class BitnetBackend(BackendInterface):
         entry = self._processes.pop(model_id, None)
         if not entry:
             return
-        proc, _ = entry
+        proc = entry.process
         if proc.returncode is not None:
+            entry.log_file.close()
             return
 
         if graceful:
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
+                entry.log_file.close()
                 return
             except (TimeoutError, ProcessLookupError):
-                logger.warning("bitnet_sigterm_timeout", model_id=model_id)
+                logger.warning(
+                    "bitnet_sigterm_timeout",
+                    model_id=model_id,
+                    log_tail=self._read_log_tail(model_id),
+                )
 
         try:
             proc.kill()
             await proc.wait()
         except ProcessLookupError:
             pass
+        finally:
+            entry.log_file.close()
 
-    async def _read_stderr_tail(self, proc: asyncio.subprocess.Process, limit: int = 3000) -> str:
-        if proc.stderr is None:
-            return ""
+    def _read_log_tail(self, model_id: str, limit: int = 3000) -> str:
+        """Best-effort tail of the worker's combined stdout+stderr log file
+        (see ``_worker_log_path`` / ``load()``)."""
         try:
-            data = await asyncio.wait_for(proc.stderr.read(), timeout=0.3)
-        except Exception:
+            path = _worker_log_path(model_id)
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > limit:
+                    f.seek(size - limit)
+                data = f.read()
+        except OSError:
             return ""
         if not data:
             return ""
         text = data.decode("utf-8", errors="replace").strip()
-        if len(text) <= limit:
-            return text
-        return text[-limit:]
+        return text if len(text) <= limit else text[-limit:]
 
     def _to_int_or_none(self, value: Any) -> int | None:
         if value is None:

@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,18 @@ _SHUTDOWN_TIMEOUT_S = 30
 _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "sglang_worker.py"
 
 
+def _worker_log_path(model_id: str) -> str:
+    safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
+    return f"/tmp/sglang-worker-{safe}.log"
+
+
+@dataclass
+class _SGLangWorker:
+    process: asyncio.subprocess.Process
+    port: int
+    log_file: Any  # open file handle, stdout/stderr target — see load()
+
+
 class SGLangBackend(BackendInterface):
 
     @classmethod
@@ -88,7 +101,7 @@ class SGLangBackend(BackendInterface):
         )
 
     def __init__(self) -> None:
-        self._processes: dict[str, tuple[asyncio.subprocess.Process, int]] = {}
+        self._processes: dict[str, _SGLangWorker] = {}
 
     def _resolve_python_bin(self) -> str:
         """Pick the python that runs the sglang server inside the worker.
@@ -213,13 +226,20 @@ class SGLangBackend(BackendInterface):
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         logger.info("sglang_starting", model_id=model_id, port=port, tp=tensor_parallel)
+        # stdout/stderr go to a real file, not PIPE — see the identical,
+        # live-confirmed fix + rationale in llama_cpp_backend.py (2026-10-30):
+        # nothing ever drained these pipes during normal serving, so a
+        # chatty-enough worker can fill the kernel pipe buffer and block on
+        # its own write(), wedging the server while /health keeps answering.
+        log_path = _worker_log_path(model_id)
+        log_file = open(log_path, "ab")  # noqa: SIM115 — lives for the worker's lifetime, closed in _kill_process
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
         )
-        self._processes[model_id] = (process, port)
+        self._processes[model_id] = _SGLangWorker(process=process, port=port, log_file=log_file)
 
         try:
             await self._wait_for_startup(
@@ -253,7 +273,7 @@ class SGLangBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             return False
-        process, port = entry
+        process, port = entry.process, entry.port
         if process.returncode is not None:
             return False
         try:
@@ -330,7 +350,7 @@ class SGLangBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No SGLang worker for model '{model_id}'")
-        _, port = entry
+        port = entry.port
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
             response.raise_for_status()
@@ -340,7 +360,7 @@ class SGLangBackend(BackendInterface):
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No SGLang worker for model '{model_id}'")
-        _, port = entry
+        port = entry.port
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", f"http://127.0.0.1:{port}{path}", json=body) as response:
                 response.raise_for_status()
@@ -358,10 +378,10 @@ class SGLangBackend(BackendInterface):
         url = f"http://127.0.0.1:{port}/health"
         while asyncio.get_running_loop().time() < deadline:
             entry = self._processes.get(model_id)
-            if entry and entry[0].returncode is not None:
-                rc = entry[0].returncode
-                stderr_tail = await self._read_stderr_tail(entry[0])
-                suffix = f" stderr={stderr_tail}" if stderr_tail else ""
+            if entry and entry.process.returncode is not None:
+                rc = entry.process.returncode
+                log_tail = self._read_log_tail(model_id)
+                suffix = f" log_tail={log_tail}" if log_tail else ""
                 if rc in {-signal.SIGKILL, 137}:
                     raise MemoryError(f"SGLang worker for '{model_id}' was OOM-killed (rc={rc}).{suffix}")
                 raise RuntimeError(f"SGLang worker for '{model_id}' exited with rc={rc}.{suffix}")
@@ -379,36 +399,46 @@ class SGLangBackend(BackendInterface):
         entry = self._processes.pop(model_id, None)
         if not entry:
             return
-        process, _ = entry
+        process = entry.process
         if process.returncode is not None:
+            entry.log_file.close()
             return
         if graceful:
             try:
                 process.terminate()
                 await asyncio.wait_for(process.wait(), timeout=float(_SHUTDOWN_TIMEOUT_S))
+                entry.log_file.close()
                 return
             except (TimeoutError, ProcessLookupError):
-                logger.warning("sglang_sigterm_timeout", model_id=model_id)
+                logger.warning(
+                    "sglang_sigterm_timeout",
+                    model_id=model_id,
+                    log_tail=self._read_log_tail(model_id),
+                )
         try:
             process.kill()
             await process.wait()
         except ProcessLookupError:
             pass
+        finally:
+            entry.log_file.close()
 
-    async def _read_stderr_tail(self, process: asyncio.subprocess.Process, limit: int = 4000) -> str:
-        if process.stderr is None:
-            return ""
+    def _read_log_tail(self, model_id: str, limit: int = 4000) -> str:
+        """Best-effort tail of the worker's combined stdout+stderr log file
+        (see ``_worker_log_path`` / ``load()``)."""
         try:
-            data = await asyncio.wait_for(process.stderr.read(), timeout=0.3)
-        except Exception:
+            path = _worker_log_path(model_id)
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > limit:
+                    f.seek(size - limit)
+                data = f.read()
+        except OSError:
             return ""
         if not data:
             return ""
         text = data.decode("utf-8", errors="replace").strip()
-        if len(text) <= limit:
-            return text
-        half = limit // 2
-        return f"{text[:half]}\n...[truncated]...\n{text[-half:]}"
+        return text if len(text) <= limit else text[-limit:]
 
     def _resolve_model_target(self, model_id: str) -> str:
         local = self._resolve_local_model_dir(model_id)
