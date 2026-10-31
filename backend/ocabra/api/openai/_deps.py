@@ -627,6 +627,35 @@ OCABRA_MODEL_HEADERS: dict = {
         ),
         "schema": {"type": "string"},
     },
+    "X-Ocabra-Slot-Queue-Saturated": {
+        "description": (
+            "``1`` (non-streaming only) when the request arrived to find "
+            "every one of the worker's fair-share concurrency slots "
+            "already occupied (see ``FairSlotGate``) and had to wait its "
+            "turn — covers queueing on an *already-loaded* model, distinct "
+            "from ``X-Ocabra-Expected-Wait-Seconds``/``model_loading`` "
+            "which cover a cold model load. No queue *position* is given: "
+            "the gate alternates by least-recently-served user, not strict "
+            "FIFO, so a numeric position would be unstable. Streaming "
+            "clients get the equivalent ``ocabra.slot_queued`` SSE comment "
+            "instead (see the streaming response description above)."
+        ),
+        "schema": {"type": "string", "enum": ["1"]},
+    },
+    "X-Ocabra-Slot-In-Flight": {
+        "description": (
+            "Requests in flight on that worker at arrival time. Present "
+            "only alongside ``X-Ocabra-Slot-Queue-Saturated``."
+        ),
+        "schema": {"type": "integer"},
+    },
+    "X-Ocabra-Slot-Count": {
+        "description": (
+            "Configured concurrency slots for that worker. Present only "
+            "alongside ``X-Ocabra-Slot-Queue-Saturated``."
+        ),
+        "schema": {"type": "integer"},
+    },
 }
 
 
@@ -684,6 +713,12 @@ STREAMING_LOAD_RESPONSE_DOC: dict = {
             '``: {\"event\":\"ocabra.model_ready\",\"model_id\":...,'
             '\"worker_key\":...,\"load_duration_ms\":...,'
             '\"was_cold_start\":...}\\n\\n`` once the model is ready.\n\n'
+            "A third, unrelated to cold-start, is emitted when the model "
+            "is already loaded but every fair-share concurrency slot is "
+            "occupied (see ``X-Ocabra-Slot-Queue-Saturated`` below for the "
+            "non-streaming equivalent and why there's no queue position):\n\n"
+            '``: {\"event\":\"ocabra.slot_queued\",\"model_id\":...,'
+            '\"in_flight\":...,\"slots\":...}\\n\\n``\n\n'
             "The leading ``:`` makes these SSE **comments**, ignored by "
             "strict OpenAI SDK parsers. oCabra-aware clients may parse the "
             "JSON after the colon. If the load fails after headers have "
