@@ -264,6 +264,14 @@ class _ModelCalibration:
     cold_start_p95_s: float     # from model_load_stats, 0 if unknown
     chat_regression: _ChatRegression | None = None
     family_regression: _FamilyRegression | None = None
+    # Largest output_tokens actually delivered for this model in the
+    # calibration window (2026-10-31 — grounds api/openai/models.py's
+    # exposed max_output_tokens in real traffic instead of a theoretical
+    # number: the default_output_reservation_tokens budget turned out to
+    # wildly understate it for models that regularly produce long-form
+    # completions, e.g. gemma4:26b-ctx160k observed at 112k+ output tokens
+    # against a 4096/16384 reservation default).
+    max_output_tokens_observed: int = 0
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def confidence(self) -> float:
@@ -481,6 +489,17 @@ class DurationEstimator:
 
     # ── Public API ────────────────────────────────────────────
 
+    def observed_max_output_tokens(self, model_id: str) -> int:
+        """Largest ``output_tokens`` actually delivered for ``model_id`` in
+        the calibration window, or 0 if there's no calibration yet.
+
+        ``model_id`` here is whatever ``request_stats.model_id`` recorded —
+        the user-facing profile id (e.g. ``"qwen3.8:27b"``), same key
+        ``estimate()`` uses.
+        """
+        cal = self._calibrations.get(model_id)
+        return cal.max_output_tokens_observed if cal is not None else 0
+
     async def estimate(
         self,
         model_id: str,
@@ -672,7 +691,8 @@ class DurationEstimator:
                             backend_type,
                             COUNT(*)                                                                  AS n,
                             PERCENTILE_DISC(0.5)  WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p50_s,
-                            PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p95_s
+                            PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p95_s,
+                            MAX(output_tokens)                                                        AS max_output_tokens
                         FROM request_stats
                         WHERE started_at > :cutoff
                           AND status_code < 400
@@ -800,6 +820,7 @@ class DurationEstimator:
                     cold_start_p95_s=cold_by_model.get(row.model_id, 0.0),
                     chat_regression=fit_by_model.get(row.model_id),
                     family_regression=fam_fit_by_model.get(row.model_id),
+                    max_output_tokens_observed=int(row.max_output_tokens or 0),
                 )
 
             # Atomic swap — a concurrent reader sees either the old map or

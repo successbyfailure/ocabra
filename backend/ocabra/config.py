@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.20.4"
+    app_version: str = "0.21.2"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -236,6 +236,9 @@ class Settings(BaseSettings):
     vllm_trust_remote_code: bool = False
     vllm_disable_log_requests: bool = True
     # llama.cpp / llama-server
+    # Explicit oCabra fork override. When unset, use the modular install or
+    # the legacy binary below.
+    llama_cpp_custom_server_bin: str | None = None
     llama_cpp_server_bin: str = "/usr/local/bin/llama-server"
     llama_cpp_gpu_layers: int = 0
     llama_cpp_ctx_size: int = 4096

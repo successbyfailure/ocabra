@@ -46,8 +46,30 @@ def _put(estimator: DurationEstimator, model_id: str, **kwargs) -> None:
         sample_count=kwargs.pop("sample_count", 200),
         residual_ratio=kwargs.pop("residual_ratio", 0.5),
         cold_start_p95_s=kwargs.pop("cold_start_p95_s", 0.0),
+        max_output_tokens_observed=kwargs.pop("max_output_tokens_observed", 0),
         updated_at=kwargs.pop("updated_at", datetime.now(UTC)),
     )
+
+
+class TestObservedMaxOutputTokens:
+    """See api/openai/models.py._resolve_realistic_output_tokens (2026-10-31):
+    the admission-default reservation alone understated what some models
+    routinely deliver, so max_output_tokens also factors in real history
+    via this accessor."""
+
+    def test_returns_observed_value_when_calibrated(self):
+        estimator = DurationEstimator()
+        _put(estimator, "gemma4:26b-ctx160k", max_output_tokens_observed=112156)
+        assert estimator.observed_max_output_tokens("gemma4:26b-ctx160k") == 112156
+
+    def test_returns_zero_for_unknown_model(self):
+        estimator = DurationEstimator()
+        assert estimator.observed_max_output_tokens("never/seen") == 0
+
+    def test_returns_zero_when_no_requests_carried_output_tokens(self):
+        estimator = DurationEstimator()
+        _put(estimator, "test/model")  # default max_output_tokens_observed=0
+        assert estimator.observed_max_output_tokens("test/model") == 0
 
 
 class TestFamilyDefaultFallback:

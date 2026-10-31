@@ -132,18 +132,47 @@ def _resolve_default_output_reservation(profile: Any) -> int:
     return int(settings.runtime_preset_default_output_reservation_tokens)
 
 
-def _capped_output_tokens(context_length: int, reservation: int) -> int:
-    """``reservation``, but never above ``context_length`` — a tiny model
-    (e.g. context_length=1024) can't honor a 4096-token default reservation."""
+def _capped_output_tokens(context_length: int, target: int) -> int:
+    """``target``, but never above ``context_length`` — a tiny model
+    (e.g. context_length=1024) can't honor a 4096-token reservation."""
     if context_length <= 0:
-        return reservation
-    return min(context_length, reservation)
+        return target
+    return min(context_length, target)
+
+
+def _resolve_realistic_output_tokens(model_manager: Any, profile: Any) -> int:
+    """Best estimate of ``max_output_tokens`` grounded in real traffic.
+
+    The admission-default reservation (``_resolve_default_output_
+    reservation``) is a *floor* — what oCabra assumes a request needs when
+    the client doesn't say — not a ceiling on what the model can actually
+    deliver. 2026-10-31: checked real history and several profiles
+    routinely exceed it by 5-25x (gemma4:26b-ctx160k peaked at 112k+ output
+    tokens against a 4096/16384 reservation), so advertising the
+    reservation alone as "max" would have been just as misleading as the
+    raw context_length it replaced — only in the opposite direction. Take
+    whichever of the two is larger; callers still cap the result by
+    context_length.
+    """
+    reservation = _resolve_default_output_reservation(profile)
+    estimator = getattr(model_manager, "_duration_estimator", None)
+    observed = 0
+    if estimator is not None:
+        try:
+            # int(...) inside the try, not just the attribute call — a
+            # test double or a future caller handing back something that
+            # isn't a real int (e.g. a Mock's auto-attribute) must fall
+            # back to 0 too, not blow up the comparison below.
+            observed = int(estimator.observed_max_output_tokens(profile.profile_id))
+        except Exception:  # noqa: BLE001 — never let a stats lookup break /v1/models
+            observed = 0
+    return max(reservation, observed)
 
 
 def _apply_context_metadata(
     entry: dict[str, Any],
     metadata: dict[str, Any] | None,
-    default_output_reservation: int | None = None,
+    target_output_tokens: int | None = None,
 ) -> None:
     if metadata is None:
         return
@@ -152,15 +181,13 @@ def _apply_context_metadata(
     entry["ocabra"]["context"] = metadata
     capabilities = dict(entry["ocabra"].get("capabilities") or {})
     capabilities["context_length"] = effective_max
-    # See _resolve_default_output_reservation — refresh max_output_tokens
-    # here too so it tracks the runtime-preset-aware effective_max rather
-    # than staying at whatever context_length resolve_display_capabilities
-    # saw before this preset-aware override ran.
+    # See _resolve_realistic_output_tokens — refresh max_output_tokens here
+    # too so it tracks the runtime-preset-aware effective_max rather than
+    # staying at whatever context_length resolve_display_capabilities saw
+    # before this preset-aware override ran.
     capabilities["max_output_tokens"] = _capped_output_tokens(
         effective_max,
-        default_output_reservation
-        if default_output_reservation is not None
-        else effective_max,
+        target_output_tokens if target_output_tokens is not None else effective_max,
     )
     entry["ocabra"]["capabilities"] = capabilities
 
@@ -276,7 +303,7 @@ async def list_models(
         local_profile_ids.add(profile.profile_id)
 
         capabilities, capabilities_source = resolve_display_capabilities(base_state)
-        output_reservation = _resolve_default_output_reservation(profile)
+        output_reservation = _resolve_realistic_output_tokens(model_manager, profile)
         capabilities["max_output_tokens"] = _capped_output_tokens(
             int(capabilities.get("context_length") or 0), output_reservation
         )
@@ -374,7 +401,7 @@ async def list_models(
                 ) or None,
             }
             _apply_context_metadata(
-                entry, context, _resolve_default_output_reservation(profile)
+                entry, context, _resolve_realistic_output_tokens(model_manager, profile)
             )
         local_profile_ids.add(profile.profile_id)
         entries_by_profile_id[profile.profile_id] = entry
@@ -549,7 +576,7 @@ async def get_model(
         expected_wait = await model_manager.get_expected_load_seconds(state.model_id)
 
     capabilities = state.capabilities.to_dict()
-    output_reservation = _resolve_default_output_reservation(profile)
+    output_reservation = _resolve_realistic_output_tokens(model_manager, profile)
     capabilities["max_output_tokens"] = _capped_output_tokens(
         int(capabilities.get("context_length") or 0), output_reservation
     )
