@@ -42,6 +42,7 @@ describe("Settings", () => {
       idleEvictionCheckIntervalSeconds: 15,
       modelLoadWaitTimeoutSeconds: 720,
       pressureEvictionDrainTimeoutSeconds: 60,
+      pinReloadPollIntervalSeconds: 120,
       vramBufferMb: 768,
       vramPressureThresholdPct: 91,
       openaiAudioMaxPartSizeMb: 256,

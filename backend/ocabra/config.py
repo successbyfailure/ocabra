@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.19.5"
+    app_version: str = "0.20.1"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -460,6 +460,14 @@ class Settings(BaseSettings):
     # Covers: eviction of a busy model (drain) + actual model startup time.
     # Large models (vLLM 70B, Whisper large-v3 + diarization) can take 10+ minutes.
     model_load_wait_timeout_s: int = 720
+    # How often (seconds) a PIN model's auto-reload watcher (_watch_and_reload)
+    # polls for free GPU room after being pressure-evicted. 2026-10-31: raised
+    # from 30 — a competing load's VRAM only shows up (NVML + the internal
+    # lock) once it finishes, so a short poll interval made the watcher more
+    # likely to catch a neighbour mid-load, look "free", and race it (now
+    # harmless since allow_pressure_eviction=False makes that attempt a
+    # no-op, but still a wasted attempt worth avoiding).
+    pin_reload_poll_interval_s: int = 120
     # Max seconds to wait for in-flight requests to drain before pressure-evicting a model.
     pressure_eviction_drain_timeout_s: int = 60
 

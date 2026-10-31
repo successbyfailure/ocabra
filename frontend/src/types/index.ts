@@ -191,6 +191,7 @@ export type LlamaKvCacheType = "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0
 export type LlamaCppSplitMode = "layer" | "row" | "none"
 export type LlamaCppSplitStrategy = "evenly" | "favor_main" | "single"
 export type LlamaCppRuntime = "cuda" | "rocm" | "vulkan" | "cpu"
+export type LlamaCppVisionMode = "enabled" | "disabled" | "on_demand"
 
 export interface SpeculativeConfig {
   draftModelId: string
@@ -232,6 +233,8 @@ export interface LlamaCppConfig {
   parallelSlots?: number | null
   contBatching?: boolean | null
   keepAliveSeconds?: number | null
+  mmprojModelId?: string | null
+  visionMode?: LlamaCppVisionMode | null
 }
 
 export interface BitNetConfig {
@@ -477,6 +480,7 @@ export interface ServerConfig {
   idleEvictionCheckIntervalSeconds: number
   modelLoadWaitTimeoutSeconds: number
   pressureEvictionDrainTimeoutSeconds: number
+  pinReloadPollIntervalSeconds: number
   vramBufferMb: number
   vramPressureThresholdPct: number
   maxInflightPerModel: number

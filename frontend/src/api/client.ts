@@ -220,6 +220,8 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
       "embedding",
       "cache_type_k",
       "cache_type_v",
+      "mmproj_model_id",
+      "vision_mode",
     ])
   ) {
     const cacheK = (llamaCppSource.cache_type_k ?? llamaCppSource.cacheTypeK) as
@@ -247,6 +249,8 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
       embedding: Boolean(llamaCppSource.embedding),
       cacheTypeK: (cacheK ?? null) as LlamaCppConfig["cacheTypeK"],
       cacheTypeV: (cacheV ?? null) as LlamaCppConfig["cacheTypeV"],
+      mmprojModelId: (llamaCppSource.mmproj_model_id ?? llamaCppSource.mmprojModelId ?? null) as string | null,
+      visionMode: (llamaCppSource.vision_mode ?? llamaCppSource.visionMode ?? null) as LlamaCppConfig["visionMode"],
     }
   }
 
@@ -855,6 +859,9 @@ function toServerConfig(raw: unknown): ServerConfig {
     ),
     pressureEvictionDrainTimeoutSeconds: Number(
       data.pressureEvictionDrainTimeoutSeconds ?? data.pressure_eviction_drain_timeout_seconds ?? 60,
+    ),
+    pinReloadPollIntervalSeconds: Number(
+      data.pinReloadPollIntervalSeconds ?? data.pin_reload_poll_interval_seconds ?? 120,
     ),
     vramBufferMb: Number(data.vramBufferMb ?? 0),
     vramPressureThresholdPct: Number(data.vramPressureThresholdPct ?? 0),

@@ -32,6 +32,7 @@ const EMPTY_CONFIG: ServerConfig = {
   idleEvictionCheckIntervalSeconds: 15,
   modelLoadWaitTimeoutSeconds: 720,
   pressureEvictionDrainTimeoutSeconds: 60,
+  pinReloadPollIntervalSeconds: 120,
   vramBufferMb: 512,
   vramPressureThresholdPct: 85,
   maxInflightPerModel: 32,

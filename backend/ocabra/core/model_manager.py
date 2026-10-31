@@ -1446,7 +1446,10 @@ class ModelManager:
             )
 
     async def _load_model(
-        self, model_id: str, force_gpu: int | None = None
+        self,
+        model_id: str,
+        force_gpu: int | None = None,
+        allow_pressure_eviction: bool = True,
     ) -> "ModelState":
         state = self._states[model_id]
 
@@ -1565,6 +1568,7 @@ class ModelManager:
                                 enforce_vllm_headroom=enforce_vllm_headroom,
                                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                                 required_gpu_indices=required_multi_gpu,
+                                allow_pressure_eviction=allow_pressure_eviction,
                             )
 
                             # Use-case resolution stays inside the gate because it
@@ -2078,6 +2082,7 @@ class ModelManager:
         enforce_vllm_headroom: bool,
         vllm_gpu_memory_utilization: float | None,
         required_gpu_indices: list[int] | None = None,
+        allow_pressure_eviction: bool = True,
     ) -> list[int]:
         """Assign and validate GPUs immediately before a backend starts.
 
@@ -2102,6 +2107,7 @@ class ModelManager:
                 preferred_gpu=preferred_gpu,
                 enforce_vllm_headroom=enforce_vllm_headroom,
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                allow_pressure_eviction=allow_pressure_eviction,
             )
         else:
             gpu_indices = [settings.default_gpu_index]
@@ -2117,12 +2123,13 @@ class ModelManager:
                 if vram_needed > available_total:
                     deficit = vram_needed - available_total
                     freed_total = 0
-                    for gpu_idx in gpu_indices:
-                        if freed_total >= deficit:
-                            break
-                        freed_total += await self._evict_for_space(
-                            gpu_idx, deficit - freed_total
-                        )
+                    if allow_pressure_eviction:
+                        for gpu_idx in gpu_indices:
+                            if freed_total >= deficit:
+                                break
+                            freed_total += await self._evict_for_space(
+                                gpu_idx, deficit - freed_total
+                            )
                     if freed_total < deficit:
                         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -2135,8 +2142,10 @@ class ModelManager:
                 for gpu_idx in gpu_indices:
                     available = await self._gpu_manager.get_free_vram(gpu_idx)
                     if vram_needed > available:
-                        freed = await self._evict_for_space(
-                            gpu_idx, vram_needed - available
+                        freed = (
+                            await self._evict_for_space(gpu_idx, vram_needed - available)
+                            if allow_pressure_eviction
+                            else 0
                         )
                         if freed < (vram_needed - available):
                             from ocabra.core.scheduler import InsufficientVRAMError
@@ -2180,6 +2189,7 @@ class ModelManager:
         enforce_vllm_headroom: bool,
         vllm_gpu_memory_utilization: float | None = None,
         suppress_reload_seconds: int = 0,
+        allow_pressure_eviction: bool = True,
     ) -> list[int]:
         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -2194,6 +2204,23 @@ class ModelManager:
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
             )
         except InsufficientVRAMError as initial_exc:
+            if not allow_pressure_eviction:
+                # PIN's own background self-reload (see _watch_and_reload)
+                # calls us with this False — it should only reclaim a GPU
+                # that's genuinely free, never force room by evicting
+                # whatever is legitimately resident there (e.g. a WARM
+                # model that loaded into the PIN's old slot while it was
+                # unloaded). Only a real client request for this model
+                # goes through the default allow_pressure_eviction=True
+                # path and can actually evict a neighbour. Reproduced live
+                # 2026-10-31: the watcher's pre-check in _watch_and_reload
+                # can see stale "free" VRAM while a competing load is still
+                # ramping up (locks are only registered once that load
+                # finishes — see _load_model's lock_vram call), so without
+                # this guard the watcher would reach here and evict a
+                # worker that had, in the meantime, actually become
+                # resident.
+                raise initial_exc
             last_exc = initial_exc
 
             # First: try stopping external services (ACE-Step, ComfyUI, etc.) on the
@@ -2632,12 +2659,12 @@ class ModelManager:
                 if suppressed_until > deadline:
                     deadline = suppressed_until
                 if datetime.now(UTC) < suppressed_until:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
                     continue
             if datetime.now(UTC) >= deadline:
                 logger.warning("watch_and_reload_timeout", model_id=model_id)
                 return
-            await asyncio.sleep(30)
+            await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
             state = self._states.get(model_id)
             if not state or state.load_policy != LoadPolicy.PIN or state.status != ModelStatus.UNLOADED:
                 return
@@ -2650,7 +2677,17 @@ class ModelManager:
                     vram_needed, state.preferred_gpu
                 )
                 if gpu_indices:
-                    await self._load_model(model_id)
+                    # allow_pressure_eviction=False: this pre-check can be
+                    # stale (a competing load's VRAM lock is only registered
+                    # once it finishes — see _load_model's lock_vram call —
+                    # so a model that's mid-load or has just become
+                    # resident can look like free space here). Only reclaim
+                    # the GPU if _load_model's own fresh check still finds
+                    # it genuinely free; never force room by evicting a
+                    # neighbour that beat us to it. A real client request
+                    # for this model uses the default (evicting) path and
+                    # can still take the GPU back at any time.
+                    await self._load_model(model_id, allow_pressure_eviction=False)
                     break
             except Exception:
                 continue

@@ -49,6 +49,9 @@ class ServerConfigPatch(BaseModel):
     pressure_eviction_drain_timeout_seconds: int | None = Field(
         default=None, alias="pressureEvictionDrainTimeoutSeconds"
     )
+    pin_reload_poll_interval_seconds: int | None = Field(
+        default=None, alias="pinReloadPollIntervalSeconds"
+    )
     vram_buffer_mb: int | None = Field(default=None, alias="vramBufferMb")
     vram_pressure_threshold_pct: float | None = Field(
         default=None, alias="vramPressureThresholdPct"
@@ -265,6 +268,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "idleEvictionCheckIntervalSeconds": settings.idle_eviction_check_interval_seconds,
         "modelLoadWaitTimeoutSeconds": settings.model_load_wait_timeout_s,
         "pressureEvictionDrainTimeoutSeconds": settings.pressure_eviction_drain_timeout_s,
+        "pinReloadPollIntervalSeconds": settings.pin_reload_poll_interval_s,
         "vramBufferMb": settings.vram_buffer_mb,
         "vramPressureThresholdPct": settings.vram_pressure_threshold_pct,
         "maxInflightPerModel": settings.max_inflight_per_model,
@@ -437,6 +441,9 @@ async def patch_config(
         await _persist(
             "pressure_eviction_drain_timeout_s", settings.pressure_eviction_drain_timeout_s
         )
+    if "pin_reload_poll_interval_seconds" in payload:
+        settings.pin_reload_poll_interval_s = int(payload["pin_reload_poll_interval_seconds"])
+        await _persist("pin_reload_poll_interval_s", settings.pin_reload_poll_interval_s)
     if "vram_buffer_mb" in payload:
         settings.vram_buffer_mb = int(payload["vram_buffer_mb"])
         await _persist("vram_buffer_mb", settings.vram_buffer_mb)

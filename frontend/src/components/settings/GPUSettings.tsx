@@ -184,6 +184,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
   const [idleEvictionCheckIntervalSeconds, setIdleEvictionCheckIntervalSeconds] = useState(config.idleEvictionCheckIntervalSeconds)
   const [modelLoadWaitTimeoutSeconds, setModelLoadWaitTimeoutSeconds] = useState(config.modelLoadWaitTimeoutSeconds)
   const [pressureEvictionDrainTimeoutSeconds, setPressureEvictionDrainTimeoutSeconds] = useState(config.pressureEvictionDrainTimeoutSeconds)
+  const [pinReloadPollIntervalSeconds, setPinReloadPollIntervalSeconds] = useState(config.pinReloadPollIntervalSeconds)
   const [vramBufferMb, setVramBufferMb] = useState(config.vramBufferMb)
   const [vramPressureThresholdPct, setVramPressureThresholdPct] = useState(config.vramPressureThresholdPct)
   const [maxTemperatureC, setMaxTemperatureC] = useState(config.maxTemperatureC)
@@ -198,6 +199,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     setIdleEvictionCheckIntervalSeconds(config.idleEvictionCheckIntervalSeconds)
     setModelLoadWaitTimeoutSeconds(config.modelLoadWaitTimeoutSeconds)
     setPressureEvictionDrainTimeoutSeconds(config.pressureEvictionDrainTimeoutSeconds)
+    setPinReloadPollIntervalSeconds(config.pinReloadPollIntervalSeconds)
     setVramBufferMb(config.vramBufferMb)
     setVramPressureThresholdPct(config.vramPressureThresholdPct)
     setMaxTemperatureC(config.maxTemperatureC)
@@ -213,6 +215,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     config.maxInflightPerModel,
     config.modelLoadWaitTimeoutSeconds,
     config.pressureEvictionDrainTimeoutSeconds,
+    config.pinReloadPollIntervalSeconds,
     config.vramBufferMb,
     config.vramPressureThresholdPct,
     config.gpuThrottleEnabled,
@@ -228,6 +231,7 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
         idleEvictionCheckIntervalSeconds,
         modelLoadWaitTimeoutSeconds,
         pressureEvictionDrainTimeoutSeconds,
+        pinReloadPollIntervalSeconds,
         vramBufferMb,
         vramPressureThresholdPct,
         maxTemperatureC,
@@ -302,6 +306,19 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
             onChange={(event) => setPressureEvictionDrainTimeoutSeconds(Number(event.target.value))}
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
+        </label>
+        <label className="text-sm text-muted-foreground">
+          Reintento de recarga de modelos PIN (s)
+          <input
+            type="number"
+            min={1}
+            value={pinReloadPollIntervalSeconds}
+            onChange={(event) => setPinReloadPollIntervalSeconds(Number(event.target.value))}
+            className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+          />
+          <span className="mt-1 block text-xs text-muted-foreground/80">
+            Cada cuánto comprueba un modelo PIN desalojado por presión si ya hay sitio para recargarse. Nunca fuerza la evicción de otro modelo — solo reclama la GPU si está realmente libre.
+          </span>
         </label>
         <label className="text-sm text-muted-foreground">
           Máx. peticiones concurrentes por modelo
