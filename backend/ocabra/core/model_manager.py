@@ -3430,9 +3430,20 @@ def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:
     else:
         caps, source = declared_capabilities(state).to_dict(), "declared"
     # See BackendCapabilities.max_output_tokens: no backend tracks a real
-    # output ceiling distinct from "remaining context after the prompt", so
-    # mirror context_length here rather than exposing 0 ("unknown") to
-    # OpenAI-compat clients that assume the field is always present.
+    # output ceiling distinct from "remaining context after the prompt".
+    # Profile-unaware callers land here without access to a per-profile
+    # runtime_policy.default_output_reservation_tokens override (see
+    # api/openai/models.py._resolve_default_output_reservation, which
+    # refines this further for the actual /v1/models response) — fall back
+    # to the same global default the admission layer assumes when a client
+    # doesn't pass max_tokens, capped by context_length for small models.
+    # Mirroring the full context_length here (as before) implied a single
+    # response could consume the entire window, true only for a near-empty
+    # prompt — not a number any client should plan around.
     if not caps.get("max_output_tokens"):
-        caps["max_output_tokens"] = caps.get("context_length") or 0
+        context_length = int(caps.get("context_length") or 0)
+        reservation = int(settings.runtime_preset_default_output_reservation_tokens)
+        caps["max_output_tokens"] = (
+            min(context_length, reservation) if context_length > 0 else reservation
+        )
     return caps, source

@@ -104,8 +104,46 @@ async def _context_metadata(
     }
 
 
+def _resolve_default_output_reservation(profile: Any) -> int:
+    """Realistic ``max_output_tokens`` for *profile* — the same output
+    budget the admission layer itself assumes for a request that doesn't
+    pass ``max_tokens`` (see ``runtime_coordinator.estimate_request_token_
+    budget``'s ``default_output_reservation`` resolution: per-profile
+    ``runtime_policy.default_output_reservation_tokens`` override, else
+    ``settings.runtime_preset_default_output_reservation_tokens``).
+
+    Exposing raw ``context_length`` here (the previous behaviour) implied a
+    single response could consume the *entire* context window, which is
+    only true for a near-empty prompt and not a number any client should
+    plan around — this is the number oCabra's own scheduler budgets for
+    instead (2026-10-31, reported against OpenCode expecting a credible
+    ``max_output_tokens``).
+    """
+    from ocabra.config import settings
+
+    policy = getattr(profile, "runtime_policy", None)
+    policy = policy if isinstance(policy, dict) else {}
+    raw = policy.get("default_output_reservation_tokens")
+    try:
+        if raw is not None:
+            return int(raw)
+    except (TypeError, ValueError):
+        pass
+    return int(settings.runtime_preset_default_output_reservation_tokens)
+
+
+def _capped_output_tokens(context_length: int, reservation: int) -> int:
+    """``reservation``, but never above ``context_length`` — a tiny model
+    (e.g. context_length=1024) can't honor a 4096-token default reservation."""
+    if context_length <= 0:
+        return reservation
+    return min(context_length, reservation)
+
+
 def _apply_context_metadata(
-    entry: dict[str, Any], metadata: dict[str, Any] | None
+    entry: dict[str, Any],
+    metadata: dict[str, Any] | None,
+    default_output_reservation: int | None = None,
 ) -> None:
     if metadata is None:
         return
@@ -114,12 +152,16 @@ def _apply_context_metadata(
     entry["ocabra"]["context"] = metadata
     capabilities = dict(entry["ocabra"].get("capabilities") or {})
     capabilities["context_length"] = effective_max
-    # See resolve_display_capabilities: max_output_tokens mirrors
-    # context_length (no backend tracks a separate output ceiling) — refresh
-    # it here too so it tracks the runtime-preset-aware effective_max rather
-    # than staying at whatever raw context_length resolve_display_capabilities
+    # See _resolve_default_output_reservation — refresh max_output_tokens
+    # here too so it tracks the runtime-preset-aware effective_max rather
+    # than staying at whatever context_length resolve_display_capabilities
     # saw before this preset-aware override ran.
-    capabilities["max_output_tokens"] = effective_max
+    capabilities["max_output_tokens"] = _capped_output_tokens(
+        effective_max,
+        default_output_reservation
+        if default_output_reservation is not None
+        else effective_max,
+    )
     entry["ocabra"]["capabilities"] = capabilities
 
 
@@ -234,6 +276,10 @@ async def list_models(
         local_profile_ids.add(profile.profile_id)
 
         capabilities, capabilities_source = resolve_display_capabilities(base_state)
+        output_reservation = _resolve_default_output_reservation(profile)
+        capabilities["max_output_tokens"] = _capped_output_tokens(
+            int(capabilities.get("context_length") or 0), output_reservation
+        )
         entry: dict[str, Any] = {
             "id": profile.profile_id,
             "object": "model",
@@ -261,6 +307,7 @@ async def list_models(
             _apply_context_metadata(
                 entry,
                 await _context_metadata(profile, model_manager, base_state),
+                output_reservation,
             )
         except Exception as exc:  # noqa: BLE001 -- listing must remain available
             import structlog
@@ -326,7 +373,9 @@ async def list_models(
                     default=0,
                 ) or None,
             }
-            _apply_context_metadata(entry, context)
+            _apply_context_metadata(
+                entry, context, _resolve_default_output_reservation(profile)
+            )
         local_profile_ids.add(profile.profile_id)
         entries_by_profile_id[profile.profile_id] = entry
         data.append(entry)
@@ -499,6 +548,11 @@ async def get_model(
     if status != "loaded":
         expected_wait = await model_manager.get_expected_load_seconds(state.model_id)
 
+    capabilities = state.capabilities.to_dict()
+    output_reservation = _resolve_default_output_reservation(profile)
+    capabilities["max_output_tokens"] = _capped_output_tokens(
+        int(capabilities.get("context_length") or 0), output_reservation
+    )
     entry = {
         "id": profile.profile_id,
         "object": "model",
@@ -509,7 +563,7 @@ async def get_model(
             "status": status,
             "loaded": status == "loaded",
             "expected_wait_seconds": expected_wait,
-            "capabilities": state.capabilities.to_dict(),
+            "capabilities": capabilities,
             "display_name": profile.display_name or state.display_name,
             "base_model_id": profile.base_model_id,
             "load_policy": state.load_policy.value,
@@ -523,6 +577,7 @@ async def get_model(
             _apply_context_metadata(
                 entry,
                 await _context_metadata(profile, model_manager, base_state),
+                output_reservation,
             )
     except Exception as exc:  # noqa: BLE001 -- preserve OpenAI model retrieval
         import structlog
