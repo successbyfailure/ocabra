@@ -136,6 +136,48 @@ async def test_preload_fails_if_cannot_free_enough():
 
 
 # ------------------------------------------------------------------
+# _evict_last_resort_for_space tests (2026-10-31 — required_gpu_indices
+# tensor-parallel loads used to have no path to soft-pin candidates at
+# all; reproduced live when qwen3.8-27b's 128k preset forced GPU0+GPU1
+# and GPU0's only occupant was an idle soft-pin whisper worker)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_last_resort_evicts_soft_pin_when_polite_pass_cannot():
+    mm = _make_mm()
+    # Soft-pin (pin_permanent defaults to False) — _evict_for_space would
+    # never touch this; _evict_last_resort_for_space should.
+    _add_loaded_model(mm, "test/soft-pin", load_policy="pin", gpu_indices=[0], vram_mb=4000)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        freed_polite = await mm._evict_for_space(0, 3000)
+        assert freed_polite == 0
+        assert mm._states["test/soft-pin"].status == ModelStatus.LOADED
+
+        freed = await mm._evict_last_resort_for_space("test/requesting", 0, 3000)
+
+    assert freed >= 3000
+    assert mm._states["test/soft-pin"].status == ModelStatus.UNLOADED
+
+
+@pytest.mark.asyncio
+async def test_last_resort_skips_busy_candidates():
+    mm = _make_mm()
+    _add_loaded_model(
+        mm, "test/busy-soft-pin", load_policy="pin", gpu_indices=[0], vram_mb=4000, in_flight=1
+    )
+
+    freed = await mm._evict_last_resort_for_space("test/requesting", 0, 3000)
+
+    assert freed == 0
+    assert mm._states["test/busy-soft-pin"].status == ModelStatus.LOADED
+
+
+# ------------------------------------------------------------------
 # _vram_watchdog tests (simulated)
 # ------------------------------------------------------------------
 

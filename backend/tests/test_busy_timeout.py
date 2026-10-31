@@ -111,7 +111,14 @@ class _FakeSettings:
 
 
 async def _run_watchdog_once(mm: ModelManager, cfg: _FakeSettings | None = None) -> None:
-    """Run one iteration of the watchdog logic without the sleep loop."""
+    """Run one iteration of the watchdog logic without the sleep loop.
+
+    Mirrors ModelManager._busy_watchdog: a request only counts as stuck once
+    its *last_activity_at* (updated per streamed chunk, see ActiveRequest's
+    docstring) goes stale for timeout_s — total elapsed duration alone isn't
+    enough, since a long-running request that's still streaming tokens
+    isn't stuck.
+    """
     if cfg is None:
         cfg = _FakeSettings()
 
@@ -121,7 +128,8 @@ async def _run_watchdog_once(mm: ModelManager, cfg: _FakeSettings | None = None)
         snapshot = list(mm._active_requests.values())
     for req in snapshot:
         elapsed = now - req.started_at
-        if elapsed > timeout_s:
+        stale_s = now - (req.last_activity_at or req.started_at)
+        if stale_s > timeout_s:
             with mm._in_flight_lock:
                 mm._active_requests.pop(req.request_id, None)
                 count = mm._in_flight.get(req.model_id, 0)
@@ -142,8 +150,8 @@ async def _run_watchdog_once(mm: ModelManager, cfg: _FakeSettings | None = None)
                 if state:
                     state.status = ModelStatus.ERROR
                     state.error_message = (
-                        f"Request {req.request_id} timed out "
-                        f"after {elapsed:.0f}s"
+                        f"Request {req.request_id} stuck: no activity "
+                        f"for {stale_s:.0f}s (running {elapsed:.0f}s total)"
                     )
 
 
@@ -155,6 +163,7 @@ async def test_watchdog_detects_timeout():
 
     rid = mm.begin_request("test/model")
     mm._active_requests[rid].started_at = time.time() - 400
+    mm._active_requests[rid].last_activity_at = time.time() - 400
 
     await _run_watchdog_once(mm, _FakeSettings(timeout=300, action="mark_error"))
 
@@ -178,6 +187,46 @@ async def test_watchdog_ignores_fresh_requests():
 
 
 @pytest.mark.asyncio
+async def test_watchdog_ignores_long_running_request_still_streaming():
+    """A request running well past the timeout isn't stuck if it's still
+    producing tokens — only staleness since the *last* chunk counts (see
+    ActiveRequest.last_activity_at). Started 20 minutes ago, timeout=300s,
+    but a chunk arrived 5s ago: must not be touched.
+    """
+    mm = _make_mm()
+    _add_model_state(mm, "test/model")
+
+    rid = mm.begin_request("test/model")
+    mm._active_requests[rid].started_at = time.time() - 1200
+    mm._active_requests[rid].last_activity_at = time.time() - 5
+
+    await _run_watchdog_once(mm, _FakeSettings(timeout=300, action="mark_error"))
+
+    assert rid in mm._active_requests
+    assert mm._states["test/model"].status == ModelStatus.LOADED
+
+
+@pytest.mark.asyncio
+async def test_watchdog_flags_request_once_streaming_actually_stops():
+    """Same long-running request as above, but no chunk for 400s (> the
+    300s timeout) — now it really is stuck and must be flagged, even
+    though total elapsed (1200s) was already past timeout long before
+    that.
+    """
+    mm = _make_mm()
+    _add_model_state(mm, "test/model")
+
+    rid = mm.begin_request("test/model")
+    mm._active_requests[rid].started_at = time.time() - 1200
+    mm._active_requests[rid].last_activity_at = time.time() - 400
+
+    await _run_watchdog_once(mm, _FakeSettings(timeout=300, action="mark_error"))
+
+    assert rid not in mm._active_requests
+    assert mm._states["test/model"].status == ModelStatus.ERROR
+
+
+@pytest.mark.asyncio
 async def test_timeout_count_increments():
     """Verify _timeout_counts increments on timeout."""
     mm = _make_mm()
@@ -186,7 +235,9 @@ async def test_timeout_count_increments():
     r1 = mm.begin_request("test/model")
     r2 = mm.begin_request("test/model")
     mm._active_requests[r1].started_at = time.time() - 400
+    mm._active_requests[r1].last_activity_at = time.time() - 400
     mm._active_requests[r2].started_at = time.time() - 500
+    mm._active_requests[r2].last_activity_at = time.time() - 500
 
     await _run_watchdog_once(mm, _FakeSettings(timeout=300, action="mark_error"))
 
@@ -201,12 +252,13 @@ async def test_mark_error_action():
 
     rid = mm.begin_request("test/model")
     mm._active_requests[rid].started_at = time.time() - 600
+    mm._active_requests[rid].last_activity_at = time.time() - 600
 
     await _run_watchdog_once(mm, _FakeSettings(timeout=300, action="mark_error"))
 
     state = mm._states["test/model"]
     assert state.status == ModelStatus.ERROR
-    assert "timed out" in state.error_message
+    assert "no activity" in state.error_message
     assert rid in state.error_message
 
 
@@ -218,6 +270,7 @@ async def test_restart_worker_action():
 
     rid = mm.begin_request("test/model")
     mm._active_requests[rid].started_at = time.time() - 400
+    mm._active_requests[rid].last_activity_at = time.time() - 400
 
     with patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
         await _run_watchdog_once(mm, _FakeSettings(timeout=300, action="restart_worker"))

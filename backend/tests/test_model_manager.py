@@ -843,6 +843,54 @@ async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
 
 
 @pytest.mark.asyncio
+async def test_pressure_eviction_skips_wrong_gpu_and_cpu_only_candidates(worker_pool):
+    """2026-10-31 live incident: a GPU1 shortfall evicted piper (no GPU at
+    all) and a GPU0 model before ever reaching the GPU1 neighbour that
+    actually had room to give. Neither of those could ever have freed GPU1
+    VRAM — _get_pressure_eviction_candidates must skip them when the
+    requested model has an explicit preferred_gpu.
+    """
+    mm = ModelManager(worker_pool, gpu_scheduler=AsyncMock())
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "unload", new=AsyncMock()) as unload_mock,
+    ):
+        requested = await add_test_model(mm, model_id="test/requested")
+        requested.preferred_gpu = 1
+
+        cpu_only = await add_test_model(mm, model_id="test/cpu-only", load_policy="on_demand")
+        cpu_only.status = ModelStatus.LOADED
+        cpu_only.current_gpu = []
+        cpu_only.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+
+        wrong_gpu = await add_test_model(mm, model_id="test/wrong-gpu", load_policy="on_demand")
+        wrong_gpu.status = ModelStatus.LOADED
+        wrong_gpu.current_gpu = [0]
+        wrong_gpu.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+
+        right_gpu = await add_test_model(mm, model_id="test/right-gpu", load_policy="warm")
+        right_gpu.status = ModelStatus.LOADED
+        right_gpu.current_gpu = [1]
+        right_gpu.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+        from ocabra.core.scheduler import InsufficientVRAMError
+
+        mm._gpu_scheduler.find_gpu_for_model = AsyncMock(
+            side_effect=[
+                InsufficientVRAMError("full"),
+                [1],
+            ]
+        )
+
+        state = await mm.load("test/requested", force_gpu=1)
+
+    assert state.status == ModelStatus.LOADED
+    unload_mock.assert_awaited_once_with("test/right-gpu", reason="pressure")
+
+
+@pytest.mark.asyncio
 async def test_update_config_rejects_unsupported_fields(model_manager):
     await add_test_model(model_manager)
 

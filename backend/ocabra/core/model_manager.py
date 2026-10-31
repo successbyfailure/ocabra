@@ -875,12 +875,22 @@ class ModelManager:
                     snapshot = list(self._active_requests.values())
                 for req in snapshot:
                     elapsed = now - req.started_at
-                    if elapsed > timeout_s:
+                    # Stale time since the last streamed chunk, not total
+                    # duration — see ActiveRequest.last_activity_at's
+                    # docstring. A long batch job streaming tokens the
+                    # entire time isn't "stuck"; it only counts as timed
+                    # out once chunks stop arriving for timeout_s. For
+                    # non-streaming requests last_activity_at never moves
+                    # past started_at (nothing to tee), so this is
+                    # identical to the old elapsed-based check for them.
+                    stale_s = now - (req.last_activity_at or req.started_at)
+                    if stale_s > timeout_s:
                         logger.error(
                             "request_busy_timeout",
                             request_id=req.request_id,
                             model_id=req.model_id,
                             elapsed_s=f"{elapsed:.0f}",
+                            stale_s=f"{stale_s:.0f}",
                             timeout_s=timeout_s,
                         )
                         with self._in_flight_lock:
@@ -908,15 +918,16 @@ class ModelManager:
                             if state:
                                 state.status = ModelStatus.ERROR
                                 state.error_message = (
-                                    f"Request {req.request_id} timed out "
-                                    f"after {elapsed:.0f}s"
+                                    f"Request {req.request_id} stuck: no activity "
+                                    f"for {stale_s:.0f}s (running {elapsed:.0f}s total)"
                                 )
                                 await self._publish_event(req.model_id, "busy_timeout")
                                 try:
                                     await publish_system_alert(
                                         "warning",
                                         f"Model '{req.model_id}' marked ERROR: "
-                                        f"request timed out after {elapsed:.0f}s",
+                                        f"request stuck, no activity for {stale_s:.0f}s "
+                                        f"(running {elapsed:.0f}s total)",
                                     )
                                 except Exception:
                                     pass
@@ -1033,6 +1044,42 @@ class ModelManager:
                 reason="vram_pressure",
             )
             await self.unload(model_id, reason="vram_pressure")
+            freed += vram_per_gpu
+        return freed
+
+    async def _evict_last_resort_for_space(
+        self, requesting_model_id: str, gpu_index: int, needed_mb: int
+    ) -> int:
+        """Fallback for ``_admit_gpu_load``'s ``required_gpu_indices`` path
+        once ``_evict_for_space`` (WARM/ON_DEMAND only) still leaves a
+        deficit on ``gpu_index`` — same last-resort candidate list
+        ``_assign_gpus_for_load`` falls back to (soft-pin included, hard-pin
+        and realtime-session-held excluded — see
+        ``_get_pressure_eviction_candidates``), skipping anything currently
+        busy since this path has no drain-wait of its own.
+
+        Returns MB freed.
+        """
+        freed = 0
+        for candidate_id in self._get_pressure_eviction_candidates(
+            requesting_model_id, gpu_indices=[gpu_index]
+        ):
+            if freed >= needed_mb:
+                break
+            if self.is_busy(candidate_id):
+                continue
+            state = self._states.get(candidate_id)
+            if not state:
+                continue
+            vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
+            logger.info(
+                "vram_eviction_last_resort",
+                model_id=candidate_id,
+                gpu_index=gpu_index,
+                vram_mb=vram_per_gpu,
+                reason="vram_pressure",
+            )
+            await self.unload(candidate_id, reason="vram_pressure")
             freed += vram_per_gpu
         return freed
 
@@ -2130,6 +2177,26 @@ class ModelManager:
                             freed_total += await self._evict_for_space(
                                 gpu_idx, deficit - freed_total
                             )
+                        # 2026-10-31 — this path (required_gpu_indices, e.g. a
+                        # runtime preset forcing tensor-parallel across GPUs)
+                        # bypasses _assign_gpus_for_load entirely, so it never
+                        # got that function's richer eviction cascade — only
+                        # _evict_for_space (WARM/ON_DEMAND only, never PIN).
+                        # Reproduced live: qwen3.8-27b escalating to its 128k
+                        # preset (forced onto GPU0+GPU1) kept failing because
+                        # GPU0's only occupant was whisper (soft-pin, idle at
+                        # the time) — evictable in principle, but this branch
+                        # had no path to it. Fall back to the same last-resort
+                        # candidate list _assign_gpus_for_load uses (includes
+                        # soft-pin, skips busy/hard-pin/realtime-held) before
+                        # giving up.
+                        if freed_total < deficit:
+                            for gpu_idx in gpu_indices:
+                                if freed_total >= deficit:
+                                    break
+                                freed_total += await self._evict_last_resort_for_space(
+                                    model_id, gpu_idx, deficit - freed_total
+                                )
                     if freed_total < deficit:
                         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -2147,6 +2214,10 @@ class ModelManager:
                             if allow_pressure_eviction
                             else 0
                         )
+                        if allow_pressure_eviction and freed < (vram_needed - available):
+                            freed += await self._evict_last_resort_for_space(
+                                model_id, gpu_idx, vram_needed - available - freed
+                            )
                         if freed < (vram_needed - available):
                             from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -2255,7 +2326,17 @@ class ModelManager:
                         continue
 
             # Then: evict model workers (on-demand first, then warm, then pinned)
-            candidates = self._get_pressure_eviction_candidates(model_id)
+            # — scoped to preferred_gpu when the model has one, so a
+            # shortfall on that GPU never evicts a neighbour sitting on a
+            # different GPU (or a CPU-only worker) that could never have
+            # freed that room. Without an explicit preferred_gpu the
+            # scheduler itself picks dynamically across all healthy GPUs
+            # (see find_gpu_for_model), so there's no single target to
+            # scope to — fall back to the old unrestricted candidate list.
+            candidates = self._get_pressure_eviction_candidates(
+                model_id,
+                gpu_indices=[preferred_gpu] if preferred_gpu is not None else None,
+            )
             logger.info(
                 "pressure_eviction_candidates",
                 requested_model_id=model_id,
@@ -2388,7 +2469,9 @@ class ModelManager:
                     continue
             raise last_exc from initial_exc
 
-    def _get_pressure_eviction_candidates(self, requested_model_id: str) -> list[str]:
+    def _get_pressure_eviction_candidates(
+        self, requested_model_id: str, gpu_indices: list[int] | None = None
+    ) -> list[str]:
         """Last-resort eviction order when the polite LRU pass
         (``_get_eviction_candidates``, which excludes ALL pin) finds no
         candidate and a new load genuinely has nowhere else to go.
@@ -2397,6 +2480,17 @@ class ModelManager:
         candidate here — lowest priority, evicted only if nothing else can
         free the VRAM. Hard-pin (``pin_permanent=True``) is excluded even
         from this path: the only way to move it is an explicit admin unload.
+
+        ``gpu_indices``, when given, restricts candidates to models actually
+        resident on one of those GPUs — VRAM isn't a shared pool across
+        GPUs, so evicting a model on GPU0 can never free room on GPU1.
+        CPU-only models (``current_gpu`` empty, e.g. piper) are excluded
+        unconditionally for the same reason: evicting them frees no VRAM on
+        any GPU. Reproduced live 2026-10-31: a GPU1 load evicted piper (0
+        GPU usage) and GPU0's whisper before ever reaching the GPU1 model
+        that actually had room to give — pure disruption, no benefit,
+        because candidate order only considered load_policy/last-used and
+        never which GPU (if any) a candidate actually occupied.
         """
         policy_order = {
             LoadPolicy.ON_DEMAND: 0,
@@ -2404,6 +2498,13 @@ class ModelManager:
             LoadPolicy.PIN: 2,
         }
         fallback_time = datetime.min.replace(tzinfo=UTC)
+
+        def _on_target_gpu(state: "ModelState") -> bool:
+            if not state.current_gpu:
+                return False
+            if gpu_indices is None:
+                return True
+            return any(g in gpu_indices for g in state.current_gpu)
 
         candidates = [
             state
@@ -2415,6 +2516,7 @@ class ModelManager:
             # invisible to pressure eviction. Ripping them out mid-turn
             # kills the WebSocket in a way the client can't recover from.
             and not self._is_reserved_by_realtime_session(state.model_id)
+            and _on_target_gpu(state)
         ]
         candidates.sort(
             key=lambda state: (
@@ -2430,6 +2532,8 @@ class ModelManager:
             if model_id != requested_model_id
             and worker.backend_type != "ollama"
             and not self._is_reserved_by_realtime_session(model_id)
+            and worker.gpu_indices
+            and (gpu_indices is None or any(g in gpu_indices for g in worker.gpu_indices))
         ]
 
     async def _wait_for_vram_released(self, released_vram_mb: int) -> None:
