@@ -10,6 +10,7 @@ from ocabra.core.worker_pool import InferenceTimeoutError
 from ocabra.stats.collector import (
     StatsMiddleware,
     _classify_request_kind,
+    _client_addr,
     _count_input_tokens,
     _extract_error_message,
     _extract_generation_ms,
@@ -23,6 +24,39 @@ from ocabra.stats.collector import (
     _stream_output_tokens,
     record_realtime_request,
 )
+
+
+def _fake_request(headers: dict[str, str], *, peer_host: str | None = "172.22.0.13") -> SimpleNamespace:
+    return SimpleNamespace(
+        headers=headers,
+        client=SimpleNamespace(host=peer_host) if peer_host else None,
+    )
+
+
+class TestClientAddr:
+    """2026-10-31: the proxy in front of Caddy for the public domain sends
+    BOTH headers, but X-Forwarded-For carries its own address, not the
+    client's — only X-Real-IP has the genuine origin. _client_addr must
+    prefer X-Real-IP, not just fall back to it when X-Forwarded-For is
+    absent."""
+
+    def test_prefers_x_real_ip_over_x_forwarded_for(self) -> None:
+        req = _fake_request(
+            {"x-real-ip": "79.117.117.14", "x-forwarded-for": "10.0.8.5"}
+        )
+        assert _client_addr(req) == "79.117.117.14"
+
+    def test_falls_back_to_x_forwarded_for_without_x_real_ip(self) -> None:
+        req = _fake_request({"x-forwarded-for": "203.0.113.9, 10.0.8.5"})
+        assert _client_addr(req) == "203.0.113.9"
+
+    def test_falls_back_to_direct_peer_without_either_header(self) -> None:
+        req = _fake_request({}, peer_host="198.51.100.2")
+        assert _client_addr(req) == "198.51.100.2"
+
+    def test_returns_none_with_no_signal_at_all(self) -> None:
+        req = _fake_request({}, peer_host=None)
+        assert _client_addr(req) is None
 
 
 def test_classify_request_kind_known_paths() -> None:

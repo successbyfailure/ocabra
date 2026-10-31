@@ -993,14 +993,26 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
 
 def _client_addr(request: Request) -> str | None:
-    """Real client IP: X-Forwarded-For (first hop) / X-Real-IP behind Caddy,
-    falling back to the direct peer."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()[:64] or None
+    """Real client IP: X-Real-IP, then X-Forwarded-For (first hop), falling
+    back to the direct peer.
+
+    2026-10-31: whatever sits in front of Caddy for the public domain
+    (reported against an opencode/ollama-python client showing up as a LAN
+    IP in the dashboard) sends BOTH headers, but only X-Real-IP carries the
+    genuine original client — X-Forwarded-For is set to that proxy's own
+    address instead of being a real forwarding chain. X-Forwarded-For used
+    to be checked first, so the dashboard showed the proxy's IP every time.
+    X-Real-IP is a single trusted value by convention (not an
+    attacker/intermediary-extensible chain like X-Forwarded-For), so
+    preferring it first is also the safer default in general, not just a
+    fix for this specific proxy's behavior.
+    """
     xri = request.headers.get("x-real-ip")
     if xri:
         return xri.strip()[:64] or None
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()[:64] or None
     client = request.client
     return client.host if client else None
 
