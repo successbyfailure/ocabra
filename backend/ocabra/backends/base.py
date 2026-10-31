@@ -127,6 +127,16 @@ class BackendCapabilities:
     # ceiling that bounds presets. Zero means "unknown — treat context_length
     # as both".
     native_context_length: int = 0
+    # Hard cap on output tokens per request. None of oCabra's backends
+    # (llama.cpp/vLLM/Ollama/...) enforce a separate output ceiling beyond
+    # "whatever's left of the context window after the prompt" — there's no
+    # backend-level concept to source a tighter number from. Left at 0
+    # ("unknown") here; resolve_display_capabilities() backfills it from
+    # context_length before exposing it via /v1/models, since OpenAI-compat
+    # clients (OpenCode, 2026-10-31) increasingly assume a model advertising
+    # context also advertises max output tokens and fall back to guessing
+    # (commonly a conservative 4096/8192) when the field is absent entirely.
+    max_output_tokens: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)

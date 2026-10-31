@@ -114,6 +114,12 @@ def _apply_context_metadata(
     entry["ocabra"]["context"] = metadata
     capabilities = dict(entry["ocabra"].get("capabilities") or {})
     capabilities["context_length"] = effective_max
+    # See resolve_display_capabilities: max_output_tokens mirrors
+    # context_length (no backend tracks a separate output ceiling) — refresh
+    # it here too so it tracks the runtime-preset-aware effective_max rather
+    # than staying at whatever raw context_length resolve_display_capabilities
+    # saw before this preset-aware override ran.
+    capabilities["max_output_tokens"] = effective_max
     entry["ocabra"]["capabilities"] = capabilities
 
 

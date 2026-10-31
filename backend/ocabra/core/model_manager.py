@@ -3424,7 +3424,15 @@ def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:
     ``"declared"`` (heuristic for a model never loaded this deployment).
     """
     if state.status == ModelStatus.LOADED:
-        return state.capabilities.to_dict(), "live"
-    if capabilities_populated(state.capabilities):
-        return state.capabilities.to_dict(), "cached"
-    return declared_capabilities(state).to_dict(), "declared"
+        caps, source = state.capabilities.to_dict(), "live"
+    elif capabilities_populated(state.capabilities):
+        caps, source = state.capabilities.to_dict(), "cached"
+    else:
+        caps, source = declared_capabilities(state).to_dict(), "declared"
+    # See BackendCapabilities.max_output_tokens: no backend tracks a real
+    # output ceiling distinct from "remaining context after the prompt", so
+    # mirror context_length here rather than exposing 0 ("unknown") to
+    # OpenAI-compat clients that assume the field is always present.
+    if not caps.get("max_output_tokens"):
+        caps["max_output_tokens"] = caps.get("context_length") or 0
+    return caps, source
