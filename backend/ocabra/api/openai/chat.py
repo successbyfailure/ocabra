@@ -32,6 +32,7 @@ from ocabra.agents.executor import AgentExecutor
 from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
 from ocabra.agents.resolver import is_agent_model, resolve_agent
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 from ocabra.database import AsyncSessionLocal
 
 from ._deps import (
@@ -49,6 +50,7 @@ from ._deps import (
     keepalive_until_done,
     lookup_profile,
     merge_profile_defaults,
+    raise_inference_dispatch_error,
     raise_upstream_http_error,
     resolve_profile,
     resolve_profile_runtime_plan,
@@ -380,6 +382,8 @@ async def chat_completions(
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+        raise_inference_dispatch_error(exc)
     from fastapi.responses import JSONResponse
 
     from ocabra.api.openai._deps import ocabra_response_headers

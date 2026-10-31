@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
@@ -34,6 +35,7 @@ from ._deps import (
     get_openai_user,
     get_profile_registry,
     merge_profile_defaults,
+    raise_inference_dispatch_error,
     raise_upstream_http_error,
     resolve_profile,
 )
@@ -174,6 +176,8 @@ async def image_generations(
         result = await worker_pool.forward_request(worker_key, "/generate", worker_body)
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+        raise_inference_dispatch_error(exc)
     finally:
         model_manager.end_request(worker_key, inflight_request_id)
 
@@ -463,6 +467,8 @@ async def image_edits(
                 status_code=400,
             ) from exc
         raise_upstream_http_error(exc)
+    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+        raise_inference_dispatch_error(exc)
     finally:
         model_manager.end_request(worker_key, inflight_request_id)
 

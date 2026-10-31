@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
@@ -23,6 +24,7 @@ from ._deps import (
     get_profile_registry,
     merge_profile_defaults,
     ocabra_response_headers,
+    raise_inference_dispatch_error,
     raise_upstream_http_error,
     resolve_profile,
     to_backend_body,
@@ -81,6 +83,8 @@ async def embeddings(
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+        raise_inference_dispatch_error(exc)
     resp_headers = await ocabra_response_headers(
         request, model_manager, worker_key, profile.base_model_id
     )

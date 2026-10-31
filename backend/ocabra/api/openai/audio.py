@@ -585,7 +585,11 @@ async def generate_music(
         )
     except TimeoutError as exc:
         raise _openai_error(
-            str(exc), "server_error", code="generation_timeout", status_code=504
+            str(exc),
+            "server_error",
+            code="generation_timeout",
+            status_code=504,
+            headers={"Retry-After": "5"},
         ) from exc
     except RuntimeError as exc:
         raise _openai_error(

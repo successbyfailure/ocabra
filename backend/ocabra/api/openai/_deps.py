@@ -679,7 +679,19 @@ RETRY_AFTER_HEADER_DOC: dict = {
 #: Reused across every OpenAI-compatible endpoint that loads a model
 #: on-demand — 503 covers "model/worker not available yet" (transient, see
 #: ``RETRY_AFTER_HEADER_DOC``), 429 covers the per-worker concurrency cap.
+#: 409/504 (2026-10-31) cover failures from the request-dispatch path
+#: itself (``raise_inference_dispatch_error``) — previously undocumented
+#: here even though the codes (``insufficient_vram``, ``generation_timeout``,
+#: ``worker_degraded``) already existed and were used by the streaming
+#: in-band error path (``stream_error_details``).
 LOAD_FAILURE_RESPONSES_DOC: dict = {
+    409: {
+        "description": (
+            "Not enough free VRAM to load the model even after waiting "
+            "for scheduler eviction (``insufficient_vram``). Permanent "
+            "given the server's current state — no ``Retry-After``."
+        ),
+    },
     429: {
         "description": (
             "The resolved worker is already at its concurrency cap "
@@ -690,9 +702,19 @@ LOAD_FAILURE_RESPONSES_DOC: dict = {
     },
     503: {
         "description": (
-            "Model/worker not available (still loading, failed to load, "
-            "or an internal registry isn't ready yet post-restart). See "
-            "``Retry-After`` below for whether retrying makes sense."
+            "Model/worker not available — still loading, failed to load "
+            "(``model_load_failed``), an internal registry isn't ready yet "
+            "post-restart, or the per-worker circuit breaker is open after "
+            "repeated failures (``worker_degraded``). See ``Retry-After`` "
+            "below for whether retrying makes sense."
+        ),
+        "headers": RETRY_AFTER_HEADER_DOC,
+    },
+    504: {
+        "description": (
+            "The worker accepted the request but didn't respond within "
+            "oCabra's inference timeout (``generation_timeout``) — "
+            "transient, see ``Retry-After``."
         ),
         "headers": RETRY_AFTER_HEADER_DOC,
     },
@@ -1618,6 +1640,40 @@ def raise_upstream_http_error(exc: httpx.HTTPStatusError) -> None:
         "invalid_request_error" if 400 <= status_code < 500 else "server_error",
         status_code=status_code,
     )
+
+
+def raise_inference_dispatch_error(exc: Exception) -> None:
+    """Translate ``InferenceTimeoutError``/``WorkerDegradedError`` from
+    ``WorkerPool.forward_request`` into the same stable codes the streaming
+    path already produces via ``stream_error_details`` — neither is an
+    ``httpx.HTTPStatusError``, so a bare ``except httpx.HTTPStatusError``
+    around the non-streaming ``forward_request`` call lets both escape
+    uncaught into main.py's generic ``Exception`` handler: a 500 with
+    ``code`` set to the raw Python exception class name, no ``Retry-After``,
+    and no match to any documented status (confirmed 2026-10-31 — both are
+    transient and should look like it).
+    """
+    from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+
+    if isinstance(exc, InferenceTimeoutError):
+        raise _openai_error(
+            str(exc),
+            "server_error",
+            code="generation_timeout",
+            status_code=504,
+            headers={"Retry-After": "5"},
+        ) from exc
+    if isinstance(exc, WorkerDegradedError):
+        from ocabra.config import settings
+
+        raise _openai_error(
+            str(exc),
+            "server_error",
+            code="worker_degraded",
+            status_code=503,
+            headers={"Retry-After": str(settings.worker_circuit_breaker_cooldown_s)},
+        ) from exc
+    raise exc
 
 
 def stream_error_details(exc: Exception) -> tuple[str, str]:
