@@ -985,10 +985,31 @@ async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
     # model from the UI left tens of GB of orphaned blobs in (2)/(3) — the
     # dashboard would report the model gone while ``df`` insisted the
     # disk was full. Now we clean up whichever locations exist.
+    #
+    # 2026-11-01: a single-GGUF-file model_id (llama.cpp registry entries
+    # for a repo with multiple quants, e.g.
+    # ``llama_cpp/Qwen/Qwen2.5-0.5B-Instruct-GGUF::qwen2.5-0.5b-instruct-
+    # q4_k_m``) embeds a SECOND separator, ``::``, between the repo and the
+    # specific artifact stem — distinct from the ``/`` the code above
+    # already handled. The download manager
+    # (api/internal/downloads.py — ``f"{model_ref.replace('/','--')}--
+    # {stem}"``) writes the directory with BOTH separators flattened to
+    # ``--``, but this function only flattened ``/``, so the computed
+    # candidate path for ``models_dir/huggingface/`` kept a literal ``::``
+    # that never matched the real directory on disk — ``candidate.exists()``
+    # silently failed and the GGUF (and its hf_cache metadata) was never
+    # deleted. Confirmed live: ~5.5 GB left behind across 2 deleted models
+    # after the API returned 200 OK for both. The hf_cache entries for a
+    # single-GGUF-file download are also keyed by repo ALONE (no artifact
+    # stem — one hub cache dir is shared by every quant of that repo), so
+    # that candidate needs the repo-only variant, not the full name.
     parts = model_id.split("/", 1)
     raw_model = parts[1] if len(parts) == 2 else model_id
-    hf_dir_name = raw_model.replace("/", "--")
+    repo_part, _, artifact_part = raw_model.partition("::")
+    hf_dir_name = raw_model.replace("::", "--").replace("/", "--")
+    hf_repo_dir_name = repo_part.replace("/", "--")
     hub_dir_name = f"models--{hf_dir_name}"
+    hub_repo_dir_name = f"models--{hf_repo_dir_name}"
     models_dir = Path(settings.models_dir or "/data/models")
     hf_cache_dir = Path(settings.hf_cache_dir or "/data/hf_cache")
 
@@ -999,6 +1020,13 @@ async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
         (hf_cache_dir / "hub" / hub_dir_name, hf_cache_dir / "hub"),
         (hf_cache_dir / hub_dir_name, hf_cache_dir),
     ]
+    if artifact_part:
+        candidates.extend(
+            [
+                (hf_cache_dir / "hub" / hub_repo_dir_name, hf_cache_dir / "hub"),
+                (hf_cache_dir / hub_repo_dir_name, hf_cache_dir),
+            ]
+        )
     for candidate, base in candidates:
         if not candidate.exists():
             continue

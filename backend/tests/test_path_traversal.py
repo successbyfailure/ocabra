@@ -233,6 +233,47 @@ class TestDeleteModelFiles:
         assert not hub_model.exists()
         assert not legacy_model.exists()
 
+    @pytest.mark.asyncio
+    async def test_single_gguf_artifact_model_id_is_fully_deleted(self, tmp_path, monkeypatch):
+        """2026-11-01: a llama.cpp registry entry for one specific GGUF file
+        inside a multi-quant repo encodes the artifact as
+        ``<repo>::<artifact-stem>`` (see api/internal/downloads.py, which
+        writes the download dir as repo and stem both flattened to ``--``).
+        The deletion path used to flatten only ``/``, leaving a literal
+        ``::`` in the computed candidate — it never matched the real
+        directory, so the GGUF (several GB) was silently left behind while
+        the API still returned 200 OK. Also covers the hf_cache entry,
+        which is keyed by repo alone (shared across every quant of that
+        repo), not by the full repo+stem name.
+        """
+        from ocabra.api.internal import models as models_mod
+
+        models_dir = tmp_path / "models"
+        gguf_dir = (
+            models_dir
+            / "huggingface"
+            / "Qwen--Qwen2.5-0.5B-Instruct-GGUF--qwen2.5-0.5b-instruct-q4_k_m"
+        )
+        gguf_dir.mkdir(parents=True)
+        (gguf_dir / "qwen2.5-0.5b-instruct-q4_k_m.gguf").write_text("x" * 1024)
+
+        hf_cache = tmp_path / "hf_cache"
+        hub_repo_dir = hf_cache / "hub" / "models--Qwen--Qwen2.5-0.5B-Instruct-GGUF"
+        hub_repo_dir.mkdir(parents=True)
+        (hub_repo_dir / "refs").write_text("main")
+
+        monkeypatch.setattr(models_mod.settings, "models_dir", str(models_dir))
+        monkeypatch.setattr(models_mod.settings, "hf_cache_dir", str(hf_cache))
+
+        result = await _delete_model_files(
+            "llama_cpp/Qwen/Qwen2.5-0.5B-Instruct-GGUF::qwen2.5-0.5b-instruct-q4_k_m",
+            "llama_cpp",
+        )
+
+        assert result is not None
+        assert not gguf_dir.exists()
+        assert not hub_repo_dir.exists()
+
 
 # ── TRT-LLM engine deletion path traversal ───────────────────────
 
