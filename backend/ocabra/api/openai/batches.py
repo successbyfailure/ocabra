@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,9 +79,66 @@ _IMAGE_EDIT_FILE_FIELDS = (
 
 class BatchCreateBody(BaseModel):
     input_file_id: str
-    endpoint: str
-    completion_window: str = "24h"
+    endpoint: str = Field(..., json_schema_extra={"enum": sorted(ALLOWED_ENDPOINTS)})
+    completion_window: str = Field("24h", json_schema_extra={"enum": ["24h"]})
     metadata: dict[str, Any] | None = None
+
+
+class TranscriptionBatchLineBody(BaseModel):
+    """Shape of ``body`` in a ``/v1/audio/transcriptions`` batch line.
+
+    Documentation-only (used for OpenAPI + line-shape validation, not as a
+    FastAPI request param): the real endpoint takes multipart/form-data, so
+    this describes the oCabra file_id-reference extension instead — see
+    ``_BATCH_INPUT_AUDIO_PURPOSE`` above.
+    """
+
+    file_id: str = Field(
+        ..., description="file-<uuid> uploaded via POST /v1/files with purpose='batch_input_audio'"
+    )
+    model: str = Field(..., description="Whisper profile_id")
+    language: str | None = None
+    prompt: str | None = None
+    response_format: str | None = Field(
+        None, json_schema_extra={"enum": ["json", "text", "srt", "vtt", "verbose_json"]}
+    )
+    temperature: float | None = None
+    diarize: bool | None = None
+    timestamp_granularities: list[str] | None = None
+    vad_filter: bool | None = None
+    condition_on_previous_text: bool | None = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ImageEditsBatchLineBody(BaseModel):
+    """Shape of ``body`` in a ``/v1/images/edits`` batch line.
+
+    Documentation-only, same rationale as ``TranscriptionBatchLineBody`` —
+    describes the oCabra file_id-reference extension (see
+    ``_BATCH_INPUT_IMAGE_PURPOSE`` / ``_IMAGE_EDIT_FILE_FIELDS`` above), not
+    the real multipart endpoint.
+    """
+
+    image_file_id: str = Field(
+        ..., description="file-<uuid> uploaded via POST /v1/files with purpose='batch_input_image'"
+    )
+    mask_file_id: str | None = Field(None, description="Same purpose as image_file_id")
+    image_ref_1_file_id: str | None = None
+    image_ref_2_file_id: str | None = None
+    image_ref_3_file_id: str | None = None
+    model: str = Field(..., description="Profile ID del modelo de edicion de imagen")
+    prompt: str = Field(..., description="Descripcion de la edicion")
+    response_format: str | None = Field(None, json_schema_extra={"enum": ["b64_json", "url"]})
+    n: int | None = None
+    size: str | None = None
+    negative_prompt: str | None = None
+    num_inference_steps: int | None = None
+    guidance_scale: float | None = None
+    strength: float | None = None
+    seed: int | None = None
+
+    model_config = ConfigDict(extra="allow")
 
 
 def _is_manager_or_admin(user: UserContext) -> bool:
@@ -125,6 +182,27 @@ async def _resolve_owned_batch_file(
     return file
 
 
+def _line_body_shape_errors(
+    model_cls: type[BaseModel], line_body: dict[str, Any], *, skip_fields: set[str]
+) -> list[dict[str, Any]]:
+    """Validate a batch line's ``body`` against its documented Pydantic
+    shape (``TranscriptionBatchLineBody``/``ImageEditsBatchLineBody``),
+    skipping fields that already get a friendlier file_id-specific error
+    from the caller (``missing_file_id``/``invalid_file_id``) so the same
+    problem isn't reported twice under two different codes."""
+    try:
+        model_cls.model_validate(line_body)
+    except ValidationError as exc:
+        errors = []
+        for err in exc.errors():
+            field = str(err["loc"][0]) if err["loc"] else "body"
+            if field in skip_fields:
+                continue
+            errors.append({"code": "invalid_body", "message": f"body.{field}: {err['msg']}"})
+        return errors
+    return []
+
+
 def _strip_id(prefixed: str, prefix: str) -> uuid.UUID:
     raw = prefixed[len(prefix):] if prefixed.startswith(prefix) else prefixed
     try:
@@ -142,7 +220,15 @@ async def create_batch(
     user: Annotated[UserContext, Depends(get_openai_user)],
     request: Request,
 ) -> dict:
-    """Create a new batch job from an uploaded JSONL file."""
+    """Create a new batch job from an uploaded JSONL file.
+
+    Each line's ``body`` is forwarded verbatim to ``endpoint``, except for
+    the two oCabra file_id-reference extensions documented as their own
+    schemas (see the Schemas section of this page): ``endpoint=
+    "/v1/audio/transcriptions"`` lines must match
+    ``TranscriptionBatchLineBody`` and ``endpoint="/v1/images/edits"`` lines
+    must match ``ImageEditsBatchLineBody``.
+    """
     if user.is_anonymous or user.user_id is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -218,6 +304,10 @@ async def create_batch(
                     continue
                 if body.endpoint == "/v1/audio/transcriptions":
                     line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
+                    for shape_err in _line_body_shape_errors(
+                        TranscriptionBatchLineBody, line_body, skip_fields={"file_id"}
+                    ):
+                        validation_errors.append({"line": line_no, **shape_err})
                     audio_file_id = line_body.get("file_id")
                     if not audio_file_id:
                         validation_errors.append({
@@ -242,6 +332,10 @@ async def create_batch(
                         })
                 elif body.endpoint == "/v1/images/edits":
                     line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
+                    for shape_err in _line_body_shape_errors(
+                        ImageEditsBatchLineBody, line_body, skip_fields={"image_file_id"}
+                    ):
+                        validation_errors.append({"line": line_no, **shape_err})
                     image_file_id = line_body.get("image_file_id")
                     if not image_file_id:
                         validation_errors.append({

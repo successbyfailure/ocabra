@@ -420,6 +420,16 @@ Endpoints soportados dentro de un lote: `/v1/chat/completions`,
 `/v1/audio/generate` (música). `completion_window` solo admite `"24h"` por
 ahora.
 
+Esta lista no es solo prosa: `endpoint` (y `purpose` de `POST /v1/files`)
+llevan un `enum` real en el schema OpenAPI servido en `/docs`, así que
+Swagger, SDKs generados y validadores pueden descubrir y comprobar los
+valores válidos sin leer esta página. El `body` de las líneas de
+transcripción/edición de imagen también tiene schema propio
+(`TranscriptionBatchLineBody` / `ImageEditsBatchLineBody`, visibles en la
+sección "Schemas" de `/docs`), y `POST /v1/batches` valida cada línea
+contra ellos al crear el lote (tipos, campos requeridos), no solo la
+presencia del `file_id`.
+
 Para `/v1/pooling`, `/v1/score`, `/v1/rerank` y `/v1/classify` el `body` de
 cada línea es exactamente el mismo JSON que mandarías contra el endpoint
 real — no necesitan ninguna extensión, a diferencia de las transcripciones.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Chat Completions ────────────────────────────────────────────
@@ -216,11 +216,63 @@ class RerankRequest(BaseModel):
     top_n: int | None = Field(None, description="Numero de resultados a retornar")
 
 
+# ── Pooling / Score / Classify ──────────────────────────────────
+
+
+class PoolingRequest(BaseModel):
+    model: str = Field(..., description="Profile ID del modelo con soporte pooling")
+    input: str | list[str] | None = Field(
+        None,
+        description="Texto(s) de entrada. El resto del body se reenvia verbatim al backend.",
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ScoreRequest(BaseModel):
+    model: str = Field(..., description="Profile ID del modelo de scoring/similaridad")
+    queries: str | list[str] = Field(
+        ..., description="Query(s). Acepta tambien los alias 'query' o 'text_1'."
+    )
+    documents: str | list[str] = Field(
+        ...,
+        description=(
+            "Documento(s) emparejados con 'queries'. Acepta tambien 'document' o "
+            "'text_2'. Si ambos son listas, deben tener la misma longitud."
+        ),
+    )
+
+
+class ClassifyRequest(BaseModel):
+    model: str = Field(..., description="Profile ID del modelo de clasificacion")
+    input: str | list[str] = Field(..., description="Texto(s) a clasificar")
+
+
 # ── Music ───────────────────────────────────────────────────────
 
 
 class MusicGenerationRequest(BaseModel):
-    model: str = Field(..., description="Profile ID del modelo de musica")
+    model: str = Field(..., description="Profile ID del modelo de musica (ACE-Step)")
     prompt: str = Field(..., description="Descripcion de la musica a generar")
-    duration_seconds: int = Field(30, description="Duracion en segundos")
     lyrics: str | None = Field(None, description="Letra de la cancion (opcional)")
+    audio_duration: int | None = Field(
+        None, description="Duracion en segundos (10-600, default segun el modelo)"
+    )
+    bpm: int | None = Field(None, description="Tempo en BPM (30-300)")
+    key_scale: str | None = Field(None, description="Tonalidad, p.ej. 'C Major'", examples=["C Major"])
+    time_signature: str | None = Field(None, description="Compas, p.ej. '4'", examples=["4"])
+    inference_steps: int | None = Field(
+        None, description="Pasos de difusion (default 8 en el modelo turbo)"
+    )
+    thinking: bool | None = Field(
+        None, description="Planificacion de la cancion asistida por LM (default false)"
+    )
+    vocal_language: str | None = Field(
+        None, description="Idioma de la letra, p.ej. 'en'/'es' (default 'en')"
+    )
+    seed: int | None = Field(None, description="Semilla; -1 para aleatoria")
+    response_format: str | None = Field(
+        None,
+        json_schema_extra={"enum": ["mp3", "wav", "flac"]},
+        description="Formato de audio de salida (default 'mp3')",
+    )

@@ -959,13 +959,17 @@ def _custom_openapi():
 
     from ocabra.api.openai._schemas import (
         ChatCompletionRequest,
+        ClassifyRequest,
         CompletionRequest,
         EmbeddingRequest,
         ImageGenerationRequest,
         MusicGenerationRequest,
+        PoolingRequest,
         RerankRequest,
+        ScoreRequest,
         SpeechRequest,
     )
+    from ocabra.api.openai.batches import ImageEditsBatchLineBody, TranscriptionBatchLineBody
 
     # Inject Pydantic schemas into components
     schemas = schema.setdefault("components", {}).setdefault("schemas", {})
@@ -976,7 +980,17 @@ def _custom_openapi():
         SpeechRequest,
         ImageGenerationRequest,
         RerankRequest,
+        PoolingRequest,
+        ScoreRequest,
+        ClassifyRequest,
         MusicGenerationRequest,
+        # Not wired to any requestBody below — these describe the shape of
+        # a line's "body" inside a Batches JSONL input file, which isn't
+        # itself part of any HTTP request schema. Injected here purely so
+        # they're discoverable in the Swagger "Schemas" section instead of
+        # living only in prose (see POST /v1/batches' description).
+        TranscriptionBatchLineBody,
+        ImageEditsBatchLineBody,
     ):
         schemas[model_cls.__name__] = model_cls.model_json_schema(
             ref_template="#/components/schemas/{model}"
@@ -990,6 +1004,9 @@ def _custom_openapi():
         "/v1/audio/speech": "SpeechRequest",
         "/v1/images/generations": "ImageGenerationRequest",
         "/v1/rerank": "RerankRequest",
+        "/v1/pooling": "PoolingRequest",
+        "/v1/score": "ScoreRequest",
+        "/v1/classify": "ClassifyRequest",
         "/v1/audio/generate": "MusicGenerationRequest",
     }
 
@@ -1029,6 +1046,41 @@ def _custom_openapi():
                                 "diarize": {"type": "boolean", "description": "Diarización de hablantes (perfiles -diarized)."},
                                 "vad_filter": {"type": "boolean", "default": True, "description": "Descarta tramos sin voz (VAD) antes de transcribir."},
                                 "condition_on_previous_text": {"type": "boolean", "default": False, "description": "Evita que un bucle de alucinación se propague vía el contexto del decoder."},
+                            },
+                        }
+                    }
+                },
+            }
+
+    # Same reasoning as transcriptions above: /v1/images/edits is
+    # multipart/form-data (read via request.form), not auto-generated.
+    edit_methods = schema.get("paths", {}).get("/v1/images/edits", {})
+    for method_info in edit_methods.values():
+        if isinstance(method_info, dict) and "summary" in method_info:
+            method_info["requestBody"] = {
+                "required": True,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["image", "model", "prompt"],
+                            "properties": {
+                                "image": {"type": "string", "format": "binary", "description": "Imagen base PNG a editar."},
+                                "mask": {"type": "string", "format": "binary", "description": "PNG opcional; pixeles transparentes marcan el area a repintar. Sin mask, edicion img2img sobre la imagen completa."},
+                                "image_ref_1": {"type": "string", "format": "binary", "description": "Imagen de referencia extra opcional (pipelines multi-imagen, hasta 3)."},
+                                "image_ref_2": {"type": "string", "format": "binary"},
+                                "image_ref_3": {"type": "string", "format": "binary"},
+                                "model": {"type": "string", "description": "Profile ID del modelo de edicion."},
+                                "prompt": {"type": "string", "description": "Descripcion de la edicion."},
+                                "response_format": {"type": "string", "enum": ["b64_json", "url"], "default": "b64_json"},
+                                "n": {"type": "integer", "default": 1},
+                                "size": {"type": "string"},
+                                "negative_prompt": {"type": "string"},
+                                "num_inference_steps": {"type": "integer"},
+                                "guidance_scale": {"type": "number"},
+                                "strength": {"type": "number"},
+                                "seed": {"type": "integer"},
+                                "user": {"type": "string"},
                             },
                         }
                     }

@@ -62,7 +62,7 @@ def _ensure_storage_dir() -> Path:
 async def upload_file(
     user: Annotated[UserContext, Depends(get_openai_user)],
     file: UploadFile = File(...),
-    purpose: str = Form(...),
+    purpose: str = Form(..., json_schema_extra={"enum": sorted(VALID_PURPOSES)}),
 ) -> dict:
     """Upload a file. Required ``purpose=batch`` for use as Batches input."""
     if purpose not in VALID_PURPOSES:
