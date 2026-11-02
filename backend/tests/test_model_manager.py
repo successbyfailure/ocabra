@@ -1037,6 +1037,49 @@ async def test_pressure_eviction_skips_wrong_gpu_and_cpu_only_candidates(worker_
 
 
 @pytest.mark.asyncio
+async def test_pressure_eviction_falls_back_to_other_gpu_pool(worker_pool):
+    """2026-11-02 live report: a model merely *preferring* GPU0 (not
+    restricted to it — find_gpu_for_model already falls back across GPUs
+    when one has free room) failed outright because GPU0 had nothing
+    evictable while GPU1 held a soft-pin neighbour that would have freed
+    plenty of room. preferred_gpu must only order which GPU's resident
+    models are tried first for eviction, not strand the load on a GPU
+    with no candidates — it still never evicts on GPU A hoping to free
+    GPU B (each pool pass stays scoped to one GPU at a time)."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states.return_value = [
+        SimpleNamespace(index=0),
+        SimpleNamespace(index=1),
+    ]
+    gpu_manager.get_free_vram = AsyncMock(return_value=400)
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model = AsyncMock(side_effect=[InsufficientVRAMError("full"), [1]])
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+
+    requested = await add_test_model(mm, model_id="test/embedding")
+    requested.preferred_gpu = 0
+
+    other_gpu_pin = await add_test_model(mm, model_id="test/pinned-llm", load_policy="pin")
+    other_gpu_pin.status = ModelStatus.LOADED
+    other_gpu_pin.current_gpu = [1]
+    other_gpu_pin.vram_used_mb = 22_000
+    other_gpu_pin.loaded_at = datetime.now(timezone.utc) - timedelta(hours=2)
+
+    with patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
+        gpu_indices = await mm._assign_gpus_for_load(
+            "test/embedding",
+            vram_needed=7740,
+            preferred_gpu=0,
+            enforce_vllm_headroom=False,
+        )
+
+    assert gpu_indices == [1]
+    unload_mock.assert_awaited_once_with("test/pinned-llm", reason="pressure")
+
+
+@pytest.mark.asyncio
 async def test_update_config_rejects_unsupported_fields(model_manager):
     await add_test_model(model_manager)
 
