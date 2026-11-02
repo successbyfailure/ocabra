@@ -79,7 +79,7 @@ describe("ModelGridCard runtime controls", () => {
     const { onCancelLoad } = renderCard(model())
 
     expect(screen.getByText("Ampliando")).toBeTruthy()
-    expect(screen.getByText("4")).toBeTruthy()
+    expect(screen.getByText((text) => text.includes("4 slots"))).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: /Cancelar carga/i }))
     expect(onCancelLoad).toHaveBeenCalledWith("llama_cpp/chaos")
   })

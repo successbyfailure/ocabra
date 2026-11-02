@@ -1,7 +1,7 @@
 {
   "name": "ocabra-frontend",
   "private": true,
-  "version": "0.22.15",
+  "version": "0.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -30,6 +30,7 @@
     "react-router-dom": "^6.28.0",
     "recharts": "^2.14.1",
     "rehype-highlight": "^7.0.1",
+    "simple-icons": "^16.36.0",
     "sonner": "^1.7.1",
     "tailwind-merge": "^2.6.0",
     "zustand": "^5.0.2"

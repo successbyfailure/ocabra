@@ -21,6 +21,7 @@ import {
 import { CapabilityBadge } from "@/components/common/CapabilityBadge"
 import { BackendBadge } from "@/components/models/BackendBadge"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
+import { ModelIcon } from "@/components/models/ModelIcon"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import { CATEGORY_COLORS } from "@/components/models/ProfileModal"
 import { formatTokenCount, getModelContextSummary, getVllmConfig, type ModelCategory } from "@/lib/modelContext"
@@ -92,15 +93,6 @@ function CategoryPill({ category }: { category: ProfileCategory }) {
   )
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="truncate text-sm text-foreground">{value}</div>
-      <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">{label}</div>
-    </div>
-  )
-}
-
 export function ModelGridCard({
   model,
   category,
@@ -134,35 +126,53 @@ export function ModelGridCard({
     : model.currentGpu.length > 0
       ? model.currentGpu.join(", ")
       : (model.preferredGpu ?? null)
+  const statLine = [
+    gpuLabel != null ? `GPU ${gpuLabel}` : null,
+    isCpuOnly ? `${model.ramUsedMb.toLocaleString()} MB RAM` : `${model.vramUsedMb.toLocaleString()} MB VRAM`,
+    `${model.runtimeSlots ?? 1} slots`,
+    category === "chat"
+      ? `${formatTokenCount(context.configuredContext)} ctx (${formatTokenCount(context.nativeContext)} nativo)`
+      : formatDiskSize(model.diskSizeBytes),
+  ]
+    .filter(Boolean)
+    .join(" · ")
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-primary/40">
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className={`truncate font-medium${model.federation?.remote ? " opacity-75" : ""}`}>
-              {profileCount > 1 ? model.modelId : model.displayName}
-            </span>
-            {model.federation?.remote && (
-              <Tooltip.Root>
-                <Tooltip.Trigger asChild>
-                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-medium text-violet-200">
-                    <Share2 size={9} />
-                    Remote
-                  </span>
-                </Tooltip.Trigger>
-                <Tooltip.Portal>
-                  <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md" sideOffset={4}>
-                    Modelo federado desde nodo: {model.federation.nodeName || model.federation.nodeId}
-                    <Tooltip.Arrow className="fill-border" />
-                  </Tooltip.Content>
-                </Tooltip.Portal>
-              </Tooltip.Root>
-            )}
-          </div>
-          <div className="truncate text-xs text-muted-foreground">
-            {profileCount > 1 ? `${profileCount} perfiles` : model.modelId}
+        <div className="flex min-w-0 items-start gap-2">
+          <ModelIcon
+            modelId={model.modelId}
+            displayName={model.displayName}
+            backendType={model.backendType}
+            size={28}
+          />
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className={`truncate font-medium${model.federation?.remote ? " opacity-75" : ""}`}>
+                {profileCount > 1 ? model.modelId : model.displayName}
+              </span>
+              {model.federation?.remote && (
+                <Tooltip.Root>
+                  <Tooltip.Trigger asChild>
+                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-medium text-violet-200">
+                      <Share2 size={9} />
+                      Remote
+                    </span>
+                  </Tooltip.Trigger>
+                  <Tooltip.Portal>
+                    <Tooltip.Content className="z-50 rounded-md border border-border bg-popover px-3 py-1.5 text-xs shadow-md" sideOffset={4}>
+                      Modelo federado desde nodo: {model.federation.nodeName || model.federation.nodeId}
+                      <Tooltip.Arrow className="fill-border" />
+                    </Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              )}
+            </div>
+            <div className="truncate text-xs text-muted-foreground">
+              {profileCount > 1 ? `${profileCount} perfiles` : model.modelId}
+            </div>
           </div>
         </div>
         <ModelStatusBadge status={model.runtimePhase ?? model.status} />
@@ -180,23 +190,9 @@ export function ModelGridCard({
         {model.capabilities.videoInput && <CapabilityBadge capability="videoInput" />}
       </div>
 
-      {/* Stats grid */}
-      <div className="grid grid-cols-2 gap-x-3 gap-y-2 rounded-md bg-muted/30 p-2.5">
-        <Stat label="GPU" value={gpuLabel != null ? String(gpuLabel) : "-"} />
-        {isCpuOnly ? (
-          <Stat label="RAM" value={`${model.ramUsedMb.toLocaleString()} MB`} />
-        ) : (
-          <Stat label="VRAM" value={`${model.vramUsedMb.toLocaleString()} MB`} />
-        )}
-        <Stat label="Slots" value={String(model.runtimeSlots ?? 1)} />
-        {category === "chat" ? (
-          <>
-            <Stat label="Ctx nativo" value={formatTokenCount(context.nativeContext)} />
-            <Stat label="Ctx config" value={formatTokenCount(context.configuredContext)} />
-          </>
-        ) : (
-          <Stat label="Tamaño" value={formatDiskSize(model.diskSizeBytes)} />
-        )}
+      {/* Stats line */}
+      <div className="truncate rounded-md bg-muted/30 px-2.5 py-1.5 text-xs text-foreground" title={statLine}>
+        {statLine}
       </div>
 
       {errorHint && (
