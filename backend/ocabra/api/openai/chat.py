@@ -227,6 +227,10 @@ async def chat_completions(
 
     _content_kinds = _detect_message_content_kinds(body.get("messages") or [])
     worker_pool = request.app.state.worker_pool
+    runtime_telemetry = getattr(request.state, "runtime_telemetry", None)
+    telemetry_admission = (
+        {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
+    )
 
     # Streaming path: pre-flush response headers (including
     # ``X-Ocabra-Expected-Wait-Seconds``) *before* triggering the load, so
@@ -299,6 +303,7 @@ async def chat_completions(
                     body=body,
                     content_kinds=_content_kinds,
                     user_key=fairness_user_key(user),
+                    telemetry=runtime_telemetry,
                 ),
                 media_type="text/event-stream",
                 headers=headers,
@@ -366,6 +371,7 @@ async def chat_completions(
                     is_batch,
                     kv_capacity,
                     kv_tokens,
+                    runtime_telemetry,
                 ),
                 media_type="text/event-stream",
                 headers=stream_headers,
@@ -377,6 +383,7 @@ async def chat_completions(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **telemetry_admission,
             **kv_admission,
         )
         first_chunk, first_exc = await _peek_first_chunk(gen)
@@ -407,6 +414,7 @@ async def chat_completions(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **telemetry_admission,
             **kv_admission,
         )
     except httpx.HTTPStatusError as exc:
@@ -449,6 +457,7 @@ async def _stream_chat_queued(
     is_batch: bool,
     kv_capacity_tokens: int | None,
     kv_tokens: int,
+    telemetry=None,
 ) -> AsyncIterator[bytes]:
     """Fallback used only when the fair-share queue is already saturated
     (see ``chat_completions``) — the "you're queued" heads-up has to go
@@ -482,6 +491,7 @@ async def _stream_chat_queued(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
             **(
                 {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
                 if kv_capacity_tokens is not None
@@ -566,6 +576,7 @@ async def _stream_chat_with_load(
     body: dict,
     content_kinds: set[str],
     user_key: str | None = None,
+    telemetry=None,
 ):
     """SSE generator that triggers the model load lazily.
 
@@ -633,6 +644,8 @@ async def _stream_chat_with_load(
     state = load_task.result()
 
     load_duration_ms = int((time.monotonic() - load_started_at) * 1000)
+    if telemetry is not None:
+        telemetry.mark_load(load_duration_ms)
     yield sse_ocabra_event(
         "model_ready",
         model_id=state.model_id,
@@ -696,6 +709,7 @@ async def _stream_chat_with_load(
             backend_body,
             user_key=user_key,
             slots=slots,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
             **kv_admission,
         ):
             yield chunk

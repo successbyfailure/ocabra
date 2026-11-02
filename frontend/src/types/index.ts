@@ -777,6 +777,18 @@ export interface RecentRequest {
   queuePosition?: number;
   slots?: number;
   queueWaitEstimateMs?: number | null;
+  runtimeTelemetry?: {
+    prompt_tokens_estimate?: number;
+    kv_tokens_reserved?: number;
+    queue_ms?: number;
+    load_ms?: number;
+    ttft_ms?: number;
+    prefill_ms?: number;
+    slot_id?: number;
+    physical_slots?: number;
+    admission_limit?: number;
+    admission_concurrency?: number;
+  } | null;
 }
 
 export interface RecentRequestsData {
@@ -1288,7 +1300,13 @@ export type BatchEndpoint =
   | "/v1/completions"
   | "/v1/images/generations"
   | "/v1/audio/speech"
-  | "/v1/audio/transcriptions";
+  | "/v1/audio/transcriptions"
+  | "/v1/audio/generate"
+  | "/v1/pooling"
+  | "/v1/score"
+  | "/v1/rerank"
+  | "/v1/classify"
+  | "/v1/images/edits";
 
 export type BatchStatus =
   | "validating"

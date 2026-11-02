@@ -30,6 +30,7 @@ worker key for backends/models that need a different process.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -49,11 +50,24 @@ class KVCapacityError(ValueError):
 
 @dataclass
 class _Waiter:
-    future: asyncio.Future[None]
+    future: asyncio.Future[AdmissionTelemetry]
     user_key: str
     is_batch: bool
     kv_tokens: int
+    prompt_tokens: int
+    admission_limit: int
+    queued_at: float
     granted: bool = False
+
+
+@dataclass(frozen=True)
+class AdmissionTelemetry:
+    """Facts captured atomically when the gate grants a request."""
+
+    queue_ms: int
+    physical_slots: int
+    admission_limit: int
+    admission_concurrency: int
 
 
 class FairSlotGate:
@@ -69,7 +83,16 @@ class FairSlotGate:
     arrived in between.
     """
 
-    def __init__(self, slots: int, kv_capacity_tokens: int | None = None) -> None:
+    def __init__(
+        self,
+        slots: int,
+        kv_capacity_tokens: int | None = None,
+        *,
+        medium_prefill_tokens: int | None = None,
+        medium_prefill_max_concurrency: int | None = None,
+        large_prefill_tokens: int | None = None,
+        large_prefill_max_concurrency: int | None = None,
+    ) -> None:
         self.slots = max(1, int(slots))
         self.kv_capacity_tokens = (
             None if kv_capacity_tokens is None else max(0, int(kv_capacity_tokens))
@@ -82,6 +105,15 @@ class FairSlotGate:
         # slot is held, and all of them are batch" from "every slot is held
         # by real interactive traffic" without walking a task registry.
         self._in_flight_batch = 0
+        self.medium_prefill_tokens = self._positive_or_none(medium_prefill_tokens)
+        self.medium_prefill_max_concurrency = self._bounded_limit(
+            medium_prefill_max_concurrency
+        )
+        self.large_prefill_tokens = self._positive_or_none(large_prefill_tokens)
+        self.large_prefill_max_concurrency = self._bounded_limit(
+            large_prefill_max_concurrency
+        )
+        self._admission_limits_in_flight: dict[int, int] = {}
         # user_key -> queue of not-yet-granted waiters for that user.
         self._queues: dict[str, deque[_Waiter]] = {}
         # Dispatch priority key per user_key: (batch_tier, served_tier, seq).
@@ -98,6 +130,34 @@ class FairSlotGate:
         self._last_served: dict[str, int] = {}
         self._seq = 0
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _positive_or_none(value: int | None) -> int | None:
+        if value is None:
+            return None
+        normalized = int(value)
+        return normalized if normalized > 0 else None
+
+    def _bounded_limit(self, value: int | None) -> int:
+        if value is None:
+            return self.slots
+        return min(self.slots, max(1, int(value)))
+
+    def _admission_limit_for(self, prompt_tokens: int) -> int:
+        prompt_tokens = max(0, int(prompt_tokens))
+        if self.large_prefill_tokens is not None and prompt_tokens >= self.large_prefill_tokens:
+            return self.large_prefill_max_concurrency
+        if self.medium_prefill_tokens is not None and prompt_tokens >= self.medium_prefill_tokens:
+            return self.medium_prefill_max_concurrency
+        return self.slots
+
+    def _active_admission_limit(self) -> int:
+        active = [limit for limit, count in self._admission_limits_in_flight.items() if count > 0]
+        return min(active, default=self.slots)
+
+    def _fits_compute(self, admission_limit: int) -> bool:
+        effective_limit = min(self.slots, admission_limit, self._active_admission_limit())
+        return self._in_flight < effective_limit
 
     def _priority_key(self, user_key: str, *, is_batch: bool) -> tuple[int, int, int]:
         batch_tier = 1 if is_batch else 0
@@ -124,7 +184,7 @@ class FairSlotGate:
         """
         return self._in_flight >= self.slots and self._in_flight_batch >= self._in_flight
 
-    def batch_blocks(self, kv_tokens: int = 0) -> bool:
+    def batch_blocks(self, kv_tokens: int = 0, prompt_tokens: int = 0) -> bool:
         """Whether running batch work prevents this interactive admission.
 
         A weighted pool can be saturated before every physical slot is in use,
@@ -135,19 +195,31 @@ class FairSlotGate:
         if self.batch_holds_all_slots():
             return True
         requested = max(0, int(kv_tokens))
-        return (
+        kv_blocked = (
             requested > 0 and not self._fits_kv(requested) and self._kv_tokens_in_flight_batch > 0
         )
+        compute_blocked = (
+            not self._fits_compute(self._admission_limit_for(prompt_tokens))
+            and self._in_flight_batch > 0
+        )
+        return kv_blocked or compute_blocked
+
+    def compute_saturated(self, prompt_tokens: int = 0) -> bool:
+        """Whether a candidate prompt is blocked by adaptive admission."""
+        return not self._fits_compute(self._admission_limit_for(prompt_tokens))
 
     def snapshot(self) -> dict[str, int | bool | None]:
         """Return logical admission state without exposing mutable internals."""
         capacity = self.kv_capacity_tokens
         free = None if capacity is None else max(0, capacity - self._kv_tokens_in_flight)
+        active_limit = self._active_admission_limit()
         return {
             "in_flight": self._in_flight,
             "queued": sum(len(queue) for queue in self._queues.values()),
             "slots": self.slots,
             "slot_saturated": self._in_flight >= self.slots,
+            "admission_limit": active_limit,
+            "compute_saturated": self._in_flight >= active_limit,
             "kv_capacity_tokens": capacity,
             "kv_reserved_tokens": self._kv_tokens_in_flight,
             "kv_free_tokens": free,
@@ -169,7 +241,8 @@ class FairSlotGate:
         *,
         is_batch: bool = False,
         kv_tokens: int = 0,
-    ) -> None:
+        prompt_tokens: int = 0,
+    ) -> AdmissionTelemetry:
         kv_tokens = max(0, int(kv_tokens))
         if self.kv_capacity_tokens is not None and kv_tokens > self.kv_capacity_tokens:
             raise KVCapacityError(kv_tokens, self.kv_capacity_tokens)
@@ -180,6 +253,9 @@ class FairSlotGate:
             user_key=user_key,
             is_batch=is_batch,
             kv_tokens=kv_tokens,
+            prompt_tokens=max(0, int(prompt_tokens)),
+            admission_limit=self._admission_limit_for(prompt_tokens),
+            queued_at=time.monotonic(),
         )
         async with self._lock:
             if user_key not in self._first_seen:
@@ -189,7 +265,7 @@ class FairSlotGate:
             queue.append(waiter)
             self._dispatch_locked()
         try:
-            await waiter.future
+            return await waiter.future
         except asyncio.CancelledError:
             # The caller gave up before being granted a slot (e.g. client
             # disconnected while queued) — drop our own future from the
@@ -199,7 +275,9 @@ class FairSlotGate:
             # don't leak it.
             async with self._lock:
                 if waiter.granted:
-                    self._release_locked(waiter.is_batch, waiter.kv_tokens)
+                    self._release_locked(
+                        waiter.is_batch, waiter.kv_tokens, waiter.admission_limit
+                    )
                     self._dispatch_locked()
                 else:
                     queue = self._queues.get(user_key)
@@ -227,7 +305,9 @@ class FairSlotGate:
             candidates = [
                 user_key
                 for user_key, queue in self._queues.items()
-                if queue and self._fits_kv(queue[0].kv_tokens)
+                if queue
+                and self._fits_kv(queue[0].kv_tokens)
+                and self._fits_compute(queue[0].admission_limit)
             ]
             if not candidates:
                 break
@@ -246,29 +326,56 @@ class FairSlotGate:
             self._seq += 1
             self._in_flight += 1
             self._kv_tokens_in_flight += waiter.kv_tokens
+            self._admission_limits_in_flight[waiter.admission_limit] = (
+                self._admission_limits_in_flight.get(waiter.admission_limit, 0) + 1
+            )
             waiter.granted = True
             if waiter.is_batch:
                 self._in_flight_batch += 1
                 self._kv_tokens_in_flight_batch += waiter.kv_tokens
             if not waiter.future.done():
-                waiter.future.set_result(None)
+                waiter.future.set_result(
+                    AdmissionTelemetry(
+                        queue_ms=max(0, int((time.monotonic() - waiter.queued_at) * 1000)),
+                        physical_slots=self.slots,
+                        admission_limit=min(
+                            waiter.admission_limit, self._active_admission_limit()
+                        ),
+                        admission_concurrency=self._in_flight,
+                    )
+                )
             else:
                 # Waiter already cancelled before we got here — the slot
                 # we just handed out was never actually claimed; give it
                 # back and keep dispatching.
                 waiter.granted = False
-                self._release_locked(waiter.is_batch, waiter.kv_tokens)
+                self._release_locked(waiter.is_batch, waiter.kv_tokens, waiter.admission_limit)
 
-    def _release_locked(self, is_batch: bool, kv_tokens: int) -> None:
+    def _release_locked(self, is_batch: bool, kv_tokens: int, admission_limit: int) -> None:
         self._in_flight = max(0, self._in_flight - 1)
         self._kv_tokens_in_flight = max(0, self._kv_tokens_in_flight - kv_tokens)
+        count = self._admission_limits_in_flight.get(admission_limit, 0)
+        if count <= 1:
+            self._admission_limits_in_flight.pop(admission_limit, None)
+        else:
+            self._admission_limits_in_flight[admission_limit] = count - 1
         if is_batch:
             self._in_flight_batch = max(0, self._in_flight_batch - 1)
             self._kv_tokens_in_flight_batch = max(0, self._kv_tokens_in_flight_batch - kv_tokens)
 
-    async def release(self, *, is_batch: bool = False, kv_tokens: int = 0) -> None:
+    async def release(
+        self,
+        *,
+        is_batch: bool = False,
+        kv_tokens: int = 0,
+        admission_limit: int | None = None,
+    ) -> None:
         async with self._lock:
-            self._release_locked(is_batch, max(0, int(kv_tokens)))
+            self._release_locked(
+                is_batch,
+                max(0, int(kv_tokens)),
+                self.slots if admission_limit is None else int(admission_limit),
+            )
             self._dispatch_locked()
 
     @asynccontextmanager
@@ -278,12 +385,22 @@ class FairSlotGate:
         *,
         is_batch: bool = False,
         kv_tokens: int = 0,
-    ) -> AsyncIterator[None]:
-        await self.acquire(user_key, is_batch=is_batch, kv_tokens=kv_tokens)
+        prompt_tokens: int = 0,
+    ) -> AsyncIterator[AdmissionTelemetry]:
+        admission = await self.acquire(
+            user_key,
+            is_batch=is_batch,
+            kv_tokens=kv_tokens,
+            prompt_tokens=prompt_tokens,
+        )
         try:
-            yield
+            yield admission
         finally:
-            await self.release(is_batch=is_batch, kv_tokens=kv_tokens)
+            await self.release(
+                is_batch=is_batch,
+                kv_tokens=kv_tokens,
+                admission_limit=self._admission_limit_for(prompt_tokens),
+            )
 
 
 class WorkerPoolFairGates:
@@ -305,6 +422,11 @@ class WorkerPoolFairGates:
         worker_key: str,
         slots: int,
         kv_capacity_tokens: int | None = None,
+        *,
+        medium_prefill_tokens: int | None = None,
+        medium_prefill_max_concurrency: int | None = None,
+        large_prefill_tokens: int | None = None,
+        large_prefill_max_concurrency: int | None = None,
     ) -> FairSlotGate:
         gate = self._gates.get(worker_key)
         normalized_slots = max(1, int(slots))
@@ -315,13 +437,26 @@ class WorkerPoolFairGates:
             gate is None
             or gate.slots != normalized_slots
             or gate.kv_capacity_tokens != normalized_capacity
+            or gate.medium_prefill_tokens != medium_prefill_tokens
+            or gate.medium_prefill_max_concurrency
+            != min(normalized_slots, max(1, int(medium_prefill_max_concurrency or normalized_slots)))
+            or gate.large_prefill_tokens != large_prefill_tokens
+            or gate.large_prefill_max_concurrency
+            != min(normalized_slots, max(1, int(large_prefill_max_concurrency or normalized_slots)))
         ):
             if gate is not None and not gate.is_idle():
                 raise RuntimeError(
                     f"cannot resize active admission gate '{worker_key}'; "
                     "runtime configuration must use a distinct worker key"
                 )
-            gate = FairSlotGate(normalized_slots, normalized_capacity)
+            gate = FairSlotGate(
+                normalized_slots,
+                normalized_capacity,
+                medium_prefill_tokens=medium_prefill_tokens,
+                medium_prefill_max_concurrency=medium_prefill_max_concurrency,
+                large_prefill_tokens=large_prefill_tokens,
+                large_prefill_max_concurrency=large_prefill_max_concurrency,
+            )
             self._gates[worker_key] = gate
         return gate
 

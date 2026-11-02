@@ -620,8 +620,10 @@ POST   /v1/batches                   → BatchObject
   body: {
     input_file_id: "file-<uuid>",
     endpoint: "/v1/chat/completions"|"/v1/embeddings"|"/v1/completions"|
-              "/v1/images/generations"|"/v1/audio/speech"|
-              "/v1/audio/transcriptions",
+              "/v1/images/generations"|"/v1/images/edits"|
+              "/v1/audio/speech"|"/v1/audio/transcriptions"|
+              "/v1/pooling"|"/v1/score"|"/v1/rerank"|"/v1/classify"|
+              "/v1/audio/generate",
     completion_window: "24h",
     metadata?: dict
   }
@@ -637,6 +639,18 @@ POST   /v1/batches                   → BatchObject
   "invalid_file_id", con el número de línea). batch_processor reconstruye
   la petición multipart real a partir de esa referencia en tiempo de
   despacho.
+
+  endpoint="/v1/images/edits" (extensión oCabra, no estándar OpenAI —
+  mismo motivo que transcriptions: el endpoint real es multipart, no cabe
+  en una línea JSON): body debe llevar {image_file_id: "file-<uuid>",
+  mask_file_id?, image_ref_1_file_id?, image_ref_2_file_id?,
+  image_ref_3_file_id?, model, prompt, ...} en vez de binarios inline;
+  cada *_file_id presente debe referenciar un fichero propio con
+  purpose="batch_input_image" subido antes por POST /v1/files (solo
+  image_file_id es obligatorio), o la creación del batch se rechaza (400,
+  code="missing_file_id"|"invalid_file_id", con el número de línea).
+  batch_processor reconstruye la petición multipart real a partir de esas
+  referencias en tiempo de despacho.
 
 GET    /v1/batches                   → {object: "list", data: [BatchObject]}
   query: after? (cursor pagination), limit? (1-100, default 20)
@@ -775,7 +789,8 @@ request_stats (
   group_id        UUID,
   api_key_name    TEXT,         -- etiqueta, nunca la key real
   client_addr     TEXT,
-  user_agent      TEXT
+  user_agent      TEXT,
+  runtime_telemetry JSONB      -- cola/carga/TTFT/prefill/slot/admisión
 )
 
 -- Stats de GPU (serie temporal, agregada por minuto)
@@ -1183,6 +1198,50 @@ await gate.acquire(
 - ``slots`` limita peticiones concurrentes físicas.
 - ``kv_capacity_tokens`` es el pool agregado del runtime; ``None`` desactiva
   la dimensión KV y conserva exactamente el comportamiento anterior.
+
+**Admisión computacional adaptativa de llama.cpp.** Los slots declarados por
+el runtime siguen siendo físicos y no se redimensiona el pool KV. Antes de
+conceder cada lease, el mismo ``FairSlotGate`` calcula un límite efectivo a
+partir del prompt estimado:
+
+- prompt menor de 32k: hasta los cuatro slots físicos;
+- prompt de 32k o más: máximo tres peticiones activas;
+- prompt de 64k o más: máximo dos peticiones activas.
+
+Mientras una petición ponderada está activa, el límite también se aplica a
+las peticiones pequeñas que lleguen después. Así un prefill grande no queda
+rodeado por tres admisiones nuevas. Los umbrales son configurables mediante
+``LLAMA_CPP_{MEDIUM,LARGE}_PREFILL_*`` y sólo se aplican a workers
+``llama_cpp``. La dimensión computacional se concede atómicamente junto con
+slot, KV y prioridad justa; no existe una segunda cola con orden diferente.
+
+Cada fila completada puede persistir ``runtime_telemetry`` con estas claves
+opcionales:
+
+```json
+{
+  "prompt_tokens_estimate": 68240,
+  "kv_tokens_reserved": 98304,
+  "queue_ms": 1270,
+  "load_ms": 30171,
+  "ttft_ms": 3240,
+  "prefill_ms": 1850,
+  "slot_id": 2,
+  "physical_slots": 4,
+  "admission_limit": 2,
+  "admission_concurrency": 2
+}
+```
+
+``queue_ms`` mide exclusivamente la espera dentro del gate; ``load_ms`` la
+espera explícita del runtime en los caminos que cargan desde el stream;
+``ttft_ms`` se mide desde la entrada HTTP hasta el primer token visible.
+``prefill_ms`` y ``slot_id`` sólo aparecen cuando llama.cpp los entrega en su
+bloque ``timings``. ``GET /ocabra/stats/recent`` expone el objeto sin
+reinterpretarlo.
+
+Detalles adicionales del gate KV:
+
 - ``kv_tokens`` procede de ``RuntimePlan.required_tokens``. El coordinador lo
   calcula también para perfiles sin presets; una petición sin estimación usa
   cero y nunca activa por accidente un gate ponderado.
@@ -1206,8 +1265,9 @@ await gate.acquire(
   slot puede ver hasta el pool completo; ``FairSlotGate`` impide que la suma de
   reservas lógicas lo exceda. No se multiplica ``ctx_size`` por los slots.
 
-El snapshot de diagnóstico debe distinguir ``slot_saturated`` de
-``kv_saturated`` y publicar capacidad, reservado y libre. Estas cifras son
+El snapshot de diagnóstico debe distinguir ``slot_saturated``,
+``compute_saturated`` y ``kv_saturated`` y publicar capacidad, reservado y
+libre. Estas cifras son
 reservas lógicas conservadoras de oCabra hasta que llama.cpp exponga ocupación
 física inequívoca; no se presentarán como celdas KV observadas.
 
@@ -1225,6 +1285,8 @@ manteniendo el ``modelId`` canónico solicitado. Después expone:
     "activeRequests": 2,
     "queuedRequests": 1,
     "slotSaturated": false,
+    "computeSaturated": true,
+    "admissionLimit": 2,
     "kvCapacityTokens": 98304,
     "kvReservedTokens": 72000,
     "kvFreeTokens": 26304

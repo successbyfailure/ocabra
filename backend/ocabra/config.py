@@ -269,6 +269,17 @@ class Settings(BaseSettings):
     # raise per-model (extra_config.llama_cpp.parallel_slots) where there's headroom.
     llama_cpp_parallel_slots: int = 1
     llama_cpp_cont_batching: bool = True
+    llama_cpp_adaptive_admission_enabled: bool = Field(
+        default=True,
+        description=(
+            "Keep the configured llama.cpp slots physical, but reduce effective "
+            "concurrency while medium or large prompt prefills are active."
+        ),
+    )
+    llama_cpp_medium_prefill_tokens: int = Field(default=32768, ge=1)
+    llama_cpp_medium_prefill_max_concurrency: int = Field(default=3, ge=1)
+    llama_cpp_large_prefill_tokens: int = Field(default=65536, ge=1)
+    llama_cpp_large_prefill_max_concurrency: int = Field(default=2, ge=1)
     # Admission control: max concurrent in-flight requests per model. When a model
     # is already serving this many requests, further requests get 429 instead of
     # piling onto one worker (flood protection so one client can't starve others).

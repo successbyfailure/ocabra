@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 from ocabra import config
 from ocabra.backends._mock import MockBackend
 from ocabra.core.fair_slot_gate import KVCapacityError
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 from ocabra.core.worker_pool import (
     WorkerPool,
     _ollama_native_body,
@@ -633,3 +635,31 @@ async def test_weighted_stream_cancellation_releases_reservation(pool, monkeypat
     assert state is not None
     assert state["in_flight"] == 0
     assert state["kv_reserved_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_forward_request_records_admission_telemetry(pool, monkeypatch):
+    monkeypatch.setattr(
+        "ocabra.core.worker_pool.httpx.AsyncClient",
+        _make_post_client(200, b'{"ok":true}'),
+    )
+    _register_worker(pool)
+    telemetry = RequestRuntimeTelemetry(started_monotonic=time.monotonic())
+
+    await pool.forward_request(
+        "test/model",
+        "/v1/chat/completions",
+        {"messages": [{"role": "user", "content": "hola"}]},
+        user_key="alice",
+        slots=4,
+        kv_capacity_tokens=96_000,
+        kv_tokens=8_000,
+        telemetry=telemetry,
+    )
+
+    assert telemetry.queue_ms is not None
+    assert telemetry.physical_slots == 4
+    assert telemetry.admission_limit == 4
+    assert telemetry.admission_concurrency == 1
+    assert telemetry.kv_tokens_reserved == 8_000
+    assert telemetry.prompt_tokens_estimate is not None

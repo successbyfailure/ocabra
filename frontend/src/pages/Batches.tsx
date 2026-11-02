@@ -25,6 +25,12 @@ const ENDPOINTS: { value: BatchEndpoint; label: string }[] = [
   { value: "/v1/images/generations", label: "Images generations" },
   { value: "/v1/audio/speech", label: "Audio speech (TTS)" },
   { value: "/v1/audio/transcriptions", label: "Audio transcriptions (extensión oCabra)" },
+  { value: "/v1/audio/generate", label: "Audio generate (música)" },
+  { value: "/v1/pooling", label: "Pooling" },
+  { value: "/v1/score", label: "Score" },
+  { value: "/v1/rerank", label: "Rerank" },
+  { value: "/v1/classify", label: "Classify" },
+  { value: "/v1/images/edits", label: "Images edits (extensión oCabra)" },
 ]
 
 const CANCELLABLE: BatchStatus[] = ["validating", "in_progress", "finalizing"]
@@ -586,16 +592,20 @@ function CreateBatchModal({ onClose, onCreated }: CreateBatchModalProps) {
     }
   }
 
-  const uploadAudio = async () => {
+  const needsAuxFileUpload =
+    endpoint === "/v1/audio/transcriptions" || endpoint === "/v1/images/edits"
+  const auxFilePurpose = endpoint === "/v1/images/edits" ? "batch_input_image" : "batch_input_audio"
+
+  const uploadAuxFile = async () => {
     if (!audioFile) return
     setAudioUploading(true)
     try {
-      const uploaded = await api.batches.uploadFile(audioFile, "batch_input_audio")
+      const uploaded = await api.batches.uploadFile(audioFile, auxFilePurpose)
       setUploadedFileIds((prev) => [...prev, { filename: audioFile.name, fileId: uploaded.id }])
       setAudioFile(null)
       toast.success(`Subido como ${uploaded.id}`)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error subiendo audio")
+      toast.error(err instanceof Error ? err.message : "Error subiendo el fichero")
     } finally {
       setAudioUploading(false)
     }
@@ -634,24 +644,34 @@ function CreateBatchModal({ onClose, onCreated }: CreateBatchModalProps) {
             </select>
           </div>
 
-          {endpoint === "/v1/audio/transcriptions" && (
+          {needsAuxFileUpload && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
               <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
                 <FileAudio size={14} />
-                Extensión oCabra: sube el audio primero, referencia el <code>file_id</code> en
-                <code className="ml-1">body.file_id</code> de tu línea JSONL
+                {endpoint === "/v1/images/edits" ? (
+                  <>
+                    Extensión oCabra: sube la imagen base (y, si la usas, máscara/referencias) primero,
+                    referencia sus <code>file_id</code> en <code className="ml-1">body.image_file_id</code>
+                    {" "}(y opcionalmente <code>mask_file_id</code>/<code>image_ref_N_file_id</code>) de tu línea JSONL
+                  </>
+                ) : (
+                  <>
+                    Extensión oCabra: sube el audio primero, referencia el <code>file_id</code> en
+                    <code className="ml-1">body.file_id</code> de tu línea JSONL
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <input
                   type="file"
-                  accept="audio/*"
+                  accept={endpoint === "/v1/images/edits" ? "image/*" : "audio/*"}
                   onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)}
                   className="flex-1 text-xs"
                 />
                 <button
                   type="button"
                   disabled={!audioFile || audioUploading}
-                  onClick={() => void uploadAudio()}
+                  onClick={() => void uploadAuxFile()}
                   className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
                 >
                   {audioUploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}

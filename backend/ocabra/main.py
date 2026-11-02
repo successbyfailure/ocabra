@@ -843,6 +843,52 @@ Consulta `GET /v1/models` para ver los modelos disponibles.
 | **Generacion de imagenes** | `/v1/images/generations` | diffusers |
 | **Generacion de musica** | `/v1/audio/generate` | acestep |
 | **Reranking** | `/v1/rerank` | vllm |
+| **Scoring de pares** | `/v1/score` | vllm |
+| **Pooling** | `/v1/pooling` | vllm |
+| **Clasificacion de texto** | `/v1/classify` | vllm |
+
+## Carga no interactiva: usa Batches, no `/v1/*` directo
+
+Si no hay un humano esperando la respuesta en pantalla (automatizaciones,
+backfills, transcripcion masiva, generacion de datos, agentes que lanzan
+rafagas) usa **`POST /v1/batches`** en vez de pegarle directo a `/v1/chat/completions`,
+`/v1/embeddings`, etc. Las peticiones sincronas compiten por los mismos slots
+de GPU que usuarios reales; un script que manda miles de peticiones por esa
+via puede degradar la latencia de quien si esta esperando en vivo. Los lotes
+se procesan en background con prioridad mas baja que el trafico interactivo
+(una peticion interactiva puede desalojar una linea de lote en curso; se
+reintenta sola, no cuenta como fallo).
+
+Flujo: sube un JSONL con `POST /v1/files` (`purpose="batch"`, una linea por
+peticion: `{"custom_id", "method": "POST", "url", "body"}`) y crea el lote con
+`POST /v1/batches` (`input_file_id`, `endpoint`). Soporta
+`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/generate`,
+`/v1/pooling`, `/v1/score`, `/v1/rerank`, `/v1/classify` y, como extensiones
+propias fuera del estandar OpenAI (el endpoint real es multipart, no cabe en
+una linea JSON), `/v1/audio/transcriptions` y `/v1/images/edits`: la linea
+referencia ficheros subidos antes con `purpose="batch_input_audio"` /
+`purpose="batch_input_image"` en vez de binarios inline (`file_id` para
+transcripciones; `image_file_id` + opcionalmente `mask_file_id` /
+`image_ref_{1,2,3}_file_id` para edicion de imagenes). Respuestas binarias
+(TTS, musica) tampoco se inlinean: el resultado referencia un `file_id`
+descargable via `GET /v1/files/{id}/content`. Consulta progreso con
+`GET /v1/batches/{id}`.
+
+## Routers "recomendado-*": modelos que el servidor mantiene calientes
+
+Ademas de perfiles normales (`profile_kind: execution`, un modelo concreto),
+`model=` tambien acepta perfiles **router** (`profile_kind: router`): no
+ejecutan nada por si mismos, enumeran `routing_targets` por prioridad y
+delegan en el primero que ya este cargado. Este despliegue expone varios con
+el prefijo `recomendado-` (p.ej. `recomendado-sota`, `recomendado-ha-chatbots`,
+`recomendado-stt`) que apuntan a los modelos que el servidor mantiene
+calientes habitualmente (`load_policy: pin`/`warm`) — usalos cuando no
+necesitas un modelo concreto y prefieres "el mejor disponible ahora mismo"
+sin pagar un cold-start. Consulta `GET /v1/models` para ver los disponibles y
+sus `routing_targets` actuales. Las cabeceras `X-Ocabra-Router` /
+`X-Ocabra-Router-Target` indican a que perfil apuntaste y cual respondio
+realmente.
 
 ## Formatos de audio (TTS)
 

@@ -104,6 +104,11 @@ class RequestStat(Base):
     # completion families can leave this NULL since input/output tokens
     # are already columns of their own.
     work_size_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Runtime admission/load timing captured around the worker dispatch.
+    # Kept as JSONB because llama.cpp can add slot/phase fields without a
+    # schema migration for every new engine signal. Contracted keys live in
+    # docs/CONTRACTS.md.
+    runtime_telemetry: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # When a router profile redirected this request to a different target,
     # this records the router's profile_id. NULL means the request went
     # directly to ``model_id`` without going through a router.

@@ -36,6 +36,19 @@ ALLOWED_ENDPOINTS = {
     "/v1/images/generations",
     "/v1/audio/speech",
     "/v1/audio/transcriptions",
+    # 2026-11-02: pooling/score/rerank/classify/audio-generate all take a
+    # plain JSON body and return either JSON (pooling/score/rerank/classify)
+    # or binary (audio/generate, same as audio/speech) — batch_processor's
+    # generic _dispatch() already handles both shapes, so no per-endpoint
+    # dispatch code was needed to add these, unlike audio/transcriptions.
+    "/v1/pooling",
+    "/v1/score",
+    "/v1/rerank",
+    "/v1/classify",
+    "/v1/audio/generate",
+    # 2026-11-02: same file_id-reference trick as /v1/audio/transcriptions
+    # below, extended to the other multipart-only endpoint.
+    "/v1/images/edits",
 }
 
 # oCabra extension (2026-10-30), NOT part of the OpenAI Batches spec: the
@@ -46,6 +59,22 @@ ALLOWED_ENDPOINTS = {
 # file_id in the line's body. batch_processor._dispatch() builds the real
 # multipart request from that reference at execution time.
 _BATCH_INPUT_AUDIO_PURPOSE = "batch_input_audio"
+
+# oCabra extension (2026-11-02), same shape as _BATCH_INPUT_AUDIO_PURPOSE
+# above: /v1/images/edits takes multipart/form-data (a base image, plus
+# optional mask / up to 3 extra reference images), none of which fit a JSON
+# line. Batch lines reference pre-uploaded files instead: body.image_file_id
+# (required) and optionally body.mask_file_id / body.image_ref_1_file_id /
+# body.image_ref_2_file_id / body.image_ref_3_file_id, all uploaded via
+# POST /v1/files with purpose="batch_input_image".
+_BATCH_INPUT_IMAGE_PURPOSE = "batch_input_image"
+_IMAGE_EDIT_FILE_FIELDS = (
+    "image_file_id",
+    "mask_file_id",
+    "image_ref_1_file_id",
+    "image_ref_2_file_id",
+    "image_ref_3_file_id",
+)
 
 
 class BatchCreateBody(BaseModel):
@@ -70,6 +99,30 @@ async def _with_username(session: AsyncSession, batch: OpenAIBatch) -> dict[str,
     )).scalar_one_or_none()
     d["user"] = {"id": str(batch.user_id), "username": username}
     return d
+
+
+async def _resolve_owned_batch_file(
+    session: AsyncSession,
+    raw_file_id: Any,
+    *,
+    user_uuid: uuid.UUID,
+    is_admin: bool,
+    purpose: str,
+) -> OpenAIFile | None:
+    """Resolve a file_id reference used by a multipart-only batch extension
+    (transcriptions, images/edits) to an owned file with the right purpose.
+    Returns None for any kind of mismatch — caller turns that into a single
+    ``invalid_file_id`` validation error, same message shape either way."""
+    try:
+        file_uuid = uuid.UUID(
+            str(raw_file_id)[5:] if str(raw_file_id).startswith("file-") else str(raw_file_id)
+        )
+    except ValueError:
+        return None
+    file = await session.get(OpenAIFile, file_uuid)
+    if file is None or (file.user_id != user_uuid and not is_admin) or file.purpose != purpose:
+        return None
+    return file
 
 
 def _strip_id(prefixed: str, prefix: str) -> uuid.UUID:
@@ -175,24 +228,46 @@ async def create_batch(
                             "/v1/files with purpose='batch_input_audio')",
                         })
                         continue
-                    try:
-                        audio_file_uuid = uuid.UUID(
-                            str(audio_file_id)[5:] if str(audio_file_id).startswith("file-") else str(audio_file_id)
-                        )
-                        audio_file = await session.get(OpenAIFile, audio_file_uuid)
-                    except ValueError:
-                        audio_file = None
-                    if (
-                        audio_file is None
-                        or (audio_file.user_id != user_uuid and not user.is_admin)
-                        or audio_file.purpose != _BATCH_INPUT_AUDIO_PURPOSE
-                    ):
+                    audio_file = await _resolve_owned_batch_file(
+                        session, audio_file_id,
+                        user_uuid=user_uuid, is_admin=user.is_admin,
+                        purpose=_BATCH_INPUT_AUDIO_PURPOSE,
+                    )
+                    if audio_file is None:
                         validation_errors.append({
                             "line": line_no,
                             "code": "invalid_file_id",
                             "message": f"body.file_id '{audio_file_id}' is not a file you own "
                             f"with purpose='{_BATCH_INPUT_AUDIO_PURPOSE}'",
                         })
+                elif body.endpoint == "/v1/images/edits":
+                    line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
+                    image_file_id = line_body.get("image_file_id")
+                    if not image_file_id:
+                        validation_errors.append({
+                            "line": line_no,
+                            "code": "missing_file_id",
+                            "message": "body.image_file_id is required for /v1/images/edits "
+                            "lines (oCabra extension — upload the base image first via POST "
+                            "/v1/files with purpose='batch_input_image')",
+                        })
+                        continue
+                    for field in _IMAGE_EDIT_FILE_FIELDS:
+                        ref_id = line_body.get(field)
+                        if ref_id is None:
+                            continue
+                        ref_file = await _resolve_owned_batch_file(
+                            session, ref_id,
+                            user_uuid=user_uuid, is_admin=user.is_admin,
+                            purpose=_BATCH_INPUT_IMAGE_PURPOSE,
+                        )
+                        if ref_file is None:
+                            validation_errors.append({
+                                "line": line_no,
+                                "code": "invalid_file_id",
+                                "message": f"body.{field} '{ref_id}' is not a file you own "
+                                f"with purpose='{_BATCH_INPUT_IMAGE_PURPOSE}'",
+                            })
 
         if request_total == 0:
             raise HTTPException(status_code=400, detail={"error": {

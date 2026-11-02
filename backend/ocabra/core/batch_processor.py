@@ -735,6 +735,58 @@ class BatchProcessor:
                             data_kw["timestamp_granularities[]"] = [str(v) for v in value]
                         else:
                             data_kw[key] = str(value)
+        elif endpoint == "/v1/images/edits":
+            # oCabra extension (2026-11-02), same shape as
+            # /v1/audio/transcriptions above: the real endpoint takes
+            # multipart/form-data (a base image, plus optional mask / up to
+            # 3 extra reference images) — none of which fit a JSON line.
+            # Batch lines reference pre-uploaded files instead (purpose=
+            # "batch_input_image") via *_file_id keys in the body.
+            json_kw = None
+            file_field_map = {
+                "image_file_id": "image",
+                "mask_file_id": "mask",
+                "image_ref_1_file_id": "image_ref_1",
+                "image_ref_2_file_id": "image_ref_2",
+                "image_ref_3_file_id": "image_ref_3",
+            }
+            resolved_files: dict[str, tuple[str, bytes, str]] = {}
+            for body_key, form_field in file_field_map.items():
+                raw_file_id = body.pop(body_key, None)
+                if raw_file_id is None:
+                    continue
+                file_id = (
+                    str(raw_file_id)[5:] if str(raw_file_id).startswith("file-") else str(raw_file_id)
+                )
+                try:
+                    async with AsyncSessionLocal() as session:
+                        ref_file = await session.get(OpenAIFile, uuid.UUID(file_id))
+                except ValueError:
+                    ref_file = None
+                if ref_file is None:
+                    multipart_error = {
+                        "code": "invalid_file_id",
+                        "message": f"body.{body_key} '{raw_file_id}' does not reference an uploaded file",
+                    }
+                    break
+                ref_path = Path(ref_file.storage_path)
+                if not ref_path.exists():
+                    multipart_error = {
+                        "code": "file_not_found",
+                        "message": f"Referenced file for body.{body_key} missing on disk",
+                    }
+                    break
+                content_type = mimetypes.guess_type(ref_file.filename)[0] or "image/png"
+                resolved_files[form_field] = (ref_file.filename, ref_path.read_bytes(), content_type)
+            if multipart_error is None:
+                if "image" not in resolved_files:
+                    multipart_error = {
+                        "code": "missing_file_id",
+                        "message": "body.image_file_id is required for /v1/images/edits lines",
+                    }
+                else:
+                    files_kw = resolved_files
+                    data_kw = {str(k): str(v) for k, v in body.items() if v is not None}
 
         if multipart_error is not None:
             return None, 400, multipart_error

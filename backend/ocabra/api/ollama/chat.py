@@ -203,6 +203,10 @@ async def chat(
     check_capability(state, "chat", "chat")
 
     worker_pool = request.app.state.worker_pool
+    runtime_telemetry = getattr(request.state, "runtime_telemetry", None)
+    telemetry_admission = (
+        {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
+    )
     if state.backend_type == "ollama":
         upstream_body = build_native_passthrough_body(
             merged_body,
@@ -249,6 +253,7 @@ async def chat(
                 slots,
                 kv_capacity,
                 kv_tokens,
+                runtime_telemetry,
             ),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -262,6 +267,7 @@ async def chat(
             vllm_body,
             user_key=user_key,
             slots=slots,
+            **telemetry_admission,
             **kv_admission,
         )
     except KVCapacityError as exc:
@@ -374,6 +380,7 @@ async def _stream_chat(
     slots: int = 1,
     kv_capacity_tokens: int | None = None,
     kv_tokens: int = 0,
+    telemetry=None,
 ) -> AsyncIterator[bytes]:
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
@@ -394,6 +401,7 @@ async def _stream_chat(
             body,
             user_key=user_key,
             slots=slots,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
             **(
                 {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
                 if kv_capacity_tokens is not None

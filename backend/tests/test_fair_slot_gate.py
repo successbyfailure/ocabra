@@ -268,3 +268,63 @@ async def test_worker_pool_fair_gates_refuses_to_orphan_active_reservation():
     assert registry.peek("worker-1") is gate
     assert gate.snapshot()["kv_reserved_tokens"] == 32_000
     await gate.release(kv_tokens=32_000)
+
+
+@pytest.mark.asyncio
+async def test_large_prefill_reduces_effective_concurrency_without_resizing_slots():
+    gate = FairSlotGate(
+        slots=4,
+        medium_prefill_tokens=32_000,
+        medium_prefill_max_concurrency=3,
+        large_prefill_tokens=64_000,
+        large_prefill_max_concurrency=2,
+    )
+    release = asyncio.Event()
+    entered: list[str] = []
+
+    async def run(label: str, prompt_tokens: int) -> None:
+        async with gate.slot(label, prompt_tokens=prompt_tokens) as admission:
+            entered.append(label)
+            assert admission.physical_slots == 4
+            await release.wait()
+
+    tasks = [
+        asyncio.create_task(run("large", 80_000)),
+        asyncio.create_task(run("small-1", 4_000)),
+        asyncio.create_task(run("small-2", 4_000)),
+    ]
+    await asyncio.sleep(0.01)
+
+    assert entered == ["large", "small-1"]
+    assert gate.snapshot()["admission_limit"] == 2
+    assert gate.snapshot()["compute_saturated"] is True
+
+    release.set()
+    await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_medium_prefill_allows_three_of_four_physical_slots():
+    gate = FairSlotGate(
+        slots=4,
+        medium_prefill_tokens=32_000,
+        medium_prefill_max_concurrency=3,
+        large_prefill_tokens=64_000,
+        large_prefill_max_concurrency=2,
+    )
+    release = asyncio.Event()
+    entered: list[str] = []
+
+    async def run(label: str) -> None:
+        async with gate.slot(label, prompt_tokens=40_000):
+            entered.append(label)
+            await release.wait()
+
+    tasks = [asyncio.create_task(run(f"request-{index}")) for index in range(4)]
+    await asyncio.sleep(0.01)
+
+    assert len(entered) == 3
+    assert gate.snapshot()["admission_limit"] == 3
+
+    release.set()
+    await asyncio.gather(*tasks)

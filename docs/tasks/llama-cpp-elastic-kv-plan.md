@@ -1120,6 +1120,37 @@ cambios de pool que mantengan la misma colocación.
   cuando está vacío, incluso si llega partido entre chunks SSE. El razonamiento
   no vacío se conserva.
 
+### Tráfico real de Chaos y admisión adaptativa (2026-11-02)
+
+- En 1.406 peticiones del 2026-11-01, dos concurrentes en el runtime extendido
+  elevaron el throughput agregado estimado de 19,1 a 26,4 tok/s con una
+  penalización moderada por stream. Con tres, el p95 subió de 15,4 a 60,6 s y
+  cinco generaciones cayeron por debajo de 5 tok/s.
+- El runtime conserva ``--parallel 4`` y el pool KV completo. El gate limita
+  sólo la concurrencia efectiva: 4 para prompts pequeños, 3 desde 32k y 2
+  desde 64k. Un prefill grande ya activo limita también admisiones pequeñas
+  posteriores.
+- ``request_stats.runtime_telemetry`` registra prompt estimado, reserva KV,
+  espera de gate, carga, TTFT, prefill/slot cuando el engine los informa,
+  slots físicos, límite efectivo y concurrencia al conceder el lease. La
+  tabla de peticiones recientes muestra un resumen y conserva el detalle en
+  tooltip.
+- La campaña normal de Chaos probó 104k, 112k, 120k y 128k con KV Q8 y
+  cuatro slots físicos. Los cuatro cargaron y generaron; 128k consumió un
+  pico observado de 20.990 MiB en la RTX 3090 y dejó unos 3.188 MiB libres.
+  El perfil normal queda promovido a 131.072 tokens, con el runtime extendido
+  de 262.144 sin cambios.
+- En 128k, cuatro peticiones con reserva estimada de 39.898 tokens concedieron
+  exactamente tres leases (concurrencias persistidas 1, 2 y 3); la cuarta
+  esperó 62.986 ms antes de entrar. Tres peticiones en torno a 64k confirmaron
+  la interacción con el gate KV. En un pool de 128k, dos reservas de al menos
+  64k más salida no caben simultáneamente, por lo que el cap computacional 2
+  sólo es independiente del gate KV en perfiles mayores como el extendido.
+- El smoke de streaming verificó persistencia real de carga, TTFT, cola,
+  prefill y admisión. La primera ejecución detectó que un stream completo en
+  menos de 500 ms podía eludir TTFT; se corrigió y el segundo smoke registró
+  ``load_ms=93379``, ``ttft_ms=93772`` y ``prefill_ms=188``.
+
 ## Cuestiones abiertas
 
 - [ ] ¿Qué margen productivo aplicar a los máximos ya medidos (Gemma 12B y

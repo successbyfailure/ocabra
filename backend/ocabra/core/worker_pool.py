@@ -12,6 +12,8 @@ import structlog
 from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import WorkerPoolFairGates
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+from ocabra.core.runtime_coordinator import estimate_prompt_tokens
 
 logger = structlog.get_logger(__name__)
 
@@ -489,6 +491,7 @@ class WorkerPool:
         model_id: str,
         *,
         kv_tokens: int = 0,
+        prompt_tokens: int = 0,
     ) -> dict[str, Any] | None:
         """Read-only snapshot of a worker's fair-share gate — ``None`` when
         no gate exists yet (nothing has used fairness on this worker).
@@ -507,10 +510,14 @@ class WorkerPool:
         snapshot = gate.snapshot()
         kv_free = snapshot["kv_free_tokens"]
         kv_saturated = kv_free is not None and max(0, int(kv_tokens)) > kv_free
+        compute_saturated = gate.compute_saturated(prompt_tokens)
         return {
             **snapshot,
             "kv_saturated": kv_saturated,
-            "saturated": bool(snapshot["slot_saturated"] or kv_saturated),
+            "compute_saturated": compute_saturated,
+            "saturated": bool(
+                snapshot["slot_saturated"] or kv_saturated or compute_saturated
+            ),
         }
 
     def peek_gate_priority(
@@ -523,6 +530,58 @@ class WorkerPool:
         if gate is None:
             return None
         return gate.peek_priority(user_key, is_batch=is_batch)
+
+    def _fair_gate(
+        self,
+        model_id: str,
+        slots: int,
+        kv_capacity_tokens: int | None,
+    ):
+        worker = self._workers.get(model_id)
+        adaptive = bool(
+            worker
+            and worker.backend_type == "llama_cpp"
+            and settings.llama_cpp_adaptive_admission_enabled
+        )
+        return self._fair_gates.get(
+            model_id,
+            slots,
+            kv_capacity_tokens,
+            medium_prefill_tokens=(
+                settings.llama_cpp_medium_prefill_tokens if adaptive else None
+            ),
+            medium_prefill_max_concurrency=(
+                settings.llama_cpp_medium_prefill_max_concurrency if adaptive else None
+            ),
+            large_prefill_tokens=(settings.llama_cpp_large_prefill_tokens if adaptive else None),
+            large_prefill_max_concurrency=(
+                settings.llama_cpp_large_prefill_max_concurrency if adaptive else None
+            ),
+        )
+
+    @staticmethod
+    def _prompt_tokens(body: dict) -> int:
+        try:
+            return estimate_prompt_tokens(body)
+        except Exception:  # noqa: BLE001 - telemetry/admission fallback must not break inference
+            return 0
+
+    @staticmethod
+    def _record_admission(
+        telemetry: RequestRuntimeTelemetry | None,
+        admission,
+        *,
+        prompt_tokens: int,
+        kv_tokens: int,
+    ) -> None:
+        if telemetry is None:
+            return
+        telemetry.prompt_tokens_estimate = prompt_tokens
+        telemetry.kv_tokens_reserved = max(0, int(kv_tokens))
+        telemetry.queue_ms = admission.queue_ms
+        telemetry.physical_slots = admission.physical_slots
+        telemetry.admission_limit = admission.admission_limit
+        telemetry.admission_concurrency = admission.admission_concurrency
 
     def _record_forward_failure(self, model_id: str) -> None:
         self._consecutive_failures[model_id] = self._consecutive_failures.get(model_id, 0) + 1
@@ -615,6 +674,7 @@ class WorkerPool:
         gate,
         is_batch: bool,
         kv_tokens: int = 0,
+        prompt_tokens: int = 0,
     ) -> None:
         """Preempt batch work when it blocks an interactive admission.
 
@@ -625,7 +685,7 @@ class WorkerPool:
         """
         if is_batch or self._batch_priority is None:
             return
-        saturated = gate.batch_blocks(kv_tokens)
+        saturated = gate.batch_blocks(kv_tokens, prompt_tokens)
         logger.info(
             "batch_priority_check",
             model_id=model_id,
@@ -653,11 +713,26 @@ class WorkerPool:
         is_batch: bool = False,
         kv_capacity_tokens: int | None = None,
         kv_tokens: int = 0,
+        telemetry: RequestRuntimeTelemetry | None = None,
     ) -> Any:
         if user_key is not None:
-            gate = self._fair_gates.get(model_id, slots, kv_capacity_tokens)
-            await self._preempt_batch_if_saturated(model_id, gate, is_batch, kv_tokens)
-            async with gate.slot(user_key, is_batch=is_batch, kv_tokens=kv_tokens):
+            gate = self._fair_gate(model_id, slots, kv_capacity_tokens)
+            prompt_tokens = self._prompt_tokens(body)
+            await self._preempt_batch_if_saturated(
+                model_id, gate, is_batch, kv_tokens, prompt_tokens
+            )
+            async with gate.slot(
+                user_key,
+                is_batch=is_batch,
+                kv_tokens=kv_tokens,
+                prompt_tokens=prompt_tokens,
+            ) as admission:
+                self._record_admission(
+                    telemetry,
+                    admission,
+                    prompt_tokens=prompt_tokens,
+                    kv_tokens=kv_tokens,
+                )
                 return await self._forward_request_unfair(model_id, path, body)
         return await self._forward_request_unfair(model_id, path, body)
 
@@ -751,14 +826,29 @@ class WorkerPool:
         is_batch: bool = False,
         kv_capacity_tokens: int | None = None,
         kv_tokens: int = 0,
+        telemetry: RequestRuntimeTelemetry | None = None,
     ) -> AsyncIterator[bytes]:
         if user_key is None:
             async for chunk in self._forward_stream_unfair(model_id, path, body):
                 yield chunk
             return
-        gate = self._fair_gates.get(model_id, slots, kv_capacity_tokens)
-        await self._preempt_batch_if_saturated(model_id, gate, is_batch, kv_tokens)
-        async with gate.slot(user_key, is_batch=is_batch, kv_tokens=kv_tokens):
+        gate = self._fair_gate(model_id, slots, kv_capacity_tokens)
+        prompt_tokens = self._prompt_tokens(body)
+        await self._preempt_batch_if_saturated(
+            model_id, gate, is_batch, kv_tokens, prompt_tokens
+        )
+        async with gate.slot(
+            user_key,
+            is_batch=is_batch,
+            kv_tokens=kv_tokens,
+            prompt_tokens=prompt_tokens,
+        ) as admission:
+            self._record_admission(
+                telemetry,
+                admission,
+                prompt_tokens=prompt_tokens,
+                kv_tokens=kv_tokens,
+            )
             async for chunk in self._forward_stream_unfair(model_id, path, body):
                 yield chunk
 

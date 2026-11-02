@@ -475,6 +475,8 @@ async def get_model_status(
             "activeRequests": gate["in_flight"],
             "queuedRequests": gate["queued"],
             "slotSaturated": gate["slot_saturated"],
+            "computeSaturated": gate.get("compute_saturated", False),
+            "admissionLimit": gate.get("admission_limit", gate["slots"]),
             "kvCapacityTokens": gate["kv_capacity_tokens"],
             "kvReservedTokens": gate["kv_reserved_tokens"],
             "kvFreeTokens": gate["kv_free_tokens"],

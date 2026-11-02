@@ -744,6 +744,7 @@ async def get_recent_requests(limit: int = 20) -> dict:
             "apiKeyName": getattr(r, "api_key_name", None),
             "clientAddr": getattr(r, "client_addr", None),
             "userAgent": getattr(r, "user_agent", None),
+            "runtimeTelemetry": getattr(r, "runtime_telemetry", None),
         })
     return {"requests": requests_out}
 
@@ -779,6 +780,7 @@ async def get_recent_requests_for_user(user_id: str, limit: int = 20) -> dict:
             "outputTokens": r.output_tokens,
             "error": r.error,
             "apiKeyName": getattr(r, "api_key_name", None),
+            "runtimeTelemetry": getattr(r, "runtime_telemetry", None),
         })
     return {"requests": requests_out}
 

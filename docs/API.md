@@ -415,17 +415,27 @@ presión — úsalos para todo lo que pueda esperar.
 
 Endpoints soportados dentro de un lote: `/v1/chat/completions`,
 `/v1/embeddings`, `/v1/completions`, `/v1/images/generations`,
-`/v1/audio/speech`, `/v1/audio/transcriptions`. `completion_window` solo
-admite `"24h"` por ahora.
+`/v1/images/edits`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
+`/v1/pooling`, `/v1/score`, `/v1/rerank`, `/v1/classify` y
+`/v1/audio/generate` (música). `completion_window` solo admite `"24h"` por
+ahora.
 
-**No soportado**: `/v1/images/edits` — necesita subir una imagen binaria en
-la propia petición (`multipart/form-data`), que no cabe en el modelo de "una
-línea JSON por petición" del formato JSONL de entrada. La API real de
-Batches de OpenAI tiene la misma limitación con todo lo que requiere subir
-un binario — por eso tampoco soporta `/v1/audio/transcriptions` ni
-`/v1/images/edits`. oCabra sí soporta transcripciones en lote, pero como
-**extensión propia, fuera del estándar OpenAI** (ver más abajo) — no es algo
-que un cliente/SDK oficial de OpenAI sepa construir.
+Para `/v1/pooling`, `/v1/score`, `/v1/rerank` y `/v1/classify` el `body` de
+cada línea es exactamente el mismo JSON que mandarías contra el endpoint
+real — no necesitan ninguna extensión, a diferencia de las transcripciones.
+`/v1/audio/generate` (música, backend ACE-Step) tampoco necesita extensión:
+el `body` es el mismo JSON de la petición normal (`model`, `prompt`,
+`lyrics?`, `audio_duration?`, ...) y, como devuelve audio binario, su salida
+se trata igual que `/v1/audio/speech` (ver "Respuestas binarias" más abajo).
+
+La API real de Batches de OpenAI no soporta ningún endpoint que requiera
+subir un binario en la propia petición (`multipart/form-data`) — no cabe en
+el modelo de "una línea JSON por petición" del JSONL de entrada. oCabra
+soporta los dos que tiene (`/v1/audio/transcriptions` e `/v1/images/edits`)
+igualmente, pero como **extensiones propias, fuera del estándar OpenAI**: la
+línea referencia un fichero pre-subido en vez de llevar el binario inline
+(ver ambas más abajo) — no es algo que un cliente/SDK oficial de OpenAI sepa
+construir sin más.
 
 Cada línea del JSONL de entrada:
 ```json
@@ -442,16 +452,17 @@ Los fallos van a un fichero separado (`error_file_id`), mismo formato con
 `response: null` y `error` relleno — `error_file_id` solo aparece cuando hubo
 al menos un fallo, igual que en la API real de OpenAI.
 
-**Respuestas binarias (`/v1/audio/speech`)**: TTS no devuelve JSON, devuelve
-el audio crudo — no cabe inline en el JSONL de salida. En su lugar, el
-`body` de la respuesta referencia un fichero nuevo (`purpose:
-"batch_artifact"`), descargable por el `GET /v1/files/{id}/content` de
-siempre:
+**Respuestas binarias (`/v1/audio/speech`, `/v1/audio/generate`)**: TTS y
+generación de música no devuelven JSON, devuelven el audio crudo — no cabe
+inline en el JSONL de salida. En su lugar, el `body` de la respuesta
+referencia un fichero nuevo (`purpose: "batch_artifact"`), descargable por
+el `GET /v1/files/{id}/content` de siempre:
 ```json
 {"id": "batch_req_...", "custom_id": "req-1", "response": {"status_code": 200, "body": {"file_id": "file-...", "bytes": 94252, "content_type": "audio/wav"}}, "error": null}
 ```
-`/v1/images/generations` **no** necesita este tratamiento — su respuesta ya
-es JSON puro (`b64_json` o `url`), igual que chat.
+`/v1/images/generations`, `/v1/pooling`, `/v1/score`, `/v1/rerank` y
+`/v1/classify` **no** necesitan este tratamiento — su respuesta ya es JSON
+puro, igual que chat.
 
 **Transcripciones en lote (`/v1/audio/transcriptions`) — extensión oCabra,
 no estándar OpenAI.** El endpoint real recibe el audio como
@@ -470,6 +481,29 @@ partir de esa referencia. Si el `file_id` falta, no existe, no es tuyo, o no
 tiene `purpose=batch_input_audio`, el lote se rechaza entero en la creación
 (`POST /v1/batches` devuelve 400 con el número de línea exacto), igual que
 cualquier otro error de validación del JSONL de entrada.
+
+**Edición de imágenes en lote (`/v1/images/edits`) — extensión oCabra, no
+estándar OpenAI.** Mismo mecanismo que las transcripciones: el endpoint real
+recibe la imagen base (y opcionalmente una máscara y hasta 3 imágenes de
+referencia extra) como `multipart/form-data`. En su lugar:
+
+1. Sube cada imagen por separado con `POST /v1/files`, `purpose=batch_input_image`
+   — la base, la máscara si la usas, y cualquier referencia extra.
+2. En la línea del lote, referencia sus `file_id` en el `body` en vez de
+   enviar los binarios: `image_file_id` (requerido) y, opcionalmente,
+   `mask_file_id`, `image_ref_1_file_id`, `image_ref_2_file_id`,
+   `image_ref_3_file_id`. El resto de campos (`model`, `prompt`,
+   `response_format`, `n`, `size`, `negative_prompt`, `num_inference_steps`,
+   `guidance_scale`, `strength`, `seed`, ...) son los mismos que acepta el
+   endpoint real:
+```json
+{"custom_id": "req-1", "method": "POST", "url": "/v1/images/edits", "body": {"image_file_id": "file-...", "mask_file_id": "file-...", "model": "qwen-image-edit", "prompt": "añade un sombrero"}}
+```
+`batch_processor` reconstruye internamente la petición multipart real a
+partir de esas referencias. Igual que con el audio, cualquier `*_file_id`
+ausente (para `image_file_id`), inexistente, ajeno, o sin
+`purpose=batch_input_image` rechaza el lote entero en la creación con el
+número de línea exacto.
 
 **Campos extra (oCabra, no estándar OpenAI)**: cada batch trae además
 `total_tokens` (suma de `usage.total_tokens` de las líneas con éxito — 0
@@ -663,6 +697,28 @@ Un perfil es ahora de uno de dos tipos (`profile_kind`):
   (profile_ids ordenados por preferencia) y delega la petición al primero
   que esté disponible/cargado. Sin `base_model_id`, sin presets, sin
   `load_overrides`.
+
+> **Routers `recomendado-*` de este despliegue.** `recomendado-*` no es una
+> palabra reservada del framework — es solo la convención de nombres que
+> este despliegue usa para sus routers de uso general, pensados para quien
+> no quiere fijar un `model` concreto y prefiere "el mejor disponible ahora
+> mismo" (en vez de competir por cargar/descargar modelos para su propio
+> uso). Apuntan a modelos que el servidor normalmente mantiene calientes
+> (`load_policy: pin` o `warm`), así que resuelven sin cold-start en la
+> mayoría de los casos. Ejemplos vistos en producción (consulta
+> `GET /v1/models` o `GET /ocabra/profiles/{profile_id}` para la lista y los
+> `routing_targets` reales, que pueden cambiar):
+> - `recomendado-ha-chatbots` — alta disponibilidad: el primer LLM de chat
+>   disponible entre varios candidatos, sin fijar contexto.
+> - `recomendado-sota` — calidad prioritaria: el LLM de mejor calidad
+>   disponible, con fallback ordenado a otros si el primero no está cargado.
+> - `recomendado-stt` — transcripción recomendada, con fallback gestionado
+>   por el router en vez de fijar un modelo Whisper concreto.
+>
+> Cualquier cliente puede usarlos igual que un `profile_id` normal en
+> `model=` — incluidos dentro de un lote de Batches (ver más abajo), donde
+> el procesador también resuelve el router en cada línea en vez de asumir
+> un único modelo fijo para todo el lote.
 
 | Method | Endpoint | Descripcion |
 |--------|----------|-------------|

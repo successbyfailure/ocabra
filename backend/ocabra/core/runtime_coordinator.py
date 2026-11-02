@@ -101,32 +101,13 @@ def _image_count(value: Any) -> int:
     return count
 
 
-def estimate_request_token_budget(
-    body: dict[str, Any], *, default_output_reservation: int | None = None
-) -> int:
-    """Conservatively estimate prompt plus reserved output tokens.
+def estimate_prompt_tokens(body: dict[str, Any]) -> int:
+    """Conservatively estimate prompt tokens without the output reservation.
 
-    Exact tokenization is model-specific and may require loading tokenizer code.
-    The estimator uses both character and word bounds with headroom, then adds
-    the client's complete output reservation. It intentionally rounds upward.
-
-    ``default_output_reservation`` overrides the global
-    ``settings.runtime_preset_default_output_reservation_tokens`` fallback —
-    used by callers that know this profile's own
-    ``runtime_policy.default_output_reservation_tokens`` (see
-    ``plan_profile_runtime``). 2026-10-29: a single global 4096-token default
-    for every model, reasoning or not, meant a client that didn't pass
-    ``max_tokens`` against a heavy-reasoning profile (gemma4, qwen3.8) could
-    burn its entire reservation on ``reasoning_content`` and get cut with
-    ``finish_reason: "length"`` and empty ``content`` — the preset system
-    had no way to know it needed more room than the global default assumed.
+    Exact tokenization is model-specific and may require loading tokenizer
+    code. The estimator intentionally rounds upward and includes structural
+    overhead, tool schemas and image placeholders.
     """
-    default_reservation = (
-        default_output_reservation
-        if default_output_reservation is not None
-        else settings.runtime_preset_default_output_reservation_tokens
-    )
-
     if isinstance(body.get("messages"), list):
         source: Any = body["messages"]
         structural_overhead = 16 * len(body["messages"])
@@ -140,6 +121,27 @@ def estimate_request_token_budget(
     prompt_estimate = max(math.ceil(chars / 3), math.ceil(words * 1.5))
     prompt_estimate = math.ceil(prompt_estimate * 1.15) + structural_overhead
     prompt_estimate += _image_count(source) * _IMAGE_TOKEN_RESERVATION
+    return max(1, prompt_estimate)
+
+
+def estimate_request_token_budget(
+    body: dict[str, Any], *, default_output_reservation: int | None = None
+) -> int:
+    """Conservatively estimate prompt plus reserved output tokens.
+
+    Exact tokenization is model-specific and may require loading tokenizer code.
+    The estimator uses both character and word bounds with headroom, then adds
+    the client's complete output reservation. It intentionally rounds upward.
+
+    ``default_output_reservation`` overrides the global
+    ``settings.runtime_preset_default_output_reservation_tokens`` fallback.
+    """
+    default_reservation = (
+        default_output_reservation
+        if default_output_reservation is not None
+        else settings.runtime_preset_default_output_reservation_tokens
+    )
+    prompt_estimate = estimate_prompt_tokens(body)
 
     options = body.get("options") if isinstance(body.get("options"), dict) else {}
     output_value = body.get(

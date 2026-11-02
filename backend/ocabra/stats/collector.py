@@ -20,6 +20,7 @@ from starlette.types import ASGIApp
 
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 from ocabra.core.runtime_coordinator import _text_size
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
@@ -452,6 +453,51 @@ def _extract_generation_ms(payload: dict | None) -> int | None:
     return None
 
 
+def _update_engine_runtime_telemetry(request: Request, payload: dict | None) -> None:
+    """Merge optional llama.cpp prompt/slot timings into request telemetry."""
+    telemetry = getattr(request.state, "runtime_telemetry", None)
+    if not isinstance(telemetry, RequestRuntimeTelemetry) or not isinstance(payload, dict):
+        return
+    timings = payload.get("timings")
+    if not isinstance(timings, dict):
+        timings = {}
+    raw_prompt_ms = timings.get("prompt_ms")
+    try:
+        if raw_prompt_ms is not None:
+            telemetry.prefill_ms = max(0, int(float(raw_prompt_ms)))
+    except (TypeError, ValueError):
+        pass
+    raw_slot = payload.get("slot_id", timings.get("slot_id"))
+    try:
+        if raw_slot is not None:
+            telemetry.slot_id = int(raw_slot)
+    except (TypeError, ValueError):
+        pass
+
+
+def _mark_stream_first_token(
+    request: Request,
+    chunks: list[bytes],
+    content_type: str,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Capture TTFT even when a complete stream finishes inside 500 ms.
+
+    Live progress is deliberately throttled, but TTFT must inspect every chunk
+    until the first visible content/reasoning token arrives. After that this is
+    a constant-time no-op, so long streams do not acquire quadratic parsing.
+    """
+    telemetry = getattr(request.state, "runtime_telemetry", None)
+    if not isinstance(telemetry, RequestRuntimeTelemetry) or telemetry.ttft_ms is not None:
+        return
+    output_tokens = _stream_output_tokens(
+        b"".join(chunks), content_type, include_reasoning=True
+    )
+    if output_tokens is not None and output_tokens > 0:
+        telemetry.mark_first_token(now_monotonic)
+
+
 def _extract_speculative_stats(
     payload: dict | None,
 ) -> tuple[int | None, int | None, float | None, float | None]:
@@ -542,6 +588,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
 
         start = time.monotonic()
         started_at = datetime.now(UTC)
+        request.state.runtime_telemetry = RequestRuntimeTelemetry(started_monotonic=start)
         request_payload = await _extract_request_payload(request)
         request_kind = _classify_request_kind(path)
 
@@ -835,6 +882,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8")
                         chunks.append(chunk)
+                        _mark_stream_first_token(request, chunks, content_type)
                         yield chunk
                         # Live progress for the model/GPU card "is this hung
                         # or still working" indicator (2026-10-29). Throttled
@@ -873,6 +921,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                             error_msg, error_code = stream_error
                             recorded_status = _stream_error_status(error_code)
                         last_payload = _extract_last_payload_from_stream(all_body, content_type)
+                        _update_engine_runtime_telemetry(request, last_payload)
                         in_tok, out_tok, cached_tok, reason_tok = _extract_usage_tokens_detailed(
                             last_payload, request_kind, request_payload
                         )
@@ -943,6 +992,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 response_payload, request_kind=request_kind, request_payload=request_payload
             )
             generation_ms = _extract_generation_ms(response_payload)
+            _update_engine_runtime_telemetry(request, response_payload)
             draft_n, draft_n_accepted, predicted_tps, prompt_tps = (
                 _extract_speculative_stats(response_payload)
             )
@@ -1392,6 +1442,14 @@ async def _record_stat(
                 agent_id=agent_id_ctx,
                 # Bloque 20 — Duration estimator + Router audit.
                 work_size_meta=work_size_meta,
+                runtime_telemetry=(
+                    telemetry.as_dict()
+                    if isinstance(
+                        (telemetry := getattr(request.state, "runtime_telemetry", None)),
+                        RequestRuntimeTelemetry,
+                    )
+                    else None
+                ),
                 via_router_profile_id=via_router_profile_id,
                 runtime_preset=getattr(request.state, "runtime_preset_key", None),
                 runtime_key=getattr(request.state, "runtime_key", None),

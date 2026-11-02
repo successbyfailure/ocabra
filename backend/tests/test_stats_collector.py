@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 from ocabra.core.worker_pool import InferenceTimeoutError
 from ocabra.stats.collector import (
     StatsMiddleware,
@@ -19,9 +20,11 @@ from ocabra.stats.collector import (
     _extract_speculative_stats,
     _extract_stream_error,
     _extract_usage_tokens,
+    _mark_stream_first_token,
     _resolve_inflight_model_id,
     _stream_error_status,
     _stream_output_tokens,
+    _update_engine_runtime_telemetry,
     record_realtime_request,
 )
 
@@ -253,6 +256,36 @@ def test_extract_generation_ms_none_when_backend_does_not_report_it() -> None:
     assert _extract_generation_ms({"timings": {}}) is None
 
 
+def test_engine_runtime_telemetry_extracts_prefill_and_slot() -> None:
+    telemetry = RequestRuntimeTelemetry(started_monotonic=0.0)
+    request = SimpleNamespace(state=SimpleNamespace(runtime_telemetry=telemetry))
+
+    _update_engine_runtime_telemetry(
+        request,
+        {"slot_id": 3, "timings": {"prompt_ms": 1234.9}},
+    )
+
+    assert telemetry.prefill_ms == 1234
+    assert telemetry.slot_id == 3
+
+
+def test_stream_ttft_is_captured_before_progress_throttle() -> None:
+    telemetry = RequestRuntimeTelemetry(started_monotonic=10.0)
+    request = SimpleNamespace(state=SimpleNamespace(runtime_telemetry=telemetry))
+    chunks = [b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n']
+
+    _mark_stream_first_token(
+        request, chunks, "text/event-stream", now_monotonic=10.1
+    )
+    assert telemetry.ttft_ms is None
+
+    chunks.append(b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n')
+    _mark_stream_first_token(
+        request, chunks, "text/event-stream", now_monotonic=10.25
+    )
+    assert telemetry.ttft_ms == 250
+
+
 def test_extract_error_message_preserves_openai_detail() -> None:
     payload = {
         "detail": {
@@ -452,6 +485,11 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
     model_manager.try_begin_request.assert_called_once_with(
         "ollama/gemma:12b",
         0,
+        user_id=None,
+        username=None,
+        api_key_name=None,
+        profile_id="gemma-public",
+        input_tokens_estimate=None,
     )
     model_manager.end_request.assert_called_once_with(
         "ollama/gemma:12b",

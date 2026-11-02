@@ -573,6 +573,19 @@ function RecentRequestsSection() {
                       ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
                       : "border-border bg-muted/50 text-muted-foreground"
                   const statusLabel = req.error ? `Error: ${req.error.substring(0, 40)}` : req.statusCode != null ? String(req.statusCode) : "—"
+                  const runtime = req.runtimeTelemetry
+                  const runtimeSummary = runtime
+                    ? [
+                        runtime.queue_ms != null && runtime.queue_ms > 0 ? `cola ${runtime.queue_ms} ms` : null,
+                        runtime.load_ms != null && runtime.load_ms > 0 ? `carga ${runtime.load_ms} ms` : null,
+                        runtime.ttft_ms != null ? `TTFT ${runtime.ttft_ms} ms` : null,
+                        runtime.prefill_ms != null ? `prefill ${runtime.prefill_ms} ms` : null,
+                        runtime.admission_concurrency != null && runtime.admission_limit != null
+                          ? `${runtime.admission_concurrency}/${runtime.admission_limit} activas`
+                          : null,
+                        runtime.slot_id != null ? `slot ${runtime.slot_id}` : null,
+                      ].filter(Boolean).join(" · ")
+                    : ""
                   return (
                     <tr key={req.id} className={`transition-colors hover:bg-muted/30${req.error ? " bg-red-500/5" : ""}`}>
                       <td className="px-3.5 py-2.5 font-mono text-xs text-muted-foreground">{hora}</td>
@@ -580,7 +593,17 @@ function RecentRequestsSection() {
                       <td className="px-3.5 py-2.5">
                         <RequestKindBadge kind={req.requestKind ?? req.backendType} />
                       </td>
-                      <td className="px-3.5 py-2.5 text-right tabular-nums text-muted-foreground">{req.durationMs != null ? `${req.durationMs} ms` : "—"}</td>
+                      <td
+                        className="px-3.5 py-2.5 text-right tabular-nums text-muted-foreground"
+                        title={runtimeSummary || undefined}
+                      >
+                        <div>{req.durationMs != null ? `${req.durationMs} ms` : "—"}</div>
+                        {runtimeSummary && (
+                          <div className="max-w-[14rem] truncate text-[10px] text-muted-foreground/60">
+                            {runtimeSummary}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3.5 py-2.5 text-right tabular-nums text-muted-foreground">
                         {req.inputTokens != null || req.outputTokens != null
                           ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}` : "—"}

@@ -129,6 +129,10 @@ async def completions(
             return fed_resp
 
     worker_pool = request.app.state.worker_pool
+    runtime_telemetry = getattr(request.state, "runtime_telemetry", None)
+    telemetry_admission = (
+        {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
+    )
 
     # Streaming: pre-flush headers (incl. X-Ocabra-Expected-Wait-Seconds)
     # before triggering the load.
@@ -193,6 +197,7 @@ async def completions(
                     required_tokens=runtime_plan.required_tokens,
                     body=body,
                     user_key=fairness_user_key(user),
+                    telemetry=runtime_telemetry,
                 ),
                 media_type="text/event-stream",
                 headers=headers,
@@ -244,6 +249,7 @@ async def completions(
                     is_batch,
                     kv_capacity,
                     kv_tokens,
+                    runtime_telemetry,
                 ),
                 media_type="text/event-stream",
                 headers=stream_headers,
@@ -255,6 +261,7 @@ async def completions(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **telemetry_admission,
             **kv_admission,
         )
         first_chunk, first_exc = await _peek_first_chunk(gen)
@@ -285,6 +292,7 @@ async def completions(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **telemetry_admission,
             **kv_admission,
         )
     except httpx.HTTPStatusError as exc:
@@ -323,6 +331,7 @@ async def _stream_completions_queued(
     is_batch: bool,
     kv_capacity_tokens: int | None,
     kv_tokens: int,
+    telemetry=None,
 ) -> AsyncIterator[bytes]:
     """Fallback for an already-saturated fair-share queue — see the
     identical rationale on ``ocabra.api.openai.chat._stream_chat_queued``.
@@ -352,6 +361,7 @@ async def _stream_completions_queued(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
             **(
                 {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
                 if kv_capacity_tokens is not None
@@ -415,6 +425,7 @@ async def _stream_completions_with_load(
     required_tokens: int | None,
     body: dict,
     user_key: str | None = None,
+    telemetry=None,
 ):
     """SSE generator that triggers the model load lazily — see chat.py.
 
@@ -467,6 +478,8 @@ async def _stream_completions_with_load(
     state = load_task.result()
 
     load_duration_ms = int((time.monotonic() - load_started_at) * 1000)
+    if telemetry is not None:
+        telemetry.mark_load(load_duration_ms)
     yield sse_ocabra_event(
         "model_ready",
         model_id=state.model_id,
@@ -522,6 +535,7 @@ async def _stream_completions_with_load(
             backend_body,
             user_key=user_key,
             slots=slots,
+            **({"telemetry": telemetry} if telemetry is not None else {}),
             **kv_admission,
         ):
             yield chunk

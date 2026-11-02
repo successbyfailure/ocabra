@@ -223,6 +223,8 @@ Implementado:
 Implementado:
 - **OpenAI Files API** (`/v1/files` · `POST`/`GET`/`DELETE`, `GET /v1/files/{id}/content`) con almacenamiento en disco (`/data/openai_files`, volumen `./data/openai_files`). Tabla `openai_files`.
 - **OpenAI Batches API** (`/v1/batches` · `POST`/`GET`/`cancel`) con tabla `openai_batches` y migración `0016`. Soporta `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech` (añadidos 2026-10-30). Respuestas no-JSON (TTS) se guardan como fichero aparte (`purpose="batch_artifact"`) referenciado por `file_id` en vez de ir inline. `/v1/audio/transcriptions` también soportado (2026-10-30) pero como **extensión propia fuera del estándar OpenAI**: la línea referencia un `file_id` pre-subido (`purpose="batch_input_audio"`) en vez de llevar el audio inline, y `batch_processor` reconstruye la petición multipart real en tiempo de despacho — necesario porque el endpoint real recibe `multipart/form-data`, incompatible con una línea JSON. `/v1/images/edits` se queda fuera por el mismo motivo, sin extensión equivalente todavía.
+- **Batches — `/v1/pooling`, `/v1/score`, `/v1/rerank`, `/v1/classify`, `/v1/audio/generate`** (2026-11-02): añadidos a `ALLOWED_ENDPOINTS`. Los cinco toman JSON puro de entrada y devuelven JSON o binario (música, igual que TTS) — encajan sin cambios en el `_dispatch()` genérico de `batch_processor.py`, a diferencia de transcripciones. Motivado por una auditoría de documentación que encontró que la matriz de soporte real no coincidía con lo documentado.
+- **Batches — `/v1/images/edits`** (2026-11-02): ya no se queda fuera. Añadida la misma extensión oCabra que `/v1/audio/transcriptions` (referencia a fichero pre-subido en vez de binario inline): `image_file_id` (requerido) + `mask_file_id`/`image_ref_{1,2,3}_file_id` (opcionales), todos con `purpose="batch_input_image"` vía `POST /v1/files`. `batch_processor` reconstruye el multipart real (hasta 5 ficheros) en tiempo de despacho.
 - **BatchProcessor** (`backend/ocabra/core/batch_processor.py`): loop en background, dispatch in-process vía `httpx.ASGITransport`, impersonación del owner con `X-Gateway-Token` + `X-Internal-User-Id` (añadido soporte en `_deps_auth.py`). Concurrencia configurable (`batch_max_concurrency=4`), poll cada `batch_poll_interval_seconds=5`; el timeout efectivo por petición es `max(batch_request_timeout_seconds, inference_request_timeout_seconds + 30)`.
 - **Fix ACL `/ocabra/models`**: ahora filtra por `accessible_model_ids` para usuarios no-admin (igual que `/v1/models`). Verificado con usuario de grupo limitado: 1 modelo visible vs. todos antes.
 - Smoke test e2e: upload JSONL → create batch → procesado completo con output JSONL descargable vía Files API.
@@ -729,6 +731,14 @@ runners Ollama persistentes, drena peticiones activas, espera telemetría físic
 fresca y repite la evicción sobre el déficit real si una autocarga PIN cambia
 el estado durante la operación. La vuelta 2→1 se validó de extremo a extremo
 con Qwen abliterated 224k/4 → 64k/1.
+Desde 2026-11-02 llama.cpp mantiene cuatro slots físicos pero aplica
+admisión computacional adaptativa (4/<32k, 3/≥32k, 2/≥64k) para proteger decode
+frente a prefills grandes. Las decisiones quedan persistidas junto con cola,
+carga, TTFT, prefill y slot en ``request_stats.runtime_telemetry``. El barrido
+104k–128k del perfil normal de Chaos terminó correctamente: queda validado en
+128k/4 slots/Q8 sobre la RTX 3090, con ~20.990 MiB de pico y ~3.188 MiB libres.
+Una ráfaga real de cuatro reservas de ~40k admitió tres y encoló la cuarta
+62.986 ms, confirmando el límite adaptativo sin reducir slots físicos.
 Desde 0.22.15, la API y la UI agregan los workers derivados durante todo su
 ciclo de vida y señalizan ``loading``, ``loaded``, ``upsizing``,
 ``downsizing`` y ``unloading`` junto con sus slots físicos. Hay controles para
