@@ -737,6 +737,32 @@ function imagesFromBody(body: unknown): string[] {
     .filter((v): v is string => typeof v === "string")
 }
 
+/** Metadata-only summary of a batch line's response body — token usage,
+ * finish reason, model — deliberately never the actual message/embedding
+ * content, since batch results can be shared across the team. */
+function summarizeBody(body: unknown): string {
+  if (typeof body !== "object" || body === null) return "Respuesta recibida"
+  const b = body as Record<string, unknown>
+  const parts: string[] = []
+  if (typeof b.model === "string") parts.push(b.model)
+  const choices = Array.isArray(b.choices) ? b.choices : null
+  const finishReason = choices
+    ?.map((c) => (typeof c === "object" && c !== null ? (c as Record<string, unknown>).finish_reason : null))
+    .find((v) => typeof v === "string")
+  if (typeof finishReason === "string") parts.push(`finish: ${finishReason}`)
+  const usage = typeof b.usage === "object" && b.usage !== null ? (b.usage as Record<string, unknown>) : null
+  if (usage && typeof usage.total_tokens === "number") {
+    const prompt = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null
+    const completion = typeof usage.completion_tokens === "number" ? usage.completion_tokens : null
+    parts.push(
+      prompt != null && completion != null
+        ? `${usage.total_tokens} tokens (${prompt} + ${completion})`
+        : `${usage.total_tokens} tokens`,
+    )
+  }
+  return parts.length > 0 ? parts.join(" · ") : "Respuesta recibida"
+}
+
 function BatchDetailModal({ batch, onClose }: { batch: OpenAIBatchJob; onClose: () => void }) {
   const [outputLines, setOutputLines] = useState<BatchLineResult[] | null>(null)
   const [errorLines, setErrorLines] = useState<BatchLineResult[] | null>(null)
@@ -887,7 +913,7 @@ function BatchDetailModal({ batch, onClose }: { batch: OpenAIBatchJob; onClose: 
                     ))}
                   </div>
                 ) : (
-                  <pre className="max-h-40 overflow-auto text-[10px]">{JSON.stringify(body, null, 2)}</pre>
+                  <p className="text-xs text-muted-foreground">{summarizeBody(body)}</p>
                 )}
               </div>
             )

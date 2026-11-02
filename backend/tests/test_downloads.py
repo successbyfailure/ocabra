@@ -142,3 +142,56 @@ async def test_auto_register_hf_nemo_sets_base_model_path(tmp_path: Path, monkey
     call = model_manager.add_model.await_args.kwargs
     assert call["backend_type"] == "whisper"
     assert call["extra_config"]["base_model_id"] == str(nemo_file)
+
+
+def _job(job_id: str, status: str, completed_at: str | None) -> DownloadJob:
+    return DownloadJob(
+        job_id=job_id,
+        source="ollama",
+        model_ref="qwen3:8b",
+        artifact=None,
+        register_config=None,
+        status=status,
+        progress_pct=100.0 if status == "completed" else 0.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error="boom" if status == "failed" else None,
+        started_at="2026-03-14T00:00:00Z",
+        completed_at=completed_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sweep_old_jobs_deletes_past_retention_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """completed jobs sweep sooner than failed/cancelled ones (the error is
+    the only record of what went wrong, worth keeping longer), and anything
+    still active or younger than its retention window is left alone."""
+    import ocabra.api.internal.downloads as downloads_mod
+
+    manager = DownloadManager()
+    jobs = [
+        _job("old-completed", "completed", "2026-01-01T00:00:00Z"),  # past both cutoffs
+        _job("recent-completed", "completed", "2026-11-01T23:59:00Z"),  # within completed retention
+        _job("old-failed", "failed", "2026-10-25T00:00:00Z"),  # past the (longer) failed retention too
+        _job("recent-failed", "failed", "2026-11-01T12:00:00Z"),  # past completed's window, within failed's
+        _job("still-downloading", "downloading", None),  # not terminal — never swept
+    ]
+    manager.list_jobs = AsyncMock(return_value=jobs)
+    fake_redis = SimpleNamespace(delete=AsyncMock())
+    monkeypatch.setattr(downloads_mod, "get_redis_safe", lambda: fake_redis)
+
+    class _FrozenDatetime:
+        @staticmethod
+        def now(_tz):
+            from datetime import datetime as real_datetime
+
+            return real_datetime(2026, 11, 2, 0, 0, 0, tzinfo=_tz)
+
+    monkeypatch.setattr(downloads_mod, "datetime", _FrozenDatetime)
+
+    deleted = await manager._sweep_old_jobs()
+
+    assert deleted == 2
+    fake_redis.delete.assert_any_await("download:job:old-completed")
+    fake_redis.delete.assert_any_await("download:job:old-failed")
+    assert fake_redis.delete.await_count == 2

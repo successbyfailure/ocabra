@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
@@ -19,6 +20,8 @@ from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscrib
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.ollama_registry import OllamaRegistry
 from ocabra.schemas.registry import DownloadJob
+
+logger = structlog.get_logger(__name__)
 
 QUEUE_NAME = "queue:download"
 DOWNLOAD_PROGRESS_CHANNEL = "download:progress"
@@ -36,16 +39,21 @@ class DownloadManager:
         self._hf_registry = HuggingFaceRegistry()
         self._ollama_registry = OllamaRegistry()
         self._worker_task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
         self._active_cancel_flags: dict[str, asyncio.Event] = {}
         self._app = None
 
     async def start(self, app=None) -> None:
         self._app = app
-        if self._worker_task and not self._worker_task.done():
-            return
-        await self._cleanup_stale_jobs()
-
-        self._worker_task = asyncio.create_task(self._worker_loop(), name="download-manager-worker")
+        if not self._worker_task or self._worker_task.done():
+            await self._cleanup_stale_jobs()
+            self._worker_task = asyncio.create_task(
+                self._worker_loop(), name="download-manager-worker"
+            )
+        if not self._cleanup_task or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(
+                self._cleanup_loop(), name="download-manager-cleanup"
+            )
 
     async def _cleanup_stale_jobs(self) -> None:
         """Mark jobs left in 'downloading' state as failed (server was killed mid-download)."""
@@ -57,13 +65,41 @@ class DownloadManager:
                 )
                 await self._save_and_publish(failed)
 
+    async def _cleanup_loop(self) -> None:
+        """Periodically sweep terminal jobs whose result has had time to be
+        seen — the queue would otherwise accumulate every download/update job
+        ever run (111 stale entries found on 2026-11-02, days old)."""
+        while True:
+            await asyncio.sleep(max(60, int(settings.download_job_cleanup_poll_interval_s)))
+            try:
+                await self._sweep_old_jobs()
+            except Exception:
+                logger.exception("download_cleanup_sweep_failed")
+
+    async def _sweep_old_jobs(self) -> int:
+        now = datetime.now(UTC)
+        completed_cutoff = now.timestamp() - settings.download_job_retention_completed_s
+        failed_cutoff = now.timestamp() - settings.download_job_retention_failed_s
+        redis = get_redis_safe()
+        deleted = 0
+        for job in await self.list_jobs():
+            if job.status not in {"completed", "failed", "cancelled"} or job.completed_at is None:
+                continue
+            cutoff = completed_cutoff if job.status == "completed" else failed_cutoff
+            if job.completed_at.timestamp() < cutoff:
+                await redis.delete(f"download:job:{job.job_id}")
+                deleted += 1
+        return deleted
+
     async def stop(self) -> None:
-        if not self._worker_task:
-            return
-        self._worker_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._worker_task
+        for task in (self._worker_task, self._cleanup_task):
+            if not task:
+                continue
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         self._worker_task = None
+        self._cleanup_task = None
 
     async def enqueue(
         self,

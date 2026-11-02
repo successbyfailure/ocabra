@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.22.11"
+    app_version: str = "0.22.12"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     # writing files until the disk fills mid-stream — the cascade that took
     # the pool to 100% during the 2026-05-09 update-all incident.
     download_min_free_gb: int = 30
+    # Finished download/update job records (completed/failed/cancelled) are
+    # never useful once their result has been seen — they just accumulate in
+    # Redis forever otherwise (111 stale entries found on 2026-11-02, some
+    # days old). completed jobs are swept soon after finishing; failed/
+    # cancelled ones are kept longer since their error message is the only
+    # record of what went wrong.
+    download_job_retention_completed_s: int = 3600
+    download_job_retention_failed_s: int = 86400
+    download_job_cleanup_poll_interval_s: int = 900
     # Bloque 15 — Modular backends install root (one subdir per backend).
     backends_dir: str = "/data/backends"
     # True on the fat image (all backends pre-installed): unknown backends
