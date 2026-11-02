@@ -7,6 +7,7 @@ import { useServiceStore } from "@/stores/serviceStore"
 import { useBackendsStore } from "@/stores/backendsStore"
 import { useAgentsStore } from "@/stores/agentsStore"
 import { useMCPStore } from "@/stores/mcpStore"
+import { api } from "@/api/client"
 
 const getWebSocketUrl = () =>
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
@@ -64,6 +65,10 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
         data: {
           event: String(data.event ?? "status_changed"),
           modelId: data.model_id,
+          canonicalModelId:
+            typeof data.canonical_model_id === "string"
+              ? data.canonical_model_id
+              : undefined,
           status: String(data.status ?? data.new_status ?? "configured") as ModelStatus,
         },
       }
@@ -172,7 +177,15 @@ export function useWebSocket() {
           if (event.type === "gpu_stats") {
             setGpus(event.data)
           } else if (event.type === "model_event") {
-            updateModel(event.data.modelId, { status: event.data.status })
+            // Runtime presets publish events with their derived ``::<hash>``
+            // worker id. Refresh the canonical projection so transitions,
+            // target GPUs, slots and action flags change immediately without
+            // creating a phantom derived card in the store.
+            const canonicalId = event.data.canonicalModelId ?? event.data.modelId
+            void api.models
+              .get(canonicalId)
+              .then((model) => updateModel(canonicalId, model))
+              .catch(() => updateModel(canonicalId, { status: event.data.status }))
           } else if (event.type === "download_progress") {
             updateJob(event.data.jobId, {
               progressPct: event.data.pct,

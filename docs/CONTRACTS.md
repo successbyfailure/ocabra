@@ -196,10 +196,39 @@ class ModelState:
     error_message: str | None
     extra_config: dict
 
+    # Vista runtime agregada. Para modelos con presets, model_id sigue siendo
+    # el id canónico aunque el proceso real use ``model_id::<hash>``.
+    runtime_phase: str          # configured | loading | loaded | upsizing |
+                                # downsizing | unloading | unloaded | error
+    runtime_worker_id: str | None
+    runtime_slots: int          # Siempre >= 1; capacidad física configurada/activa
+    can_cancel_load: bool       # Hay una tarea LOADING cancelable
+    can_downsize: bool          # Hay un runtime multi-GPU cargado y ocioso
+
 # Publicado en Redis como evento en cada cambio de estado:
 # Canal: "model:events"
 # Payload: {"event": "status_changed", "model_id": str, "new_status": ModelStatus}
 ```
+
+La API administrativa agrega cualquier worker derivado sobre su entrada
+canónica también durante transiciones, no solo cuando ya está cargado. El
+campo legado ``status`` conserva el ciclo de vida del worker seleccionado;
+``runtime_phase`` distingue un cambio de capacidad de una carga/descarga
+normal.
+
+La identidad derivada se resuelve contra los ids canónicos del catálogo. No se
+puede separar por el primer ``::``: en llama.cpp el propio id GGUF usa
+``repositorio::artefacto`` y el worker añade después ``::<hash>``. Los eventos
+incluyen ``canonical_model_id`` para que los clientes no tengan que inferirlo.
+
+Las operaciones administrativas son:
+
+- ``POST /ocabra/models/{model_id}/cancel-load``: cancela las tareas de carga
+  del canónico o de sus derivados y ejecuta la limpieza normal del backend.
+- ``POST /ocabra/models/{model_id}/downsize``: si no hay peticiones activas,
+  descarga el runtime multi-GPU y restaura el preset por defecto de una GPU.
+  Devuelve ``409`` si el runtime está ocupado o no existe una variante que
+  pueda reducirse.
 
 ---
 
@@ -1054,8 +1083,24 @@ runtime_policy = {
     "small_requests_extend_large_ttl": False,
     "remote_warm_threshold_seconds": 10,
     "max_context_tokens": None,               # techo validado opcional
+    "max_output_tokens": None,                # límite duro de generación opcional
+    "validated_context_tokens": {"normal": 98304}, # pools fijos medidos
+    "validated_vram_mb": {"normal": 24000}, # pico medido + margen
 }
 ```
+
+``validated_context_tokens`` solo puede confirmar el tamaño exacto de un preset
+``fixed`` del mismo nombre. Permite que una prueba empírica reproducible
+prevalezca sobre un estimador conservador para esa colocación concreta; no
+eleva ``max_context_tokens`` ni el contexto nativo del modelo y no se aplica a
+otros presets o GPU.
+
+``validated_vram_mb`` es opcional y solo se aplica cuando el contexto exacto
+del mismo preset figura también en ``validated_context_tokens``. Sustituye la
+estimación genérica durante admisión y reserva por un pico empírico con margen;
+permite representar runtimes que caben realmente aunque el estimador del GGUF
+y del grafo supere la capacidad física. No afecta presets ni colocaciones no
+validados.
 
 Selección de preset para chat/completions:
 
@@ -1065,9 +1110,14 @@ Selección de preset para chat/completions:
 3. Sin candidato cargado, usar el default si cubre la petición; si no, usar el
    menor preset habilitado suficiente.
 4. Comparar carga local con un remoto caliente cuando la política lo permita.
-5. Si ningún preset cubre el presupuesto, responder
-   ``context_length_exceeded`` antes de arrancar un runner.
-6. El escalado hacia arriba es inmediato; la vuelta al default se difiere por
+5. Si el perfil configura ``runtime_policy.max_output_tokens`` y un
+   ``max_tokens`` o ``max_completion_tokens`` explícito lo supera, responder
+   HTTP 400 con
+   ``param=<campo>`` y ``code=max_tokens_exceeded`` antes de admission.
+6. Si la salida solicitada respeta ese límite pero la suma de prompt y salida
+   no cabe en ningún preset, responder ``context_length_exceeded`` antes de
+   arrancar un runner.
+7. El escalado hacia arriba es inmediato; la vuelta al default se difiere por
    ``downgrade_grace_seconds`` y nunca interrumpe peticiones activas.
 
 **Presets ``max`` y el límite del split entre GPUs.** El preset con
@@ -1105,7 +1155,7 @@ por defecto del build fijado:
 ```python
 {
     "kv_unified": True,              # --kv-unified / --no-kv-unified
-    "kv_unified_per_slot": 32768,    # límite por secuencia, >= 1
+    "kv_unified_per_slot": 131072,   # cap opcional por secuencia, >= 1
     "cache_ram_mib": 0,              # -1 sin límite, 0 desactivada, >0 MiB
     "cache_idle_slots": False,       # --cache-idle-slots / --no-cache-idle-slots
 }
@@ -1116,6 +1166,150 @@ con la UI. Estos campos configuran ``llama-server`` al crear el runtime; no
 autorizan una mutación en caliente. Durante el spike inicial se usarán
 ``cache_ram_mib=0`` y ``cache_idle_slots=False`` para que la prompt cache no
 interfiera con las pruebas de aislamiento del pool unificado.
+
+**Admission control ponderado del pool KV.** La cola justa existente es la
+única autoridad de admisión delante del worker. No se crea una segunda cola
+para KV: ``FairSlotGate`` aplica atómicamente los dos límites al conceder una
+reserva:
+
+```python
+await gate.acquire(
+    user_key,
+    is_batch=False,
+    kv_tokens=required_tokens,       # prompt estimado + salida reservada
+)
+```
+
+- ``slots`` limita peticiones concurrentes físicas.
+- ``kv_capacity_tokens`` es el pool agregado del runtime; ``None`` desactiva
+  la dimensión KV y conserva exactamente el comportamiento anterior.
+- ``kv_tokens`` procede de ``RuntimePlan.required_tokens``. El coordinador lo
+  calcula también para perfiles sin presets; una petición sin estimación usa
+  cero y nunca activa por accidente un gate ponderado.
+- La capacidad usa primero el contexto efectivo del preset y, para perfiles
+  fijos sin presets, ``llama_cpp.ctx_size``/``use_case.context``. Del mismo
+  modo, los slots físicos usan ``_runtime.parallelism`` o el
+  ``parallel_slots``/``use_case.slots`` configurado.
+- Una reserva mayor que el pool se rechaza de inmediato; no puede quedar
+  encolada para siempre.
+- Una reserva que cabe individualmente pero no en el remanente espera en la
+  misma cola justa. El orden sigue siendo interactiva antes que batch y,
+  dentro de cada tier, usuario menos recientemente servido entre las
+  cabeceras que caben en ese momento.
+- La liberación es idempotente desde el punto de vista del contexto de
+  petición y ocurre al completar, fallar o cancelar, incluido streaming.
+- Solo los runtimes llama.cpp con ``kv_unified=true`` anuncian capacidad KV a
+  este gate. El resto de backends conserva el gate exclusivamente por slots.
+- En el modo productivo preferido, sin presets, ``llama_cpp.ctx_size`` es el
+  pool físico agregado y ``parallel_slots`` es únicamente el límite de
+  peticiones simultáneas. Si ``kv_unified_per_slot`` no está configurado, cada
+  slot puede ver hasta el pool completo; ``FairSlotGate`` impide que la suma de
+  reservas lógicas lo exceda. No se multiplica ``ctx_size`` por los slots.
+
+El snapshot de diagnóstico debe distinguir ``slot_saturated`` de
+``kv_saturated`` y publicar capacidad, reservado y libre. Estas cifras son
+reservas lógicas conservadoras de oCabra hasta que llama.cpp exponga ocupación
+física inequívoca; no se presentarán como celdas KV observadas.
+
+``GET /ocabra/models/{model_id}/status`` incluye ``admission=null`` hasta que
+el worker haya creado su gate. Si se consulta el ID canónico y existe un único
+runtime derivado cargado, resuelve automáticamente su gate; con varios runtimes
+derivados simultáneos el cliente debe consultar el ID derivado inequívoco.
+En ese caso también publica ``loaded/status/gpu/vramUsedMb`` del runtime activo
+manteniendo el ``modelId`` canónico solicitado. Después expone:
+
+```json
+{
+  "admission": {
+    "slots": 4,
+    "activeRequests": 2,
+    "queuedRequests": 1,
+    "slotSaturated": false,
+    "kvCapacityTokens": 98304,
+    "kvReservedTokens": 72000,
+    "kvFreeTokens": 26304
+  }
+}
+```
+
+**Visión opcional en llama.cpp.** ``extra_config.llama_cpp`` acepta
+``mmproj_model_id`` junto a ``vision_mode``:
+
+```python
+{
+    "mmproj_model_id": "/data/models/mmproj.gguf",
+    "vision_mode": "enabled",  # enabled | disabled | on_demand
+}
+```
+
+- ``enabled`` carga ``--mmproj`` al arrancar, como antes de existir el campo.
+- ``disabled`` no carga el projector y anuncia ``vision=false``.
+- ``on_demand`` arranca sin projector, anuncia que la visión está disponible
+  y la activa al recibir la primera petición que contiene una imagen. Tras la
+  activación permanece cargada durante la vida del worker.
+- Si se omite ``vision_mode``, un ``mmproj_model_id`` presente implica
+  ``enabled`` para mantener compatibilidad; sin projector implica ``disabled``.
+- ``enabled`` y ``on_demand`` requieren ``mmproj_model_id``.
+
+El modo bajo demanda es exclusivo del runtime custom de oCabra. El worker
+arranca con ``--props`` y oCabra invoca ``POST /props`` sobre loopback con:
+
+```json
+{"vision": {"enabled": true, "mmproj": "/data/models/mmproj.gguf"}}
+```
+
+La respuesta de éxito es
+``{"success": true, "vision": {"enabled": true, "active": true}}``. oCabra
+exige ``vision.active=true`` para no confundir la respuesta genérica de un
+``POST /props`` upstream con una activación real. El runtime serializa la
+transición, espera a que sea seguro modificar el projector y no acepta una
+petición multimodal hasta completarla. Un llama.cpp upstream sin esta extensión
+debe producir un error explícito; oCabra no reinicia silenciosamente el modelo.
+
+**Razonamiento en llama.cpp.** ``extra_config.llama_cpp`` admite controles de
+arranque independientes del parser de respuesta:
+
+```python
+{
+    "jinja": True,
+    "reasoning": "off",          # on | off | auto
+    "reasoning_format": "none", # none | deepseek | deepseek-legacy | auto
+    "reasoning_budget": -1,    # sin tope; permite activación por petición
+}
+```
+
+``reasoning_format=none`` solo evita extraer el pensamiento a
+``reasoning_content``; no desactiva por sí mismo la generación razonada.
+Para desactivarla por defecto se usa ``reasoning=off``. Este valor configura el
+arranque, pero no elimina la capacidad del modelo: una petición puede activar
+thinking sin recargar el worker mediante ``reasoning_effort=low|medium|high``.
+En llama.cpp oCabra lo traduce conjuntamente a
+``chat_template_kwargs.enable_thinking=true`` y al nivel solicitado. Un valor
+ausente o ``default`` conserva el valor de arranque; ``off``/``none`` fuerza
+``enable_thinking=false`` para esa petición. ``reasoning_budget=0`` queda
+disponible para modelos o plantillas que necesiten además cerrar el bloque de
+pensamiento inmediatamente, pero no debe configurarse en un perfil que quiera
+permitir activación bajo demanda.
+
+``capabilities.reasoning`` expresa soporte, no que thinking esté activo por
+defecto. El catálogo expone el valor de arranque separadamente como
+``ocabra.reasoning_default`` cuando está configurado explícitamente.
+
+La compatibilidad OpenAI elimina de ``message.content`` y de los deltas SSE
+únicamente un bloque inicial ``<think>`` vacío. Un bloque con contenido se
+preserva; cuando thinking se solicita explícitamente, el parser lo publica como
+``reasoning_content``.
+
+El binario custom se selecciona con ``LLAMA_CPP_CUSTOM_SERVER_BIN``. Si queda
+vacío, se conserva el orden normal: instalación modular y, como fallback,
+``LLAMA_CPP_SERVER_BIN``. Una ruta custom inexistente falla explícitamente en
+vez de arrancar un runtime upstream sin hot-mmproj.
+
+Con KV unificada, ``ctx_size`` dimensiona un único pool físico y cada slot puede
+direccionar hasta todo el pool. ``kv_unified_per_slot`` no reserva memoria por
+slot: solo reduce ese máximo lógico. Para reparto completamente flexible se
+omite el campo o se iguala a ``ctx_size``; oCabra debe controlar que las reservas
+agregadas de las peticiones admitidas no superen el pool.
 
 Endpoints internos:
 
@@ -1137,6 +1331,22 @@ KV y ``runtime_key``; nunca se anuncia ni reserva memoria para slots que el
 backend va a reducir. No carga ni descarga el modelo y no se usa directamente
 en ``/v1/models``; la API pública consumirá la misma información desde una
 caché de capacidades para no convertir el listado en una sonda bloqueante.
+En presets legacy, ``effective_context`` y ``hardware_max`` son contexto por
+petición. Para llama.cpp sin KV unificada, el runner materializa ese reparto
+como ``--ctx-size = effective_context * effective_parallelism``. Cuando el
+modelo usa ``llama_cpp.kv_unified=true``, ambos valores expresan en cambio el
+pool agregado real: ``--ctx-size = effective_context`` y los cuatro slots
+pueden direccionar todo el pool. El ``WeightedSlotGate`` impide que la suma de
+reservas concurrentes lo exceda. Esta distinción se persiste en el runtime como
+``_runtime.context_is_pool=true`` y evita multiplicar accidentalmente por el
+número de slots durante la admisión o el arranque.
+
+Los perfiles adaptativos llama.cpp pueden combinar un preset default forzado a
+la RTX 3090 y otro preset extendido forzado a 3060+3090. La petición selecciona
+el menor pool que cubre ``prompt + salida reservada``; el salto a dos GPU drena
+y desaloja los runtimes que ocupen cualquiera de sus shards. El retorno al
+default ocurre únicamente tras ``minimum_residency_seconds`` y
+``downgrade_grace_seconds``, nunca con peticiones activas.
 
 ``runtime-presets/{preset_key}/benchmark`` admite una carga fría opcional y
 devuelve ``load_ms``, ``generation_ms``, tokens de salida y tokens/segundo. No
@@ -1163,6 +1373,15 @@ Selección y observabilidad:
   ``ocabra.context_preset``. oCabra la elimina antes de llamar al backend.
 - ``context_length`` público equivale a ``effective_max``. El contexto activo
   se expone aparte y nunca reduce la capacidad anunciada.
+- ``ocabra.capabilities.max_output_tokens`` es un límite duro exigible y solo
+  se publica cuando el perfil o el backend declaran uno independiente de la
+  ventana total. Nunca se infiere de ``context_length``. Si el límite no está
+  configurado, el campo se omite y admission solo valida que entrada más
+  salida quepan en el preset seleccionado.
+- ``recommended_output_tokens`` es el presupuesto operativo derivado de la
+  reserva por defecto y del tráfico real. ``recommended_input_tokens`` es la
+  parte de la ventana que queda al reservar ese presupuesto. Ambos son
+  recomendaciones para planificación y nunca límites duros.
 - El heartbeat federado puede añadir ``runtime_preset``,
   ``effective_context`` y ``parallelism`` al runtime cargado. Son campos
   opcionales para permitir nodos con versiones distintas.

@@ -104,6 +104,7 @@ El trabajo restante está en `docs/ROADMAP.md`.
 
 ### Próximas fases
 
+- **Bloque 22 — KV elástica y paralelismo dinámico en llama.cpp (DISEÑO ACTIVO, 2026-10-30)**: Gemma 4 12B/26B-A4B y Qwen3.8 27B, cuatro slots físicos iniciales, pool KV compartido dimensionado en RTX 3060, RTX 3090 y ambas, admission control ponderado por tokens y estrategia upstream-first. Plan en `docs/tasks/llama-cpp-elastic-kv-plan.md`.
 - **Revisión futura de fiabilidad global**: evaluar conjuntamente estrategias
   de recursos, concurrencia, admission control y timeouts. También queda
   aplazada la decisión sobre OpenAI Responses API. Fuente: `docs/ROADMAP.md`.

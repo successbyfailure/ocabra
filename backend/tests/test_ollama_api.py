@@ -1,4 +1,5 @@
 """Tests for Ollama API compatibility layer."""
+
 from __future__ import annotations
 
 import json
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 # Profile helpers (shared pattern with test_openai_api)
 # ---------------------------------------------------------------------------
+
 
 def _make_test_profile(profile_id, base_model_id, category="llm", **kwargs):
     """Create a SimpleNamespace that mimics a ModelProfile for tests."""
@@ -54,8 +56,12 @@ def _make_app(model_state=None, worker_result=None) -> FastAPI:
     from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
     _admin_ctx = UserContext(
-        user_id=None, username=None, role="system_admin",
-        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+        user_id=None,
+        username=None,
+        role="system_admin",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=False,
     )
 
     app = FastAPI()
@@ -64,6 +70,7 @@ def _make_app(model_state=None, worker_result=None) -> FastAPI:
     # Override all auth callables so no real DB/Redis is needed
     async def _fake_user():
         return _admin_ctx
+
     app.dependency_overrides[get_current_user] = _fake_user
     app.dependency_overrides[get_ollama_user] = _fake_user
     app.dependency_overrides[get_openai_user] = _fake_user
@@ -75,7 +82,9 @@ def _make_app(model_state=None, worker_result=None) -> FastAPI:
             backend_type="vllm",
             status=ModelStatus.LOADED,
             load_policy=LoadPolicy.ON_DEMAND,
-            capabilities=BackendCapabilities(chat=True, completion=True, embeddings=True, streaming=True),
+            capabilities=BackendCapabilities(
+                chat=True, completion=True, embeddings=True, streaming=True
+            ),
         )
 
     mm = MagicMock()
@@ -130,7 +139,9 @@ def test_name_resolution_prefers_native_ollama_model() -> None:
 
     with patch(
         "ocabra.api.ollama._mapper.resolve_openai_model",
-        new=AsyncMock(side_effect=AssertionError("openai fallback should not run for native ollama matches")),
+        new=AsyncMock(
+            side_effect=AssertionError("openai fallback should not run for native ollama matches")
+        ),
     ):
         model_id, state = asyncio.run(resolve_model(FakeModelManager(), "llama3.2:3b"))
 
@@ -244,10 +255,16 @@ def test_pull_delegates_to_download_manager() -> None:
     fake_job = MagicMock()
     fake_job.job_id = "job-1"
 
-    with patch("ocabra.api.ollama.pull.download_manager.enqueue", new=AsyncMock(return_value=fake_job)) as enqueue:
+    with patch(
+        "ocabra.api.ollama.pull.download_manager.enqueue", new=AsyncMock(return_value=fake_job)
+    ) as enqueue:
         with patch(
             "ocabra.api.ollama.pull.download_manager.get_job",
-            new=AsyncMock(return_value=MagicMock(status="completed", model_dump=lambda mode="json": {"status": "completed"})),
+            new=AsyncMock(
+                return_value=MagicMock(
+                    status="completed", model_dump=lambda mode="json": {"status": "completed"}
+                )
+            ),
         ):
             resp = client.post("/api/pull", json={"name": "llama3.2:3b", "stream": False})
 
@@ -266,7 +283,9 @@ def test_chat_stream_translates_sse_to_ndjson() -> None:
         backend_type="vllm",
         status=ModelStatus.LOADED,
         load_policy=LoadPolicy.ON_DEMAND,
-        capabilities=BackendCapabilities(chat=True, completion=True, embeddings=True, streaming=True),
+        capabilities=BackendCapabilities(
+            chat=True, completion=True, embeddings=True, streaming=True
+        ),
     )
 
     app = _make_app(model_state=model_state)
@@ -352,7 +371,9 @@ def test_chat_stream_accumulates_and_converts_tool_call_deltas() -> None:
         backend_type="vllm",
         status=ModelStatus.LOADED,
         load_policy=LoadPolicy.ON_DEMAND,
-        capabilities=BackendCapabilities(chat=True, completion=True, embeddings=True, streaming=True),
+        capabilities=BackendCapabilities(
+            chat=True, completion=True, embeddings=True, streaming=True
+        ),
     )
     app = _make_app(model_state=model_state)
     app.state.worker_pool.forward_stream = MagicMock(
@@ -390,7 +411,12 @@ def test_chat_stream_accumulates_and_converts_tool_call_deltas() -> None:
 
 
 def test_generate_translates_options_to_vllm_params() -> None:
-    app = _make_app(worker_result={"choices": [{"text": "ok"}], "usage": {"prompt_tokens": 2, "completion_tokens": 1}})
+    app = _make_app(
+        worker_result={
+            "choices": [{"text": "ok"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        }
+    )
     client = TestClient(app)
 
     resp = client.post(
@@ -575,12 +601,18 @@ def test_chat_non_streaming_forwards_fairness_user_key_and_slots() -> None:
         capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
         extra_config={"_runtime": {"parallelism": 3}},
     )
-    app = _make_app(model_state=model_state, worker_result={"choices": [{"message": {"content": "ok"}}]})
+    app = _make_app(
+        model_state=model_state, worker_result={"choices": [{"message": {"content": "ok"}}]}
+    )
     client = TestClient(app)
 
     resp = client.post(
         "/api/chat",
-        json={"model": "llama3.2:3b", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        json={
+            "model": "llama3.2:3b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        },
     )
 
     assert resp.status_code == 200
@@ -597,7 +629,9 @@ def test_chat_non_streaming_surfaces_done_reason() -> None:
     (done: true, no hint). OpenAI's finish_reason maps 1:1 onto Ollama's
     done_reason vocabulary (stop/length/tool_calls)."""
     worker_result = {
-        "choices": [{"message": {"role": "assistant", "content": "partial..."}, "finish_reason": "length"}],
+        "choices": [
+            {"message": {"role": "assistant", "content": "partial..."}, "finish_reason": "length"}
+        ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5},
     }
     app = _make_app(worker_result=worker_result)
@@ -605,7 +639,11 @@ def test_chat_non_streaming_surfaces_done_reason() -> None:
 
     resp = client.post(
         "/api/chat",
-        json={"model": "llama3.2:3b", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        json={
+            "model": "llama3.2:3b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        },
     )
 
     assert resp.status_code == 200
@@ -622,7 +660,9 @@ def test_chat_stream_surfaces_done_reason_in_final_chunk() -> None:
         backend_type="vllm",
         status=ModelStatus.LOADED,
         load_policy=LoadPolicy.ON_DEMAND,
-        capabilities=BackendCapabilities(chat=True, completion=True, embeddings=True, streaming=True),
+        capabilities=BackendCapabilities(
+            chat=True, completion=True, embeddings=True, streaming=True
+        ),
     )
     app = _make_app(model_state=model_state)
     app.state.worker_pool.forward_stream = MagicMock(
@@ -639,7 +679,11 @@ def test_chat_stream_surfaces_done_reason_in_final_chunk() -> None:
     with client.stream(
         "POST",
         "/api/chat",
-        json={"model": "llama3.2:3b", "messages": [{"role": "user", "content": "hello"}], "stream": True},
+        json={
+            "model": "llama3.2:3b",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        },
     ) as resp:
         assert resp.status_code == 200
         lines = [line for line in resp.iter_lines() if line]

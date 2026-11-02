@@ -30,6 +30,9 @@ KvCacheType = Literal["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"]
 SplitMode = Literal["layer", "row", "none"]
 SplitStrategy = Literal["evenly", "favor_main"]
 RuntimeType = Literal["cuda", "rocm", "vulkan", "cpu"]
+VisionMode = Literal["enabled", "disabled", "on_demand"]
+ReasoningMode = Literal["on", "off", "auto"]
+ReasoningFormat = Literal["none", "deepseek", "deepseek-legacy", "auto"]
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +122,10 @@ class LlamaCppLoadConfig(BaseModel):
     # --- Sprint 17.2 (KV-quant) ---
     cache_type_k: KvCacheType | None = None
     cache_type_v: KvCacheType | None = None  # requires flash_attn=True if != f16
+    kv_unified: bool | None = None
+    kv_unified_per_slot: int | None = Field(default=None, ge=1)
+    cache_ram_mib: int | None = Field(default=None, ge=-1)
+    cache_idle_slots: bool | None = None
 
     # --- Sprint 17.3 (Multi-GPU + MoE CPU offload) ---
     main_gpu: int | None = Field(default=None, ge=0)
@@ -126,6 +133,10 @@ class LlamaCppLoadConfig(BaseModel):
     split_mode: SplitMode | None = None
     disabled_gpus: list[int] | None = None
     split_strategy: SplitStrategy | None = None
+    # Operator-calibrated total footprint. Useful for configurations already
+    # measured on the target hardware when the generic planner is deliberately
+    # more conservative than the observed llama.cpp allocation.
+    vram_estimate_mb: int | None = Field(default=None, ge=1)
     n_cpu_moe: int | None = Field(default=None, ge=0)
     override_tensor: str | None = None
 
@@ -141,6 +152,17 @@ class LlamaCppLoadConfig(BaseModel):
     # ``speculative.draft_model_id``: a direct file path, or a canonical
     # model_id looked up under ``settings.models_dir``.
     mmproj_model_id: str | None = None
+    vision_mode: VisionMode | None = Field(
+        default=None,
+        description=(
+            "Vision projector lifecycle. Omitted preserves legacy behaviour: "
+            "enabled when mmproj_model_id is configured, disabled otherwise."
+        ),
+    )
+    jinja: bool | None = None
+    reasoning: ReasoningMode | None = None
+    reasoning_format: ReasoningFormat | None = None
+    reasoning_budget: int | None = Field(default=None, ge=-1)
 
     @model_validator(mode="after")
     def _validate_cache_type_v_requires_flash_attn(self) -> LlamaCppLoadConfig:
@@ -150,6 +172,12 @@ class LlamaCppLoadConfig(BaseModel):
                 "cache_type_v != 'f16' requires flash_attn=True (llama.cpp only "
                 "supports quantized V cache when flash attention is enabled)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_vision_mode_has_projector(self) -> LlamaCppLoadConfig:
+        if self.vision_mode in {"enabled", "on_demand"} and not self.mmproj_model_id:
+            raise ValueError(f"vision_mode='{self.vision_mode}' requires mmproj_model_id")
         return self
 
     @field_validator("tensor_split")

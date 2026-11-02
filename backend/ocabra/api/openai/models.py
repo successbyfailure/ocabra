@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.output_limits import resolve_max_output_tokens
 
 from ._deps import (
     _openai_error,
@@ -34,11 +35,7 @@ async def _context_metadata(
 ) -> dict[str, Any] | None:
     """Resolve the public context contract against current hardware."""
 
-    enabled = [
-        preset
-        for preset in getattr(profile, "runtime_presets", [])
-        if preset.enabled
-    ]
+    enabled = [preset for preset in getattr(profile, "runtime_presets", []) if preset.enabled]
     if not enabled:
         return None
 
@@ -62,9 +59,7 @@ async def _context_metadata(
     if not usable:
         return None
 
-    default_key = next(
-        (preset.preset_key for preset in enabled if preset.is_default), None
-    )
+    default_key = next((preset.preset_key for preset in enabled if preset.is_default), None)
     default_row = next(
         (row for row in usable if row["preset_key"] == default_key),
         min(usable, key=lambda row: int(row["effective_context"])),
@@ -75,21 +70,12 @@ async def _context_metadata(
     for runtime_state in await model_manager.list_states(include_derived=True):
         if runtime_state.status.value != "loaded":
             continue
-        extra = (
-            runtime_state.extra_config
-            if isinstance(runtime_state.extra_config, dict)
-            else {}
-        )
+        extra = runtime_state.extra_config if isinstance(runtime_state.extra_config, dict) else {}
         runtime = extra.get("_runtime")
-        if (
-            not isinstance(runtime, dict)
-            or runtime.get("profile_id") != profile.profile_id
-        ):
+        if not isinstance(runtime, dict) or runtime.get("profile_id") != profile.profile_id:
             continue
         loaded_at = runtime_state.loaded_at
-        if active_loaded_at is None or (
-            loaded_at is not None and loaded_at > active_loaded_at
-        ):
+        if active_loaded_at is None or (loaded_at is not None and loaded_at > active_loaded_at):
             active_loaded_at = loaded_at
             active_context = runtime.get("effective_context")
             active_preset = runtime.get("preset_key")
@@ -105,19 +91,16 @@ async def _context_metadata(
 
 
 def _resolve_default_output_reservation(profile: Any) -> int:
-    """Realistic ``max_output_tokens`` for *profile* — the same output
+    """Default recommended output budget for *profile* — the same output
     budget the admission layer itself assumes for a request that doesn't
     pass ``max_tokens`` (see ``runtime_coordinator.estimate_request_token_
     budget``'s ``default_output_reservation`` resolution: per-profile
     ``runtime_policy.default_output_reservation_tokens`` override, else
     ``settings.runtime_preset_default_output_reservation_tokens``).
 
-    Exposing raw ``context_length`` here (the previous behaviour) implied a
-    single response could consume the *entire* context window, which is
-    only true for a near-empty prompt and not a number any client should
-    plan around — this is the number oCabra's own scheduler budgets for
-    instead (2026-10-31, reported against OpenCode expecting a credible
-    ``max_output_tokens``).
+    This is the number oCabra's scheduler reserves when the caller omits an
+    explicit limit. It is exposed as ``recommended_output_tokens`` and must
+    not be confused with the enforceable hard maximum.
     """
     from ocabra.config import settings
 
@@ -140,19 +123,15 @@ def _capped_output_tokens(context_length: int, target: int) -> int:
     return min(context_length, target)
 
 
-def _resolve_realistic_output_tokens(model_manager: Any, profile: Any) -> int:
-    """Best estimate of ``max_output_tokens`` grounded in real traffic.
+def _resolve_recommended_output_tokens(model_manager: Any, profile: Any) -> int:
+    """Recommended output budget grounded in defaults and real traffic.
 
     The admission-default reservation (``_resolve_default_output_
     reservation``) is a *floor* — what oCabra assumes a request needs when
     the client doesn't say — not a ceiling on what the model can actually
     deliver. 2026-10-31: checked real history and several profiles
-    routinely exceed it by 5-25x (gemma4:26b-ctx160k peaked at 112k+ output
-    tokens against a 4096/16384 reservation), so advertising the
-    reservation alone as "max" would have been just as misleading as the
-    raw context_length it replaced — only in the opposite direction. Take
-    whichever of the two is larger; callers still cap the result by
-    context_length.
+    routinely exceed it by 5-25x. This is guidance, never a hard cap; the
+    enforceable ``max_output_tokens`` contract comes from usable context.
     """
     reservation = _resolve_default_output_reservation(profile)
     estimator = getattr(model_manager, "_duration_estimator", None)
@@ -172,7 +151,8 @@ def _resolve_realistic_output_tokens(model_manager: Any, profile: Any) -> int:
 def _apply_context_metadata(
     entry: dict[str, Any],
     metadata: dict[str, Any] | None,
-    target_output_tokens: int | None = None,
+    recommended_output_tokens: int,
+    max_output_tokens: int | None,
 ) -> None:
     if metadata is None:
         return
@@ -181,14 +161,14 @@ def _apply_context_metadata(
     entry["ocabra"]["context"] = metadata
     capabilities = dict(entry["ocabra"].get("capabilities") or {})
     capabilities["context_length"] = effective_max
-    # See _resolve_realistic_output_tokens — refresh max_output_tokens here
-    # too so it tracks the runtime-preset-aware effective_max rather than
-    # staying at whatever context_length resolve_display_capabilities saw
-    # before this preset-aware override ran.
-    capabilities["max_output_tokens"] = _capped_output_tokens(
-        effective_max,
-        target_output_tokens if target_output_tokens is not None else effective_max,
-    )
+    hard_limit = min(max_output_tokens, effective_max) if max_output_tokens else None
+    if hard_limit is None:
+        capabilities.pop("max_output_tokens", None)
+    else:
+        capabilities["max_output_tokens"] = hard_limit
+    recommended = _capped_output_tokens(effective_max, recommended_output_tokens)
+    capabilities["recommended_output_tokens"] = recommended
+    capabilities["recommended_input_tokens"] = max(effective_max - recommended, 1)
     entry["ocabra"]["capabilities"] = capabilities
 
 
@@ -249,7 +229,11 @@ async def list_models(
     into the listing. Duplicate models (same model_id available both locally
     and remotely) appear once with metadata about all available nodes.
     """
-    from ocabra.core.model_manager import ModelStatus, resolve_display_capabilities
+    from ocabra.core.model_manager import (
+        ModelStatus,
+        configured_reasoning_default,
+        resolve_display_capabilities,
+    )
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
@@ -303,10 +287,20 @@ async def list_models(
         local_profile_ids.add(profile.profile_id)
 
         capabilities, capabilities_source = resolve_display_capabilities(base_state)
-        output_reservation = _resolve_realistic_output_tokens(model_manager, profile)
-        capabilities["max_output_tokens"] = _capped_output_tokens(
-            int(capabilities.get("context_length") or 0), output_reservation
+        recommended_output = _resolve_recommended_output_tokens(model_manager, profile)
+        context_length = int(capabilities.get("context_length") or 0)
+        hard_output_limit = resolve_max_output_tokens(
+            profile,
+            context_length=context_length,
+            backend_limit=int(capabilities.get("max_output_tokens") or 0),
         )
+        if hard_output_limit is None:
+            capabilities.pop("max_output_tokens", None)
+        else:
+            capabilities["max_output_tokens"] = hard_output_limit
+        recommended = _capped_output_tokens(context_length, recommended_output)
+        capabilities["recommended_output_tokens"] = recommended
+        capabilities["recommended_input_tokens"] = max(context_length - recommended, 1)
         entry: dict[str, Any] = {
             "id": profile.profile_id,
             "object": "model",
@@ -330,11 +324,15 @@ async def list_models(
                 "vram_used_mb": base_state.vram_used_mb,
             },
         }
+        reasoning_default = configured_reasoning_default(base_state)
+        if reasoning_default is not None:
+            entry["ocabra"]["reasoning_default"] = reasoning_default
         try:
             _apply_context_metadata(
                 entry,
                 await _context_metadata(profile, model_manager, base_state),
-                output_reservation,
+                recommended_output,
+                hard_output_limit,
             )
         except Exception as exc:  # noqa: BLE001 -- listing must remain available
             import structlog
@@ -398,10 +396,24 @@ async def list_models(
                 "active": max(
                     (int(item.get("active") or 0) for item in contexts),
                     default=0,
-                ) or None,
+                )
+                or None,
             }
             _apply_context_metadata(
-                entry, context, _resolve_realistic_output_tokens(model_manager, profile)
+                entry,
+                context,
+                _resolve_recommended_output_tokens(model_manager, profile),
+                max(
+                    (
+                        int(
+                            item.get("ocabra", {}).get("capabilities", {}).get("max_output_tokens")
+                            or 0
+                        )
+                        for item in target_entries
+                    ),
+                    default=0,
+                )
+                or None,
             )
         local_profile_ids.add(profile.profile_id)
         entries_by_profile_id[profile.profile_id] = entry
@@ -463,18 +475,14 @@ async def list_models(
     except Exception as exc:  # noqa: BLE001 — never block /v1/models on agent lookup
         import structlog
 
-        structlog.get_logger(__name__).warning(
-            "openai_models_agent_listing_failed", error=str(exc)
-        )
+        structlog.get_logger(__name__).warning("openai_models_agent_listing_failed", error=str(exc))
         agent_entries = []
     data.extend(agent_entries)
 
     return {"object": "list", "data": data}
 
 
-async def _list_agent_model_entries(
-    user: UserContext, now_ts: int
-) -> list[dict[str, Any]]:
+async def _list_agent_model_entries(user: UserContext, now_ts: int) -> list[dict[str, Any]]:
     """Return ``[{id: 'agent/<slug>', owned_by: 'ocabra-agent', ...}, ...]``.
 
     Filtering mirrors ``/v1/models``: admins see every agent; other callers
@@ -490,9 +498,7 @@ async def _list_agent_model_entries(
         rows = (
             (
                 await session.execute(
-                    sa.select(Agent)
-                    .options(selectinload(Agent.mcp_links))
-                    .order_by(Agent.slug)
+                    sa.select(Agent).options(selectinload(Agent.mcp_links)).order_by(Agent.slug)
                 )
             )
             .scalars()
@@ -538,7 +544,10 @@ async def get_model(
     profile_registry = get_profile_registry(request)
 
     direct_profile = await profile_registry.get(model_id)
-    if direct_profile is not None and getattr(direct_profile, "profile_kind", "execution") == "router":
+    if (
+        direct_profile is not None
+        and getattr(direct_profile, "profile_kind", "execution") == "router"
+    ):
         listing = await list_models(request, user)
         entry = next(
             (item for item in listing["data"] if item.get("id") == model_id),
@@ -576,10 +585,20 @@ async def get_model(
         expected_wait = await model_manager.get_expected_load_seconds(state.model_id)
 
     capabilities = state.capabilities.to_dict()
-    output_reservation = _resolve_realistic_output_tokens(model_manager, profile)
-    capabilities["max_output_tokens"] = _capped_output_tokens(
-        int(capabilities.get("context_length") or 0), output_reservation
+    recommended_output = _resolve_recommended_output_tokens(model_manager, profile)
+    context_length = int(capabilities.get("context_length") or 0)
+    hard_output_limit = resolve_max_output_tokens(
+        profile,
+        context_length=context_length,
+        backend_limit=int(capabilities.get("max_output_tokens") or 0),
     )
+    if hard_output_limit is None:
+        capabilities.pop("max_output_tokens", None)
+    else:
+        capabilities["max_output_tokens"] = hard_output_limit
+    recommended = _capped_output_tokens(context_length, recommended_output)
+    capabilities["recommended_output_tokens"] = recommended
+    capabilities["recommended_input_tokens"] = max(context_length - recommended, 1)
     entry = {
         "id": profile.profile_id,
         "object": "model",
@@ -604,7 +623,8 @@ async def get_model(
             _apply_context_metadata(
                 entry,
                 await _context_metadata(profile, model_manager, base_state),
-                output_reservation,
+                recommended_output,
+                hard_output_limit,
             )
     except Exception as exc:  # noqa: BLE001 -- preserve OpenAI model retrieval
         import structlog

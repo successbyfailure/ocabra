@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,7 @@ def _stub_settings(mock_settings: MagicMock, models_dir: str) -> None:
     """Apply the standard llama_cpp settings stub used across tests."""
     mock_settings.models_dir = models_dir
     mock_settings.llama_cpp_server_bin = "/usr/local/bin/llama-server"
+    mock_settings.llama_cpp_custom_server_bin = None
     mock_settings.llama_cpp_gpu_layers = 16
     mock_settings.llama_cpp_ctx_size = 8192
     mock_settings.llama_cpp_threads = 8
@@ -89,6 +91,30 @@ async def test_load_success(tmp_path: Path) -> None:
     assert "--no-kv-offload" not in args
     assert "--rope-freq-base" not in args
     assert "--rope-freq-scale" not in args
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_kills_partial_worker(tmp_path: Path) -> None:
+    gguf = tmp_path / "demo.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+        patch.object(
+            LlamaCppBackend,
+            "_wait_for_startup",
+            new=AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch.object(backend, "_kill_process", new=AsyncMock()) as kill_process,
+    ):
+        _stub_settings(mock_settings, str(tmp_path))
+        with pytest.raises(asyncio.CancelledError):
+            await backend.load("demo", [1], port=18031, extra_config={})
+
+    kill_process.assert_awaited_once_with("demo")
 
 
 @pytest.mark.asyncio
@@ -243,6 +269,96 @@ async def test_load_passes_cache_type_flags(tmp_path: Path) -> None:
     assert "q8_0" in args
     assert "--cache-type-v" in args
     assert "q4_0" in args
+
+
+@pytest.mark.asyncio
+async def test_load_passes_elastic_kv_flags(tmp_path: Path) -> None:
+    args = await _capture_load_cmd(
+        tmp_path,
+        {
+            "llama_cpp": {
+                "kv_unified": True,
+                "kv_unified_per_slot": 32768,
+                "cache_ram_mib": 0,
+                "cache_idle_slots": False,
+            }
+        },
+    )
+
+    assert "--kv-unified" in args
+    assert args[args.index("--kv-unified-per-slot") + 1] == "32768"
+    assert args[args.index("--cache-ram") + 1] == "0"
+    assert "--no-cache-idle-slots" in args
+
+
+@pytest.mark.asyncio
+async def test_load_accepts_camel_case_elastic_kv_flags(tmp_path: Path) -> None:
+    args = await _capture_load_cmd(
+        tmp_path,
+        {
+            "llama_cpp": {
+                "kvUnified": False,
+                "kvUnifiedPerSlot": 16384,
+                "cacheRamMib": -1,
+                "cacheIdleSlots": True,
+            }
+        },
+    )
+
+    assert "--no-kv-unified" in args
+    assert args[args.index("--kv-unified-per-slot") + 1] == "16384"
+    assert args[args.index("--cache-ram") + 1] == "-1"
+    assert "--cache-idle-slots" in args
+
+
+def test_load_config_validates_elastic_kv_ranges() -> None:
+    from ocabra.schemas.backend_load import LlamaCppLoadConfig
+
+    config = LlamaCppLoadConfig(
+        kv_unified=True,
+        kv_unified_per_slot=32768,
+        cache_ram_mib=0,
+        cache_idle_slots=False,
+    )
+    assert config.kv_unified_per_slot == 32768
+    assert config.cache_ram_mib == 0
+
+    with pytest.raises(ValueError):
+        LlamaCppLoadConfig(kv_unified_per_slot=0)
+    with pytest.raises(ValueError):
+        LlamaCppLoadConfig(cache_ram_mib=-2)
+
+
+def test_load_config_validates_vision_mode() -> None:
+    from ocabra.schemas.backend_load import LlamaCppLoadConfig
+
+    config = LlamaCppLoadConfig(
+        mmproj_model_id="/data/mmproj.gguf",
+        vision_mode="on_demand",
+    )
+    assert config.vision_mode == "on_demand"
+
+    with pytest.raises(ValueError, match="requires mmproj_model_id"):
+        LlamaCppLoadConfig(vision_mode="enabled")
+    with pytest.raises(ValueError, match="requires mmproj_model_id"):
+        LlamaCppLoadConfig(vision_mode="on_demand")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_config", "message"),
+    [
+        ({"llama_cpp": {"kv_unified_per_slot": 0}}, "kv_unified_per_slot"),
+        ({"llama_cpp": {"cache_ram_mib": -2}}, "cache_ram_mib"),
+    ],
+)
+async def test_load_rejects_invalid_elastic_kv_ranges(
+    tmp_path: Path,
+    extra_config: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        await _capture_load_cmd(tmp_path, extra_config)
 
 
 @pytest.mark.asyncio
@@ -562,6 +678,45 @@ async def test_load_passes_mmproj_flag(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_on_demand_vision_enables_props_without_loading_mmproj(
+    tmp_path: Path,
+) -> None:
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+
+    args = await _capture_load_cmd(
+        tmp_path,
+        {
+            "llama_cpp": {
+                "mmproj_model_id": str(mmproj),
+                "vision_mode": "on_demand",
+            }
+        },
+    )
+
+    assert "--props" in args
+    assert "--mmproj" not in args
+
+
+@pytest.mark.asyncio
+async def test_load_disabled_vision_does_not_load_mmproj(tmp_path: Path) -> None:
+    mmproj = tmp_path / "missing-is-allowed-while-disabled.gguf"
+
+    args = await _capture_load_cmd(
+        tmp_path,
+        {
+            "llama_cpp": {
+                "mmproj_model_id": str(mmproj),
+                "vision_mode": "disabled",
+            }
+        },
+    )
+
+    assert "--props" not in args
+    assert "--mmproj" not in args
+
+
+@pytest.mark.asyncio
 async def test_get_capabilities_reports_vision_when_mmproj_configured() -> None:
     backend = LlamaCppBackend()
     backend._model_configs["gemma4-26b"] = {"mmproj_model_id": "/data/mmproj.gguf"}
@@ -569,6 +724,162 @@ async def test_get_capabilities_reports_vision_when_mmproj_configured() -> None:
     caps = await backend.get_capabilities("gemma4-26b")
 
     assert caps.vision is True
+
+
+@pytest.mark.asyncio
+async def test_get_capabilities_respects_disabled_and_on_demand_vision() -> None:
+    backend = LlamaCppBackend()
+    backend._model_configs["disabled"] = {
+        "mmproj_model_id": "/data/mmproj.gguf",
+        "vision_mode": "disabled",
+    }
+    backend._model_configs["on-demand"] = {
+        "mmproj_model_id": "/data/mmproj.gguf",
+        "vision_mode": "on_demand",
+    }
+
+    assert (await backend.get_capabilities("disabled")).vision is False
+    assert (await backend.get_capabilities("on-demand")).vision is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_activates_on_demand_vision_only_once() -> None:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "success": True,
+        "vision": {"enabled": True, "active": True},
+    }
+    client = AsyncMock()
+    client.post.return_value = response
+    client_context = AsyncMock()
+    client_context.__aenter__.return_value = client
+
+    backend = LlamaCppBackend()
+    backend._model_configs["demo"] = {
+        "vision_mode": "on_demand",
+        "mmproj_path": "/data/mmproj.gguf",
+    }
+    backend._processes["demo"] = SimpleNamespace(port=18047)
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:..."}}],
+            }
+        ]
+    }
+
+    with patch("ocabra.backends.llama_cpp_backend.httpx.AsyncClient", return_value=client_context):
+        await backend.prepare_request("demo", "/v1/chat/completions", body)
+        await backend.prepare_request("demo", "/v1/chat/completions", body)
+
+    client.post.assert_awaited_once_with(
+        "http://127.0.0.1:18047/props",
+        json={"vision": {"enabled": True, "mmproj": "/data/mmproj.gguf"}},
+    )
+    assert "demo" in backend._vision_active
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_retries_vision_activation_while_slots_are_active() -> None:
+    busy = MagicMock(status_code=503)
+    ready = MagicMock(status_code=200)
+    ready.raise_for_status.return_value = None
+    ready.json.return_value = {
+        "success": True,
+        "vision": {"enabled": True, "active": True},
+    }
+    client = AsyncMock()
+    client.post.side_effect = [busy, ready]
+    client_context = AsyncMock()
+    client_context.__aenter__.return_value = client
+    backend = LlamaCppBackend()
+    backend._model_configs["demo"] = {
+        "vision_mode": "on_demand",
+        "mmproj_path": "/data/mmproj.gguf",
+    }
+    backend._processes["demo"] = SimpleNamespace(port=18047)
+
+    with (
+        patch("ocabra.backends.llama_cpp_backend.httpx.AsyncClient", return_value=client_context),
+        patch("ocabra.backends.llama_cpp_backend.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        await backend.prepare_request(
+            "demo",
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "images": ["base64"]}]},
+        )
+
+    assert client.post.await_count == 2
+    sleep.assert_awaited_once_with(0.1)
+    assert "demo" in backend._vision_active
+
+
+@pytest.mark.asyncio
+async def test_text_request_waits_for_in_progress_vision_activation() -> None:
+    backend = LlamaCppBackend()
+    backend._model_configs["demo"] = {"vision_mode": "on_demand"}
+    lock = backend._vision_locks.setdefault("demo", asyncio.Lock())
+    await lock.acquire()
+
+    pending = asyncio.create_task(
+        backend.prepare_request(
+            "demo",
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+    )
+    await asyncio.sleep(0)
+    assert not pending.done()
+
+    lock.release()
+    await pending
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_rejects_upstream_props_noop() -> None:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"success": True}
+    client = AsyncMock()
+    client.post.return_value = response
+    client_context = AsyncMock()
+    client_context.__aenter__.return_value = client
+    backend = LlamaCppBackend()
+    backend._model_configs["demo"] = {
+        "vision_mode": "on_demand",
+        "mmproj_path": "/data/mmproj.gguf",
+    }
+    backend._processes["demo"] = SimpleNamespace(port=18047)
+
+    with (
+        patch(
+            "ocabra.backends.llama_cpp_backend.httpx.AsyncClient",
+            return_value=client_context,
+        ),
+        pytest.raises(RuntimeError, match="rejected vision activation"),
+    ):
+        await backend.prepare_request(
+            "demo",
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "images": ["base64"]}]},
+        )
+
+    assert "demo" not in backend._vision_active
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_rejects_image_when_vision_disabled() -> None:
+    backend = LlamaCppBackend()
+    backend._model_configs["demo"] = {"vision_mode": "disabled"}
+
+    with pytest.raises(ValueError, match="Vision is disabled"):
+        await backend.prepare_request(
+            "demo",
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "images": ["base64"]}]},
+        )
 
 
 def _write_minimal_gguf(path: Path, context_length: int) -> None:
@@ -638,11 +949,53 @@ async def test_load_passes_chat_template_override(tmp_path: Path) -> None:
     assert args[args.index("--chat-template") + 1] == "llama3"
 
 
+@pytest.mark.asyncio
+async def test_load_passes_reasoning_controls(tmp_path: Path) -> None:
+    args = await _capture_load_cmd(
+        tmp_path,
+        {
+            "llama_cpp": {
+                "jinja": True,
+                "reasoning": "off",
+                "reasoning_format": "none",
+                "reasoning_budget": 0,
+            }
+        },
+    )
+
+    assert "--jinja" in args
+    assert args[args.index("--reasoning") + 1] == "off"
+    assert args[args.index("--reasoning-format") + 1] == "none"
+    assert args[args.index("--reasoning-budget") + 1] == "0"
+
+
 def test_get_binary_path_default_uses_resolve_server_bin(tmp_path: Path) -> None:
     backend = LlamaCppBackend()
     with patch.object(backend, "_resolve_server_bin", return_value="/opt/cuda/llama-server"):
         assert backend._get_binary_path(None) == "/opt/cuda/llama-server"
         assert backend._get_binary_path("cuda") == "/opt/cuda/llama-server"
+
+
+def test_resolve_server_bin_prefers_explicit_custom_binary(tmp_path: Path) -> None:
+    custom = tmp_path / "llama-server"
+    custom.write_bytes(b"custom")
+    backend = LlamaCppBackend()
+
+    with patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings:
+        mock_settings.llama_cpp_custom_server_bin = str(custom)
+        assert backend._resolve_server_bin() == str(custom)
+
+
+def test_resolve_server_bin_rejects_missing_custom_binary(tmp_path: Path) -> None:
+    backend = LlamaCppBackend()
+    missing = tmp_path / "missing-llama-server"
+
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        pytest.raises(FileNotFoundError, match="Custom llama-server not found"),
+    ):
+        mock_settings.llama_cpp_custom_server_bin = str(missing)
+        backend._resolve_server_bin()
 
 
 def test_get_binary_path_alternate_runtime(tmp_path: Path) -> None:

@@ -3,18 +3,110 @@ Tests for OpenAI API compatibility layer.
 
 Uses FastAPI TestClient with mocked ModelManager and WorkerPool.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from ocabra.api.openai._deps import fairness_kv_budget, fairness_slots
 
 # ---------------------------------------------------------------------------
 # Profile helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_output_limit_error_names_max_tokens_instead_of_context_pressure(
+    monkeypatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from ocabra.api.openai import _deps
+    from ocabra.core.runtime_coordinator import OutputTokenLimitError
+
+    monkeypatch.setattr(
+        _deps,
+        "plan_profile_runtime",
+        AsyncMock(
+            side_effect=OutputTokenLimitError(
+                parameter="max_tokens",
+                requested=500_000,
+                maximum=262_144,
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await _deps.resolve_profile_runtime_plan(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            {"max_tokens": 500_000},
+        )
+
+    error = raised.value.detail["error"]
+    assert raised.value.status_code == 400
+    assert error["param"] == "max_tokens"
+    assert error["code"] == "max_tokens_exceeded"
+
+
+def test_fairness_kv_budget_only_enables_weighting_for_unified_llama_cpp():
+    enabled = SimpleNamespace(
+        backend_type="llama_cpp",
+        extra_config={
+            "llama_cpp": {"kvUnified": True},
+            "_runtime": {
+                "preset_key": "shared-24k",
+                "effective_context": 24_000,
+                "parallelism": 4,
+            },
+        },
+    )
+    disabled = SimpleNamespace(
+        backend_type="llama_cpp",
+        extra_config={
+            "llama_cpp": {"kv_unified": False},
+            "_runtime": {"effective_context": 96_000},
+        },
+    )
+    other_backend = SimpleNamespace(backend_type="vllm", extra_config={})
+    fixed_config = SimpleNamespace(
+        backend_type="llama_cpp",
+        extra_config={"llama_cpp": {"kv_unified": True, "ctx_size": 131_072}},
+    )
+    adaptive_pool = SimpleNamespace(
+        backend_type="llama_cpp",
+        extra_config={
+            "llama_cpp": {"kv_unified": True},
+            "_runtime": {
+                "preset_key": "normal",
+                "effective_context": 98_304,
+                "parallelism": 4,
+                "context_is_pool": True,
+            },
+        },
+    )
+
+    assert fairness_kv_budget(enabled, required_tokens=12_000) == (96_000, 12_000)
+    assert fairness_kv_budget(fixed_config, required_tokens=12_000) == (131_072, 12_000)
+    assert fairness_kv_budget(adaptive_pool, required_tokens=12_000) == (98_304, 12_000)
+    assert fairness_kv_budget(disabled, required_tokens=12_000) == (None, 0)
+    assert fairness_kv_budget(other_backend, required_tokens=12_000) == (None, 0)
+
+
+def test_fairness_slots_reads_fixed_llama_cpp_parallelism_without_presets():
+    state = SimpleNamespace(
+        backend_type="llama_cpp",
+        extra_config={"llama_cpp": {"parallelSlots": 4}},
+    )
+
+    assert fairness_slots(state) == 4
+
 
 def _make_test_profile(profile_id, base_model_id, category="llm", **kwargs):
     """Create a SimpleNamespace that mimics a ModelProfile for tests."""
@@ -53,6 +145,7 @@ class FakeProfileRegistry:
 # Test app factory
 # ---------------------------------------------------------------------------
 
+
 def _make_app(model_state=None, worker_result=None):
     """Create a minimal FastAPI app with mocked state."""
     from ocabra.api._deps_auth import UserContext, get_current_user
@@ -62,8 +155,12 @@ def _make_app(model_state=None, worker_result=None):
     from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
     _admin_ctx = UserContext(
-        user_id=None, username=None, role="system_admin",
-        group_ids=[], accessible_model_ids=set(), is_anonymous=False,
+        user_id=None,
+        username=None,
+        role="system_admin",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=False,
     )
 
     app = FastAPI()
@@ -72,6 +169,7 @@ def _make_app(model_state=None, worker_result=None):
     # Override both auth callables so no real DB/Redis is needed
     async def _fake_user():
         return _admin_ctx
+
     app.dependency_overrides[get_current_user] = _fake_user
     app.dependency_overrides[get_openai_user] = _fake_user
 
@@ -79,8 +177,14 @@ def _make_app(model_state=None, worker_result=None):
     mm = MagicMock()
     if model_state is None:
         caps = BackendCapabilities(
-            chat=True, completion=True, tools=True, streaming=True,
-            embeddings=False, image_generation=False, audio_transcription=False, tts=False,
+            chat=True,
+            completion=True,
+            tools=True,
+            streaming=True,
+            embeddings=False,
+            image_generation=False,
+            audio_transcription=False,
+            tts=False,
             context_length=8192,
         )
         model_state = ModelState(
@@ -100,7 +204,9 @@ def _make_app(model_state=None, worker_result=None):
     # Mock worker pool
     wp = MagicMock()
     wp.forward_request = AsyncMock(return_value=worker_result or {})
-    wp.forward_stream = AsyncMock(return_value=_async_gen([b"data: chunk\n\n", b"data: [DONE]\n\n"]))
+    wp.forward_stream = AsyncMock(
+        return_value=_async_gen([b"data: chunk\n\n", b"data: [DONE]\n\n"])
+    )
     worker = MagicMock()
     worker.port = 18001
     wp.get_worker = MagicMock(return_value=worker)
@@ -282,7 +388,7 @@ class TestLlamaCppReasoningControls:
     2026-10-29: previously silently dropped entirely, so neither model had
     any way to cap how long a client's request could make it think."""
 
-    def test_reasoning_effort_level_forwarded_directly(self) -> None:
+    def test_reasoning_effort_level_enables_thinking_for_request(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
 
         payload = to_backend_body(
@@ -291,9 +397,10 @@ class TestLlamaCppReasoningControls:
         )
 
         assert payload["reasoning_effort"] == "low"
-        assert "reasoning" not in payload
+        assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+        assert payload["reasoning_format"] == "deepseek"
 
-    def test_reasoning_effort_off_translates_to_reasoning_off(self) -> None:
+    def test_reasoning_effort_off_disables_thinking_for_request(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
 
         payload = to_backend_body(
@@ -301,8 +408,20 @@ class TestLlamaCppReasoningControls:
             {"model": "gemma4:26b", "reasoning_effort": "off", "messages": []},
         )
 
-        assert payload["reasoning"] == "off"
+        assert payload["reasoning_effort"] == "none"
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_reasoning_effort_default_preserves_launch_default(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        payload = to_backend_body(
+            _llama_cpp_state(),
+            {"model": "gemma4:26b", "reasoning_effort": "default", "messages": []},
+        )
+
         assert "reasoning_effort" not in payload
+        assert "chat_template_kwargs" not in payload
+        assert "reasoning_format" not in payload
 
     def test_reasoning_budget_forwarded_as_reasoning_budget_tokens(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
@@ -342,9 +461,7 @@ class TestLlamaCppReasoningControls:
         own --reasoning-budget default (-1, unrestricted) still applies."""
         from ocabra.api.openai._deps import to_backend_body
 
-        payload = to_backend_body(
-            _llama_cpp_state(), {"model": "gemma4:26b", "messages": []}
-        )
+        payload = to_backend_body(_llama_cpp_state(), {"model": "gemma4:26b", "messages": []})
 
         assert "reasoning_effort" not in payload
         assert "reasoning_budget" not in payload
@@ -355,6 +472,7 @@ class TestLlamaCppReasoningControls:
 # ---------------------------------------------------------------------------
 # Cold-model capability display (cache + declared fallback)
 # ---------------------------------------------------------------------------
+
 
 def _make_state(backend_type, model_id, *, status=None, capabilities=None, extra_config=None):
     from ocabra.backends.base import BackendCapabilities
@@ -411,13 +529,34 @@ def test_declared_capabilities_uses_context_length_fallback():
     assert declared_capabilities(state).context_length == 32768
 
 
+def test_declared_capabilities_separates_reasoning_support_from_default() -> None:
+    from ocabra.core.model_manager import (
+        configured_reasoning_default,
+        declared_capabilities,
+        resolve_display_capabilities,
+    )
+
+    state = _make_state(
+        "llama_cpp",
+        "llama_cpp/Qwen/Qwen3.8-27B",
+        extra_config={"llama_cpp": {"reasoning": "off"}},
+    )
+
+    assert declared_capabilities(state).reasoning is True
+    capabilities, _source = resolve_display_capabilities(state)
+    assert capabilities["reasoning"] is True
+    assert configured_reasoning_default(state) == "off"
+
+
 def test_resolve_display_capabilities_sources():
     from ocabra.backends.base import BackendCapabilities
     from ocabra.core.model_manager import ModelStatus, resolve_display_capabilities
 
     # Loaded → live (authoritative)
     loaded = _make_state(
-        "vllm", "vllm/demo", status=ModelStatus.LOADED,
+        "vllm",
+        "vllm/demo",
+        status=ModelStatus.LOADED,
         capabilities=BackendCapabilities(chat=True, context_length=4096),
     )
     caps, source = resolve_display_capabilities(loaded)
@@ -425,7 +564,9 @@ def test_resolve_display_capabilities_sources():
 
     # Cold but retaining last-known caps → cached
     cached = _make_state(
-        "vllm", "vllm/demo", status=ModelStatus.UNLOADED,
+        "vllm",
+        "vllm/demo",
+        status=ModelStatus.UNLOADED,
         capabilities=BackendCapabilities(chat=True, context_length=4096),
     )
     caps, source = resolve_display_capabilities(cached)
@@ -441,12 +582,13 @@ def test_resolve_display_capabilities_sources():
 # GET /v1/models
 # ---------------------------------------------------------------------------
 
+
 class TestListModels:
     def test_returns_loaded_models(self):
         from ocabra.backends.base import BackendCapabilities
         from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
-        caps = BackendCapabilities(chat=True, streaming=True, context_length=4096)
+        caps = BackendCapabilities(chat=True, streaming=True, context_length=8192)
         state = ModelState(
             model_id="llama-3-8b",
             display_name="Llama 3 8B",
@@ -469,6 +611,9 @@ class TestListModels:
         assert model["id"] == "llama-3-8b"
         assert model["owned_by"] == "ocabra"
         assert model["ocabra"]["status"] == "loaded"
+        assert "max_output_tokens" not in model["ocabra"]["capabilities"]
+        assert model["ocabra"]["capabilities"]["recommended_output_tokens"] == 4096
+        assert model["ocabra"]["capabilities"]["recommended_input_tokens"] == 4096
 
     def test_includes_unloaded_models(self):
         from ocabra.backends.base import BackendCapabilities
@@ -497,6 +642,7 @@ class TestListModels:
 # POST /v1/chat/completions
 # ---------------------------------------------------------------------------
 
+
 class TestChatCompletions:
     def test_non_stream_returns_json(self):
         fake_response = {
@@ -508,10 +654,13 @@ class TestChatCompletions:
         app = _make_app(worker_result=fake_response)
         client = TestClient(app)
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["object"] == "chat.completion"
 
@@ -520,10 +669,13 @@ class TestChatCompletions:
         app.state.model_manager.get_state = AsyncMock(return_value=None)
         client = TestClient(app)
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "nonexistent",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "nonexistent",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert resp.status_code == 404
         assert resp.json()["detail"]["error"]["code"] == "model_not_found"
 
@@ -543,10 +695,13 @@ class TestChatCompletions:
         app = _make_app(model_state=state)
         client = TestClient(app)
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "bert-base",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "bert-base",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
 
@@ -576,20 +731,27 @@ class TestChatCompletions:
             worker_result={"object": "chat.completion", "choices": []},
         )
 
-        # _ensure_worker_loaded calls get_state once, then _do_ensure_loaded
-        # calls it again; after load() it calls a third time.
-        app.state.model_manager.get_state = AsyncMock(side_effect=[
-            configured_state,  # _ensure_worker_loaded check
-            configured_state,  # _do_ensure_loaded initial check (CONFIGURED → triggers load)
-            loaded_state,      # _do_ensure_loaded post-load check
-        ])
-        app.state.model_manager.load = AsyncMock(return_value=loaded_state)
+        current_state = configured_state
+
+        async def _get_state(_model_id):
+            return current_state
+
+        async def _load(_model_id):
+            nonlocal current_state
+            current_state = loaded_state
+            return current_state
+
+        app.state.model_manager.get_state = AsyncMock(side_effect=_get_state)
+        app.state.model_manager.load = AsyncMock(side_effect=_load)
 
         client = TestClient(app)
-        client.post("/v1/chat/completions", json={
-            "model": "lazy-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "lazy-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         app.state.model_manager.load.assert_called_once_with("lazy-model")
 
     def test_loaded_request_updates_last_request_timestamp(self):
@@ -605,7 +767,9 @@ class TestChatCompletions:
             capabilities=BackendCapabilities(chat=True, streaming=True),
         )
         assert state.last_request_at is None
-        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        app = _make_app(
+            model_state=state, worker_result={"object": "chat.completion", "choices": []}
+        )
         client = TestClient(app)
 
         resp = client.post(
@@ -632,7 +796,9 @@ class TestChatCompletions:
             load_policy=LoadPolicy.ON_DEMAND,
             capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
         )
-        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        app = _make_app(
+            model_state=state, worker_result={"object": "chat.completion", "choices": []}
+        )
         # Add a profile with a slug-friendly id that maps to the model
         profile = _make_test_profile(
             profile_id="mistral-7b",
@@ -641,10 +807,13 @@ class TestChatCompletions:
         app.state.profile_registry = FakeProfileRegistry([profile])
         client = TestClient(app)
 
-        resp = client.post("/v1/chat/completions", json={
-            "model": "mistral-7b",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "mistral-7b",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
 
         assert resp.status_code == 200
         called = app.state.worker_pool.forward_request.await_args
@@ -698,10 +867,13 @@ class TestModelLookupAliases:
         )
         client = TestClient(app)
 
-        r = client.post("/v1/chat/completions", json={
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert r.status_code == 400
         assert r.json()["detail"]["error"]["message"] == "chat template missing"
 
@@ -835,9 +1007,7 @@ class TestPoolingEndpoints:
         resp = client.post("/v1/score", json=payload)
 
         assert resp.status_code == 200
-        app.state.worker_pool.forward_request.assert_called_once_with(
-            "e5-base", "/score", payload
-        )
+        app.state.worker_pool.forward_request.assert_called_once_with("e5-base", "/score", payload)
 
     def test_score_rejects_mismatched_batch_lengths(self):
         from ocabra.backends.base import BackendCapabilities
@@ -902,7 +1072,9 @@ class TestPoolingEndpoints:
             "query": "best retrieval model",
             "documents": ["alpha", "beta"],
         }
-        app = _make_app(model_state=state, worker_result={"results": [{"index": 0, "relevance_score": 0.9}]})
+        app = _make_app(
+            model_state=state, worker_result={"results": [{"index": 0, "relevance_score": 0.9}]}
+        )
         client = TestClient(app)
 
         resp = client.post("/v1/rerank", json=payload)
@@ -1146,10 +1318,13 @@ class TestPoolingEndpoints:
         )
         client = TestClient(app)
 
-        r = client.post("/v1/chat/completions", json={
-            "model": "lazy-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "lazy-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert r.status_code == 409
         assert r.json()["detail"]["error"]["code"] == "insufficient_vram"
 
@@ -1204,10 +1379,13 @@ class TestPoolingEndpoints:
         app.state.model_manager.load = AsyncMock(side_effect=RuntimeError("boom"))
         client = TestClient(app)
 
-        r = client.post("/v1/chat/completions", json={
-            "model": "lazy-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "lazy-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert r.status_code == 503
         assert r.json()["detail"]["error"]["code"] == "model_load_failed"
         # 2026-10-27: a generic load failure is a transient condition (worker
@@ -1235,10 +1413,13 @@ class TestPoolingEndpoints:
         app.state.model_manager.get_state = AsyncMock(return_value=error_state)
         client = TestClient(app)
 
-        r = client.post("/v1/chat/completions", json={
-            "model": "broken-model",
-            "messages": [{"role": "user", "content": "Hi"}],
-        })
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "broken-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
         assert r.status_code == 503
         assert r.json()["detail"]["error"]["code"] == "model_unavailable"
         assert "retry-after" not in r.headers
@@ -1247,6 +1428,7 @@ class TestPoolingEndpoints:
 # ---------------------------------------------------------------------------
 # POST /v1/embeddings
 # ---------------------------------------------------------------------------
+
 
 class TestEmbeddings:
     def test_embeddings_success(self):
@@ -1269,10 +1451,13 @@ class TestEmbeddings:
         app = _make_app(model_state=state, worker_result=fake_response)
         client = TestClient(app)
 
-        resp = client.post("/v1/embeddings", json={
-            "model": "bert-base",
-            "input": "Hello world",
-        })
+        resp = client.post(
+            "/v1/embeddings",
+            json={
+                "model": "bert-base",
+                "input": "Hello world",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["object"] == "list"
 
@@ -1328,10 +1513,13 @@ class TestEmbeddings:
         app = _make_app()  # default state has chat=True, embeddings=False
         client = TestClient(app)
 
-        resp = client.post("/v1/embeddings", json={
-            "model": "test-model",
-            "input": "Hello",
-        })
+        resp = client.post(
+            "/v1/embeddings",
+            json={
+                "model": "test-model",
+                "input": "Hello",
+            },
+        )
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
 
@@ -1340,9 +1528,11 @@ class TestEmbeddings:
 # POST /v1/images/generations
 # ---------------------------------------------------------------------------
 
+
 class TestImageGenerations:
     def test_size_parsing(self):
         from ocabra.api.openai.images import _parse_size
+
         assert _parse_size("1024x1024") == (1024, 1024)
         assert _parse_size("1792x1024") == (1792, 1024)
         assert _parse_size("1024x1792") == (1024, 1792)
@@ -1353,10 +1543,13 @@ class TestImageGenerations:
         app = _make_app()  # default has image_generation=False
         client = TestClient(app)
 
-        resp = client.post("/v1/images/generations", json={
-            "model": "test-model",
-            "prompt": "a cat",
-        })
+        resp = client.post(
+            "/v1/images/generations",
+            json={
+                "model": "test-model",
+                "prompt": "a cat",
+            },
+        )
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"]["code"] == "model_not_capable"
 
@@ -1390,9 +1583,13 @@ class TestImageGenerations:
     def test_image_generation_default_returns_b64(self, tmp_path):
         app, png_b64 = self._diffusers_app(tmp_path)
         client = TestClient(app)
-        resp = client.post("/v1/images/generations", json={
-            "model": "sdxl", "prompt": "a cat",
-        })
+        resp = client.post(
+            "/v1/images/generations",
+            json={
+                "model": "sdxl",
+                "prompt": "a cat",
+            },
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"][0]["b64_json"] == png_b64
@@ -1402,9 +1599,14 @@ class TestImageGenerations:
     def test_image_generation_url_persists_and_serves(self, tmp_path):
         app, _ = self._diffusers_app(tmp_path)
         client = TestClient(app)
-        resp = client.post("/v1/images/generations", json={
-            "model": "sdxl", "prompt": "a cat", "response_format": "url",
-        })
+        resp = client.post(
+            "/v1/images/generations",
+            json={
+                "model": "sdxl",
+                "prompt": "a cat",
+                "response_format": "url",
+            },
+        )
         assert resp.status_code == 200
         url = resp.json()["data"][0]["url"]
         assert url.startswith("https://api.test.local/v1/images/files/")
@@ -1420,9 +1622,14 @@ class TestImageGenerations:
     def test_image_generation_rejects_invalid_response_format(self, tmp_path):
         app, _ = self._diffusers_app(tmp_path)
         client = TestClient(app)
-        resp = client.post("/v1/images/generations", json={
-            "model": "sdxl", "prompt": "a cat", "response_format": "html",
-        })
+        resp = client.post(
+            "/v1/images/generations",
+            json={
+                "model": "sdxl",
+                "prompt": "a cat",
+                "response_format": "html",
+            },
+        )
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"]["param"] == "response_format"
 
@@ -1439,6 +1646,7 @@ class TestImageGenerations:
         client = TestClient(app)
         # Well-formed name but file isn't there → 404 (mimics post-TTL state).
         import uuid as _uuid
+
         resp = client.get(f"/v1/images/files/{_uuid.uuid4()}.png")
         assert resp.status_code == 404
 
@@ -1446,6 +1654,7 @@ class TestImageGenerations:
 # ---------------------------------------------------------------------------
 # POST /v1/images/edits
 # ---------------------------------------------------------------------------
+
 
 class TestImageEdits:
     _PNG_B64 = (
@@ -1455,6 +1664,7 @@ class TestImageEdits:
 
     def _png_bytes(self) -> bytes:
         import base64
+
         return base64.b64decode(self._PNG_B64)
 
     def _diffusers_app(self, tmp_path):
@@ -1468,7 +1678,10 @@ class TestImageEdits:
             backend_type="diffusers",
             status=ModelStatus.LOADED,
             load_policy=LoadPolicy.ON_DEMAND,
-            capabilities=BackendCapabilities(image_generation=True),
+            capabilities=BackendCapabilities(
+                image_generation=True,
+                image_editing=True,
+            ),
         )
         app = _make_app(
             model_state=state,
@@ -1502,6 +1715,7 @@ class TestImageEdits:
 
     def test_edit_b64_roundtrip_forwards_image_to_worker(self, tmp_path):
         import base64
+
         app = self._diffusers_app(tmp_path)
         client = TestClient(app)
 
@@ -1526,6 +1740,7 @@ class TestImageEdits:
 
     def test_edit_forwards_mask_when_provided(self, tmp_path):
         import base64
+
         app = self._diffusers_app(tmp_path)
         client = TestClient(app)
         png = self._png_bytes()
@@ -1697,7 +1912,9 @@ class TestBackendAgnosticRouting:
             load_policy=LoadPolicy.ON_DEMAND,
             capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
         )
-        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        app = _make_app(
+            model_state=state, worker_result={"object": "chat.completion", "choices": []}
+        )
         client = TestClient(app)
 
         resp = client.post(
@@ -1718,6 +1935,7 @@ class TestBackendAgnosticRouting:
             },
             user_key="anonymous",
             slots=1,
+            is_batch=False,
         )
 
     def test_completions_routes_for_llama_cpp_backend(self):
@@ -1733,7 +1951,9 @@ class TestBackendAgnosticRouting:
             load_policy=LoadPolicy.ON_DEMAND,
             capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
         )
-        app = _make_app(model_state=state, worker_result={"object": "text_completion", "choices": []})
+        app = _make_app(
+            model_state=state, worker_result={"object": "text_completion", "choices": []}
+        )
         client = TestClient(app)
 
         resp = client.post(
@@ -1754,7 +1974,45 @@ class TestBackendAgnosticRouting:
             },
             user_key="anonymous",
             slots=1,
+            is_batch=False,
         )
+
+    def test_completions_forwards_weighted_kv_admission_to_worker_pool(self):
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+        state = ModelState(
+            model_id="llama_cpp/demo",
+            backend_model_id="demo",
+            display_name="Demo",
+            backend_type="llama_cpp",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(completion=True, streaming=True),
+        )
+        app = _make_app(
+            model_state=state,
+            worker_result={"object": "text_completion", "choices": []},
+        )
+        client = TestClient(app)
+
+        with patch(
+            "ocabra.api.openai.completions.fairness_kv_budget",
+            return_value=(96_000, 12_000),
+        ):
+            resp = client.post(
+                "/v1/completions",
+                json={"model": state.model_id, "prompt": "Hello"},
+            )
+
+        assert resp.status_code == 200
+        assert app.state.worker_pool.forward_request.call_args.kwargs == {
+            "user_key": "anonymous",
+            "slots": 1,
+            "is_batch": False,
+            "kv_capacity_tokens": 96_000,
+            "kv_tokens": 12_000,
+        }
 
     def test_embeddings_routes_for_tensorrt_backend(self):
         from ocabra.backends.base import BackendCapabilities
@@ -1811,7 +2069,9 @@ class TestFairnessGateWiring:
             capabilities=BackendCapabilities(chat=True, streaming=True),
             extra_config={"_runtime": {"parallelism": 3}},
         )
-        app = _make_app(model_state=state, worker_result={"object": "chat.completion", "choices": []})
+        app = _make_app(
+            model_state=state, worker_result={"object": "chat.completion", "choices": []}
+        )
         client = TestClient(app)
 
         resp = client.post(
@@ -1837,7 +2097,9 @@ class TestFairnessGateWiring:
             capabilities=BackendCapabilities(completion=True, streaming=True),
             extra_config={"_runtime": {"parallelism": 2}},
         )
-        app = _make_app(model_state=state, worker_result={"object": "text_completion", "choices": []})
+        app = _make_app(
+            model_state=state, worker_result={"object": "text_completion", "choices": []}
+        )
         client = TestClient(app)
 
         resp = client.post(
@@ -1878,7 +2140,9 @@ class TestFairnessGateWiring:
         worker_pool = MagicMock()
         worker_pool.forward_stream = MagicMock(return_value=_async_gen([b"data: [DONE]\n\n"]))
 
-        profile = _make_test_profile(profile_id="qwen3.8-27b", base_model_id="llama_cpp/qwen3.8-27b")
+        profile = _make_test_profile(
+            profile_id="qwen3.8-27b", base_model_id="llama_cpp/qwen3.8-27b"
+        )
 
         async def _fake_ensure_worker_loaded(*args, **kwargs):
             return loaded_state
@@ -1887,6 +2151,7 @@ class TestFairnessGateWiring:
             "ocabra.api.openai.chat.ensure_worker_loaded",
             side_effect=_fake_ensure_worker_loaded,
         ):
+
             async def _drain():
                 chunks = []
                 async for chunk in _stream_chat_with_load(
@@ -1936,13 +2201,21 @@ class TestModelErrorRecovery:
             capabilities=BackendCapabilities(chat=True, streaming=True),
         )
 
-        app = _make_app(model_state=loaded_state, worker_result={"object": "chat.completion", "choices": []})
-        # resolve_profile -> _ensure_worker_loaded -> get_state (1st: returns error_state)
-        # -> _do_ensure_loaded -> get_state (2nd: error_state) -> load -> get_state (3rd: loaded)
-        app.state.model_manager.get_state = AsyncMock(
-            side_effect=[error_state, error_state, loaded_state]
+        app = _make_app(
+            model_state=loaded_state, worker_result={"object": "chat.completion", "choices": []}
         )
-        app.state.model_manager.load = AsyncMock(return_value=loaded_state)
+        current_state = error_state
+
+        async def _get_state(_model_id):
+            return current_state
+
+        async def _load(_model_id):
+            nonlocal current_state
+            current_state = loaded_state
+            return current_state
+
+        app.state.model_manager.get_state = AsyncMock(side_effect=_get_state)
+        app.state.model_manager.load = AsyncMock(side_effect=_load)
 
         client = TestClient(app)
         resp = client.post(
@@ -1991,3 +2264,70 @@ class TestModelErrorRecovery:
         detail = resp.json()["detail"]["error"]
         assert detail["code"] == "model_load_failed"
         assert "worker startup timeout" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_unloaded_derived_worker_refreshes_mutable_base_config() -> None:
+    """A reused preset worker must not restart with stale vision settings."""
+    from ocabra.api.openai._deps import _ensure_worker_loaded
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    base_id = "llama_cpp/gemma4-26b"
+    worker_id = f"{base_id}::64k"
+    base_state = ModelState(
+        model_id=base_id,
+        backend_model_id="gemma4-26b",
+        display_name="Gemma 4 26B",
+        backend_type="llama_cpp",
+        status=ModelStatus.UNLOADED,
+        load_policy=LoadPolicy.PIN,
+        preferred_gpu=1,
+        extra_config={
+            "llama_cpp": {
+                "vision_mode": "disabled",
+                "mmproj_model_id": "/models/mmproj.gguf",
+            }
+        },
+    )
+    derived_state = ModelState(
+        model_id=worker_id,
+        backend_model_id="gemma4-26b",
+        display_name="Gemma 4 26B (override)",
+        backend_type="llama_cpp",
+        status=ModelStatus.UNLOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        preferred_gpu=0,
+        extra_config={
+            "llama_cpp": {
+                "vision_mode": "on_demand",
+                "mmproj_model_id": "/models/mmproj.gguf",
+            },
+            "use_case": {"context": 65536},
+        },
+    )
+
+    class FakeModelManager:
+        async def get_state(self, model_id: str):
+            return {base_id: base_state, worker_id: derived_state}.get(model_id)
+
+        async def load(self, model_id: str):
+            assert model_id == worker_id
+            derived_state.status = ModelStatus.LOADED
+            return derived_state
+
+        async def touch_last_request_at(self, model_id: str, request_at):
+            assert model_id == worker_id
+
+    resolved = await _ensure_worker_loaded(
+        FakeModelManager(),
+        base_id,
+        worker_id,
+        {"use_case": {"context": 65536}},
+        preferred_gpu=1,
+        load_policy="pin",
+    )
+
+    assert resolved.extra_config["llama_cpp"]["vision_mode"] == "disabled"
+    assert resolved.extra_config["use_case"] == {"context": 65536}
+    assert resolved.preferred_gpu == 1
+    assert resolved.load_policy == LoadPolicy.PIN

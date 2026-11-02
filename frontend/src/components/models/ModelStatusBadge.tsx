@@ -1,10 +1,10 @@
-import type { ModelStatus } from "@/types"
+import type { RuntimePhase } from "@/types"
 
 interface ModelStatusBadgeProps {
-  status: ModelStatus
+  status: RuntimePhase
 }
 
-const STATUS_LABELS: Record<ModelStatus, string> = {
+const STATUS_LABELS: Record<RuntimePhase, string> = {
   discovered: "Discovered",
   configured: "Configured",
   loading: "Loading",
@@ -12,6 +12,8 @@ const STATUS_LABELS: Record<ModelStatus, string> = {
   unloading: "Unloading",
   unloaded: "Unloaded",
   error: "Error",
+  upsizing: "Ampliando",
+  downsizing: "Reduciendo",
 }
 
 export function ModelStatusBadge({ status }: ModelStatusBadgeProps) {
@@ -19,7 +21,12 @@ export function ModelStatusBadge({ status }: ModelStatusBadgeProps) {
 
   if (status === "loaded") {
     classes = "border-emerald-500/40 bg-emerald-500/20 text-emerald-200"
-  } else if (status === "loading" || status === "unloading") {
+  } else if (
+    status === "loading" ||
+    status === "unloading" ||
+    status === "upsizing" ||
+    status === "downsizing"
+  ) {
     classes = "border-amber-500/40 bg-amber-500/20 text-amber-100 animate-pulse"
   } else if (status === "error") {
     classes = "border-red-500/40 bg-red-500/20 text-red-100"

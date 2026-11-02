@@ -1,15 +1,18 @@
 import asyncio
-from unittest.mock import patch
+import json
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 from ocabra import config
 from ocabra.backends._mock import MockBackend
+from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.worker_pool import (
     WorkerPool,
     _ollama_native_body,
     _ollama_native_response,
+    _strip_empty_think_prefix,
 )
 
 
@@ -34,6 +37,33 @@ async def test_release_port_makes_it_available(pool):
     pool.release_port(port)
     reused = await pool.assign_port()
     assert reused == port
+
+
+def test_strip_empty_think_prefix_preserves_real_reasoning() -> None:
+    assert _strip_empty_think_prefix("<think>\n\n</think>\n\nHello") == "Hello"
+    assert _strip_empty_think_prefix("<think>real thought</think>Answer") == (
+        "<think>real thought</think>Answer"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_stream_strips_chunked_empty_think_prefix() -> None:
+    async def raw():
+        yield b'data: {"choices":[{"index":0,"delta":{"content":"<thi"}}]}\n\n'
+        yield b'data: {"choices":[{"index":0,"delta":{"content":"nk>\\n\\n"}}]}\n\n'
+        yield b'data: {"choices":[{"index":0,"delta":{"content":"</think>\\n\\nHello"}}]}\n\n'
+        yield b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    chunks = [chunk async for chunk in WorkerPool._normalize_reasoning_stream(raw())]
+    events = []
+    for line in b"".join(chunks).splitlines():
+        if line.startswith(b"data: {"):
+            events.append(json.loads(line[6:]))
+    content = "".join(
+        choice["delta"].get("content", "") for event in events for choice in event["choices"]
+    )
+    assert content == "Hello"
 
 
 @pytest.mark.asyncio
@@ -65,8 +95,10 @@ async def test_set_get_remove_worker(pool):
 async def test_assign_port_range_exhausted():
     pool = WorkerPool()
     # Use a tiny range (only 2 ports)
-    with patch.object(config.settings, "worker_port_range_start", 19000), \
-         patch.object(config.settings, "worker_port_range_end", 19002):
+    with (
+        patch.object(config.settings, "worker_port_range_start", 19000),
+        patch.object(config.settings, "worker_port_range_end", 19002),
+    ):
         await pool.assign_port()
         await pool.assign_port()
         with pytest.raises(RuntimeError, match="No available ports"):
@@ -80,6 +112,20 @@ async def test_get_backend_disabled_reason():
 
     with pytest.raises(RuntimeError, match="feature flag disabled"):
         await pool.get_backend("tensorrt_llm")
+
+
+@pytest.mark.asyncio
+async def test_interactive_request_preempts_batch_when_kv_is_saturated(pool):
+    coordinator = AsyncMock()
+    coordinator.preempt_now.return_value = 1
+    pool.set_batch_priority(coordinator)
+    gate = pool._fair_gates.get("test/model", slots=2, kv_capacity_tokens=100)
+    await gate.acquire("batch", is_batch=True, kv_tokens=70)
+
+    await pool._preempt_batch_if_saturated("test/model", gate, is_batch=False, kv_tokens=40)
+
+    coordinator.preempt_now.assert_awaited_once_with("test/model", estimator=None)
+    await gate.release(is_batch=True, kv_tokens=70)
 
 
 @pytest.mark.asyncio
@@ -266,9 +312,7 @@ def _make_post_client(status_code: int, body: bytes):
                 raise httpx.HTTPStatusError(
                     "error",
                     request=self._request,
-                    response=httpx.Response(
-                        self.status_code, request=self._request, content=body
-                    ),
+                    response=httpx.Response(self.status_code, request=self._request, content=body),
                 )
 
         def json(self):
@@ -328,6 +372,22 @@ async def test_forward_request_trips_circuit_breaker_on_repeated_dead_backend_er
 
     with pytest.raises(WorkerDegradedError):
         await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+
+@pytest.mark.asyncio
+async def test_forward_request_prepares_backend_before_dispatch(pool, monkeypatch):
+    backend = pool.registered_backends()["mock"]
+    backend.prepare_request = AsyncMock()
+    monkeypatch.setattr(
+        "ocabra.core.worker_pool.httpx.AsyncClient",
+        _make_post_client(200, b'{"choices": []}'),
+    )
+    _register_worker(pool)
+    body = {"messages": [{"role": "user", "content": "hola"}]}
+
+    await pool.forward_request("test/model", "/v1/chat/completions", body)
+
+    backend.prepare_request.assert_awaited_once_with("test/model", "/v1/chat/completions", body)
 
 
 @pytest.mark.asyncio
@@ -457,3 +517,119 @@ async def test_forward_request_fair_gate_interleaves_two_users_on_one_slot(pool,
 
     release_events[2].set()
     await alice2
+
+
+@pytest.mark.asyncio
+async def test_forward_request_waits_for_kv_even_when_slot_is_free(pool, monkeypatch):
+    dispatch_log: list[str] = []
+    fake_client_cls, release_events = _make_controllable_post_client(dispatch_log)
+    monkeypatch.setattr("ocabra.core.worker_pool.httpx.AsyncClient", fake_client_cls)
+    _register_worker(pool)
+
+    async def call(tag: str, user_key: str, kv_tokens: int):
+        await pool.forward_request(
+            "test/model",
+            "/v1/chat/completions",
+            {"_tag": tag},
+            user_key=user_key,
+            slots=2,
+            kv_capacity_tokens=100,
+            kv_tokens=kv_tokens,
+        )
+
+    alice = asyncio.create_task(call("alice", "alice", 80))
+    await asyncio.sleep(0.01)
+    bob = asyncio.create_task(call("bob", "bob", 30))
+    await asyncio.sleep(0.01)
+
+    assert dispatch_log == ["start:alice"]
+    state = pool.peek_queue_state("test/model", kv_tokens=30)
+    assert state is not None
+    assert state["slot_saturated"] is False
+    assert state["kv_saturated"] is True
+    assert state["kv_reserved_tokens"] == 80
+
+    release_events[0].set()
+    await alice
+    await asyncio.sleep(0.01)
+    assert dispatch_log[-1] == "start:bob"
+    release_events[1].set()
+    await bob
+
+
+@pytest.mark.asyncio
+async def test_forward_request_rejects_reservation_larger_than_pool(pool):
+    _register_worker(pool)
+
+    with pytest.raises(KVCapacityError):
+        await pool.forward_request(
+            "test/model",
+            "/v1/chat/completions",
+            {},
+            user_key="alice",
+            slots=4,
+            kv_capacity_tokens=96_000,
+            kv_tokens=100_000,
+        )
+
+
+@pytest.mark.asyncio
+async def test_weighted_reservation_is_released_when_backend_request_fails(pool, monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("backend failed")
+
+    monkeypatch.setattr(pool, "_forward_request_unfair", fail)
+
+    with pytest.raises(RuntimeError, match="backend failed"):
+        await pool.forward_request(
+            "test/model",
+            "/v1/chat/completions",
+            {},
+            user_key="alice",
+            slots=4,
+            kv_capacity_tokens=96_000,
+            kv_tokens=40_000,
+        )
+
+    state = pool.peek_queue_state("test/model", kv_tokens=40_000)
+    assert state is not None
+    assert state["in_flight"] == 0
+    assert state["kv_reserved_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_weighted_stream_cancellation_releases_reservation(pool, monkeypatch):
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def stream_forever(*_args, **_kwargs):
+        entered.set()
+        await never.wait()
+        yield b"unreachable"
+
+    monkeypatch.setattr(pool, "_forward_stream_unfair", stream_forever)
+
+    async def consume() -> None:
+        async for _chunk in pool.forward_stream(
+            "test/model",
+            "/v1/chat/completions",
+            {},
+            user_key="alice",
+            slots=4,
+            kv_capacity_tokens=96_000,
+            kv_tokens=40_000,
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await entered.wait()
+    assert pool.peek_queue_state("test/model")["kv_reserved_tokens"] == 40_000
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = pool.peek_queue_state("test/model", kv_tokens=40_000)
+    assert state is not None
+    assert state["in_flight"] == 0
+    assert state["kv_reserved_tokens"] == 0

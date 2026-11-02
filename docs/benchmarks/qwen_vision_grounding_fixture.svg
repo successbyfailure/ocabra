@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="960" viewBox="0 0 1280 960">
+  <rect width="1280" height="960" fill="#f4f4f4"/>
+  <text x="40" y="55" font-family="sans-serif" font-size="30" fill="#111">WAREHOUSE MAP — BATCH ZX-417</text>
+  <g stroke="#999" stroke-width="2" stroke-dasharray="8 8">
+    <path d="M320 80V920M640 80V920M960 80V920"/>
+    <path d="M40 320H1240M40 640H1240"/>
+  </g>
+  <circle cx="170" cy="190" r="78" fill="#e53935" stroke="#111" stroke-width="6"/>
+  <text x="112" y="200" font-family="sans-serif" font-size="28" fill="white">RED A1</text>
+  <rect x="455" y="120" width="220" height="145" rx="12" fill="#1e88e5" stroke="#111" stroke-width="6"/>
+  <text x="505" y="205" font-family="sans-serif" font-size="28" fill="white">BLUE B2</text>
+  <polygon points="1050,105 1165,275 935,275" fill="#43a047" stroke="#111" stroke-width="6"/>
+  <text x="988" y="235" font-family="sans-serif" font-size="27" fill="white">GREEN C3</text>
+  <polygon points="205,420 235,510 330,510 252,565 282,655 205,600 128,655 158,565 80,510 175,510" fill="#fdd835" stroke="#111" stroke-width="6"/>
+  <text x="143" y="545" font-family="sans-serif" font-size="25" fill="#111">STAR D4</text>
+  <ellipse cx="630" cy="520" rx="155" ry="90" fill="#8e24aa" stroke="#111" stroke-width="6"/>
+  <text x="555" y="530" font-family="sans-serif" font-size="27" fill="white">PURPLE E5</text>
+  <path d="M955 430H1190V635H955Z M1015 480H1130V585H1015Z" fill="#fb8c00" fill-rule="evenodd" stroke="#111" stroke-width="6"/>
+  <text x="982" y="680" font-family="sans-serif" font-size="27" fill="#111">ORANGE F6</text>
+  <rect x="70" y="750" width="1140" height="130" fill="white" stroke="#111" stroke-width="4"/>
+  <text x="95" y="800" font-family="monospace" font-size="26" fill="#111">CHECK: 6 objects | priority target: D4 | route: B2 → E5 → F6</text>
+  <text x="95" y="845" font-family="monospace" font-size="26" fill="#111">Return code: OCABRA-7391 | damaged item: C3</text>
+</svg>

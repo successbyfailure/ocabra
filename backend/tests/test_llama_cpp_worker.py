@@ -5,13 +5,20 @@ def _args(*extra: str):
     import sys
 
     argv = [
-        "--server-bin", "/bin/llama-server",
-        "--model-id", "test/model",
-        "--model-path", "/data/model.gguf",
-        "--port", "18000",
-        "--ctx-size", "4096",
-        "--batch-size", "512",
-        "--ubatch-size", "512",
+        "--server-bin",
+        "/bin/llama-server",
+        "--model-id",
+        "test/model",
+        "--model-path",
+        "/data/model.gguf",
+        "--port",
+        "18000",
+        "--ctx-size",
+        "4096",
+        "--batch-size",
+        "512",
+        "--ubatch-size",
+        "512",
         *extra,
     ]
     old_argv = sys.argv
@@ -68,3 +75,54 @@ def test_mmproj_forwarded_to_llama_server():
     cmd = build_command(_args("--mmproj", "/data/mmproj.gguf"))
     idx = cmd.index("--mmproj")
     assert cmd[idx + 1] == "/data/mmproj.gguf"
+
+
+def test_props_endpoint_is_opt_in():
+    assert "--props" not in build_command(_args())
+    assert "--props" in build_command(_args("--props"))
+
+
+def test_reasoning_controls_are_forwarded():
+    cmd = build_command(
+        _args(
+            "--jinja",
+            "--reasoning",
+            "off",
+            "--reasoning-format",
+            "none",
+            "--reasoning-budget",
+            "0",
+        )
+    )
+
+    assert "--jinja" in cmd
+    assert cmd[cmd.index("--reasoning") + 1] == "off"
+    assert cmd[cmd.index("--reasoning-format") + 1] == "none"
+    assert cmd[cmd.index("--reasoning-budget") + 1] == "0"
+
+
+def test_elastic_kv_flags_are_omitted_when_unset():
+    cmd = build_command(_args())
+    assert "--kv-unified" not in cmd
+    assert "--no-kv-unified" not in cmd
+    assert "--kv-unified-per-slot" not in cmd
+    assert "--cache-ram" not in cmd
+    assert "--cache-idle-slots" not in cmd
+    assert "--no-cache-idle-slots" not in cmd
+
+
+def test_elastic_kv_flags_are_forwarded():
+    cmd = build_command(
+        _args(
+            "--kv-unified",
+            "--kv-unified-per-slot",
+            "32768",
+            "--cache-ram",
+            "0",
+            "--no-cache-idle-slots",
+        )
+    )
+    assert "--kv-unified" in cmd
+    assert cmd[cmd.index("--kv-unified-per-slot") + 1] == "32768"
+    assert cmd[cmd.index("--cache-ram") + 1] == "0"
+    assert "--no-cache-idle-slots" in cmd

@@ -17,6 +17,7 @@ from typing import Any
 
 from ocabra.core.model_manager_helpers import (
     _resolve_rs_rollback_snapshots,
+    estimate_llama_cpp_vram_from_config,
     estimate_vllm_vram_from_config,
     resolve_llama_cpp_gpu_layers,
     resolve_llama_cpp_option,
@@ -521,6 +522,19 @@ def test_explicit_override_bypasses_helper(tmp_path: Path) -> None:
             state, models_dir=tmp_path, default_gpu_memory_utilization=0.94
         )
         == 0
+    )
+
+
+def test_llama_cpp_explicit_vram_estimate_takes_precedence() -> None:
+    """A measured deployment override must bypass the generic GGUF planner."""
+    state = _FakeState(
+        backend_model_id="gemma4-26b",
+        extra_config={"llama_cpp": {"gpu_layers": 99, "vram_estimate_mb": 23_632}},
+    )
+
+    assert (
+        estimate_llama_cpp_vram_from_config(state, default_gpu_layers=99)
+        == 23_632
     )
 
 

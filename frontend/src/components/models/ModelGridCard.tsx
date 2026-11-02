@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Cpu,
   MoreHorizontal,
+  Minimize2,
   Pencil,
   Pin,
   PinOff,
@@ -15,6 +16,7 @@ import {
   Share2,
   Square,
   Trash2,
+  X,
 } from "lucide-react"
 import { CapabilityBadge } from "@/components/common/CapabilityBadge"
 import { BackendBadge } from "@/components/models/BackendBadge"
@@ -30,6 +32,8 @@ interface ModelGridCardProps {
   busy?: boolean
   onLoad: (modelId: string) => void
   onUnload: (modelId: string) => void
+  onCancelLoad: (modelId: string) => void
+  onDownsize: (modelId: string) => void
   onTogglePin: (model: ModelState) => void
   onConfigure: (model: ModelState) => void
   onDelete: (model: ModelState) => void
@@ -103,6 +107,8 @@ export function ModelGridCard({
   busy,
   onLoad,
   onUnload,
+  onCancelLoad,
+  onDownsize,
   onTogglePin,
   onConfigure,
   onDelete,
@@ -159,7 +165,7 @@ export function ModelGridCard({
             {profileCount > 1 ? `${profileCount} perfiles` : model.modelId}
           </div>
         </div>
-        <ModelStatusBadge status={model.status} />
+        <ModelStatusBadge status={model.runtimePhase ?? model.status} />
       </div>
 
       {/* Badges row */}
@@ -182,6 +188,7 @@ export function ModelGridCard({
         ) : (
           <Stat label="VRAM" value={`${model.vramUsedMb.toLocaleString()} MB`} />
         )}
+        <Stat label="Slots" value={String(model.runtimeSlots ?? 1)} />
         {category === "chat" ? (
           <>
             <Stat label="Ctx nativo" value={formatTokenCount(context.nativeContext)} />
@@ -280,15 +287,27 @@ export function ModelGridCard({
 
       {/* Actions footer */}
       <div className="mt-auto flex items-center gap-1.5 border-t border-border/60 pt-3">
-        <button
-          type="button"
-          onClick={() => onLoad(model.modelId)}
-          disabled={busy || isLoaded}
-          className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 px-2 py-1.5 text-xs text-emerald-200 disabled:opacity-40"
-          title="Load"
-        >
-          <Play size={13} /> Cargar
-        </button>
+        {model.canCancelLoad ? (
+          <button
+            type="button"
+            onClick={() => onCancelLoad(model.modelId)}
+            disabled={busy}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 px-2 py-1.5 text-xs text-amber-200 disabled:opacity-40"
+            title="Cancelar la carga en curso"
+          >
+            <X size={13} /> Cancelar carga
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onLoad(model.modelId)}
+            disabled={busy || isLoaded}
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 px-2 py-1.5 text-xs text-emerald-200 disabled:opacity-40"
+            title="Load"
+          >
+            <Play size={13} /> Cargar
+          </button>
+        )}
         <button
           type="button"
           onClick={() => onUnload(model.modelId)}
@@ -298,6 +317,17 @@ export function ModelGridCard({
         >
           <Square size={13} /> Descargar
         </button>
+        {model.canDownsize && (
+          <button
+            type="button"
+            onClick={() => onDownsize(model.modelId)}
+            disabled={busy}
+            className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 px-2 py-1.5 text-xs text-sky-200 disabled:opacity-40"
+            title="Liberar la segunda GPU y restaurar el perfil normal"
+          >
+            <Minimize2 size={13} /> 1 GPU
+          </button>
+        )}
 
         <div className="ml-auto">
           <DropdownMenu.Root>

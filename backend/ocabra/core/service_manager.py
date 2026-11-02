@@ -420,13 +420,19 @@ class ServiceManager:
             state.last_health_check_at = now
             state.status = "unreachable"
             state.detail = str(exc)
-            if was_runtime_loaded:
-                # Container crashed/unresponsive after having a runtime loaded —
-                # release any VRAM reservation, docker's restart: unless-stopped
-                # will bring it back fresh and re-reserve if it generates again.
-                # Skip this if it was never loaded yet (e.g. a transient health
-                # check blip during a heavy first load) — same falling-edge
-                # reasoning as the success path above.
+            container_stopped = bool(
+                state.docker_container_name
+                and not await self._is_container_running(state)
+            )
+            if was_runtime_loaded or (
+                state.vram_reserved_at is not None and container_stopped
+            ):
+                # A stopped container cannot materialise a reservation. Release
+                # it even when the runtime never reached ``loaded``; otherwise a
+                # failed service startup leaves a phantom lock until the long
+                # expiry timer and can block unrelated dual-GPU LLMs. Keep the
+                # reservation when the container is still running: its health
+                # endpoint may be transiently unavailable during a heavy load.
                 await self.release_gpu_vram(service_id)
         await self._publish_state(state, "health_checked")
         return state

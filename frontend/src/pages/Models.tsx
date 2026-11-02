@@ -488,6 +488,16 @@ export function Models() {
                 busy={busyModelId === model.modelId}
                 onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
                 onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
+                onCancelLoad={(modelId) =>
+                  void runAction(modelId, async () => {
+                    await api.models.cancelLoad(modelId)
+                  })
+                }
+                onDownsize={(modelId) =>
+                  void runAction(modelId, async () => {
+                    await api.models.downsize(modelId)
+                  })
+                }
                 onTogglePin={(item) => void togglePin(item)}
                 onConfigure={(item) => setConfigModel(item)}
                 onDelete={(item) => setDeleteModel(item)}

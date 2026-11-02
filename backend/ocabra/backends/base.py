@@ -127,15 +127,9 @@ class BackendCapabilities:
     # ceiling that bounds presets. Zero means "unknown — treat context_length
     # as both".
     native_context_length: int = 0
-    # Hard cap on output tokens per request. None of oCabra's backends
-    # (llama.cpp/vLLM/Ollama/...) enforce a separate output ceiling beyond
-    # "whatever's left of the context window after the prompt" — there's no
-    # backend-level concept to source a tighter number from. Left at 0
-    # ("unknown") here; resolve_display_capabilities() backfills it from
-    # context_length before exposing it via /v1/models, since OpenAI-compat
-    # clients (OpenCode, 2026-10-31) increasingly assume a model advertising
-    # context also advertises max output tokens and fall back to guessing
-    # (commonly a conservative 4096/8192) when the field is absent entirely.
+    # Independent hard cap on output tokens per request. Zero means unknown;
+    # it must never be inferred from context_length. A profile may declare an
+    # enforceable operational cap through runtime_policy.max_output_tokens.
     max_output_tokens: int = 0
 
     def to_dict(self) -> dict:
@@ -190,9 +184,7 @@ class BackendInterface(ABC):
         """Detect and return the model capabilities."""
 
     @abstractmethod
-    async def get_vram_estimate_mb(
-        self, model_id: str, extra_config: dict | None = None
-    ) -> int:
+    async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         """Estimate VRAM required before loading the model.
 
         ``extra_config`` lets backends compute a realistic estimate for
@@ -207,10 +199,17 @@ class BackendInterface(ABC):
         """Forward a request to the worker. Returns the response."""
 
     @abstractmethod
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
+    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         """Forward a streaming request to the worker."""
+
+    async def prepare_request(self, model_id: str, path: str, body: dict) -> None:
+        """Prepare backend state before forwarding one inference request.
+
+        Most backends need no request-time transition. Stateful runtimes can
+        override this hook, for example to activate an optional multimodal
+        projector before the request reaches the worker.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Multi-modal interface (optional — subclasses override as needed)
@@ -224,71 +223,41 @@ class BackendInterface(ABC):
         """
         return set()
 
-    async def generate_text(
-        self, model_id: str, messages: list[dict], **kwargs: Any
-    ) -> dict:
+    async def generate_text(self, model_id: str, messages: list[dict], **kwargs: Any) -> dict:
         """Generate a text completion. Override in text-capable backends."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support text generation"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support text generation")
 
     async def stream_text(
         self, model_id: str, messages: list[dict], **kwargs: Any
     ) -> AsyncIterator[bytes]:
         """Stream a text completion. Override in text-capable backends."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support text streaming"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support text streaming")
 
-    async def generate_embeddings(
-        self, model_id: str, input: list[str], **kwargs: Any
-    ) -> dict:
+    async def generate_embeddings(self, model_id: str, input: list[str], **kwargs: Any) -> dict:
         """Generate embeddings for the given input texts."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support embeddings"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support embeddings")
 
-    async def generate_image(
-        self, model_id: str, prompt: str, **kwargs: Any
-    ) -> dict:
+    async def generate_image(self, model_id: str, prompt: str, **kwargs: Any) -> dict:
         """Generate an image from a text prompt."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support image generation"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support image generation")
 
-    async def transcribe(
-        self, model_id: str, audio: bytes, **kwargs: Any
-    ) -> dict:
+    async def transcribe(self, model_id: str, audio: bytes, **kwargs: Any) -> dict:
         """Transcribe audio to text."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support audio transcription"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support audio transcription")
 
-    async def synthesize_speech(
-        self, model_id: str, text: str, **kwargs: Any
-    ) -> bytes:
+    async def synthesize_speech(self, model_id: str, text: str, **kwargs: Any) -> bytes:
         """Synthesize speech from text. Returns raw audio bytes."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support speech synthesis"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support speech synthesis")
 
-    async def rerank(
-        self, model_id: str, query: str, documents: list[str], **kwargs: Any
-    ) -> dict:
+    async def rerank(self, model_id: str, query: str, documents: list[str], **kwargs: Any) -> dict:
         """Rerank documents by relevance to the query."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support reranking"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support reranking")
 
-    async def upscale_video(
-        self, model_id: str, video: bytes, **kwargs: Any
-    ) -> bytes:
+    async def upscale_video(self, model_id: str, video: bytes, **kwargs: Any) -> bytes:
         """Upscale/restore a video segment. Returns the encoded segment bytes.
 
         Callers send one self-contained segment without audio and get the
         upscaled segment back; the backend keeps no state between calls so the
         scheduler stays free to evict the model in between.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support video upscaling"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support video upscaling")

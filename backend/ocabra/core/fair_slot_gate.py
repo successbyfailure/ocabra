@@ -21,18 +21,39 @@ ever waits for the already-*running* work currently holding the slots to
 finish (unavoidable — nothing can preempt a request mid-flight) — never for
 an active user's entire remaining queue.
 
-One gate instance per worker (keyed by worker_key, which already changes
-whenever a model's runtime preset changes, so a preset escalation
-naturally gets a fresh gate sized for the new slot count — see
-WorkerPoolFairGates).
+One gate instance per worker. For a fixed llama.cpp runtime with unified KV,
+the gate keeps the same worker key and arbitrates both its stable physical
+slot count and its shared token pool. Runtime presets may still derive a new
+worker key for backends/models that need a different process.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from dataclasses import dataclass
+
+
+class KVCapacityError(ValueError):
+    """A single request reservation is larger than the worker's KV pool."""
+
+    def __init__(self, requested_tokens: int, capacity_tokens: int) -> None:
+        self.requested_tokens = requested_tokens
+        self.capacity_tokens = capacity_tokens
+        super().__init__(
+            f"request needs {requested_tokens} KV tokens but the pool holds {capacity_tokens}"
+        )
+
+
+@dataclass
+class _Waiter:
+    future: asyncio.Future[None]
+    user_key: str
+    is_batch: bool
+    kv_tokens: int
+    granted: bool = False
 
 
 class FairSlotGate:
@@ -48,20 +69,21 @@ class FairSlotGate:
     arrived in between.
     """
 
-    def __init__(self, slots: int) -> None:
+    def __init__(self, slots: int, kv_capacity_tokens: int | None = None) -> None:
         self.slots = max(1, int(slots))
+        self.kv_capacity_tokens = (
+            None if kv_capacity_tokens is None else max(0, int(kv_capacity_tokens))
+        )
         self._in_flight = 0
+        self._kv_tokens_in_flight = 0
+        self._kv_tokens_in_flight_batch = 0
         # How many of the currently-in-flight occupants are batch-origin —
         # tracked separately so callers (preemption logic) can tell "every
         # slot is held, and all of them are batch" from "every slot is held
         # by real interactive traffic" without walking a task registry.
         self._in_flight_batch = 0
         # user_key -> queue of not-yet-granted waiters for that user.
-        self._queues: dict[str, deque[asyncio.Future]] = {}
-        # Whether the longest-waiting future per user_key is batch-origin —
-        # needed at dispatch time to update ``_in_flight_batch`` and to feed
-        # the priority key below.
-        self._is_batch: dict[asyncio.Future, bool] = {}
+        self._queues: dict[str, deque[_Waiter]] = {}
         # Dispatch priority key per user_key: (batch_tier, served_tier, seq).
         # batch_tier is 0 for interactive, 1 for batch-origin — batch NEVER
         # wins the next free slot while an interactive caller is waiting,
@@ -102,19 +124,72 @@ class FairSlotGate:
         """
         return self._in_flight >= self.slots and self._in_flight_batch >= self._in_flight
 
-    async def acquire(self, user_key: str, *, is_batch: bool = False) -> None:
+    def batch_blocks(self, kv_tokens: int = 0) -> bool:
+        """Whether running batch work prevents this interactive admission.
+
+        A weighted pool can be saturated before every physical slot is in use,
+        so slot occupancy alone is not enough to decide whether preemption may
+        help. This remains conservative: no batch reservation means no
+        preemption request, even if interactive work also fills the pool.
+        """
+        if self.batch_holds_all_slots():
+            return True
+        requested = max(0, int(kv_tokens))
+        return (
+            requested > 0 and not self._fits_kv(requested) and self._kv_tokens_in_flight_batch > 0
+        )
+
+    def snapshot(self) -> dict[str, int | bool | None]:
+        """Return logical admission state without exposing mutable internals."""
+        capacity = self.kv_capacity_tokens
+        free = None if capacity is None else max(0, capacity - self._kv_tokens_in_flight)
+        return {
+            "in_flight": self._in_flight,
+            "queued": sum(len(queue) for queue in self._queues.values()),
+            "slots": self.slots,
+            "slot_saturated": self._in_flight >= self.slots,
+            "kv_capacity_tokens": capacity,
+            "kv_reserved_tokens": self._kv_tokens_in_flight,
+            "kv_free_tokens": free,
+        }
+
+    def is_idle(self) -> bool:
+        """Return whether replacing this gate cannot orphan a lease/waiter."""
+        return self._in_flight == 0 and not any(self._queues.values())
+
+    def _fits_kv(self, kv_tokens: int) -> bool:
+        return (
+            self.kv_capacity_tokens is None
+            or self._kv_tokens_in_flight + kv_tokens <= self.kv_capacity_tokens
+        )
+
+    async def acquire(
+        self,
+        user_key: str,
+        *,
+        is_batch: bool = False,
+        kv_tokens: int = 0,
+    ) -> None:
+        kv_tokens = max(0, int(kv_tokens))
+        if self.kv_capacity_tokens is not None and kv_tokens > self.kv_capacity_tokens:
+            raise KVCapacityError(kv_tokens, self.kv_capacity_tokens)
+
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        waiter = _Waiter(
+            future=loop.create_future(),
+            user_key=user_key,
+            is_batch=is_batch,
+            kv_tokens=kv_tokens,
+        )
         async with self._lock:
             if user_key not in self._first_seen:
                 self._first_seen[user_key] = self._seq
                 self._seq += 1
-            self._is_batch[fut] = is_batch
             queue = self._queues.setdefault(user_key, deque())
-            queue.append(fut)
+            queue.append(waiter)
             self._dispatch_locked()
         try:
-            await fut
+            await waiter.future
         except asyncio.CancelledError:
             # The caller gave up before being granted a slot (e.g. client
             # disconnected while queued) — drop our own future from the
@@ -123,17 +198,14 @@ class FairSlotGate:
             # (fut.done()) the slot is ours; release it like normal so we
             # don't leak it.
             async with self._lock:
-                if fut.done() and not fut.cancelled():
-                    self._in_flight -= 1
-                    if self._is_batch.pop(fut, False):
-                        self._in_flight_batch -= 1
+                if waiter.granted:
+                    self._release_locked(waiter.is_batch, waiter.kv_tokens)
                     self._dispatch_locked()
                 else:
-                    self._is_batch.pop(fut, None)
                     queue = self._queues.get(user_key)
                     if queue is not None:
                         try:
-                            queue.remove(fut)
+                            queue.remove(waiter)
                         except ValueError:
                             pass
                         if not queue:
@@ -143,72 +215,113 @@ class FairSlotGate:
     def _dispatch_locked(self) -> None:
         """Grant queued waiters while slots are free. Caller holds ``_lock``."""
         while self._in_flight < self.slots:
-            candidates = [uk for uk, q in self._queues.items() if q]
+            # Cancelled queued futures can be completed by asyncio before the
+            # acquire coroutine gets CPU time to remove itself. Discard them
+            # here so they neither block a user's head nor consume capacity.
+            for user_key, queue in list(self._queues.items()):
+                while queue and queue[0].future.done() and not queue[0].granted:
+                    queue.popleft()
+                if not queue:
+                    self._queues.pop(user_key, None)
+
+            candidates = [
+                user_key
+                for user_key, queue in self._queues.items()
+                if queue and self._fits_kv(queue[0].kv_tokens)
+            ]
             if not candidates:
                 break
             user_key = min(
                 candidates,
-                key=lambda uk: self._priority_key(uk, is_batch=self._is_batch.get(self._queues[uk][0], False)),
+                key=lambda candidate: self._priority_key(
+                    candidate,
+                    is_batch=self._queues[candidate][0].is_batch,
+                ),
             )
             queue = self._queues[user_key]
-            fut = queue.popleft()
+            waiter = queue.popleft()
             if not queue:
                 self._queues.pop(user_key, None)
             self._last_served[user_key] = self._seq
             self._seq += 1
             self._in_flight += 1
-            # Consumed once the dispatch decision is made — leaving it in
-            # the dict after this would leak one entry per ever-dispatched
-            # future for the gate's lifetime.
-            dispatched_is_batch = self._is_batch.pop(fut, False)
-            if dispatched_is_batch:
+            self._kv_tokens_in_flight += waiter.kv_tokens
+            waiter.granted = True
+            if waiter.is_batch:
                 self._in_flight_batch += 1
-            if not fut.done():
-                fut.set_result(None)
+                self._kv_tokens_in_flight_batch += waiter.kv_tokens
+            if not waiter.future.done():
+                waiter.future.set_result(None)
             else:
                 # Waiter already cancelled before we got here — the slot
                 # we just handed out was never actually claimed; give it
                 # back and keep dispatching.
-                self._in_flight -= 1
-                if dispatched_is_batch:
-                    self._in_flight_batch -= 1
+                waiter.granted = False
+                self._release_locked(waiter.is_batch, waiter.kv_tokens)
 
-    async def release(self, *, is_batch: bool = False) -> None:
+    def _release_locked(self, is_batch: bool, kv_tokens: int) -> None:
+        self._in_flight = max(0, self._in_flight - 1)
+        self._kv_tokens_in_flight = max(0, self._kv_tokens_in_flight - kv_tokens)
+        if is_batch:
+            self._in_flight_batch = max(0, self._in_flight_batch - 1)
+            self._kv_tokens_in_flight_batch = max(0, self._kv_tokens_in_flight_batch - kv_tokens)
+
+    async def release(self, *, is_batch: bool = False, kv_tokens: int = 0) -> None:
         async with self._lock:
-            self._in_flight = max(0, self._in_flight - 1)
-            if is_batch:
-                self._in_flight_batch = max(0, self._in_flight_batch - 1)
+            self._release_locked(is_batch, max(0, int(kv_tokens)))
             self._dispatch_locked()
 
     @asynccontextmanager
-    async def slot(self, user_key: str, *, is_batch: bool = False) -> AsyncIterator[None]:
-        await self.acquire(user_key, is_batch=is_batch)
+    async def slot(
+        self,
+        user_key: str,
+        *,
+        is_batch: bool = False,
+        kv_tokens: int = 0,
+    ) -> AsyncIterator[None]:
+        await self.acquire(user_key, is_batch=is_batch, kv_tokens=kv_tokens)
         try:
             yield
         finally:
-            await self.release(is_batch=is_batch)
+            await self.release(is_batch=is_batch, kv_tokens=kv_tokens)
 
 
 class WorkerPoolFairGates:
     """Lazily creates and caches one :class:`FairSlotGate` per worker_key.
 
-    A worker_key already encodes the active runtime preset (see
-    ``runtime_coordinator.py`` — switching presets derives a different
-    worker_key), so an escalation to a bigger/smaller preset naturally
-    gets a fresh gate sized for the new slot count instead of reusing a
-    stale one. Gates for worker_keys that stop being used just sit idle
-    (cheap — an empty gate is a few empty containers) rather than being
-    actively cleaned up; that's an acceptable trade for not having to hook
-    into every unload path.
+    Fixed unified-KV runtimes reuse one gate. If their configured slot count
+    or pool capacity changes after a drained reload, :meth:`get` replaces the
+    idle gate with one sized for the new limits. A runtime preset can instead
+    derive another worker key; its gate is then independent. Gates for worker
+    keys that stop being used remain idle (cheap — an empty gate is a few
+    containers) rather than hooking cleanup into every unload path.
     """
 
     def __init__(self) -> None:
         self._gates: dict[str, FairSlotGate] = {}
 
-    def get(self, worker_key: str, slots: int) -> FairSlotGate:
+    def get(
+        self,
+        worker_key: str,
+        slots: int,
+        kv_capacity_tokens: int | None = None,
+    ) -> FairSlotGate:
         gate = self._gates.get(worker_key)
-        if gate is None or gate.slots != max(1, int(slots)):
-            gate = FairSlotGate(slots)
+        normalized_slots = max(1, int(slots))
+        normalized_capacity = (
+            None if kv_capacity_tokens is None else max(0, int(kv_capacity_tokens))
+        )
+        if (
+            gate is None
+            or gate.slots != normalized_slots
+            or gate.kv_capacity_tokens != normalized_capacity
+        ):
+            if gate is not None and not gate.is_idle():
+                raise RuntimeError(
+                    f"cannot resize active admission gate '{worker_key}'; "
+                    "runtime configuration must use a distinct worker key"
+                )
+            gate = FairSlotGate(normalized_slots, normalized_capacity)
             self._gates[worker_key] = gate
         return gate
 

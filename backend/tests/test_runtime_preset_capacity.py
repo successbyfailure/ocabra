@@ -93,9 +93,7 @@ async def test_ollama_forced_multi_gpu_resolves_via_shared_pool(monkeypatch) -> 
         base_model_id="ollama/gemma4:12b",
         load_overrides=None,
         runtime_policy=None,
-        runtime_presets=[
-            _preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])
-        ],
+        runtime_presets=[_preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])],
     )
     state = SimpleNamespace(backend_type="ollama", preferred_gpu=1, extra_config={})
     gpus = [
@@ -128,9 +126,7 @@ async def test_llama_cpp_forced_multi_gpu_resolves_via_layer_split(monkeypatch) 
         base_model_id="llama_cpp/qwen3.8-27b",
         load_overrides=None,
         runtime_policy=None,
-        runtime_presets=[
-            _preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])
-        ],
+        runtime_presets=[_preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])],
     )
     state = SimpleNamespace(backend_type="llama_cpp", preferred_gpu=1, extra_config={})
     gpus = [
@@ -143,6 +139,81 @@ async def test_llama_cpp_forced_multi_gpu_resolves_via_layer_split(monkeypatch) 
     assert row["resolved"] is True
     assert row["target_gpus"] == [0, 1]
     assert row["effective_context"] == 190_540
+    assert row["fits"] is True
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_unified_preset_context_is_aggregate_pool(monkeypatch) -> None:
+    arch = ModelArch(32, 8, 128, 128, context_length=262_144)
+    monkeypatch.setattr(
+        "ocabra.core.runtime_preset_capacity.resolve_arch_and_weights",
+        AsyncMock(return_value=ArchResolution(arch, 10_000, "")),
+    )
+    profile = SimpleNamespace(
+        base_model_id="llama_cpp/qwen3.8-27b",
+        load_overrides=None,
+        runtime_policy={"max_context_tokens": 262_144},
+        runtime_presets=[
+            _preset("normal", mode="fixed", tokens=98_304, placement="forced", gpus=[1]),
+            _preset("dual", mode="fixed", tokens=262_144, placement="forced", gpus=[0, 1]),
+        ],
+    )
+    state = SimpleNamespace(
+        backend_type="llama_cpp",
+        preferred_gpu=1,
+        extra_config={"llama_cpp": {"kv_unified": True}},
+    )
+    gpus = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+
+    rows = await resolve_profile_runtime_capacities(profile, state, gpus)
+    by_key = {row["preset_key"]: row for row in rows}
+
+    assert by_key["normal"]["effective_context"] == 98_304
+    assert by_key["normal"]["target_gpus"] == [1]
+    assert by_key["dual"]["effective_context"] == 262_144
+    assert by_key["dual"]["target_gpus"] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_empirically_validated_fixed_pool_overrides_conservative_estimate(
+    monkeypatch,
+) -> None:
+    arch = ModelArch(32, 8, 128, 128, context_length=262_144)
+    monkeypatch.setattr(
+        "ocabra.core.runtime_preset_capacity.resolve_arch_and_weights",
+        AsyncMock(return_value=ArchResolution(arch, 20_000, "")),
+    )
+    profile = SimpleNamespace(
+        base_model_id="llama_cpp/qwen3.8-27b",
+        load_overrides=None,
+        runtime_policy={
+            "max_context_tokens": 262_144,
+            "validated_context_tokens": {"normal": 98_304},
+        },
+        runtime_presets=[
+            _preset("normal", mode="fixed", tokens=98_304, placement="forced", gpus=[1])
+        ],
+    )
+    state = SimpleNamespace(
+        backend_type="llama_cpp",
+        preferred_gpu=1,
+        extra_config={"llama_cpp": {"kv_unified": True}},
+    )
+
+    row = (
+        await resolve_profile_runtime_capacities(
+            profile,
+            state,
+            [SimpleNamespace(index=1, total_vram_mb=24_576)],
+        )
+    )[0]
+
+    assert row["effective_context"] == 98_304
+    assert row["hardware_max"] == 98_304
+    assert row["warnings"] == []
     assert row["fits"] is True
 
 
@@ -162,9 +233,7 @@ async def test_non_ollama_backend_does_not_fake_explicit_multi_gpu_capacity(
         base_model_id="vllm/some-model",
         load_overrides=None,
         runtime_policy=None,
-        runtime_presets=[
-            _preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])
-        ],
+        runtime_presets=[_preset("dual", mode="max", tokens=None, placement="forced", gpus=[0, 1])],
     )
     state = SimpleNamespace(backend_type="vllm", preferred_gpu=1, extra_config={})
     gpus = [

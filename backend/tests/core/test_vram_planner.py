@@ -69,10 +69,15 @@ def _write_gguf(tmp_path: Path, kv: dict) -> str:
     p.write_bytes(_gguf_bytes(kv))
     return str(p)
 
+
 # qwen3:4b architecture (from Ollama /api/show model_info)
 QWEN3_4B = vp.ModelArch(
-    layers=36, n_kv_heads=8, key_length=128, value_length=128,
-    hidden_size=2560, context_length=262144,
+    layers=36,
+    n_kv_heads=8,
+    key_length=128,
+    value_length=128,
+    hidden_size=2560,
+    context_length=262144,
 )
 
 
@@ -130,7 +135,9 @@ def test_ollama_translator_multiplies_by_parallel():
 
 def test_max_context_inverse_of_estimate():
     weights, free = 2400, 22000
-    c = vp.max_context_tokens(free, weights, QWEN3_4B, slots=1)
+    # Disable the normal 10% safety margin when testing the mathematical
+    # inverse itself; with the margin enabled, spare headroom is intentional.
+    c = vp.max_context_tokens(free, weights, QWEN3_4B, slots=1, safety_factor=1.0)
     # feeding c back must not exceed the budget
     assert vp.estimate_total_vram_mb(weights, QWEN3_4B, c) <= free
     # one token more would overflow (within rounding)
@@ -165,14 +172,19 @@ def test_rs_cache_mb_per_slot_matches_qwen35_real_params():
     # n_embd_s = 128 * 6144 = 786432
     # bytes/slot = 48 * (30720 + 786432) * 4 (F32) = 156893184 B = 149.625 MiB exactly
     mb = vp._hybrid_rs_cache_mb_per_slot(
-        recurrent_layers=48, ssm_d_conv=4, ssm_d_inner=6144, ssm_d_state=128, ssm_n_group=16,
+        recurrent_layers=48,
+        ssm_d_conv=4,
+        ssm_d_inner=6144,
+        ssm_d_state=128,
+        ssm_n_group=16,
     )
     assert mb == 149.625
 
 
 def test_rs_cache_vram_mb_scales_with_slots_and_rollback():
-    arch = vp.ModelArch(layers=65, n_kv_heads=4, key_length=256, value_length=256,
-                         rs_cache_mb_per_slot=149.625)
+    arch = vp.ModelArch(
+        layers=65, n_kv_heads=4, key_length=256, value_length=256, rs_cache_mb_per_slot=149.625
+    )
     assert vp.rs_cache_vram_mb(arch, slots=1) == 149.625
     assert vp.rs_cache_vram_mb(arch, slots=2) == 149.625 * 2
     # self-speculative rollback (n_rs_seq) widens every slot's rows by (1 + n_rs_seq)
@@ -187,9 +199,14 @@ def test_rs_cache_zero_for_non_hybrid_arch():
 
 def test_max_context_tokens_deducts_rs_cache_budget():
     arch_dense = vp.ModelArch(layers=65, n_kv_heads=4, key_length=256, value_length=256)
-    arch_hybrid = vp.ModelArch(layers=65, n_kv_heads=4, key_length=256, value_length=256,
-                                kv_elements_per_token_override=17 * 4 * (256 + 256),
-                                rs_cache_mb_per_slot=149.625)
+    arch_hybrid = vp.ModelArch(
+        layers=65,
+        n_kv_heads=4,
+        key_length=256,
+        value_length=256,
+        kv_elements_per_token_override=17 * 4 * (256 + 256),
+        rs_cache_mb_per_slot=149.625,
+    )
     dense_ctx = vp.max_context_tokens(24000, 16000, arch_dense, slots=1)
     hybrid_ctx = vp.max_context_tokens(24000, 16000, arch_hybrid, slots=1)
     # same free budget, hybrid has fewer KV-bearing layers (17 vs 65) → more
@@ -279,10 +296,13 @@ def test_arch_from_gguf_gemma4_matches_real_measurements(tmp_path):
     draft_overhead = vp.mtp_draft_overhead_mb(1)
     for ctx, real_mb in [(32768, 19009), (131072, 21225)]:
         predicted = vp.estimate_total_vram_mb(
-            weights_mb, arch, ctx,
+            weights_mb,
+            arch,
+            ctx,
             kv_dtype_bytes=1.0,
             overhead_mb=vp.DEFAULT_OVERHEAD_MB + draft_overhead,
-            slots=1, rs_rollback_snapshots=3,
+            slots=1,
+            rs_rollback_snapshots=3,
         )
         assert predicted == real_mb
 
@@ -308,8 +328,12 @@ def test_arch_from_gguf_falls_back_to_head_count_when_head_count_kv_missing(tmp_
 
 
 _QWEN35_REAL_ARCH = vp.ModelArch(
-    layers=65, n_kv_heads=4, key_length=256, value_length=256,
-    hidden_size=5120, context_length=262144,
+    layers=65,
+    n_kv_heads=4,
+    key_length=256,
+    value_length=256,
+    hidden_size=5120,
+    context_length=262144,
     kv_elements_per_token_override=17 * 4 * (256 + 256),
     rs_cache_mb_per_slot=149.625,
 )
@@ -340,8 +364,13 @@ def test_plan_llama_cpp_vram_mb_matches_real_measurement_1_slot_32k():
     production capacity at 1 slot where 5+ would fit). The fixed estimate
     must stay >= real (safety) without drifting back to that old padding."""
     predicted = vp.plan_llama_cpp_vram_mb(
-        _QWEN35_REAL_ARCH, QWEN35_FILE_SIZE_MB, 32768, gpu_layers=99,
-        kv_dtype_bytes=1.0, parallel_slots=1, rs_rollback_snapshots=3,
+        _QWEN35_REAL_ARCH,
+        QWEN35_FILE_SIZE_MB,
+        32768,
+        gpu_layers=99,
+        kv_dtype_bytes=1.0,
+        parallel_slots=1,
+        rs_rollback_snapshots=3,
     )
     real = 17665
     assert predicted >= real
@@ -354,8 +383,13 @@ def test_plan_llama_cpp_vram_mb_matches_real_measurement_2_slots_128k_total():
     Measured 22303 MiB. This is the config that OOM'd when the rs_cache fix
     shipped without the draft-overhead term (predicted 21980 < real 22303)."""
     predicted = vp.plan_llama_cpp_vram_mb(
-        _QWEN35_REAL_ARCH, QWEN35_FILE_SIZE_MB, 131072, gpu_layers=99,
-        kv_dtype_bytes=1.0, parallel_slots=2, rs_rollback_snapshots=3,
+        _QWEN35_REAL_ARCH,
+        QWEN35_FILE_SIZE_MB,
+        131072,
+        gpu_layers=99,
+        kv_dtype_bytes=1.0,
+        parallel_slots=2,
+        rs_rollback_snapshots=3,
     )
     real = 22303
     assert predicted >= real
@@ -371,8 +405,13 @@ def test_plan_llama_cpp_vram_mb_matches_real_measurement_3_slots_32768_each():
     with a lookup table of real measurements instead of an extrapolated
     curve."""
     predicted = vp.plan_llama_cpp_vram_mb(
-        _QWEN35_REAL_ARCH, QWEN35_FILE_SIZE_MB, 98304, gpu_layers=99,
-        kv_dtype_bytes=1.0, parallel_slots=3, rs_rollback_snapshots=3,
+        _QWEN35_REAL_ARCH,
+        QWEN35_FILE_SIZE_MB,
+        98304,
+        gpu_layers=99,
+        kv_dtype_bytes=1.0,
+        parallel_slots=3,
+        rs_rollback_snapshots=3,
     )
     real = 21549
     assert predicted >= real
@@ -385,9 +424,14 @@ def test_plan_use_case_lets_3x32k_fit_on_the_3090_alone():
     resolve as fitting on a single 3090 (24576 MiB) — it does in reality,
     with ~2.6 GiB of real headroom to spare."""
     plan = vp.plan_use_case(
-        "llama_cpp", _QWEN35_REAL_ARCH, QWEN35_FILE_SIZE_MB,
-        gpu_total_mb=24576, requested_context=32768, slots=3,
-        kv_dtype_bytes=1.0, rs_rollback_snapshots=3,
+        "llama_cpp",
+        _QWEN35_REAL_ARCH,
+        QWEN35_FILE_SIZE_MB,
+        gpu_total_mb=24576,
+        requested_context=32768,
+        slots=3,
+        kv_dtype_bytes=1.0,
+        rs_rollback_snapshots=3,
     )
     assert plan["effective_context"] == 32768
     assert plan["warnings"] == []
@@ -407,9 +451,13 @@ def test_vllm_max_model_len_shrinks_with_concurrency():
 
 def test_arch_from_hf_config():
     cfg = {
-        "num_hidden_layers": 36, "num_attention_heads": 32,
-        "num_key_value_heads": 8, "hidden_size": 4096, "head_dim": 128,
-        "max_position_embeddings": 40960, "torch_dtype": "bfloat16",
+        "num_hidden_layers": 36,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_size": 4096,
+        "head_dim": 128,
+        "max_position_embeddings": 40960,
+        "torch_dtype": "bfloat16",
     }
     arch = vp.arch_from_hf_config(cfg)
     assert arch is not None
@@ -419,8 +467,10 @@ def test_arch_from_hf_config():
 def test_arch_from_hf_config_head_dim_fallback():
     # no explicit head_dim → hidden_size / num_attention_heads
     cfg = {
-        "num_hidden_layers": 22, "num_attention_heads": 32,
-        "num_key_value_heads": 4, "hidden_size": 2048,
+        "num_hidden_layers": 22,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 4,
+        "hidden_size": 2048,
         "torch_dtype": "float16",
     }
     arch = vp.arch_from_hf_config(cfg)
@@ -492,7 +542,9 @@ def test_capacity_rows_vllm_uses_concurrency():
 
 def test_plan_use_case_auto_picks_max():
     arch = vp.ModelArch(36, 8, 128, 128, context_length=262144)
-    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context="max", slots=1)
+    plan = vp.plan_use_case(
+        "ollama", arch, 2400, gpu_total_mb=24000, requested_context="max", slots=1
+    )
     assert plan["auto"] is True
     assert plan["effective_context"] == plan["max_context"] > 0
     assert plan["warnings"] == []
@@ -501,21 +553,27 @@ def test_plan_use_case_auto_picks_max():
 def test_plan_use_case_clamps_to_fit():
     arch = vp.ModelArch(36, 8, 128, 128, context_length=262144)
     # ask for far more than fits → clamped to max with a warning
-    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context=500000, slots=1)
+    plan = vp.plan_use_case(
+        "ollama", arch, 2400, gpu_total_mb=24000, requested_context=500000, slots=1
+    )
     assert plan["effective_context"] == plan["max_context"]
     assert plan["warnings"]
 
 
 def test_plan_use_case_caps_at_native():
     arch = vp.ModelArch(36, 8, 128, 128, context_length=8192)
-    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context=32768, slots=1)
+    plan = vp.plan_use_case(
+        "ollama", arch, 2400, gpu_total_mb=24000, requested_context=32768, slots=1
+    )
     assert plan["effective_context"] == 8192
     assert any("nativo" in w for w in plan["warnings"])
 
 
 def test_plan_use_case_fits_exactly_no_warning():
     arch = vp.ModelArch(36, 8, 128, 128, context_length=262144)
-    plan = vp.plan_use_case("ollama", arch, 2400, gpu_total_mb=24000, requested_context=8192, slots=1)
+    plan = vp.plan_use_case(
+        "ollama", arch, 2400, gpu_total_mb=24000, requested_context=8192, slots=1
+    )
     assert plan["effective_context"] == 8192
     assert plan["warnings"] == []
 
@@ -528,12 +586,22 @@ def test_plan_use_case_rollback_shrinks_max_context_for_hybrid_mtp_model():
     process can hold (the exact gap that caused the 2026-10-26 OOM, just in
     the "what fits" display instead of the admission check)."""
     without_rollback = vp.plan_use_case(
-        "llama_cpp", _QWEN35_REAL_ARCH, QWEN35_FILE_SIZE_MB,
-        gpu_total_mb=24576, requested_context="max", slots=1, kv_dtype_bytes=1.0,
+        "llama_cpp",
+        _QWEN35_REAL_ARCH,
+        QWEN35_FILE_SIZE_MB,
+        gpu_total_mb=24576,
+        requested_context="max",
+        slots=1,
+        kv_dtype_bytes=1.0,
     )
     with_rollback = vp.plan_use_case(
-        "llama_cpp", _QWEN35_REAL_ARCH, QWEN35_FILE_SIZE_MB,
-        gpu_total_mb=24576, requested_context="max", slots=1, kv_dtype_bytes=1.0,
+        "llama_cpp",
+        _QWEN35_REAL_ARCH,
+        QWEN35_FILE_SIZE_MB,
+        gpu_total_mb=24576,
+        requested_context="max",
+        slots=1,
+        kv_dtype_bytes=1.0,
         rs_rollback_snapshots=3,
     )
     assert with_rollback["max_context"] < without_rollback["max_context"]

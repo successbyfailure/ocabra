@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-09-10
+Última actualización: 2026-10-30
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -580,6 +580,12 @@ las variantes ``-ctx*`` en presets internos. oCabra anuncia el máximo efectivo
 que puede servir, mantiene un contexto normal configurable y escala al preset
 mínimo suficiente cuando llega una petición mayor.
 
+> Infraestructura activa para los perfiles llama.cpp que cambian de
+> colocación. Cada preset sigue usando un pool KV unificado: no vuelve la
+> partición rígida por slot. Qwen usa un runtime normal en la 3090 y uno
+> extendido en ambas GPU; Gemma y RavenX, cuyo máximo ya cabe en una tarjeta,
+> conservan un único runtime.
+
 ### Decisiones cerradas
 
 - ``MAX`` se calcula por modelo y despliegue; nunca es un número global.
@@ -669,6 +675,70 @@ ocupada.
 
 ---
 
+## 🚧 Bloque 22 — KV elástica y paralelismo dinámico en llama.cpp
+
+Plan activo en `docs/tasks/llama-cpp-elastic-kv-plan.md`.
+
+Objetivo: medir Gemma 4 12B, Gemma 4 26B-A4B y Qwen3.8 27B en RTX 3060,
+RTX 3090 y ambas; mantener los pesos residentes en la mejor colocación,
+reservar el mayor pool KV seguro y repartirlo dinámicamente entre hasta cuatro
+peticiones sin dividir el contexto en parcelas fijas por slot. oCabra aplicará
+admission control por tokens y conservará el spill a ambas GPU para las cargas
+que no quepan en una.
+
+Decisiones iniciales:
+
+- cuatro slots físicos como punto de partida, seguidos de pruebas con otros
+  valores;
+- medir hasta el límite nativo de 256k en cada colocación en vez de asumir un
+  techo de 128k, como campaña oportunista y no como bloqueo inicial;
+- empezar con capacidades upstream existentes antes de modificar llama.cpp;
+- separar cambios genéricos candidatos a upstream de las políticas propias de
+  oCabra;
+- desplegar KV unificada de forma acotada en los perfiles llama.cpp principales
+  tras superar aislamiento, MTP, visión y cancelación; el soak largo queda como
+  validación posterior antes de ampliar pools o cambiar políticas globales;
+- investigar después la recreación de `llama_context` conservando
+  `llama_model` para cambios de pool en la misma colocación.
+
+Estado: baseline de capacidad y wiring del pool KV documentados. Visión
+``enabled``, ``disabled`` y ``on_demand`` está implementada y validada con
+Gemma 12B/26B y Qwen3.8, incluida transición hot-mmproj, grounding,
+concurrencia y soak acelerado. El admission control ponderado está cableado en
+OpenAI/Ollama, cubierto por tests y validado en un canary real Gemma 26B
+128k/4 con carga desigual, cancelación y rechazo oversized. Desde 2026-11-01,
+Gemma 12B/26B mantienen 256k/4 en la 3090. Qwen estándar usa 96k/4 en la
+3090 y escala a 256k/4 en ambas GPU con split 1:3; el abliterated usa 64k/1
+en la 3090 y escala a 224k/4 con split 1:2,3. Qwen Coder usa 116k/4 en la
+3090 y 256k/4 dual 1:3. Tras 300 s sin demanda grande vuelven al preset normal
+y liberan completamente la 3060. Dentro de cada runtime, una petición puede
+consumir todo el pool si las demás no lo están usando; el
+``WeightedSlotGate`` controla la suma agregada. RavenX conserva 240k/4 en una
+3090. La recreación caliente del
+``llama_context`` conservando pesos queda como optimización posterior, no como
+requisito del reparto flexible. 256k de Raven queda 74 MiB por encima del
+presupuesto con el margen configurado.
+Las variantes Ollama se conservan como ``*-ollama``. Quedan la tokenización
+exacta cuando exista
+una vía pre-load fiable y el soak largo solicitado por el operador. La UI ya
+permite configurar KV unificada y el cap opcional por slot; dejar este último
+vacío expone el pool completo. La admisión por presión también prevalida el
+máximo recuperable y no desaloja modelos si el nuevo runtime seguiría sin
+caber aun liberando todos los candidatos. La transición 1→2 reconcilia los
+runners Ollama persistentes, drena peticiones activas, espera telemetría física
+fresca y repite la evicción sobre el déficit real si una autocarga PIN cambia
+el estado durante la operación. La vuelta 2→1 se validó de extremo a extremo
+con Qwen abliterated 224k/4 → 64k/1.
+Desde 0.22.15, la API y la UI agregan los workers derivados durante todo su
+ciclo de vida y señalizan ``loading``, ``loaded``, ``upsizing``,
+``downsizing`` y ``unloading`` junto con sus slots físicos. Hay controles para
+cancelar una carga (con limpieza del proceso parcial) y para restaurar un
+runtime dual al preset single-GPU; este último solo se habilita si el modelo
+está ocioso y existe un destino de una GPU verificable. Los eventos de un
+worker ``::<hash>`` refrescan su card canónica inmediatamente.
+
+---
+
 ## 🔬 Investigación pendiente — speculative en Nemotron-H híbrido
 
 Revalidar speculative decoding para Nemotron 3 Nano cuando vLLM publique una
@@ -707,6 +777,7 @@ corrección para el estado Mamba con tokens especulativos:
 [✅ Hecho]    Bloque 19 — Observabilidad atribuible de OpenAI Realtime
 [🚧 En curso] Bloque 20 — Router profiles, duration estimator y session registry
 [✅ Hecho]    Bloque 21 — Presets de contexto y runtimes adaptativos
+[🚧 En curso] Bloque 22 — KV elástica y paralelismo dinámico en llama.cpp (pool fijo, admission, UI y canary completados; soak y context reinit pendientes)
 [Pendiente]   Revalidar paralelismo Qwen 3.8 cuando Ollama soporte qwen35 con más de un slot
 [Pendiente]   Investigación e integración de vLLM sleep mode
 [Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido

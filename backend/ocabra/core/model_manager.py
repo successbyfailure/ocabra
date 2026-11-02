@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -35,8 +36,7 @@ logger = structlog.get_logger(__name__)
 
 def _to_camel_key(value: str) -> str:
     return "".join(
-        part.capitalize() if index else part
-        for index, part in enumerate(value.split("_"))
+        part.capitalize() if index else part for index, part in enumerate(value.split("_"))
     )
 
 
@@ -114,7 +114,14 @@ class ModelState:
     # model evicted for a multi-minute service generation just reloads
     # itself 30s later and re-fills the GPU.
     reload_suppressed_until: datetime | None = None
-
+    # Administrative/runtime projection fields. Canonical model entries use
+    # these to describe the real derived ``::<hash>`` worker without leaking
+    # that implementation detail into model identity.
+    runtime_phase: str | None = None
+    runtime_worker_id: str | None = None
+    runtime_slots: int = 1
+    can_cancel_load: bool = False
+    can_downsize: bool = False
 
     def __post_init__(self) -> None:
         if self.backend_model_id:
@@ -147,9 +154,7 @@ class ModelState:
             "vram_used_mb": self.vram_used_mb,
             "ram_used_mb": self.ram_used_mb,
             "capabilities": self.capabilities.to_dict(),
-            "last_request_at": (
-                self.last_request_at.isoformat() if self.last_request_at else None
-            ),
+            "last_request_at": (self.last_request_at.isoformat() if self.last_request_at else None),
             "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
             "error_message": self.error_message,
             "extra_config": self.extra_config,
@@ -162,7 +167,13 @@ class ModelState:
             "release_date": (registry_meta or {}).get("release_date"),
             "last_updated": (registry_meta or {}).get("last_updated"),
             "metadata_fetched_at": (registry_meta or {}).get("fetched_at"),
+            "runtime_phase": self.runtime_phase or self.status.value,
+            "runtime_worker_id": self.runtime_worker_id,
+            "runtime_slots": max(1, int(self.runtime_slots or 1)),
+            "can_cancel_load": self.can_cancel_load,
+            "can_downsize": self.can_downsize,
         }
+
 
 @dataclass
 class ActiveRequest:
@@ -248,6 +259,14 @@ class ModelManager:
         # ``_load_in_progress``: model_id set of loads currently active.
         self._load_queue_waiters: int = 0
         self._load_in_progress: set[str] = set()
+        # Exact task owning each load, so an administrator can cancel a cold
+        # start without guessing which user request triggered the derived
+        # runtime. Entries are removed in _load_model's finally block.
+        self._load_tasks: dict[str, asyncio.Task] = {}
+        # Canonical model id -> capacity transition. Loading/unloading remain
+        # represented by ModelStatus; only elastic changes need a distinct
+        # phase for the UI.
+        self._runtime_transitions: dict[str, str] = {}
         self._persisted_model_ids: set[str] = set()
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
         # In-flight request tracking
@@ -352,9 +371,7 @@ class ModelManager:
         assert request_id is not None  # max_inflight<=0 never rejects
         return request_id
 
-    def rebind_request(
-        self, request_id: str, old_model_id: str, new_model_id: str
-    ) -> None:
+    def rebind_request(self, request_id: str, old_model_id: str, new_model_id: str) -> None:
         """Move an admitted request from its public key to the resolved runtime."""
 
         if not request_id or old_model_id == new_model_id:
@@ -428,17 +445,11 @@ class ModelManager:
         """
         if max_inflight <= 0:
             return max_inflight
-        canonical = model_id.split("::", 1)[0]
+        canonical = self._canonical_runtime_model_id(model_id)
         state = self._states.get(canonical) or self._states.get(model_id)
         if state is not None and state.capabilities is not None:
             caps = state.capabilities
-            if (
-                caps.embeddings
-                or caps.pooling
-                or caps.rerank
-                or caps.classification
-                or caps.score
-            ):
+            if caps.embeddings or caps.pooling or caps.rerank or caps.classification or caps.score:
                 return max_inflight
         slots = 1
         if state is not None and state.backend_type == "piper":
@@ -448,9 +459,7 @@ class ModelManager:
             slots = max(1, int(settings.piper_parallelism))
         elif state is not None:
             meta = (
-                state.extra_config.get("_runtime")
-                if isinstance(state.extra_config, dict)
-                else None
+                state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
             )
             if isinstance(meta, dict):
                 try:
@@ -468,14 +477,14 @@ class ModelManager:
         worker key. Requests already in flight are untouched — this only
         gates ``try_begin_request``, called before a request is admitted.
         """
-        canonical = model_id.split("::", 1)[0]
+        canonical = self._canonical_runtime_model_id(model_id)
         if enabled:
             self._maintenance_models.add(canonical)
         else:
             self._maintenance_models.discard(canonical)
 
     def is_in_maintenance(self, model_id: str) -> bool:
-        return model_id.split("::", 1)[0] in self._maintenance_models
+        return self._canonical_runtime_model_id(model_id) in self._maintenance_models
 
     def try_begin_request(
         self,
@@ -583,9 +592,7 @@ class ModelManager:
             return "loading", None
         return "ready", None
 
-    async def _monitor_load_vram_progress(
-        self, model_id: str, gpu_indices: list[int]
-    ) -> None:
+    async def _monitor_load_vram_progress(self, model_id: str, gpu_indices: list[int]) -> None:
         """Runs concurrently with a `backend.load()` call, sampling VRAM/
         utilization every 5s on the GPUs the load is targeting. Warns once
         if VRAM stops growing AND utilization stays near 0% for ~15s+ while
@@ -777,15 +784,11 @@ class ModelManager:
         for state in self._states.values():
             if state.backend_type != "ollama":
                 continue
-            if state.backend_model_id == ollama_name or state.model_id.endswith(
-                f"/{ollama_name}"
-            ):
+            if state.backend_model_id == ollama_name or state.model_id.endswith(f"/{ollama_name}"):
                 return state
         return None
 
-    async def _infer_ollama_gpu_map(
-        self, loaded_vram_map: dict[str, int]
-    ) -> dict[str, list[int]]:
+    async def _infer_ollama_gpu_map(self, loaded_vram_map: dict[str, int]) -> dict[str, list[int]]:
         """Map each loaded Ollama model → the GPU indices it occupies.
 
         oCabra doesn't place Ollama models (Ollama does), so their ``current_gpu``
@@ -827,17 +830,11 @@ class ModelManager:
                 if p > 0:
                     worker_pids.add(p)
 
-        pid_total = {
-            pid: sum(g.values())
-            for pid, g in pid_gpus.items()
-            if pid not in worker_pids
-        }
+        pid_total = {pid: sum(g.values()) for pid, g in pid_gpus.items() if pid not in worker_pids}
         used_pids: set[int] = set()
         # Largest models first so a big model claims its big process before a
         # smaller one can mis-match to it.
-        for name in sorted(
-            loaded_vram_map, key=lambda n: loaded_vram_map[n], reverse=True
-        ):
+        for name in sorted(loaded_vram_map, key=lambda n: loaded_vram_map[n], reverse=True):
             target = int(loaded_vram_map[name])
             if target <= 0:
                 continue
@@ -1056,18 +1053,64 @@ class ModelManager:
         ``_assign_gpus_for_load`` falls back to (soft-pin included, hard-pin
         and realtime-session-held excluded — see
         ``_get_pressure_eviction_candidates``), skipping anything currently
-        busy since this path has no drain-wait of its own.
+        busy only after a bounded drain wait, so an interactive request can
+        finish before a large-context transition reclaims its worker.
 
         Returns MB freed.
         """
         freed = 0
-        for candidate_id in self._get_pressure_eviction_candidates(
+        candidate_ids = self._get_pressure_eviction_candidates(
             requesting_model_id, gpu_indices=[gpu_index]
-        ):
+        )
+        logger.info(
+            "vram_eviction_last_resort_candidates",
+            requested_model_id=requesting_model_id,
+            gpu_index=gpu_index,
+            candidates=candidate_ids,
+            needed_mb=needed_mb,
+        )
+        for candidate_id in candidate_ids:
             if freed >= needed_mb:
                 break
             if self.is_busy(candidate_id):
-                continue
+                static_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
+                drain_timeout_s = static_timeout_s
+                estimator = getattr(self, "_duration_estimator", None)
+                if estimator is not None:
+                    try:
+                        remaining = estimator.in_flight_remaining(
+                            candidate_id, model_id=candidate_id
+                        )
+                    except Exception:  # noqa: BLE001
+                        remaining = None
+                    if remaining is not None and remaining > 0:
+                        drain_timeout_s = min(
+                            max(static_timeout_s, int(settings.max_drain_timeout_s)),
+                            int(remaining) + 15,
+                        )
+                logger.info(
+                    "vram_eviction_last_resort_drain_wait",
+                    requested_model_id=requesting_model_id,
+                    evicting_model_id=candidate_id,
+                    gpu_index=gpu_index,
+                    drain_timeout_s=drain_timeout_s,
+                )
+                self._eviction_wait_for[requesting_model_id] = candidate_id
+                try:
+                    for _ in range(drain_timeout_s * 2):
+                        if not self.is_busy(candidate_id):
+                            break
+                        await asyncio.sleep(0.5)
+                finally:
+                    self._eviction_wait_for.pop(requesting_model_id, None)
+                if self.is_busy(candidate_id):
+                    logger.warning(
+                        "vram_eviction_last_resort_drain_timeout_skip",
+                        requested_model_id=requesting_model_id,
+                        evicting_model_id=candidate_id,
+                        gpu_index=gpu_index,
+                    )
+                    continue
             state = self._states.get(candidate_id)
             if not state:
                 continue
@@ -1079,7 +1122,14 @@ class ModelManager:
                 vram_mb=vram_per_gpu,
                 reason="vram_pressure",
             )
+            snapshot = await self._get_vram_free_snapshot([gpu_index])
+            baseline_free_mb = snapshot[0] if snapshot is not None else None
             await self.unload(candidate_id, reason="vram_pressure")
+            await self._wait_for_vram_released(
+                vram_per_gpu,
+                baseline_free_mb=baseline_free_mb,
+                gpu_indices=[gpu_index],
+            )
             freed += vram_per_gpu
         return freed
 
@@ -1105,7 +1155,8 @@ class ModelManager:
                     ratio = gpu_state.used_vram_mb / gpu_state.total_vram_mb
                     if ratio > threshold:
                         loaded_on_gpu = [
-                            s for s in self._states.values()
+                            s
+                            for s in self._states.values()
                             if s.status == ModelStatus.LOADED
                             and gpu_state.index in (s.current_gpu or [])
                         ]
@@ -1113,9 +1164,7 @@ class ModelManager:
                             # Single legit worker pushing past threshold via its
                             # own gpu_memory_utilization. Evicting causes thrash.
                             continue
-                        over_mb = gpu_state.used_vram_mb - int(
-                            gpu_state.total_vram_mb * threshold
-                        )
+                        over_mb = gpu_state.used_vram_mb - int(gpu_state.total_vram_mb * threshold)
                         if over_mb > 0:
                             logger.warning(
                                 "vram_threshold_exceeded",
@@ -1225,13 +1274,19 @@ class ModelManager:
                     pool_gpus=item["pool_gpus"],
                 )
                 continue
-            if state.status == ModelStatus.LOADED:
-                continue
+            was_loaded = state.status == ModelStatus.LOADED
+            previous_gpus = list(state.current_gpu or [])
+            event = (
+                "ollama_model_residency_refreshed"
+                if was_loaded
+                else "ollama_model_adopted_on_startup"
+            )
             logger.info(
-                "ollama_model_adopted_on_startup",
+                event,
                 model_id=state.model_id,
                 vram_mb=item["vram_mb"],
                 pool_gpus=item["pool_gpus"],
+                previous_gpus=previous_gpus,
             )
             worker_info = WorkerInfo(
                 backend_type="ollama",
@@ -1252,12 +1307,10 @@ class ModelManager:
             state.loaded_at = datetime.now(UTC)
             state.error_message = None
             self._worker_pool.set_worker(state.model_id, worker_info)
-            if self._gpu_manager and item["pool_gpus"]:
+            if not was_loaded and self._gpu_manager and item["pool_gpus"]:
                 vram_per_gpu = item["vram_mb"] // max(1, len(item["pool_gpus"]))
                 for gpu_idx in item["pool_gpus"]:
-                    await self._gpu_manager.lock_vram(
-                        gpu_idx, vram_per_gpu, state.model_id
-                    )
+                    await self._gpu_manager.lock_vram(gpu_idx, vram_per_gpu, state.model_id)
 
     async def start(self) -> None:
         await self._load_configs_from_db()
@@ -1267,7 +1320,12 @@ class ModelManager:
             # PIN: always preload, never evictable.
             # WARM: load on first request and then keep resident until VRAM
             # pressure requires eviction. ON_DEMAND also stays lazy.
-            if state.load_policy == LoadPolicy.PIN:
+            # A long-lived Ollama pool may already hold the PIN across an API
+            # restart.  Reconciliation above adopts that worker as LOADED;
+            # scheduling another load would move it through LOADING and make
+            # it temporarily invisible to pressure eviction even though it is
+            # still consuming physical VRAM.
+            if state.load_policy == LoadPolicy.PIN and state.status != ModelStatus.LOADED:
                 logger.info(
                     "auto_loading_managed_model",
                     model_id=model_id,
@@ -1365,6 +1423,7 @@ class ModelManager:
                 {
                     "event": event,
                     "model_id": model_id,
+                    "canonical_model_id": self._canonical_runtime_model_id(model_id),
                     "new_status": state.status.value,
                 },
             )
@@ -1507,10 +1566,15 @@ class ModelManager:
             state.status = ModelStatus.LOADING
             await self._publish_event(model_id, "status_changed")
             load_started_at = datetime.now(UTC)
+            load_task = asyncio.current_task()
+            if load_task is not None:
+                self._load_tasks[model_id] = load_task
 
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=state.extra_config)
+                vram_needed = await backend.get_vram_estimate_mb(
+                    state.backend_model_id, extra_config=state.extra_config
+                )
                 if state.backend_type == "bitnet":
                     vram_needed = self._estimate_bitnet_vram_from_config(state)
                 elif state.backend_type == "llama_cpp":
@@ -1525,6 +1589,28 @@ class ModelManager:
                     )
                     if est > 0:
                         vram_needed = est
+                    runtime_meta = (
+                        state.extra_config.get("_runtime")
+                        if isinstance(state.extra_config, dict)
+                        else None
+                    )
+                    calibrated_vram = (
+                        runtime_meta.get("capacity_vram_mb")
+                        if isinstance(runtime_meta, dict) and runtime_meta.get("capacity_validated")
+                        else None
+                    )
+                    try:
+                        calibrated_vram_mb = int(calibrated_vram or 0)
+                    except (TypeError, ValueError):
+                        calibrated_vram_mb = 0
+                    if calibrated_vram_mb > 0:
+                        logger.info(
+                            "llama_cpp_validated_vram_applied",
+                            model_id=model_id,
+                            estimated_vram_mb=vram_needed,
+                            calibrated_vram_mb=calibrated_vram_mb,
+                        )
+                        vram_needed = calibrated_vram_mb
                 elif state.backend_type == "vllm":
                     # vLLM's own get_vram_estimate_mb is weights-only. Long-context
                     # loads then pass the eviction filter (weights fit) but crash
@@ -1536,9 +1622,7 @@ class ModelManager:
                     est = estimate_vllm_vram_from_config(
                         state,
                         models_dir=settings.models_dir,
-                        default_gpu_memory_utilization=float(
-                            settings.vllm_gpu_memory_utilization
-                        ),
+                        default_gpu_memory_utilization=float(settings.vllm_gpu_memory_utilization),
                         hf_cache_dir=getattr(settings, "hf_cache_dir", None),
                     )
                     if est > 0:
@@ -1566,8 +1650,7 @@ class ModelManager:
                     else None
                 )
                 enforce_vllm_headroom = (
-                    state.backend_type == "vllm"
-                    and not self._has_explicit_vllm_kv_cache(state)
+                    state.backend_type == "vllm" and not self._has_explicit_vllm_kv_cache(state)
                 )
 
                 self._load_queue_waiters += 1
@@ -1584,37 +1667,67 @@ class ModelManager:
                             # backend start. Otherwise another model (notably Ollama,
                             # whose runner may span every GPU) can consume VRAM after
                             # vLLM's headroom check but before its process starts.
-                            # Multi-GPU hint ``_runtime.gpu_indices`` (set by the
-                            # runtime coordinator for presets with multiple
-                            # ``preferred_gpus``) bypasses the single-GPU
-                            # scheduler so admission validates VRAM and evicts
-                            # neighbours on every GPU the backend will spread
-                            # onto, not just the "best" single one.
+                            # Runtime placement ``_runtime.gpu_indices`` bypasses
+                            # scheduler placement for both one and many GPUs.
+                            # A forced single-GPU preset must not be widened to a
+                            # spill allocation merely because its conservative
+                            # estimate exceeds that card while the backend's
+                            # measured configuration is known to fit there.
                             _runtime_meta = (
                                 state.extra_config.get("_runtime")
                                 if isinstance(state.extra_config, dict)
                                 else None
                             )
-                            required_multi_gpu: list[int] | None = None
+                            required_gpu_indices: list[int] | None = None
+                            required_gpu_vram_mb: dict[int, int] | None = None
                             if isinstance(_runtime_meta, dict):
                                 raw_indices = _runtime_meta.get("gpu_indices") or []
-                                if isinstance(raw_indices, list) and len(raw_indices) > 1:
+                                if isinstance(raw_indices, list) and raw_indices:
                                     try:
-                                        required_multi_gpu = [int(i) for i in raw_indices]
+                                        required_gpu_indices = [int(i) for i in raw_indices]
                                     except (TypeError, ValueError):
-                                        required_multi_gpu = None
+                                        required_gpu_indices = None
+                            if (
+                                state.backend_type == "llama_cpp"
+                                and required_gpu_indices
+                                and len(required_gpu_indices) > 1
+                            ):
+                                llama_config = state.extra_config.get("llama_cpp")
+                                tensor_split = (
+                                    llama_config.get("tensor_split")
+                                    if isinstance(llama_config, dict)
+                                    else None
+                                )
+                                if isinstance(tensor_split, list) and len(tensor_split) == len(
+                                    required_gpu_indices
+                                ):
+                                    try:
+                                        ratios = [max(0.0, float(value)) for value in tensor_split]
+                                        ratio_total = sum(ratios)
+                                        if ratio_total > 0:
+                                            required_gpu_vram_mb = {
+                                                gpu_index: math.ceil(
+                                                    vram_needed * ratio / ratio_total
+                                                )
+                                                for gpu_index, ratio in zip(
+                                                    required_gpu_indices,
+                                                    ratios,
+                                                    strict=True,
+                                                )
+                                            }
+                                    except (TypeError, ValueError):
+                                        required_gpu_vram_mb = None
                             gpu_indices = await self._admit_gpu_load(
                                 model_id=model_id,
                                 vram_needed=vram_needed,
                                 preferred_gpu=(
-                                    force_gpu
-                                    if force_gpu is not None
-                                    else state.preferred_gpu
+                                    force_gpu if force_gpu is not None else state.preferred_gpu
                                 ),
                                 gpu_managed=gpu_managed,
                                 enforce_vllm_headroom=enforce_vllm_headroom,
                                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
-                                required_gpu_indices=required_multi_gpu,
+                                required_gpu_indices=required_gpu_indices,
+                                required_gpu_vram_mb=required_gpu_vram_mb,
                                 allow_pressure_eviction=allow_pressure_eviction,
                             )
 
@@ -1623,8 +1736,7 @@ class ModelManager:
                             effective_extra = state.extra_config
                             try:
                                 if self._gpu_manager and (
-                                    (gpu_managed and gpu_indices)
-                                    or state.backend_type == "ollama"
+                                    (gpu_managed and gpu_indices) or state.backend_type == "ollama"
                                 ):
                                     from ocabra.core.vram_capacity import (
                                         apply_use_case_flags,
@@ -1654,9 +1766,7 @@ class ModelManager:
                                         )
                                     else:
                                         target_gpu = (
-                                            gpu_indices[0]
-                                            if gpu_indices
-                                            else state.preferred_gpu
+                                            gpu_indices[0] if gpu_indices else state.preferred_gpu
                                         )
                                         if target_gpu is None and gpu_states:
                                             target_gpu = max(
@@ -1679,9 +1789,7 @@ class ModelManager:
                                             logger.info(
                                                 "use_case_applied",
                                                 model_id=model_id,
-                                                effective_context=plan.get(
-                                                    "effective_context"
-                                                ),
+                                                effective_context=plan.get("effective_context"),
                                                 slots=plan.get("slots"),
                                                 warnings=plan.get("warnings"),
                                             )
@@ -1695,10 +1803,7 @@ class ModelManager:
                                 effective_extra = state.extra_config
 
                             backend_gpu_indices = gpu_indices
-                            if (
-                                state.backend_type == "ollama"
-                                and state.preferred_gpu is not None
-                            ):
+                            if state.backend_type == "ollama" and state.preferred_gpu is not None:
                                 # Ollama affinity is enforced by selecting an
                                 # independently CUDA-pinned pool endpoint —
                                 # the generic scheduler's gpu_indices is
@@ -1726,9 +1831,7 @@ class ModelManager:
                                     and callable(fallback_candidates)
                                 ):
                                     try:
-                                        free_mb = await self._gpu_manager.get_free_vram(
-                                            target_gpu
-                                        )
+                                        free_mb = await self._gpu_manager.get_free_vram(target_gpu)
                                     except Exception:  # noqa: BLE001
                                         free_mb = None
                                     if free_mb is not None and free_mb < vram_needed:
@@ -1739,20 +1842,15 @@ class ModelManager:
                                         )
                                         required_parallelism = max(
                                             1,
-                                            int(
-                                                (runtime_meta or {}).get("parallelism")
-                                                or 1
-                                            ),
+                                            int((runtime_meta or {}).get("parallelism") or 1),
                                         )
                                         for alt_gpu in fallback_candidates(
                                             exclude_gpu=target_gpu,
                                             required_parallelism=required_parallelism,
                                         ):
                                             try:
-                                                alt_free_mb = (
-                                                    await self._gpu_manager.get_free_vram(
-                                                        alt_gpu
-                                                    )
+                                                alt_free_mb = await self._gpu_manager.get_free_vram(
+                                                    alt_gpu
                                                 )
                                             except Exception:  # noqa: BLE001
                                                 continue
@@ -1770,9 +1868,7 @@ class ModelManager:
                                 backend_gpu_indices = [target_gpu]
                             monitor_task = (
                                 asyncio.create_task(
-                                    self._monitor_load_vram_progress(
-                                        model_id, backend_gpu_indices
-                                    )
+                                    self._monitor_load_vram_progress(model_id, backend_gpu_indices)
                                 )
                                 if backend_gpu_indices and self._gpu_manager
                                 else None
@@ -1791,12 +1887,8 @@ class ModelManager:
                                     with suppress(asyncio.CancelledError):
                                         await monitor_task
                             backend_loaded = True
-                            capabilities = await backend.get_capabilities(
-                                state.backend_model_id
-                            )
-                            capabilities = self._apply_capability_fallbacks(
-                                state, capabilities
-                            )
+                            capabilities = await backend.get_capabilities(state.backend_model_id)
+                            capabilities = self._apply_capability_fallbacks(state, capabilities)
 
                             # WorkerInfo.gpu_indices is always a list (never
                             # None) — CPU-only backends (e.g. Piper) report
@@ -1813,9 +1905,7 @@ class ModelManager:
                             state.current_gpu = actual_gpu_indices
                             # Prefer the honest pre-load estimate over the backend's
                             # weights-only report so KV cache is represented too.
-                            effective_vram_mb = max(
-                                worker_info.vram_used_mb, vram_needed
-                            )
+                            effective_vram_mb = max(worker_info.vram_used_mb, vram_needed)
                             state.vram_used_mb = effective_vram_mb
                             state.ram_used_mb = (
                                 await _measure_process_ram_mb(worker_info.pid)
@@ -1828,9 +1918,7 @@ class ModelManager:
                             state.error_message = None
 
                             if gpu_managed and self._gpu_manager:
-                                vram_per_gpu = effective_vram_mb // max(
-                                    1, len(actual_gpu_indices)
-                                )
+                                vram_per_gpu = effective_vram_mb // max(1, len(actual_gpu_indices))
                                 for gpu_idx in actual_gpu_indices:
                                     await self._gpu_manager.lock_vram(
                                         gpu_idx, vram_per_gpu, model_id
@@ -1864,6 +1952,24 @@ class ModelManager:
                     gpu=gpu_indices,
                     vram_mb=effective_vram_mb,
                 )
+            except asyncio.CancelledError:
+                # Cancellation can arrive while backend.load() is waiting for
+                # worker startup. Backends clean their partial process, while
+                # the manager must also release its port and reset residency
+                # state so a later load is not blocked by a ghost LOADING row.
+                try:
+                    if "backend" in locals():
+                        await backend.unload(state.backend_model_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning("model_load_cancel_cleanup_failed", model_id=model_id)
+                self._worker_pool.remove_worker(model_id)
+                if "assigned_port" in locals() and assigned_port:
+                    self._worker_pool.release_port(assigned_port)
+                state.status = ModelStatus.UNLOADED
+                state.error_message = None
+                await self._publish_event(model_id, "load_cancelled")
+                logger.info("model_load_cancelled", model_id=model_id)
+                raise
             except Exception as e:
                 state.status = ModelStatus.ERROR
                 state.error_message = str(e)
@@ -1899,6 +2005,9 @@ class ModelManager:
                         f"Failed to load model '{model_id}': {e}",
                     )
                 raise
+            finally:
+                if self._load_tasks.get(model_id) is load_task:
+                    self._load_tasks.pop(model_id, None)
 
         return state
 
@@ -1913,7 +2022,8 @@ class ModelManager:
 
         current_context_length = int(getattr(capabilities, "context_length", 0) or 0)
         if current_context_length <= 0 or (
-            state.backend_type == "tensorrt_llm" and fallback_context_length > current_context_length
+            state.backend_type == "tensorrt_llm"
+            and fallback_context_length > current_context_length
         ):
             capabilities.context_length = fallback_context_length
         return capabilities
@@ -1961,7 +2071,9 @@ class ModelManager:
                         finished_at=finished_at,
                         duration_ms=duration_ms,
                         gpu_count=len(gpu_indices),
-                        gpu_indices=",".join(str(idx) for idx in gpu_indices) if gpu_indices else None,
+                        gpu_indices=",".join(str(idx) for idx in gpu_indices)
+                        if gpu_indices
+                        else None,
                     )
                 )
                 await session.commit()
@@ -1972,9 +2084,7 @@ class ModelManager:
         # the next query.
         self._expected_load_cache.pop(model_id, None)
 
-    async def get_expected_load_seconds(
-        self, model_id: str, *, sample_size: int = 5
-    ) -> int | None:
+    async def get_expected_load_seconds(self, model_id: str, *, sample_size: int = 5) -> int | None:
         """Return the expected load time in seconds for *model_id*.
 
         Uses the median ``duration_ms`` of the last ``sample_size`` successful
@@ -2082,8 +2192,7 @@ class ModelManager:
         if not isinstance(extra_args, (list, tuple)):
             return False
         return any(
-            str(arg) == "--kv-cache-memory-bytes"
-            or str(arg).startswith("--kv-cache-memory-bytes=")
+            str(arg) == "--kv-cache-memory-bytes" or str(arg).startswith("--kv-cache-memory-bytes=")
             for arg in extra_args
         )
 
@@ -2129,6 +2238,7 @@ class ModelManager:
         enforce_vllm_headroom: bool,
         vllm_gpu_memory_utilization: float | None,
         required_gpu_indices: list[int] | None = None,
+        required_gpu_vram_mb: dict[int, int] | None = None,
         allow_pressure_eviction: bool = True,
     ) -> list[int]:
         """Assign and validate GPUs immediately before a backend starts.
@@ -2161,69 +2271,176 @@ class ModelManager:
 
         # Pre-load: try to evict LRU models if VRAM is insufficient.
         if self._gpu_manager and gpu_indices:
+            physical_residents_reconciled = False
+            admission_state = self._states.get(model_id)
+            admission_runtime = (
+                admission_state.extra_config.get("_runtime")
+                if admission_state is not None and isinstance(admission_state.extra_config, dict)
+                else None
+            )
+            capacity_validated = bool(
+                isinstance(admission_runtime, dict) and admission_runtime.get("capacity_validated")
+            )
+
+            async def admission_free_vram(gpu_index: int) -> int:
+                if not capacity_validated:
+                    return await self._gpu_manager.get_free_vram(gpu_index)
+                # Exact preset + placement combinations in
+                # validated_context_tokens have already passed real load and
+                # modality tests.  Use physical free VRAM for those profiles
+                # so the generic scheduler buffer does not reject a measured
+                # edge configuration by a few MiB. Unvalidated loads retain
+                # the normal safety reserve.
+                gpu_state = await self._gpu_manager.get_state(gpu_index)
+                return int(gpu_state.free_vram_mb)
+
+            async def admission_free_vram_after_eviction(gpu_index: int, required_mb: int) -> int:
+                """Wait out partial hw-monitor samples while a process exits."""
+                available_mb = await admission_free_vram(gpu_index)
+                deadline = asyncio.get_event_loop().time() + 12.0
+                while available_mb < required_mb and asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(0.75)
+                    available_mb = await admission_free_vram(gpu_index)
+                return available_mb
+
+            async def reconcile_physical_residents(*, force: bool = False) -> None:
+                nonlocal physical_residents_reconciled
+                if (physical_residents_reconciled and not force) or not allow_pressure_eviction:
+                    return
+                # Ollama runners outlive the API process and its in-memory
+                # state can briefly lag the periodic inventory. Refresh on an
+                # actual deficit so a physically resident soft-pin is visible
+                # to pressure eviction instead of making a dual transition
+                # fail against unattributed VRAM.
+                await self._reconcile_ollama_state()
+                physical_residents_reconciled = True
+
             if len(gpu_indices) > 1:
                 # Tensor-parallel backends shard the model across GPUs, so
-                # validate and evict against combined capacity.
-                available_total = 0
-                for gpu_idx in gpu_indices:
-                    available_total += await self._gpu_manager.get_free_vram(gpu_idx)
-                if vram_needed > available_total:
-                    deficit = vram_needed - available_total
-                    freed_total = 0
-                    if allow_pressure_eviction:
-                        for gpu_idx in gpu_indices:
-                            if freed_total >= deficit:
-                                break
-                            freed_total += await self._evict_for_space(
-                                gpu_idx, deficit - freed_total
+                # validate and evict against each known shard. A combined
+                # check can pass while one card is a few MiB short for its
+                # tensor_split allocation and the backend then OOMs.
+                if required_gpu_vram_mb:
+                    for gpu_idx in gpu_indices:
+                        shard_needed = required_gpu_vram_mb.get(gpu_idx, 0)
+                        available = await admission_free_vram(gpu_idx)
+                        deficit = max(0, shard_needed - available)
+                        freed = 0
+                        if deficit and allow_pressure_eviction:
+                            await reconcile_physical_residents()
+                            freed = await self._evict_for_space(gpu_idx, deficit)
+                            if freed < deficit:
+                                # The polite unload can take several monitor
+                                # cycles. A concurrent PIN load may finish in
+                                # that window and change its placement/status;
+                                # refresh once more before computing the true
+                                # last-resort candidate list.
+                                await reconcile_physical_residents(force=True)
+                                freed += await self._evict_last_resort_for_space(
+                                    model_id, gpu_idx, deficit - freed
+                                )
+                        # Declared model VRAM is only an estimate (and can be
+                        # tens of MiB below what the driver actually releases).
+                        # The unload wait above crosses an hw-monitor refresh;
+                        # make the final decision from that fresh physical
+                        # reading instead of ``available + estimated_freed``.
+                        available_after = (
+                            await admission_free_vram_after_eviction(gpu_idx, shard_needed)
+                            if deficit
+                            else available
+                        )
+                        if shard_needed > available_after and allow_pressure_eviction:
+                            # Candidate VRAM estimates can be double-counted
+                            # if a soft PIN reloads while the first eviction
+                            # pass is running. Reconcile and make one final
+                            # pass against the *physical* remaining deficit.
+                            await reconcile_physical_residents(force=True)
+                            await self._evict_last_resort_for_space(
+                                model_id,
+                                gpu_idx,
+                                shard_needed - available_after,
                             )
-                        # 2026-10-31 — this path (required_gpu_indices, e.g. a
-                        # runtime preset forcing tensor-parallel across GPUs)
-                        # bypasses _assign_gpus_for_load entirely, so it never
-                        # got that function's richer eviction cascade — only
-                        # _evict_for_space (WARM/ON_DEMAND only, never PIN).
-                        # Reproduced live: qwen3.8-27b escalating to its 128k
-                        # preset (forced onto GPU0+GPU1) kept failing because
-                        # GPU0's only occupant was whisper (soft-pin, idle at
-                        # the time) — evictable in principle, but this branch
-                        # had no path to it. Fall back to the same last-resort
-                        # candidate list _assign_gpus_for_load uses (includes
-                        # soft-pin, skips busy/hard-pin/realtime-held) before
-                        # giving up.
-                        if freed_total < deficit:
+                            available_after = await admission_free_vram_after_eviction(
+                                gpu_idx, shard_needed
+                            )
+                        if shard_needed > available_after:
+                            from ocabra.core.scheduler import InsufficientVRAMError
+
+                            raise InsufficientVRAMError(
+                                f"GPU {gpu_idx} shard: need {shard_needed} MB, "
+                                f"only {available_after} MB available after eviction"
+                            )
+                else:
+                    # Backends without an explicit split still use combined
+                    # capacity; their own runtime controls the distribution.
+                    available_total = 0
+                    for gpu_idx in gpu_indices:
+                        available_total += await admission_free_vram(gpu_idx)
+                    if vram_needed > available_total:
+                        deficit = vram_needed - available_total
+                        freed_total = 0
+                        if allow_pressure_eviction:
+                            await reconcile_physical_residents()
                             for gpu_idx in gpu_indices:
                                 if freed_total >= deficit:
                                     break
-                                freed_total += await self._evict_last_resort_for_space(
-                                    model_id, gpu_idx, deficit - freed_total
+                                freed_total += await self._evict_for_space(
+                                    gpu_idx, deficit - freed_total
                                 )
-                    if freed_total < deficit:
-                        from ocabra.core.scheduler import InsufficientVRAMError
-
-                        raise InsufficientVRAMError(
-                            f"Tensor-parallel across GPUs {gpu_indices}: need "
-                            f"{vram_needed} MB, only {available_total + freed_total} MB "
-                            "free combined after eviction"
+                            if freed_total < deficit:
+                                await reconcile_physical_residents(force=True)
+                                for gpu_idx in gpu_indices:
+                                    if freed_total >= deficit:
+                                        break
+                                    freed_total += await self._evict_last_resort_for_space(
+                                        model_id, gpu_idx, deficit - freed_total
+                                    )
+                        available_after_total = sum(
+                            [await admission_free_vram(gpu_idx) for gpu_idx in gpu_indices]
                         )
+                        if vram_needed > available_after_total:
+                            from ocabra.core.scheduler import InsufficientVRAMError
+
+                            raise InsufficientVRAMError(
+                                f"Tensor-parallel across GPUs {gpu_indices}: need "
+                                f"{vram_needed} MB, only {available_after_total} MB "
+                                "free combined after eviction"
+                            )
             else:
                 for gpu_idx in gpu_indices:
-                    available = await self._gpu_manager.get_free_vram(gpu_idx)
+                    available = await admission_free_vram(gpu_idx)
                     if vram_needed > available:
+                        if allow_pressure_eviction:
+                            await reconcile_physical_residents()
                         freed = (
                             await self._evict_for_space(gpu_idx, vram_needed - available)
                             if allow_pressure_eviction
                             else 0
                         )
                         if allow_pressure_eviction and freed < (vram_needed - available):
+                            await reconcile_physical_residents(force=True)
                             freed += await self._evict_last_resort_for_space(
                                 model_id, gpu_idx, vram_needed - available - freed
                             )
-                        if freed < (vram_needed - available):
+                        available_after = await admission_free_vram_after_eviction(
+                            gpu_idx, vram_needed
+                        )
+                        if vram_needed > available_after and allow_pressure_eviction:
+                            await reconcile_physical_residents(force=True)
+                            await self._evict_last_resort_for_space(
+                                model_id,
+                                gpu_idx,
+                                vram_needed - available_after,
+                            )
+                            available_after = await admission_free_vram_after_eviction(
+                                gpu_idx, vram_needed
+                            )
+                        if vram_needed > available_after:
                             from ocabra.core.scheduler import InsufficientVRAMError
 
                             raise InsufficientVRAMError(
                                 f"GPU {gpu_idx}: need {vram_needed} MB, "
-                                f"only {available + freed} MB available after eviction"
+                                f"only {available_after} MB available after eviction"
                             )
 
         # vLLM checks against a fraction of total VRAM, not only model weights.
@@ -2297,7 +2514,9 @@ class ModelManager:
             # First: try stopping external services (ACE-Step, ComfyUI, etc.) on the
             # preferred GPU — they often hold large amounts of VRAM and can be restarted.
             if self._service_manager:
-                service_candidates = self._service_manager.get_pressure_eviction_candidates(preferred_gpu)
+                service_candidates = self._service_manager.get_pressure_eviction_candidates(
+                    preferred_gpu
+                )
                 if service_candidates:
                     logger.info(
                         "pressure_eviction_service_candidates",
@@ -2342,10 +2561,47 @@ class ModelManager:
                 requested_model_id=model_id,
                 candidates=candidates,
             )
+            # Eviction is destructive, so reject an impossible plan before
+            # unloading anything.  ``get_free_vram`` already applies the
+            # scheduler buffer and service reservations; adding every
+            # candidate's resident estimate gives an optimistic upper bound.
+            # If even that bound is below the requested footprint, no ordering
+            # of these evictions can make the load fit.  This matters for a
+            # multi-GPU request while one card carries legitimate auxiliary
+            # traffic: evicting a large pinned model from the other card could
+            # still leave the aggregate short, disrupting both models for no
+            # benefit.
+            if candidates and self._gpu_manager is not None:
+                try:
+                    gpu_states = await self._gpu_manager.get_all_states()
+                    free_now_mb = 0
+                    for gpu_state in gpu_states:
+                        free_now_mb += await self._gpu_manager.get_free_vram(int(gpu_state.index))
+                    reclaimable_mb = sum(
+                        max(0, int(self._states[candidate_id].vram_used_mb))
+                        for candidate_id in candidates
+                        if candidate_id in self._states
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "pressure_eviction_preflight_failed",
+                        requested_model_id=model_id,
+                        error=str(exc),
+                    )
+                else:
+                    maximum_available_mb = free_now_mb + reclaimable_mb
+                    if maximum_available_mb < vram_needed:
+                        logger.info(
+                            "pressure_eviction_impossible_skip",
+                            requested_model_id=model_id,
+                            vram_needed_mb=vram_needed,
+                            free_now_mb=free_now_mb,
+                            reclaimable_mb=reclaimable_mb,
+                            maximum_available_mb=maximum_available_mb,
+                        )
+                        raise last_exc from initial_exc
             static_drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
-            max_drain_timeout_s = max(
-                static_drain_timeout_s, int(settings.max_drain_timeout_s)
-            )
+            max_drain_timeout_s = max(static_drain_timeout_s, int(settings.max_drain_timeout_s))
             for candidate_id in candidates:
                 # Wait for any in-flight requests to drain before evicting.
                 # Bloque 20 — grace dinámico: the estimator can predict how
@@ -2536,7 +2792,36 @@ class ModelManager:
             and (gpu_indices is None or any(g in gpu_indices for g in worker.gpu_indices))
         ]
 
-    async def _wait_for_vram_released(self, released_vram_mb: int) -> None:
+    async def _get_vram_free_snapshot(
+        self, gpu_indices: list[int] | None = None
+    ) -> tuple[int, int] | None:
+        """Return physical free/total VRAM, optionally scoped to selected GPUs."""
+        if not self._gpu_manager:
+            return None
+        try:
+            states = await self._gpu_manager.get_all_states()
+        except Exception:
+            return None
+
+        selected = [
+            state
+            for state in states
+            if gpu_indices is None or int(getattr(state, "index", -1)) in gpu_indices
+        ]
+        if not selected:
+            return None
+        return (
+            sum(int(getattr(state, "free_vram_mb", 0)) for state in selected),
+            sum(int(getattr(state, "total_vram_mb", 0)) for state in selected),
+        )
+
+    async def _wait_for_vram_released(
+        self,
+        released_vram_mb: int,
+        *,
+        baseline_free_mb: int | None = None,
+        gpu_indices: list[int] | None = None,
+    ) -> None:
         if not self._gpu_manager:
             return
 
@@ -2546,33 +2831,170 @@ class ModelManager:
         # the scheduler re-check stale/occupied VRAM 150ms after eviction and fail
         # with "insufficient_vram". Poll aggregate free VRAM until it actually
         # rises (across refresh cycles), capped so a load never blocks forever.
-        async def _total_free_mb() -> int:
-            try:
-                states = await self._gpu_manager.get_all_states()
-                return sum(int(getattr(s, "free_vram_mb", 0)) for s in states)
-            except Exception:
-                return -1
-
-        baseline = await _total_free_mb()
-        if baseline < 0:
+        initial = await self._get_vram_free_snapshot(gpu_indices)
+        if initial is None:
             await asyncio.sleep(3.0)
             return
+        current_free_mb, total_vram_mb = initial
+        baseline = current_free_mb if baseline_free_mb is None else baseline_free_mb
 
-        # Expect at least the claimed amount back, or ~1 GB for the 0-report case.
-        target = baseline + (released_vram_mb if released_vram_mb > 0 else 1024)
+        # A one-GiB rise is enough to prove that hw-monitor published a sample
+        # taken after process exit. Waiting for the entire reported allocation
+        # was both unnecessary and sometimes impossible once driver overhead
+        # and the generic safety buffer were included in the estimate.
+        expected_rise_mb = min(released_vram_mb, 1024) if released_vram_mb > 0 else 1024
+        target = min(total_vram_mb, baseline + expected_rise_mb)
+        if current_free_mb >= target or baseline >= total_vram_mb:
+            return
+
         deadline = asyncio.get_event_loop().time() + 12.0
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.75)
-            free = await _total_free_mb()
-            if free >= target:
+            snapshot = await self._get_vram_free_snapshot(gpu_indices)
+            if snapshot is not None and snapshot[0] >= target:
                 return
 
-    async def load(
-        self, model_id: str, force_gpu: int | None = None
-    ) -> "ModelState":
+    async def load(self, model_id: str, force_gpu: int | None = None) -> "ModelState":
         if model_id not in self._states:
             raise KeyError(f"Model '{model_id}' not configured")
         return await self._load_model(model_id, force_gpu)
+
+    def runtime_transition(self, model_id: str) -> str | None:
+        """Return the elastic transition for a canonical or derived id."""
+
+        return self._runtime_transitions.get(self._canonical_runtime_model_id(model_id))
+
+    def _canonical_runtime_model_id(self, model_id: str) -> str:
+        """Resolve a derived worker id without corrupting GGUF ``repo::file`` ids."""
+
+        persisted = [
+            candidate
+            for candidate in self._persisted_model_ids
+            if model_id == candidate or model_id.startswith(f"{candidate}::")
+        ]
+        if persisted:
+            return max(persisted, key=len)
+
+        def _is_base(candidate: ModelState) -> bool:
+            runtime = (
+                candidate.extra_config.get("_runtime")
+                if isinstance(candidate.extra_config, dict)
+                else None
+            )
+            return not isinstance(runtime, dict)
+
+        configured = [
+            candidate.model_id
+            for candidate in self._states.values()
+            if _is_base(candidate)
+            and (model_id == candidate.model_id or model_id.startswith(f"{candidate.model_id}::"))
+        ]
+        if configured:
+            return max(configured, key=len)
+        return model_id.rsplit("::", 1)[0] if "::" in model_id else model_id
+
+    async def cancel_load(self, model_id: str) -> list[str]:
+        """Cancel active loads for a canonical model and all its variants.
+
+        Cancellation is deliberately routed through the task that owns
+        ``_load_model``. That preserves the backend/port cleanup in its
+        ``CancelledError`` handler instead of mutating a LOADING state behind
+        the coroutine's back.
+        """
+
+        base_id = self._canonical_runtime_model_id(model_id)
+        target_ids = [
+            worker_id
+            for worker_id, state in self._states.items()
+            if (worker_id == model_id or self._canonical_runtime_model_id(worker_id) == base_id)
+            and state.status == ModelStatus.LOADING
+        ]
+        current_task = asyncio.current_task()
+        cancelled: list[str] = []
+        for worker_id in target_ids:
+            task = self._load_tasks.get(worker_id)
+            if task is None or task is current_task or task.done():
+                continue
+            task.cancel()
+            cancelled.append(worker_id)
+        return cancelled
+
+    def can_downsize_runtime(self, model_id: str) -> bool:
+        """Whether a loaded multi-GPU worker has a one-GPU default target."""
+
+        state = self._states.get(model_id)
+        runtime = (
+            state.extra_config.get("_runtime")
+            if state is not None and isinstance(state.extra_config, dict)
+            else None
+        )
+        if state is None or state.status != ModelStatus.LOADED or not isinstance(runtime, dict):
+            return False
+        raw_gpus = runtime.get("gpu_indices")
+        current_gpus = raw_gpus if isinstance(raw_gpus, list) else state.current_gpu
+        if len(current_gpus) <= 1:
+            return False
+
+        default_context = int(runtime.get("default_context") or 0)
+        if default_context <= 0:
+            return False
+        default_overrides = runtime.get("default_load_overrides")
+        override_runtime = (
+            default_overrides.get("_runtime")
+            if isinstance(default_overrides, dict)
+            else None
+        )
+        override_gpus = (
+            override_runtime.get("gpu_indices")
+            if isinstance(override_runtime, dict)
+            else None
+        )
+        if isinstance(override_gpus, list) and len(override_gpus) == 1:
+            return True
+
+        profile_id = runtime.get("profile_id")
+        return any(
+            candidate.model_id != model_id
+            and isinstance(candidate.extra_config, dict)
+            and isinstance(candidate.extra_config.get("_runtime"), dict)
+            and candidate.extra_config["_runtime"].get("profile_id") == profile_id
+            and int(candidate.extra_config["_runtime"].get("effective_context") or 0)
+            == default_context
+            and len(candidate.extra_config["_runtime"].get("gpu_indices") or []) == 1
+            for candidate in self._states.values()
+        )
+
+    async def downsize_runtime(self, model_id: str) -> str:
+        """Restore an idle multi-GPU derived runtime to its default preset."""
+
+        base_id = self._canonical_runtime_model_id(model_id)
+        candidates: list[ModelState] = []
+        for state in self._states.values():
+            if self._canonical_runtime_model_id(state.model_id) != base_id:
+                continue
+            runtime = (
+                state.extra_config.get("_runtime")
+                if isinstance(state.extra_config, dict)
+                else None
+            )
+            if state.status != ModelStatus.LOADED or not isinstance(runtime, dict):
+                continue
+            if self.can_downsize_runtime(state.model_id):
+                candidates.append(state)
+        if not candidates:
+            raise RuntimeError("No loaded multi-GPU runtime is available to downsize")
+
+        state = max(
+            candidates,
+            key=lambda candidate: int(
+                candidate.extra_config["_runtime"].get("effective_context") or 0
+            ),
+        )
+        if self.is_busy(state.model_id):
+            raise RuntimeError("Cannot downsize while the model has active requests")
+
+        await self._downgrade_runtime_variant(state.model_id)
+        return state.model_id
 
     async def unload(self, model_id: str, reason: str = "manual") -> None:
         state = self._states.get(model_id)
@@ -2593,16 +3015,38 @@ class ModelManager:
             # every currently-loaded derived sibling instead of just the
             # canonical key — "unload this model" should mean exactly that,
             # regardless of which preset(s) happen to be resident.
-            if "::" not in model_id:
+            if self._canonical_runtime_model_id(model_id) == model_id:
                 derived_loaded = [
                     sibling_id
                     for sibling_id, sibling in self._states.items()
                     if sibling.status == ModelStatus.LOADED
-                    and sibling_id.startswith(f"{model_id}::")
+                    and sibling_id != model_id
+                    and self._canonical_runtime_model_id(sibling_id) == model_id
                 ]
                 for sibling_id in derived_loaded:
                     await self.unload(sibling_id, reason=reason)
             return
+
+        released_vram_mb = state.vram_used_mb
+        released_gpu_indices = list(state.current_gpu)
+        if self._gpu_manager:
+            locked_gpu_indices_result = getattr(
+                self._gpu_manager, "locked_gpu_indices", lambda _model_id: []
+            )(model_id)
+            if isinstance(locked_gpu_indices_result, Awaitable):
+                locked_gpu_indices_result = await locked_gpu_indices_result
+            locked_gpu_indices = (
+                list(locked_gpu_indices_result)
+                if isinstance(locked_gpu_indices_result, (list, tuple, set))
+                else []
+            )
+            released_gpu_indices = list(dict.fromkeys([*released_gpu_indices, *locked_gpu_indices]))
+        wait_for_fresh_vram = reason in {"manual", "runtime_context_downgrade"}
+        baseline_free_mb: int | None = None
+        if wait_for_fresh_vram and released_gpu_indices and self._gpu_manager:
+            snapshot = await self._get_vram_free_snapshot(released_gpu_indices)
+            if snapshot is not None:
+                baseline_free_mb = snapshot[0]
 
         state.status = ModelStatus.UNLOADING
         await self._publish_event(model_id, "status_changed")
@@ -2622,7 +3066,7 @@ class ModelManager:
                 await backend.unload(state.backend_model_id)
 
             if self._gpu_manager:
-                for gpu_idx in state.current_gpu:
+                for gpu_idx in released_gpu_indices:
                     await self._gpu_manager.unlock_vram(gpu_idx, model_id)
 
             self._worker_pool.remove_worker(model_id)
@@ -2636,6 +3080,16 @@ class ModelManager:
             self._notify_event_listeners("unload", state)
             logger.info("model_unloaded", model_id=model_id, reason=reason)
 
+            # The backend process has exited, but hw-monitor publishes physical
+            # VRAM on a slower cadence. Do not let a caller issue an immediate
+            # manual reload against the stale pre-unload sample.
+            if wait_for_fresh_vram and released_gpu_indices:
+                await self._wait_for_vram_released(
+                    released_vram_mb,
+                    baseline_free_mb=baseline_free_mb,
+                    gpu_indices=released_gpu_indices,
+                )
+
             # PIN means "always loaded": if it got pushed out under VRAM
             # pressure (only possible for soft-pin — see
             # _get_pressure_eviction_candidates), reclaim the GPU the moment
@@ -2645,7 +3099,7 @@ class ModelManager:
             # immediately undo (2026-10-30: this used to be a separate
             # per-model ``auto_reload`` checkbox; folded into load_policy
             # itself since the checkbox had no use case independent of it).
-            if reason == "pressure" and state.load_policy == LoadPolicy.PIN:
+            if reason in {"pressure", "vram_pressure"} and state.load_policy == LoadPolicy.PIN:
                 self._create_background_task(
                     self._watch_and_reload(model_id),
                     task_name=f"watch-and-reload:{model_id}",
@@ -2709,6 +3163,12 @@ class ModelManager:
             if state is not None and isinstance(state.extra_config, dict)
             else None
         )
+        base_id = (
+            str(runtime.get("base_model_id"))
+            if isinstance(runtime, dict) and runtime.get("base_model_id")
+            else self._canonical_runtime_model_id(model_id)
+        )
+        self._runtime_transitions[base_id] = "downsizing"
         try:
             if state is None or not isinstance(runtime, dict):
                 return
@@ -2724,22 +3184,57 @@ class ModelManager:
                     and candidate.load_policy in {LoadPolicy.WARM, LoadPolicy.PIN}
                     and isinstance(candidate.extra_config, dict)
                     and isinstance(candidate.extra_config.get("_runtime"), dict)
-                    and candidate.extra_config["_runtime"].get("profile_id")
-                    == profile_id
-                    and int(
-                        candidate.extra_config["_runtime"].get(
-                            "effective_context", 0
-                        )
-                    )
+                    and candidate.extra_config["_runtime"].get("profile_id") == profile_id
+                    and int(candidate.extra_config["_runtime"].get("effective_context", 0))
                     == default_context
                 ),
                 None,
             )
+            if default_state is None:
+                default_worker_key = runtime.get("default_worker_key")
+                default_overrides = runtime.get("default_load_overrides")
+                base_model_id = runtime.get("base_model_id")
+                base_state = self._states.get(str(base_model_id))
+                if (
+                    default_worker_key
+                    and isinstance(default_overrides, dict)
+                    and base_state is not None
+                ):
+                    merged_extra = {
+                        **base_state.extra_config,
+                        **default_overrides,
+                    }
+                    default_runtime = default_overrides.get("_runtime")
+                    default_gpus = (
+                        default_runtime.get("gpu_indices")
+                        if isinstance(default_runtime, dict)
+                        else None
+                    )
+                    preferred_gpu = (
+                        int(default_gpus[0])
+                        if isinstance(default_gpus, list) and len(default_gpus) == 1
+                        else None
+                    )
+                    await self.add_model(
+                        model_id=str(default_worker_key),
+                        backend_type=base_state.backend_type,
+                        display_name=f"{base_state.display_name} (default runtime)",
+                        load_policy=base_state.load_policy.value,
+                        pin_permanent=base_state.pin_permanent,
+                        preferred_gpu=preferred_gpu,
+                        extra_config=merged_extra,
+                        persist=False,
+                        backend_model_id_override=base_state.backend_model_id,
+                    )
+                    default_state = self._states.get(str(default_worker_key))
             if default_state is not None:
                 await self._load_model(default_state.model_id)
         finally:
             if isinstance(runtime, dict):
                 runtime.pop("downgrade_scheduled", None)
+            if self._runtime_transitions.get(base_id) == "downsizing":
+                self._runtime_transitions.pop(base_id, None)
+            await self._publish_event(base_id, "runtime_downsize_complete")
 
     async def _watch_and_reload(self, model_id: str) -> None:
         if not self._gpu_scheduler:
@@ -2770,13 +3265,19 @@ class ModelManager:
                 return
             await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
             state = self._states.get(model_id)
-            if not state or state.load_policy != LoadPolicy.PIN or state.status != ModelStatus.UNLOADED:
+            if (
+                not state
+                or state.load_policy != LoadPolicy.PIN
+                or state.status != ModelStatus.UNLOADED
+            ):
                 return
             if state.reload_suppressed_until and datetime.now(UTC) < state.reload_suppressed_until:
                 continue
             try:
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=state.extra_config)
+                vram_needed = await backend.get_vram_estimate_mb(
+                    state.backend_model_id, extra_config=state.extra_config
+                )
                 gpu_indices = await self._gpu_scheduler.find_gpu_for_model(
                     vram_needed, state.preferred_gpu
                 )
@@ -2803,33 +3304,19 @@ class ModelManager:
             if state.status != ModelStatus.LOADED:
                 continue
             runtime = (
-                state.extra_config.get("_runtime")
-                if isinstance(state.extra_config, dict)
-                else None
+                state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
             )
             if isinstance(runtime, dict):
                 effective = int(runtime.get("effective_context") or 0)
                 default_context = int(runtime.get("default_context") or effective)
-                restore_default = bool(
-                    runtime.get("restore_default_when_idle", True)
-                )
-                if (
-                    effective > default_context
-                    and restore_default
-                    and not self.is_busy(model_id)
-                ):
+                restore_default = bool(runtime.get("restore_default_when_idle", True))
+                if effective > default_context and restore_default and not self.is_busy(model_id):
                     loaded_at = state.loaded_at or now
                     residence_s = (now - loaded_at).total_seconds()
-                    last_large = self._parse_datetime(
-                        runtime.get("last_large_request_at")
-                    )
+                    last_large = self._parse_datetime(runtime.get("last_large_request_at"))
                     demand_anchor = last_large or loaded_at
-                    grace_s = max(
-                        0, int(runtime.get("downgrade_grace_seconds", 600))
-                    )
-                    min_residence_s = max(
-                        0, int(runtime.get("minimum_residency_seconds", 120))
-                    )
+                    grace_s = max(0, int(runtime.get("downgrade_grace_seconds", 600)))
+                    min_residence_s = max(0, int(runtime.get("minimum_residency_seconds", 120)))
                     if (
                         residence_s >= min_residence_s
                         and (now - demand_anchor).total_seconds() >= grace_s
@@ -2922,10 +3409,14 @@ class ModelManager:
             from sqlalchemy import select, update
 
             rows = (
-                await session.execute(
-                    select(ModelConfig).where(ModelConfig.backend_type == "llama_cpp")
+                (
+                    await session.execute(
+                        select(ModelConfig).where(ModelConfig.backend_type == "llama_cpp")
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for row in rows:
                 vocab, bos, eos = await self._extract_llama_cpp_fingerprint(
                     row.model_id, row.extra_config or {}
@@ -2933,11 +3424,7 @@ class ModelManager:
                 if vocab is None and bos is None and eos is None:
                     missing += 1
                     continue
-                if (
-                    row.vocab_size == vocab
-                    and row.bos_id == bos
-                    and row.eos_id == eos
-                ):
+                if row.vocab_size == vocab and row.bos_id == bos and row.eos_id == eos:
                     skipped += 1
                     continue
                 await session.execute(
@@ -3036,13 +3523,21 @@ class ModelManager:
         loaded_model_ids: list[str] | None = None,
         loaded_vram_mb: dict[str, int] | None = None,
         loaded_pool_url: dict[str, str] | None = None,
+        loaded_pool_gpus: dict[str, list[int]] | None = None,
     ) -> int:
         added = await self.sync_ollama_models(installed_model_ids)
         installed_set = {model_id.strip() for model_id in installed_model_ids if model_id.strip()}
         loaded_set = {model_id.strip() for model_id in (loaded_model_ids or []) if model_id.strip()}
-        loaded_vram_map = {k.strip(): int(v) for k, v in (loaded_vram_mb or {}).items() if k and str(k).strip()}
+        loaded_vram_map = {
+            k.strip(): int(v) for k, v in (loaded_vram_mb or {}).items() if k and str(k).strip()
+        }
         loaded_pool_url_map = {
             k.strip(): v for k, v in (loaded_pool_url or {}).items() if k and str(k).strip() and v
+        }
+        loaded_pool_gpu_map = {
+            k.strip(): [int(index) for index in indices]
+            for k, indices in (loaded_pool_gpus or {}).items()
+            if k and str(k).strip() and indices
         }
         parsed = urlparse(settings.ollama_base_url)
         ollama_port = int(parsed.port or 11434)
@@ -3068,7 +3563,12 @@ class ModelManager:
 
             if backend_model_id in loaded_set:
                 loaded_vram = max(0, int(loaded_vram_map.get(backend_model_id, 0)))
-                inferred_gpus = gpu_map.get(backend_model_id, [])
+                # Pool configuration is authoritative and avoids depending on
+                # a best-effort PID/NVML match.  The latter remains useful for
+                # legacy callers that only provide names and VRAM sizes.
+                inferred_gpus = loaded_pool_gpu_map.get(
+                    backend_model_id, gpu_map.get(backend_model_id, [])
+                )
                 # Which pool actually holds this model — see the 2026-10-30
                 # comment in main.py's _ollama_inventory_loop for why this
                 # matters: without it, ModelManager.unload() (which only
@@ -3281,9 +3781,7 @@ class ModelManager:
         }
         unsupported_fields = sorted(set(patch) - allowed_fields)
         if unsupported_fields:
-            raise ValueError(
-                "Unsupported model config fields: " + ", ".join(unsupported_fields)
-            )
+            raise ValueError("Unsupported model config fields: " + ", ".join(unsupported_fields))
 
         if model_id in self._persisted_model_ids:
             async with database.AsyncSessionLocal() as session:
@@ -3300,7 +3798,9 @@ class ModelManager:
                         elif key == "pin_permanent":
                             setattr(cfg, key, bool(val))
                         elif key == "extra_config":
-                            existing_extra = cfg.extra_config if isinstance(cfg.extra_config, dict) else {}
+                            existing_extra = (
+                                cfg.extra_config if isinstance(cfg.extra_config, dict) else {}
+                            )
                             setattr(cfg, key, _deep_merge_dicts(existing_extra, val or {}))
                         else:
                             setattr(cfg, key, val)
@@ -3322,16 +3822,11 @@ class ModelManager:
         return state
 
     async def delete_model(self, model_id: str) -> None:
-        if (
-            model_id in self._states
-            and self._states[model_id].status == ModelStatus.LOADED
-        ):
+        if model_id in self._states and self._states[model_id].status == ModelStatus.LOADED:
             await self.unload(model_id)
 
         async with database.AsyncSessionLocal() as session:
-            await session.execute(
-                sa.delete(ModelConfig).where(ModelConfig.model_id == model_id)
-            )
+            await session.execute(sa.delete(ModelConfig).where(ModelConfig.model_id == model_id))
             await session.commit()
 
         self._states.pop(model_id, None)
@@ -3366,6 +3861,28 @@ def capabilities_populated(capabilities: BackendCapabilities) -> bool:
     return any(value is True for value in data.values())
 
 
+def configured_reasoning_default(state: "ModelState") -> str | None:
+    """Return the explicit llama.cpp launch default, if configured.
+
+    This is intentionally separate from the reasoning capability: a worker
+    launched with thinking off can still enable it for an individual request.
+    """
+
+    if (state.backend_type or "").strip().lower() != "llama_cpp":
+        return None
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    llama_cpp = extra.get("llama_cpp")
+    llama_cpp = llama_cpp if isinstance(llama_cpp, dict) else {}
+    mode = llama_cpp.get("reasoning")
+    budget = llama_cpp.get("reasoning_budget", llama_cpp.get("reasoningBudget"))
+    normalized = str(mode).strip().lower()
+    if normalized == "off" or budget == 0:
+        return "off"
+    if normalized in {"on", "auto"}:
+        return normalized
+    return None
+
+
 def declared_capabilities(state: "ModelState") -> BackendCapabilities:
     """Best-effort capabilities for a never-loaded model, from backend + name.
 
@@ -3393,15 +3910,39 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
             caps.streaming = True
             if any(hint in name for hint in ("-vl", "vl-", "vision", "llava", "omni")):
                 caps.vision = True
-            if any(hint in name for hint in (
-                "deepseek-r1", "deepseek-v3", "qwen3", "qwq", "-r1", "reason",
-                "cyberagent", "nemotron", "magistral", "cogito", "thinking",
-            )):
+            if any(
+                hint in name
+                for hint in (
+                    "deepseek-r1",
+                    "deepseek-v3",
+                    "qwen3",
+                    "qwq",
+                    "-r1",
+                    "reason",
+                    "cyberagent",
+                    "nemotron",
+                    "magistral",
+                    "cogito",
+                    "thinking",
+                )
+            ):
                 caps.reasoning = True
-            if any(hint in name for hint in (
-                "llama", "mistral", "mixtral", "qwen", "gemma", "nemotron",
-                "command-r", "devstral", "ministral", "phi", "tool",
-            )):
+            if any(
+                hint in name
+                for hint in (
+                    "llama",
+                    "mistral",
+                    "mixtral",
+                    "qwen",
+                    "gemma",
+                    "nemotron",
+                    "command-r",
+                    "devstral",
+                    "ministral",
+                    "phi",
+                    "tool",
+                )
+            ):
                 caps.tools = True
     elif backend_type in {"whisper", "vibeasr"}:
         caps.audio_transcription = True
@@ -3429,21 +3970,7 @@ def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:
         caps, source = state.capabilities.to_dict(), "cached"
     else:
         caps, source = declared_capabilities(state).to_dict(), "declared"
-    # See BackendCapabilities.max_output_tokens: no backend tracks a real
-    # output ceiling distinct from "remaining context after the prompt".
-    # Profile-unaware callers land here without access to a per-profile
-    # runtime_policy.default_output_reservation_tokens override (see
-    # api/openai/models.py._resolve_default_output_reservation, which
-    # refines this further for the actual /v1/models response) — fall back
-    # to the same global default the admission layer assumes when a client
-    # doesn't pass max_tokens, capped by context_length for small models.
-    # Mirroring the full context_length here (as before) implied a single
-    # response could consume the entire window, true only for a near-empty
-    # prompt — not a number any client should plan around.
-    if not caps.get("max_output_tokens"):
-        context_length = int(caps.get("context_length") or 0)
-        reservation = int(settings.runtime_preset_default_output_reservation_tokens)
-        caps["max_output_tokens"] = (
-            min(context_length, reservation) if context_length > 0 else reservation
-        )
+    # A total context window is not an independent generation cap. The public
+    # profile-aware API adds runtime_policy.max_output_tokens when configured;
+    # profile-unaware callers keep zero to mean "unknown".
     return caps, source

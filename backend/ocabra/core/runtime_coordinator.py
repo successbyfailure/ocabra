@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -9,15 +10,18 @@ from typing import Any
 import structlog
 
 from ocabra.config import settings
-from ocabra.core.model_manager_helpers import compute_worker_key
-
-logger = structlog.get_logger(__name__)
+from ocabra.core.model_manager_helpers import compute_worker_key, resolve_llama_cpp_option
+from ocabra.core.output_limits import resolve_max_output_tokens
 from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
 from ocabra.core.runtime_presets import (
     ContextCapacityError,
     ResolvedRuntimePreset,
     select_runtime_preset,
 )
+
+logger = structlog.get_logger(__name__)
+
+_IMAGE_TOKEN_RESERVATION = 128
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,32 @@ class RuntimePlan:
     selection_reason: str | None
 
 
+class OutputTokenLimitError(ContextCapacityError):
+    """An explicit output budget exceeds the model's enforceable hard cap."""
+
+    def __init__(self, *, parameter: str, requested: int, maximum: int) -> None:
+        self.parameter = parameter
+        self.requested = requested
+        self.maximum = maximum
+        super().__init__(
+            f"{parameter}={requested} exceeds the model maximum output of {maximum} tokens"
+        )
+
+
+def _explicit_output_budget(body: dict[str, Any]) -> tuple[str, int] | None:
+    """Return the OpenAI output-limit field that controls this request."""
+
+    for parameter in ("max_completion_tokens", "max_tokens"):
+        raw = body.get(parameter)
+        if raw is None:
+            continue
+        try:
+            return parameter, int(raw)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _text_size(value: Any) -> tuple[int, int]:
     """Return (characters, words) from the textual portions of an OpenAI body."""
 
@@ -45,12 +75,30 @@ def _text_size(value: Any) -> tuple[int, int]:
         return (0, 0)
     chars = words = 0
     for key, item in value.items():
-        if key in {"image_url", "input_audio", "video_url"}:
+        if key in {"type", "image_url", "input_audio", "video_url"}:
             continue
         item_chars, item_words = _text_size(item)
         chars += item_chars
         words += item_words
     return chars, words
+
+
+def _image_count(value: Any) -> int:
+    """Count image inputs without decoding or fetching their payloads."""
+    if isinstance(value, list):
+        return sum(_image_count(item) for item in value)
+    if not isinstance(value, dict):
+        return 0
+    if value.get("type") in {"image_url", "input_image"}:
+        return 1
+    count = 0
+    images = value.get("images")
+    if isinstance(images, list):
+        count += len(images)
+    for key, item in value.items():
+        if key not in {"image_url", "images"}:
+            count += _image_count(item)
+    return count
 
 
 def estimate_request_token_budget(
@@ -91,6 +139,7 @@ def estimate_request_token_budget(
     words += tools_words
     prompt_estimate = max(math.ceil(chars / 3), math.ceil(words * 1.5))
     prompt_estimate = math.ceil(prompt_estimate * 1.15) + structural_overhead
+    prompt_estimate += _image_count(source) * _IMAGE_TOKEN_RESERVATION
 
     options = body.get("options") if isinstance(body.get("options"), dict) else {}
     output_value = body.get(
@@ -120,6 +169,93 @@ def _requested_preset_key(body: dict[str, Any]) -> str | None:
     return str(value).strip() if value else None
 
 
+def _apply_llama_cpp_preset_placement(
+    overrides: dict[str, Any],
+    state: Any,
+    preset: ResolvedRuntimePreset,
+    gpu_states: list[Any],
+) -> None:
+    """Translate a resolved preset placement into concrete llama.cpp flags.
+
+    ``_runtime.gpu_indices`` drives admission, but llama.cpp also needs its
+    CUDA visibility and split flags changed on the derived worker. Without
+    this translation a dual preset cloned ``disabled_gpus=[0]`` from a normal
+    3090-only base profile and silently remained single-GPU.
+    """
+    if str(getattr(state, "backend_type", "")).lower() != "llama_cpp":
+        return
+    selected = list(dict.fromkeys(int(index) for index in preset.gpu_indices))
+    if not selected:
+        return
+
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    section = copy.deepcopy(extra.get("llama_cpp") or {})
+    profile_section = overrides.get("llama_cpp")
+    if isinstance(profile_section, dict):
+        section.update(copy.deepcopy(profile_section))
+
+    known_indices = sorted(int(gpu.index) for gpu in gpu_states)
+    raw_disabled = section.get("disabled_gpus", section.get("disabledGpus", []))
+    try:
+        prior_disabled = {int(index) for index in (raw_disabled or [])}
+    except (TypeError, ValueError):
+        prior_disabled = set()
+    prior_visible = [index for index in known_indices if index not in prior_disabled]
+    section["disabled_gpus"] = [index for index in known_indices if index not in selected]
+    # A measured override belongs to one concrete placement. Keep it only
+    # when the preset uses that exact GPU set; otherwise use the planner.
+    if prior_visible != selected:
+        section["vram_estimate_mb"] = None
+
+    if len(selected) == 1:
+        section.update(
+            {
+                "split_mode": "none",
+                "split_strategy": None,
+                "tensor_split": None,
+                "main_gpu": None,
+            }
+        )
+    else:
+        totals = {int(gpu.index): int(gpu.total_vram_mb) for gpu in gpu_states}
+        smallest = min((totals.get(index, 1) for index in selected), default=1)
+        raw_split = section.get("tensor_split", section.get("tensorSplit"))
+        calibrated_split = (
+            prior_visible == selected
+            and isinstance(raw_split, list)
+            and len(raw_split) == len(selected)
+        )
+        ratios = (
+            [float(value) for value in raw_split]
+            if calibrated_split
+            else [totals.get(index, smallest) / max(1, smallest) for index in selected]
+        )
+        raw_main_gpu = section.get("main_gpu", section.get("mainGpu"))
+        try:
+            configured_main_gpu = int(raw_main_gpu)
+        except (TypeError, ValueError):
+            configured_main_gpu = -1
+        main_gpu = (
+            configured_main_gpu
+            if calibrated_split and 0 <= configured_main_gpu < len(selected)
+            else max(
+                range(len(selected)),
+                key=lambda pos: totals.get(selected[pos], 0),
+            )
+        )
+        section.update(
+            {
+                "split_mode": "layer",
+                "split_strategy": "evenly",
+                "tensor_split": ratios,
+                # llama.cpp interprets --main-gpu relative to CUDA_VISIBLE_DEVICES.
+                "main_gpu": main_gpu,
+            }
+        )
+
+    overrides["llama_cpp"] = section
+
+
 async def plan_profile_runtime(
     profile: Any,
     model_manager: Any,
@@ -127,10 +263,30 @@ async def plan_profile_runtime(
 ) -> RuntimePlan:
     """Resolve and select the runtime variant for one profile request."""
 
+    body = request_body or {}
+    raw_policy = getattr(profile, "runtime_policy", None)
+    policy = raw_policy if isinstance(raw_policy, dict) else {}
+    raw_reservation = policy.get("default_output_reservation_tokens")
+    try:
+        default_output_reservation = int(raw_reservation) if raw_reservation is not None else None
+    except (TypeError, ValueError):
+        default_output_reservation = None
+    required_tokens = estimate_request_token_budget(
+        body, default_output_reservation=default_output_reservation
+    )
+    explicit_output = _explicit_output_budget(body)
+    declared_max_output = resolve_max_output_tokens(profile)
+    if explicit_output is not None and declared_max_output is not None:
+        parameter, requested_output = explicit_output
+        if requested_output > declared_max_output:
+            raise OutputTokenLimitError(
+                parameter=parameter,
+                requested=requested_output,
+                maximum=declared_max_output,
+            )
+
     enabled_presets = [
-        preset
-        for preset in getattr(profile, "runtime_presets", [])
-        if preset.enabled
+        preset for preset in getattr(profile, "runtime_presets", []) if preset.enabled
     ]
     if not enabled_presets:
         worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
@@ -142,7 +298,7 @@ async def plan_profile_runtime(
             preset_key=None,
             runtime_key=None,
             effective_context=None,
-            required_tokens=None,
+            required_tokens=required_tokens,
             selection_reason=None,
         )
 
@@ -186,18 +342,6 @@ async def plan_profile_runtime(
         )
         raise ContextCapacityError("profile has no enabled runtime preset that fits")
 
-    body = request_body or {}
-    policy = profile.runtime_policy if isinstance(profile.runtime_policy, dict) else {}
-    raw_reservation = policy.get("default_output_reservation_tokens")
-    try:
-        default_output_reservation = (
-            int(raw_reservation) if raw_reservation is not None else None
-        )
-    except (TypeError, ValueError):
-        default_output_reservation = None
-    required_tokens = estimate_request_token_budget(
-        body, default_output_reservation=default_output_reservation
-    )
     explicit_key = _requested_preset_key(body)
     loaded_keys: set[str] = set()
     for runtime_state in await model_manager.list_states(include_derived=True):
@@ -246,62 +390,105 @@ async def plan_profile_runtime(
         explicit=bool(explicit_key),
     )
 
-    preset = preset_by_key[chosen.preset_key]
-    overrides = dict(profile.load_overrides or {})
-    overrides["use_case"] = {
-        "context": chosen.effective_context,
-        "slots": chosen.parallelism,
-        "kv_dtype": preset.kv_cache_dtype,
-    }
-    overrides["_runtime"] = {
-        "profile_id": profile.profile_id,
-        "base_model_id": profile.base_model_id,
-        "preset_key": preset.preset_key,
-        "runtime_key": chosen.runtime_key,
-        "effective_context": chosen.effective_context,
-        "requested_parallelism": preset.parallelism,
-        "parallelism": chosen.parallelism,
-        "kv_cache_dtype": preset.kv_cache_dtype,
-        "placement_policy": preset.placement_policy,
-        "execution_policy": preset.execution_policy,
-        # Multi-GPU hint para los backends con pool shared (Ollama). El
-        # coordinator no sabe pools, pero sí sabe que este preset pide >1 GPU.
-        # ``_select_pool`` del backend usa esta lista para elegir un pool que
-        # exponga todas estas GPUs juntas (``multi_gpu=true`` + ``gpus`` ⊇).
-        "gpu_indices": list(chosen.gpu_indices),
-        "tracking_worker_key": compute_worker_key(
-            profile.base_model_id,
-            profile.load_overrides,
-        ),
-        "default_context": next(
-            (
-                item.effective_context
-                for item in candidates
-                if item.is_default
+    default_candidate = next((item for item in candidates if item.is_default), chosen)
+
+    def _overrides_for(candidate: ResolvedRuntimePreset) -> dict[str, Any]:
+        candidate_preset = preset_by_key[candidate.preset_key]
+        measured_contexts = policy.get("validated_context_tokens")
+        measured_context = (
+            measured_contexts.get(candidate.preset_key)
+            if isinstance(measured_contexts, dict)
+            else None
+        )
+        try:
+            capacity_validated = int(measured_context) == candidate.effective_context
+        except (TypeError, ValueError):
+            capacity_validated = False
+        measured_vram_by_preset = policy.get("validated_vram_mb")
+        measured_vram = (
+            measured_vram_by_preset.get(candidate.preset_key)
+            if capacity_validated and isinstance(measured_vram_by_preset, dict)
+            else None
+        )
+        try:
+            capacity_vram_mb = max(0, int(measured_vram or 0))
+        except (TypeError, ValueError):
+            capacity_vram_mb = 0
+        candidate_overrides = dict(profile.load_overrides or {})
+        _apply_llama_cpp_preset_placement(candidate_overrides, state, candidate, gpu_states)
+        unified_pool = False
+        if str(getattr(state, "backend_type", "")).lower() == "llama_cpp":
+            section = candidate_overrides.get("llama_cpp")
+            raw_unified = (
+                section.get("kv_unified", section.get("kvUnified"))
+                if isinstance(section, dict)
+                else None
+            )
+            if raw_unified is None:
+                raw_unified = resolve_llama_cpp_option(state, "kv_unified", False)
+            unified_pool = (
+                raw_unified.strip().lower() in {"1", "true", "yes", "on"}
+                if isinstance(raw_unified, str)
+                else bool(raw_unified)
+            )
+            if isinstance(section, dict):
+                # Admission estimates run before resolve_use_case(). Materialize
+                # the exact physical pool here so the scheduler never sizes a
+                # normal one-GPU runtime using the base model's dual-GPU pool.
+                section["ctx_size"] = (
+                    candidate.effective_context
+                    if unified_pool
+                    else candidate.effective_context * candidate.parallelism
+                )
+                section["parallel_slots"] = candidate.parallelism
+        candidate_overrides["use_case"] = {
+            "context": candidate.effective_context,
+            "slots": candidate.parallelism,
+            "kv_dtype": candidate_preset.kv_cache_dtype,
+        }
+        if unified_pool:
+            candidate_overrides["use_case"]["context_is_pool"] = True
+        candidate_overrides["_runtime"] = {
+            "profile_id": profile.profile_id,
+            "base_model_id": profile.base_model_id,
+            "preset_key": candidate_preset.preset_key,
+            "runtime_key": candidate.runtime_key,
+            "effective_context": candidate.effective_context,
+            "context_is_pool": unified_pool,
+            "capacity_validated": capacity_validated,
+            "capacity_vram_mb": capacity_vram_mb or None,
+            "requested_parallelism": candidate_preset.parallelism,
+            "parallelism": candidate.parallelism,
+            "kv_cache_dtype": candidate_preset.kv_cache_dtype,
+            "placement_policy": candidate_preset.placement_policy,
+            "execution_policy": candidate_preset.execution_policy,
+            # Multi-GPU hint para los backends con pool shared (Ollama). El
+            # coordinator no sabe pools, pero sí sabe que este preset pide >1 GPU.
+            # ``_select_pool`` del backend usa esta lista para elegir un pool que
+            # exponga todas estas GPUs juntas (``multi_gpu=true`` + ``gpus`` ⊇).
+            "gpu_indices": list(candidate.gpu_indices),
+            "tracking_worker_key": compute_worker_key(
+                profile.base_model_id,
+                profile.load_overrides,
             ),
-            chosen.effective_context,
-        ),
-        "restore_default_when_idle": bool(
-            (profile.runtime_policy or {}).get("restore_default_when_idle", True)
-            if isinstance(profile.runtime_policy, dict)
-            else True
-        ),
-        "downgrade_grace_seconds": int(
-            (profile.runtime_policy or {}).get("downgrade_grace_seconds", 600)
-            if isinstance(profile.runtime_policy, dict)
-            else 600
-        ),
-        "minimum_residency_seconds": int(
-            (profile.runtime_policy or {}).get("minimum_residency_seconds", 120)
-            if isinstance(profile.runtime_policy, dict)
-            else 120
-        ),
-        "small_requests_extend_large_ttl": bool(
-            (profile.runtime_policy or {}).get("small_requests_extend_large_ttl", False)
-            if isinstance(profile.runtime_policy, dict)
-            else False
-        ),
-    }
+            "default_context": default_candidate.effective_context,
+            "restore_default_when_idle": bool(policy.get("restore_default_when_idle", True)),
+            "downgrade_grace_seconds": int(policy.get("downgrade_grace_seconds", 600)),
+            "minimum_residency_seconds": int(policy.get("minimum_residency_seconds", 120)),
+            "small_requests_extend_large_ttl": bool(
+                policy.get("small_requests_extend_large_ttl", False)
+            ),
+        }
+        return candidate_overrides
+
+    preset = preset_by_key[chosen.preset_key]
+    overrides = _overrides_for(chosen)
+    if not chosen.is_default:
+        default_overrides = _overrides_for(default_candidate)
+        overrides["_runtime"]["default_worker_key"] = compute_worker_key(
+            profile.base_model_id, default_overrides
+        )
+        overrides["_runtime"]["default_load_overrides"] = default_overrides
     worker_key = compute_worker_key(profile.base_model_id, overrides)
     preferred_gpu = chosen.gpu_indices[0] if len(chosen.gpu_indices) == 1 else None
     # load_policy lives on the base model (ModelConfig), not per-preset

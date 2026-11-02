@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 from ._deps import (
@@ -23,6 +24,7 @@ from ._deps import (
     build_model_status_headers,
     check_capability,
     ensure_worker_loaded,
+    fairness_kv_budget,
     fairness_slots,
     fairness_user_key,
     get_federation_manager,
@@ -79,9 +81,7 @@ async def completions(
                 fed_profile = alias_target[0] if alias_target is not None else None
             if fed_profile is not None and getattr(fed_profile, "runtime_presets", []):
                 try:
-                    fed_plan = await resolve_profile_runtime_plan(
-                        fed_profile, model_manager, body
-                    )
+                    fed_plan = await resolve_profile_runtime_plan(fed_profile, model_manager, body)
                     selected = next(
                         preset
                         for preset in getattr(fed_profile, "runtime_presets", [])
@@ -97,9 +97,7 @@ async def completions(
                     model_id, model_manager, federation_manager, profile_registry
                 )
                 if execution_policy == "remote" and fed_profile is not None:
-                    forced_peer = federation_manager.find_best_peer(
-                        fed_profile.base_model_id
-                    )
+                    forced_peer = federation_manager.find_best_peer(fed_profile.base_model_id)
                     if forced_peer is not None:
                         target, peer = "remote", forced_peer
             if target == "remote" and peer is not None:
@@ -216,27 +214,55 @@ async def completions(
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
     is_batch = is_batch_origin_request(request)
+    kv_capacity, kv_tokens = fairness_kv_budget(
+        state,
+        required_tokens=getattr(request.state, "runtime_required_tokens", None),
+        effective_context=getattr(request.state, "runtime_effective_context", None),
+    )
+    kv_admission = (
+        {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
+        if kv_capacity is not None
+        else {}
+    )
 
     if stream:
         backend_body = to_backend_body(state, merged_body)
         stream_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-        queue_state = worker_pool.peek_queue_state(worker_key) if user_key is not None else None
+        queue_state = (
+            worker_pool.peek_queue_state(worker_key, kv_tokens=kv_tokens)
+            if user_key is not None
+            else None
+        )
         if queue_state is not None and queue_state["saturated"]:
             return StreamingResponse(
                 _stream_completions_queued(
-                    worker_pool, worker_key, backend_body, user_key, slots, is_batch
+                    worker_pool,
+                    worker_key,
+                    backend_body,
+                    user_key,
+                    slots,
+                    is_batch,
+                    kv_capacity,
+                    kv_tokens,
                 ),
                 media_type="text/event-stream",
                 headers=stream_headers,
             )
         gen = worker_pool.forward_stream(
-            worker_key, "/v1/completions", backend_body,
-            user_key=user_key, slots=slots, is_batch=is_batch,
+            worker_key,
+            "/v1/completions",
+            backend_body,
+            user_key=user_key,
+            slots=slots,
+            is_batch=is_batch,
+            **kv_admission,
         )
         first_chunk, first_exc = await _peek_first_chunk(gen)
         if first_exc is not None:
             if isinstance(first_exc, httpx.HTTPStatusError):
                 raise_upstream_http_error(first_exc)
+            if isinstance(first_exc, KVCapacityError):
+                raise_inference_dispatch_error(first_exc)
             message, code = stream_error_details(first_exc)
             raise HTTPException(
                 status_code=502,
@@ -248,7 +274,9 @@ async def completions(
             headers=stream_headers,
         )
 
-    queue_state = worker_pool.peek_queue_state(worker_key) if not is_batch else None
+    queue_state = (
+        worker_pool.peek_queue_state(worker_key, kv_tokens=kv_tokens) if not is_batch else None
+    )
     try:
         result = await worker_pool.forward_request(
             worker_key,
@@ -257,10 +285,11 @@ async def completions(
             user_key=user_key,
             slots=slots,
             is_batch=is_batch,
+            **kv_admission,
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+    except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:
         raise_inference_dispatch_error(exc)
     from fastapi.responses import JSONResponse
 
@@ -269,10 +298,14 @@ async def completions(
     resp_headers = await ocabra_response_headers(
         request, model_manager, worker_key, profile.base_model_id
     )
-    if queue_state is not None and queue_state["saturated"]:
+    if queue_state is not None and queue_state["slot_saturated"]:
         resp_headers["X-Ocabra-Slot-Queue-Saturated"] = "1"
         resp_headers["X-Ocabra-Slot-In-Flight"] = str(queue_state["in_flight"])
         resp_headers["X-Ocabra-Slot-Count"] = str(queue_state["slots"])
+    if queue_state is not None and queue_state["kv_saturated"]:
+        resp_headers["X-Ocabra-KV-Queue-Saturated"] = "1"
+        resp_headers["X-Ocabra-KV-Capacity-Tokens"] = str(queue_state["kv_capacity_tokens"])
+        resp_headers["X-Ocabra-KV-Reserved-Tokens"] = str(queue_state["kv_reserved_tokens"])
     return JSONResponse(content=result, headers=resp_headers)
 
 
@@ -288,21 +321,42 @@ async def _stream_completions_queued(
     user_key: str | None,
     slots: int,
     is_batch: bool,
+    kv_capacity_tokens: int | None,
+    kv_tokens: int,
 ) -> AsyncIterator[bytes]:
     """Fallback for an already-saturated fair-share queue — see the
     identical rationale on ``ocabra.api.openai.chat._stream_chat_queued``.
     """
     try:
-        queue_state = worker_pool.peek_queue_state(model_id)
+        queue_state = worker_pool.peek_queue_state(model_id, kv_tokens=kv_tokens)
         if queue_state is not None and queue_state["saturated"]:
-            yield sse_ocabra_event(
-                "slot_queued",
-                model_id=model_id,
-                in_flight=queue_state["in_flight"],
-                slots=queue_state["slots"],
-            )
+            if queue_state["slot_saturated"]:
+                yield sse_ocabra_event(
+                    "slot_queued",
+                    model_id=model_id,
+                    in_flight=queue_state["in_flight"],
+                    slots=queue_state["slots"],
+                )
+            if queue_state["kv_saturated"]:
+                yield sse_ocabra_event(
+                    "kv_queued",
+                    model_id=model_id,
+                    capacity_tokens=queue_state["kv_capacity_tokens"],
+                    reserved_tokens=queue_state["kv_reserved_tokens"],
+                    requested_tokens=kv_tokens,
+                )
         async for chunk in worker_pool.forward_stream(
-            model_id, "/v1/completions", body, user_key=user_key, slots=slots, is_batch=is_batch
+            model_id,
+            "/v1/completions",
+            body,
+            user_key=user_key,
+            slots=slots,
+            is_batch=is_batch,
+            **(
+                {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
+                if kv_capacity_tokens is not None
+                else {}
+            ),
         ):
             yield chunk
     except Exception as e:
@@ -434,18 +488,41 @@ async def _stream_completions_with_load(
     merged_body = merge_profile_defaults(profile, body)
     backend_body = to_backend_body(state, merged_body)
     slots = fairness_slots(state)
+    kv_capacity, kv_tokens = fairness_kv_budget(
+        state,
+        required_tokens=required_tokens,
+    )
+    kv_admission = (
+        {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
+        if kv_capacity is not None
+        else {}
+    )
     try:
         if user_key is not None:
-            queue_state = worker_pool.peek_queue_state(worker_key)
+            queue_state = worker_pool.peek_queue_state(worker_key, kv_tokens=kv_tokens)
             if queue_state is not None and queue_state["saturated"]:
-                yield sse_ocabra_event(
-                    "slot_queued",
-                    model_id=worker_key,
-                    in_flight=queue_state["in_flight"],
-                    slots=queue_state["slots"],
-                )
+                if queue_state["slot_saturated"]:
+                    yield sse_ocabra_event(
+                        "slot_queued",
+                        model_id=worker_key,
+                        in_flight=queue_state["in_flight"],
+                        slots=queue_state["slots"],
+                    )
+                if queue_state["kv_saturated"]:
+                    yield sse_ocabra_event(
+                        "kv_queued",
+                        model_id=worker_key,
+                        capacity_tokens=queue_state["kv_capacity_tokens"],
+                        reserved_tokens=queue_state["kv_reserved_tokens"],
+                        requested_tokens=kv_tokens,
+                    )
         async for chunk in worker_pool.forward_stream(
-            worker_key, "/v1/completions", backend_body, user_key=user_key, slots=slots
+            worker_key,
+            "/v1/completions",
+            backend_body,
+            user_key=user_key,
+            slots=slots,
+            **kv_admission,
         ):
             yield chunk
     except Exception as exc:

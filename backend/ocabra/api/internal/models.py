@@ -26,6 +26,17 @@ router = APIRouter(tags=["models"])
 _ollama_registry = OllamaRegistry()
 
 
+def _canonical_runtime_id(model_id: str, canonical_ids: set[str]) -> str | None:
+    """Match a runtime worker to a catalog id, preserving GGUF ``repo::file``."""
+
+    matches = [
+        candidate
+        for candidate in canonical_ids
+        if model_id == candidate or model_id.startswith(f"{candidate}::")
+    ]
+    return max(matches, key=len) if matches else None
+
+
 class ModelPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -107,8 +118,7 @@ async def list_models(
         if row.model_id is not None:
             rows_by_model[row.model_id].append(row)
     schedules_by_model: dict[str, list[dict]] = {
-        model_id: model_schedule_rows_to_payload(rows)
-        for model_id, rows in rows_by_model.items()
+        model_id: model_schedule_rows_to_payload(rows) for model_id, rows in rows_by_model.items()
     }
 
     profile_registry = getattr(request.app.state, "profile_registry", None)
@@ -253,11 +263,12 @@ async def get_models_activity(
     # (2) leer el ``_runtime.parallelism`` del preset activo, que vive en
     # el derivado y no en el canonical state.
     all_states = await mm.list_states(include_derived=True)
+    canonical_ids = {state.model_id for state in states}
     runtime_by_canonical: dict[str, int] = {}
     for s in all_states:
-        if "::" not in s.model_id:
+        base = _canonical_runtime_id(s.model_id, canonical_ids)
+        if base is None or base == s.model_id:
             continue
-        base = s.model_id.rsplit("::", 1)[0]
         meta = s.extra_config.get("_runtime") if isinstance(s.extra_config, dict) else None
         if not isinstance(meta, dict):
             continue
@@ -271,9 +282,9 @@ async def get_models_activity(
             runtime_by_canonical[base] = max(runtime_by_canonical.get(base, 0), p)
     derived_keys_by_canonical: dict[str, list[str]] = {}
     for key in snapshot:
-        if "::" not in key:
+        base = _canonical_runtime_id(key, canonical_ids)
+        if base is None or base == key:
             continue
-        base = key.rsplit("::", 1)[0]
         derived_keys_by_canonical.setdefault(base, []).append(key)
     activity: dict[str, dict] = {}
     for state in states:
@@ -291,9 +302,7 @@ async def get_models_activity(
             source_counts: dict[str, int] = {}
             for key in keys:
                 for source, source_count in sources.get(key, {}).items():
-                    source_counts[source] = max(
-                        source_counts.get(source, 0), source_count
-                    )
+                    source_counts[source] = max(source_counts.get(source, 0), source_count)
             # Concurrency the backend will actually serve in parallel. Only
             # ``_runtime.parallelism`` (set by the coordinator, reflects the
             # active preset) is a real measure of that — it's set for
@@ -353,19 +362,21 @@ async def get_models_activity(
                         phase = "prompt_eval"
                     else:
                         phase = "generating"
-                    requests_detail.append({
-                        "requestId": req.request_id,
-                        "username": req.username,
-                        "elapsedSeconds": round(elapsed_s, 1),
-                        "inputTokensEstimate": req.input_tokens_estimate,
-                        "outputTokensEstimate": req.output_tokens_estimate,
-                        "tokensPerSecond": tokens_per_second,
-                        "lastActivitySecondsAgo": round(
-                            max(0.0, now_ts - (req.last_activity_at or req.started_at)), 1
-                        ),
-                        "phase": phase,
-                        "waitingOnModelId": waiting_on,
-                    })
+                    requests_detail.append(
+                        {
+                            "requestId": req.request_id,
+                            "username": req.username,
+                            "elapsedSeconds": round(elapsed_s, 1),
+                            "inputTokensEstimate": req.input_tokens_estimate,
+                            "outputTokensEstimate": req.output_tokens_estimate,
+                            "tokensPerSecond": tokens_per_second,
+                            "lastActivitySecondsAgo": round(
+                                max(0.0, now_ts - (req.last_activity_at or req.started_at)), 1
+                            ),
+                            "phase": phase,
+                            "waitingOnModelId": waiting_on,
+                        }
+                    )
             activity[state.model_id] = {
                 "inFlight": count,
                 "oldestSeconds": round(oldest, 1),
@@ -434,19 +445,50 @@ async def get_model_status(
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-    status = state.status.value
+    worker_pool = getattr(request.app.state, "worker_pool", None)
+    gate = worker_pool.peek_queue_state(state.model_id) if worker_pool is not None else None
+    active_state = state
+    # Runtime presets are served by an ephemeral ``base::<hash>`` worker.
+    # The public status URL normally receives the canonical base id, so fall
+    # through to its single loaded derived sibling for both load and admission
+    # state rather than describing the idle canonical configuration.
+    if "::" not in state.model_id:
+        runtime_states = await mm.list_states(include_derived=True)
+        loaded_siblings = [
+            sibling
+            for sibling in runtime_states
+            if sibling.status.value == "loaded"
+            and sibling.model_id.startswith(f"{state.model_id}::")
+        ]
+        if len(loaded_siblings) == 1:
+            active_state = loaded_siblings[0]
+            if gate is None and worker_pool is not None:
+                gate = worker_pool.peek_queue_state(active_state.model_id)
+    status = active_state.status.value
     expected_wait = None
     if status != "loaded":
-        expected_wait = await mm.get_expected_load_seconds(state.model_id)
+        expected_wait = await mm.get_expected_load_seconds(active_state.model_id)
+    admission = None
+    if gate is not None:
+        admission = {
+            "slots": gate["slots"],
+            "activeRequests": gate["in_flight"],
+            "queuedRequests": gate["queued"],
+            "slotSaturated": gate["slot_saturated"],
+            "kvCapacityTokens": gate["kv_capacity_tokens"],
+            "kvReservedTokens": gate["kv_reserved_tokens"],
+            "kvFreeTokens": gate["kv_free_tokens"],
+        }
     return {
         "modelId": state.model_id,
-        "backendType": state.backend_type,
+        "backendType": active_state.backend_type,
         "status": status,
         "loaded": status == "loaded",
         "expectedWaitSeconds": expected_wait,
-        "gpu": state.current_gpu,
-        "vramUsedMb": state.vram_used_mb,
-        "errorMessage": state.error_message,
+        "gpu": active_state.current_gpu,
+        "vramUsedMb": active_state.vram_used_mb,
+        "errorMessage": active_state.error_message,
+        "admission": admission,
     }
 
 
@@ -467,10 +509,14 @@ _KV_DTYPE_BYTES = {"fp16": 2.0, "bf16": 2.0, "fp8": 1.0, "q8": 1.0, "q4": 0.5}
 async def get_model_capacity(
     model_id: str,
     request: Request,
-    gpu: int | None = Query(default=None, description="Target GPU index (default: preferred/most-free)"),
+    gpu: int | None = Query(
+        default=None, description="Target GPU index (default: preferred/most-free)"
+    ),
     slots: str = Query(default="1,2,4", description="Comma list of slot/concurrency counts"),
     kv_dtype: str = Query(default="fp16", description="KV cache dtype: fp16|fp8|q4"),
-    context: str | None = Query(default=None, description="Validate a desired context (int or 'max') at slots[0]"),
+    context: str | None = Query(
+        default=None, description="Validate a desired context (int or 'max') at slots[0]"
+    ),
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """VRAM capacity/planning report for a model on a given GPU."""
@@ -538,18 +584,27 @@ async def get_model_capacity(
     report["concurrency_label"] = "concurrency" if backend in vp._POOLED_BACKENDS else "slots"
     report["fits_free_now"] = free_mb >= res.weights_mb + vp.DEFAULT_OVERHEAD_MB
     report["capacity"] = vp.capacity_rows(
-        backend, arch, res.weights_mb,
-        gpu_total_mb=total_mb, slots=slot_counts,
-        gpu_memory_utilization=gpu_mem_util, kv_dtype_bytes=kv_bytes,
+        backend,
+        arch,
+        res.weights_mb,
+        gpu_total_mb=total_mb,
+        slots=slot_counts,
+        gpu_memory_utilization=gpu_mem_util,
+        kv_dtype_bytes=kv_bytes,
     )
     report["vram_curve"] = vp.vram_curve(arch, res.weights_mb, kv_dtype_bytes=kv_bytes)
 
     if context is not None:
         requested: int | str = context if context.lower() in ("max", "auto") else int(context)
         plan = vp.plan_use_case(
-            backend, arch, res.weights_mb,
-            gpu_total_mb=total_mb, requested_context=requested, slots=slot_counts[0],
-            gpu_memory_utilization=gpu_mem_util, kv_dtype_bytes=kv_bytes,
+            backend,
+            arch,
+            res.weights_mb,
+            gpu_total_mb=total_mb,
+            requested_context=requested,
+            slots=slot_counts[0],
+            gpu_memory_utilization=gpu_mem_util,
+            kv_dtype_bytes=kv_bytes,
         )
         report["validation"] = {
             "requested_context": requested,
@@ -579,6 +634,7 @@ async def get_model(
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    state = (await _overlay_loaded_derived_state(mm, [state]))[0]
     ollama_sizes = await _get_ollama_sizes_bytes() if state.backend_type == "ollama" else {}
     return await _serialize_model_state(request, state, ollama_sizes)
 
@@ -673,6 +729,45 @@ async def unload_model(
 
 
 @router.post(
+    "/models/{model_id:path}/cancel-load",
+    summary="Cancel an in-progress model load",
+    responses={404: {"description": "Model not found"}, 409: {"description": "No load active"}},
+)
+async def cancel_model_load(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    mm = request.app.state.model_manager
+    if not await mm.get_state(model_id):
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    cancelled = await mm.cancel_load(model_id)
+    if not cancelled:
+        raise HTTPException(status_code=409, detail="No cancellable model load is active")
+    return {"model_id": model_id, "cancelled_workers": cancelled}
+
+
+@router.post(
+    "/models/{model_id:path}/downsize",
+    summary="Restore a multi-GPU runtime to its one-GPU default",
+    responses={404: {"description": "Model not found"}, 409: {"description": "Cannot downsize"}},
+)
+async def downsize_model_runtime(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    mm = request.app.state.model_manager
+    if not await mm.get_state(model_id):
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    try:
+        worker_id = await mm.downsize_runtime(model_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"model_id": model_id, "downsized_worker": worker_id}
+
+
+@router.post(
     "/models/{model_id:path}/maintenance",
     summary="Pause or resume new requests for a model",
     description=(
@@ -751,9 +846,7 @@ async def update_model(
     else:
         updated = state
 
-    ollama_sizes = (
-        await _get_ollama_sizes_bytes() if updated.backend_type == "ollama" else {}
-    )
+    ollama_sizes = await _get_ollama_sizes_bytes() if updated.backend_type == "ollama" else {}
     return await _serialize_model_state(request, updated, ollama_sizes)
 
 
@@ -830,9 +923,7 @@ async def list_speculative_candidates(
 
     async with AsyncSessionLocal() as session:
         target = (
-            await session.execute(
-                sa.select(ModelConfig).where(ModelConfig.model_id == model_id)
-            )
+            await session.execute(sa.select(ModelConfig).where(ModelConfig.model_id == model_id))
         ).scalar_one_or_none()
         if target is None or target.vocab_size is None:
             return []
@@ -1152,7 +1243,9 @@ async def _build_model_memory_estimate(
         estimate["warning"] = "No backend runtime available to calculate memory estimates."
         return estimate
 
-    heuristic_mb = int(await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=extra_config) or 0)
+    heuristic_mb = int(
+        await backend.get_vram_estimate_mb(state.backend_model_id, extra_config=extra_config) or 0
+    )
 
     if state.backend_type == "vllm":
         gpu_util = _resolve_vllm_gpu_memory_utilization(extra_config)
@@ -1276,7 +1369,9 @@ def _estimate_llama_cpp_memory(
     )
     from ocabra.schemas.backend_load import LlamaCppLoadConfig
 
-    def _fallback_to_heuristic(notes: list[str], *, status: str = "ok", warning: str | None = None) -> dict[str, Any]:
+    def _fallback_to_heuristic(
+        notes: list[str], *, status: str = "ok", warning: str | None = None
+    ) -> dict[str, Any]:
         estimate.update(
             {
                 "estimated_weights_mb": heuristic_mb or None,
@@ -1323,13 +1418,19 @@ def _estimate_llama_cpp_memory(
     if arch is None or gguf_file is None:
         return _fallback_to_heuristic(["Estimación heurística: GGUF no encontrado o no parseable."])
 
-    gpu_layers = load_config.gpu_layers if load_config.gpu_layers is not None else settings.llama_cpp_gpu_layers
+    gpu_layers = (
+        load_config.gpu_layers
+        if load_config.gpu_layers is not None
+        else settings.llama_cpp_gpu_layers
+    )
     if gpu_layers <= 0:
         return _fallback_to_heuristic(["Estimación heurística: gpu_layers=0 (modelo en CPU)."])
 
     ctx_size = int(load_config.ctx_size or settings.llama_cpp_ctx_size)
     parallel_slots = max(1, load_config.parallel_slots or settings.llama_cpp_parallel_slots)
-    kv_dtype_bytes = vp.kv_dtype_bytes_for_cache_type(load_config.cache_type_k or load_config.cache_type_v)
+    kv_dtype_bytes = vp.kv_dtype_bytes_for_cache_type(
+        load_config.cache_type_k or load_config.cache_type_v
+    )
 
     rs_rollback_snapshots = 0
     if load_config.speculative is not None:
@@ -1350,9 +1451,16 @@ def _estimate_llama_cpp_memory(
         arch
         if offloaded == total_layers
         else vp.ModelArch(
-            offloaded, arch.n_kv_heads, arch.key_length, arch.value_length,
-            arch.hidden_size, arch.context_length, arch.weight_dtype_bytes,
-            int(arch.kv_elements_per_token_override * frac) if arch.kv_elements_per_token_override else 0,
+            offloaded,
+            arch.n_kv_heads,
+            arch.key_length,
+            arch.value_length,
+            arch.hidden_size,
+            arch.context_length,
+            arch.weight_dtype_bytes,
+            int(arch.kv_elements_per_token_override * frac)
+            if arch.kv_elements_per_token_override
+            else 0,
             arch.rs_cache_mb_per_slot * frac,
             arch.fixed_load_overhead_mb * frac,
         )
@@ -1360,7 +1468,9 @@ def _estimate_llama_cpp_memory(
     draft_overhead_mb = (
         vp.mtp_draft_overhead_mb(parallel_slots) if rs_rollback_snapshots > 0 else 0.0
     )
-    rs_mb = vp.rs_cache_vram_mb(kv_arch, slots=parallel_slots, rollback_snapshots=rs_rollback_snapshots)
+    rs_mb = vp.rs_cache_vram_mb(
+        kv_arch, slots=parallel_slots, rollback_snapshots=rs_rollback_snapshots
+    )
     fixed_mb = vp.fixed_overhead_vram_mb(kv_arch)
     kv_mb = vp.kv_vram_mb(kv_arch, max(1, ctx_size), kv_dtype_bytes)
     overhead_mb = vp.DEFAULT_OVERHEAD_MB + draft_overhead_mb
@@ -1368,15 +1478,18 @@ def _estimate_llama_cpp_memory(
 
     estimated_max_context_length = None
     if total_vram_mb is not None:
-        estimated_max_context_length = vp.max_context_tokens(
-            total_vram_mb,
-            weights_mb,
-            kv_arch,
-            slots=parallel_slots,
-            kv_dtype_bytes=kv_dtype_bytes,
-            overhead_mb=overhead_mb,
-            rs_rollback_snapshots=rs_rollback_snapshots,
-        ) or None
+        estimated_max_context_length = (
+            vp.max_context_tokens(
+                total_vram_mb,
+                weights_mb,
+                kv_arch,
+                slots=parallel_slots,
+                kv_dtype_bytes=kv_dtype_bytes,
+                overhead_mb=overhead_mb,
+                rs_rollback_snapshots=rs_rollback_snapshots,
+            )
+            or None
+        )
 
     notes = [
         "Estimación determinística desde el header GGUF (arquitectura, KV cache, "
@@ -1412,8 +1525,48 @@ def _estimate_llama_cpp_memory(
     return estimate
 
 
+def _runtime_meta(state) -> dict[str, Any]:
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    runtime = extra.get("_runtime")
+    return runtime if isinstance(runtime, dict) else {}
+
+
+def _runtime_slots(state) -> int:
+    """Return declared physical concurrency, including unloaded models."""
+
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    runtime = _runtime_meta(state)
+    candidates = [runtime.get("parallelism")]
+    for section_name in ("llama_cpp", "use_case"):
+        section = extra.get(section_name)
+        if isinstance(section, dict):
+            candidates.extend(
+                [section.get("parallel_slots"), section.get("parallelSlots"), section.get("slots")]
+            )
+    for value in candidates:
+        try:
+            slots = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if slots > 0:
+            return slots
+    return 1
+
+
+def _runtime_gpus(state) -> list[int]:
+    if state.current_gpu:
+        return list(state.current_gpu)
+    raw = _runtime_meta(state).get("gpu_indices")
+    if not isinstance(raw, list):
+        return []
+    try:
+        return [int(index) for index in raw]
+    except (TypeError, ValueError):
+        return []
+
+
 async def _overlay_loaded_derived_state(mm, states: list) -> list:
-    """Roll a loaded derived worker's live status onto its base catalog entry.
+    """Roll a derived worker's live lifecycle onto its base catalog entry.
 
     Runtime presets load a per-request-size derived worker key
     (``base_model_id::<hash>``), not the base ``model_id`` itself — see
@@ -1426,10 +1579,9 @@ async def _overlay_loaded_derived_state(mm, states: list) -> list:
     nothing is loaded. Reproduced live 2026-10-26: qwen3.8:27b showing
     "Sin modelos cargados" while GPU1 sat at 95% util / 17.7GB used.
 
-    Overlays only the runtime-facing fields (status, current_gpu,
-    vram_used_mb, loaded_at, last_request_at, worker_info) from the most
-    recently loaded derived sibling; identity/config fields (model_id,
-    display_name, capabilities, extra_config, ...) stay the base entry's own.
+    Loading and unloading variants must be visible too: otherwise a cold
+    start disappears from the UI until it finishes, leaving no load to cancel.
+    Identity/config fields remain the base entry's own.
     """
     import dataclasses
     from datetime import UTC, datetime
@@ -1438,28 +1590,69 @@ async def _overlay_loaded_derived_state(mm, states: list) -> list:
 
     min_dt = datetime.min.replace(tzinfo=UTC)
     all_states = await mm.list_states(include_derived=True)
-    loaded_derived_by_base: dict[str, Any] = {}
+    canonical_ids = {state.model_id for state in states}
+    derived_by_base: dict[str, list[Any]] = {}
     for candidate in all_states:
-        if candidate.status != ModelStatus.LOADED:
+        base_id = _canonical_runtime_id(candidate.model_id, canonical_ids)
+        if base_id is None or base_id == candidate.model_id:
             continue
-        base_id, sep, _suffix = candidate.model_id.partition("::")
-        if not sep:
-            continue
-        existing = loaded_derived_by_base.get(base_id)
-        if existing is None or (candidate.loaded_at or min_dt) > (existing.loaded_at or min_dt):
-            loaded_derived_by_base[base_id] = candidate
+        derived_by_base.setdefault(base_id, []).append(candidate)
 
     overlaid = []
     for state in states:
-        derived = loaded_derived_by_base.get(state.model_id) if state.status != ModelStatus.LOADED else None
+        siblings = derived_by_base.get(state.model_id, [])
+        loading = [item for item in siblings if item.status == ModelStatus.LOADING]
+        unloading = [item for item in siblings if item.status == ModelStatus.UNLOADING]
+        loaded = [item for item in siblings if item.status == ModelStatus.LOADED]
+        errors = [item for item in siblings if item.status == ModelStatus.ERROR]
+        transition_getter = getattr(mm, "runtime_transition", None)
+        transition = transition_getter(state.model_id) if callable(transition_getter) else None
+        if transition == "downsizing":
+            pool = loading or unloading or loaded
+        else:
+            pool = loading or unloading or loaded or errors
+        derived = max(pool, key=lambda item: item.loaded_at or min_dt) if pool else None
+
+        active = derived or state
+        phase = transition or active.status.value
+        if transition is None and derived is not None and derived.status == ModelStatus.LOADING:
+            resident = loaded + ([state] if state.status == ModelStatus.LOADED else [])
+            target_context = int(_runtime_meta(derived).get("effective_context") or 0)
+            target_gpus = len(_runtime_gpus(derived))
+            if any(
+                target_context > int(_runtime_meta(item).get("effective_context") or 0)
+                or target_gpus > len(_runtime_gpus(item))
+                for item in resident
+            ):
+                phase = "upsizing"
+
+        can_downsize = any(
+            item.status == ModelStatus.LOADED
+            and len(_runtime_gpus(item)) > 1
+            and not getattr(mm, "is_busy", lambda _model_id: False)(item.model_id)
+            and getattr(mm, "can_downsize_runtime", lambda _model_id: True)(item.model_id)
+            for item in [state, *siblings]
+        )
+        common = {
+            "runtime_phase": phase,
+            "runtime_worker_id": active.model_id if active.status in {
+                ModelStatus.LOADING,
+                ModelStatus.LOADED,
+                ModelStatus.UNLOADING,
+                ModelStatus.ERROR,
+            } else None,
+            "runtime_slots": _runtime_slots(active),
+            "can_cancel_load": active.status == ModelStatus.LOADING,
+            "can_downsize": can_downsize,
+        }
         if derived is None:
-            overlaid.append(state)
+            overlaid.append(dataclasses.replace(state, **common))
             continue
         overlaid.append(
             dataclasses.replace(
                 state,
                 status=derived.status,
-                current_gpu=derived.current_gpu,
+                current_gpu=_runtime_gpus(derived),
                 vram_used_mb=derived.vram_used_mb,
                 loaded_at=derived.loaded_at,
                 last_request_at=derived.last_request_at or state.last_request_at,
@@ -1470,7 +1663,8 @@ async def _overlay_loaded_derived_state(mm, states: list) -> list:
                 # base entry's own cached capabilities are stale defaults
                 # from before it was ever loaded.
                 capabilities=derived.capabilities,
-                error_message=None,
+                error_message=derived.error_message,
+                **common,
             )
         )
     return overlaid

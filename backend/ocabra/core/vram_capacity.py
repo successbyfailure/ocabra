@@ -8,6 +8,7 @@ the pure math is in :mod:`ocabra.core.vram_planner`.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import copy
@@ -169,18 +170,38 @@ async def resolve_use_case(state, gpu_total_mb: float) -> dict | None:
         or settings.vllm_gpu_memory_utilization
     )
 
+    context_is_pool = bool(uc.get("context_is_pool", False))
+    requested_context = uc.get("context")
+    unified_llama_pool = backend == "llama_cpp" and context_is_pool
+    planner_context = requested_context
+    if unified_llama_pool and requested_context != "max":
+        try:
+            planner_context = math.ceil(int(requested_context) / slots)
+        except (TypeError, ValueError):
+            planner_context = requested_context
+
     plan = vp.plan_use_case(
         backend, res.arch, res.weights_mb,
         gpu_total_mb=gpu_total_mb,
-        requested_context=uc.get("context"),
+        requested_context=planner_context,
         slots=slots,
         gpu_memory_utilization=gpu_mem_util,
         kv_dtype_bytes=kv_bytes,
     )
+    if unified_llama_pool:
+        plan["max_context"] = int(plan.get("max_context") or 0) * slots
+        aggregate_effective = int(plan.get("effective_context") or 0) * slots
+        if requested_context != "max":
+            try:
+                aggregate_effective = min(int(requested_context), aggregate_effective)
+            except (TypeError, ValueError):
+                pass
+        plan["effective_context"] = aggregate_effective
     plan["applied"] = True
     plan["kv_dtype"] = kv_label
     plan["vllm_kv_cache_dtype"] = vllm_kv
     plan["llama_cache_type"] = llama_ct
+    plan["context_is_pool"] = context_is_pool
     return plan
 
 
@@ -198,14 +219,11 @@ def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> d
 
     if backend in ("llama_cpp", "bitnet"):
         sect = merged.setdefault("llama_cpp", {})
-        # ``ctx`` (plan["effective_context"]) is the PER-SLOT context —
-        # vram_planner.max_context_tokens already divided the fitting budget
-        # by ``slots`` to get it. But llama-server's own ``--ctx-size`` is the
-        # TOTAL pool, which it then divides by ``--parallel`` internally to
-        # get n_ctx_slot. Passing the per-slot value straight through as
-        # ctx_size double-divides it — each slot would end up with
-        # ctx/slots tokens instead of ctx. Multiply back out here.
-        sect["ctx_size"] = ctx * slots
+        # Legacy presets express context per slot and therefore materialize
+        # ``ctx * slots``. Unified-KV adaptive presets express the aggregate
+        # physical pool: every slot can address it and oCabra's weighted gate
+        # controls the sum of concurrent reservations.
+        sect["ctx_size"] = ctx if plan.get("context_is_pool") else ctx * slots
         sect["parallel_slots"] = slots
         ct = plan.get("llama_cache_type")
         if ct and ct != "f16":

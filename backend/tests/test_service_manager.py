@@ -8,6 +8,17 @@ import pytest
 from ocabra.core.service_manager import ServiceManager
 
 
+class _FakeGPUManager:
+    def __init__(self) -> None:
+        self.locks: dict[tuple[int, str], int] = {}
+
+    async def lock_vram(self, gpu_index: int, amount_mb: int, owner: str) -> None:
+        self.locks[(gpu_index, owner)] = amount_mb
+
+    async def unlock_vram(self, gpu_index: int, owner: str) -> None:
+        self.locks.pop((gpu_index, owner), None)
+
+
 @pytest.mark.asyncio
 async def test_service_manager_refresh_sets_service_alive(monkeypatch) -> None:
     events: list[tuple[str, dict]] = []
@@ -36,6 +47,72 @@ async def test_service_manager_refresh_sets_service_alive(monkeypatch) -> None:
     assert state.status == "active"
     assert events[-1][0] == "service:events"
     assert states["service:state:comfyui"]["service_alive"] is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_releases_unmaterialized_reservation_for_stopped_container(
+    monkeypatch,
+) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def not_alive(self, state) -> bool:
+        _ = self, state
+        return False
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(ServiceManager, "_check_service_alive", not_alive)
+    monkeypatch.setattr(ServiceManager, "_is_container_running", not_alive)
+
+    manager = ServiceManager()
+    gpu_manager = _FakeGPUManager()
+    manager.set_gpu_manager(gpu_manager)  # type: ignore[arg-type]
+
+    await manager.reserve_gpu_vram("comfyui", 5903)
+    assert gpu_manager.locks == {(0, "service:comfyui"): 5903}
+
+    state = await manager.refresh("comfyui")
+
+    assert state.status == "unreachable"
+    assert state.vram_reserved_at is None
+    assert gpu_manager.locks == {}
+
+
+@pytest.mark.asyncio
+async def test_refresh_keeps_startup_reservation_while_container_runs(monkeypatch) -> None:
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def not_alive(self, state) -> bool:
+        _ = self, state
+        return False
+
+    async def container_running(self, state) -> bool:
+        _ = self, state
+        return True
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(ServiceManager, "_check_service_alive", not_alive)
+    monkeypatch.setattr(ServiceManager, "_is_container_running", container_running)
+
+    manager = ServiceManager()
+    gpu_manager = _FakeGPUManager()
+    manager.set_gpu_manager(gpu_manager)  # type: ignore[arg-type]
+
+    await manager.reserve_gpu_vram("comfyui", 5903)
+    state = await manager.refresh("comfyui")
+
+    assert state.status == "unreachable"
+    assert state.vram_reserved_at is not None
+    assert gpu_manager.locks == {(0, "service:comfyui"): 5903}
 
 
 @pytest.mark.asyncio

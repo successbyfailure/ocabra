@@ -1,5 +1,6 @@
 import asyncio
 import json as _json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -13,6 +14,43 @@ from ocabra.config import settings
 from ocabra.core.fair_slot_gate import WorkerPoolFairGates
 
 logger = structlog.get_logger(__name__)
+
+_EMPTY_THINK_PREFIX_RE = re.compile(r"^\s*<think>\s*</think>\s*", re.IGNORECASE)
+
+
+def _strip_empty_think_prefix(content: Any) -> Any:
+    """Remove only a leading, empty Qwen-style thinking block."""
+
+    if not isinstance(content, str):
+        return content
+    return _EMPTY_THINK_PREFIX_RE.sub("", content, count=1)
+
+
+def _consume_think_prefix(content: str) -> tuple[str, bool]:
+    """Resolve a possibly chunked empty ``<think>`` prefix.
+
+    Returns ``(output, resolved)``. While unresolved, callers retain the
+    accumulated prefix and emit an empty content delta. A non-empty thinking
+    block is released untouched; only an empty one is removed.
+    """
+
+    candidate = content.lstrip()
+    lowered = candidate.lower()
+    opening = "<think>"
+    if not lowered or opening.startswith(lowered):
+        return "", False
+    if not lowered.startswith(opening):
+        return content, True
+
+    after_open = candidate[len(opening) :]
+    close_at = after_open.lower().find("</think>")
+    if close_at >= 0:
+        if after_open[:close_at].strip():
+            return content, True
+        return _strip_empty_think_prefix(content), True
+    if after_open.strip():
+        return content, True
+    return "", False
 
 
 def _ollama_native_messages(messages: Any) -> tuple[list[dict[str, Any]], bool]:
@@ -48,9 +86,7 @@ def _ollama_native_messages(messages: Any) -> tuple[list[dict[str, Any]], bool]:
 
             block_type = str(block.get("type") or "")
             text = block.get("text")
-            if block_type in {"text", "input_text", "output_text"} and isinstance(
-                text, str
-            ):
+            if block_type in {"text", "input_text", "output_text"} and isinstance(text, str):
                 text_parts.append(text)
                 continue
             if block_type == "image_url":
@@ -105,9 +141,7 @@ def _coerce_tool_arguments_to_object(messages: list[dict[str, Any]]) -> None:
                     pass
 
 
-def _apply_openai_tool_choice(
-    native: dict[str, Any], tool_choice: Any
-) -> None:
+def _apply_openai_tool_choice(native: dict[str, Any], tool_choice: Any) -> None:
     """Translate OpenAI's ``tool_choice`` into something Ollama can honour.
 
     Ollama 0.4+ does not expose a native ``tool_choice`` knob; the model
@@ -143,9 +177,9 @@ def _apply_openai_tool_choice(
         name = function.get("name")
         if isinstance(name, str) and name:
             filtered = [
-                tool for tool in tools
-                if isinstance(tool, dict)
-                and (tool.get("function") or {}).get("name") == name
+                tool
+                for tool in tools
+                if isinstance(tool, dict) and (tool.get("function") or {}).get("name") == name
             ]
             if filtered:
                 native["tools"] = filtered
@@ -385,7 +419,9 @@ def _summarize_messages_for_log(body: dict) -> list[dict] | None:
     return out
 
 
-def _log_upstream_http_error(logger_, event: str, *, model_id: str, path: str, body: dict, exc: httpx.HTTPStatusError) -> None:
+def _log_upstream_http_error(
+    logger_, event: str, *, model_id: str, path: str, body: dict, exc: httpx.HTTPStatusError
+) -> None:
     try:
         error_body = exc.response.text[:2000]
     except Exception:  # noqa: BLE001 — best-effort diagnostics only
@@ -448,7 +484,12 @@ class WorkerPool:
         # Cooldown elapsed: let one probe request through (half-open) instead
         # of tripping forever on a worker that may have already recovered.
 
-    def peek_queue_state(self, model_id: str) -> dict[str, Any] | None:
+    def peek_queue_state(
+        self,
+        model_id: str,
+        *,
+        kv_tokens: int = 0,
+    ) -> dict[str, Any] | None:
         """Read-only snapshot of a worker's fair-share gate — ``None`` when
         no gate exists yet (nothing has used fairness on this worker).
 
@@ -463,10 +504,13 @@ class WorkerPool:
         gate = self._fair_gates.peek(model_id)
         if gate is None:
             return None
+        snapshot = gate.snapshot()
+        kv_free = snapshot["kv_free_tokens"]
+        kv_saturated = kv_free is not None and max(0, int(kv_tokens)) > kv_free
         return {
-            "in_flight": gate._in_flight,
-            "slots": gate.slots,
-            "saturated": gate._in_flight >= gate.slots,
+            **snapshot,
+            "kv_saturated": kv_saturated,
+            "saturated": bool(snapshot["slot_saturated"] or kv_saturated),
         }
 
     def peek_gate_priority(
@@ -565,18 +609,23 @@ class WorkerPool:
     def release_port(self, port: int) -> None:
         self._used_ports.discard(port)
 
-    async def _preempt_batch_if_saturated(self, model_id: str, gate, is_batch: bool) -> None:
-        """An interactive caller is about to wait on a gate every slot of
-        which is held by batch-origin work — nothing will free up on its
-        own soon. Ask the coordinator to cancel enough of it per policy
-        before we start waiting, instead of just queueing behind it (see
-        ``batch_priority.py`` for the measured motivation: with all slots
-        saturated, a new request waits almost the full remaining duration
-        of whatever finishes first).
+    async def _preempt_batch_if_saturated(
+        self,
+        model_id: str,
+        gate,
+        is_batch: bool,
+        kv_tokens: int = 0,
+    ) -> None:
+        """Preempt batch work when it blocks an interactive admission.
+
+        Blocking can come from every physical slot being held by batch work,
+        or from batch KV reservations leaving too little room even though a
+        physical slot remains free. Ask the coordinator to cancel according
+        to its policy before the interactive caller starts waiting.
         """
         if is_batch or self._batch_priority is None:
             return
-        saturated = gate.batch_holds_all_slots()
+        saturated = gate.batch_blocks(kv_tokens)
         logger.info(
             "batch_priority_check",
             model_id=model_id,
@@ -602,11 +651,13 @@ class WorkerPool:
         user_key: str | None = None,
         slots: int = 1,
         is_batch: bool = False,
+        kv_capacity_tokens: int | None = None,
+        kv_tokens: int = 0,
     ) -> Any:
         if user_key is not None:
-            gate = self._fair_gates.get(model_id, slots)
-            await self._preempt_batch_if_saturated(model_id, gate, is_batch)
-            async with gate.slot(user_key, is_batch=is_batch):
+            gate = self._fair_gates.get(model_id, slots, kv_capacity_tokens)
+            await self._preempt_batch_if_saturated(model_id, gate, is_batch, kv_tokens)
+            async with gate.slot(user_key, is_batch=is_batch, kv_tokens=kv_tokens):
                 return await self._forward_request_unfair(model_id, path, body)
         return await self._forward_request_unfair(model_id, path, body)
 
@@ -615,6 +666,9 @@ class WorkerPool:
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
         self._check_circuit_breaker(model_id)
+        backend = self._backends.get(worker.backend_type)
+        if backend is not None:
+            await backend.prepare_request(worker.model_id, path, body)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -644,7 +698,12 @@ class WorkerPool:
             raise InferenceTimeoutError(model_id, path, timeout_s) from exc
         except httpx.HTTPStatusError as exc:
             _log_upstream_http_error(
-                logger, "inference_upstream_http_error", model_id=model_id, path=path, body=body, exc=exc
+                logger,
+                "inference_upstream_http_error",
+                model_id=model_id,
+                path=path,
+                body=body,
+                exc=exc,
             )
             if _looks_like_dead_backend(exc):
                 self._record_forward_failure(model_id)
@@ -664,6 +723,8 @@ class WorkerPool:
                 msg = choice.get("message") or choice.get("delta")
                 if msg and "reasoning" in msg:
                     msg["reasoning_content"] = msg.pop("reasoning")
+                if msg and "content" in msg:
+                    msg["content"] = _strip_empty_think_prefix(msg["content"])
         if settings.langfuse_enabled:
             from ocabra.integrations.langfuse_tracer import trace_generation
 
@@ -688,22 +749,29 @@ class WorkerPool:
         user_key: str | None = None,
         slots: int = 1,
         is_batch: bool = False,
+        kv_capacity_tokens: int | None = None,
+        kv_tokens: int = 0,
     ) -> AsyncIterator[bytes]:
         if user_key is None:
             async for chunk in self._forward_stream_unfair(model_id, path, body):
                 yield chunk
             return
-        gate = self._fair_gates.get(model_id, slots)
-        await self._preempt_batch_if_saturated(model_id, gate, is_batch)
-        async with gate.slot(user_key, is_batch=is_batch):
+        gate = self._fair_gates.get(model_id, slots, kv_capacity_tokens)
+        await self._preempt_batch_if_saturated(model_id, gate, is_batch, kv_tokens)
+        async with gate.slot(user_key, is_batch=is_batch, kv_tokens=kv_tokens):
             async for chunk in self._forward_stream_unfair(model_id, path, body):
                 yield chunk
 
-    async def _forward_stream_unfair(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
+    async def _forward_stream_unfair(
+        self, model_id: str, path: str, body: dict
+    ) -> AsyncIterator[bytes]:
         worker = self._workers.get(model_id)
         if not worker:
             raise KeyError(f"No worker found for model '{model_id}'")
         self._check_circuit_breaker(model_id)
+        backend = self._backends.get(worker.backend_type)
+        if backend is not None:
+            await backend.prepare_request(worker.model_id, path, body)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -748,7 +816,12 @@ class WorkerPool:
                 raise InferenceTimeoutError(model_id, path, timeout_s) from exc
             except httpx.HTTPStatusError as exc:
                 _log_upstream_http_error(
-                    logger, "inference_upstream_stream_http_error", model_id=model_id, path=path, body=body, exc=exc
+                    logger,
+                    "inference_upstream_stream_http_error",
+                    model_id=model_id,
+                    path=path,
+                    body=body,
+                    exc=exc,
                 )
                 if _looks_like_dead_backend(exc):
                     self._record_forward_failure(model_id)
@@ -890,6 +963,8 @@ class WorkerPool:
         only the JSON payload of ``data:`` lines, and re-emits valid SSE.
         """
         buf = b""
+        pending_content: dict[int, str] = {}
+        resolved_content: set[int] = set()
         async for chunk in raw:
             buf += chunk
             # Process all complete lines in the buffer
@@ -901,11 +976,31 @@ class WorkerPool:
                     try:
                         payload = _json.loads(line[6:])
                         changed = False
-                        for choice in payload.get("choices", []):
+                        for position, choice in enumerate(payload.get("choices", [])):
                             delta = choice.get("delta")
                             if delta and "reasoning" in delta:
                                 delta["reasoning_content"] = delta.pop("reasoning")
                                 changed = True
+                            choice_index = int(choice.get("index", position))
+                            if delta and choice_index not in resolved_content:
+                                content = delta.get("content")
+                                if isinstance(content, str):
+                                    combined = pending_content.get(choice_index, "") + content
+                                    output, resolved = _consume_think_prefix(combined)
+                                    if resolved:
+                                        resolved_content.add(choice_index)
+                                        pending_content.pop(choice_index, None)
+                                        delta["content"] = output
+                                    else:
+                                        pending_content[choice_index] = combined
+                                        delta["content"] = ""
+                                    changed = True
+                                elif choice.get("finish_reason") is not None:
+                                    pending = pending_content.pop(choice_index, "")
+                                    if pending:
+                                        delta["content"] = pending
+                                        changed = True
+                                    resolved_content.add(choice_index)
                         if changed:
                             line = (
                                 b"data: "

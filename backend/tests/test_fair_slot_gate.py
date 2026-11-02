@@ -4,7 +4,11 @@ import asyncio
 
 import pytest
 
-from ocabra.core.fair_slot_gate import FairSlotGate, WorkerPoolFairGates
+from ocabra.core.fair_slot_gate import (
+    FairSlotGate,
+    KVCapacityError,
+    WorkerPoolFairGates,
+)
 
 
 @pytest.mark.asyncio
@@ -81,9 +85,7 @@ async def test_two_users_alternate_once_both_have_backlogs():
 
     async def step(label_hint: str):
         await gate.release()
-        done, _ = await asyncio.wait(
-            [*alice_more, *bob_more], return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait([*alice_more, *bob_more], return_when=asyncio.FIRST_COMPLETED)
         for fut in done:
             if fut in alice_more:
                 order.append("alice")
@@ -102,7 +104,9 @@ async def test_two_users_alternate_once_both_have_backlogs():
     for i in range(1, len(order)):
         if order[i] == order[i - 1]:
             # Allowed only once the other user's queue has fully drained.
-            assert order[i - 1] not in order[i:], f"same user served twice in a row too early: {order}"
+            assert order[i - 1] not in order[i:], (
+                f"same user served twice in a row too early: {order}"
+            )
 
 
 @pytest.mark.asyncio
@@ -169,3 +173,98 @@ def test_worker_pool_fair_gates_resizes_on_slot_count_change():
     gate_resized = registry.get("worker-1", slots=4)
     assert gate_resized is not gate_a
     assert gate_resized.slots == 4
+
+
+@pytest.mark.asyncio
+async def test_kv_reservation_blocks_until_both_dimensions_fit():
+    gate = FairSlotGate(slots=3, kv_capacity_tokens=100)
+    await gate.acquire("alice", kv_tokens=70)
+
+    bob = asyncio.create_task(gate.acquire("bob", kv_tokens=40))
+    await asyncio.sleep(0)
+    assert not bob.done()  # A physical slot is free, but only 30 KV tokens are.
+
+    carol = asyncio.create_task(gate.acquire("carol", kv_tokens=20))
+    await asyncio.sleep(0)
+    assert carol.done()  # A fitting head may use otherwise-idle capacity.
+    assert gate.snapshot()["kv_reserved_tokens"] == 90
+
+    await gate.release(kv_tokens=20)
+    assert not bob.done()
+    await gate.release(kv_tokens=70)
+    await bob
+    assert gate.snapshot()["kv_reserved_tokens"] == 40
+    await gate.release(kv_tokens=40)
+
+
+@pytest.mark.asyncio
+async def test_request_larger_than_kv_pool_is_rejected_not_queued():
+    gate = FairSlotGate(slots=4, kv_capacity_tokens=96_000)
+
+    with pytest.raises(KVCapacityError) as exc_info:
+        await gate.acquire("alice", kv_tokens=100_000)
+
+    assert exc_info.value.requested_tokens == 100_000
+    assert exc_info.value.capacity_tokens == 96_000
+    assert gate.snapshot()["in_flight"] == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_kv_reservation_can_block_with_a_physical_slot_free():
+    gate = FairSlotGate(slots=2, kv_capacity_tokens=100)
+    await gate.acquire("batch", is_batch=True, kv_tokens=70)
+
+    assert gate.snapshot()["slot_saturated"] is False
+    assert gate.batch_blocks(40) is True
+    assert gate.batch_blocks(20) is False
+
+    await gate.release(is_batch=True, kv_tokens=70)
+    assert gate.batch_blocks(40) is False
+
+
+@pytest.mark.asyncio
+async def test_cancelling_granted_weighted_slot_releases_kv_reservation():
+    gate = FairSlotGate(slots=1, kv_capacity_tokens=100)
+    entered = asyncio.Event()
+    keep_running = asyncio.Event()
+
+    async def run_request() -> None:
+        async with gate.slot("alice", kv_tokens=80):
+            entered.set()
+            await keep_running.wait()
+
+    task = asyncio.create_task(run_request())
+    await entered.wait()
+    assert gate.snapshot()["kv_reserved_tokens"] == 80
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert gate.snapshot()["in_flight"] == 0
+    assert gate.snapshot()["kv_reserved_tokens"] == 0
+
+
+def test_worker_pool_fair_gates_resizes_on_kv_capacity_change():
+    registry = WorkerPoolFairGates()
+    gate_a = registry.get("worker-1", slots=4, kv_capacity_tokens=96_000)
+    gate_same = registry.get("worker-1", slots=4, kv_capacity_tokens=96_000)
+    gate_resized = registry.get("worker-1", slots=4, kv_capacity_tokens=128_000)
+
+    assert gate_same is gate_a
+    assert gate_resized is not gate_a
+    assert gate_resized.kv_capacity_tokens == 128_000
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_fair_gates_refuses_to_orphan_active_reservation():
+    registry = WorkerPoolFairGates()
+    gate = registry.get("worker-1", slots=4, kv_capacity_tokens=96_000)
+    await gate.acquire("alice", kv_tokens=32_000)
+
+    with pytest.raises(RuntimeError, match="cannot resize active admission gate"):
+        registry.get("worker-1", slots=4, kv_capacity_tokens=128_000)
+
+    assert registry.peek("worker-1") is gate
+    assert gate.snapshot()["kv_reserved_tokens"] == 32_000
+    await gate.release(kv_tokens=32_000)

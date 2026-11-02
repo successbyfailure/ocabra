@@ -68,4 +68,5 @@ Documentación ya alineada con el código:
 
 - `docs/agents/*.md`: ya no son briefings de implementación; ahora son resúmenes de estado por stream.
 - `docs/tasks/CLAUDE-TASKS.md`, `docs/tasks/QWEN-TASKS.md`, `docs/tasks/refactor-doc-audit-swarm-plan.md`, `docs/tasks/bitnet-implementation-plan.md`: documentos históricos.
-- `docs/tasks/trtllm-compile-ui-plan.md` y `docs/tasks/langfuse-integration-plan.md`: siguen siendo planes activos.
+- `docs/tasks/trtllm-compile-ui-plan.md`, `docs/tasks/langfuse-integration-plan.md`
+  y `docs/tasks/llama-cpp-elastic-kv-plan.md`: siguen siendo planes activos.

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
-from ocabra.core.model_manager_helpers import _resolve_rs_rollback_snapshots
+from ocabra.core.model_manager_helpers import (
+    _resolve_rs_rollback_snapshots,
+    resolve_llama_cpp_option,
+)
 from ocabra.core.runtime_presets import build_runtime_key
 from ocabra.core.vram_capacity import KV_DTYPES, resolve_arch_and_weights
 
@@ -107,6 +111,101 @@ def _gpu_dict(gpu: Any) -> dict[str, int]:
         "index": int(gpu.index),
         "total_mb": int(gpu.total_vram_mb),
     }
+
+
+def _uses_unified_kv_pool(state: Any) -> bool:
+    """Whether preset context denotes one aggregate llama.cpp KV pool.
+
+    llama.cpp's legacy preset contract sized an equal context partition per
+    slot.  The oCabra build uses ``--kv-unified`` instead: all physical slots
+    draw from one pool and a single request may consume all of it.  Capacity
+    planning still accounts for per-slot fixed/RS overhead, but the context
+    exposed to selection is the aggregate pool, not ``pool / slots``.
+    """
+
+    if str(getattr(state, "backend_type", "")).lower() != "llama_cpp":
+        return False
+    raw = resolve_llama_cpp_option(state, "kv_unified", False)
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
+
+
+def _plan_preset_capacity(
+    backend: str,
+    arch: Any,
+    weights_mb: float,
+    *,
+    gpu_total_mb: int,
+    preset: Any,
+    effective_parallelism: int,
+    gpu_memory_utilization: float,
+    kv_dtype_bytes: float,
+    rs_rollback_snapshots: int,
+    unified_pool: bool,
+) -> dict[str, Any]:
+    """Plan one preset, translating unified aggregate pools for the planner.
+
+    ``vram_planner`` models equal per-slot context because that remains useful
+    for fixed slot overhead.  For unified KV we feed it ``pool / slots`` for
+    memory accounting, then translate the result back to aggregate tokens.
+    """
+
+    requested: int | str | None
+    if preset.context_mode == "max":
+        requested = "max"
+    elif unified_pool:
+        requested = math.ceil(int(preset.context_tokens or 0) / effective_parallelism)
+    else:
+        requested = preset.context_tokens
+    plan = vp.plan_use_case(
+        backend,
+        arch,
+        weights_mb,
+        gpu_total_mb=gpu_total_mb,
+        requested_context=requested,
+        slots=effective_parallelism,
+        gpu_memory_utilization=gpu_memory_utilization,
+        kv_dtype_bytes=kv_dtype_bytes,
+        rs_rollback_snapshots=rs_rollback_snapshots,
+    )
+    if not unified_pool:
+        return plan
+
+    translated = dict(plan)
+    aggregate_max = int(plan.get("max_context") or 0) * effective_parallelism
+    aggregate_effective = int(plan.get("effective_context") or 0) * effective_parallelism
+    if preset.context_mode != "max" and preset.context_tokens is not None:
+        aggregate_effective = min(int(preset.context_tokens), aggregate_effective)
+    translated["max_context"] = aggregate_max
+    translated["effective_context"] = aggregate_effective
+    return translated
+
+
+def _apply_validated_context_override(
+    *,
+    preset: Any,
+    policy: dict[str, Any],
+    effective: int,
+    hardware_max: int,
+    warnings: list[str],
+) -> tuple[int, int, list[str]]:
+    """Trust an exact, explicitly benchmarked fixed pool for this preset."""
+
+    measured = policy.get("validated_context_tokens")
+    raw = measured.get(preset.preset_key) if isinstance(measured, dict) else None
+    try:
+        validated = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        validated = None
+    if (
+        validated is None
+        or validated <= 0
+        or preset.context_mode != "fixed"
+        or int(preset.context_tokens or 0) != validated
+    ):
+        return effective, hardware_max, warnings
+    return validated, max(hardware_max, validated), []
 
 
 def resolve_effective_parallelism(state: Any, requested: int) -> tuple[int, str | None]:
@@ -209,6 +308,7 @@ async def resolve_profile_runtime_capacities(
     # "hardware_max" it reports) would silently drift back to the
     # pre-2026-10-27 over-optimistic numbers that caused the OOM.
     rs_rollback_snapshots = _resolve_rs_rollback_snapshots(state)
+    unified_pool = _uses_unified_kv_pool(state)
     model_max = resolution.arch.context_length or None
     policy = profile.runtime_policy if isinstance(profile.runtime_policy, dict) else {}
     raw_policy_max = policy.get("max_context_tokens")
@@ -278,23 +378,36 @@ async def resolve_profile_runtime_capacities(
                 "index": -1,
                 "total_mb": sum(int(gpu["total_mb"]) for gpu in selected_gpus),
             }
-            requested_context: int | str | None = (
-                "max" if preset.context_mode == "max" else preset.context_tokens
-            )
             kv_bytes = KV_DTYPES.get(str(preset.kv_cache_dtype).lower(), (2.0, None, "f16"))[0]
-            plan = vp.plan_use_case(
+            plan = _plan_preset_capacity(
                 backend,
                 resolution.arch,
                 resolution.weights_mb,
                 gpu_total_mb=virtual_gpu["total_mb"],
-                requested_context=requested_context,
-                slots=effective_parallelism,
+                preset=preset,
+                effective_parallelism=effective_parallelism,
                 gpu_memory_utilization=gpu_memory_utilization,
                 kv_dtype_bytes=kv_bytes,
                 rs_rollback_snapshots=rs_rollback_snapshots,
+                unified_pool=unified_pool,
             )
             effective = int(plan["effective_context"] or 0)
+            hardware_max = int(plan["max_context"] or 0)
             warnings = list(plan["warnings"])
+            effective, hardware_max, warnings = _apply_validated_context_override(
+                preset=preset,
+                policy=policy,
+                effective=effective,
+                hardware_max=hardware_max,
+                warnings=warnings,
+            )
+            if unified_pool and model_max is not None and effective > model_max:
+                if preset.context_mode != "max":
+                    warnings.append(
+                        f"pool {effective} supera el contexto nativo {model_max}; "
+                        f"reducido a {model_max}"
+                    )
+                effective = model_max
             if policy_max is not None and effective > policy_max:
                 if preset.context_mode != "max":
                     warnings.append(
@@ -328,7 +441,7 @@ async def resolve_profile_runtime_capacities(
                     "requested_context": preset.context_tokens,
                     "effective_context": effective,
                     "model_max": model_max,
-                    "hardware_max": int(plan["max_context"] or 0),
+                    "hardware_max": hardware_max,
                     "policy_max": policy_max,
                     "requested_parallelism": preset.parallelism,
                     "effective_parallelism": effective_parallelism,
@@ -341,22 +454,20 @@ async def resolve_profile_runtime_capacities(
             continue
 
         candidates = _ordered_candidates(preset, state, gpus)
-        requested_context: int | str | None = (
-            "max" if preset.context_mode == "max" else preset.context_tokens
-        )
         kv_bytes = KV_DTYPES.get(str(preset.kv_cache_dtype).lower(), (2.0, None, "f16"))[0]
         evaluated: list[tuple[dict[str, int], dict[str, Any]]] = []
         for gpu in candidates:
-            plan = vp.plan_use_case(
+            plan = _plan_preset_capacity(
                 backend,
                 resolution.arch,
                 resolution.weights_mb,
                 gpu_total_mb=gpu["total_mb"],
-                requested_context=requested_context,
-                slots=effective_parallelism,
+                preset=preset,
+                effective_parallelism=effective_parallelism,
                 gpu_memory_utilization=gpu_memory_utilization,
                 kv_dtype_bytes=kv_bytes,
                 rs_rollback_snapshots=rs_rollback_snapshots,
+                unified_pool=unified_pool,
             )
             evaluated.append((gpu, plan))
 
@@ -394,7 +505,22 @@ async def resolve_profile_runtime_capacities(
                 key=lambda item: item[1]["effective_context"],
             )
         effective = int(plan["effective_context"] or 0)
+        hardware_max = int(plan["max_context"] or 0)
         warnings = list(plan["warnings"])
+        effective, hardware_max, warnings = _apply_validated_context_override(
+            preset=preset,
+            policy=policy,
+            effective=effective,
+            hardware_max=hardware_max,
+            warnings=warnings,
+        )
+        if unified_pool and model_max is not None and effective > model_max:
+            if preset.context_mode != "max":
+                warnings.append(
+                    f"pool {effective} supera el contexto nativo {model_max}; "
+                    f"reducido a {model_max}"
+                )
+            effective = model_max
         if policy_max is not None and effective > policy_max:
             if preset.context_mode != "max":
                 warnings.append(
@@ -426,7 +552,7 @@ async def resolve_profile_runtime_capacities(
                 "requested_context": preset.context_tokens,
                 "effective_context": effective,
                 "model_max": model_max,
-                "hardware_max": int(plan["max_context"] or 0),
+                "hardware_max": hardware_max,
                 "policy_max": policy_max,
                 "requested_parallelism": preset.parallelism,
                 "effective_parallelism": effective_parallelism,

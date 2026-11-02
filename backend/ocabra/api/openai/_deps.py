@@ -20,7 +20,11 @@ from fastapi import Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, get_current_user
 from ocabra.core.model_manager_helpers import compute_worker_key  # noqa: F401
-from ocabra.core.runtime_coordinator import RuntimePlan, plan_profile_runtime
+from ocabra.core.runtime_coordinator import (
+    OutputTokenLimitError,
+    RuntimePlan,
+    plan_profile_runtime,
+)
 from ocabra.core.runtime_presets import ContextCapacityError
 
 if TYPE_CHECKING:
@@ -294,6 +298,14 @@ async def resolve_profile_runtime_plan(
 
     try:
         plan = await plan_profile_runtime(profile, model_manager, request_body)
+    except OutputTokenLimitError as exc:
+        raise _openai_error(
+            str(exc),
+            "invalid_request_error",
+            param=exc.parameter,
+            code="max_tokens_exceeded",
+            status_code=400,
+        ) from exc
     except ContextCapacityError as exc:
         raise _openai_error(
             str(exc),
@@ -361,11 +373,7 @@ async def resolve_profile(
     alias_target = await alias_resolver(requested) if alias_resolver is not None else None
     profile = alias_target[0] if alias_target is not None else None
     if alias_target is not None and alias_target[1]:
-        extension = (
-            dict(request_body.get("ocabra") or {})
-            if isinstance(request_body, dict)
-            else {}
-        )
+        extension = dict(request_body.get("ocabra") or {}) if isinstance(request_body, dict) else {}
         extension["context_preset"] = alias_target[1]
         request_body = {**(request_body or {}), "ocabra": extension}
     if profile is None:
@@ -496,11 +504,7 @@ async def resolve_profile(
     # APIs and persisted configuration advertise this stable identifier.
     model_state = await model_manager.get_state(requested)
     if model_state is not None:
-        if (
-            user is not None
-            and not user.is_admin
-            and requested not in user.accessible_model_ids
-        ):
+        if user is not None and not user.is_admin and requested not in user.accessible_model_ids:
             raise _openai_error(
                 f"The model '{requested}' does not exist.",
                 "invalid_request_error",
@@ -568,9 +572,7 @@ OCABRA_MODEL_HEADERS: dict = {
         "schema": {"type": "string"},
     },
     "X-Ocabra-Model-Id": {
-        "description": (
-            "Canonical model id resolved from the request (post-router)."
-        ),
+        "description": ("Canonical model id resolved from the request (post-router)."),
         "schema": {"type": "string"},
     },
     "X-Ocabra-Expected-Wait-Seconds": {
@@ -656,6 +658,28 @@ OCABRA_MODEL_HEADERS: dict = {
         ),
         "schema": {"type": "integer"},
     },
+    "X-Ocabra-KV-Queue-Saturated": {
+        "description": (
+            "``1`` when the request had to wait because its conservative KV "
+            "reservation did not fit in the unified pool remainder. Distinct "
+            "from physical slot saturation."
+        ),
+        "schema": {"type": "string", "enum": ["1"]},
+    },
+    "X-Ocabra-KV-Capacity-Tokens": {
+        "description": (
+            "Logical unified-pool capacity used by oCabra admission. Present "
+            "alongside ``X-Ocabra-KV-Queue-Saturated``."
+        ),
+        "schema": {"type": "integer"},
+    },
+    "X-Ocabra-KV-Reserved-Tokens": {
+        "description": (
+            "Logical KV tokens already reserved when the request arrived. "
+            "This is an oCabra estimate, not observed llama.cpp cell usage."
+        ),
+        "schema": {"type": "integer"},
+    },
 }
 
 
@@ -729,22 +753,22 @@ STREAMING_LOAD_RESPONSE_DOC: dict = {
             "headers below **before** triggering any model load, and "
             "interleaves two oCabra-aware SSE **comment** frames carrying "
             "load progress:\n\n"
-            '``: {\"event\":\"ocabra.model_loading\",\"model_id\":...,'
-            '\"worker_key\":...,\"status\":...,'
-            '\"expected_wait_seconds\":...}\\n\\n`` on stream open, and\n\n'
-            '``: {\"event\":\"ocabra.model_ready\",\"model_id\":...,'
-            '\"worker_key\":...,\"load_duration_ms\":...,'
-            '\"was_cold_start\":...}\\n\\n`` once the model is ready.\n\n'
+            '``: {"event":"ocabra.model_loading","model_id":...,'
+            '"worker_key":...,"status":...,'
+            '"expected_wait_seconds":...}\\n\\n`` on stream open, and\n\n'
+            '``: {"event":"ocabra.model_ready","model_id":...,'
+            '"worker_key":...,"load_duration_ms":...,'
+            '"was_cold_start":...}\\n\\n`` once the model is ready.\n\n'
             "A third, unrelated to cold-start, is emitted when the model "
             "is already loaded but every fair-share concurrency slot is "
             "occupied (see ``X-Ocabra-Slot-Queue-Saturated`` below for the "
             "non-streaming equivalent and why there's no queue position):\n\n"
-            '``: {\"event\":\"ocabra.slot_queued\",\"model_id\":...,'
-            '\"in_flight\":...,\"slots\":...}\\n\\n``\n\n'
+            '``: {"event":"ocabra.slot_queued","model_id":...,'
+            '"in_flight":...,"slots":...}\\n\\n``\n\n'
             "The leading ``:`` makes these SSE **comments**, ignored by "
             "strict OpenAI SDK parsers. oCabra-aware clients may parse the "
             "JSON after the colon. If the load fails after headers have "
-            "been flushed, the error travels as ``data: {\"error\": ...}`` "
+            'been flushed, the error travels as ``data: {"error": ...}`` '
             "in the same stream (not as an HTTP status)."
         ),
         "headers": OCABRA_MODEL_HEADERS,
@@ -1004,6 +1028,7 @@ async def _ensure_worker_loaded(
 
     Returns the :class:`ModelState` of the loaded worker.
     """
+
     async def _mark_runtime(state: ModelState) -> None:
         marker = getattr(model_manager, "mark_runtime_request", None)
         if marker is None:
@@ -1028,14 +1053,10 @@ async def _ensure_worker_loaded(
         await _mark_runtime(state)
         return state
 
-    # Dedicated worker: check if a state already exists for this key
-    state = await model_manager.get_state(worker_key)
-    if state is not None:
-        state = await _do_ensure_loaded(model_manager, worker_key)
-        await _mark_runtime(state)
-        return state
-
-    # Clone from base model
+    # Clone from the current base configuration. Derived states are retained in
+    # memory after unload, while the base configuration remains mutable. Always
+    # resolve the base first so an unloaded derived worker cannot restart with a
+    # stale option such as vision_mode or mmproj_model_id.
     base_state = await model_manager.get_state(base_model_id)
     if base_state is None:
         raise _openai_error(
@@ -1047,6 +1068,25 @@ async def _ensure_worker_loaded(
         )
 
     merged_extra = {**base_state.extra_config, **(load_overrides or {})}
+
+    # Dedicated worker: reuse an existing transient state, but refresh it when
+    # no process is running. Mutating a loaded/loading state would make its
+    # metadata disagree with the arguments of the live backend process.
+    state = await model_manager.get_state(worker_key)
+    if state is not None:
+        from ocabra.core.model_manager import LoadPolicy, ModelStatus
+
+        if state.status not in (ModelStatus.LOADED, ModelStatus.LOADING):
+            state.extra_config = merged_extra
+            state.preferred_gpu = (
+                preferred_gpu if preferred_gpu is not None else base_state.preferred_gpu
+            )
+            state.load_policy = LoadPolicy(load_policy or base_state.load_policy.value)
+            state.pin_permanent = base_state.pin_permanent
+        state = await _do_ensure_loaded(model_manager, worker_key)
+        await _mark_runtime(state)
+        return state
+
     try:
         # Derived workers are in-memory only: the profile that owns the
         # overrides is already persisted in ``model_profiles`` and knows how
@@ -1170,9 +1210,7 @@ async def _do_ensure_loaded(
     # crash, etc.) — retrying on a timer won't help, so skip the hint there.
     # Any other non-terminal status (CONFIGURED, UNLOADING, ...) is a normal
     # transitional state a short wait can resolve.
-    retry_headers = (
-        None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
-    )
+    retry_headers = None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
     raise _openai_error(
         (
             f"Model '{model_id}' is not available "
@@ -1313,9 +1351,7 @@ async def ensure_loaded(
         detail_suffix = f" detail: {state.error_message}"
 
     # See the twin ensure_worker_loaded() site above for why ERROR skips the hint.
-    retry_headers = (
-        None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
-    )
+    retry_headers = None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
     raise _openai_error(
         (
             f"Model '{resolved_model_id}' is not available "
@@ -1343,7 +1379,11 @@ def is_batch_origin_request(request: Request) -> bool:
     from ocabra.config import settings
 
     gw_token = request.headers.get("X-Gateway-Token", "")
-    if not gw_token or not settings.gateway_service_token or gw_token != settings.gateway_service_token:
+    if (
+        not gw_token
+        or not settings.gateway_service_token
+        or gw_token != settings.gateway_service_token
+    ):
         return False
     return request.headers.get("X-Internal-Request-Origin", "") == "batch"
 
@@ -1365,10 +1405,8 @@ def fairness_slots(state: ModelState) -> int:
     parallelism (``_runtime.parallelism`` — the coordinator always sets
     this in extra_config right before a load, see
     ``runtime_coordinator.py``); models that never go through the preset
-    system (e.g. a plain Ollama registration with no use_case block) fall
-    back to 1, which just makes the gate a strict one-at-a-time fair
-    queue — correct, if conservative, for a backend whose real
-    concurrency oCabra doesn't track.
+    system fall back to configured llama.cpp ``parallel_slots`` or
+    ``use_case.slots``. Unknown backends remain conservatively one-at-a-time.
     """
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
     runtime_meta = extra.get("_runtime")
@@ -1377,7 +1415,71 @@ def fairness_slots(state: ModelState) -> int:
             return max(1, int(runtime_meta.get("parallelism") or 1))
         except (TypeError, ValueError):
             return 1
+    if state.backend_type == "llama_cpp":
+        from ocabra.core.model_manager_helpers import resolve_llama_cpp_option
+
+        configured = resolve_llama_cpp_option(state, "parallel_slots", None)
+        if configured is None:
+            use_case = extra.get("use_case")
+            if isinstance(use_case, dict):
+                configured = use_case.get("slots")
+        try:
+            return max(1, int(configured or 1))
+        except (TypeError, ValueError):
+            return 1
     return 1
+
+
+def fairness_kv_budget(
+    state: ModelState,
+    *,
+    required_tokens: int | None,
+    effective_context: int | None = None,
+) -> tuple[int | None, int]:
+    """Return ``(pool_capacity, request_reservation)`` for fair admission.
+
+    KV weighting is deliberately opt-in at runtime: only llama.cpp workers
+    that explicitly enabled the unified cache publish a capacity. Every other
+    backend receives ``(None, 0)`` and keeps the historical slot-only gate.
+    """
+    if state.backend_type != "llama_cpp" or required_tokens is None:
+        return None, 0
+
+    from ocabra.core.model_manager_helpers import resolve_llama_cpp_option
+
+    enabled = resolve_llama_cpp_option(state, "kv_unified", False)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return None, 0
+
+    runtime = state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
+    raw_capacity = effective_context
+    if raw_capacity is None and isinstance(runtime, dict):
+        raw_capacity = runtime.get("effective_context")
+    if raw_capacity is None:
+        raw_capacity = resolve_llama_cpp_option(state, "ctx_size", None)
+    if raw_capacity is None and isinstance(state.extra_config, dict):
+        use_case = state.extra_config.get("use_case")
+        if isinstance(use_case, dict):
+            raw_capacity = use_case.get("context")
+    try:
+        capacity = int(raw_capacity or 0)
+        # Legacy runtime presets express context per slot. Adaptive unified-KV
+        # presets instead expose the aggregate physical pool so one request can
+        # use all of it; those must not be multiplied by parallelism.
+        if (
+            isinstance(runtime, dict)
+            and runtime.get("preset_key")
+            and not runtime.get("context_is_pool")
+        ):
+            capacity *= max(1, int(runtime.get("parallelism") or 1))
+        reservation = max(0, int(required_tokens))
+    except (TypeError, ValueError):
+        return None, 0
+    if capacity <= 0:
+        return None, 0
+    return capacity, reservation
 
 
 def check_capability(state: ModelState, capability: str, endpoint: str) -> None:
@@ -1449,6 +1551,7 @@ def _apply_thinking_controls(state: ModelState, payload: dict) -> None:
 
 _REASONING_EFFORT_LEVELS = {"low", "medium", "high"}
 _REASONING_EFFORT_OFF = {"off", "none", "disabled", "no", "false"}
+_REASONING_EFFORT_DEFAULT = {"", "default"}
 
 
 def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
@@ -1462,14 +1565,11 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
     - **Ollama ≥0.5**: translated to the native ``think`` field
       (``True`` for low/medium/high — Ollama has a single on/off switch —
       and ``False`` for off/none/disabled).
-    - **llama.cpp (native)**: ``llama-server`` accepts ``reasoning_effort``
-      ('low'/'medium'/'high', mirroring its ``--reasoning-effort`` CLI flag)
-      and ``reasoning`` ('on'/'off'/'auto', mirroring ``--reasoning``)
-      directly as per-request JSON body fields — forwarded as-is, no
-      reshaping needed. 2026-10-29: previously silently dropped here, so
-      gemma4/qwen3.8 (both llama_cpp) had zero way to cap how much a client
-      could make them think, even though llama-server itself always
-      supported it per-request.
+    - **llama.cpp (native)**: the requested level is forwarded as
+      ``reasoning_effort`` and paired with the per-request Jinja override
+      ``chat_template_kwargs.enable_thinking``. The boolean is required when
+      the worker was launched with ``--reasoning off``: a level alone does not
+      override that launch default. ``default`` deliberately injects nothing.
     - **Everything else**: silently dropped — no-op for backends with no
       native reasoning control.
 
@@ -1480,6 +1580,8 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
     if raw is None:
         return
     value = str(raw).strip().lower()
+    if value in _REASONING_EFFORT_DEFAULT:
+        return
     if value in _REASONING_EFFORT_OFF:
         enabled = False
     elif value in _REASONING_EFFORT_LEVELS:
@@ -1510,10 +1612,16 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
         # same key still works.
         payload.setdefault("think", enabled)
     elif backend == "llama_cpp":
+        template_kwargs = payload.get("chat_template_kwargs")
+        template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
+        template_kwargs["enable_thinking"] = enabled
+        payload["chat_template_kwargs"] = template_kwargs
+        payload["reasoning_effort"] = value if enabled else "none"
         if enabled:
-            payload.setdefault("reasoning_effort", value)
-        else:
-            payload.setdefault("reasoning", "off")
+            # Chaos starts with reasoning_format=none so ordinary requests do
+            # not expose empty think tags. An explicit reasoning request wants
+            # the standard split field consumed by OpenAI-compatible clients.
+            payload.setdefault("reasoning_format", "deepseek")
 
 
 def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
@@ -1653,7 +1761,16 @@ def raise_inference_dispatch_error(exc: Exception) -> None:
     and no match to any documented status (confirmed 2026-10-31 — both are
     transient and should look like it).
     """
+    from ocabra.core.fair_slot_gate import KVCapacityError
     from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+
+    if isinstance(exc, KVCapacityError):
+        raise _openai_error(
+            str(exc),
+            "invalid_request_error",
+            code="context_length_exceeded",
+            status_code=400,
+        ) from exc
 
     if isinstance(exc, InferenceTimeoutError):
         raise _openai_error(
@@ -1684,7 +1801,11 @@ def stream_error_details(exc: Exception) -> tuple[str, str]:
     the worker's JSON error message in the SSE envelope and encode its status
     class in a stable oCabra code for request statistics.
     """
+    from ocabra.core.fair_slot_gate import KVCapacityError
     from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+
+    if isinstance(exc, KVCapacityError):
+        return str(exc), "context_length_exceeded"
 
     if isinstance(exc, InferenceTimeoutError):
         return str(exc), "generation_timeout"

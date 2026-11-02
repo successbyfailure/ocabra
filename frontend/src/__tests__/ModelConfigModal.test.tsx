@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
+import type { LlamaCppConfig } from "@/types"
 
 vi.mock("@/api/client", () => ({
   api: {
@@ -237,15 +238,35 @@ describe("ModelConfigModal", () => {
           loadedAt: null,
           extraConfig: {
             model_path: "/models/qwen.gguf",
+            llama_cpp: {
+              mmproj_model_id: "/models/legacy-mmproj.gguf",
+              vision_mode: "on_demand",
+              kv_unified: true,
+              parallel_slots: 4,
+            } as unknown as LlamaCppConfig,
           },
         }}
       />,
     )
 
+    expect((screen.getByLabelText(/Projector multimodal/i) as HTMLInputElement).value).toBe(
+      "/models/legacy-mmproj.gguf",
+    )
+    expect((screen.getByLabelText(/Política de visión/i) as HTMLSelectElement).value).toBe(
+      "on_demand",
+    )
+    expect(screen.getByText(/Pool KV total compartido por 4 slots/i)).toBeTruthy()
+    expect((screen.getByDisplayValue("activada") as HTMLSelectElement).value).toBe("true")
     fireEvent.change(screen.getByLabelText(/GPU layers/i), { target: { value: "24" } })
     fireEvent.change(screen.getByLabelText(/Context size/i), { target: { value: "16384" } })
     fireEvent.click(screen.getByLabelText(/flash attention/i))
     fireEvent.click(screen.getByLabelText(/embedding mode/i))
+    fireEvent.change(screen.getByLabelText(/Projector multimodal/i), {
+      target: { value: "/models/mmproj.gguf" },
+    })
+    fireEvent.change(screen.getByLabelText(/Política de visión/i), {
+      target: { value: "on_demand" },
+    })
     await act(async () => {
       fireEvent.click(screen.getByText(/^Guardar$/i))
     })
@@ -260,6 +281,9 @@ describe("ModelConfigModal", () => {
             ctxSize: 16384,
             flashAttn: true,
             embedding: true,
+            mmprojModelId: "/models/mmproj.gguf",
+            visionMode: "on_demand",
+            kvUnified: true,
           }),
         }),
       }),

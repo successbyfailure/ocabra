@@ -242,6 +242,15 @@ def estimate_llama_cpp_vram_from_config(
     offloaded-layer fraction plus a small overhead.
     Returns 0 for CPU-only (gpu_layers <= 0).
     """
+    explicit_estimate = resolve_llama_cpp_option(state, "vram_estimate_mb", None)
+    if explicit_estimate is not None:
+        try:
+            estimate_mb = int(explicit_estimate)
+        except (TypeError, ValueError):
+            estimate_mb = 0
+        if estimate_mb > 0:
+            return estimate_mb
+
     gpu_layers = resolve_llama_cpp_gpu_layers(state, default_gpu_layers)
     if gpu_layers <= 0:
         return 0

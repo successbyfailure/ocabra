@@ -1,49 +1,50 @@
 // Base types mirroring docs/CONTRACTS.md
 // Stream 1-D expands these. All streams consume them.
 
-export type ChatAudioFormat = "wav" | "mp3" | "m4a" | "webm" | "ogg" | "flac"
+export type ChatAudioFormat = "wav" | "mp3" | "m4a" | "webm" | "ogg" | "flac";
 
 export interface ChatTextPart {
-  type: "text"
-  text: string
+  type: "text";
+  text: string;
 }
 
 export interface ChatImageUrlPart {
-  type: "image_url"
-  image_url: { url: string }
+  type: "image_url";
+  image_url: { url: string };
 }
 
 export interface ChatInputAudioPart {
-  type: "input_audio"
-  input_audio: { data: string; format: ChatAudioFormat }
+  type: "input_audio";
+  input_audio: { data: string; format: ChatAudioFormat };
 }
 
-export type ChatContentPart = ChatTextPart | ChatImageUrlPart | ChatInputAudioPart
+export type ChatContentPart =
+  ChatTextPart | ChatImageUrlPart | ChatInputAudioPart;
 
 export interface ChatRequestMessage {
-  role: "system" | "user" | "assistant"
-  content: string | ChatContentPart[]
+  role: "system" | "user" | "assistant";
+  content: string | ChatContentPart[];
 }
 
 export interface GPUProcessInfo {
-  pid: number
-  processName: string | null
-  processType: "compute" | "graphics"
-  usedVramMb: number
+  pid: number;
+  processName: string | null;
+  processType: "compute" | "graphics";
+  usedVramMb: number;
 }
 
 export interface GPUState {
-  index: number
-  name: string
-  totalVramMb: number
-  freeVramMb: number
-  usedVramMb: number
-  utilizationPct: number
-  temperatureC: number
-  powerDrawW: number
-  powerLimitW: number
-  lockedVramMb: number
-  processes: GPUProcessInfo[]
+  index: number;
+  name: string;
+  totalVramMb: number;
+  freeVramMb: number;
+  usedVramMb: number;
+  utilizationPct: number;
+  temperatureC: number;
+  powerDrawW: number;
+  powerLimitW: number;
+  lockedVramMb: number;
+  processes: GPUProcessInfo[];
 }
 
 export type ModelStatus =
@@ -53,9 +54,11 @@ export type ModelStatus =
   | "loaded"
   | "unloading"
   | "unloaded"
-  | "error"
+  | "error";
 
-export type LoadPolicy = "pin" | "warm" | "on_demand"
+export type RuntimePhase = ModelStatus | "upsizing" | "downsizing";
+
+export type LoadPolicy = "pin" | "warm" | "on_demand";
 export type BackendType =
   | "vllm"
   | "bitnet"
@@ -73,252 +76,268 @@ export type BackendType =
   | "ollama"
   | "tensorrt_llm"
   | "llama_cpp"
-  | "sglang"
+  | "sglang";
 
 export interface ModelCapabilities {
-  chat: boolean
-  completion: boolean
-  tools: boolean
-  vision: boolean
-  embeddings: boolean
-  pooling: boolean
-  rerank: boolean
-  classification: boolean
-  score: boolean
-  reasoning: boolean
-  imageGeneration: boolean
-  imageEditing: boolean
-  audioTranscription: boolean
-  musicGeneration: boolean
-  tts: boolean
-  audioInput: boolean
-  audioOutput: boolean
-  videoInput: boolean
-  streaming: boolean
-  contextLength: number
-  nativeContextLength: number
+  chat: boolean;
+  completion: boolean;
+  tools: boolean;
+  vision: boolean;
+  embeddings: boolean;
+  pooling: boolean;
+  rerank: boolean;
+  classification: boolean;
+  score: boolean;
+  reasoning: boolean;
+  imageGeneration: boolean;
+  imageEditing: boolean;
+  audioTranscription: boolean;
+  musicGeneration: boolean;
+  tts: boolean;
+  audioInput: boolean;
+  audioOutput: boolean;
+  videoInput: boolean;
+  streaming: boolean;
+  contextLength: number;
+  nativeContextLength: number;
 }
 
 export interface ModelState {
-  modelId: string
-  displayName: string
-  backendType: BackendType
-  status: ModelStatus
-  loadPolicy: LoadPolicy
+  modelId: string;
+  displayName: string;
+  backendType: BackendType;
+  status: ModelStatus;
+  loadPolicy: LoadPolicy;
   /** Only meaningful when loadPolicy === "pin". False (default, "soft pin"):
    * preloaded at startup, never evicted by the routine LRU pass, but still
    * evictable as an absolute last resort under VRAM pressure (and reloads
    * automatically once room frees up). True ("hard pin"): excluded from
    * that last-resort path too — only an explicit admin unload moves it. */
-  pinPermanent: boolean
-  preferredGpu: number | null
-  currentGpu: number[]
-  vramUsedMb: number
-  ramUsedMb: number
-  diskSizeBytes: number | null
-  capabilities: ModelCapabilities
-  lastRequestAt: string | null
-  loadedAt: string | null
-  errorMessage?: string | null
-  schedules?: EvictionSchedule[]
-  extraConfig?: BackendExtraConfig
-  profiles?: ModelProfile[]
-  createdAt?: string | null
-  updatedAt?: string | null
-  releaseDate?: string | null
-  lastUpdated?: string | null
-  metadataFetchedAt?: string | null
+  pinPermanent: boolean;
+  preferredGpu: number | null;
+  currentGpu: number[];
+  vramUsedMb: number;
+  ramUsedMb: number;
+  diskSizeBytes: number | null;
+  capabilities: ModelCapabilities;
+  lastRequestAt: string | null;
+  loadedAt: string | null;
+  errorMessage?: string | null;
+  runtimePhase?: RuntimePhase;
+  runtimeWorkerId?: string | null;
+  runtimeSlots?: number;
+  canCancelLoad?: boolean;
+  canDownsize?: boolean;
+  schedules?: EvictionSchedule[];
+  extraConfig?: BackendExtraConfig;
+  profiles?: ModelProfile[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  releaseDate?: string | null;
+  lastUpdated?: string | null;
+  metadataFetchedAt?: string | null;
   federation?: {
-    remote: boolean
-    nodeName: string
-    nodeId: string
-  } | null
+    remote: boolean;
+    nodeName: string;
+    nodeId: string;
+  } | null;
 }
 
 export interface ModelsStorageStats {
-  path: string
-  totalBytes: number
-  usedBytes: number
-  freeBytes: number
+  path: string;
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
 }
 
 export interface VLLMConfig {
-  recipeId?: string | null
-  recipeNotes?: string[]
-  recipeModelImpl?: "auto" | "vllm" | "transformers" | null
-  recipeRunner?: "generate" | "pooling" | null
-  suggestedConfig?: Record<string, unknown>
-  suggestedTuning?: Record<string, unknown>
-  probeStatus?: HFVLLMRuntimeProbe["status"] | null
-  probeReason?: string | null
-  probeObservedAt?: string | null
-  probeRecommendedModelImpl?: HFVLLMRuntimeProbe["recommendedModelImpl"] | null
-  probeRecommendedRunner?: HFVLLMRuntimeProbe["recommendedRunner"] | null
-  modelImpl?: "auto" | "vllm" | "transformers" | null
-  runner?: "generate" | "pooling" | null
-  hfOverrides?: string | Record<string, unknown> | null
-  chatTemplate?: string | null
-  chatTemplateContentFormat?: string | null
-  generationConfig?: string | null
-  overrideGenerationConfig?: string | Record<string, unknown> | null
-  toolCallParser?: string | null
-  toolParserPlugin?: string | null
-  reasoningParser?: string | null
-  languageModelOnly?: boolean | null
-  maxNumSeqs?: number | null
-  maxNumBatchedTokens?: number | null
-  tensorParallelSize?: number | null
-  maxModelLen?: number | null
-  gpuMemoryUtilization?: number | null
-  enablePrefixCaching?: boolean
-  enableChunkedPrefill?: boolean | null
-  enforceEager?: boolean
-  trustRemoteCode?: boolean
-  swapSpace?: number | null
-  kvCacheDtype?: string | null
-  limitMmPerPrompt?: { image?: number; audio?: number; video?: number } | null
+  recipeId?: string | null;
+  recipeNotes?: string[];
+  recipeModelImpl?: "auto" | "vllm" | "transformers" | null;
+  recipeRunner?: "generate" | "pooling" | null;
+  suggestedConfig?: Record<string, unknown>;
+  suggestedTuning?: Record<string, unknown>;
+  probeStatus?: HFVLLMRuntimeProbe["status"] | null;
+  probeReason?: string | null;
+  probeObservedAt?: string | null;
+  probeRecommendedModelImpl?: HFVLLMRuntimeProbe["recommendedModelImpl"] | null;
+  probeRecommendedRunner?: HFVLLMRuntimeProbe["recommendedRunner"] | null;
+  modelImpl?: "auto" | "vllm" | "transformers" | null;
+  runner?: "generate" | "pooling" | null;
+  hfOverrides?: string | Record<string, unknown> | null;
+  chatTemplate?: string | null;
+  chatTemplateContentFormat?: string | null;
+  generationConfig?: string | null;
+  overrideGenerationConfig?: string | Record<string, unknown> | null;
+  toolCallParser?: string | null;
+  toolParserPlugin?: string | null;
+  reasoningParser?: string | null;
+  languageModelOnly?: boolean | null;
+  maxNumSeqs?: number | null;
+  maxNumBatchedTokens?: number | null;
+  tensorParallelSize?: number | null;
+  maxModelLen?: number | null;
+  gpuMemoryUtilization?: number | null;
+  enablePrefixCaching?: boolean;
+  enableChunkedPrefill?: boolean | null;
+  enforceEager?: boolean;
+  trustRemoteCode?: boolean;
+  swapSpace?: number | null;
+  kvCacheDtype?: string | null;
+  limitMmPerPrompt?: { image?: number; audio?: number; video?: number } | null;
 }
 
 export interface SGLangConfig {
-  tensorParallelSize?: number | null
-  memFractionStatic?: number | null
-  contextLength?: number | null
-  trustRemoteCode?: boolean
-  disableRadixCache?: boolean
+  tensorParallelSize?: number | null;
+  memFractionStatic?: number | null;
+  contextLength?: number | null;
+  trustRemoteCode?: boolean;
+  disableRadixCache?: boolean;
 }
 
-export type LlamaKvCacheType = "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0"
-export type LlamaCppSplitMode = "layer" | "row" | "none"
-export type LlamaCppSplitStrategy = "evenly" | "favor_main" | "single"
-export type LlamaCppRuntime = "cuda" | "rocm" | "vulkan" | "cpu"
-export type LlamaCppVisionMode = "enabled" | "disabled" | "on_demand"
+export type LlamaKvCacheType =
+  "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0";
+export type LlamaCppSplitMode = "layer" | "row" | "none";
+export type LlamaCppSplitStrategy = "evenly" | "favor_main" | "single";
+export type LlamaCppRuntime = "cuda" | "rocm" | "vulkan" | "cpu";
+export type LlamaCppVisionMode = "enabled" | "disabled" | "on_demand";
 
 export interface SpeculativeConfig {
-  draftModelId: string
-  draftN?: number | null
-  draftMin?: number | null
-  draftPMin?: number | null
+  draftModelId: string;
+  draftN?: number | null;
+  draftMin?: number | null;
+  draftPMin?: number | null;
 }
 
 export interface LlamaCppConfig {
-  gpuLayers?: number | null
-  ctxSize?: number | null
-  flashAttn?: boolean
-  embedding?: boolean
+  gpuLayers?: number | null;
+  ctxSize?: number | null;
+  flashAttn?: boolean;
+  embedding?: boolean;
   // Sprint 17.1 — Tier 1 advanced controls.
-  threads?: number | null
-  batchSize?: number | null
-  ubatchSize?: number | null
-  mlock?: boolean
+  threads?: number | null;
+  batchSize?: number | null;
+  ubatchSize?: number | null;
+  mlock?: boolean;
   // Tri-state: undefined/null => use mmap (default); false => --no-mmap.
-  mmap?: boolean | null
-  seed?: number | null
-  noKvOffload?: boolean
-  ropeFreqBase?: number | null
-  ropeFreqScale?: number | null
+  mmap?: boolean | null;
+  seed?: number | null;
+  noKvOffload?: boolean;
+  ropeFreqBase?: number | null;
+  ropeFreqScale?: number | null;
   // Sprint 17.2 — KV cache quantization
-  cacheTypeK?: LlamaKvCacheType | null
-  cacheTypeV?: LlamaKvCacheType | null
+  cacheTypeK?: LlamaKvCacheType | null;
+  cacheTypeV?: LlamaKvCacheType | null;
   // Sprint 17.3: Multi-GPU + MoE CPU offload.
-  mainGpu?: number | null
-  tensorSplit?: number[] | null
-  splitMode?: LlamaCppSplitMode | null
-  disabledGpus?: number[] | null
-  splitStrategy?: LlamaCppSplitStrategy | null
-  nCpuMoe?: number | null
-  overrideTensor?: string | null
+  mainGpu?: number | null;
+  tensorSplit?: number[] | null;
+  splitMode?: LlamaCppSplitMode | null;
+  disabledGpus?: number[] | null;
+  splitStrategy?: LlamaCppSplitStrategy | null;
+  nCpuMoe?: number | null;
+  overrideTensor?: string | null;
   // --- Sprint 17.4 ---
-  speculative?: SpeculativeConfig | null
-  runtime?: LlamaCppRuntime | null
-  parallelSlots?: number | null
-  contBatching?: boolean | null
-  keepAliveSeconds?: number | null
-  mmprojModelId?: string | null
-  visionMode?: LlamaCppVisionMode | null
+  speculative?: SpeculativeConfig | null;
+  runtime?: LlamaCppRuntime | null;
+  parallelSlots?: number | null;
+  kvUnified?: boolean | null;
+  kvUnifiedPerSlot?: number | null;
+  contBatching?: boolean | null;
+  keepAliveSeconds?: number | null;
+  mmprojModelId?: string | null;
+  visionMode?: LlamaCppVisionMode | null;
+  jinja?: boolean | null;
+  reasoning?: "on" | "off" | "auto" | null;
+  reasoningFormat?: "none" | "deepseek" | "deepseek-legacy" | "auto" | null;
+  reasoningBudget?: number | null;
 }
 
 export interface BitNetConfig {
-  gpuLayers?: number | null
-  ctxSize?: number | null
-  flashAttn?: boolean
+  gpuLayers?: number | null;
+  ctxSize?: number | null;
+  flashAttn?: boolean;
 }
 
 export interface TensorRTLLMConfig {
-  maxBatchSize?: number | null
-  contextLength?: number | null
-  trustRemoteCode?: boolean
+  maxBatchSize?: number | null;
+  contextLength?: number | null;
+  trustRemoteCode?: boolean;
 }
 
 export interface WhisperConfig {
-  diarizationEnabled?: boolean
-  diarizationModelId?: string | null
-  numWorkers?: number | null
+  diarizationEnabled?: boolean;
+  diarizationModelId?: string | null;
+  numWorkers?: number | null;
 }
 
 export interface ModelMemoryEstimate {
-  backendType: BackendType
-  gpuIndex: number | null
-  totalVramMb: number | null
-  freeVramMb: number | null
-  budgetVramMb: number | null
-  requestedContextLength: number | null
-  estimatedWeightsMb: number | null
-  estimatedEngineMbPerGpu: number | null
-  estimatedKvCacheMb: number | null
-  estimatedMaxContextLength: number | null
-  modelLoadingMemoryMb: number | null
-  maximumConcurrency: number | null
-  tensorParallelSize: number | null
-  fitsCurrentGpu: boolean | null
-  enginePresent: boolean | null
-  source: "heuristic" | "runtime_probe" | "gguf_header"
-  status: "ok" | "warning" | "error"
-  warning: string | null
-  notes: string[]
+  backendType: BackendType;
+  gpuIndex: number | null;
+  totalVramMb: number | null;
+  freeVramMb: number | null;
+  budgetVramMb: number | null;
+  requestedContextLength: number | null;
+  estimatedWeightsMb: number | null;
+  estimatedEngineMbPerGpu: number | null;
+  estimatedKvCacheMb: number | null;
+  estimatedMaxContextLength: number | null;
+  modelLoadingMemoryMb: number | null;
+  maximumConcurrency: number | null;
+  tensorParallelSize: number | null;
+  fitsCurrentGpu: boolean | null;
+  enginePresent: boolean | null;
+  source: "heuristic" | "runtime_probe" | "gguf_header";
+  status: "ok" | "warning" | "error";
+  warning: string | null;
+  notes: string[];
 }
 
 // Raw shape of GET /ocabra/models/{id}/capacity (snake_case, passed through).
 export interface ModelCapacity {
-  model_id: string
-  backend_type: string
-  applicable: boolean
-  weights_mb: number
-  overhead_mb: number
-  kv_dtype: string
-  target_gpu: number
-  gpus: { index: number; total_mb: number; free_mb: number }[]
-  note?: string
-  fits_free_now?: boolean
-  concurrency_label?: "slots" | "concurrency"
+  model_id: string;
+  backend_type: string;
+  applicable: boolean;
+  weights_mb: number;
+  overhead_mb: number;
+  kv_dtype: string;
+  target_gpu: number;
+  gpus: { index: number; total_mb: number; free_mb: number }[];
+  note?: string;
+  fits_free_now?: boolean;
+  concurrency_label?: "slots" | "concurrency";
   arch?: {
-    layers: number
-    n_kv_heads: number
-    key_length: number
-    value_length: number
-    native_context: number
-    kv_bytes_per_token: number
-    kv_mb_per_1k_tokens: number
-  }
-  capacity?: { slots: number; max_context: number; max_context_capped: number }[]
-  vram_curve?: { context: number; vram_mb: number }[]
+    layers: number;
+    n_kv_heads: number;
+    key_length: number;
+    value_length: number;
+    native_context: number;
+    kv_bytes_per_token: number;
+    kv_mb_per_1k_tokens: number;
+  };
+  capacity?: {
+    slots: number;
+    max_context: number;
+    max_context_capped: number;
+  }[];
+  vram_curve?: { context: number; vram_mb: number }[];
   validation?: {
-    requested_context: number | string
-    slots: number
-    effective_context: number
-    max_context: number
-    fits: boolean
-    warnings: string[]
-  }
+    requested_context: number | string;
+    slots: number;
+    effective_context: number;
+    max_context: number;
+    fits: boolean;
+    warnings: string[];
+  };
 }
 
 export type BackendExtraConfig = Record<string, unknown> & {
-  vllm?: VLLMConfig
-  sglang?: SGLangConfig
-  llama_cpp?: LlamaCppConfig
-  bitnet?: BitNetConfig
-  tensorrt_llm?: TensorRTLLMConfig
-  whisper?: WhisperConfig
-}
+  vllm?: VLLMConfig;
+  sglang?: SGLangConfig;
+  llama_cpp?: LlamaCppConfig;
+  bitnet?: BitNetConfig;
+  tensorrt_llm?: TensorRTLLMConfig;
+  whisper?: WhisperConfig;
+};
 
 export interface HFVLLMRuntimeProbe {
   status:
@@ -333,895 +352,934 @@ export interface HFVLLMRuntimeProbe {
     | "unsupported_tokenizer"
     | "unsupported_architecture"
     | "unavailable"
-    | "unknown"
-  reason: string | null
-  recommendedModelImpl: "auto" | "vllm" | "transformers" | null
-  recommendedRunner: "generate" | "pooling" | null
-  tokenizerLoad: boolean | null
-  configLoad: boolean | null
-  observedAt: string | null
+    | "unknown";
+  reason: string | null;
+  recommendedModelImpl: "auto" | "vllm" | "transformers" | null;
+  recommendedRunner: "generate" | "pooling" | null;
+  tokenizerLoad: boolean | null;
+  configLoad: boolean | null;
+  observedAt: string | null;
 }
 
 export interface HFVLLMSupport {
-  classification: "native_vllm" | "transformers_backend" | "pooling" | "unsupported" | "unknown"
-  label: string
-  modelImpl: "auto" | "vllm" | "transformers" | null
-  runner: "generate" | "pooling" | null
-  taskMode: "generate" | "multimodal_generate" | "pooling" | "multimodal_pooling" | null
-  requiredOverrides: string[]
-  recipeId: string | null
-  recipeNotes: string[]
-  recipeModelImpl: "auto" | "vllm" | "transformers" | null
-  recipeRunner: "generate" | "pooling" | null
-  suggestedConfig: Record<string, unknown>
-  suggestedTuning: Record<string, unknown>
-  runtimeProbe: HFVLLMRuntimeProbe | null
+  classification:
+    | "native_vllm"
+    | "transformers_backend"
+    | "pooling"
+    | "unsupported"
+    | "unknown";
+  label: string;
+  modelImpl: "auto" | "vllm" | "transformers" | null;
+  runner: "generate" | "pooling" | null;
+  taskMode:
+    | "generate"
+    | "multimodal_generate"
+    | "pooling"
+    | "multimodal_pooling"
+    | null;
+  requiredOverrides: string[];
+  recipeId: string | null;
+  recipeNotes: string[];
+  recipeModelImpl: "auto" | "vllm" | "transformers" | null;
+  recipeRunner: "generate" | "pooling" | null;
+  suggestedConfig: Record<string, unknown>;
+  suggestedTuning: Record<string, unknown>;
+  runtimeProbe: HFVLLMRuntimeProbe | null;
 }
 
 export interface ModelPatchRequest {
-  loadPolicy?: LoadPolicy
-  preferredGpu?: number | null
-  pinPermanent?: boolean
-  displayName?: string
-  schedules?: EvictionSchedule[]
-  extraConfig?: BackendExtraConfig
+  loadPolicy?: LoadPolicy;
+  preferredGpu?: number | null;
+  pinPermanent?: boolean;
+  displayName?: string;
+  schedules?: EvictionSchedule[];
+  extraConfig?: BackendExtraConfig;
 }
 
 export interface EvictionSchedule {
-  id: string
-  days: number[]
-  start: string
-  end: string
-  enabled: boolean
+  id: string;
+  days: number[];
+  start: string;
+  end: string;
+  enabled: boolean;
 }
 
 export interface DownloadJob {
-  jobId: string
-  source: "huggingface" | "ollama" | "bitnet"
-  modelRef: string
-  artifact?: string | null
+  jobId: string;
+  source: "huggingface" | "ollama" | "bitnet";
+  modelRef: string;
+  artifact?: string | null;
   registerConfig?: {
-    displayName?: string
-    loadPolicy?: LoadPolicy
-    pinPermanent?: boolean
-    preferredGpu?: number | null
-    extraConfig?: BackendExtraConfig
-  } | null
-  status: "queued" | "downloading" | "completed" | "failed" | "cancelled"
-  progressPct: number
-  speedMbS: number | null
-  etaSeconds: number | null
-  error: string | null
-  startedAt: string
-  completedAt: string | null
-  kind: "install" | "update"
+    displayName?: string;
+    loadPolicy?: LoadPolicy;
+    pinPermanent?: boolean;
+    preferredGpu?: number | null;
+    extraConfig?: BackendExtraConfig;
+  } | null;
+  status: "queued" | "downloading" | "completed" | "failed" | "cancelled";
+  progressPct: number;
+  speedMbS: number | null;
+  etaSeconds: number | null;
+  error: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  kind: "install" | "update";
 }
 
-export type DownloadSource = "huggingface" | "ollama" | "bitnet"
-export type DownloadStatus = "queued" | "downloading" | "completed" | "failed" | "cancelled"
+export type DownloadSource = "huggingface" | "ollama" | "bitnet";
+export type DownloadStatus =
+  "queued" | "downloading" | "completed" | "failed" | "cancelled";
 
 export interface HFModelCard {
-  repoId: string
-  modelName: string
-  task: string | null
-  downloads: number
-  likes: number
-  sizeGb: number | null
-  tags: string[]
-  gated: boolean
-  suggestedBackend: BackendType
+  repoId: string;
+  modelName: string;
+  task: string | null;
+  downloads: number;
+  likes: number;
+  sizeGb: number | null;
+  tags: string[];
+  gated: boolean;
+  suggestedBackend: BackendType;
   // Backends that this repo can run on (suggestedBackend always first).
   // Empty/missing array means just [suggestedBackend] is supported.
-  backendOptions?: BackendType[]
-  compatibility?: string
-  compatibilityReason?: string | null
-  vllmSupport?: HFVLLMSupport | null
-  createdAt?: string | null
-  lastModified?: string | null
+  backendOptions?: BackendType[];
+  compatibility?: string;
+  compatibilityReason?: string | null;
+  vllmSupport?: HFVLLMSupport | null;
+  createdAt?: string | null;
+  lastModified?: string | null;
 }
 
 export interface HFModelDetail extends HFModelCard {
-  siblings: Record<string, unknown>[]
-  readmeExcerpt: string | null
-  suggestedBackend: BackendType
-  estimatedVramGb: number | null
-  vllmSupport?: HFVLLMSupport | null
+  siblings: Record<string, unknown>[];
+  readmeExcerpt: string | null;
+  suggestedBackend: BackendType;
+  estimatedVramGb: number | null;
+  vllmSupport?: HFVLLMSupport | null;
 }
 
 export interface HFModelVariant {
-  variantId: string
-  label: string
-  artifact: string | null
-  sizeGb: number | null
-  format: string
-  quantization: string | null
-  backendType: BackendType
-  isDefault: boolean
-  installable?: boolean
-  compatibility?: string
-  compatibilityReason?: string | null
-  vllmSupport?: HFVLLMSupport | null
+  variantId: string;
+  label: string;
+  artifact: string | null;
+  sizeGb: number | null;
+  format: string;
+  quantization: string | null;
+  backendType: BackendType;
+  isDefault: boolean;
+  installable?: boolean;
+  compatibility?: string;
+  compatibilityReason?: string | null;
+  vllmSupport?: HFVLLMSupport | null;
 }
 
 export interface OllamaModelCard {
-  name: string
-  description: string
-  tags: string[]
-  sizeGb: number | null
-  pulls: number
+  name: string;
+  description: string;
+  tags: string[];
+  sizeGb: number | null;
+  pulls: number;
 }
 
 export interface OllamaModelVariant {
-  name: string
-  tag: string
-  sizeGb: number | null
-  parameterSize: string | null
-  quantization: string | null
-  contextWindow: string | null
-  modality: string | null
-  updatedHint: string | null
+  name: string;
+  tag: string;
+  sizeGb: number | null;
+  parameterSize: string | null;
+  quantization: string | null;
+  contextWindow: string | null;
+  modality: string | null;
+  updatedHint: string | null;
 }
 
 export interface LocalModel {
-  modelId: string
-  path: string
-  sizeGb: number
-  backendType: BackendType
-  configured: boolean
+  modelId: string;
+  path: string;
+  sizeGb: number;
+  backendType: BackendType;
+  configured: boolean;
   // Where the file was discovered. "ollama-shared" entries point at a GGUF
   // blob inside Ollama's content-addressed store and can be served by our
   // llama.cpp backend without re-downloading.
-  source?: "huggingface" | "gguf" | "ollama" | "ollama-shared"
+  source?: "huggingface" | "gguf" | "ollama" | "ollama-shared";
 }
 
 export interface ServerConfig {
-  defaultGpuIndex: number
-  idleTimeoutSeconds: number
-  idleEvictionCheckIntervalSeconds: number
-  modelLoadWaitTimeoutSeconds: number
-  pressureEvictionDrainTimeoutSeconds: number
-  pinReloadPollIntervalSeconds: number
-  vramBufferMb: number
-  vramPressureThresholdPct: number
-  maxInflightPerModel: number
-  openaiAudioMaxPartSizeMb: number
-  whisperStartupTimeoutSeconds: number
-  logLevel: string
-  litellmBaseUrl: string
-  litellmAdminKey: string
-  litellmAutoSync: boolean
-  energyCostEurKwh: number
-  modelsDir: string
-  downloadDir: string
-  maxTemperatureC: number
-  gpuThrottleEnabled: boolean
-  gpuThrottlePowerReductionPct: number
-  gpuThrottleCooldownS: number
-  gpuThrottleRecoveryMarginC: number
-  vllmGpuMemoryUtilization: number
-  vllmMaxNumSeqs: number | null
-  vllmMaxNumBatchedTokens: number | null
-  vllmEnablePrefixCaching: boolean
-  vllmEnforceEager: boolean
-  sglangMemFractionStatic: number
-  sglangContextLength: number | null
-  sglangDisableRadixCache: boolean
-  llamaCppGpuLayers: number
-  llamaCppCtxSize: number
-  llamaCppFlashAttn: boolean
-  bitnetGpuLayers: number
-  bitnetCtxSize: number
-  bitnetFlashAttn: boolean
-  diffusersTorchDtype: string
-  diffusersOffloadMode: string
-  diffusersEnableTorchCompile: boolean
-  diffusersEnableXformers: boolean
-  diffusersAllowTf32: boolean
-  tensorrtLlmEnabled: boolean
-  tensorrtLlmMaxBatchSize: number | null
-  tensorrtLlmContextLength: number | null
-  globalSchedules: EvictionSchedule[]
-  requireApiKeyOpenai: boolean
-  requireApiKeyOllama: boolean
-  realtimeDefaultSttModel: string
-  realtimeDefaultTtsModel: string
-  federationEnabled: boolean
-  federationNodeName: string
-  batchPriorityEnabled: boolean
-  batchPreemptMode: "never" | "instant" | "conditional"
-  batchPreemptMinElapsedS: number
-  batchPreemptGraceS: number
-  batchFreeSlotsPct: number
-  batchResumeCooldownSlotsS: number
-  batchResumeCooldownEvictionS: number
-  batchInterJobCooldownS: number
-  hunyuanIdleUnloadSeconds: number
-  hunyuanGenerationGracePeriodS: number
-  hunyuanPreferredGpu: number
-  trellis2IdleUnloadSeconds: number
-  trellis2GenerationGracePeriodS: number
-  trellis2PreferredGpu: number
-  comfyuiIdleUnloadSeconds: number
-  comfyuiGenerationGracePeriodS: number
-  comfyuiPreferredGpu: number
-  a1111IdleUnloadSeconds: number
-  a1111GenerationGracePeriodS: number
-  a1111PreferredGpu: number
-  acestepIdleUnloadSeconds: number
-  acestepGenerationGracePeriodS: number
-  acestepPreferredGpu: number
-  unslothIdleUnloadSeconds: number
-  unslothGenerationGracePeriodS: number
-  unslothPreferredGpu: number
-  generationGpuUtilThresholdPct: number
+  defaultGpuIndex: number;
+  idleTimeoutSeconds: number;
+  idleEvictionCheckIntervalSeconds: number;
+  modelLoadWaitTimeoutSeconds: number;
+  pressureEvictionDrainTimeoutSeconds: number;
+  pinReloadPollIntervalSeconds: number;
+  vramBufferMb: number;
+  vramPressureThresholdPct: number;
+  maxInflightPerModel: number;
+  openaiAudioMaxPartSizeMb: number;
+  whisperStartupTimeoutSeconds: number;
+  logLevel: string;
+  litellmBaseUrl: string;
+  litellmAdminKey: string;
+  litellmAutoSync: boolean;
+  energyCostEurKwh: number;
+  modelsDir: string;
+  downloadDir: string;
+  maxTemperatureC: number;
+  gpuThrottleEnabled: boolean;
+  gpuThrottlePowerReductionPct: number;
+  gpuThrottleCooldownS: number;
+  gpuThrottleRecoveryMarginC: number;
+  vllmGpuMemoryUtilization: number;
+  vllmMaxNumSeqs: number | null;
+  vllmMaxNumBatchedTokens: number | null;
+  vllmEnablePrefixCaching: boolean;
+  vllmEnforceEager: boolean;
+  sglangMemFractionStatic: number;
+  sglangContextLength: number | null;
+  sglangDisableRadixCache: boolean;
+  llamaCppGpuLayers: number;
+  llamaCppCtxSize: number;
+  llamaCppFlashAttn: boolean;
+  bitnetGpuLayers: number;
+  bitnetCtxSize: number;
+  bitnetFlashAttn: boolean;
+  diffusersTorchDtype: string;
+  diffusersOffloadMode: string;
+  diffusersEnableTorchCompile: boolean;
+  diffusersEnableXformers: boolean;
+  diffusersAllowTf32: boolean;
+  tensorrtLlmEnabled: boolean;
+  tensorrtLlmMaxBatchSize: number | null;
+  tensorrtLlmContextLength: number | null;
+  globalSchedules: EvictionSchedule[];
+  requireApiKeyOpenai: boolean;
+  requireApiKeyOllama: boolean;
+  realtimeDefaultSttModel: string;
+  realtimeDefaultTtsModel: string;
+  federationEnabled: boolean;
+  federationNodeName: string;
+  batchPriorityEnabled: boolean;
+  batchPreemptMode: "never" | "instant" | "conditional";
+  batchPreemptMinElapsedS: number;
+  batchPreemptGraceS: number;
+  batchFreeSlotsPct: number;
+  batchResumeCooldownSlotsS: number;
+  batchResumeCooldownEvictionS: number;
+  batchInterJobCooldownS: number;
+  hunyuanIdleUnloadSeconds: number;
+  hunyuanGenerationGracePeriodS: number;
+  hunyuanPreferredGpu: number;
+  trellis2IdleUnloadSeconds: number;
+  trellis2GenerationGracePeriodS: number;
+  trellis2PreferredGpu: number;
+  comfyuiIdleUnloadSeconds: number;
+  comfyuiGenerationGracePeriodS: number;
+  comfyuiPreferredGpu: number;
+  a1111IdleUnloadSeconds: number;
+  a1111GenerationGracePeriodS: number;
+  a1111PreferredGpu: number;
+  acestepIdleUnloadSeconds: number;
+  acestepGenerationGracePeriodS: number;
+  acestepPreferredGpu: number;
+  unslothIdleUnloadSeconds: number;
+  unslothGenerationGracePeriodS: number;
+  unslothPreferredGpu: number;
+  generationGpuUtilThresholdPct: number;
   // Bloque 20 — routing/estimator/sessions
-  routingEnabled?: boolean
-  routerConfidenceFloor?: number
-  routerFallbackDelayMs?: number
-  maxDrainTimeoutS?: number
-  sessionPauseThresholdS?: number
-  sessionMaxIdleS?: number
+  routingEnabled?: boolean;
+  routerConfidenceFloor?: number;
+  routerFallbackDelayMs?: number;
+  maxDrainTimeoutS?: number;
+  sessionPauseThresholdS?: number;
+  sessionMaxIdleS?: number;
 }
 
 export interface StatsParams {
-  from?: string
-  to?: string
-  modelId?: string
-  allTime?: boolean
-  includeSeries?: boolean
+  from?: string;
+  to?: string;
+  modelId?: string;
+  allTime?: boolean;
+  includeSeries?: boolean;
 }
 
 export interface RequestStats {
-  totalRequests: number
-  errorRate: number
-  rejections: number
-  avgDurationMs: number
-  p50DurationMs: number
-  p95DurationMs: number
-  series: { timestamp: string; count: number }[]
+  totalRequests: number;
+  errorRate: number;
+  rejections: number;
+  avgDurationMs: number;
+  p50DurationMs: number;
+  p95DurationMs: number;
+  series: { timestamp: string; count: number }[];
 }
 
-export type RequestLoadPhase = "loading" | "waiting_for_gpu" | "prompt_eval" | "generating"
+export type RequestLoadPhase =
+  "loading" | "waiting_for_gpu" | "prompt_eval" | "generating";
 
 export interface ActiveRequestProgress {
-  requestId: string
-  username?: string | null
-  elapsedSeconds: number
-  inputTokensEstimate: number | null
-  outputTokensEstimate: number | null
-  tokensPerSecond: number | null
-  lastActivitySecondsAgo: number
-  phase: RequestLoadPhase
-  waitingOnModelId: string | null
+  requestId: string;
+  username?: string | null;
+  elapsedSeconds: number;
+  inputTokensEstimate: number | null;
+  outputTokensEstimate: number | null;
+  tokensPerSecond: number | null;
+  lastActivitySecondsAgo: number;
+  phase: RequestLoadPhase;
+  waitingOnModelId: string | null;
 }
 
 export interface ModelActivity {
-  inFlight: number
-  oldestSeconds: number
-  slots?: number | null
-  requests?: ActiveRequestProgress[]
+  inFlight: number;
+  oldestSeconds: number;
+  slots?: number | null;
+  requests?: ActiveRequestProgress[];
 }
 
 export interface ModelActivityMap {
-  activity: Record<string, ModelActivity>
-  stuckThresholdSeconds: number
+  activity: Record<string, ModelActivity>;
+  stuckThresholdSeconds: number;
 }
 
 export interface OllamaRuntimeInfo {
-  sizeMb: number
-  sizeVramMb: number
-  gpuPct: number
-  cpuPct: number
-  contextLength: number | null
+  sizeMb: number;
+  sizeVramMb: number;
+  gpuPct: number;
+  cpuPct: number;
+  contextLength: number | null;
 }
 
 export interface GpuUsageTotal {
-  gpuIndex: number
-  samples: number
-  hoursTotal: number
-  hoursActive: number
-  activeRatio: number
-  avgUtilizationPct: number
-  avgVramMb: number
-  peakVramMb: number
-  avgTempC: number
-  kwh: number
+  gpuIndex: number;
+  samples: number;
+  hoursTotal: number;
+  hoursActive: number;
+  activeRatio: number;
+  avgUtilizationPct: number;
+  avgVramMb: number;
+  peakVramMb: number;
+  avgTempC: number;
+  kwh: number;
 }
 
 export interface GpuUsageSeriesPoint {
-  t: string
-  gpuIndex: number
-  utilizationPct: number
-  vramMb: number
-  powerW: number
-  tempC: number
+  t: string;
+  gpuIndex: number;
+  utilizationPct: number;
+  vramMb: number;
+  powerW: number;
+  tempC: number;
 }
 
 export interface GpuUsageStats {
-  from: string
-  to: string
-  bucket: "hour" | "day"
-  activeThresholdPct: number
-  totals: GpuUsageTotal[]
-  series: GpuUsageSeriesPoint[]
+  from: string;
+  to: string;
+  bucket: "hour" | "day";
+  activeThresholdPct: number;
+  totals: GpuUsageTotal[];
+  series: GpuUsageSeriesPoint[];
 }
 
 export interface EnergyStats {
-  totalKwh: number
-  estimatedCostEur: number
-  byGpu: { gpuIndex: number; totalKwh: number; powerDrawW: number }[]
-  cpuKwh?: number
-  totalServerKwh?: number
+  totalKwh: number;
+  estimatedCostEur: number;
+  byGpu: { gpuIndex: number; totalKwh: number; powerDrawW: number }[];
+  cpuKwh?: number;
+  totalServerKwh?: number;
 }
 
 export interface PerformanceStats {
   byModel: {
-    modelId: string
-    backendType: string
-    requestKinds: string[]
-    totalRequests: number
-    avgLatencyMs: number
-    p95LatencyMs: number
-    requestsPerMinute: number
-    tokensPerSecond: number
-    totalInputTokens: number
-    totalOutputTokens: number
-    tokenizedRequests: number
-    errorCount: number
-    uptimePct: number
-    loadCount: number
-    avgLoadMs: number
-    p95LoadMs: number
-    lastLoadMs: number
-  }[]
+    modelId: string;
+    backendType: string;
+    requestKinds: string[];
+    totalRequests: number;
+    avgLatencyMs: number;
+    p95LatencyMs: number;
+    requestsPerMinute: number;
+    tokensPerSecond: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    tokenizedRequests: number;
+    errorCount: number;
+    uptimePct: number;
+    loadCount: number;
+    avgLoadMs: number;
+    p95LoadMs: number;
+    lastLoadMs: number;
+  }[];
 }
 
 export interface TokenGpuStats {
-  gpuIndex: number | null
-  inputTokens: number
-  outputTokens: number
+  gpuIndex: number | null;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 export interface TokenStats {
-  totalInputTokens: number
-  totalOutputTokens: number
-  byBackend: { backendType: string; inputTokens: number; outputTokens: number }[]
-  byGpu: TokenGpuStats[]
-  series: { timestamp: string; inputTokens: number; outputTokens: number }[]
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  byBackend: {
+    backendType: string;
+    inputTokens: number;
+    outputTokens: number;
+  }[];
+  byGpu: TokenGpuStats[];
+  series: { timestamp: string; inputTokens: number; outputTokens: number }[];
 }
 
 export interface OverviewStats {
-  totalRequests: number
-  totalErrors: number
-  avgDurationMs: number
-  tokenizedRequests: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  estimatedCostUsd?: number
-  totalEnergyWh?: number
+  totalRequests: number;
+  totalErrors: number;
+  avgDurationMs: number;
+  tokenizedRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  estimatedCostUsd?: number;
+  totalEnergyWh?: number;
   byBackend: {
-    backendType: string
-    totalRequests: number
-    errorRate: number
-    avgLatencyMs: number
-    p95LatencyMs: number
-  }[]
+    backendType: string;
+    totalRequests: number;
+    errorRate: number;
+    avgLatencyMs: number;
+    p95LatencyMs: number;
+  }[];
   byRequestKind: {
-    requestKind: string
-    totalRequests: number
-    errorRate: number
-    avgLatencyMs: number
-    p95LatencyMs: number
-  }[]
+    requestKind: string;
+    totalRequests: number;
+    errorRate: number;
+    avgLatencyMs: number;
+    p95LatencyMs: number;
+  }[];
 }
 
 export interface RecentRequest {
-  id: string
-  modelId: string
-  backendType: string | null
-  requestKind: string | null
-  endpointPath: string | null
-  statusCode: number | null
-  startedAt: string
-  durationMs: number | null
-  inputTokens: number | null
-  outputTokens: number | null
-  error: string | null
-  userId: string | null
-  username: string | null
-  groupId: string | null
-  groupName: string | null
-  apiKeyName: string | null
-  clientAddr: string | null
-  userAgent: string | null
-  inFlight?: boolean
-  elapsedMs?: number | null
-  estimatedRemainingMs?: number | null
-  workerKey?: string | null
-  queued?: boolean
-  queuePosition?: number
-  slots?: number
-  queueWaitEstimateMs?: number | null
+  id: string;
+  modelId: string;
+  backendType: string | null;
+  requestKind: string | null;
+  endpointPath: string | null;
+  statusCode: number | null;
+  startedAt: string;
+  durationMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  error: string | null;
+  userId: string | null;
+  username: string | null;
+  groupId: string | null;
+  groupName: string | null;
+  apiKeyName: string | null;
+  clientAddr: string | null;
+  userAgent: string | null;
+  inFlight?: boolean;
+  elapsedMs?: number | null;
+  estimatedRemainingMs?: number | null;
+  workerKey?: string | null;
+  queued?: boolean;
+  queuePosition?: number;
+  slots?: number;
+  queueWaitEstimateMs?: number | null;
 }
 
 export interface RecentRequestsData {
-  requests: RecentRequest[]
+  requests: RecentRequest[];
 }
 
 export interface UserStatRow {
-  userId: string
-  username: string
-  totalRequests: number
-  totalErrors: number
-  avgDurationMs: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  totalEnergyWh?: number
-  estimatedCostUsd?: number
+  userId: string;
+  username: string;
+  totalRequests: number;
+  totalErrors: number;
+  avgDurationMs: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalEnergyWh?: number;
+  estimatedCostUsd?: number;
 }
 
 export interface GroupStatRow {
-  groupId: string
-  groupName: string
-  totalRequests: number
-  totalErrors: number
-  avgDurationMs: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  totalEnergyWh?: number
-  estimatedCostUsd?: number
+  groupId: string;
+  groupName: string;
+  totalRequests: number;
+  totalErrors: number;
+  avgDurationMs: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalEnergyWh?: number;
+  estimatedCostUsd?: number;
 }
 
 export interface ByUserStats {
-  byUser: UserStatRow[]
+  byUser: UserStatRow[];
 }
 
 export interface ByGroupStats {
-  byGroup: GroupStatRow[]
+  byGroup: GroupStatRow[];
 }
 
 export interface MyGroupStats {
-  groupId: string | null
-  groupName: string | null
-  stats: OverviewStats
+  groupId: string | null;
+  groupName: string | null;
+  stats: OverviewStats;
 }
 
 export interface ApiKeyStatRow {
-  apiKeyName: string
-  userId: string | null
-  username: string | null
-  totalRequests: number
-  totalErrors: number
-  avgDurationMs: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  totalEnergyWh: number
-  estimatedCostUsd: number
+  apiKeyName: string;
+  userId: string | null;
+  username: string | null;
+  totalRequests: number;
+  totalErrors: number;
+  avgDurationMs: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalEnergyWh: number;
+  estimatedCostUsd: number;
 }
 
 export interface ByApiKeyStats {
-  byApiKey: ApiKeyStatRow[]
+  byApiKey: ApiKeyStatRow[];
 }
 
 export interface UserDetailStats {
-  userId: string
-  username: string
-  totalRequests: number
-  totalErrors: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  totalEnergyWh: number
-  estimatedCostUsd: number
-  topModels: { modelId: string; requests: number; inputTokens: number; outputTokens: number }[]
-  byRequestKind: { requestKind: string; count: number }[]
-  tokenSeries: { timestamp: string; inputTokens: number; outputTokens: number }[]
+  userId: string;
+  username: string;
+  totalRequests: number;
+  totalErrors: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalEnergyWh: number;
+  estimatedCostUsd: number;
+  topModels: {
+    modelId: string;
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+  }[];
+  byRequestKind: { requestKind: string; count: number }[];
+  tokenSeries: {
+    timestamp: string;
+    inputTokens: number;
+    outputTokens: number;
+  }[];
 }
 
 export interface FederationStats {
-  localCount: number
-  remoteCount: number
-  byNode: { nodeId: string; count: number; avgDurationMs: number }[]
+  localCount: number;
+  remoteCount: number;
+  byNode: { nodeId: string; count: number; avgDurationMs: number }[];
 }
 
 export interface BatchVsInteractiveSummary {
-  totalRequests: number
-  totalErrors: number
-  avgDurationMs: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  totalTokens: number
-  totalEnergyWh: number
-  estimatedCostUsd: number
+  totalRequests: number;
+  totalErrors: number;
+  avgDurationMs: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalEnergyWh: number;
+  estimatedCostUsd: number;
 }
 
 export interface BatchVsInteractiveStats {
-  batch: BatchVsInteractiveSummary
-  interactive: BatchVsInteractiveSummary
-  dailySeries: { date: string; batch: number; interactive: number }[]
+  batch: BatchVsInteractiveSummary;
+  interactive: BatchVsInteractiveSummary;
+  dailySeries: { date: string; batch: number; interactive: number }[];
 }
 
 export interface BatchPriorityCooldown {
-  workerKey: string
-  kind: string
-  remainingSeconds: number
+  workerKey: string;
+  kind: string;
+  remainingSeconds: number;
 }
 
 export interface BatchPriorityEvent {
-  type: string
-  workerKey: string
-  batchId: string
-  lineIdx: number
-  elapsedSeconds: number
-  mode: string
-  secondsAgo: number
+  type: string;
+  workerKey: string;
+  batchId: string;
+  lineIdx: number;
+  elapsedSeconds: number;
+  mode: string;
+  secondsAgo: number;
 }
 
 export interface BatchPriorityStatus {
-  totalPreemptions: number
-  activeCooldowns: BatchPriorityCooldown[]
-  recentEvents: BatchPriorityEvent[]
+  totalPreemptions: number;
+  activeCooldowns: BatchPriorityCooldown[];
+  recentEvents: BatchPriorityEvent[];
 }
 
 export interface ServerPower {
-  cpuPowerW: number | null
-  cpuTempC: number | null
-  totalGpuPowerW: number | null
-  totalPowerW: number | null
+  cpuPowerW: number | null;
+  cpuTempC: number | null;
+  totalGpuPowerW: number | null;
+  totalPowerW: number | null;
 }
 
 export interface GPUStatHistoryPoint {
-  timestamp: string
-  usedVramMb: number
-  utilizationPct: number
-  temperatureC: number
-  powerDrawW: number
+  timestamp: string;
+  usedVramMb: number;
+  utilizationPct: number;
+  temperatureC: number;
+  powerDrawW: number;
 }
 
 export interface GPUStatHistory {
-  gpuIndex: number
-  window: string
-  points: GPUStatHistoryPoint[]
+  gpuIndex: number;
+  window: string;
+  points: GPUStatHistoryPoint[];
 }
 
-export type ServiceStatus = "unknown" | "idle" | "active" | "unreachable" | "disabled" | "building" | "starting"
+export type ServiceStatus =
+  | "unknown"
+  | "idle"
+  | "active"
+  | "unreachable"
+  | "disabled"
+  | "building"
+  | "starting";
 
 export interface ServiceState {
-  serviceId: string
-  serviceType: string
-  displayName: string
-  uiUrl: string
-  preferredGpu: number | null
-  idleUnloadAfterSeconds: number
-  enabled: boolean
-  serviceAlive: boolean
-  runtimeLoaded: boolean
-  status: ServiceStatus
-  activeModelRef: string | null
-  lastActivityAt: string | null
-  lastHealthCheckAt: string | null
-  detail: string | null
+  serviceId: string;
+  serviceType: string;
+  displayName: string;
+  uiUrl: string;
+  preferredGpu: number | null;
+  idleUnloadAfterSeconds: number;
+  enabled: boolean;
+  serviceAlive: boolean;
+  runtimeLoaded: boolean;
+  status: ServiceStatus;
+  activeModelRef: string | null;
+  lastActivityAt: string | null;
+  lastHealthCheckAt: string | null;
+  detail: string | null;
   // Generation metrics
-  isGenerating: boolean
-  queueDepth: number
-  vramUsedMb: number | null
-  gpuUtilPct: number | null
+  isGenerating: boolean;
+  queueDepth: number;
+  vramUsedMb: number | null;
+  gpuUtilPct: number | null;
   // Container resource metrics
-  cpuPct: number | null
-  memUsedMb: number | null
-  memLimitMb: number | null
+  cpuPct: number | null;
+  memUsedMb: number | null;
+  memLimitMb: number | null;
 }
 
 export interface HostStats {
-  cpuPct: number
-  cpuCount: number
-  cpuCountPhysical: number
-  loadAvg1m: number
-  loadAvg5m: number
-  loadAvg15m: number
-  memTotalMb: number
-  memUsedMb: number
-  memFreeMb: number
-  memPct: number
-  swapTotalMb: number
-  swapUsedMb: number
-  swapPct: number
+  cpuPct: number;
+  cpuCount: number;
+  cpuCountPhysical: number;
+  loadAvg1m: number;
+  loadAvg5m: number;
+  loadAvg15m: number;
+  memTotalMb: number;
+  memUsedMb: number;
+  memFreeMb: number;
+  memPct: number;
+  swapTotalMb: number;
+  swapUsedMb: number;
+  swapPct: number;
 }
 
 // TRT-LLM compile jobs
-export type CompileStatus = "pending" | "running" | "done" | "failed" | "cancelled"
-export type CompilePhase = "convert" | "build" | null
+export type CompileStatus =
+  "pending" | "running" | "done" | "failed" | "cancelled";
+export type CompilePhase = "convert" | "build" | null;
 
 export interface CompileJob {
-  jobId: string
-  sourceModel: string
-  engineName: string
-  gpuIndices: number[]
-  dtype: string
+  jobId: string;
+  sourceModel: string;
+  engineName: string;
+  gpuIndices: number[];
+  dtype: string;
   config: {
-    maxBatchSize: number
-    maxInputLen: number
-    maxSeqLen: number
-  }
-  status: CompileStatus
-  phase: CompilePhase
-  progressPct: number
-  errorDetail: string | null
-  engineDir: string | null
-  startedAt: string | null
-  finishedAt: string | null
+    maxBatchSize: number;
+    maxInputLen: number;
+    maxSeqLen: number;
+  };
+  status: CompileStatus;
+  phase: CompilePhase;
+  progressPct: number;
+  errorDetail: string | null;
+  engineDir: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
 }
 
 // Auth types
-export type UserRole = "user" | "model_manager" | "system_admin"
+export type UserRole = "user" | "model_manager" | "system_admin";
 
 export interface AuthUser {
-  id: string
-  username: string
-  email: string | null
-  role: UserRole
-  createdAt: string
+  id: string;
+  username: string;
+  email: string | null;
+  role: UserRole;
+  createdAt: string;
 }
 
 export interface ApiKey {
-  id: string
-  name: string
-  keyPrefix: string
-  expiresAt: string | null
-  lastUsedAt: string | null
-  isRevoked: boolean
-  createdAt: string
-  groupId?: string | null
+  id: string;
+  name: string;
+  keyPrefix: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  isRevoked: boolean;
+  createdAt: string;
+  groupId?: string | null;
 }
 
 // An API key as seen by an admin in the "all keys" view, including its owner.
 export interface AdminApiKey extends ApiKey {
-  userId: string
-  username: string
+  userId: string;
+  username: string;
 }
 
 export interface Group {
-  id: string
-  name: string
-  description: string
-  isDefault: boolean
-  memberCount: number
-  modelCount: number
-  createdAt: string
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  memberCount: number;
+  modelCount: number;
+  createdAt: string;
 }
 
 // Admin user management
 export interface AdminUser {
-  id: string
-  username: string
-  email: string | null
-  role: UserRole
-  isActive: boolean
-  createdAt: string
+  id: string;
+  username: string;
+  email: string | null;
+  role: UserRole;
+  isActive: boolean;
+  createdAt: string;
 }
 
 export interface GroupMember {
-  userId: string
-  username: string
-  role: UserRole
+  userId: string;
+  username: string;
+  role: UserRole;
 }
 
 export interface CreateUserPayload {
-  username: string
-  password: string
-  role: UserRole
-  email?: string | null
+  username: string;
+  password: string;
+  role: UserRole;
+  email?: string | null;
 }
 
 export interface UpdateUserPayload {
-  role?: UserRole
-  isActive?: boolean
-  email?: string | null
+  role?: UserRole;
+  isActive?: boolean;
+  email?: string | null;
 }
 
 export interface CreateGroupPayload {
-  name: string
-  description?: string | null
+  name: string;
+  description?: string | null;
 }
 
 export interface UpdateGroupPayload {
-  name?: string
-  description?: string | null
+  name?: string;
+  description?: string | null;
 }
 
 // Model profiles
-export type ProfileCategory = "llm" | "tts" | "stt" | "image" | "music"
+export type ProfileCategory = "llm" | "tts" | "stt" | "image" | "music";
 
 export interface RuntimePolicy {
-  selection: "prefer_loaded" | "prefer_default"
-  restoreDefaultWhenIdle: boolean
-  downgradeGraceSeconds: number
-  minimumResidencySeconds: number
-  smallRequestsExtendLargeTtl: boolean
-  remoteWarmThresholdSeconds: number
-  maxContextTokens: number | null
+  selection: "prefer_loaded" | "prefer_default";
+  restoreDefaultWhenIdle: boolean;
+  downgradeGraceSeconds: number;
+  minimumResidencySeconds: number;
+  smallRequestsExtendLargeTtl: boolean;
+  remoteWarmThresholdSeconds: number;
+  maxContextTokens: number | null;
+  maxOutputTokens: number | null;
+  validatedContextTokens: Record<string, number>;
+  validatedVramMb: Record<string, number>;
+  defaultOutputReservationTokens: number | null;
 }
 
 export interface RuntimePreset {
-  id: string
-  profileId: string
-  presetKey: string
-  label: string
-  contextMode: "fixed" | "max"
-  contextTokens: number | null
-  parallelism: number
-  kvCacheDtype: "fp16" | "bf16" | "fp8" | "q8" | "q4"
-  placementPolicy: "auto" | "preferred" | "forced"
-  preferredGpus: number[] | null
-  executionPolicy: "auto" | "local" | "remote"
-  enabled: boolean
-  isDefault: boolean
-  priority: number
-  createdAt: string | null
-  updatedAt: string | null
+  id: string;
+  profileId: string;
+  presetKey: string;
+  label: string;
+  contextMode: "fixed" | "max";
+  contextTokens: number | null;
+  parallelism: number;
+  kvCacheDtype: "fp16" | "bf16" | "fp8" | "q8" | "q4";
+  placementPolicy: "auto" | "preferred" | "forced";
+  preferredGpus: number[] | null;
+  executionPolicy: "auto" | "local" | "remote";
+  enabled: boolean;
+  isDefault: boolean;
+  priority: number;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface RuntimePresetResolution {
-  presetKey: string
-  resolved: boolean
-  requestedContext: number | null
-  effectiveContext: number | null
-  modelMax: number | null
-  hardwareMax: number | null
-  policyMax: number | null
-  requestedParallelism: number
-  effectiveParallelism: number
-  targetGpus: number[]
-  fits: boolean
-  runtimeKey: string | null
-  warnings: string[]
+  presetKey: string;
+  resolved: boolean;
+  requestedContext: number | null;
+  effectiveContext: number | null;
+  modelMax: number | null;
+  hardwareMax: number | null;
+  policyMax: number | null;
+  requestedParallelism: number;
+  effectiveParallelism: number;
+  targetGpus: number[];
+  fits: boolean;
+  runtimeKey: string | null;
+  warnings: string[];
 }
 
 export interface RuntimePresetBenchmark {
-  presetKey: string
-  effectiveContext: number
-  workerKey: string
-  wasCold: boolean
-  loadMs: number
-  generationMs: number
-  outputTokens: number | null
-  tokensPerSecond: number | null
+  presetKey: string;
+  effectiveContext: number;
+  workerKey: string;
+  wasCold: boolean;
+  loadMs: number;
+  generationMs: number;
+  outputTokens: number | null;
+  tokensPerSecond: number | null;
 }
 
 export interface RuntimePresetCreate {
-  presetKey: string
-  label: string
-  contextMode: "fixed" | "max"
-  contextTokens?: number | null
-  parallelism: number
-  kvCacheDtype: RuntimePreset["kvCacheDtype"]
-  placementPolicy: RuntimePreset["placementPolicy"]
-  preferredGpus?: number[] | null
-  executionPolicy: RuntimePreset["executionPolicy"]
-  enabled?: boolean
-  isDefault?: boolean
-  priority?: number
+  presetKey: string;
+  label: string;
+  contextMode: "fixed" | "max";
+  contextTokens?: number | null;
+  parallelism: number;
+  kvCacheDtype: RuntimePreset["kvCacheDtype"];
+  placementPolicy: RuntimePreset["placementPolicy"];
+  preferredGpus?: number[] | null;
+  executionPolicy: RuntimePreset["executionPolicy"];
+  enabled?: boolean;
+  isDefault?: boolean;
+  priority?: number;
 }
 
-export type RuntimePresetUpdate = Partial<Omit<RuntimePresetCreate, "presetKey">>
+export type RuntimePresetUpdate = Partial<
+  Omit<RuntimePresetCreate, "presetKey">
+>;
 
 export interface ModelProfile {
-  profileId: string
-  profileKind: "execution" | "router"
-  baseModelId: string | null
-  displayName: string | null
-  description: string | null
-  category: ProfileCategory
-  loadOverrides: Record<string, unknown> | null
-  requestDefaults: Record<string, unknown> | null
-  assets: Record<string, unknown> | null
-  enabled: boolean
-  isDefault: boolean
+  profileId: string;
+  profileKind: "execution" | "router";
+  baseModelId: string | null;
+  displayName: string | null;
+  description: string | null;
+  category: ProfileCategory;
+  loadOverrides: Record<string, unknown> | null;
+  requestDefaults: Record<string, unknown> | null;
+  assets: Record<string, unknown> | null;
+  enabled: boolean;
+  isDefault: boolean;
   // Bloque 20 — when non-empty, this profile is a Router: resolve()
   // walks these profile IDs in order and returns the first available
   // one. An empty/null array means "regular profile".
-  routingTargets: string[] | null
-  runtimePolicy: RuntimePolicy | null
-  runtimePresets: RuntimePreset[]
-  aliases: ProfileAlias[]
-  createdAt: string | null
-  updatedAt: string | null
+  routingTargets: string[] | null;
+  runtimePolicy: RuntimePolicy | null;
+  runtimePresets: RuntimePreset[];
+  aliases: ProfileAlias[];
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface ProfileAlias {
-  aliasId: string
-  profileId: string
-  presetKey: string | null
-  hidden: boolean
+  aliasId: string;
+  profileId: string;
+  presetKey: string | null;
+  hidden: boolean;
 }
 
 export interface ProfileCreate {
-  profileId: string
-  displayName?: string
-  description?: string
-  category: string
-  loadOverrides?: Record<string, unknown>
-  requestDefaults?: Record<string, unknown>
-  enabled?: boolean
-  isDefault?: boolean
-  routingTargets?: string[] | null
-  runtimePolicy?: RuntimePolicy | null
+  profileId: string;
+  displayName?: string;
+  description?: string;
+  category: string;
+  loadOverrides?: Record<string, unknown>;
+  requestDefaults?: Record<string, unknown>;
+  enabled?: boolean;
+  isDefault?: boolean;
+  routingTargets?: string[] | null;
+  runtimePolicy?: RuntimePolicy | null;
 }
 
 export interface ProfileUpdate {
-  displayName?: string
-  description?: string
-  category?: string
-  loadOverrides?: Record<string, unknown>
-  requestDefaults?: Record<string, unknown>
-  enabled?: boolean
-  isDefault?: boolean
-  routingTargets?: string[] | null
-  runtimePolicy?: RuntimePolicy | null
+  displayName?: string;
+  description?: string;
+  category?: string;
+  loadOverrides?: Record<string, unknown>;
+  requestDefaults?: Record<string, unknown>;
+  enabled?: boolean;
+  isDefault?: boolean;
+  routingTargets?: string[] | null;
+  runtimePolicy?: RuntimePolicy | null;
 }
 
 export interface RouterCreate {
-  profileId: string
-  displayName?: string
-  description?: string
-  category: ProfileCategory
-  requestDefaults?: Record<string, unknown>
-  enabled?: boolean
-  routingTargets: string[]
+  profileId: string;
+  displayName?: string;
+  description?: string;
+  category: ProfileCategory;
+  requestDefaults?: Record<string, unknown>;
+  enabled?: boolean;
+  routingTargets: string[];
 }
 
 // Federation types
 export interface FederationPeerGpu {
-  index: number
-  name: string
-  total_vram_mb: number
-  free_vram_mb: number
+  index: number;
+  name: string;
+  total_vram_mb: number;
+  free_vram_mb: number;
 }
 
 export interface FederationPeerModel {
-  model_id: string
-  status: string
-  profiles: string[]
+  model_id: string;
+  status: string;
+  profiles: string[];
 }
 
 export interface FederationPeerLoad {
-  active_requests: number
-  gpu_utilization_avg_pct: number
+  active_requests: number;
+  gpu_utilization_avg_pct: number;
 }
 
 export interface FederationPeer {
-  peer_id: string
-  name: string
-  url: string
-  access_level: "inference" | "full"
-  enabled: boolean
-  online: boolean
-  last_heartbeat: string | null
-  latency_ms?: number
-  gpus: FederationPeerGpu[]
-  models: FederationPeerModel[]
-  load: FederationPeerLoad
+  peer_id: string;
+  name: string;
+  url: string;
+  access_level: "inference" | "full";
+  enabled: boolean;
+  online: boolean;
+  last_heartbeat: string | null;
+  latency_ms?: number;
+  gpus: FederationPeerGpu[];
+  models: FederationPeerModel[];
+  load: FederationPeerLoad;
 }
 
 export interface FederationPeerCreate {
-  name: string
-  url: string
-  api_key: string
-  access_level: "inference" | "full"
+  name: string;
+  url: string;
+  api_key: string;
+  access_level: "inference" | "full";
 }
 
 export interface FederationPeerUpdate {
-  name?: string
-  url?: string
-  api_key?: string
-  access_level?: "inference" | "full"
-  enabled?: boolean
+  name?: string;
+  url?: string;
+  api_key?: string;
+  access_level?: "inference" | "full";
+  enabled?: boolean;
 }
 
 export interface FederationTestResult {
-  success: boolean
-  latency_ms: number | null
-  error?: string
-  node_info?: Record<string, unknown>
+  success: boolean;
+  latency_ms: number | null;
+  error?: string;
+  node_info?: Record<string, unknown>;
 }
 
 export type BatchEndpoint =
@@ -1230,7 +1288,7 @@ export type BatchEndpoint =
   | "/v1/completions"
   | "/v1/images/generations"
   | "/v1/audio/speech"
-  | "/v1/audio/transcriptions"
+  | "/v1/audio/transcriptions";
 
 export type BatchStatus =
   | "validating"
@@ -1240,42 +1298,42 @@ export type BatchStatus =
   | "failed"
   | "expired"
   | "cancelling"
-  | "cancelled"
+  | "cancelled";
 
 export interface OpenAIBatchJob {
-  id: string
-  object: "batch"
-  endpoint: BatchEndpoint
-  errors: unknown
-  input_file_id: string
-  completion_window: string
-  status: BatchStatus
-  output_file_id: string | null
-  error_file_id: string | null
-  created_at: number | null
-  in_progress_at: number | null
-  expires_at: number | null
-  finalizing_at: number | null
-  completed_at: number | null
-  failed_at: number | null
-  expired_at: number | null
-  cancelling_at: number | null
-  cancelled_at: number | null
-  request_counts: { total: number; completed: number; failed: number }
-  total_tokens: number
-  metadata: Record<string, unknown> | null
-  user: { id: string; username: string | null }
+  id: string;
+  object: "batch";
+  endpoint: BatchEndpoint;
+  errors: unknown;
+  input_file_id: string;
+  completion_window: string;
+  status: BatchStatus;
+  output_file_id: string | null;
+  error_file_id: string | null;
+  created_at: number | null;
+  in_progress_at: number | null;
+  expires_at: number | null;
+  finalizing_at: number | null;
+  completed_at: number | null;
+  failed_at: number | null;
+  expired_at: number | null;
+  cancelling_at: number | null;
+  cancelled_at: number | null;
+  request_counts: { total: number; completed: number; failed: number };
+  total_tokens: number;
+  metadata: Record<string, unknown> | null;
+  user: { id: string; username: string | null };
 }
 
 export interface OpenAIFileObject {
-  id: string
-  object: "file"
-  bytes: number
-  created_at: number
-  filename: string
-  purpose: string
-  status: string
-  status_details: string | null
+  id: string;
+  object: "file";
+  bytes: number;
+  created_at: number;
+  filename: string;
+  purpose: string;
+  status: string;
+  status_details: string | null;
 }
 
 // Backend modules (Bloque 15) — re-exported for convenience.
@@ -1284,26 +1342,52 @@ export type {
   BackendInstallMethod,
   BackendInstallSource,
   BackendModuleState,
-} from "./backends"
+} from "./backends";
 
-import type { BackendModuleState } from "./backends"
+import type { BackendModuleState } from "./backends";
 
 // WebSocket events
 export type WSEvent =
   | { type: "gpu_stats"; data: GPUState[] }
-  | { type: "model_event"; data: { event: string; modelId: string; status: ModelStatus } }
-  | { type: "download_progress"; data: { jobId: string; pct: number; speedMbS: number } }
-  | { type: "service_event"; data: { event: string; serviceId: string; status: ServiceStatus; service: ServiceState } }
+  | {
+      type: "model_event";
+      data: {
+        event: string;
+        modelId: string;
+        canonicalModelId?: string;
+        status: ModelStatus;
+      };
+    }
+  | {
+      type: "download_progress";
+      data: { jobId: string; pct: number; speedMbS: number };
+    }
+  | {
+      type: "service_event";
+      data: {
+        event: string;
+        serviceId: string;
+        status: ServiceStatus;
+        service: ServiceState;
+      };
+    }
   | { type: "system_alert"; data: { level: "warn" | "error"; message: string } }
   | { type: "peer_online"; data: { peer_id: string; name: string } }
   | { type: "peer_offline"; data: { peer_id: string; name: string } }
   | { type: "remote_model_loaded"; data: { peer_id: string; model_id: string } }
-  | { type: "remote_model_unloaded"; data: { peer_id: string; model_id: string } }
+  | {
+      type: "remote_model_unloaded";
+      data: { peer_id: string; model_id: string };
+    }
   | { type: "backend_installed"; data: BackendModuleState }
   | { type: "backend_uninstalled"; data: { backendType: string } }
   | { type: "backend_progress"; data: BackendModuleState }
   | { type: "agent_updated"; data: { slug: string } }
   | {
-      type: "mcp_server_health_changed"
-      data: { id: string; health_status: "unknown" | "healthy" | "unhealthy"; last_error?: string | null }
-    }
+      type: "mcp_server_health_changed";
+      data: {
+        id: string;
+        health_status: "unknown" | "healthy" | "unhealthy";
+        last_error?: string | null;
+      };
+    };

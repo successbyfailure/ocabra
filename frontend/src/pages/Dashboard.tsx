@@ -951,7 +951,7 @@ export function Dashboard() {
                     <p className="truncate text-[14.5px] font-semibold tracking-tight">{model.displayName}</p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                    <ModelStatusBadge status={model.status} />
+                    <ModelStatusBadge status={model.runtimePhase ?? model.status} />
                     <LoadPolicyBadge policy={model.loadPolicy} />
                     <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
                       <Cpu size={11} />

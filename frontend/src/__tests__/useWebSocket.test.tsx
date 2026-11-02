@@ -3,6 +3,9 @@ import { act, render, waitFor } from "@testing-library/react"
 import { describe, expect, it, beforeEach, vi } from "vitest"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import { useGpuStore } from "@/stores/gpuStore"
+import { useModelStore } from "@/stores/modelStore"
+import { api } from "@/api/client"
+import type { ModelState } from "@/types"
 
 class MockWebSocket {
   static instances: MockWebSocket[] = []
@@ -42,6 +45,7 @@ describe("useWebSocket", () => {
     vi.useRealTimers()
     vi.stubGlobal("WebSocket", MockWebSocket)
     useGpuStore.setState({ gpus: [], lastUpdated: null })
+    useModelStore.setState({ models: {} })
   })
 
   it("updates gpu store from gpu_stats event", async () => {
@@ -93,5 +97,46 @@ describe("useWebSocket", () => {
     })
 
     expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  it("refreshes a derived model event into its canonical card", async () => {
+    const getModel = vi.spyOn(api.models, "get").mockResolvedValue({
+      modelId: "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M",
+      status: "loading",
+      runtimePhase: "upsizing",
+      runtimeSlots: 4,
+    } as ModelState)
+    render(<Harness />)
+    const socket = MockWebSocket.instances[0]
+
+    act(() => {
+      socket.emitMessage({
+        type: "model_event",
+        data: {
+          model_id:
+            "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M::0123456789ab",
+          canonical_model_id:
+            "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M",
+          new_status: "loading",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(getModel).toHaveBeenCalledWith(
+        "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M",
+      )
+      expect(
+        useModelStore.getState().models[
+          "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M"
+        ].runtimePhase,
+      ).toBe("upsizing")
+      expect(
+        useModelStore.getState().models[
+          "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M::0123456789ab"
+        ],
+      ).toBeUndefined()
+    })
+    getModel.mockRestore()
   })
 })

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 # ── Chat Completions ────────────────────────────────────────────
 
+
 class ChatMessage(BaseModel):
     role: str = Field(..., description="Role: system, user, assistant, tool", examples=["user"])
     content: str | list[Any] | None = Field(
@@ -39,8 +40,9 @@ class ChatCompletionRequest(BaseModel):
     reasoning_effort: str | None = Field(
         None,
         description=(
-            "Thinking budget for reasoning-capable models: `low`, `medium` or "
-            "`high` (`off`/`none`/`disabled` also accepted to turn thinking off). "
+            "Thinking level for reasoning-capable models: `low`, `medium` or "
+            "`high` (`off`/`none`/`disabled` turn thinking off; `default` keeps "
+            "the model profile's launch default). "
             "oCabra translates the value per backend: vLLM gets it as "
             "`extra_body.chat_template_kwargs.reasoning_effort`, Ollama ≥0.5 "
             "receives `think: 'low'|'medium'|'high'|False`, llama.cpp-native "
@@ -60,7 +62,7 @@ class ChatCompletionRequest(BaseModel):
             "template may ignore) — guarantees non-empty `content`. "
             "Verified live 2026-10-29 against qwen3.8:27b: budget=200 "
             "produced 674 chars of reasoning and a clean `finish_reason: "
-            "\"stop\"` (vs ~16.6k chars unconstrained). Server default is "
+            '"stop"` (vs ~16.6k chars unconstrained). Server default is '
             "unrestricted (-1) if you don't set this. No native "
             "equivalent on other backends — silently ignored there."
         ),
@@ -70,57 +72,62 @@ class ChatCompletionRequest(BaseModel):
         description=(
             "Structured output. Two shapes supported, forwarded verbatim to "
             "the backend:\n"
-            "- `{\"type\": \"json_object\"}` — any valid JSON. Supported by "
+            '- `{"type": "json_object"}` — any valid JSON. Supported by '
             "vLLM, Ollama ≥0.1.33 and llama.cpp.\n"
-            "- `{\"type\": \"json_schema\", \"json_schema\": {\"name\": \"...\", "
-            "\"strict\": true, \"schema\": {...}}}` — constrained decoding "
+            '- `{"type": "json_schema", "json_schema": {"name": "...", '
+            '"strict": true, "schema": {...}}}` — constrained decoding '
             "against a JSON Schema. Supported by vLLM ≥0.26, Ollama ≥0.4 "
             "and llama.cpp (grammar). The model is forced to produce output "
             "that validates against the schema."
         ),
     )
 
-    model_config = {"json_schema_extra": {"examples": [
-        {
-            "model": "qwen3-8b",
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Say hello in Spanish"},
-            ],
-            "max_tokens": 256,
-            "temperature": 0.7,
-        },
-        {
-            "model": "mistral-7b",
-            "messages": [
-                {"role": "user", "content": "Give me a fictional person"},
-            ],
-            "max_tokens": 300,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "person",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "age": {"type": "integer"},
-                            "hobbies": {
-                                "type": "array",
-                                "items": {"type": "string"},
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "model": "qwen3-8b",
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "Say hello in Spanish"},
+                    ],
+                    "max_tokens": 256,
+                    "temperature": 0.7,
+                },
+                {
+                    "model": "mistral-7b",
+                    "messages": [
+                        {"role": "user", "content": "Give me a fictional person"},
+                    ],
+                    "max_tokens": 300,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "person",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "age": {"type": "integer"},
+                                    "hobbies": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["name", "age", "hobbies"],
+                                "additionalProperties": False,
                             },
                         },
-                        "required": ["name", "age", "hobbies"],
-                        "additionalProperties": False,
                     },
                 },
-            },
-        },
-    ]}}
+            ]
+        }
+    }
 
 
 # ── Text Completions ───────────────────────────────────────────
+
 
 class CompletionRequest(BaseModel):
     model: str = Field(..., description="Profile ID o model ID", examples=["qwen3-8b"])
@@ -133,6 +140,7 @@ class CompletionRequest(BaseModel):
 
 # ── Embeddings ──────────────────────────────────────────────────
 
+
 class EmbeddingRequest(BaseModel):
     model: str = Field(..., description="Profile ID o model ID", examples=["qwen3-embedding-8b"])
     input: str | list[str] = Field(..., description="Text(s) to embed", examples=["Hello world"])
@@ -140,6 +148,7 @@ class EmbeddingRequest(BaseModel):
 
 
 # ── TTS ─────────────────────────────────────────────────────────
+
 
 class SpeechRequest(BaseModel):
     model: str = Field(..., description="Profile ID del modelo TTS", examples=["kokoro-82m"])
@@ -163,15 +172,19 @@ class SpeechRequest(BaseModel):
         None, description="Instruccion de estilo (ej: 'Speak calmly and slowly')"
     )
 
-    model_config = {"json_schema_extra": {"examples": [
-        {
-            "model": "kokoro-82m",
-            "input": "Hello, this is a test of text to speech.",
-            "voice": "af_heart",
-            "response_format": "mp3",
-            "speed": 1.0,
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "model": "kokoro-82m",
+                    "input": "Hello, this is a test of text to speech.",
+                    "voice": "af_heart",
+                    "response_format": "mp3",
+                    "speed": 1.0,
+                }
+            ]
         }
-    ]}}
+    }
 
 
 # ── STT ─────────────────────────────────────────────────────────
@@ -180,9 +193,12 @@ class SpeechRequest(BaseModel):
 
 # ── Images ──────────────────────────────────────────────────────
 
+
 class ImageGenerationRequest(BaseModel):
     model: str = Field(..., description="Profile ID del modelo de imagen")
-    prompt: str = Field(..., description="Texto descriptivo de la imagen", examples=["A cat on a rainbow"])
+    prompt: str = Field(
+        ..., description="Texto descriptivo de la imagen", examples=["A cat on a rainbow"]
+    )
     n: int = Field(1, description="Numero de imagenes a generar")
     size: str = Field("512x512", description="Tamano: 256x256, 512x512, 1024x1024")
     num_inference_steps: int | None = Field(None, description="Pasos de inferencia")
@@ -192,6 +208,7 @@ class ImageGenerationRequest(BaseModel):
 
 # ── Rerank ──────────────────────────────────────────────────────
 
+
 class RerankRequest(BaseModel):
     model: str = Field(..., description="Profile ID del modelo de reranking")
     query: str = Field(..., description="Query de busqueda")
@@ -200,6 +217,7 @@ class RerankRequest(BaseModel):
 
 
 # ── Music ───────────────────────────────────────────────────────
+
 
 class MusicGenerationRequest(BaseModel):
     model: str = Field(..., description="Profile ID del modelo de musica")

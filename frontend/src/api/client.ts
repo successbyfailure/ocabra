@@ -66,37 +66,45 @@ import type {
   OpenAIBatchJob,
   OpenAIFileObject,
   BatchEndpoint,
-} from "@/types"
-import { useAuthStore } from "@/stores/authStore"
+} from "@/types";
+import { useAuthStore } from "@/stores/authStore";
 
-const BASE = ""
+const BASE = "";
 
-type AnyRecord = Record<string, unknown>
+type AnyRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is AnyRecord {
-  return typeof value === "object" && value !== null
+  return typeof value === "object" && value !== null;
 }
 
 function hasAnyKey(record: AnyRecord, keys: string[]): boolean {
-  return keys.some((key) => key in record)
+  return keys.some((key) => key in record);
 }
 
-function toNumberOrNull(record: AnyRecord, snakeKey: string, camelKey = snakeKey): number | null {
-  const value = record[snakeKey] ?? record[camelKey]
-  return value == null ? null : Number(value)
+function toNumberOrNull(
+  record: AnyRecord,
+  snakeKey: string,
+  camelKey = snakeKey,
+): number | null {
+  const value = record[snakeKey] ?? record[camelKey];
+  return value == null ? null : Number(value);
 }
 
-function toBooleanOrNull(record: AnyRecord, snakeKey: string, camelKey = snakeKey): boolean | null {
-  const value = record[snakeKey] ?? record[camelKey]
-  return value == null ? null : Boolean(value)
+function toBooleanOrNull(
+  record: AnyRecord,
+  snakeKey: string,
+  camelKey = snakeKey,
+): boolean | null {
+  const value = record[snakeKey] ?? record[camelKey];
+  return value == null ? null : Boolean(value);
 }
 
 function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
-  const data = isRecord(raw) ? raw : {}
-  const next: ModelState["extraConfig"] = { ...data }
+  const data = isRecord(raw) ? raw : {};
+  const next: ModelState["extraConfig"] = { ...data };
 
-  const vllmRaw = isRecord(data.vllm) ? data.vllm : {}
-  const vllmSource = isRecord(data.vllm) ? vllmRaw : data
+  const vllmRaw = isRecord(data.vllm) ? data.vllm : {};
+  const vllmSource = isRecord(data.vllm) ? vllmRaw : data;
   if (
     isRecord(data.vllm) ||
     hasAnyKey(vllmSource, [
@@ -130,87 +138,157 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
     ])
   ) {
     next.vllm = {
-      recipeId: (vllmSource.recipe_id ?? vllmSource.recipeId ?? null) as string | null,
-      recipeNotes: Array.isArray(vllmSource.recipe_notes ?? vllmSource.recipeNotes)
-        ? ((vllmSource.recipe_notes ?? vllmSource.recipeNotes) as unknown[]).map(String)
+      recipeId: (vllmSource.recipe_id ?? vllmSource.recipeId ?? null) as
+        string | null,
+      recipeNotes: Array.isArray(
+        vllmSource.recipe_notes ?? vllmSource.recipeNotes,
+      )
+        ? (
+            (vllmSource.recipe_notes ?? vllmSource.recipeNotes) as unknown[]
+          ).map(String)
         : [],
-      recipeModelImpl: (vllmSource.recipe_model_impl ?? vllmSource.recipeModelImpl ?? null) as
-        | "auto"
-        | "vllm"
-        | "transformers"
-        | null,
-      recipeRunner: (vllmSource.recipe_runner ?? vllmSource.recipeRunner ?? null) as
-        | "generate"
-        | "pooling"
-        | null,
-      suggestedConfig: isRecord(vllmSource.suggested_config ?? vllmSource.suggestedConfig)
-        ? ((vllmSource.suggested_config ?? vllmSource.suggestedConfig) as Record<string, unknown>)
+      recipeModelImpl: (vllmSource.recipe_model_impl ??
+        vllmSource.recipeModelImpl ??
+        null) as "auto" | "vllm" | "transformers" | null,
+      recipeRunner: (vllmSource.recipe_runner ??
+        vllmSource.recipeRunner ??
+        null) as "generate" | "pooling" | null,
+      suggestedConfig: isRecord(
+        vllmSource.suggested_config ?? vllmSource.suggestedConfig,
+      )
+        ? ((vllmSource.suggested_config ??
+            vllmSource.suggestedConfig) as Record<string, unknown>)
         : {},
-      suggestedTuning: isRecord(vllmSource.suggested_tuning ?? vllmSource.suggestedTuning)
-        ? ((vllmSource.suggested_tuning ?? vllmSource.suggestedTuning) as Record<string, unknown>)
+      suggestedTuning: isRecord(
+        vllmSource.suggested_tuning ?? vllmSource.suggestedTuning,
+      )
+        ? ((vllmSource.suggested_tuning ??
+            vllmSource.suggestedTuning) as Record<string, unknown>)
         : {},
-      probeStatus: (vllmSource.probe_status ?? vllmSource.probeStatus ?? null) as import("@/types").HFVLLMRuntimeProbe["status"] | null,
-      probeReason: (vllmSource.probe_reason ?? vllmSource.probeReason ?? null) as string | null,
-      probeObservedAt: (vllmSource.probe_observed_at ?? vllmSource.probeObservedAt ?? null) as string | null,
-      probeRecommendedModelImpl:
-        (vllmSource.probe_recommended_model_impl ?? vllmSource.probeRecommendedModelImpl ?? null) as
-          | "auto"
-          | "vllm"
-          | "transformers"
-          | null,
-      probeRecommendedRunner:
-        (vllmSource.probe_recommended_runner ?? vllmSource.probeRecommendedRunner ?? null) as
-          | "generate"
-          | "pooling"
-          | null,
+      probeStatus: (vllmSource.probe_status ??
+        vllmSource.probeStatus ??
+        null) as import("@/types").HFVLLMRuntimeProbe["status"] | null,
+      probeReason: (vllmSource.probe_reason ??
+        vllmSource.probeReason ??
+        null) as string | null,
+      probeObservedAt: (vllmSource.probe_observed_at ??
+        vllmSource.probeObservedAt ??
+        null) as string | null,
+      probeRecommendedModelImpl: (vllmSource.probe_recommended_model_impl ??
+        vllmSource.probeRecommendedModelImpl ??
+        null) as "auto" | "vllm" | "transformers" | null,
+      probeRecommendedRunner: (vllmSource.probe_recommended_runner ??
+        vllmSource.probeRecommendedRunner ??
+        null) as "generate" | "pooling" | null,
       modelImpl: (vllmSource.model_impl ?? vllmSource.modelImpl ?? null) as
-        | "auto"
-        | "vllm"
-        | "transformers"
-        | null,
+        "auto" | "vllm" | "transformers" | null,
       runner: (vllmSource.runner ?? null) as "generate" | "pooling" | null,
-      hfOverrides: (vllmSource.hf_overrides ?? vllmSource.hfOverrides ?? null) as string | Record<string, unknown> | null,
-      chatTemplate: (vllmSource.chat_template ?? vllmSource.chatTemplate ?? null) as string | null,
-      chatTemplateContentFormat:
-        (vllmSource.chat_template_content_format ?? vllmSource.chatTemplateContentFormat ?? null) as string | null,
-      generationConfig: (vllmSource.generation_config ?? vllmSource.generationConfig ?? null) as string | null,
-      overrideGenerationConfig:
-        (vllmSource.override_generation_config ?? vllmSource.overrideGenerationConfig ?? null) as
-          | string
-          | Record<string, unknown>
-          | null,
-      toolCallParser: (vllmSource.tool_call_parser ?? vllmSource.toolCallParser ?? null) as string | null,
-      toolParserPlugin: (vllmSource.tool_parser_plugin ?? vllmSource.toolParserPlugin ?? null) as string | null,
-      reasoningParser: (vllmSource.reasoning_parser ?? vllmSource.reasoningParser ?? null) as string | null,
-      languageModelOnly: toBooleanOrNull(vllmSource, "language_model_only", "languageModelOnly"),
+      hfOverrides: (vllmSource.hf_overrides ??
+        vllmSource.hfOverrides ??
+        null) as string | Record<string, unknown> | null,
+      chatTemplate: (vllmSource.chat_template ??
+        vllmSource.chatTemplate ??
+        null) as string | null,
+      chatTemplateContentFormat: (vllmSource.chat_template_content_format ??
+        vllmSource.chatTemplateContentFormat ??
+        null) as string | null,
+      generationConfig: (vllmSource.generation_config ??
+        vllmSource.generationConfig ??
+        null) as string | null,
+      overrideGenerationConfig: (vllmSource.override_generation_config ??
+        vllmSource.overrideGenerationConfig ??
+        null) as string | Record<string, unknown> | null,
+      toolCallParser: (vllmSource.tool_call_parser ??
+        vllmSource.toolCallParser ??
+        null) as string | null,
+      toolParserPlugin: (vllmSource.tool_parser_plugin ??
+        vllmSource.toolParserPlugin ??
+        null) as string | null,
+      reasoningParser: (vllmSource.reasoning_parser ??
+        vllmSource.reasoningParser ??
+        null) as string | null,
+      languageModelOnly: toBooleanOrNull(
+        vllmSource,
+        "language_model_only",
+        "languageModelOnly",
+      ),
       maxNumSeqs: toNumberOrNull(vllmSource, "max_num_seqs", "maxNumSeqs"),
-      maxNumBatchedTokens: toNumberOrNull(vllmSource, "max_num_batched_tokens", "maxNumBatchedTokens"),
-      tensorParallelSize: toNumberOrNull(vllmSource, "tensor_parallel_size", "tensorParallelSize"),
+      maxNumBatchedTokens: toNumberOrNull(
+        vllmSource,
+        "max_num_batched_tokens",
+        "maxNumBatchedTokens",
+      ),
+      tensorParallelSize: toNumberOrNull(
+        vllmSource,
+        "tensor_parallel_size",
+        "tensorParallelSize",
+      ),
       maxModelLen: toNumberOrNull(vllmSource, "max_model_len", "maxModelLen"),
-      gpuMemoryUtilization: toNumberOrNull(vllmSource, "gpu_memory_utilization", "gpuMemoryUtilization"),
-      enablePrefixCaching: Boolean(vllmSource.enable_prefix_caching ?? vllmSource.enablePrefixCaching),
-      enableChunkedPrefill: toBooleanOrNull(vllmSource, "enable_chunked_prefill", "enableChunkedPrefill"),
-      enforceEager: Boolean(vllmSource.enforce_eager ?? vllmSource.enforceEager),
-      trustRemoteCode: Boolean(vllmSource.trust_remote_code ?? vllmSource.trustRemoteCode),
+      gpuMemoryUtilization: toNumberOrNull(
+        vllmSource,
+        "gpu_memory_utilization",
+        "gpuMemoryUtilization",
+      ),
+      enablePrefixCaching: Boolean(
+        vllmSource.enable_prefix_caching ?? vllmSource.enablePrefixCaching,
+      ),
+      enableChunkedPrefill: toBooleanOrNull(
+        vllmSource,
+        "enable_chunked_prefill",
+        "enableChunkedPrefill",
+      ),
+      enforceEager: Boolean(
+        vllmSource.enforce_eager ?? vllmSource.enforceEager,
+      ),
+      trustRemoteCode: Boolean(
+        vllmSource.trust_remote_code ?? vllmSource.trustRemoteCode,
+      ),
       swapSpace: toNumberOrNull(vllmSource, "swap_space", "swapSpace"),
-      kvCacheDtype: (vllmSource.kv_cache_dtype ?? vllmSource.kvCacheDtype ?? null) as string | null,
-    }
+      kvCacheDtype: (vllmSource.kv_cache_dtype ??
+        vllmSource.kvCacheDtype ??
+        null) as string | null,
+    };
   }
 
-  const sglangRaw = isRecord(data.sglang) ? data.sglang : {}
-  const sglangSource = isRecord(data.sglang) ? sglangRaw : data
-  if (isRecord(data.sglang) || hasAnyKey(sglangSource, ["tensor_parallel_size", "context_length", "mem_fraction_static", "trust_remote_code", "disable_radix_cache"])) {
+  const sglangRaw = isRecord(data.sglang) ? data.sglang : {};
+  const sglangSource = isRecord(data.sglang) ? sglangRaw : data;
+  if (
+    isRecord(data.sglang) ||
+    hasAnyKey(sglangSource, [
+      "tensor_parallel_size",
+      "context_length",
+      "mem_fraction_static",
+      "trust_remote_code",
+      "disable_radix_cache",
+    ])
+  ) {
     next.sglang = {
-      tensorParallelSize: toNumberOrNull(sglangSource, "tensor_parallel_size", "tensorParallelSize"),
-      contextLength: toNumberOrNull(sglangSource, "context_length", "contextLength"),
-      memFractionStatic: toNumberOrNull(sglangSource, "mem_fraction_static", "memFractionStatic"),
-      trustRemoteCode: Boolean(sglangSource.trust_remote_code ?? sglangSource.trustRemoteCode),
-      disableRadixCache: Boolean(sglangSource.disable_radix_cache ?? sglangSource.disableRadixCache),
-    }
+      tensorParallelSize: toNumberOrNull(
+        sglangSource,
+        "tensor_parallel_size",
+        "tensorParallelSize",
+      ),
+      contextLength: toNumberOrNull(
+        sglangSource,
+        "context_length",
+        "contextLength",
+      ),
+      memFractionStatic: toNumberOrNull(
+        sglangSource,
+        "mem_fraction_static",
+        "memFractionStatic",
+      ),
+      trustRemoteCode: Boolean(
+        sglangSource.trust_remote_code ?? sglangSource.trustRemoteCode,
+      ),
+      disableRadixCache: Boolean(
+        sglangSource.disable_radix_cache ?? sglangSource.disableRadixCache,
+      ),
+    };
   }
 
-  const llamaCppRaw = isRecord(data.llama_cpp) ? data.llama_cpp : {}
-  const llamaCppSource = isRecord(data.llama_cpp) ? llamaCppRaw : data
+  const llamaCppRaw = isRecord(data.llama_cpp) ? data.llama_cpp : {};
+  const llamaCppSource = isRecord(data.llama_cpp) ? llamaCppRaw : data;
   if (
     isRecord(data.llama_cpp) ||
     hasAnyKey(llamaCppSource, [
@@ -222,16 +300,16 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
       "cache_type_v",
       "mmproj_model_id",
       "vision_mode",
+      "jinja",
+      "reasoning",
+      "reasoning_format",
+      "reasoning_budget",
     ])
   ) {
-    const cacheK = (llamaCppSource.cache_type_k ?? llamaCppSource.cacheTypeK) as
-      | string
-      | null
-      | undefined
-    const cacheV = (llamaCppSource.cache_type_v ?? llamaCppSource.cacheTypeV) as
-      | string
-      | null
-      | undefined
+    const cacheK = (llamaCppSource.cache_type_k ??
+      llamaCppSource.cacheTypeK) as string | null | undefined;
+    const cacheV = (llamaCppSource.cache_type_v ??
+      llamaCppSource.cacheTypeV) as string | null | undefined;
     next.llama_cpp = {
       // Spread the raw source first so fields this parser doesn't know
       // about (model_path, speculative, mmproj_model_id, disabled_gpus,
@@ -244,56 +322,111 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
       ...(llamaCppSource as unknown as LlamaCppConfig),
       gpuLayers: toNumberOrNull(llamaCppSource, "gpu_layers", "gpuLayers"),
       ctxSize: toNumberOrNull(llamaCppSource, "ctx_size", "ctxSize"),
-      parallelSlots: toNumberOrNull(llamaCppSource, "parallel_slots", "parallelSlots"),
+      parallelSlots: toNumberOrNull(
+        llamaCppSource,
+        "parallel_slots",
+        "parallelSlots",
+      ),
+      kvUnified: (llamaCppSource.kv_unified ??
+        llamaCppSource.kvUnified ??
+        null) as boolean | null,
+      kvUnifiedPerSlot: toNumberOrNull(
+        llamaCppSource,
+        "kv_unified_per_slot",
+        "kvUnifiedPerSlot",
+      ),
       flashAttn: Boolean(llamaCppSource.flash_attn ?? llamaCppSource.flashAttn),
       embedding: Boolean(llamaCppSource.embedding),
       cacheTypeK: (cacheK ?? null) as LlamaCppConfig["cacheTypeK"],
       cacheTypeV: (cacheV ?? null) as LlamaCppConfig["cacheTypeV"],
-      mmprojModelId: (llamaCppSource.mmproj_model_id ?? llamaCppSource.mmprojModelId ?? null) as string | null,
-      visionMode: (llamaCppSource.vision_mode ?? llamaCppSource.visionMode ?? null) as LlamaCppConfig["visionMode"],
-    }
+      mmprojModelId: (llamaCppSource.mmproj_model_id ??
+        llamaCppSource.mmprojModelId ??
+        null) as string | null,
+      visionMode: (llamaCppSource.vision_mode ??
+        llamaCppSource.visionMode ??
+        null) as LlamaCppConfig["visionMode"],
+      jinja: (llamaCppSource.jinja ?? null) as boolean | null,
+      reasoning: (llamaCppSource.reasoning ??
+        null) as LlamaCppConfig["reasoning"],
+      reasoningFormat: (llamaCppSource.reasoning_format ??
+        llamaCppSource.reasoningFormat ??
+        null) as LlamaCppConfig["reasoningFormat"],
+      reasoningBudget: toNumberOrNull(
+        llamaCppSource,
+        "reasoning_budget",
+        "reasoningBudget",
+      ),
+    };
   }
 
-  const bitnetRaw = isRecord(data.bitnet) ? data.bitnet : {}
-  const bitnetSource = isRecord(data.bitnet) ? bitnetRaw : data
-  if (isRecord(data.bitnet) || hasAnyKey(bitnetSource, ["gpu_layers", "ctx_size", "flash_attn"])) {
+  const bitnetRaw = isRecord(data.bitnet) ? data.bitnet : {};
+  const bitnetSource = isRecord(data.bitnet) ? bitnetRaw : data;
+  if (
+    isRecord(data.bitnet) ||
+    hasAnyKey(bitnetSource, ["gpu_layers", "ctx_size", "flash_attn"])
+  ) {
     next.bitnet = {
       gpuLayers: toNumberOrNull(bitnetSource, "gpu_layers", "gpuLayers"),
       ctxSize: toNumberOrNull(bitnetSource, "ctx_size", "ctxSize"),
       flashAttn: Boolean(bitnetSource.flash_attn ?? bitnetSource.flashAttn),
-    }
+    };
   }
 
-  const tensorrtRaw = isRecord(data.tensorrt_llm) ? data.tensorrt_llm : {}
-  const tensorrtSource = isRecord(data.tensorrt_llm) ? tensorrtRaw : data
-  if (isRecord(data.tensorrt_llm) || hasAnyKey(tensorrtSource, ["max_batch_size", "context_length", "trust_remote_code"])) {
+  const tensorrtRaw = isRecord(data.tensorrt_llm) ? data.tensorrt_llm : {};
+  const tensorrtSource = isRecord(data.tensorrt_llm) ? tensorrtRaw : data;
+  if (
+    isRecord(data.tensorrt_llm) ||
+    hasAnyKey(tensorrtSource, [
+      "max_batch_size",
+      "context_length",
+      "trust_remote_code",
+    ])
+  ) {
     next.tensorrt_llm = {
-      maxBatchSize: toNumberOrNull(tensorrtSource, "max_batch_size", "maxBatchSize"),
-      contextLength: toNumberOrNull(tensorrtSource, "context_length", "contextLength"),
-      trustRemoteCode: Boolean(tensorrtSource.trust_remote_code ?? tensorrtSource.trustRemoteCode),
-    }
+      maxBatchSize: toNumberOrNull(
+        tensorrtSource,
+        "max_batch_size",
+        "maxBatchSize",
+      ),
+      contextLength: toNumberOrNull(
+        tensorrtSource,
+        "context_length",
+        "contextLength",
+      ),
+      trustRemoteCode: Boolean(
+        tensorrtSource.trust_remote_code ?? tensorrtSource.trustRemoteCode,
+      ),
+    };
   }
 
-  const whisperRaw = isRecord(data.whisper) ? data.whisper : {}
-  const whisperSource = isRecord(data.whisper) ? whisperRaw : data
+  const whisperRaw = isRecord(data.whisper) ? data.whisper : {};
+  const whisperSource = isRecord(data.whisper) ? whisperRaw : data;
   if (
     isRecord(data.whisper) ||
-    hasAnyKey(whisperSource, ["diarization_enabled", "diarization_model_id", "num_workers"])
+    hasAnyKey(whisperSource, [
+      "diarization_enabled",
+      "diarization_model_id",
+      "num_workers",
+    ])
   ) {
     next.whisper = {
-      diarizationEnabled: Boolean(whisperSource.diarization_enabled ?? whisperSource.diarizationEnabled),
-      diarizationModelId: (whisperSource.diarization_model_id ?? whisperSource.diarizationModelId ?? null) as string | null,
+      diarizationEnabled: Boolean(
+        whisperSource.diarization_enabled ?? whisperSource.diarizationEnabled,
+      ),
+      diarizationModelId: (whisperSource.diarization_model_id ??
+        whisperSource.diarizationModelId ??
+        null) as string | null,
       numWorkers: toNumberOrNull(whisperSource, "num_workers", "numWorkers"),
-    }
+    };
   }
 
-  return next
+  return next;
 }
 
 function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
-  const data = isRecord(raw) ? raw : null
-  if (!data) return null
-  const probeRaw = data.runtime_probe ?? data.runtimeProbe
+  const data = isRecord(raw) ? raw : null;
+  if (!data) return null;
+  const probeRaw = data.runtime_probe ?? data.runtimeProbe;
   const probe = isRecord(probeRaw)
     ? {
         status: String(probeRaw.status ?? "unknown") as
@@ -310,15 +443,12 @@ function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
           | "unavailable"
           | "unknown",
         reason: (probeRaw.reason ?? null) as string | null,
-        recommendedModelImpl: (probeRaw.recommended_model_impl ?? probeRaw.recommendedModelImpl ?? null) as
-          | "auto"
-          | "vllm"
-          | "transformers"
-          | null,
-        recommendedRunner: (probeRaw.recommended_runner ?? probeRaw.recommendedRunner ?? null) as
-          | "generate"
-          | "pooling"
-          | null,
+        recommendedModelImpl: (probeRaw.recommended_model_impl ??
+          probeRaw.recommendedModelImpl ??
+          null) as "auto" | "vllm" | "transformers" | null,
+        recommendedRunner: (probeRaw.recommended_runner ??
+          probeRaw.recommendedRunner ??
+          null) as "generate" | "pooling" | null,
         tokenizerLoad:
           probeRaw.tokenizer_load == null && probeRaw.tokenizerLoad == null
             ? null
@@ -327,9 +457,10 @@ function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
           probeRaw.config_load == null && probeRaw.configLoad == null
             ? null
             : Boolean(probeRaw.config_load ?? probeRaw.configLoad),
-        observedAt: (probeRaw.observed_at ?? probeRaw.observedAt ?? null) as string | null,
+        observedAt: (probeRaw.observed_at ?? probeRaw.observedAt ?? null) as
+          string | null,
       }
-    : null
+    : null;
 
   return {
     classification: String(data.classification ?? "unknown") as
@@ -339,7 +470,8 @@ function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
       | "unsupported"
       | "unknown",
     label: String(data.label ?? "unknown"),
-    modelImpl: (data.model_impl ?? data.modelImpl ?? null) as "auto" | "vllm" | "transformers" | null,
+    modelImpl: (data.model_impl ?? data.modelImpl ?? null) as
+      "auto" | "vllm" | "transformers" | null,
     runner: (data.runner ?? null) as "generate" | "pooling" | null,
     taskMode: (data.task_mode ?? data.taskMode ?? null) as
       | "generate"
@@ -347,36 +479,40 @@ function toHFVLLMSupport(raw: unknown): HFModelCard["vllmSupport"] {
       | "pooling"
       | "multimodal_pooling"
       | null,
-    requiredOverrides: Array.isArray(data.required_overrides ?? data.requiredOverrides)
-      ? ((data.required_overrides ?? data.requiredOverrides) as unknown[]).map(String)
+    requiredOverrides: Array.isArray(
+      data.required_overrides ?? data.requiredOverrides,
+    )
+      ? ((data.required_overrides ?? data.requiredOverrides) as unknown[]).map(
+          String,
+        )
       : [],
     recipeId: (data.recipe_id ?? data.recipeId ?? null) as string | null,
     recipeNotes: Array.isArray(data.recipe_notes ?? data.recipeNotes)
       ? ((data.recipe_notes ?? data.recipeNotes) as unknown[]).map(String)
       : [],
-    recipeModelImpl: (data.recipe_model_impl ?? data.recipeModelImpl ?? null) as
-      | "auto"
-      | "vllm"
-      | "transformers"
-      | null,
+    recipeModelImpl: (data.recipe_model_impl ??
+      data.recipeModelImpl ??
+      null) as "auto" | "vllm" | "transformers" | null,
     recipeRunner: (data.recipe_runner ?? data.recipeRunner ?? null) as
-      | "generate"
-      | "pooling"
-      | null,
-    suggestedConfig:
-      isRecord(data.suggested_config ?? data.suggestedConfig)
-        ? ((data.suggested_config ?? data.suggestedConfig) as Record<string, unknown>)
-        : {},
-    suggestedTuning:
-      isRecord(data.suggested_tuning ?? data.suggestedTuning)
-        ? ((data.suggested_tuning ?? data.suggestedTuning) as Record<string, unknown>)
-        : {},
+      "generate" | "pooling" | null,
+    suggestedConfig: isRecord(data.suggested_config ?? data.suggestedConfig)
+      ? ((data.suggested_config ?? data.suggestedConfig) as Record<
+          string,
+          unknown
+        >)
+      : {},
+    suggestedTuning: isRecord(data.suggested_tuning ?? data.suggestedTuning)
+      ? ((data.suggested_tuning ?? data.suggestedTuning) as Record<
+          string,
+          unknown
+        >)
+      : {},
     runtimeProbe: probe,
-  }
+  };
 }
 
 function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     chat: Boolean(data.chat),
     completion: Boolean(data.completion),
@@ -393,7 +529,9 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     // pipelines loaded before the capability landed): the endpoint will still
     // return ``edit_unsupported`` if the pipeline truly can't edit.
     imageEditing: Boolean(data.image_editing ?? data.imageEditing ?? true),
-    audioTranscription: Boolean(data.audio_transcription ?? data.audioTranscription),
+    audioTranscription: Boolean(
+      data.audio_transcription ?? data.audioTranscription,
+    ),
     musicGeneration: Boolean(data.music_generation ?? data.musicGeneration),
     tts: Boolean(data.tts),
     audioInput: Boolean(data.audio_input ?? data.audioInput),
@@ -401,12 +539,14 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     videoInput: Boolean(data.video_input ?? data.videoInput),
     streaming: Boolean(data.streaming),
     contextLength: Number(data.context_length ?? data.contextLength ?? 0),
-    nativeContextLength: Number(data.native_context_length ?? data.nativeContextLength ?? 0),
-  }
+    nativeContextLength: Number(
+      data.native_context_length ?? data.nativeContextLength ?? 0,
+    ),
+  };
 }
 
 function toGpuState(raw: unknown): GPUState {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     index: Number(data.index ?? 0),
     name: String(data.name ?? "GPU"),
@@ -420,44 +560,57 @@ function toGpuState(raw: unknown): GPUState {
     lockedVramMb: Number(data.locked_vram_mb ?? data.lockedVramMb ?? 0),
     processes: Array.isArray(data.processes)
       ? data.processes.map((processRaw) => {
-          const process = isRecord(processRaw) ? processRaw : {}
+          const process = isRecord(processRaw) ? processRaw : {};
           return {
             pid: Number(process.pid ?? 0),
-            processName: (process.process_name ?? process.processName ?? null) as string | null,
-            processType: String(process.process_type ?? process.processType ?? "compute") as
-              | "compute"
-              | "graphics",
+            processName: (process.process_name ??
+              process.processName ??
+              null) as string | null,
+            processType: String(
+              process.process_type ?? process.processType ?? "compute",
+            ) as "compute" | "graphics",
             usedVramMb: Number(process.used_vram_mb ?? process.usedVramMb ?? 0),
-          }
+          };
         })
       : [],
-  }
+  };
 }
 
 function toModelsStorageStats(raw: unknown): ModelsStorageStats {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     path: String(data.path ?? ""),
     totalBytes: Number(data.total_bytes ?? data.totalBytes ?? 0),
     usedBytes: Number(data.used_bytes ?? data.usedBytes ?? 0),
     freeBytes: Number(data.free_bytes ?? data.freeBytes ?? 0),
-  }
+  };
 }
 
 function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
-    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as ModelMemoryEstimate["backendType"],
+    backendType: String(
+      data.backend_type ?? data.backendType ?? "vllm",
+    ) as ModelMemoryEstimate["backendType"],
     gpuIndex:
-      data.gpu_index == null && data.gpuIndex == null ? null : Number(data.gpu_index ?? data.gpuIndex),
+      data.gpu_index == null && data.gpuIndex == null
+        ? null
+        : Number(data.gpu_index ?? data.gpuIndex),
     totalVramMb:
-      data.total_vram_mb == null && data.totalVramMb == null ? null : Number(data.total_vram_mb ?? data.totalVramMb),
+      data.total_vram_mb == null && data.totalVramMb == null
+        ? null
+        : Number(data.total_vram_mb ?? data.totalVramMb),
     freeVramMb:
-      data.free_vram_mb == null && data.freeVramMb == null ? null : Number(data.free_vram_mb ?? data.freeVramMb),
+      data.free_vram_mb == null && data.freeVramMb == null
+        ? null
+        : Number(data.free_vram_mb ?? data.freeVramMb),
     budgetVramMb:
-      data.budget_vram_mb == null && data.budgetVramMb == null ? null : Number(data.budget_vram_mb ?? data.budgetVramMb),
+      data.budget_vram_mb == null && data.budgetVramMb == null
+        ? null
+        : Number(data.budget_vram_mb ?? data.budgetVramMb),
     requestedContextLength:
-      data.requested_context_length == null && data.requestedContextLength == null
+      data.requested_context_length == null &&
+      data.requestedContextLength == null
         ? null
         : Number(data.requested_context_length ?? data.requestedContextLength),
     estimatedWeightsMb:
@@ -465,17 +618,23 @@ function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
         ? null
         : Number(data.estimated_weights_mb ?? data.estimatedWeightsMb),
     estimatedEngineMbPerGpu:
-      data.estimated_engine_mb_per_gpu == null && data.estimatedEngineMbPerGpu == null
+      data.estimated_engine_mb_per_gpu == null &&
+      data.estimatedEngineMbPerGpu == null
         ? null
-        : Number(data.estimated_engine_mb_per_gpu ?? data.estimatedEngineMbPerGpu),
+        : Number(
+            data.estimated_engine_mb_per_gpu ?? data.estimatedEngineMbPerGpu,
+          ),
     estimatedKvCacheMb:
       data.estimated_kv_cache_mb == null && data.estimatedKvCacheMb == null
         ? null
         : Number(data.estimated_kv_cache_mb ?? data.estimatedKvCacheMb),
     estimatedMaxContextLength:
-      data.estimated_max_context_length == null && data.estimatedMaxContextLength == null
+      data.estimated_max_context_length == null &&
+      data.estimatedMaxContextLength == null
         ? null
-        : Number(data.estimated_max_context_length ?? data.estimatedMaxContextLength),
+        : Number(
+            data.estimated_max_context_length ?? data.estimatedMaxContextLength,
+          ),
     modelLoadingMemoryMb:
       data.model_loading_memory_mb == null && data.modelLoadingMemoryMb == null
         ? null
@@ -489,25 +648,39 @@ function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
         ? null
         : Number(data.tensor_parallel_size ?? data.tensorParallelSize),
     fitsCurrentGpu:
-      data.fits_current_gpu == null && data.fitsCurrentGpu == null ? null : Boolean(data.fits_current_gpu ?? data.fitsCurrentGpu),
+      data.fits_current_gpu == null && data.fitsCurrentGpu == null
+        ? null
+        : Boolean(data.fits_current_gpu ?? data.fitsCurrentGpu),
     enginePresent:
-      data.engine_present == null && data.enginePresent == null ? null : Boolean(data.engine_present ?? data.enginePresent),
+      data.engine_present == null && data.enginePresent == null
+        ? null
+        : Boolean(data.engine_present ?? data.enginePresent),
     source: String(data.source ?? "heuristic") as ModelMemoryEstimate["source"],
     status: String(data.status ?? "ok") as ModelMemoryEstimate["status"],
     warning: (data.warning ?? null) as string | null,
     notes: Array.isArray(data.notes) ? data.notes.map(String) : [],
-  }
+  };
 }
 
 function toRuntimePolicy(raw: unknown): RuntimePolicy | null {
-  if (!isRecord(raw)) return null
+  if (!isRecord(raw)) return null;
   return {
-    selection: String(raw.selection ?? "prefer_loaded") as RuntimePolicy["selection"],
-    restoreDefaultWhenIdle: Boolean(raw.restore_default_when_idle ?? raw.restoreDefaultWhenIdle ?? true),
-    downgradeGraceSeconds: Number(raw.downgrade_grace_seconds ?? raw.downgradeGraceSeconds ?? 600),
-    minimumResidencySeconds: Number(raw.minimum_residency_seconds ?? raw.minimumResidencySeconds ?? 120),
+    selection: String(
+      raw.selection ?? "prefer_loaded",
+    ) as RuntimePolicy["selection"],
+    restoreDefaultWhenIdle: Boolean(
+      raw.restore_default_when_idle ?? raw.restoreDefaultWhenIdle ?? true,
+    ),
+    downgradeGraceSeconds: Number(
+      raw.downgrade_grace_seconds ?? raw.downgradeGraceSeconds ?? 600,
+    ),
+    minimumResidencySeconds: Number(
+      raw.minimum_residency_seconds ?? raw.minimumResidencySeconds ?? 120,
+    ),
     smallRequestsExtendLargeTtl: Boolean(
-      raw.small_requests_extend_large_ttl ?? raw.smallRequestsExtendLargeTtl ?? false,
+      raw.small_requests_extend_large_ttl ??
+      raw.smallRequestsExtendLargeTtl ??
+      false,
     ),
     remoteWarmThresholdSeconds: Number(
       raw.remote_warm_threshold_seconds ?? raw.remoteWarmThresholdSeconds ?? 10,
@@ -516,11 +689,40 @@ function toRuntimePolicy(raw: unknown): RuntimePolicy | null {
       raw.max_context_tokens == null && raw.maxContextTokens == null
         ? null
         : Number(raw.max_context_tokens ?? raw.maxContextTokens),
-  }
+    maxOutputTokens:
+      raw.max_output_tokens == null && raw.maxOutputTokens == null
+        ? null
+        : Number(raw.max_output_tokens ?? raw.maxOutputTokens),
+    validatedContextTokens: Object.fromEntries(
+      Object.entries(
+        (raw.validated_context_tokens ??
+          raw.validatedContextTokens ??
+          {}) as Record<string, unknown>,
+      ).map(([key, value]) => [key, Number(value)]),
+    ),
+    validatedVramMb: Object.fromEntries(
+      Object.entries(
+        (raw.validated_vram_mb ?? raw.validatedVramMb ?? {}) as Record<
+          string,
+          unknown
+        >,
+      ).map(([key, value]) => [key, Number(value)]),
+    ),
+    defaultOutputReservationTokens:
+      raw.default_output_reservation_tokens == null &&
+      raw.defaultOutputReservationTokens == null
+        ? null
+        : Number(
+            raw.default_output_reservation_tokens ??
+              raw.defaultOutputReservationTokens,
+          ),
+  };
 }
 
-function fromRuntimePolicy(policy: RuntimePolicy | null): Record<string, unknown> | null {
-  if (policy === null) return null
+function fromRuntimePolicy(
+  policy: RuntimePolicy | null,
+): Record<string, unknown> | null {
+  if (policy === null) return null;
   return {
     selection: policy.selection,
     restore_default_when_idle: policy.restoreDefaultWhenIdle,
@@ -529,23 +731,31 @@ function fromRuntimePolicy(policy: RuntimePolicy | null): Record<string, unknown
     small_requests_extend_large_ttl: policy.smallRequestsExtendLargeTtl,
     remote_warm_threshold_seconds: policy.remoteWarmThresholdSeconds,
     max_context_tokens: policy.maxContextTokens,
-  }
+    max_output_tokens: policy.maxOutputTokens,
+    validated_context_tokens: policy.validatedContextTokens,
+    validated_vram_mb: policy.validatedVramMb,
+    default_output_reservation_tokens: policy.defaultOutputReservationTokens,
+  };
 }
 
 function toRuntimePreset(raw: unknown): RuntimePreset {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     id: String(data.id ?? ""),
     profileId: String(data.profile_id ?? data.profileId ?? ""),
     presetKey: String(data.preset_key ?? data.presetKey ?? ""),
     label: String(data.label ?? ""),
-    contextMode: String(data.context_mode ?? data.contextMode ?? "fixed") as RuntimePreset["contextMode"],
+    contextMode: String(
+      data.context_mode ?? data.contextMode ?? "fixed",
+    ) as RuntimePreset["contextMode"],
     contextTokens:
       data.context_tokens == null && data.contextTokens == null
         ? null
         : Number(data.context_tokens ?? data.contextTokens),
     parallelism: Number(data.parallelism ?? 2),
-    kvCacheDtype: String(data.kv_cache_dtype ?? data.kvCacheDtype ?? "q8") as RuntimePreset["kvCacheDtype"],
+    kvCacheDtype: String(
+      data.kv_cache_dtype ?? data.kvCacheDtype ?? "q8",
+    ) as RuntimePreset["kvCacheDtype"],
     placementPolicy: String(
       data.placement_policy ?? data.placementPolicy ?? "auto",
     ) as RuntimePreset["placementPolicy"],
@@ -560,33 +770,53 @@ function toRuntimePreset(raw: unknown): RuntimePreset {
     priority: Number(data.priority ?? 100),
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
-  }
+  };
 }
 
-function fromRuntimePreset(data: RuntimePresetCreate | RuntimePresetUpdate): Record<string, unknown> {
+function fromRuntimePreset(
+  data: RuntimePresetCreate | RuntimePresetUpdate,
+): Record<string, unknown> {
   return {
     ...("presetKey" in data && { preset_key: data.presetKey }),
     ...(data.label !== undefined && { label: data.label }),
     ...(data.contextMode !== undefined && { context_mode: data.contextMode }),
-    ...(data.contextTokens !== undefined && { context_tokens: data.contextTokens }),
+    ...(data.contextTokens !== undefined && {
+      context_tokens: data.contextTokens,
+    }),
     ...(data.parallelism !== undefined && { parallelism: data.parallelism }),
-    ...(data.kvCacheDtype !== undefined && { kv_cache_dtype: data.kvCacheDtype }),
-    ...(data.placementPolicy !== undefined && { placement_policy: data.placementPolicy }),
-    ...(data.preferredGpus !== undefined && { preferred_gpus: data.preferredGpus }),
-    ...(data.executionPolicy !== undefined && { execution_policy: data.executionPolicy }),
+    ...(data.kvCacheDtype !== undefined && {
+      kv_cache_dtype: data.kvCacheDtype,
+    }),
+    ...(data.placementPolicy !== undefined && {
+      placement_policy: data.placementPolicy,
+    }),
+    ...(data.preferredGpus !== undefined && {
+      preferred_gpus: data.preferredGpus,
+    }),
+    ...(data.executionPolicy !== undefined && {
+      execution_policy: data.executionPolicy,
+    }),
     ...(data.enabled !== undefined && { enabled: data.enabled }),
     ...(data.isDefault !== undefined && { is_default: data.isDefault }),
     ...(data.priority !== undefined && { priority: data.priority }),
-  }
+  };
 }
 
 function toRuntimePresetResolution(raw: unknown): RuntimePresetResolution {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     presetKey: String(data.preset_key ?? data.presetKey ?? ""),
     resolved: Boolean(data.resolved),
-    requestedContext: toNumberOrNull(data, "requested_context", "requestedContext"),
-    effectiveContext: toNumberOrNull(data, "effective_context", "effectiveContext"),
+    requestedContext: toNumberOrNull(
+      data,
+      "requested_context",
+      "requestedContext",
+    ),
+    effectiveContext: toNumberOrNull(
+      data,
+      "effective_context",
+      "effectiveContext",
+    ),
     modelMax: toNumberOrNull(data, "model_max", "modelMax"),
     hardwareMax: toNumberOrNull(data, "hardware_max", "hardwareMax"),
     policyMax: toNumberOrNull(data, "policy_max", "policyMax"),
@@ -602,42 +832,56 @@ function toRuntimePresetResolution(raw: unknown): RuntimePresetResolution {
     fits: Boolean(data.fits),
     runtimeKey: (data.runtime_key ?? data.runtimeKey ?? null) as string | null,
     warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
-  }
+  };
 }
 
 function toRuntimePresetBenchmark(raw: unknown): RuntimePresetBenchmark {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     presetKey: String(data.preset_key ?? data.presetKey ?? ""),
-    effectiveContext: Number(data.effective_context ?? data.effectiveContext ?? 0),
+    effectiveContext: Number(
+      data.effective_context ?? data.effectiveContext ?? 0,
+    ),
     workerKey: String(data.worker_key ?? data.workerKey ?? ""),
     wasCold: Boolean(data.was_cold ?? data.wasCold),
     loadMs: Number(data.load_ms ?? data.loadMs ?? 0),
     generationMs: Number(data.generation_ms ?? data.generationMs ?? 0),
     outputTokens: toNumberOrNull(data, "output_tokens", "outputTokens"),
-    tokensPerSecond: toNumberOrNull(data, "tokens_per_second", "tokensPerSecond"),
-  }
+    tokensPerSecond: toNumberOrNull(
+      data,
+      "tokens_per_second",
+      "tokensPerSecond",
+    ),
+  };
 }
 
 function toModelProfile(raw: unknown): ModelProfile {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     profileId: String(data.profile_id ?? data.profileId ?? ""),
-    profileKind: String(data.profile_kind ?? data.profileKind ?? "execution") as ModelProfile["profileKind"],
+    profileKind: String(
+      data.profile_kind ?? data.profileKind ?? "execution",
+    ) as ModelProfile["profileKind"],
     baseModelId:
       data.base_model_id == null && data.baseModelId == null
         ? null
         : String(data.base_model_id ?? data.baseModelId),
-    displayName: (data.display_name ?? data.displayName ?? null) as string | null,
+    displayName: (data.display_name ?? data.displayName ?? null) as
+      string | null,
     description: (data.description ?? null) as string | null,
     category: String(data.category ?? "llm") as ModelProfile["category"],
     loadOverrides: isRecord(data.load_overrides ?? data.loadOverrides)
       ? ((data.load_overrides ?? data.loadOverrides) as Record<string, unknown>)
       : null,
     requestDefaults: isRecord(data.request_defaults ?? data.requestDefaults)
-      ? ((data.request_defaults ?? data.requestDefaults) as Record<string, unknown>)
+      ? ((data.request_defaults ?? data.requestDefaults) as Record<
+          string,
+          unknown
+        >)
       : null,
-    assets: isRecord(data.assets) ? (data.assets as Record<string, unknown>) : null,
+    assets: isRecord(data.assets)
+      ? (data.assets as Record<string, unknown>)
+      : null,
     enabled: Boolean(data.enabled ?? true),
     isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
     routingTargets: Array.isArray(data.routing_targets ?? data.routingTargets)
@@ -645,49 +889,67 @@ function toModelProfile(raw: unknown): ModelProfile {
       : null,
     runtimePolicy: toRuntimePolicy(data.runtime_policy ?? data.runtimePolicy),
     runtimePresets: Array.isArray(data.runtime_presets ?? data.runtimePresets)
-      ? ((data.runtime_presets ?? data.runtimePresets) as unknown[]).map(toRuntimePreset)
+      ? ((data.runtime_presets ?? data.runtimePresets) as unknown[]).map(
+          toRuntimePreset,
+        )
       : [],
     aliases: Array.isArray(data.aliases)
       ? data.aliases.map((rawAlias) => {
-          const alias = isRecord(rawAlias) ? rawAlias : {}
+          const alias = isRecord(rawAlias) ? rawAlias : {};
           return {
             aliasId: String(alias.alias_id ?? alias.aliasId ?? ""),
             profileId: String(alias.profile_id ?? alias.profileId ?? ""),
-            presetKey: (alias.preset_key ?? alias.presetKey ?? null) as string | null,
+            presetKey: (alias.preset_key ?? alias.presetKey ?? null) as
+              string | null,
             hidden: Boolean(alias.hidden ?? true),
-          }
+          };
         })
       : [],
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
-  }
+  };
 }
 
 function toModelState(raw: unknown): ModelState {
-  const data = isRecord(raw) ? raw : {}
-  const schedulesRaw = data.schedules
+  const data = isRecord(raw) ? raw : {};
+  const schedulesRaw = data.schedules;
   const schedules = Array.isArray(schedulesRaw)
     ? schedulesRaw.map((schedule, idx) => {
-        const s = isRecord(schedule) ? schedule : {}
+        const s = isRecord(schedule) ? schedule : {};
         return {
           id: String(s.id ?? `schedule-${idx}`),
-          days: Array.isArray(s.days) ? s.days.map((d) => Number(d)).filter((d) => Number.isFinite(d)) : [],
+          days: Array.isArray(s.days)
+            ? s.days.map((d) => Number(d)).filter((d) => Number.isFinite(d))
+            : [],
           start: String(s.start ?? "00:00"),
           end: String(s.end ?? "00:00"),
           enabled: Boolean(s.enabled ?? true),
-        }
+        };
       })
-    : undefined
+    : undefined;
   return {
     modelId: String(data.model_id ?? data.modelId ?? ""),
-    displayName: String(data.display_name ?? data.displayName ?? data.model_id ?? data.modelId ?? "Unknown model"),
-    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as ModelState["backendType"],
+    displayName: String(
+      data.display_name ??
+        data.displayName ??
+        data.model_id ??
+        data.modelId ??
+        "Unknown model",
+    ),
+    backendType: String(
+      data.backend_type ?? data.backendType ?? "vllm",
+    ) as ModelState["backendType"],
     status: String(data.status ?? "configured") as ModelState["status"],
-    loadPolicy: String(data.load_policy ?? data.loadPolicy ?? "on_demand") as ModelState["loadPolicy"],
+    loadPolicy: String(
+      data.load_policy ?? data.loadPolicy ?? "on_demand",
+    ) as ModelState["loadPolicy"],
     pinPermanent: Boolean(data.pin_permanent ?? data.pinPermanent),
-    preferredGpu: (data.preferred_gpu ?? data.preferredGpu ?? null) as number | null,
+    preferredGpu: (data.preferred_gpu ?? data.preferredGpu ?? null) as
+      number | null,
     currentGpu: Array.isArray(data.current_gpu ?? data.currentGpu)
-      ? ((data.current_gpu ?? data.currentGpu) as unknown[]).map((gpu) => Number(gpu))
+      ? ((data.current_gpu ?? data.currentGpu) as unknown[]).map((gpu) =>
+          Number(gpu),
+        )
       : [],
     vramUsedMb: Number(data.vram_used_mb ?? data.vramUsedMb ?? 0),
     ramUsedMb: Number(data.ram_used_mb ?? data.ramUsedMb ?? 0),
@@ -696,34 +958,55 @@ function toModelState(raw: unknown): ModelState {
         ? null
         : Number(data.disk_size_bytes ?? data.diskSizeBytes ?? 0),
     capabilities: toModelCapabilities(data.capabilities),
-    lastRequestAt: (data.last_request_at ?? data.lastRequestAt ?? null) as string | null,
+    lastRequestAt: (data.last_request_at ?? data.lastRequestAt ?? null) as
+      string | null,
     loadedAt: (data.loaded_at ?? data.loadedAt ?? null) as string | null,
-    errorMessage: (data.error_message ?? data.errorMessage ?? null) as string | null,
+    errorMessage: (data.error_message ?? data.errorMessage ?? null) as
+      string | null,
+    runtimePhase: String(
+      data.runtime_phase ?? data.runtimePhase ?? data.status ?? "configured",
+    ) as ModelState["runtimePhase"],
+    runtimeWorkerId: (data.runtime_worker_id ?? data.runtimeWorkerId ?? null) as
+      string | null,
+    runtimeSlots: Math.max(
+      1,
+      Number(data.runtime_slots ?? data.runtimeSlots ?? 1),
+    ),
+    canCancelLoad: Boolean(
+      data.can_cancel_load ?? data.canCancelLoad ?? false,
+    ),
+    canDownsize: Boolean(data.can_downsize ?? data.canDownsize ?? false),
     schedules,
     extraConfig: toBackendExtraConfig(data.extra_config ?? data.extraConfig),
     profiles: Array.isArray(data.profiles)
       ? data.profiles.map(toModelProfile)
       : undefined,
     federation: (() => {
-      const fed = isRecord(data.federation) ? data.federation : null
-      if (!fed || !fed.remote) return null
+      const fed = isRecord(data.federation) ? data.federation : null;
+      if (!fed || !fed.remote) return null;
       return {
         remote: Boolean(fed.remote),
         nodeName: String(fed.node_name ?? fed.nodeName ?? ""),
         nodeId: String(fed.node_id ?? fed.nodeId ?? ""),
-      }
+      };
     })(),
-    releaseDate: (data.release_date ?? data.releaseDate ?? null) as string | null,
-    lastUpdated: (data.last_updated ?? data.lastUpdated ?? null) as string | null,
-    metadataFetchedAt: (data.metadata_fetched_at ?? data.metadataFetchedAt ?? null) as string | null,
-  }
+    releaseDate: (data.release_date ?? data.releaseDate ?? null) as
+      string | null,
+    lastUpdated: (data.last_updated ?? data.lastUpdated ?? null) as
+      string | null,
+    metadataFetchedAt: (data.metadata_fetched_at ??
+      data.metadataFetchedAt ??
+      null) as string | null,
+  };
 }
 
 function toDownloadJob(raw: unknown): DownloadJob {
-  const data = isRecord(raw) ? raw : {}
-  const registerConfigRaw = isRecord(data.register_config ?? data.registerConfig)
+  const data = isRecord(raw) ? raw : {};
+  const registerConfigRaw = isRecord(
+    data.register_config ?? data.registerConfig,
+  )
     ? ((data.register_config ?? data.registerConfig) as Record<string, unknown>)
-    : null
+    : null;
   return {
     jobId: String(data.job_id ?? data.jobId ?? ""),
     source: String(data.source ?? "huggingface") as DownloadSource,
@@ -732,145 +1015,214 @@ function toDownloadJob(raw: unknown): DownloadJob {
     registerConfig: registerConfigRaw
       ? {
           displayName: registerConfigRaw.display_name as string | undefined,
-          loadPolicy: (registerConfigRaw.load_policy ?? "on_demand") as "pin" | "warm" | "on_demand",
+          loadPolicy: (registerConfigRaw.load_policy ?? "on_demand") as
+            "pin" | "warm" | "on_demand",
           pinPermanent: Boolean(registerConfigRaw.pin_permanent),
-          preferredGpu: (registerConfigRaw.preferred_gpu ?? null) as number | null,
+          preferredGpu: (registerConfigRaw.preferred_gpu ?? null) as
+            number | null,
           extraConfig: isRecord(registerConfigRaw.extra_config)
-            ? (registerConfigRaw.extra_config as { vllm?: import("@/types").VLLMConfig })
+            ? (registerConfigRaw.extra_config as {
+                vllm?: import("@/types").VLLMConfig;
+              })
             : undefined,
         }
       : null,
     status: String(data.status ?? "queued") as DownloadJob["status"],
     progressPct: Number(data.progress_pct ?? data.progressPct ?? 0),
-    speedMbS: data.speed_mb_s === null || data.speedMbS === null ? null : Number(data.speed_mb_s ?? data.speedMbS ?? 0),
-    etaSeconds: data.eta_seconds === null || data.etaSeconds === null ? null : Number(data.eta_seconds ?? data.etaSeconds ?? 0),
+    speedMbS:
+      data.speed_mb_s === null || data.speedMbS === null
+        ? null
+        : Number(data.speed_mb_s ?? data.speedMbS ?? 0),
+    etaSeconds:
+      data.eta_seconds === null || data.etaSeconds === null
+        ? null
+        : Number(data.eta_seconds ?? data.etaSeconds ?? 0),
     error: (data.error ?? null) as string | null,
-    startedAt: String(data.started_at ?? data.startedAt ?? new Date(0).toISOString()),
-    completedAt: (data.completed_at ?? data.completedAt ?? null) as string | null,
-    kind: (data.kind === "update" ? "update" : "install") as DownloadJob["kind"],
-  }
+    startedAt: String(
+      data.started_at ?? data.startedAt ?? new Date(0).toISOString(),
+    ),
+    completedAt: (data.completed_at ?? data.completedAt ?? null) as
+      string | null,
+    kind: (data.kind === "update"
+      ? "update"
+      : "install") as DownloadJob["kind"],
+  };
 }
 
 function toHFModelCard(raw: unknown): HFModelCard {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     repoId: String(data.repo_id ?? data.repoId ?? ""),
     modelName: String(data.model_name ?? data.modelName ?? ""),
     task: (data.task ?? null) as string | null,
     downloads: Number(data.downloads ?? 0),
     likes: Number(data.likes ?? 0),
-    sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
+    sizeGb:
+      data.size_gb != null
+        ? Number(data.size_gb)
+        : data.sizeGb != null
+          ? Number(data.sizeGb)
+          : null,
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
     gated: Boolean(data.gated),
-    suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelCard["suggestedBackend"],
+    suggestedBackend: String(
+      data.suggested_backend ?? data.suggestedBackend ?? "vllm",
+    ) as HFModelCard["suggestedBackend"],
     backendOptions: Array.isArray(data.backend_options ?? data.backendOptions)
       ? ((data.backend_options ?? data.backendOptions) as unknown[]).map(
           (item) => String(item) as BackendType,
         )
       : undefined,
     compatibility: String(data.compatibility ?? "unknown"),
-    compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
+    compatibilityReason: (data.compatibility_reason ??
+      data.compatibilityReason ??
+      null) as string | null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
-  }
+  };
 }
 
 function toHFModelDetail(raw: unknown): HFModelDetail {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     ...toHFModelCard(raw),
-    siblings: Array.isArray(data.siblings) ? (data.siblings as Record<string, unknown>[]) : [],
-    readmeExcerpt: (data.readme_excerpt ?? data.readmeExcerpt ?? null) as string | null,
-    suggestedBackend: String(data.suggested_backend ?? data.suggestedBackend ?? "vllm") as HFModelDetail["suggestedBackend"],
-    estimatedVramGb: data.estimated_vram_gb != null ? Number(data.estimated_vram_gb) : (data.estimatedVramGb != null ? Number(data.estimatedVramGb) : null),
+    siblings: Array.isArray(data.siblings)
+      ? (data.siblings as Record<string, unknown>[])
+      : [],
+    readmeExcerpt: (data.readme_excerpt ?? data.readmeExcerpt ?? null) as
+      string | null,
+    suggestedBackend: String(
+      data.suggested_backend ?? data.suggestedBackend ?? "vllm",
+    ) as HFModelDetail["suggestedBackend"],
+    estimatedVramGb:
+      data.estimated_vram_gb != null
+        ? Number(data.estimated_vram_gb)
+        : data.estimatedVramGb != null
+          ? Number(data.estimatedVramGb)
+          : null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
-  }
+  };
 }
 
 function toHFModelVariant(raw: unknown): HFModelVariant {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     variantId: String(data.variant_id ?? data.variantId ?? ""),
     label: String(data.label ?? ""),
     artifact: (data.artifact ?? null) as string | null,
-    sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
+    sizeGb:
+      data.size_gb != null
+        ? Number(data.size_gb)
+        : data.sizeGb != null
+          ? Number(data.sizeGb)
+          : null,
     format: String(data.format ?? "unknown"),
     quantization: (data.quantization ?? null) as string | null,
-    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as HFModelVariant["backendType"],
+    backendType: String(
+      data.backend_type ?? data.backendType ?? "vllm",
+    ) as HFModelVariant["backendType"],
     isDefault: Boolean(data.is_default ?? data.isDefault),
     installable: data.installable == null ? true : Boolean(data.installable),
     compatibility: String(data.compatibility ?? "unknown"),
-    compatibilityReason: (data.compatibility_reason ?? data.compatibilityReason ?? null) as string | null,
+    compatibilityReason: (data.compatibility_reason ??
+      data.compatibilityReason ??
+      null) as string | null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
-  }
+  };
 }
 
 function toLocalModel(raw: unknown): LocalModel {
-  const data = isRecord(raw) ? raw : {}
-  const modelRef = String(data.model_ref ?? data.modelRef ?? data.model_id ?? data.modelId ?? "")
-  const source = (data.source ?? null) as LocalModel["source"] | null
+  const data = isRecord(raw) ? raw : {};
+  const modelRef = String(
+    data.model_ref ?? data.modelRef ?? data.model_id ?? data.modelId ?? "",
+  );
+  const source = (data.source ?? null) as LocalModel["source"] | null;
   return {
     modelId: modelRef,
     path: String(data.path ?? ""),
     sizeGb: Number(data.size_gb ?? data.sizeGb ?? 0),
-    backendType: String(data.backend_type ?? data.backendType ?? "vllm") as LocalModel["backendType"],
+    backendType: String(
+      data.backend_type ?? data.backendType ?? "vllm",
+    ) as LocalModel["backendType"],
     configured: Boolean(data.configured ?? false),
     source: source ?? undefined,
-  }
+  };
 }
 
 function toOllamaVariant(raw: unknown): OllamaModelVariant {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     name: String(data.name ?? ""),
     tag: String(data.tag ?? ""),
-    sizeGb: data.size_gb != null ? Number(data.size_gb) : (data.sizeGb != null ? Number(data.sizeGb) : null),
-    parameterSize: (data.parameter_size ?? data.parameterSize ?? null) as string | null,
+    sizeGb:
+      data.size_gb != null
+        ? Number(data.size_gb)
+        : data.sizeGb != null
+          ? Number(data.sizeGb)
+          : null,
+    parameterSize: (data.parameter_size ?? data.parameterSize ?? null) as
+      string | null,
     quantization: (data.quantization ?? null) as string | null,
-    contextWindow: (data.context_window ?? data.contextWindow ?? null) as string | null,
+    contextWindow: (data.context_window ?? data.contextWindow ?? null) as
+      string | null,
     modality: (data.modality ?? null) as string | null,
-    updatedHint: (data.updated_hint ?? data.updatedHint ?? null) as string | null,
-  }
+    updatedHint: (data.updated_hint ?? data.updatedHint ?? null) as
+      string | null,
+  };
 }
 
 function toServerConfig(raw: unknown): ServerConfig {
-  const data = isRecord(raw) ? raw : {}
-  const globalSchedulesRaw = data.globalSchedules
+  const data = isRecord(raw) ? raw : {};
+  const globalSchedulesRaw = data.globalSchedules;
   const globalSchedules = Array.isArray(globalSchedulesRaw)
     ? globalSchedulesRaw.map((schedule, idx) => {
-        const s = isRecord(schedule) ? schedule : {}
+        const s = isRecord(schedule) ? schedule : {};
         return {
           id: String(s.id ?? `global-schedule-${idx}`),
-          days: Array.isArray(s.days) ? s.days.map((d) => Number(d)).filter((d) => Number.isFinite(d)) : [],
+          days: Array.isArray(s.days)
+            ? s.days.map((d) => Number(d)).filter((d) => Number.isFinite(d))
+            : [],
           start: String(s.start ?? "00:00"),
           end: String(s.end ?? "00:00"),
           enabled: Boolean(s.enabled ?? true),
-        }
+        };
       })
-    : []
+    : [];
 
   return {
     defaultGpuIndex: Number(data.defaultGpuIndex ?? 0),
     idleTimeoutSeconds: Number(data.idleTimeoutSeconds ?? 0),
     idleEvictionCheckIntervalSeconds: Number(
-      data.idleEvictionCheckIntervalSeconds ?? data.idle_eviction_check_interval_seconds ?? 15,
+      data.idleEvictionCheckIntervalSeconds ??
+        data.idle_eviction_check_interval_seconds ??
+        15,
     ),
     modelLoadWaitTimeoutSeconds: Number(
-      data.modelLoadWaitTimeoutSeconds ?? data.model_load_wait_timeout_seconds ?? 720,
+      data.modelLoadWaitTimeoutSeconds ??
+        data.model_load_wait_timeout_seconds ??
+        720,
     ),
     pressureEvictionDrainTimeoutSeconds: Number(
-      data.pressureEvictionDrainTimeoutSeconds ?? data.pressure_eviction_drain_timeout_seconds ?? 60,
+      data.pressureEvictionDrainTimeoutSeconds ??
+        data.pressure_eviction_drain_timeout_seconds ??
+        60,
     ),
     pinReloadPollIntervalSeconds: Number(
-      data.pinReloadPollIntervalSeconds ?? data.pin_reload_poll_interval_seconds ?? 120,
+      data.pinReloadPollIntervalSeconds ??
+        data.pin_reload_poll_interval_seconds ??
+        120,
     ),
     vramBufferMb: Number(data.vramBufferMb ?? 0),
     vramPressureThresholdPct: Number(data.vramPressureThresholdPct ?? 0),
     maxInflightPerModel: Number(data.maxInflightPerModel ?? 0),
     openaiAudioMaxPartSizeMb: Number(
-      data.openaiAudioMaxPartSizeMb ?? data.openai_audio_max_part_size_mb ?? 256,
+      data.openaiAudioMaxPartSizeMb ??
+        data.openai_audio_max_part_size_mb ??
+        256,
     ),
     whisperStartupTimeoutSeconds: Number(
-      data.whisperStartupTimeoutSeconds ?? data.whisper_startup_timeout_seconds ?? 300,
+      data.whisperStartupTimeoutSeconds ??
+        data.whisper_startup_timeout_seconds ??
+        300,
     ),
     logLevel: String(data.logLevel ?? "info"),
     litellmBaseUrl: String(data.litellmBaseUrl ?? ""),
@@ -881,22 +1233,31 @@ function toServerConfig(raw: unknown): ServerConfig {
     downloadDir: String(data.downloadDir ?? "/models/downloads"),
     maxTemperatureC: Number(data.maxTemperatureC ?? 88),
     gpuThrottleEnabled: Boolean(data.gpuThrottleEnabled),
-    gpuThrottlePowerReductionPct: Number(data.gpuThrottlePowerReductionPct ?? 20),
+    gpuThrottlePowerReductionPct: Number(
+      data.gpuThrottlePowerReductionPct ?? 20,
+    ),
     gpuThrottleCooldownS: Number(data.gpuThrottleCooldownS ?? 300),
     gpuThrottleRecoveryMarginC: Number(data.gpuThrottleRecoveryMarginC ?? 5),
-    vllmGpuMemoryUtilization: Number(data.vllmGpuMemoryUtilization ?? data.vllm_gpu_memory_utilization ?? 0.85),
+    vllmGpuMemoryUtilization: Number(
+      data.vllmGpuMemoryUtilization ?? data.vllm_gpu_memory_utilization ?? 0.85,
+    ),
     vllmMaxNumSeqs:
       data.vllmMaxNumSeqs == null && data.vllm_max_num_seqs == null
         ? null
         : Number(data.vllmMaxNumSeqs ?? data.vllm_max_num_seqs),
     vllmMaxNumBatchedTokens:
-      data.vllmMaxNumBatchedTokens == null && data.vllm_max_num_batched_tokens == null
+      data.vllmMaxNumBatchedTokens == null &&
+      data.vllm_max_num_batched_tokens == null
         ? null
-        : Number(data.vllmMaxNumBatchedTokens ?? data.vllm_max_num_batched_tokens),
+        : Number(
+            data.vllmMaxNumBatchedTokens ?? data.vllm_max_num_batched_tokens,
+          ),
     vllmEnablePrefixCaching: Boolean(
       data.vllmEnablePrefixCaching ?? data.vllm_enable_prefix_caching ?? true,
     ),
-    vllmEnforceEager: Boolean(data.vllmEnforceEager ?? data.vllm_enforce_eager ?? true),
+    vllmEnforceEager: Boolean(
+      data.vllmEnforceEager ?? data.vllm_enforce_eager ?? true,
+    ),
     sglangMemFractionStatic: Number(
       data.sglangMemFractionStatic ?? data.sglang_mem_fraction_static ?? 0.9,
     ),
@@ -907,133 +1268,262 @@ function toServerConfig(raw: unknown): ServerConfig {
     sglangDisableRadixCache: Boolean(
       data.sglangDisableRadixCache ?? data.sglang_disable_radix_cache ?? false,
     ),
-    llamaCppGpuLayers: Number(data.llamaCppGpuLayers ?? data.llama_cpp_gpu_layers ?? 0),
-    llamaCppCtxSize: Number(data.llamaCppCtxSize ?? data.llama_cpp_ctx_size ?? 4096),
-    llamaCppFlashAttn: Boolean(data.llamaCppFlashAttn ?? data.llama_cpp_flash_attn ?? false),
-    bitnetGpuLayers: Number(data.bitnetGpuLayers ?? data.bitnet_gpu_layers ?? 0),
+    llamaCppGpuLayers: Number(
+      data.llamaCppGpuLayers ?? data.llama_cpp_gpu_layers ?? 0,
+    ),
+    llamaCppCtxSize: Number(
+      data.llamaCppCtxSize ?? data.llama_cpp_ctx_size ?? 4096,
+    ),
+    llamaCppFlashAttn: Boolean(
+      data.llamaCppFlashAttn ?? data.llama_cpp_flash_attn ?? false,
+    ),
+    bitnetGpuLayers: Number(
+      data.bitnetGpuLayers ?? data.bitnet_gpu_layers ?? 0,
+    ),
     bitnetCtxSize: Number(data.bitnetCtxSize ?? data.bitnet_ctx_size ?? 4096),
-    bitnetFlashAttn: Boolean(data.bitnetFlashAttn ?? data.bitnet_flash_attn ?? false),
-    diffusersTorchDtype: String(data.diffusersTorchDtype ?? data.diffusers_torch_dtype ?? "auto"),
-    diffusersOffloadMode: String(data.diffusersOffloadMode ?? data.diffusers_offload_mode ?? "none"),
+    bitnetFlashAttn: Boolean(
+      data.bitnetFlashAttn ?? data.bitnet_flash_attn ?? false,
+    ),
+    diffusersTorchDtype: String(
+      data.diffusersTorchDtype ?? data.diffusers_torch_dtype ?? "auto",
+    ),
+    diffusersOffloadMode: String(
+      data.diffusersOffloadMode ?? data.diffusers_offload_mode ?? "none",
+    ),
     diffusersEnableTorchCompile: Boolean(
-      data.diffusersEnableTorchCompile ?? data.diffusers_enable_torch_compile ?? false,
+      data.diffusersEnableTorchCompile ??
+      data.diffusers_enable_torch_compile ??
+      false,
     ),
     diffusersEnableXformers: Boolean(
       data.diffusersEnableXformers ?? data.diffusers_enable_xformers ?? false,
     ),
-    diffusersAllowTf32: Boolean(data.diffusersAllowTf32 ?? data.diffusers_allow_tf32 ?? true),
-    tensorrtLlmEnabled: Boolean(data.tensorrtLlmEnabled ?? data.tensorrt_llm_enabled ?? false),
+    diffusersAllowTf32: Boolean(
+      data.diffusersAllowTf32 ?? data.diffusers_allow_tf32 ?? true,
+    ),
+    tensorrtLlmEnabled: Boolean(
+      data.tensorrtLlmEnabled ?? data.tensorrt_llm_enabled ?? false,
+    ),
     tensorrtLlmMaxBatchSize:
-      data.tensorrtLlmMaxBatchSize == null && data.tensorrt_llm_max_batch_size == null
+      data.tensorrtLlmMaxBatchSize == null &&
+      data.tensorrt_llm_max_batch_size == null
         ? null
-        : Number(data.tensorrtLlmMaxBatchSize ?? data.tensorrt_llm_max_batch_size),
+        : Number(
+            data.tensorrtLlmMaxBatchSize ?? data.tensorrt_llm_max_batch_size,
+          ),
     tensorrtLlmContextLength:
-      data.tensorrtLlmContextLength == null && data.tensorrt_llm_context_length == null
+      data.tensorrtLlmContextLength == null &&
+      data.tensorrt_llm_context_length == null
         ? null
-        : Number(data.tensorrtLlmContextLength ?? data.tensorrt_llm_context_length),
+        : Number(
+            data.tensorrtLlmContextLength ?? data.tensorrt_llm_context_length,
+          ),
     globalSchedules,
-    requireApiKeyOpenai: Boolean(data.requireApiKeyOpenai ?? data.require_api_key_openai ?? true),
-    requireApiKeyOllama: Boolean(data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true),
-    realtimeDefaultSttModel: String(data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? ""),
-    realtimeDefaultTtsModel: String(data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? ""),
-    federationEnabled: Boolean(data.federationEnabled ?? data.federation_enabled ?? false),
-    federationNodeName: String(data.federationNodeName ?? data.federation_node_name ?? ""),
-    batchPriorityEnabled: Boolean(data.batchPriorityEnabled ?? data.batch_priority_enabled ?? true),
-    batchPreemptMode: (String(
+    requireApiKeyOpenai: Boolean(
+      data.requireApiKeyOpenai ?? data.require_api_key_openai ?? true,
+    ),
+    requireApiKeyOllama: Boolean(
+      data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true,
+    ),
+    realtimeDefaultSttModel: String(
+      data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? "",
+    ),
+    realtimeDefaultTtsModel: String(
+      data.realtimeDefaultTtsModel ?? data.realtime_default_tts_model ?? "",
+    ),
+    federationEnabled: Boolean(
+      data.federationEnabled ?? data.federation_enabled ?? false,
+    ),
+    federationNodeName: String(
+      data.federationNodeName ?? data.federation_node_name ?? "",
+    ),
+    batchPriorityEnabled: Boolean(
+      data.batchPriorityEnabled ?? data.batch_priority_enabled ?? true,
+    ),
+    batchPreemptMode: String(
       data.batchPreemptMode ?? data.batch_preempt_mode ?? "conditional",
-    ) as ServerConfig["batchPreemptMode"]),
+    ) as ServerConfig["batchPreemptMode"],
     batchPreemptMinElapsedS: Number(
       data.batchPreemptMinElapsedS ?? data.batch_preempt_min_elapsed_s ?? 300,
     ),
-    batchPreemptGraceS: Number(data.batchPreemptGraceS ?? data.batch_preempt_grace_s ?? 10),
-    batchFreeSlotsPct: Number(data.batchFreeSlotsPct ?? data.batch_free_slots_pct ?? 1),
+    batchPreemptGraceS: Number(
+      data.batchPreemptGraceS ?? data.batch_preempt_grace_s ?? 10,
+    ),
+    batchFreeSlotsPct: Number(
+      data.batchFreeSlotsPct ?? data.batch_free_slots_pct ?? 1,
+    ),
     batchResumeCooldownSlotsS: Number(
-      data.batchResumeCooldownSlotsS ?? data.batch_resume_cooldown_slots_s ?? 120,
+      data.batchResumeCooldownSlotsS ??
+        data.batch_resume_cooldown_slots_s ??
+        120,
     ),
     batchResumeCooldownEvictionS: Number(
-      data.batchResumeCooldownEvictionS ?? data.batch_resume_cooldown_eviction_s ?? 300,
+      data.batchResumeCooldownEvictionS ??
+        data.batch_resume_cooldown_eviction_s ??
+        300,
     ),
     batchInterJobCooldownS: Number(
       data.batchInterJobCooldownS ?? data.batch_inter_job_cooldown_s ?? 0,
     ),
-    hunyuanIdleUnloadSeconds: Number(data.hunyuanIdleUnloadSeconds ?? data.hunyuan_idle_unload_seconds ?? 300),
-    hunyuanGenerationGracePeriodS: Number(data.hunyuanGenerationGracePeriodS ?? data.hunyuan_generation_grace_period_s ?? 120),
-    hunyuanPreferredGpu: Number(data.hunyuanPreferredGpu ?? data.hunyuan_preferred_gpu ?? 1),
-    trellis2IdleUnloadSeconds: Number(data.trellis2IdleUnloadSeconds ?? data.trellis2_idle_unload_seconds ?? 300),
-    trellis2GenerationGracePeriodS: Number(data.trellis2GenerationGracePeriodS ?? data.trellis2_generation_grace_period_s ?? 120),
-    trellis2PreferredGpu: Number(data.trellis2PreferredGpu ?? data.trellis2_preferred_gpu ?? 1),
-    comfyuiIdleUnloadSeconds: Number(data.comfyuiIdleUnloadSeconds ?? data.comfyui_idle_unload_seconds ?? 600),
-    comfyuiGenerationGracePeriodS: Number(data.comfyuiGenerationGracePeriodS ?? data.comfyui_generation_grace_period_s ?? 120),
-    comfyuiPreferredGpu: Number(data.comfyuiPreferredGpu ?? data.comfyui_preferred_gpu ?? 1),
-    a1111IdleUnloadSeconds: Number(data.a1111IdleUnloadSeconds ?? data.a1111_idle_unload_seconds ?? 600),
-    a1111GenerationGracePeriodS: Number(data.a1111GenerationGracePeriodS ?? data.a1111_generation_grace_period_s ?? 120),
-    a1111PreferredGpu: Number(data.a1111PreferredGpu ?? data.a1111_preferred_gpu ?? 1),
-    acestepIdleUnloadSeconds: Number(data.acestepIdleUnloadSeconds ?? data.acestep_idle_unload_seconds ?? 1800),
-    acestepGenerationGracePeriodS: Number(data.acestepGenerationGracePeriodS ?? data.acestep_generation_grace_period_s ?? 180),
-    acestepPreferredGpu: Number(data.acestepPreferredGpu ?? data.acestep_preferred_gpu ?? 1),
-    unslothIdleUnloadSeconds: Number(data.unslothIdleUnloadSeconds ?? data.unsloth_idle_unload_seconds ?? 0),
-    unslothGenerationGracePeriodS: Number(data.unslothGenerationGracePeriodS ?? data.unsloth_generation_grace_period_s ?? -1),
-    unslothPreferredGpu: Number(data.unslothPreferredGpu ?? data.unsloth_preferred_gpu ?? 1),
-    generationGpuUtilThresholdPct: Number(data.generationGpuUtilThresholdPct ?? data.generation_gpu_util_threshold_pct ?? 50),
-    routingEnabled: data.routingEnabled == null ? undefined : Boolean(data.routingEnabled),
-    routerConfidenceFloor: data.routerConfidenceFloor == null ? undefined : Number(data.routerConfidenceFloor),
-    routerFallbackDelayMs: data.routerFallbackDelayMs == null ? undefined : Number(data.routerFallbackDelayMs),
-    maxDrainTimeoutS: data.maxDrainTimeoutS == null ? undefined : Number(data.maxDrainTimeoutS),
-    sessionPauseThresholdS: data.sessionPauseThresholdS == null ? undefined : Number(data.sessionPauseThresholdS),
-    sessionMaxIdleS: data.sessionMaxIdleS == null ? undefined : Number(data.sessionMaxIdleS),
-  }
+    hunyuanIdleUnloadSeconds: Number(
+      data.hunyuanIdleUnloadSeconds ?? data.hunyuan_idle_unload_seconds ?? 300,
+    ),
+    hunyuanGenerationGracePeriodS: Number(
+      data.hunyuanGenerationGracePeriodS ??
+        data.hunyuan_generation_grace_period_s ??
+        120,
+    ),
+    hunyuanPreferredGpu: Number(
+      data.hunyuanPreferredGpu ?? data.hunyuan_preferred_gpu ?? 1,
+    ),
+    trellis2IdleUnloadSeconds: Number(
+      data.trellis2IdleUnloadSeconds ??
+        data.trellis2_idle_unload_seconds ??
+        300,
+    ),
+    trellis2GenerationGracePeriodS: Number(
+      data.trellis2GenerationGracePeriodS ??
+        data.trellis2_generation_grace_period_s ??
+        120,
+    ),
+    trellis2PreferredGpu: Number(
+      data.trellis2PreferredGpu ?? data.trellis2_preferred_gpu ?? 1,
+    ),
+    comfyuiIdleUnloadSeconds: Number(
+      data.comfyuiIdleUnloadSeconds ?? data.comfyui_idle_unload_seconds ?? 600,
+    ),
+    comfyuiGenerationGracePeriodS: Number(
+      data.comfyuiGenerationGracePeriodS ??
+        data.comfyui_generation_grace_period_s ??
+        120,
+    ),
+    comfyuiPreferredGpu: Number(
+      data.comfyuiPreferredGpu ?? data.comfyui_preferred_gpu ?? 1,
+    ),
+    a1111IdleUnloadSeconds: Number(
+      data.a1111IdleUnloadSeconds ?? data.a1111_idle_unload_seconds ?? 600,
+    ),
+    a1111GenerationGracePeriodS: Number(
+      data.a1111GenerationGracePeriodS ??
+        data.a1111_generation_grace_period_s ??
+        120,
+    ),
+    a1111PreferredGpu: Number(
+      data.a1111PreferredGpu ?? data.a1111_preferred_gpu ?? 1,
+    ),
+    acestepIdleUnloadSeconds: Number(
+      data.acestepIdleUnloadSeconds ?? data.acestep_idle_unload_seconds ?? 1800,
+    ),
+    acestepGenerationGracePeriodS: Number(
+      data.acestepGenerationGracePeriodS ??
+        data.acestep_generation_grace_period_s ??
+        180,
+    ),
+    acestepPreferredGpu: Number(
+      data.acestepPreferredGpu ?? data.acestep_preferred_gpu ?? 1,
+    ),
+    unslothIdleUnloadSeconds: Number(
+      data.unslothIdleUnloadSeconds ?? data.unsloth_idle_unload_seconds ?? 0,
+    ),
+    unslothGenerationGracePeriodS: Number(
+      data.unslothGenerationGracePeriodS ??
+        data.unsloth_generation_grace_period_s ??
+        -1,
+    ),
+    unslothPreferredGpu: Number(
+      data.unslothPreferredGpu ?? data.unsloth_preferred_gpu ?? 1,
+    ),
+    generationGpuUtilThresholdPct: Number(
+      data.generationGpuUtilThresholdPct ??
+        data.generation_gpu_util_threshold_pct ??
+        50,
+    ),
+    routingEnabled:
+      data.routingEnabled == null ? undefined : Boolean(data.routingEnabled),
+    routerConfidenceFloor:
+      data.routerConfidenceFloor == null
+        ? undefined
+        : Number(data.routerConfidenceFloor),
+    routerFallbackDelayMs:
+      data.routerFallbackDelayMs == null
+        ? undefined
+        : Number(data.routerFallbackDelayMs),
+    maxDrainTimeoutS:
+      data.maxDrainTimeoutS == null ? undefined : Number(data.maxDrainTimeoutS),
+    sessionPauseThresholdS:
+      data.sessionPauseThresholdS == null
+        ? undefined
+        : Number(data.sessionPauseThresholdS),
+    sessionMaxIdleS:
+      data.sessionMaxIdleS == null ? undefined : Number(data.sessionMaxIdleS),
+  };
 }
 
 function toFederationPeer(raw: unknown): FederationPeer {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     peer_id: String(d.peer_id ?? d.peerId ?? ""),
     name: String(d.name ?? ""),
     url: String(d.url ?? ""),
-    access_level: String(d.access_level ?? d.accessLevel ?? "inference") as "inference" | "full",
+    access_level: String(d.access_level ?? d.accessLevel ?? "inference") as
+      "inference" | "full",
     enabled: Boolean(d.enabled ?? true),
     online: Boolean(d.online ?? false),
-    last_heartbeat: (d.last_heartbeat ?? d.lastHeartbeat ?? null) as string | null,
-    latency_ms: d.latency_ms != null ? Number(d.latency_ms) : (d.latencyMs != null ? Number(d.latencyMs) : undefined),
+    last_heartbeat: (d.last_heartbeat ?? d.lastHeartbeat ?? null) as
+      string | null,
+    latency_ms:
+      d.latency_ms != null
+        ? Number(d.latency_ms)
+        : d.latencyMs != null
+          ? Number(d.latencyMs)
+          : undefined,
     gpus: Array.isArray(d.gpus)
       ? d.gpus.map((g) => {
-          const gpu = isRecord(g) ? g : {}
+          const gpu = isRecord(g) ? g : {};
           return {
             index: Number(gpu.index ?? 0),
             name: String(gpu.name ?? "GPU"),
             total_vram_mb: Number(gpu.total_vram_mb ?? gpu.totalVramMb ?? 0),
             free_vram_mb: Number(gpu.free_vram_mb ?? gpu.freeVramMb ?? 0),
-          }
+          };
         })
       : [],
     models: Array.isArray(d.models)
       ? d.models.map((m) => {
-          const model = isRecord(m) ? m : {}
+          const model = isRecord(m) ? m : {};
           return {
             model_id: String(model.model_id ?? model.modelId ?? ""),
             status: String(model.status ?? "unknown"),
-            profiles: Array.isArray(model.profiles) ? model.profiles.map(String) : [],
-          }
+            profiles: Array.isArray(model.profiles)
+              ? model.profiles.map(String)
+              : [],
+          };
         })
       : [],
     load: (() => {
-      const load = isRecord(d.load) ? d.load : {}
+      const load = isRecord(d.load) ? d.load : {};
       return {
-        active_requests: Number(load.active_requests ?? load.activeRequests ?? 0),
-        gpu_utilization_avg_pct: Number(load.gpu_utilization_avg_pct ?? load.gpuUtilizationAvgPct ?? 0),
-      }
+        active_requests: Number(
+          load.active_requests ?? load.activeRequests ?? 0,
+        ),
+        gpu_utilization_avg_pct: Number(
+          load.gpu_utilization_avg_pct ?? load.gpuUtilizationAvgPct ?? 0,
+        ),
+      };
     })(),
-  }
+  };
 }
 
 function toFederationTestResult(raw: unknown): FederationTestResult {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     success: Boolean(d.success ?? false),
     latency_ms: d.latency_ms != null ? Number(d.latency_ms) : null,
     error: (d.error ?? undefined) as string | undefined,
-    node_info: isRecord(d.node_info) ? (d.node_info as Record<string, unknown>) : undefined,
-  }
+    node_info: isRecord(d.node_info)
+      ? (d.node_info as Record<string, unknown>)
+      : undefined,
+  };
 }
 
 // FastAPI's HTTPException(detail=...) always wraps the response as
@@ -1043,14 +1533,19 @@ function toFederationTestResult(raw: unknown): FederationTestResult {
 // OpenAI error shape — unwrap both so callers never do `new Error(object)`
 // (which renders as the literal string "[object Object]" in a toast).
 function extractErrorMessage(err: unknown): string | undefined {
-  if (!isRecord(err)) return undefined
-  const detail = err.detail
-  if (typeof detail === "string") return detail
-  if (isRecord(detail) && isRecord(detail.error) && typeof detail.error.message === "string") {
-    return detail.error.message
+  if (!isRecord(err)) return undefined;
+  const detail = err.detail;
+  if (typeof detail === "string") return detail;
+  if (
+    isRecord(detail) &&
+    isRecord(detail.error) &&
+    typeof detail.error.message === "string"
+  ) {
+    return detail.error.message;
   }
-  if (isRecord(err.error) && typeof err.error.message === "string") return err.error.message
-  return undefined
+  if (isRecord(err.error) && typeof err.error.message === "string")
+    return err.error.message;
+  return undefined;
 }
 
 async function request<T>(
@@ -1062,50 +1557,61 @@ async function request<T>(
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
-  })
+  });
   if (!res.ok) {
     // Session gone → clear user so ProtectedRoute redirects to /login and
     // the dashboard's setInterval polls unmount instead of looping on 401.
     // Skip for /ocabra/auth/* so a failed login attempt doesn't nuke an
     // already-null user and the login form keeps its own error flow.
     if (res.status === 401 && !path.startsWith("/ocabra/auth/")) {
-      useAuthStore.getState().setUser(null)
+      useAuthStore.getState().setUser(null);
     }
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(extractErrorMessage(err) ?? res.statusText)
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(extractErrorMessage(err) ?? res.statusText);
   }
   if (res.status === 204) {
-    return undefined as T
+    return undefined as T;
   }
-  return res.json() as Promise<T>
+  return res.json() as Promise<T>;
 }
 
-function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
-  const search = new URLSearchParams()
+function buildQuery(
+  params: Record<string, string | number | boolean | undefined>,
+): string {
+  const search = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== "") {
-      search.set(key, String(value))
+      search.set(key, String(value));
     }
-  })
-  const query = search.toString()
-  return query ? `?${query}` : ""
+  });
+  const query = search.toString();
+  return query ? `?${query}` : "";
 }
 
-export function toBackendModuleState(raw: unknown): import("@/types").BackendModuleState {
-  const d = isRecord(raw) ? raw : {}
+export function toBackendModuleState(
+  raw: unknown,
+): import("@/types").BackendModuleState {
+  const d = isRecord(raw) ? raw : {};
   const status = String(
     d.install_status ?? d.installStatus ?? "not_installed",
-  ) as import("@/types").BackendInstallStatus
-  const alwaysAvailable = Boolean(d.always_available ?? d.alwaysAvailable ?? false)
-  const installSource = (d.install_source ?? d.installSource ?? null) as
-    | import("@/types").BackendInstallSource
+  ) as import("@/types").BackendInstallStatus;
+  const alwaysAvailable = Boolean(
+    d.always_available ?? d.alwaysAvailable ?? false,
+  );
+  const installSource = (d.install_source ??
+    d.installSource ??
+    null) as import("@/types").BackendInstallSource;
   return {
     backendType: String(d.backend_type ?? d.backendType ?? ""),
-    displayName: String(d.display_name ?? d.displayName ?? d.backend_type ?? d.backendType ?? ""),
+    displayName: String(
+      d.display_name ?? d.displayName ?? d.backend_type ?? d.backendType ?? "",
+    ),
     description: String(d.description ?? ""),
     tags: Array.isArray(d.tags) ? (d.tags as unknown[]).map(String) : [],
-    installStatus: alwaysAvailable && status === "installed" ? "built-in" : status,
-    installedVersion: (d.installed_version ?? d.installedVersion ?? null) as string | null,
+    installStatus:
+      alwaysAvailable && status === "installed" ? "built-in" : status,
+    installedVersion: (d.installed_version ?? d.installedVersion ?? null) as
+      string | null,
     installedAt: (d.installed_at ?? d.installedAt ?? null) as string | null,
     installSource,
     estimatedSizeMb: Number(d.estimated_size_mb ?? d.estimatedSizeMb ?? 0),
@@ -1119,41 +1625,66 @@ export function toBackendModuleState(raw: unknown): import("@/types").BackendMod
       d.install_progress == null && d.installProgress == null
         ? null
         : Number(d.install_progress ?? d.installProgress),
-    installDetail: (d.install_detail ?? d.installDetail ?? null) as string | null,
+    installDetail: (d.install_detail ?? d.installDetail ?? null) as
+      string | null,
     error: (d.error ?? null) as string | null,
     alwaysAvailable,
-  }
+  };
 }
 
 function toServiceState(raw: unknown): ServiceState {
-  const data = isRecord(raw) ? raw : {}
+  const data = isRecord(raw) ? raw : {};
   return {
     serviceId: String(data.service_id ?? data.serviceId ?? ""),
     serviceType: String(data.service_type ?? data.serviceType ?? ""),
     displayName: String(data.display_name ?? data.displayName ?? ""),
     uiUrl: String(data.ui_url ?? data.uiUrl ?? ""),
-    preferredGpu: data.preferred_gpu == null && data.preferredGpu == null ? null : Number(data.preferred_gpu ?? data.preferredGpu),
-    idleUnloadAfterSeconds: Number(data.idle_unload_after_seconds ?? data.idleUnloadAfterSeconds ?? 600),
+    preferredGpu:
+      data.preferred_gpu == null && data.preferredGpu == null
+        ? null
+        : Number(data.preferred_gpu ?? data.preferredGpu),
+    idleUnloadAfterSeconds: Number(
+      data.idle_unload_after_seconds ?? data.idleUnloadAfterSeconds ?? 600,
+    ),
     enabled: Boolean(data.enabled ?? true),
     serviceAlive: Boolean(data.service_alive ?? data.serviceAlive),
     runtimeLoaded: Boolean(data.runtime_loaded ?? data.runtimeLoaded),
     status: String(data.status ?? "unknown") as ServiceState["status"],
-    activeModelRef: (data.active_model_ref ?? data.activeModelRef ?? null) as string | null,
-    lastActivityAt: (data.last_activity_at ?? data.lastActivityAt ?? null) as string | null,
-    lastHealthCheckAt: (data.last_health_check_at ?? data.lastHealthCheckAt ?? null) as string | null,
+    activeModelRef: (data.active_model_ref ?? data.activeModelRef ?? null) as
+      string | null,
+    lastActivityAt: (data.last_activity_at ?? data.lastActivityAt ?? null) as
+      string | null,
+    lastHealthCheckAt: (data.last_health_check_at ??
+      data.lastHealthCheckAt ??
+      null) as string | null,
     detail: (data.detail ?? null) as string | null,
     isGenerating: Boolean(data.is_generating ?? data.isGenerating ?? false),
     queueDepth: Number(data.queue_depth ?? data.queueDepth ?? 0),
-    vramUsedMb: data.vram_used_mb == null && data.vramUsedMb == null ? null : Number(data.vram_used_mb ?? data.vramUsedMb),
-    gpuUtilPct: data.gpu_util_pct == null && data.gpuUtilPct == null ? null : Number(data.gpu_util_pct ?? data.gpuUtilPct),
-    cpuPct: data.cpu_pct == null && data.cpuPct == null ? null : Number(data.cpu_pct ?? data.cpuPct),
-    memUsedMb: data.mem_used_mb == null && data.memUsedMb == null ? null : Number(data.mem_used_mb ?? data.memUsedMb),
-    memLimitMb: data.mem_limit_mb == null && data.memLimitMb == null ? null : Number(data.mem_limit_mb ?? data.memLimitMb),
-  }
+    vramUsedMb:
+      data.vram_used_mb == null && data.vramUsedMb == null
+        ? null
+        : Number(data.vram_used_mb ?? data.vramUsedMb),
+    gpuUtilPct:
+      data.gpu_util_pct == null && data.gpuUtilPct == null
+        ? null
+        : Number(data.gpu_util_pct ?? data.gpuUtilPct),
+    cpuPct:
+      data.cpu_pct == null && data.cpuPct == null
+        ? null
+        : Number(data.cpu_pct ?? data.cpuPct),
+    memUsedMb:
+      data.mem_used_mb == null && data.memUsedMb == null
+        ? null
+        : Number(data.mem_used_mb ?? data.memUsedMb),
+    memLimitMb:
+      data.mem_limit_mb == null && data.memLimitMb == null
+        ? null
+        : Number(data.mem_limit_mb ?? data.memLimitMb),
+  };
 }
 
 function toHostStats(raw: unknown): import("@/types").HostStats {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     cpuPct: Number(d.cpu_pct ?? d.cpuPct ?? 0),
     cpuCount: Number(d.cpu_count ?? d.cpuCount ?? 0),
@@ -1168,12 +1699,12 @@ function toHostStats(raw: unknown): import("@/types").HostStats {
     swapTotalMb: Number(d.swap_total_mb ?? d.swapTotalMb ?? 0),
     swapUsedMb: Number(d.swap_used_mb ?? d.swapUsedMb ?? 0),
     swapPct: Number(d.swap_pct ?? d.swapPct ?? 0),
-  }
+  };
 }
 
 function toCompileJob(raw: unknown): CompileJob {
-  const data = isRecord(raw) ? raw : {}
-  const cfg = isRecord(data.config) ? data.config : {}
+  const data = isRecord(raw) ? raw : {};
+  const cfg = isRecord(data.config) ? data.config : {};
   return {
     jobId: String(data.job_id ?? data.jobId ?? ""),
     sourceModel: String(data.source_model ?? data.sourceModel ?? ""),
@@ -1190,26 +1721,27 @@ function toCompileJob(raw: unknown): CompileJob {
     status: String(data.status ?? "pending") as CompileJob["status"],
     phase: (data.phase ?? null) as CompileJob["phase"],
     progressPct: Number(data.progress_pct ?? data.progressPct ?? 0),
-    errorDetail: (data.error_detail ?? data.errorDetail ?? null) as string | null,
+    errorDetail: (data.error_detail ?? data.errorDetail ?? null) as
+      string | null,
     engineDir: (data.engine_dir ?? data.engineDir ?? null) as string | null,
     startedAt: (data.started_at ?? data.startedAt ?? null) as string | null,
     finishedAt: (data.finished_at ?? data.finishedAt ?? null) as string | null,
-  }
+  };
 }
 
 function toAuthUser(raw: unknown): AuthUser {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     id: String(d.id ?? ""),
     username: String(d.username ?? ""),
     email: (d.email ?? null) as string | null,
     role: String(d.role ?? "user") as AuthUser["role"],
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
-  }
+  };
 }
 
 function toAdminUser(raw: unknown): AdminUser {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     id: String(d.id ?? ""),
     username: String(d.username ?? ""),
@@ -1217,20 +1749,20 @@ function toAdminUser(raw: unknown): AdminUser {
     role: String(d.role ?? "user") as AdminUser["role"],
     isActive: Boolean(d.is_active ?? d.isActive ?? true),
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
-  }
+  };
 }
 
 function toGroupMember(raw: unknown): GroupMember {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     userId: String(d.user_id ?? d.userId ?? d.id ?? ""),
     username: String(d.username ?? ""),
     role: String(d.role ?? "user") as GroupMember["role"],
-  }
+  };
 }
 
 function toGroup(raw: unknown): Group {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     id: String(d.id ?? ""),
     name: String(d.name ?? ""),
@@ -1239,11 +1771,11 @@ function toGroup(raw: unknown): Group {
     memberCount: Number(d.member_count ?? d.memberCount ?? 0),
     modelCount: Number(d.model_count ?? d.modelCount ?? 0),
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
-  }
+  };
 }
 
 function toApiKey(raw: unknown): ApiKey {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     id: String(d.id ?? ""),
     name: String(d.name ?? ""),
@@ -1252,111 +1784,120 @@ function toApiKey(raw: unknown): ApiKey {
     lastUsedAt: (d.last_used_at ?? d.lastUsedAt ?? null) as string | null,
     isRevoked: Boolean(d.is_revoked ?? d.isRevoked ?? false),
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
-  }
+  };
 }
 
 function toAdminApiKey(raw: unknown): AdminApiKey {
-  const d = isRecord(raw) ? raw : {}
+  const d = isRecord(raw) ? raw : {};
   return {
     ...toApiKey(raw),
     userId: String(d.user_id ?? d.userId ?? ""),
     username: String(d.username ?? ""),
-  }
+  };
 }
 
 export type DurationEstimateResult = {
-  expectedSeconds: number
-  p50Seconds: number
-  p95Seconds: number
-  confidence: number
-  source: "regression" | "percentile" | "family_default"
-  sampleCount: number
-  coldStartSeconds: number
-}
+  expectedSeconds: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  confidence: number;
+  source: "regression" | "percentile" | "family_default";
+  sampleCount: number;
+  coldStartSeconds: number;
+};
 
 export type RealtimeSessionInfo = {
-  sessionId: string
-  userId: string | null
-  apiKeyName: string | null
-  workersHeld: string[]
-  startedAt: string
-  lastActivityAt: string
-  isPaused: boolean
-  isZombie: boolean
-}
+  sessionId: string;
+  userId: string | null;
+  apiKeyName: string | null;
+  workersHeld: string[];
+  startedAt: string;
+  lastActivityAt: string;
+  isPaused: boolean;
+  isZombie: boolean;
+};
 
 export type RoutingDecisionsResponse = {
   routers: {
-    routerProfileId: string
-    total: number
+    routerProfileId: string;
+    total: number;
     targets: {
-      modelId: string
-      count: number
-      okCount: number
-      avgDurationMs: number
-      share: number
-    }[]
-  }[]
-}
+      modelId: string;
+      count: number;
+      okCount: number;
+      avgDurationMs: number;
+      share: number;
+    }[];
+  }[];
+};
 
 function toDurationEstimate(raw: unknown): DurationEstimateResult {
-  const d = (raw ?? {}) as Record<string, unknown>
+  const d = (raw ?? {}) as Record<string, unknown>;
   return {
     expectedSeconds: Number(d.expected_seconds ?? 0),
     p50Seconds: Number(d.p50_seconds ?? 0),
     p95Seconds: Number(d.p95_seconds ?? 0),
     confidence: Number(d.confidence ?? 0),
-    source: String(d.source ?? "family_default") as DurationEstimateResult["source"],
+    source: String(
+      d.source ?? "family_default",
+    ) as DurationEstimateResult["source"],
     sampleCount: Number(d.sample_count ?? 0),
     coldStartSeconds: Number(d.cold_start_seconds ?? 0),
-  }
+  };
 }
 
 function toRealtimeSession(raw: unknown): RealtimeSessionInfo {
-  const d = (raw ?? {}) as Record<string, unknown>
+  const d = (raw ?? {}) as Record<string, unknown>;
   return {
     sessionId: String(d.session_id ?? ""),
     userId: d.user_id == null ? null : String(d.user_id),
     apiKeyName: d.api_key_name == null ? null : String(d.api_key_name),
-    workersHeld: Array.isArray(d.workers_held) ? d.workers_held.map(String) : [],
+    workersHeld: Array.isArray(d.workers_held)
+      ? d.workers_held.map(String)
+      : [],
     startedAt: String(d.started_at ?? ""),
     lastActivityAt: String(d.last_activity_at ?? ""),
     isPaused: Boolean(d.is_paused),
     isZombie: Boolean(d.is_zombie),
-  }
+  };
 }
 
 function toRoutingDecisions(raw: unknown): RoutingDecisionsResponse {
-  const d = (raw ?? {}) as Record<string, unknown>
-  const routers = Array.isArray(d.routers) ? d.routers : []
+  const d = (raw ?? {}) as Record<string, unknown>;
+  const routers = Array.isArray(d.routers) ? d.routers : [];
   return {
     routers: routers.map((r) => {
-      const rd = (r ?? {}) as Record<string, unknown>
-      const targets = Array.isArray(rd.targets) ? rd.targets : []
+      const rd = (r ?? {}) as Record<string, unknown>;
+      const targets = Array.isArray(rd.targets) ? rd.targets : [];
       return {
         routerProfileId: String(rd.router_profile_id ?? ""),
         total: Number(rd.total ?? 0),
         targets: targets.map((t) => {
-          const td = (t ?? {}) as Record<string, unknown>
+          const td = (t ?? {}) as Record<string, unknown>;
           return {
             modelId: String(td.model_id ?? ""),
             count: Number(td.count ?? 0),
             okCount: Number(td.ok_count ?? 0),
             avgDurationMs: Number(td.avg_duration_ms ?? 0),
             share: Number(td.share ?? 0),
-          }
+          };
         }),
-      }
+      };
     }),
-  }
+  };
 }
 
 export const api = {
   gpus: {
-    list: async () => (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
-    get: async (index: number) => toGpuState(await request<unknown>("GET", `/ocabra/gpus/${index}`)),
+    list: async () =>
+      (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
+    get: async (index: number) =>
+      toGpuState(await request<unknown>("GET", `/ocabra/gpus/${index}`)),
     stats: (index: number, window = "5m") =>
-      request<GPUStatHistory>("GET", `/ocabra/gpus/${index}/stats${buildQuery({ window })}`),
+      request<GPUStatHistory>(
+        "GET",
+        `/ocabra/gpus/${index}/stats${buildQuery({ window })}`,
+      ),
   },
   estimate: {
     // Bloque 20 — DurationEstimator entrypoint. Returns expected duration
@@ -1372,7 +1913,9 @@ export const api = {
     // Live Realtime sessions holding worker models. Feeds the Sessions
     // admin page and any "who's using this model?" tooltips.
     list: async () =>
-      (await request<unknown[]>("GET", "/ocabra/sessions")).map(toRealtimeSession),
+      (await request<unknown[]>("GET", "/ocabra/sessions")).map(
+        toRealtimeSession,
+      ),
     kill: (sessionId: string) =>
       request<{ session_id: string; killed: boolean }>(
         "POST",
@@ -1380,27 +1923,45 @@ export const api = {
       ),
   },
   routingStats: (params: StatsParams) => {
-    const query = buildQuery({ from: params.from, to: params.to })
-    return request<unknown>("GET", `/ocabra/stats/routing${query}`).then(toRoutingDecisions)
+    const query = buildQuery({ from: params.from, to: params.to });
+    return request<unknown>("GET", `/ocabra/stats/routing${query}`).then(
+      toRoutingDecisions,
+    );
   },
 
   models: {
-    list: async () => (await request<unknown[]>("GET", "/ocabra/models")).map(toModelState),
-    storage: async () => toModelsStorageStats(await request<unknown>("GET", "/ocabra/models/storage")),
+    list: async () =>
+      (await request<unknown[]>("GET", "/ocabra/models")).map(toModelState),
+    storage: async () =>
+      toModelsStorageStats(
+        await request<unknown>("GET", "/ocabra/models/storage"),
+      ),
     get: async (modelId: string) =>
-      toModelState(await request<unknown>("GET", `/ocabra/models/${encodeURIComponent(modelId)}`)),
+      toModelState(
+        await request<unknown>(
+          "GET",
+          `/ocabra/models/${encodeURIComponent(modelId)}`,
+        ),
+      ),
     activity: () =>
-      request<import("@/types").ModelActivityMap>("GET", "/ocabra/models/activity"),
-    ollamaRuntime: async () => {
-      const data = await request<{ models?: Record<string, import("@/types").OllamaRuntimeInfo> }>(
+      request<import("@/types").ModelActivityMap>(
         "GET",
-        "/ocabra/models/ollama-runtime",
-      )
-      return data.models ?? {}
+        "/ocabra/models/activity",
+      ),
+    ollamaRuntime: async () => {
+      const data = await request<{
+        models?: Record<string, import("@/types").OllamaRuntimeInfo>;
+      }>("GET", "/ocabra/models/ollama-runtime");
+      return data.models ?? {};
     },
     capacity: (
       modelId: string,
-      params?: { gpu?: number; slots?: string; kvDtype?: string; context?: string },
+      params?: {
+        gpu?: number;
+        slots?: string;
+        kvDtype?: string;
+        context?: string;
+      },
     ) =>
       request<import("@/types").ModelCapacity>(
         "GET",
@@ -1412,24 +1973,52 @@ export const api = {
         })}`,
       ),
     load: async (modelId: string) =>
-      toModelState(await request<unknown>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/load`)),
-    unload: (modelId: string) => request<void>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/unload`),
+      toModelState(
+        await request<unknown>(
+          "POST",
+          `/ocabra/models/${encodeURIComponent(modelId)}/load`,
+        ),
+      ),
+    unload: (modelId: string) =>
+      request<void>(
+        "POST",
+        `/ocabra/models/${encodeURIComponent(modelId)}/unload`,
+      ),
+    cancelLoad: (modelId: string) =>
+      request<{ model_id: string; cancelled_workers: string[] }>(
+        "POST",
+        `/ocabra/models/${encodeURIComponent(modelId)}/cancel-load`,
+      ),
+    downsize: (modelId: string) =>
+      request<{ model_id: string; downsized_worker: string }>(
+        "POST",
+        `/ocabra/models/${encodeURIComponent(modelId)}/downsize`,
+      ),
     patch: (modelId: string, patch: ModelPatchRequest) =>
-      request<unknown>("PATCH", `/ocabra/models/${encodeURIComponent(modelId)}`, patch).then(toModelState),
+      request<unknown>(
+        "PATCH",
+        `/ocabra/models/${encodeURIComponent(modelId)}`,
+        patch,
+      ).then(toModelState),
     estimateMemory: (
       modelId: string,
       body: {
-        preferredGpu?: number | null
-        extraConfig?: ModelPatchRequest["extraConfig"]
-        runProbe?: boolean
+        preferredGpu?: number | null;
+        extraConfig?: ModelPatchRequest["extraConfig"];
+        runProbe?: boolean;
       },
     ) =>
-      request<unknown>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/memory-estimate`, {
-        preferred_gpu: body.preferredGpu ?? null,
-        extra_config: body.extraConfig ?? null,
-        run_probe: Boolean(body.runProbe),
-      }).then(toModelMemoryEstimate),
-    delete: (modelId: string) => request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
+      request<unknown>(
+        "POST",
+        `/ocabra/models/${encodeURIComponent(modelId)}/memory-estimate`,
+        {
+          preferred_gpu: body.preferredGpu ?? null,
+          extra_config: body.extraConfig ?? null,
+          run_probe: Boolean(body.runProbe),
+        },
+      ).then(toModelMemoryEstimate),
+    delete: (modelId: string) =>
+      request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
     update: async (modelId: string) =>
       toDownloadJob(
         await request<unknown>(
@@ -1437,57 +2026,69 @@ export const api = {
           `/ocabra/models/${encodeURIComponent(modelId)}/update`,
         ),
       ),
-    refreshMetadata: async (): Promise<{ refreshed: string[]; skipped: { modelId: string; reason: string }[] }> => {
+    refreshMetadata: async (): Promise<{
+      refreshed: string[];
+      skipped: { modelId: string; reason: string }[];
+    }> => {
       const raw = await request<{
-        refreshed: string[]
-        skipped: { model_id: string; reason: string }[]
-      }>("POST", "/ocabra/models/refresh-metadata")
+        refreshed: string[];
+        skipped: { model_id: string; reason: string }[];
+      }>("POST", "/ocabra/models/refresh-metadata");
       return {
         refreshed: raw.refreshed ?? [],
-        skipped: (raw.skipped ?? []).map((s) => ({ modelId: s.model_id, reason: s.reason })),
-      }
+        skipped: (raw.skipped ?? []).map((s) => ({
+          modelId: s.model_id,
+          reason: s.reason,
+        })),
+      };
     },
-    updateAll: async (): Promise<{ enqueued: DownloadJob[]; skipped: { modelId: string; reason: string }[] }> => {
+    updateAll: async (): Promise<{
+      enqueued: DownloadJob[];
+      skipped: { modelId: string; reason: string }[];
+    }> => {
       const raw = await request<{
-        enqueued: unknown[]
-        skipped: { model_id: string; reason: string }[]
-      }>("POST", "/ocabra/models/update-all")
+        enqueued: unknown[];
+        skipped: { model_id: string; reason: string }[];
+      }>("POST", "/ocabra/models/update-all");
       return {
         enqueued: (raw.enqueued ?? []).map(toDownloadJob),
-        skipped: (raw.skipped ?? []).map((s) => ({ modelId: s.model_id, reason: s.reason })),
-      }
+        skipped: (raw.skipped ?? []).map((s) => ({
+          modelId: s.model_id,
+          reason: s.reason,
+        })),
+      };
     },
     // Sprint 17.4 — list llama.cpp models compatible as speculative-decoding drafts.
     speculativeCandidates: async (
       modelId: string,
     ): Promise<
       {
-        modelId: string
-        displayName: string
-        vocabSize: number | null
-        bosId: number | null
-        eosId: number | null
+        modelId: string;
+        displayName: string;
+        vocabSize: number | null;
+        bosId: number | null;
+        eosId: number | null;
       }[]
     > => {
       const rows = await request<
         {
-          model_id: string
-          display_name: string
-          vocab_size: number | null
-          bos_id: number | null
-          eos_id: number | null
+          model_id: string;
+          display_name: string;
+          vocab_size: number | null;
+          bos_id: number | null;
+          eos_id: number | null;
         }[]
       >(
         "GET",
         `/ocabra/models/${encodeURIComponent(modelId)}/speculative-candidates`,
-      )
+      );
       return rows.map((row) => ({
         modelId: row.model_id,
         displayName: row.display_name,
         vocabSize: row.vocab_size,
         bosId: row.bos_id,
         eosId: row.eos_id,
-      }))
+      }));
     },
   },
 
@@ -1498,22 +2099,38 @@ export const api = {
       (await request<unknown[]>("GET", "/ocabra/profiles")).map(toModelProfile),
 
     listByModel: async (modelId: string): Promise<ModelProfile[]> =>
-      (await request<unknown[]>("GET", `/ocabra/models/${encodeURIComponent(modelId)}/profiles`)).map(toModelProfile),
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/models/${encodeURIComponent(modelId)}/profiles`,
+        )
+      ).map(toModelProfile),
 
-    create: async (modelId: string, data: ProfileCreate): Promise<ModelProfile> =>
+    create: async (
+      modelId: string,
+      data: ProfileCreate,
+    ): Promise<ModelProfile> =>
       toModelProfile(
-        await request<unknown>("POST", `/ocabra/models/${encodeURIComponent(modelId)}/profiles`, {
-          profile_id: data.profileId,
-          display_name: data.displayName,
-          description: data.description,
-          category: data.category,
-          load_overrides: data.loadOverrides,
-          request_defaults: data.requestDefaults,
-          enabled: data.enabled,
-          is_default: data.isDefault,
-          ...(data.routingTargets !== undefined && { routing_targets: data.routingTargets }),
-          ...(data.runtimePolicy !== undefined && { runtime_policy: fromRuntimePolicy(data.runtimePolicy) }),
-        }),
+        await request<unknown>(
+          "POST",
+          `/ocabra/models/${encodeURIComponent(modelId)}/profiles`,
+          {
+            profile_id: data.profileId,
+            display_name: data.displayName,
+            description: data.description,
+            category: data.category,
+            load_overrides: data.loadOverrides,
+            request_defaults: data.requestDefaults,
+            enabled: data.enabled,
+            is_default: data.isDefault,
+            ...(data.routingTargets !== undefined && {
+              routing_targets: data.routingTargets,
+            }),
+            ...(data.runtimePolicy !== undefined && {
+              runtime_policy: fromRuntimePolicy(data.runtimePolicy),
+            }),
+          },
+        ),
       ),
 
     createRouter: async (data: RouterCreate): Promise<ModelProfile> =>
@@ -1530,21 +2147,45 @@ export const api = {
       ),
 
     get: async (profileId: string): Promise<ModelProfile> =>
-      toModelProfile(await request<unknown>("GET", `/ocabra/profiles/${encodeURIComponent(profileId)}`)),
-
-    update: async (profileId: string, data: ProfileUpdate): Promise<ModelProfile> =>
       toModelProfile(
-        await request<unknown>("PATCH", `/ocabra/profiles/${encodeURIComponent(profileId)}`, {
-          ...(data.displayName !== undefined && { display_name: data.displayName }),
-          ...(data.description !== undefined && { description: data.description }),
-          ...(data.category !== undefined && { category: data.category }),
-          ...(data.loadOverrides !== undefined && { load_overrides: data.loadOverrides }),
-          ...(data.requestDefaults !== undefined && { request_defaults: data.requestDefaults }),
-          ...(data.enabled !== undefined && { enabled: data.enabled }),
-          ...(data.isDefault !== undefined && { is_default: data.isDefault }),
-          ...(data.routingTargets !== undefined && { routing_targets: data.routingTargets }),
-          ...(data.runtimePolicy !== undefined && { runtime_policy: fromRuntimePolicy(data.runtimePolicy) }),
-        }),
+        await request<unknown>(
+          "GET",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}`,
+        ),
+      ),
+
+    update: async (
+      profileId: string,
+      data: ProfileUpdate,
+    ): Promise<ModelProfile> =>
+      toModelProfile(
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}`,
+          {
+            ...(data.displayName !== undefined && {
+              display_name: data.displayName,
+            }),
+            ...(data.description !== undefined && {
+              description: data.description,
+            }),
+            ...(data.category !== undefined && { category: data.category }),
+            ...(data.loadOverrides !== undefined && {
+              load_overrides: data.loadOverrides,
+            }),
+            ...(data.requestDefaults !== undefined && {
+              request_defaults: data.requestDefaults,
+            }),
+            ...(data.enabled !== undefined && { enabled: data.enabled }),
+            ...(data.isDefault !== undefined && { is_default: data.isDefault }),
+            ...(data.routingTargets !== undefined && {
+              routing_targets: data.routingTargets,
+            }),
+            ...(data.runtimePolicy !== undefined && {
+              runtime_policy: fromRuntimePolicy(data.runtimePolicy),
+            }),
+          },
+        ),
       ),
 
     listRuntimePresets: async (profileId: string): Promise<RuntimePreset[]> =>
@@ -1555,7 +2196,9 @@ export const api = {
         )
       ).map(toRuntimePreset),
 
-    resolveRuntimePresets: async (profileId: string): Promise<RuntimePresetResolution[]> =>
+    resolveRuntimePresets: async (
+      profileId: string,
+    ): Promise<RuntimePresetResolution[]> =>
       (
         await request<unknown[]>(
           "GET",
@@ -1613,18 +2256,27 @@ export const api = {
         ),
       ),
 
-    deleteRuntimePreset: async (profileId: string, presetKey: string): Promise<void> => {
+    deleteRuntimePreset: async (
+      profileId: string,
+      presetKey: string,
+    ): Promise<void> => {
       await request<unknown>(
         "DELETE",
         `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}`,
-      )
+      );
     },
 
     delete: async (profileId: string): Promise<void> => {
-      await request<unknown>("DELETE", `/ocabra/profiles/${encodeURIComponent(profileId)}`)
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/profiles/${encodeURIComponent(profileId)}`,
+      );
     },
 
-    rename: async (profileId: string, newProfileId: string): Promise<ModelProfile> =>
+    rename: async (
+      profileId: string,
+      newProfileId: string,
+    ): Promise<ModelProfile> =>
       toModelProfile(
         await request<unknown>(
           "POST",
@@ -1649,32 +2301,42 @@ export const api = {
         ),
       ),
 
-    uploadAsset: async (profileId: string, file: File): Promise<ModelProfile> => {
-      const form = new FormData()
-      form.append("file", file)
-      const res = await fetch(`${BASE}/ocabra/profiles/${encodeURIComponent(profileId)}/assets`, {
-        method: "POST",
-        body: form,
-      })
+    uploadAsset: async (
+      profileId: string,
+      file: File,
+    ): Promise<ModelProfile> => {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(
+        `${BASE}/ocabra/profiles/${encodeURIComponent(profileId)}/assets`,
+        {
+          method: "POST",
+          body: form,
+        },
+      );
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail ?? res.statusText)
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail ?? res.statusText);
       }
-      const json = (await res.json()) as Record<string, unknown>
-      return toModelProfile(json.profile)
+      const json = (await res.json()) as Record<string, unknown>;
+      return toModelProfile(json.profile);
     },
 
-    deleteAsset: async (profileId: string, assetKey: string): Promise<ModelProfile> => {
+    deleteAsset: async (
+      profileId: string,
+      assetKey: string,
+    ): Promise<ModelProfile> => {
       const raw = await request<Record<string, unknown>>(
         "DELETE",
         `/ocabra/profiles/${encodeURIComponent(profileId)}/assets/${encodeURIComponent(assetKey)}`,
-      )
-      return toModelProfile(raw.profile)
+      );
+      return toModelProfile(raw.profile);
     },
   },
 
   downloads: {
-    list: async () => (await request<unknown[]>("GET", "/ocabra/downloads")).map(toDownloadJob),
+    list: async () =>
+      (await request<unknown[]>("GET", "/ocabra/downloads")).map(toDownloadJob),
     enqueue: (
       source: DownloadSource,
       modelRef: string,
@@ -1687,64 +2349,105 @@ export const api = {
         artifact: artifact ?? null,
         register_config: registerConfig ?? null,
       }).then(toDownloadJob),
-    cancel: (jobId: string) => request<void>("DELETE", `/ocabra/downloads/${encodeURIComponent(jobId)}`),
+    cancel: (jobId: string) =>
+      request<void>("DELETE", `/ocabra/downloads/${encodeURIComponent(jobId)}`),
     clearHistory: (status = "failed,cancelled,completed") =>
-      request<{ deleted: number }>("DELETE", `/ocabra/downloads?status=${encodeURIComponent(status)}`),
+      request<{ deleted: number }>(
+        "DELETE",
+        `/ocabra/downloads?status=${encodeURIComponent(status)}`,
+      ),
     streamProgress: (jobId: string): EventSource =>
       new EventSource(`/ocabra/downloads/${encodeURIComponent(jobId)}/stream`),
   },
 
   registry: {
-    searchHF: async (q: string, task?: string, limit = 20): Promise<HFModelCard[]> => {
-      const params = new URLSearchParams({ q, limit: String(limit) })
-      if (task) params.set("task", task)
-      const raw = await request<unknown[]>("GET", `/ocabra/registry/hf/search?${params}`)
-      return raw.map(toHFModelCard)
+    searchHF: async (
+      q: string,
+      task?: string,
+      limit = 20,
+    ): Promise<HFModelCard[]> => {
+      const params = new URLSearchParams({ q, limit: String(limit) });
+      if (task) params.set("task", task);
+      const raw = await request<unknown[]>(
+        "GET",
+        `/ocabra/registry/hf/search?${params}`,
+      );
+      return raw.map(toHFModelCard);
     },
     getHFDetail: async (repoId: string): Promise<HFModelDetail> =>
-      toHFModelDetail(await request<unknown>("GET", `/ocabra/registry/hf/${encodeURIComponent(repoId)}`)),
-    getHFVariants: async (repoId: string): Promise<HFModelVariant[]> =>
-      (await request<unknown[]>("GET", `/ocabra/registry/hf/${encodeURIComponent(repoId)}/variants`)).map(
-        toHFModelVariant,
+      toHFModelDetail(
+        await request<unknown>(
+          "GET",
+          `/ocabra/registry/hf/${encodeURIComponent(repoId)}`,
+        ),
       ),
+    getHFVariants: async (repoId: string): Promise<HFModelVariant[]> =>
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/registry/hf/${encodeURIComponent(repoId)}/variants`,
+        )
+      ).map(toHFModelVariant),
     searchBitnet: async (q: string, limit = 20): Promise<HFModelCard[]> => {
-      const params = new URLSearchParams({ q, limit: String(limit) })
-      const raw = await request<unknown[]>("GET", `/ocabra/registry/bitnet/search?${params}`)
-      return raw.map(toHFModelCard)
+      const params = new URLSearchParams({ q, limit: String(limit) });
+      const raw = await request<unknown[]>(
+        "GET",
+        `/ocabra/registry/bitnet/search?${params}`,
+      );
+      return raw.map(toHFModelCard);
     },
     getBitnetVariants: async (repoId: string): Promise<HFModelVariant[]> =>
-      (await request<unknown[]>("GET", `/ocabra/registry/bitnet/${encodeURIComponent(repoId)}/variants`)).map(
-        toHFModelVariant,
-      ),
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/registry/bitnet/${encodeURIComponent(repoId)}/variants`,
+        )
+      ).map(toHFModelVariant),
     searchOllama: (q: string) =>
-      request<OllamaModelCard[]>("GET", `/ocabra/registry/ollama/search?q=${encodeURIComponent(q)}`),
-    getOllamaVariants: async (modelName: string): Promise<OllamaModelVariant[]> =>
-      (await request<unknown[]>("GET", `/ocabra/registry/ollama/${encodeURIComponent(modelName)}/variants`)).map(
-        toOllamaVariant,
-      ),
-    listLocal: async (opts: { refresh?: boolean } = {}) =>
-      (await request<unknown[]>(
+      request<OllamaModelCard[]>(
         "GET",
-        opts.refresh ? "/ocabra/registry/local?refresh=true" : "/ocabra/registry/local",
-      )).map(toLocalModel),
+        `/ocabra/registry/ollama/search?q=${encodeURIComponent(q)}`,
+      ),
+    getOllamaVariants: async (
+      modelName: string,
+    ): Promise<OllamaModelVariant[]> =>
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/registry/ollama/${encodeURIComponent(modelName)}/variants`,
+        )
+      ).map(toOllamaVariant),
+    listLocal: async (opts: { refresh?: boolean } = {}) =>
+      (
+        await request<unknown[]>(
+          "GET",
+          opts.refresh
+            ? "/ocabra/registry/local?refresh=true"
+            : "/ocabra/registry/local",
+        )
+      ).map(toLocalModel),
   },
 
   stats: {
     requests: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
-      return request<RequestStats>("GET", `/ocabra/stats/requests${query}`)
+      const query = buildQuery({
+        from: params.from,
+        to: params.to,
+        model_id: params.modelId,
+      });
+      return request<RequestStats>("GET", `/ocabra/stats/requests${query}`);
     },
     energy: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<EnergyStats>("GET", `/ocabra/stats/energy${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<EnergyStats>("GET", `/ocabra/stats/energy${query}`);
     },
     gpu: (params: StatsParams & { activeThresholdPct?: number }) => {
       const query = buildQuery({
         from: params.from,
         to: params.to,
         activeThresholdPct: params.activeThresholdPct,
-      })
-      return request<GpuUsageStats>("GET", `/ocabra/stats/gpu${query}`)
+      });
+      return request<GpuUsageStats>("GET", `/ocabra/stats/gpu${query}`);
     },
     tokens: (params: StatsParams) => {
       const query = buildQuery({
@@ -1753,16 +2456,27 @@ export const api = {
         model_id: params.modelId,
         allTime: params.allTime,
         includeSeries: params.includeSeries,
-      })
-      return request<TokenStats>("GET", `/ocabra/stats/tokens${query}`)
+      });
+      return request<TokenStats>("GET", `/ocabra/stats/tokens${query}`);
     },
     performance: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
-      return request<PerformanceStats>("GET", `/ocabra/stats/performance${query}`)
+      const query = buildQuery({
+        from: params.from,
+        to: params.to,
+        model_id: params.modelId,
+      });
+      return request<PerformanceStats>(
+        "GET",
+        `/ocabra/stats/performance${query}`,
+      );
     },
     overview: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
-      return request<OverviewStats>("GET", `/ocabra/stats/overview${query}`)
+      const query = buildQuery({
+        from: params.from,
+        to: params.to,
+        model_id: params.modelId,
+      });
+      return request<OverviewStats>("GET", `/ocabra/stats/overview${query}`);
     },
     recent: (limit = 20) =>
       request<RecentRequestsData>("GET", `/ocabra/stats/recent?limit=${limit}`),
@@ -1772,63 +2486,91 @@ export const api = {
         `/ocabra/stats/requests/${encodeURIComponent(requestId)}/cancel`,
       ),
     myRecent: (limit = 20) =>
-      request<RecentRequestsData>("GET", `/ocabra/stats/my-recent?limit=${limit}`),
+      request<RecentRequestsData>(
+        "GET",
+        `/ocabra/stats/my-recent?limit=${limit}`,
+      ),
     byUser: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<ByUserStats>("GET", `/ocabra/stats/by-user${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<ByUserStats>("GET", `/ocabra/stats/by-user${query}`);
     },
     byGroup: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<ByGroupStats>("GET", `/ocabra/stats/by-group${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<ByGroupStats>("GET", `/ocabra/stats/by-group${query}`);
     },
     my: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to, model_id: params.modelId })
-      return request<OverviewStats>("GET", `/ocabra/stats/my${query}`)
+      const query = buildQuery({
+        from: params.from,
+        to: params.to,
+        model_id: params.modelId,
+      });
+      return request<OverviewStats>("GET", `/ocabra/stats/my${query}`);
     },
     myGroup: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<MyGroupStats>("GET", `/ocabra/stats/my-group${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<MyGroupStats>("GET", `/ocabra/stats/my-group${query}`);
     },
     byApiKey: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<ByApiKeyStats>("GET", `/ocabra/stats/by-api-key${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<ByApiKeyStats>("GET", `/ocabra/stats/by-api-key${query}`);
     },
     userDetail: (userId: string, params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<UserDetailStats>("GET", `/ocabra/stats/user/${encodeURIComponent(userId)}/detail${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<UserDetailStats>(
+        "GET",
+        `/ocabra/stats/user/${encodeURIComponent(userId)}/detail${query}`,
+      );
     },
     federation: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<FederationStats>("GET", `/ocabra/stats/federation${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<FederationStats>(
+        "GET",
+        `/ocabra/stats/federation${query}`,
+      );
     },
     batchVsInteractive: (params: StatsParams) => {
-      const query = buildQuery({ from: params.from, to: params.to })
-      return request<BatchVsInteractiveStats>("GET", `/ocabra/stats/batch-vs-interactive${query}`)
+      const query = buildQuery({ from: params.from, to: params.to });
+      return request<BatchVsInteractiveStats>(
+        "GET",
+        `/ocabra/stats/batch-vs-interactive${query}`,
+      );
     },
     batchPriorityStatus: () =>
-      request<BatchPriorityStatus>("GET", `/ocabra/stats/batch-priority-status`),
+      request<BatchPriorityStatus>(
+        "GET",
+        `/ocabra/stats/batch-priority-status`,
+      ),
     serverPower: async (): Promise<ServerPower> => {
-      const raw = await request<Record<string, unknown>>("GET", `/ocabra/stats/server-power`)
+      const raw = await request<Record<string, unknown>>(
+        "GET",
+        `/ocabra/stats/server-power`,
+      );
       return {
         cpuPowerW: raw.cpuPowerW ?? raw.cpu_power_w ?? null,
         cpuTempC: raw.cpuTempC ?? raw.cpu_temp_c ?? null,
         totalGpuPowerW: raw.totalGpuPowerW ?? raw.total_gpu_power_w ?? null,
         totalPowerW: raw.totalPowerW ?? raw.total_power_w ?? null,
-      } as ServerPower
+      } as ServerPower;
     },
   },
 
   batches: {
-    uploadFile: async (file: File, purpose: string): Promise<OpenAIFileObject> => {
-      const form = new FormData()
-      form.append("file", file)
-      form.append("purpose", purpose)
-      const res = await fetch(`${BASE}/v1/files`, { method: "POST", body: form })
+    uploadFile: async (
+      file: File,
+      purpose: string,
+    ): Promise<OpenAIFileObject> => {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("purpose", purpose);
+      const res = await fetch(`${BASE}/v1/files`, {
+        method: "POST",
+        body: form,
+      });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(extractErrorMessage(err) ?? res.statusText)
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(extractErrorMessage(err) ?? res.statusText);
       }
-      return res.json() as Promise<OpenAIFileObject>
+      return res.json() as Promise<OpenAIFileObject>;
     },
     listFiles: (purpose?: string) =>
       request<{ object: string; data: OpenAIFileObject[]; has_more: boolean }>(
@@ -1840,11 +2582,12 @@ export const api = {
         "DELETE",
         `/v1/files/${encodeURIComponent(fileId)}`,
       ),
-    fileContentUrl: (fileId: string) => `${BASE}/v1/files/${encodeURIComponent(fileId)}/content`,
+    fileContentUrl: (fileId: string) =>
+      `${BASE}/v1/files/${encodeURIComponent(fileId)}/content`,
     create: (payload: {
-      inputFileId: string
-      endpoint: BatchEndpoint
-      metadata?: Record<string, unknown>
+      inputFileId: string;
+      endpoint: BatchEndpoint;
+      metadata?: Record<string, unknown>;
     }) =>
       request<OpenAIBatchJob>("POST", `/v1/batches`, {
         input_file_id: payload.inputFileId,
@@ -1853,24 +2596,40 @@ export const api = {
         ...(payload.metadata && { metadata: payload.metadata }),
       }),
     list: (params: { after?: string; limit?: number } = {}) => {
-      const query = buildQuery({ after: params.after, limit: params.limit })
-      return request<{ object: string; data: OpenAIBatchJob[]; first_id: string | null; last_id: string | null; has_more: boolean }>(
-        "GET",
-        `/v1/batches${query}`,
-      )
+      const query = buildQuery({ after: params.after, limit: params.limit });
+      return request<{
+        object: string;
+        data: OpenAIBatchJob[];
+        first_id: string | null;
+        last_id: string | null;
+        has_more: boolean;
+      }>("GET", `/v1/batches${query}`);
     },
     retrieve: (batchId: string) =>
-      request<OpenAIBatchJob>("GET", `/v1/batches/${encodeURIComponent(batchId)}`),
+      request<OpenAIBatchJob>(
+        "GET",
+        `/v1/batches/${encodeURIComponent(batchId)}`,
+      ),
     cancel: (batchId: string) =>
-      request<OpenAIBatchJob>("POST", `/v1/batches/${encodeURIComponent(batchId)}/cancel`),
+      request<OpenAIBatchJob>(
+        "POST",
+        `/v1/batches/${encodeURIComponent(batchId)}/cancel`,
+      ),
   },
 
   backends: {
     list: async (): Promise<import("@/types").BackendModuleState[]> =>
-      (await request<unknown[]>("GET", "/ocabra/backends")).map(toBackendModuleState),
-    get: async (backendType: string): Promise<import("@/types").BackendModuleState> =>
+      (await request<unknown[]>("GET", "/ocabra/backends")).map(
+        toBackendModuleState,
+      ),
+    get: async (
+      backendType: string,
+    ): Promise<import("@/types").BackendModuleState> =>
       toBackendModuleState(
-        await request<unknown>("GET", `/ocabra/backends/${encodeURIComponent(backendType)}`),
+        await request<unknown>(
+          "GET",
+          `/ocabra/backends/${encodeURIComponent(backendType)}`,
+        ),
       ),
     // NOTE: POST /install is modelled as GET here because EventSource only supports GET.
     // The backend exposes the install endpoint as GET so SSE works with a query param.
@@ -1878,10 +2637,10 @@ export const api = {
       backendType: string,
       method: import("@/types").BackendInstallMethod = "oci",
     ): EventSource => {
-      const qs = new URLSearchParams({ method })
+      const qs = new URLSearchParams({ method });
       return new EventSource(
         `/ocabra/backends/${encodeURIComponent(backendType)}/install?${qs.toString()}`,
-      )
+      );
     },
     uninstall: async (
       backendType: string,
@@ -1889,67 +2648,100 @@ export const api = {
       const raw = await request<unknown>(
         "POST",
         `/ocabra/backends/${encodeURIComponent(backendType)}/uninstall`,
-      )
-      return raw ? toBackendModuleState(raw) : null
+      );
+      return raw ? toBackendModuleState(raw) : null;
     },
     logs: async (backendType: string): Promise<string> => {
       const res = await fetch(
         `${BASE}/ocabra/backends/${encodeURIComponent(backendType)}/logs`,
-      )
+      );
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail ?? res.statusText)
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail ?? res.statusText);
       }
-      return res.text()
+      return res.text();
     },
   },
 
   services: {
-    list: async () => (await request<unknown[]>("GET", "/ocabra/services")).map(toServiceState),
+    list: async () =>
+      (await request<unknown[]>("GET", "/ocabra/services")).map(toServiceState),
     get: async (serviceId: string) =>
-      toServiceState(await request<unknown>("GET", `/ocabra/services/${encodeURIComponent(serviceId)}`)),
+      toServiceState(
+        await request<unknown>(
+          "GET",
+          `/ocabra/services/${encodeURIComponent(serviceId)}`,
+        ),
+      ),
     refresh: async (serviceId: string) =>
-      toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/refresh`)),
+      toServiceState(
+        await request<unknown>(
+          "POST",
+          `/ocabra/services/${encodeURIComponent(serviceId)}/refresh`,
+        ),
+      ),
     unload: async (serviceId: string) =>
-      toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/unload`)),
+      toServiceState(
+        await request<unknown>(
+          "POST",
+          `/ocabra/services/${encodeURIComponent(serviceId)}/unload`,
+        ),
+      ),
     start: async (serviceId: string) =>
-      toServiceState(await request<unknown>("POST", `/ocabra/services/${encodeURIComponent(serviceId)}/start`)),
+      toServiceState(
+        await request<unknown>(
+          "POST",
+          `/ocabra/services/${encodeURIComponent(serviceId)}/start`,
+        ),
+      ),
     patch: async (serviceId: string, patch: { enabled: boolean }) =>
-      toServiceState(await request<unknown>("PATCH", `/ocabra/services/${encodeURIComponent(serviceId)}`, patch)),
+      toServiceState(
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/services/${encodeURIComponent(serviceId)}`,
+          patch,
+        ),
+      ),
   },
 
   host: {
-    stats: async () => toHostStats(await request<unknown>("GET", "/ocabra/host/stats")),
+    stats: async () =>
+      toHostStats(await request<unknown>("GET", "/ocabra/host/stats")),
   },
 
   ollama: {
-    version: async (): Promise<{ current: string | null; latest: string | null; updateAvailable: boolean }> => {
-      const raw = await request<{ current: string | null; latest: string | null; update_available: boolean }>(
-        "GET",
-        "/ocabra/ollama/version",
-      )
+    version: async (): Promise<{
+      current: string | null;
+      latest: string | null;
+      updateAvailable: boolean;
+    }> => {
+      const raw = await request<{
+        current: string | null;
+        latest: string | null;
+        update_available: boolean;
+      }>("GET", "/ocabra/ollama/version");
       return {
         current: raw.current,
         latest: raw.latest,
         updateAvailable: Boolean(raw.update_available),
-      }
+      };
     },
     serverUpdateStatus: async (): Promise<{
-      status: "idle" | "pulling" | "restarting" | "done" | "error"
-      detail: string | null
-      startedAt: string | null
-      finishedAt: string | null
-      fromVersion: string | null
-      toVersion: string | null
+      status: "idle" | "pulling" | "restarting" | "done" | "error";
+      detail: string | null;
+      startedAt: string | null;
+      finishedAt: string | null;
+      fromVersion: string | null;
+      toVersion: string | null;
     }> => {
       const raw = await request<{
-        status: "idle" | "pulling" | "restarting" | "done" | "error"
-        detail: string | null
-        started_at: string | null
-        finished_at: string | null
-        from_version: string | null
-        to_version: string | null
-      }>("GET", "/ocabra/ollama/server/update")
+        status: "idle" | "pulling" | "restarting" | "done" | "error";
+        detail: string | null;
+        started_at: string | null;
+        finished_at: string | null;
+        from_version: string | null;
+        to_version: string | null;
+      }>("GET", "/ocabra/ollama/server/update");
       return {
         status: raw.status,
         detail: raw.detail,
@@ -1957,31 +2749,38 @@ export const api = {
         finishedAt: raw.finished_at,
         fromVersion: raw.from_version,
         toVersion: raw.to_version,
-      }
+      };
     },
     startServerUpdate: async () =>
-      request<{ status: string; detail: string | null }>("POST", "/ocabra/ollama/server/update"),
+      request<{ status: string; detail: string | null }>(
+        "POST",
+        "/ocabra/ollama/server/update",
+      ),
   },
 
   config: {
-    get: async () => toServerConfig(await request<unknown>("GET", "/ocabra/config")),
+    get: async () =>
+      toServerConfig(await request<unknown>("GET", "/ocabra/config")),
     patch: async (patch: Partial<ServerConfig>) =>
       toServerConfig(await request<unknown>("PATCH", "/ocabra/config", patch)),
     syncLiteLLM: async () => {
-      const result = await request<{ synced_models: number }>("POST", "/ocabra/config/litellm/sync")
-      return { syncedModels: result.synced_models }
+      const result = await request<{ synced_models: number }>(
+        "POST",
+        "/ocabra/config/litellm/sync",
+      );
+      return { syncedModels: result.synced_models };
     },
   },
 
   trtllm: {
     compile: async (body: {
-      modelId: string
-      gpuIndices: number[]
-      dtype: string
-      maxBatchSize: number
-      maxInputLen: number
-      maxSeqLen: number
-      engineName: string
+      modelId: string;
+      gpuIndices: number[];
+      dtype: string;
+      maxBatchSize: number;
+      maxInputLen: number;
+      maxSeqLen: number;
+      engineName: string;
     }): Promise<CompileJob> =>
       toCompileJob(
         await request<unknown>("POST", "/ocabra/trtllm/compile", {
@@ -1995,48 +2794,76 @@ export const api = {
         }),
       ),
     list: async (): Promise<CompileJob[]> =>
-      (await request<unknown[]>("GET", "/ocabra/trtllm/compile")).map(toCompileJob),
+      (await request<unknown[]>("GET", "/ocabra/trtllm/compile")).map(
+        toCompileJob,
+      ),
     cancel: async (jobId: string): Promise<CompileJob> =>
-      toCompileJob(await request<unknown>("DELETE", `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}`)),
-    streamUrl: (jobId: string): string => `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}/stream`,
+      toCompileJob(
+        await request<unknown>(
+          "DELETE",
+          `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}`,
+        ),
+      ),
+    streamUrl: (jobId: string): string =>
+      `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}/stream`,
     deleteEngine: async (engineName: string): Promise<void> => {
-      await request<unknown>("DELETE", `/ocabra/trtllm/engines/${encodeURIComponent(engineName)}`)
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/trtllm/engines/${encodeURIComponent(engineName)}`,
+      );
     },
     estimate: async (params: {
-      modelId: string
-      gpuIndices: number[]
-      tpSize: number
-      dtype: string
-      maxBatchSize: number
-      maxSeqLen: number
+      modelId: string;
+      gpuIndices: number[];
+      tpSize: number;
+      dtype: string;
+      maxBatchSize: number;
+      maxSeqLen: number;
     }): Promise<VramEstimate> => {
-      const qs = new URLSearchParams()
-      qs.set("model_id", params.modelId)
-      qs.set("tp_size", String(params.tpSize))
-      qs.set("dtype", params.dtype)
-      qs.set("max_batch_size", String(params.maxBatchSize))
-      qs.set("max_seq_len", String(params.maxSeqLen))
-      params.gpuIndices.forEach((gpuIndex) => qs.append("gpu_indices", String(gpuIndex)))
-      const raw = await request<Record<string, unknown>>("GET", `/ocabra/trtllm/estimate?${qs}`)
-      return toVramEstimate(raw)
+      const qs = new URLSearchParams();
+      qs.set("model_id", params.modelId);
+      qs.set("tp_size", String(params.tpSize));
+      qs.set("dtype", params.dtype);
+      qs.set("max_batch_size", String(params.maxBatchSize));
+      qs.set("max_seq_len", String(params.maxSeqLen));
+      params.gpuIndices.forEach((gpuIndex) =>
+        qs.append("gpu_indices", String(gpuIndex)),
+      );
+      const raw = await request<Record<string, unknown>>(
+        "GET",
+        `/ocabra/trtllm/estimate?${qs}`,
+      );
+      return toVramEstimate(raw);
     },
   },
 
   auth: {
-    login: async (username: string, password: string, remember?: boolean): Promise<{ user: AuthUser }> => {
-      const raw = await request<Record<string, unknown>>("POST", "/ocabra/auth/login", {
-        username,
-        password,
-        remember: remember ?? false,
-      })
-      return { user: toAuthUser(raw.user ?? raw) }
+    login: async (
+      username: string,
+      password: string,
+      remember?: boolean,
+    ): Promise<{ user: AuthUser }> => {
+      const raw = await request<Record<string, unknown>>(
+        "POST",
+        "/ocabra/auth/login",
+        {
+          username,
+          password,
+          remember: remember ?? false,
+        },
+      );
+      return { user: toAuthUser(raw.user ?? raw) };
     },
 
     logout: (): Promise<void> => request<void>("POST", "/ocabra/auth/logout"),
 
-    me: async (): Promise<AuthUser> => toAuthUser(await request<unknown>("GET", "/ocabra/auth/me")),
+    me: async (): Promise<AuthUser> =>
+      toAuthUser(await request<unknown>("GET", "/ocabra/auth/me")),
 
-    changePassword: (currentPassword: string, newPassword: string): Promise<void> =>
+    changePassword: (
+      currentPassword: string,
+      newPassword: string,
+    ): Promise<void> =>
       request<void>("PUT", "/ocabra/auth/password", {
         current_password: currentPassword,
         new_password: newPassword,
@@ -2045,12 +2872,19 @@ export const api = {
     listKeys: async (): Promise<ApiKey[]> =>
       (await request<unknown[]>("GET", "/ocabra/auth/keys")).map(toApiKey),
 
-    createKey: async (name: string, expiresInDays?: number | null): Promise<ApiKey & { key: string }> => {
-      const raw = await request<Record<string, unknown>>("POST", "/ocabra/auth/keys", {
-        name,
-        expires_in_days: expiresInDays ?? null,
-      })
-      return { ...toApiKey(raw), key: String(raw.key ?? "") }
+    createKey: async (
+      name: string,
+      expiresInDays?: number | null,
+    ): Promise<ApiKey & { key: string }> => {
+      const raw = await request<Record<string, unknown>>(
+        "POST",
+        "/ocabra/auth/keys",
+        {
+          name,
+          expires_in_days: expiresInDays ?? null,
+        },
+      );
+      return { ...toApiKey(raw), key: String(raw.key ?? "") };
     },
 
     revokeKey: (keyId: string): Promise<void> =>
@@ -2073,36 +2907,82 @@ export const api = {
         }),
       ),
     get: async (id: string): Promise<AdminUser> =>
-      toAdminUser(await request<unknown>("GET", `/ocabra/users/${encodeURIComponent(id)}`)),
+      toAdminUser(
+        await request<unknown>(
+          "GET",
+          `/ocabra/users/${encodeURIComponent(id)}`,
+        ),
+      ),
     update: async (id: string, data: UpdateUserPayload): Promise<AdminUser> =>
       toAdminUser(
-        await request<unknown>("PATCH", `/ocabra/users/${encodeURIComponent(id)}`, {
-          role: data.role,
-          is_active: data.isActive,
-          email: data.email,
-        }),
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/users/${encodeURIComponent(id)}`,
+          {
+            role: data.role,
+            is_active: data.isActive,
+            email: data.email,
+          },
+        ),
       ),
     remove: (id: string): Promise<void> =>
       request<void>("DELETE", `/ocabra/users/${encodeURIComponent(id)}`),
     resetPassword: (id: string, newPassword: string): Promise<void> =>
-      request<void>("POST", `/ocabra/users/${encodeURIComponent(id)}/reset-password`, {
-        new_password: newPassword,
-      }),
-    listKeys: async (id: string): Promise<ApiKey[]> =>
-      (await request<unknown[]>("GET", `/ocabra/users/${encodeURIComponent(id)}/keys`)).map(toApiKey),
-    revokeKey: (userId: string, keyId: string): Promise<void> =>
-      request<void>("DELETE", `/ocabra/users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}`),
-    createKeyForUser: async (userId: string, payload: { name: string; expiresInDays?: number | null; groupId?: string | null }) =>
-      request<{ id: string; name: string; keyPrefix: string; key: string; expiresAt: string | null; createdAt: string; groupId: string | null }>(
+      request<void>(
         "POST",
-        `/ocabra/users/${encodeURIComponent(userId)}/keys`,
-        { name: payload.name, expires_in_days: payload.expiresInDays ?? null, group_id: payload.groupId ?? null }
+        `/ocabra/users/${encodeURIComponent(id)}/reset-password`,
+        {
+          new_password: newPassword,
+        },
       ),
+    listKeys: async (id: string): Promise<ApiKey[]> =>
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/users/${encodeURIComponent(id)}/keys`,
+        )
+      ).map(toApiKey),
+    revokeKey: (userId: string, keyId: string): Promise<void> =>
+      request<void>(
+        "DELETE",
+        `/ocabra/users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}`,
+      ),
+    createKeyForUser: async (
+      userId: string,
+      payload: {
+        name: string;
+        expiresInDays?: number | null;
+        groupId?: string | null;
+      },
+    ) =>
+      request<{
+        id: string;
+        name: string;
+        keyPrefix: string;
+        key: string;
+        expiresAt: string | null;
+        createdAt: string;
+        groupId: string | null;
+      }>("POST", `/ocabra/users/${encodeURIComponent(userId)}/keys`, {
+        name: payload.name,
+        expires_in_days: payload.expiresInDays ?? null,
+        group_id: payload.groupId ?? null,
+      }),
     // Admin "all keys" view + bulk reassignment.
     listAllKeys: async (): Promise<AdminApiKey[]> =>
       (await request<unknown[]>("GET", "/ocabra/api-keys")).map(toAdminApiKey),
-    reassignKeys: (keyIds: string[], targetUserId: string): Promise<{ reassigned: number; skipped: number; failed: Array<{ id: string; error: string }> }> =>
-      request("POST", "/ocabra/api-keys/reassign", { key_ids: keyIds, target_user_id: targetUserId }),
+    reassignKeys: (
+      keyIds: string[],
+      targetUserId: string,
+    ): Promise<{
+      reassigned: number;
+      skipped: number;
+      failed: Array<{ id: string; error: string }>;
+    }> =>
+      request("POST", "/ocabra/api-keys/reassign", {
+        key_ids: keyIds,
+        target_user_id: targetUserId,
+      }),
     purgeRevokedKeys: (): Promise<{ deleted: number }> =>
       request("DELETE", "/ocabra/api-keys/revoked"),
   },
@@ -2119,20 +2999,27 @@ export const api = {
       ),
     update: async (id: string, data: UpdateGroupPayload): Promise<Group> =>
       toGroup(
-        await request<unknown>("PATCH", `/ocabra/groups/${encodeURIComponent(id)}`, {
-          name: data.name,
-          description: data.description,
-        }),
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/groups/${encodeURIComponent(id)}`,
+          {
+            name: data.name,
+            description: data.description,
+          },
+        ),
       ),
     remove: (id: string): Promise<void> =>
       request<void>("DELETE", `/ocabra/groups/${encodeURIComponent(id)}`),
     listModels: async (id: string): Promise<string[]> => {
-      const raw = await request<unknown[]>("GET", `/ocabra/groups/${encodeURIComponent(id)}/models`)
+      const raw = await request<unknown[]>(
+        "GET",
+        `/ocabra/groups/${encodeURIComponent(id)}/models`,
+      );
       return raw.map((item) => {
-        if (typeof item === "string") return item
-        const r = isRecord(item) ? item : {}
-        return String(r.model_id ?? r.modelId ?? r.id ?? item)
-      })
+        if (typeof item === "string") return item;
+        const r = isRecord(item) ? item : {};
+        return String(r.model_id ?? r.modelId ?? r.id ?? item);
+      });
     },
     addModel: (id: string, modelId: string): Promise<void> =>
       request<void>("POST", `/ocabra/groups/${encodeURIComponent(id)}/models`, {
@@ -2144,11 +3031,20 @@ export const api = {
         `/ocabra/groups/${encodeURIComponent(id)}/models/${encodeURIComponent(modelId)}`,
       ),
     listMembers: async (id: string): Promise<GroupMember[]> =>
-      (await request<unknown[]>("GET", `/ocabra/groups/${encodeURIComponent(id)}/members`)).map(toGroupMember),
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/groups/${encodeURIComponent(id)}/members`,
+        )
+      ).map(toGroupMember),
     addMember: (id: string, userId: string): Promise<void> =>
-      request<void>("POST", `/ocabra/groups/${encodeURIComponent(id)}/members`, {
-        user_id: userId,
-      }),
+      request<void>(
+        "POST",
+        `/ocabra/groups/${encodeURIComponent(id)}/members`,
+        {
+          user_id: userId,
+        },
+      ),
     removeMember: (id: string, userId: string): Promise<void> =>
       request<void>(
         "DELETE",
@@ -2159,14 +3055,14 @@ export const api = {
      * Fetches all groups and filters client-side using their model lists.
      */
     getModelGroups: async (modelId: string): Promise<string[]> => {
-      const groups = await (api.groups.list())
+      const groups = await api.groups.list();
       const results = await Promise.all(
         groups.map(async (group) => {
-          const modelIds = await api.groups.listModels(group.id)
-          return modelIds.includes(modelId) ? group.id : null
+          const modelIds = await api.groups.listModels(group.id);
+          return modelIds.includes(modelId) ? group.id : null;
         }),
-      )
-      return results.filter((id): id is string => id !== null)
+      );
+      return results.filter((id): id is string => id !== null);
     },
     /**
      * Synchronizes group membership for a model by adding to addGroupIds
@@ -2180,13 +3076,15 @@ export const api = {
       await Promise.all([
         ...addGroupIds.map((gid) => api.groups.addModel(gid, modelId)),
         ...removeGroupIds.map((gid) => api.groups.removeModel(gid, modelId)),
-      ])
+      ]);
     },
   },
 
   federation: {
     getPeers: async (): Promise<FederationPeer[]> =>
-      (await request<unknown[]>("GET", "/ocabra/federation/peers")).map(toFederationPeer),
+      (await request<unknown[]>("GET", "/ocabra/federation/peers")).map(
+        toFederationPeer,
+      ),
 
     addPeer: async (data: FederationPeerCreate): Promise<FederationPeer> =>
       toFederationPeer(
@@ -2198,47 +3096,67 @@ export const api = {
         }),
       ),
 
-    updatePeer: async (id: string, data: FederationPeerUpdate): Promise<FederationPeer> =>
+    updatePeer: async (
+      id: string,
+      data: FederationPeerUpdate,
+    ): Promise<FederationPeer> =>
       toFederationPeer(
-        await request<unknown>("PATCH", `/ocabra/federation/peers/${encodeURIComponent(id)}`, {
-          ...(data.name !== undefined && { name: data.name }),
-          ...(data.url !== undefined && { url: data.url }),
-          ...(data.api_key !== undefined && { api_key: data.api_key }),
-          ...(data.access_level !== undefined && { access_level: data.access_level }),
-          ...(data.enabled !== undefined && { enabled: data.enabled }),
-        }),
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/federation/peers/${encodeURIComponent(id)}`,
+          {
+            ...(data.name !== undefined && { name: data.name }),
+            ...(data.url !== undefined && { url: data.url }),
+            ...(data.api_key !== undefined && { api_key: data.api_key }),
+            ...(data.access_level !== undefined && {
+              access_level: data.access_level,
+            }),
+            ...(data.enabled !== undefined && { enabled: data.enabled }),
+          },
+        ),
       ),
 
     deletePeer: async (id: string): Promise<void> => {
-      await request<unknown>("DELETE", `/ocabra/federation/peers/${encodeURIComponent(id)}`)
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/federation/peers/${encodeURIComponent(id)}`,
+      );
     },
 
     testPeer: async (id: string): Promise<FederationTestResult> =>
       toFederationTestResult(
-        await request<unknown>("POST", `/ocabra/federation/peers/${encodeURIComponent(id)}/test`),
+        await request<unknown>(
+          "POST",
+          `/ocabra/federation/peers/${encodeURIComponent(id)}/test`,
+        ),
       ),
   },
-}
+};
 
 export interface VramEstimate {
-  estimatedParamsB: number | null
-  quant: string
-  tpSize: number
-  configFound: boolean
-  serve: { vramPerGpuMb: number; vramTotalMb: number; breakdown: { weightsMb: number; kvCacheMb: number; overheadMb: number } }
-  build: { vramPerGpuMb: number; vramTotalMb: number }
-  disk: { engineMb: number; checkpointMbTemp: number; totalPeakMb: number }
-  warnings: string[]
+  estimatedParamsB: number | null;
+  quant: string;
+  tpSize: number;
+  configFound: boolean;
+  serve: {
+    vramPerGpuMb: number;
+    vramTotalMb: number;
+    breakdown: { weightsMb: number; kvCacheMb: number; overheadMb: number };
+  };
+  build: { vramPerGpuMb: number; vramTotalMb: number };
+  disk: { engineMb: number; checkpointMbTemp: number; totalPeakMb: number };
+  warnings: string[];
 }
 
 function toVramEstimate(raw: Record<string, unknown>): VramEstimate {
-  const serveRaw = (raw.serve ?? {}) as Record<string, unknown>
-  const buildRaw = (raw.build ?? {}) as Record<string, unknown>
-  const diskRaw = (raw.disk ?? {}) as Record<string, unknown>
-  const breakdownRaw = (serveRaw.breakdown ?? {}) as Record<string, unknown>
+  const serveRaw = (raw.serve ?? {}) as Record<string, unknown>;
+  const buildRaw = (raw.build ?? {}) as Record<string, unknown>;
+  const diskRaw = (raw.disk ?? {}) as Record<string, unknown>;
+  const breakdownRaw = (serveRaw.breakdown ?? {}) as Record<string, unknown>;
 
   return {
-    estimatedParamsB: raw.estimated_params_b == null ? null : Number(raw.estimated_params_b),
+    estimatedParamsB:
+      raw.estimated_params_b == null ? null : Number(raw.estimated_params_b),
     quant: String(raw.quant ?? "unknown"),
     tpSize: Number(raw.tp_size ?? 1),
     configFound: Boolean(raw.config_found),
@@ -2261,5 +3179,5 @@ function toVramEstimate(raw: Record<string, unknown>): VramEstimate {
       totalPeakMb: Number(diskRaw.total_peak_mb ?? 0),
     },
     warnings: Array.isArray(raw.warnings) ? raw.warnings.map(String) : [],
-  }
+  };
 }

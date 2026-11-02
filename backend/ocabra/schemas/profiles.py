@@ -21,12 +21,32 @@ class RuntimePolicy(BaseModel):
     small_requests_extend_large_ttl: bool = False
     remote_warm_threshold_seconds: int = Field(default=10, ge=0, le=3600)
     max_context_tokens: int | None = Field(default=None, gt=0)
+    # Optional enforceable generation ceiling. This is deliberately distinct
+    # from both the total context window and the default admission reservation.
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    # Exact pools proven stable on the profile's declared placement. This is
+    # intentionally keyed by preset so an empirical benchmark may override a
+    # conservative estimator without weakening any other placement.
+    validated_context_tokens: dict[str, int] = Field(default_factory=dict)
+    # Calibrated peak VRAM for an exact validated preset. This is separate
+    # from the context proof because GGUF/graph estimators can exceed the
+    # physical card even when that concrete runtime has loaded successfully.
+    validated_vram_mb: dict[str, int] = Field(default_factory=dict)
     # Overrides settings.runtime_preset_default_output_reservation_tokens for
     # this profile only — see estimate_request_token_budget() /
     # plan_profile_runtime(). Reasoning-heavy profiles (gemma4, qwen3.8) need
     # more than the global default reserves, since reasoning_content counts
     # against the same budget as the final answer.
     default_output_reservation_tokens: int | None = Field(default=None, gt=0)
+
+    @field_validator("validated_context_tokens", "validated_vram_mb")
+    @classmethod
+    def validate_measured_capacity(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(not key or tokens <= 0 for key, tokens in value.items()):
+            raise ValueError(
+                "validated preset capacities must use non-empty keys and positive values"
+            )
+        return value
 
 
 class RuntimePresetCreate(BaseModel):
@@ -67,9 +87,7 @@ class RuntimePresetCreate(BaseModel):
         if self.is_default and not self.enabled:
             raise ValueError("the default runtime preset must be enabled")
         if self.placement_policy in ("preferred", "forced") and not self.preferred_gpus:
-            raise ValueError(
-                "preferred_gpus is required for preferred/forced placement"
-            )
+            raise ValueError("preferred_gpus is required for preferred/forced placement")
         return self
 
 
@@ -220,9 +238,7 @@ class ProfileClone(BaseModel):
 class ProfileAliasCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    alias_id: str = Field(
-        ..., min_length=1, max_length=512, pattern=r"^[a-z0-9][a-z0-9.\-:]*$"
-    )
+    alias_id: str = Field(..., min_length=1, max_length=512, pattern=r"^[a-z0-9][a-z0-9.\-:]*$")
     preset_key: str | None = Field(default=None, max_length=64)
     hidden: bool = True
 

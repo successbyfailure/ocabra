@@ -409,6 +409,20 @@ class GPUManager:
         self._locks.get(gpu_index, {}).pop(model_id, None)
         logger.debug("vram_unlocked", gpu=gpu_index, model=model_id)
 
+    def locked_gpu_indices(self, model_id: str) -> list[int]:
+        """Return every GPU carrying a reservation for ``model_id``.
+
+        Backend discovery can occasionally lose GPU attribution before an
+        unload (Ollama may report an empty processor list while its runner is
+        stopping).  The lock remains authoritative in that short window and
+        must still be released.
+        """
+        return [
+            gpu_index
+            for gpu_index, locks in self._locks.items()
+            if model_id in locks
+        ]
+
     async def get_free_vram(self, gpu_index: int) -> int:
         state = self._states[gpu_index]
         locks = self._locks.get(gpu_index, {})

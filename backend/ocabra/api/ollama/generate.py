@@ -16,6 +16,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     check_capability,
     ensure_loaded,
+    fairness_kv_budget,
     fairness_slots,
     fairness_user_key,
     get_federation_manager,
@@ -24,6 +25,7 @@ from ocabra.api.openai._deps import (
     merge_profile_defaults,
     resolve_profile,
 )
+from ocabra.core.fair_slot_gate import KVCapacityError
 
 from ._mapper import resolve_model
 from ._shared import (
@@ -105,8 +107,7 @@ async def generate(
                     request.state.federation_remote_node_id = None
                     resp = None
                 if resp is not None and (
-                    resp.status_code < 400
-                    or not should_fallback_to_local(resp.status_code)
+                    resp.status_code < 400 or not should_fallback_to_local(resp.status_code)
                 ):
                     return Response(
                         content=resp.content,
@@ -187,18 +188,50 @@ async def generate(
     vllm_body = _build_vllm_generate_body(merged_body, state.backend_model_id, stream)
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
+    kv_capacity, kv_tokens = fairness_kv_budget(
+        state,
+        required_tokens=getattr(request.state, "runtime_required_tokens", None),
+        effective_context=getattr(request.state, "runtime_effective_context", None),
+    )
+    kv_admission = (
+        {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
+        if kv_capacity is not None
+        else {}
+    )
+    if kv_capacity is not None and kv_tokens > kv_capacity:
+        raise HTTPException(
+            status_code=400,
+            detail=str(KVCapacityError(kv_tokens, kv_capacity)),
+        )
 
     if stream:
         return StreamingResponse(
-            _stream_generate(worker_pool, worker_key, ollama_model, vllm_body, user_key, slots),
+            _stream_generate(
+                worker_pool,
+                worker_key,
+                ollama_model,
+                vllm_body,
+                user_key,
+                slots,
+                kv_capacity,
+                kv_tokens,
+            ),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     started_ns = time.monotonic_ns()
-    result = await worker_pool.forward_request(
-        worker_key, "/v1/completions", vllm_body, user_key=user_key, slots=slots
-    )
+    try:
+        result = await worker_pool.forward_request(
+            worker_key,
+            "/v1/completions",
+            vllm_body,
+            user_key=user_key,
+            slots=slots,
+            **kv_admission,
+        )
+    except KVCapacityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     text = ""
     choices = result.get("choices") or []
     if choices:
@@ -244,6 +277,8 @@ async def _stream_generate(
     body: dict,
     user_key: str | None = None,
     slots: int = 1,
+    kv_capacity_tokens: int | None = None,
+    kv_tokens: int = 0,
 ) -> AsyncIterator[bytes]:
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
@@ -252,7 +287,16 @@ async def _stream_generate(
 
     async for payload in iter_sse_payloads(
         worker_pool.forward_stream(
-            model_id, "/v1/completions", body, user_key=user_key, slots=slots
+            model_id,
+            "/v1/completions",
+            body,
+            user_key=user_key,
+            slots=slots,
+            **(
+                {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
+                if kv_capacity_tokens is not None
+                else {}
+            ),
         )
     ):
         if payload == "[DONE]":

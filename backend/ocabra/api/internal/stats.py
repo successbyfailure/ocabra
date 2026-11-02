@@ -223,7 +223,7 @@ async def recent_requests(
         slots_by_canonical: dict[str, int] = {}
         for state in all_states:
             model_id = state.model_id
-            canonical = model_id.split("::", 1)[0]
+            canonical = mm._canonical_runtime_model_id(model_id)
             meta = state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
             if isinstance(meta, dict):
                 try:
@@ -235,7 +235,9 @@ async def recent_requests(
         # Agrupa índices por canonical (los más viejos primero → procesando).
         grouped: dict[str, list[int]] = {}
         for idx, row in enumerate(in_flight_rows):
-            canonical = (row.get("workerKey") or row["modelId"]).split("::", 1)[0]
+            canonical = mm._canonical_runtime_model_id(
+                row.get("workerKey") or row["modelId"]
+            )
             grouped.setdefault(canonical, []).append(idx)
         p50_cache: dict[str, float | None] = {}
 

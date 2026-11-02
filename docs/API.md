@@ -185,12 +185,16 @@ que acepta `"low"`, `"medium"`, `"high"` o `"off"` (sinónimos: `none`,
 | vLLM | `extra_body.chat_template_kwargs.reasoning_effort = <value>` |
 | Ollama ≥0.5 | `think: true` (low/medium/high) o `think: false` (off) |
 | Ollama 0.4 | aceptado y traducido, pero el upstream lo ignora de momento (ollama/ollama#15288) |
-| llama.cpp nativo (gemma4:26b, qwen3.8:27b) | `reasoning_effort = <value>` directo (low/medium/high), o `reasoning: "off"` para desactivarlo — llama-server acepta ambos campos tal cual, sin reshaping |
+| llama.cpp nativo (gemma4:26b, qwen3.8:27b, Chaos) | `low`/`medium`/`high` activa `chat_template_kwargs.enable_thinking=true` para esa petición y pasa el nivel; `off`/`none` lo fuerza a `false`; `default` conserva el valor de arranque |
 | Otros | silenciosamente ignorado |
 
 ```json
 {"model": "qwen3.8:27b", "messages": [...], "reasoning_effort": "off"}
 ```
+
+Si un perfil como Chaos arranca con thinking desactivado, omitir el campo o
+enviar `"default"` lo mantiene desactivado. Enviar `"low"`, `"medium"` o
+`"high"` lo activa solo para esa petición, sin recargar el modelo.
 
 **Tope duro de razonamiento (`reasoning_budget`)** — solo para modelos
 llama.cpp nativos (gemma4:26b, qwen3.8:27b). A diferencia de
@@ -852,6 +856,21 @@ clientes legacy; los nuevos deben usar `profile_id` + `ocabra.context_preset`.
 - `native_context_length`: ventana nativa del modelo (p. ej. 262144 en
   gemma4:26b). Opcional, cero significa "desconocido". Sirve para el panel y
   para que los presets `max` sepan hasta dónde pueden escalar.
+- `ocabra.capabilities.max_output_tokens`: límite duro de salida independiente
+  de la ventana total. Solo aparece si el perfil o el backend configuran uno;
+  si `max_tokens` o `max_completion_tokens` lo supera, la API responde HTTP
+  400, `param` identifica el campo y `code=max_tokens_exceeded`. No se infiere
+  de `context_length` ni se recorta silenciosamente.
+- `ocabra.capabilities.recommended_output_tokens`: presupuesto recomendado a
+  partir de la reserva del perfil y el máximo observado. Es orientación para
+  clientes, no una restricción del modelo.
+- `ocabra.capabilities.recommended_input_tokens`: ventana restante después de
+  reservar `recommended_output_tokens`; ayuda a clientes que necesitan un
+  presupuesto conservador de prompt sin confundirlo con un máximo duro.
+
+Cuando el límite explícito es válido pero `prompt + salida` supera la ventana,
+el error sigue siendo `context_length_exceeded`, porque en ese caso el problema
+sí es la suma de contexto de la petición.
 
 ### Status — Estado del servidor
 

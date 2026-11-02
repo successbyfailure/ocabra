@@ -74,6 +74,21 @@ export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
   if (config.overrideTensor == null && typeof raw.override_tensor === "string") {
     config.overrideTensor = raw.override_tensor
   }
+  if (config.mmprojModelId == null && typeof raw.mmproj_model_id === "string") {
+    config.mmprojModelId = raw.mmproj_model_id
+  }
+  if (config.visionMode == null && typeof raw.vision_mode === "string") {
+    config.visionMode = raw.vision_mode as LlamaCppConfig["visionMode"]
+  }
+  if (config.kvUnified == null && typeof raw.kv_unified === "boolean") {
+    config.kvUnified = raw.kv_unified
+  }
+  if (config.kvUnifiedPerSlot == null && typeof raw.kv_unified_per_slot === "number") {
+    config.kvUnifiedPerSlot = raw.kv_unified_per_slot
+  }
+  if (config.parallelSlots == null && typeof raw.parallel_slots === "number") {
+    config.parallelSlots = raw.parallel_slots
+  }
   return config
 }
 

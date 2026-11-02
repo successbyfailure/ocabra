@@ -46,12 +46,15 @@ def _cuda_ld_library_path() -> str:
             return donated
     return ""
 
+
 _DEFAULT_TOTAL_LAYERS = 32
 _DEFAULT_STARTUP_TIMEOUT_S = 30
 _SHUTDOWN_TIMEOUT_S = 20
+_VISION_ACTIVATION_TIMEOUT_S = 60.0
 _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_worker.py"
 _VALID_SPLIT_MODES = {"layer", "row", "none"}
 _VALID_SPLIT_STRATEGIES = {"evenly", "favor_main"}
+_VALID_VISION_MODES = {"enabled", "disabled", "on_demand"}
 
 
 def _worker_log_path(model_id: str) -> str:
@@ -140,6 +143,8 @@ class LlamaCppBackend(BackendInterface):
     def __init__(self, gpu_manager: Any | None = None) -> None:
         self._processes: dict[str, _LlamaCppWorker] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
+        self._vision_active: set[str] = set()
+        self._vision_locks: dict[str, asyncio.Lock] = {}
         self._gpu_manager = gpu_manager
 
     def set_gpu_manager(self, gpu_manager: Any) -> None:
@@ -155,10 +160,17 @@ class LlamaCppBackend(BackendInterface):
         """Pick the ``llama-server`` binary path.
 
         Priority:
-        1. ``<backends_dir>/llama_cpp/metadata.json`` -> ``extra_bins.server``
+        1. ``settings.llama_cpp_custom_server_bin`` (explicit custom fork).
+        2. ``<backends_dir>/llama_cpp/metadata.json`` -> ``extra_bins.server``
            (modular install via :class:`BackendInstaller`).
-        2. ``settings.llama_cpp_server_bin`` (legacy fat-image path).
+        3. ``settings.llama_cpp_server_bin`` (legacy fat-image path).
         """
+        custom_bin = getattr(settings, "llama_cpp_custom_server_bin", None)
+        if isinstance(custom_bin, str) and custom_bin.strip():
+            custom_path = Path(custom_bin)
+            if not custom_path.is_file():
+                raise FileNotFoundError(f"Custom llama-server not found at '{custom_path}'")
+            return str(custom_path)
         meta = read_backend_metadata(settings.backends_dir, "llama_cpp")
         if meta is not None:
             extra = meta.get("extra_bins") if isinstance(meta, dict) else None
@@ -174,6 +186,11 @@ class LlamaCppBackend(BackendInterface):
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
         if not _WORKER_PATH.exists():
             raise FileNotFoundError(f"llama_cpp_worker.py not found at '{_WORKER_PATH}'")
+
+        # A replacement worker must never inherit the hot-projector state of
+        # a prior process with the same model id.
+        self._vision_active.discard(model_id)
+        self._vision_locks.pop(model_id, None)
 
         extra_config = kwargs.get("extra_config") or {}
         model_file = self._resolve_model_file(model_id, extra_config)
@@ -253,7 +270,9 @@ class LlamaCppBackend(BackendInterface):
         if options["cache_ram_mib"] is not None:
             cmd.extend(["--cache-ram", str(options["cache_ram_mib"])])
         if options["cache_idle_slots"] is not None:
-            cmd.append("--cache-idle-slots" if options["cache_idle_slots"] else "--no-cache-idle-slots")
+            cmd.append(
+                "--cache-idle-slots" if options["cache_idle_slots"] else "--no-cache-idle-slots"
+            )
 
         # Multi-GPU + MoE flags (Sprint 17.3). All optional; only forwarded
         # when the user actually configured them.
@@ -301,9 +320,13 @@ class LlamaCppBackend(BackendInterface):
                 if draft_p_min is not None:
                     cmd.extend(["--spec-draft-p-min", str(float(draft_p_min))])
 
-        if options.get("mmproj_model_id"):
+        if options["vision_mode"] in {"enabled", "on_demand"}:
             mmproj_path = self._resolve_mmproj_path(str(options["mmproj_model_id"]))
-            cmd.extend(["--mmproj", str(mmproj_path)])
+            options["mmproj_path"] = str(mmproj_path)
+            if options["vision_mode"] == "enabled":
+                cmd.extend(["--mmproj", str(mmproj_path)])
+            else:
+                cmd.append("--props")
 
         if options.get("parallel_slots") is not None:
             cmd.extend(["--parallel", str(int(options["parallel_slots"]))])
@@ -311,6 +334,14 @@ class LlamaCppBackend(BackendInterface):
             cmd.append("--cont-batching")
         if options.get("chat_template"):
             cmd.extend(["--chat-template", str(options["chat_template"])])
+        if options.get("jinja") is not None:
+            cmd.append("--jinja" if options["jinja"] else "--no-jinja")
+        if options.get("reasoning") is not None:
+            cmd.extend(["--reasoning", str(options["reasoning"])])
+        if options.get("reasoning_format") is not None:
+            cmd.extend(["--reasoning-format", str(options["reasoning_format"])])
+        if options.get("reasoning_budget") is not None:
+            cmd.extend(["--reasoning-budget", str(options["reasoning_budget"])])
 
         env = {
             **os.environ,
@@ -346,7 +377,7 @@ class LlamaCppBackend(BackendInterface):
         # can't be interrupted out of. Mirrors the pattern already used in
         # piper_backend.py.
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: SIM115 — lives for the worker's lifetime, closed in _kill_process
+        log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — worker-lifetime handle
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
@@ -361,9 +392,16 @@ class LlamaCppBackend(BackendInterface):
                 port,
                 timeout_s=int(options.get("startup_timeout_s") or _DEFAULT_STARTUP_TIMEOUT_S),
             )
-        except Exception:
+        except BaseException:
+            # ``CancelledError`` inherits directly from BaseException on
+            # modern Python. A request cancelled while the model is still
+            # health-checking must terminate the subprocess too; otherwise it
+            # finishes loading after its owner disappeared and leaks VRAM.
             await self._kill_process(model_id)
             raise
+
+        if options["vision_mode"] == "enabled":
+            self._vision_active.add(model_id)
 
         vram_used_mb = await self.get_vram_estimate_mb(model_id)
         return WorkerInfo(
@@ -378,6 +416,8 @@ class LlamaCppBackend(BackendInterface):
     async def unload(self, model_id: str) -> None:
         await self._kill_process(model_id, graceful=True)
         self._model_configs.pop(model_id, None)
+        self._vision_active.discard(model_id)
+        self._vision_locks.pop(model_id, None)
 
     async def health_check(self, model_id: str) -> bool:
         entry = self._processes.get(model_id)
@@ -418,9 +458,7 @@ class LlamaCppBackend(BackendInterface):
             return None
         return {
             "tools": any(m in template for m in ("tool_call", "tool_calls", "tools")),
-            "reasoning": any(
-                m in template for m in ("<think>", "</think>", "reasoning_content")
-            ),
+            "reasoning": any(m in template for m in ("<think>", "</think>", "reasoning_content")),
         }
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
@@ -429,24 +467,40 @@ class LlamaCppBackend(BackendInterface):
         embeddings = bool(options.get("embedding")) or any(
             token in normalized for token in ("embed", "embedding", "bge", "e5")
         )
-        vision = bool(options.get("mmproj_model_id")) or any(
-            token in normalized for token in ("llava", "vision", "minicpmv", "vl")
-        )
+        if options:
+            vision = bool(options.get("mmproj_model_id")) and (
+                options.get("vision_mode") != "disabled"
+            )
+        else:
+            vision = any(token in normalized for token in ("llava", "vision", "minicpmv", "vl"))
         reasoning = any(
             token in normalized
             for token in (
-                "deepseek-r1", "deepseek-v3", "qwen3", "qwq", "-r1", "reason",
-                "cyberagent", "nemotron", "magistral", "cogito", "thinking", "gemma4",
+                "deepseek-r1",
+                "deepseek-v3",
+                "qwen3",
+                "qwq",
+                "-r1",
+                "reason",
+                "cyberagent",
+                "nemotron",
+                "magistral",
+                "cogito",
+                "thinking",
+                "gemma4",
             )
         )
         tools = not embeddings and any(
-            token in normalized for token in ("llama", "mistral", "mixtral", "qwen", "tool", "gemma")
+            token in normalized
+            for token in ("llama", "mistral", "mixtral", "qwen", "tool", "gemma")
         )
         # Prefer the loaded model's actual chat template over the name heuristic.
         tcaps = await self._template_caps(model_id)
         if tcaps is not None:
             tools = tcaps["tools"] and not embeddings
             reasoning = tcaps["reasoning"]
+        if options.get("reasoning") == "on":
+            reasoning = True
         # native_context_length is the architectural ceiling (e.g. 262144 for
         # gemma4) read straight from the GGUF header — independent of
         # context_length, which is just the currently-configured --ctx-size
@@ -526,6 +580,65 @@ class LlamaCppBackend(BackendInterface):
             response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
             response.raise_for_status()
             return response.json()
+
+    async def prepare_request(self, model_id: str, path: str, body: dict) -> None:
+        """Activate optional vision before forwarding an image request."""
+        options = self._model_configs.get(model_id)
+        if options is None:
+            raise KeyError(f"No llama.cpp config for model '{model_id}'")
+        mode = str(options.get("vision_mode") or "disabled")
+        has_image = self._contains_image(body)
+        lock = self._vision_locks.setdefault(model_id, asyncio.Lock())
+        if not has_image:
+            if mode == "on_demand" and lock.locked():
+                async with lock:
+                    pass
+            return
+        if mode == "disabled":
+            raise ValueError(f"Vision is disabled for llama.cpp model '{model_id}'")
+        if mode == "enabled" or model_id in self._vision_active:
+            return
+
+        entry = self._processes.get(model_id)
+        if entry is None:
+            raise KeyError(f"No llama.cpp worker for model '{model_id}'")
+        mmproj_path = options.get("mmproj_path")
+        if not mmproj_path:
+            raise RuntimeError(f"No vision projector resolved for model '{model_id}'")
+
+        async with lock:
+            if model_id in self._vision_active:
+                return
+            try:
+                deadline = asyncio.get_running_loop().time() + _VISION_ACTIVATION_TIMEOUT_S
+                async with httpx.AsyncClient(timeout=_VISION_ACTIVATION_TIMEOUT_S) as client:
+                    while True:
+                        response = await client.post(
+                            f"http://127.0.0.1:{entry.port}/props",
+                            json={
+                                "vision": {
+                                    "enabled": True,
+                                    "mmproj": str(mmproj_path),
+                                }
+                            },
+                        )
+                        if response.status_code not in {409, 503}:
+                            response.raise_for_status()
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            response.raise_for_status()
+                        await asyncio.sleep(0.1)
+                result = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                raise RuntimeError(
+                    "On-demand vision requires the oCabra custom llama.cpp runtime "
+                    "with hot mmproj support"
+                ) from exc
+            vision_state = result.get("vision") if isinstance(result, dict) else None
+            if not isinstance(vision_state, dict) or vision_state.get("active") is not True:
+                raise RuntimeError(f"llama.cpp rejected vision activation for model '{model_id}'")
+            self._vision_active.add(model_id)
+            logger.info("llama_cpp_vision_activated", model_id=model_id)
 
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         entry = self._processes.get(model_id)
@@ -622,6 +735,10 @@ class LlamaCppBackend(BackendInterface):
             "mmproj_model_id": self._normalize_str(
                 self._get_option(extra_config, "mmproj_model_id", None)
             ),
+            "vision_mode": self._normalize_vision_mode(
+                self._get_option(extra_config, "vision_mode", None),
+                self._normalize_str(self._get_option(extra_config, "mmproj_model_id", None)),
+            ),
             "runtime": self._get_option(extra_config, "runtime", None),
             "parallel_slots": self._to_int_or_none(
                 self._get_option(extra_config, "parallel_slots", settings.llama_cpp_parallel_slots)
@@ -642,6 +759,20 @@ class LlamaCppBackend(BackendInterface):
             "chat_template": self._normalize_str(
                 self._get_option(extra_config, "chat_template", None)
             ),
+            "jinja": self._to_bool_or_none(self._get_option(extra_config, "jinja", None)),
+            "reasoning": self._normalize_choice(
+                self._get_option(extra_config, "reasoning", None),
+                {"on", "off", "auto"},
+                "reasoning",
+            ),
+            "reasoning_format": self._normalize_choice(
+                self._get_option(extra_config, "reasoning_format", None),
+                {"none", "deepseek", "deepseek-legacy", "auto"},
+                "reasoning_format",
+            ),
+            "reasoning_budget": self._to_int_or_none(
+                self._get_option(extra_config, "reasoning_budget", None)
+            ),
         }
         # Sprint 17.2 — quantized V cache requires flash attention.
         cache_v = options["cache_type_v"]
@@ -654,7 +785,43 @@ class LlamaCppBackend(BackendInterface):
             raise ValueError("kv_unified_per_slot must be at least 1")
         if options["cache_ram_mib"] is not None and options["cache_ram_mib"] < -1:
             raise ValueError("cache_ram_mib must be -1 or greater")
+        if options["reasoning_budget"] is not None and options["reasoning_budget"] < -1:
+            raise ValueError("reasoning_budget must be -1 or greater")
         return options
+
+    @staticmethod
+    def _normalize_vision_mode(value: Any, mmproj_model_id: str | None) -> str:
+        if value is None:
+            return "enabled" if mmproj_model_id else "disabled"
+        normalized = str(value).strip().lower().replace("-", "_")
+        if normalized not in _VALID_VISION_MODES:
+            raise ValueError(
+                f"vision_mode must be one of {sorted(_VALID_VISION_MODES)}, got '{value}'"
+            )
+        if normalized in {"enabled", "on_demand"} and not mmproj_model_id:
+            raise ValueError(f"vision_mode='{normalized}' requires mmproj_model_id")
+        return normalized
+
+    @staticmethod
+    def _normalize_choice(value: Any, allowed: set[str], field: str) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized not in allowed:
+            raise ValueError(f"{field} must be one of {sorted(allowed)}, got '{value}'")
+        return normalized
+
+    @staticmethod
+    def _contains_image(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(LlamaCppBackend._contains_image(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        if value.get("type") in {"image_url", "input_image"}:
+            return True
+        if isinstance(value.get("images"), list) and bool(value["images"]):
+            return True
+        return any(LlamaCppBackend._contains_image(item) for item in value.values())
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
         # Accept both snake_case (canonical schema) and camelCase (frontend

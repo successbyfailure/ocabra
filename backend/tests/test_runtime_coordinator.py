@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ocabra.core.runtime_coordinator import (
+    OutputTokenLimitError,
     estimate_request_token_budget,
     plan_profile_runtime,
 )
@@ -39,7 +40,7 @@ def _profile() -> SimpleNamespace:
         profile_id="gemma4:12b",
         base_model_id="ollama/gemma4:12b",
         load_overrides=None,
-        runtime_policy={"selection": "prefer_loaded"},
+        runtime_policy={"selection": "prefer_loaded", "max_output_tokens": 65_536},
         runtime_presets=[
             _preset("64k", 65_536, default=True),
             _preset("max", None, mode="max"),
@@ -74,6 +75,30 @@ def test_estimate_request_budget_includes_reserved_output() -> None:
         "max_tokens": 8_000,
     }
     assert estimate_request_token_budget(body) > 8_000
+
+
+def test_estimate_request_budget_reserves_context_for_images() -> None:
+    text_only = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hola"}]}],
+        "max_tokens": 100,
+    }
+    with_images = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hola"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,a"}},
+                    {"type": "input_image", "image_url": "data:image/png;base64,b"},
+                ],
+            }
+        ],
+        "max_tokens": 100,
+    }
+
+    assert (
+        estimate_request_token_budget(with_images) - estimate_request_token_budget(text_only) == 256
+    )
 
 
 def test_estimate_ollama_budget_honours_num_ctx_and_num_predict() -> None:
@@ -124,12 +149,56 @@ def test_default_output_reservation_param_overrides_the_global_setting(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_profile_without_presets_still_computes_admission_budget() -> None:
+    profile = SimpleNamespace(
+        base_model_id="llama_cpp/gemma4-26b",
+        load_overrides=None,
+        runtime_policy={"default_output_reservation_tokens": 16_384},
+        runtime_presets=[],
+    )
+
+    plan = await plan_profile_runtime(
+        profile,
+        SimpleNamespace(),
+        {"messages": [{"role": "user", "content": "hola"}]},
+    )
+
+    assert plan.worker_key == profile.base_model_id
+    assert plan.required_tokens is not None
+    assert plan.required_tokens >= 16_384
+
+
+@pytest.mark.asyncio
+async def test_fixed_profile_rejects_output_above_declared_hard_cap() -> None:
+    profile = SimpleNamespace(
+        base_model_id="llama_cpp/gemma4-26b",
+        load_overrides=None,
+        runtime_policy={"max_context_tokens": 262_144, "max_output_tokens": 65_536},
+        runtime_presets=[],
+    )
+
+    with pytest.raises(OutputTokenLimitError) as raised:
+        await plan_profile_runtime(
+            profile,
+            SimpleNamespace(),
+            {
+                "messages": [{"role": "user", "content": "hola"}],
+                "max_tokens": 500_000,
+            },
+        )
+
+    assert raised.value.parameter == "max_tokens"
+    assert raised.value.maximum == 65_536
+
+
+@pytest.mark.asyncio
 async def test_default_runtime_is_selected_for_normal_request(monkeypatch) -> None:
     profile = _profile()
     state = SimpleNamespace(
         model_id=profile.base_model_id,
         backend_type="ollama",
         status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
         extra_config={},
     )
     manager = SimpleNamespace(
@@ -159,12 +228,310 @@ async def test_default_runtime_is_selected_for_normal_request(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_explicit_output_above_hard_cap_is_not_reported_as_context_pressure(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="ollama",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={},
+    )
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=[])),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(return_value=_capacity_rows()),
+    )
+
+    with pytest.raises(OutputTokenLimitError) as raised:
+        await plan_profile_runtime(
+            profile,
+            manager,
+            {
+                "messages": [{"role": "user", "content": "hola"}],
+                "max_tokens": 500_000,
+            },
+        )
+
+    assert raised.value.parameter == "max_tokens"
+    assert raised.value.requested == 500_000
+    assert raised.value.maximum == 65_536
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_dual_preset_replaces_single_gpu_base_placement(monkeypatch) -> None:
+    preset = _preset("max", 262_144, default=False)
+    preset.preferred_gpus = [0, 1]
+    profile = SimpleNamespace(
+        profile_id="gemma4:26b",
+        base_model_id="llama_cpp/gemma4-26b",
+        load_overrides=None,
+        runtime_policy={"selection": "prefer_loaded"},
+        runtime_presets=[preset],
+    )
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="llama_cpp",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={
+            "llama_cpp": {
+                "disabled_gpus": [0],
+                "split_mode": "none",
+                "vram_estimate_mb": 23_632,
+            }
+        },
+    )
+    gpu_states = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=gpu_states)),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(
+            return_value=[
+                {
+                    "preset_key": "max",
+                    "resolved": True,
+                    "fits": True,
+                    "effective_context": 262_144,
+                    "effective_parallelism": 1,
+                    "target_gpus": [0, 1],
+                    "runtime_key": "runtime:max",
+                }
+            ]
+        ),
+    )
+
+    plan = await plan_profile_runtime(
+        profile,
+        manager,
+        {
+            "messages": [{"role": "user", "content": "hola"}],
+            "max_tokens": 1,
+            "ocabra": {"context_preset": "max"},
+        },
+    )
+
+    llama = plan.load_overrides["llama_cpp"]
+    assert llama["disabled_gpus"] == []
+    assert llama["split_mode"] == "layer"
+    assert llama["tensor_split"] == [1.0, 2.0]
+    assert llama["main_gpu"] == 1
+    assert llama["vram_estimate_mb"] is None
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_dual_preset_keeps_calibrated_matching_split(monkeypatch) -> None:
+    preset = _preset("extended", 229_376, default=False)
+    preset.preferred_gpus = [0, 1]
+    profile = SimpleNamespace(
+        profile_id="qwen3.8:27b-abliterated",
+        base_model_id="llama_cpp/qwen3.8-27b-abliterated",
+        load_overrides=None,
+        runtime_policy={"selection": "prefer_loaded"},
+        runtime_presets=[preset],
+    )
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="llama_cpp",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={
+            "llama_cpp": {
+                "tensor_split": [1, 2.3],
+                "main_gpu": 1,
+                "split_mode": "layer",
+            }
+        },
+    )
+    gpu_states = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=gpu_states)),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(
+            return_value=[
+                {
+                    "preset_key": "extended",
+                    "resolved": True,
+                    "fits": True,
+                    "effective_context": 229_376,
+                    "effective_parallelism": 4,
+                    "target_gpus": [0, 1],
+                    "runtime_key": "runtime:extended",
+                }
+            ]
+        ),
+    )
+
+    plan = await plan_profile_runtime(
+        profile,
+        manager,
+        {"ocabra": {"context_preset": "extended"}, "max_tokens": 1},
+    )
+
+    llama = plan.load_overrides["llama_cpp"]
+    assert llama["tensor_split"] == [1.0, 2.3]
+    assert llama["main_gpu"] == 1
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_single_preset_keeps_matching_measured_estimate(monkeypatch) -> None:
+    preset = _preset("normal", 32_768, default=True)
+    preset.parallelism = 4
+    profile = SimpleNamespace(
+        profile_id="gemma4:26b",
+        base_model_id="llama_cpp/gemma4-26b",
+        load_overrides=None,
+        runtime_policy={"selection": "prefer_loaded"},
+        runtime_presets=[preset],
+    )
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="llama_cpp",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={
+            "llama_cpp": {
+                "disabled_gpus": [0],
+                "vram_estimate_mb": 23_632,
+            }
+        },
+    )
+    gpu_states = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=gpu_states)),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(
+            return_value=[
+                {
+                    "preset_key": "normal",
+                    "resolved": True,
+                    "fits": True,
+                    "effective_context": 32_768,
+                    "effective_parallelism": 4,
+                    "target_gpus": [1],
+                    "runtime_key": "runtime:normal",
+                }
+            ]
+        ),
+    )
+
+    plan = await plan_profile_runtime(
+        profile,
+        manager,
+        {"messages": [{"role": "user", "content": "hola"}], "max_tokens": 1},
+    )
+
+    llama = plan.load_overrides["llama_cpp"]
+    assert llama["disabled_gpus"] == [0]
+    assert llama["vram_estimate_mb"] == 23_632
+    assert llama["split_mode"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_unified_preset_materializes_aggregate_pool(monkeypatch) -> None:
+    preset = _preset("normal", 98_304, default=True)
+    preset.parallelism = 4
+    profile = SimpleNamespace(
+        profile_id="qwen3.8:27b",
+        base_model_id="llama_cpp/qwen3.8-27b",
+        load_overrides=None,
+        runtime_policy={
+            "selection": "prefer_loaded",
+            "validated_context_tokens": {"normal": 98_304},
+            "validated_vram_mb": {"normal": 24_000},
+        },
+        runtime_presets=[preset],
+    )
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="llama_cpp",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={
+            "llama_cpp": {
+                "ctx_size": 262_144,
+                "parallel_slots": 4,
+                "kv_unified": True,
+                "disabled_gpus": [],
+            }
+        },
+    )
+    gpu_states = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=gpu_states)),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(
+            return_value=[
+                {
+                    "preset_key": "normal",
+                    "resolved": True,
+                    "fits": True,
+                    "effective_context": 98_304,
+                    "effective_parallelism": 4,
+                    "target_gpus": [1],
+                    "runtime_key": "runtime:normal",
+                }
+            ]
+        ),
+    )
+
+    plan = await plan_profile_runtime(
+        profile,
+        manager,
+        {"messages": [{"role": "user", "content": "hola"}], "max_tokens": 1},
+    )
+
+    llama = plan.load_overrides["llama_cpp"]
+    assert llama["ctx_size"] == 98_304
+    assert llama["parallel_slots"] == 4
+    assert plan.load_overrides["use_case"]["context_is_pool"] is True
+    assert plan.load_overrides["_runtime"]["context_is_pool"] is True
+    assert plan.load_overrides["_runtime"]["capacity_validated"] is True
+    assert plan.load_overrides["_runtime"]["capacity_vram_mb"] == 24_000
+
+
+@pytest.mark.asyncio
 async def test_loaded_max_is_reused_for_small_request(monkeypatch) -> None:
     profile = _profile()
     base_state = SimpleNamespace(
         model_id=profile.base_model_id,
         backend_type="ollama",
         status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
         extra_config={},
     )
     max_state = SimpleNamespace(
@@ -209,6 +576,7 @@ async def test_profile_output_reservation_override_pushes_to_a_bigger_preset(mon
         model_id=profile.base_model_id,
         backend_type="ollama",
         status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
         extra_config={},
     )
     manager = SimpleNamespace(
@@ -239,6 +607,7 @@ async def test_explicit_preset_override_is_honoured(monkeypatch) -> None:
         model_id=profile.base_model_id,
         backend_type="ollama",
         status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
         extra_config={},
     )
     manager = SimpleNamespace(
@@ -272,6 +641,7 @@ async def test_request_size_does_not_change_runtime_worker_key(monkeypatch) -> N
         model_id=profile.base_model_id,
         backend_type="ollama",
         status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
         extra_config={},
     )
     manager = SimpleNamespace(

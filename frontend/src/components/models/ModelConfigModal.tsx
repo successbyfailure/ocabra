@@ -1,10 +1,10 @@
-import type { ReactNode } from "react"
-import { useEffect, useState } from "react"
-import * as Dialog from "@radix-ui/react-dialog"
-import { Link } from "react-router-dom"
-import { Layers3, X } from "lucide-react"
-import { toast } from "sonner"
-import { api } from "@/api/client"
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { Link } from "react-router-dom";
+import { Layers3, X } from "lucide-react";
+import { toast } from "sonner";
+import { api } from "@/api/client";
 import {
   formatTokenCount,
   getBitNetConfig,
@@ -15,12 +15,12 @@ import {
   getVllmConfig,
   getWhisperConfig,
   getWritableExtraConfig,
-} from "@/lib/modelContext"
-import { ScheduleEditor } from "@/components/models/ScheduleEditor"
-import { CapacityPanel, Chip } from "@/components/models/CapacityPanel"
-import { RuntimePresetsPanel } from "@/components/models/RuntimePresetsPanel"
-import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
-import { useIsAdmin } from "@/hooks/useAuth"
+} from "@/lib/modelContext";
+import { ScheduleEditor } from "@/components/models/ScheduleEditor";
+import { CapacityPanel, Chip } from "@/components/models/CapacityPanel";
+import { RuntimePresetsPanel } from "@/components/models/RuntimePresetsPanel";
+import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe";
+import { useIsAdmin } from "@/hooks/useAuth";
 import type {
   BackendExtraConfig,
   EvictionSchedule,
@@ -29,32 +29,39 @@ import type {
   LoadPolicy,
   ModelMemoryEstimate,
   ModelState,
+  LlamaCppVisionMode,
   VLLMConfig,
-} from "@/types"
+} from "@/types";
 
 interface ModelConfigModalProps {
-  model: ModelState | null
-  gpus: GPUState[]
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onSave: (modelId: string, patch: {
-    loadPolicy: LoadPolicy
-    preferredGpu: number | null
-    pinPermanent: boolean
-    schedules: EvictionSchedule[]
-    extraConfig?: BackendExtraConfig
-  }) => Promise<void>
+  model: ModelState | null;
+  gpus: GPUState[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSave: (
+    modelId: string,
+    patch: {
+      loadPolicy: LoadPolicy;
+      preferredGpu: number | null;
+      pinPermanent: boolean;
+      schedules: EvictionSchedule[];
+      extraConfig?: BackendExtraConfig;
+    },
+  ) => Promise<void>;
 }
 
-const VLLM_GPU_MEMORY_UTILIZATION_PRESETS = [0.75, 0.8, 0.85, 0.9, 0.92, 0.95]
-const VLLM_MAX_NUM_SEQS_PRESETS = [1, 2, 4, 8, 12, 16, 24, 32]
+const VLLM_GPU_MEMORY_UTILIZATION_PRESETS = [0.75, 0.8, 0.85, 0.9, 0.92, 0.95];
+const VLLM_MAX_NUM_SEQS_PRESETS = [1, 2, 4, 8, 12, 16, 24, 32];
 
-const MEMORY_ESTIMATE_SOURCE_LABELS: Record<ModelMemoryEstimate["source"], string> = {
+const MEMORY_ESTIMATE_SOURCE_LABELS: Record<
+  ModelMemoryEstimate["source"],
+  string
+> = {
   gguf_header: "header GGUF",
   runtime_probe: "probe de runtime",
   heuristic: "heurística",
-}
-const mbToGb = (mb: number) => (mb / 1024).toFixed(1)
+};
+const mbToGb = (mb: number) => (mb / 1024).toFixed(1);
 
 const VLLM_ROOT_KEYS = [
   "model_impl",
@@ -70,7 +77,7 @@ const VLLM_ROOT_KEYS = [
   "tool_call_parser",
   "reasoning_parser",
   "limit_mm_per_prompt",
-]
+];
 
 const SGLANG_ROOT_KEYS = [
   "tensor_parallel_size",
@@ -78,7 +85,7 @@ const SGLANG_ROOT_KEYS = [
   "mem_fraction_static",
   "trust_remote_code",
   "disable_radix_cache",
-]
+];
 
 const LLAMA_CPP_ROOT_KEYS = [
   "gpu_layers",
@@ -98,6 +105,8 @@ const LLAMA_CPP_ROOT_KEYS = [
   // Sprint 17.2 — KV cache quantization
   "cache_type_k",
   "cache_type_v",
+  "kv_unified",
+  "kv_unified_per_slot",
   // Sprint 17.3 — Multi-GPU + MoE CPU offload
   "main_gpu",
   "tensor_split",
@@ -106,17 +115,46 @@ const LLAMA_CPP_ROOT_KEYS = [
   "split_strategy",
   "n_cpu_moe",
   "override_tensor",
-]
-const LLAMA_KV_CACHE_TYPES = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"] as const
-const BITNET_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn"]
-const TENSORRT_LLM_ROOT_KEYS = ["max_batch_size", "context_length", "trust_remote_code"]
-const WHISPER_ROOT_KEYS = ["diarization_enabled", "diarization_model_id", "num_workers"]
+  "mmproj_model_id",
+  "vision_mode",
+  "jinja",
+  "reasoning",
+  "reasoning_format",
+  "reasoning_budget",
+];
+const LLAMA_KV_CACHE_TYPES = [
+  "f16",
+  "q8_0",
+  "q5_1",
+  "q5_0",
+  "q4_1",
+  "q4_0",
+] as const;
+const BITNET_ROOT_KEYS = ["gpu_layers", "ctx_size", "flash_attn"];
+const TENSORRT_LLM_ROOT_KEYS = [
+  "max_batch_size",
+  "context_length",
+  "trust_remote_code",
+];
+const WHISPER_ROOT_KEYS = [
+  "diarization_enabled",
+  "diarization_model_id",
+  "num_workers",
+];
 
 function FieldHint({ children }: { children: ReactNode }) {
-  return <p className="mt-1 text-xs text-muted-foreground">{children}</p>
+  return <p className="mt-1 text-xs text-muted-foreground">{children}</p>;
 }
 
-function FieldSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+function FieldSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
   return (
     <section className="space-y-4 rounded-lg border border-border/70 bg-background/40 p-4">
       <div>
@@ -125,31 +163,40 @@ function FieldSection({ title, description, children }: { title: string; descrip
       </div>
       {children}
     </section>
-  )
+  );
 }
 
 // Shown inside a backend runtime section when a use case owns context/parallelism/KV.
 function UseCaseManagedNotice({ fields }: { fields: string }) {
   return (
     <div className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-      <span className="font-medium text-foreground">Gestionado por el caso de uso.</span>{" "}
-      {fields} se calculan en el <span className="font-medium">Planificador de contexto y VRAM</span> (arriba); los
-      campos de abajo quedan de solo lectura. Borra el caso de uso para editarlos a mano.
+      <span className="font-medium text-foreground">
+        Gestionado por el caso de uso.
+      </span>{" "}
+      {fields} se calculan en el{" "}
+      <span className="font-medium">Planificador de contexto y VRAM</span>{" "}
+      (arriba); los campos de abajo quedan de solo lectura. Borra el caso de uso
+      para editarlos a mano.
     </div>
-  )
+  );
 }
 
 function clampIntegerInput(value: string, min: number) {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return ""
-  return String(Math.max(min, Math.round(parsed)))
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "";
+  return String(Math.max(min, Math.round(parsed)));
 }
 
-function clampDecimalInput(value: string, min: number, max: number, digits = 2) {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return ""
-  const clamped = Math.min(max, Math.max(min, parsed))
-  return String(Number(clamped.toFixed(digits)))
+function clampDecimalInput(
+  value: string,
+  min: number,
+  max: number,
+  digits = 2,
+) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "";
+  const clamped = Math.min(max, Math.max(min, parsed));
+  return String(Number(clamped.toFixed(digits)));
 }
 
 function PresetNumberField({
@@ -163,17 +210,20 @@ function PresetNumberField({
   step,
   help,
 }: {
-  label: string
-  value: string
-  onValueChange: (value: string) => void
-  presets: Array<number>
-  placeholder: string
-  min: number
-  max?: number
-  step: string
-  help: string
+  label: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  presets: Array<number>;
+  placeholder: string;
+  min: number;
+  max?: number;
+  step: string;
+  help: string;
 }) {
-  const presetValue = value !== "" && presets.some((preset) => String(preset) === value) ? value : "custom"
+  const presetValue =
+    value !== "" && presets.some((preset) => String(preset) === value)
+      ? value
+      : "custom";
 
   return (
     <label className="block text-sm">
@@ -182,8 +232,8 @@ function PresetNumberField({
         <select
           value={presetValue}
           onChange={(event) => {
-            if (event.target.value === "custom") return
-            onValueChange(event.target.value)
+            if (event.target.value === "custom") return;
+            onValueChange(event.target.value);
           }}
           className="w-full rounded-md border border-border bg-background px-3 py-2"
         >
@@ -208,419 +258,571 @@ function PresetNumberField({
       </div>
       <FieldHint>{help}</FieldHint>
     </label>
-  )
+  );
 }
 
 function compactConfig<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => {
-      if (entry == null) return false
-      if (entry === "") return false
-      if (Array.isArray(entry)) return entry.length > 0
-      if (typeof entry === "object") return Object.keys(entry).length > 0
-      return true
+      if (entry == null) return false;
+      if (entry === "") return false;
+      if (Array.isArray(entry)) return entry.length > 0;
+      if (typeof entry === "object") return Object.keys(entry).length > 0;
+      return true;
     }),
-  ) as T
+  ) as T;
 }
 
-function omitKeys(config: BackendExtraConfig, keys: string[]): BackendExtraConfig {
-  const next = { ...config }
-  for (const key of keys) delete next[key]
-  return next
+function omitKeys(
+  config: BackendExtraConfig,
+  keys: string[],
+): BackendExtraConfig {
+  const next = { ...config };
+  for (const key of keys) delete next[key];
+  return next;
 }
 
 function setNestedConfig(
   config: BackendExtraConfig,
-  section: "vllm" | "sglang" | "llama_cpp" | "bitnet" | "tensorrt_llm" | "whisper",
+  section:
+    "vllm" | "sglang" | "llama_cpp" | "bitnet" | "tensorrt_llm" | "whisper",
   payload: Record<string, unknown>,
   legacyRootKeys: string[],
 ): BackendExtraConfig {
-  const next = omitKeys(config, legacyRootKeys)
-  const compacted = compactConfig(payload)
+  const next = omitKeys(config, legacyRootKeys);
+  const compacted = compactConfig(payload);
   if (Object.keys(compacted).length === 0) {
-    delete next[section]
-    return next
+    delete next[section];
+    return next;
   }
-  next[section] = compacted
-  return next
+  next[section] = compacted;
+  return next;
 }
 
-export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: ModelConfigModalProps) {
-  const isAdmin = useIsAdmin()
+export function ModelConfigModal({
+  model,
+  gpus,
+  open,
+  onOpenChange,
+  onSave,
+}: ModelConfigModalProps) {
+  const isAdmin = useIsAdmin();
 
-  const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand")
-  const [preferredGpu, setPreferredGpu] = useState<number | null>(null)
-  const [pinPermanent, setPinPermanent] = useState(false)
-  const [schedules, setSchedules] = useState<EvictionSchedule[]>([])
+  const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand");
+  const [preferredGpu, setPreferredGpu] = useState<number | null>(null);
+  const [pinPermanent, setPinPermanent] = useState(false);
+  const [schedules, setSchedules] = useState<EvictionSchedule[]>([]);
   // When a use case is configured it becomes the source of truth for context /
   // parallelism / KV — the matching raw runtime fields below are then read-only.
-  const [useCaseActive, setUseCaseActive] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [useCaseActive, setUseCaseActive] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Group assignment state (system_admin only)
-  const [allGroups, setAllGroups] = useState<Group[]>([])
-  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set())
-  const [initialGroupIds, setInitialGroupIds] = useState<Set<string>>(new Set())
-  const [loadingGroups, setLoadingGroups] = useState(false)
+  const [allGroups, setAllGroups] = useState<Group[]>([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [initialGroupIds, setInitialGroupIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [loadingGroups, setLoadingGroups] = useState(false);
 
-  const [tensorParallelSize, setTensorParallelSize] = useState("")
-  const [maxModelLen, setMaxModelLen] = useState("")
-  const [modelImpl, setModelImpl] = useState<"auto" | "vllm" | "transformers" | "">("")
-  const [runner, setRunner] = useState<"generate" | "pooling" | "">("")
-  const [hfOverrides, setHfOverrides] = useState("")
-  const [chatTemplate, setChatTemplate] = useState("")
-  const [toolCallParser, setToolCallParser] = useState("")
-  const [reasoningParser, setReasoningParser] = useState("")
-  const [maxNumSeqs, setMaxNumSeqs] = useState("")
-  const [gpuMemoryUtilization, setGpuMemoryUtilization] = useState("")
-  const [enablePrefixCaching, setEnablePrefixCaching] = useState(true)
-  const [trustRemoteCode, setTrustRemoteCode] = useState(false)
-  const [limitMmImage, setLimitMmImage] = useState("")
-  const [limitMmAudio, setLimitMmAudio] = useState("")
-  const [limitMmVideo, setLimitMmVideo] = useState("")
+  const [tensorParallelSize, setTensorParallelSize] = useState("");
+  const [maxModelLen, setMaxModelLen] = useState("");
+  const [modelImpl, setModelImpl] = useState<
+    "auto" | "vllm" | "transformers" | ""
+  >("");
+  const [runner, setRunner] = useState<"generate" | "pooling" | "">("");
+  const [hfOverrides, setHfOverrides] = useState("");
+  const [chatTemplate, setChatTemplate] = useState("");
+  const [toolCallParser, setToolCallParser] = useState("");
+  const [reasoningParser, setReasoningParser] = useState("");
+  const [maxNumSeqs, setMaxNumSeqs] = useState("");
+  const [gpuMemoryUtilization, setGpuMemoryUtilization] = useState("");
+  const [enablePrefixCaching, setEnablePrefixCaching] = useState(true);
+  const [trustRemoteCode, setTrustRemoteCode] = useState(false);
+  const [limitMmImage, setLimitMmImage] = useState("");
+  const [limitMmAudio, setLimitMmAudio] = useState("");
+  const [limitMmVideo, setLimitMmVideo] = useState("");
 
-  const [sglangTensorParallelSize, setSGLangTensorParallelSize] = useState("")
-  const [sglangContextLength, setSGLangContextLength] = useState("")
-  const [sglangMemFractionStatic, setSGLangMemFractionStatic] = useState("")
-  const [sglangTrustRemoteCode, setSGLangTrustRemoteCode] = useState(false)
-  const [disableRadixCache, setDisableRadixCache] = useState(false)
+  const [sglangTensorParallelSize, setSGLangTensorParallelSize] = useState("");
+  const [sglangContextLength, setSGLangContextLength] = useState("");
+  const [sglangMemFractionStatic, setSGLangMemFractionStatic] = useState("");
+  const [sglangTrustRemoteCode, setSGLangTrustRemoteCode] = useState(false);
+  const [disableRadixCache, setDisableRadixCache] = useState(false);
 
-  const [llamaGpuLayers, setLlamaGpuLayers] = useState("")
-  const [llamaCtxSize, setLlamaCtxSize] = useState("")
-  const [llamaFlashAttn, setLlamaFlashAttn] = useState(false)
-  const [llamaEmbedding, setLlamaEmbedding] = useState(false)
+  const [llamaGpuLayers, setLlamaGpuLayers] = useState("");
+  const [llamaCtxSize, setLlamaCtxSize] = useState("");
+  const [llamaFlashAttn, setLlamaFlashAttn] = useState(false);
+  const [llamaEmbedding, setLlamaEmbedding] = useState(false);
   // Sprint 17.1 — Tier 1 advanced controls (collapsed by default).
-  const [llamaAdvancedOpen, setLlamaAdvancedOpen] = useState(false)
-  const [llamaThreads, setLlamaThreads] = useState("")
-  const [llamaBatchSize, setLlamaBatchSize] = useState("")
-  const [llamaUbatchSize, setLlamaUbatchSize] = useState("")
-  const [llamaMlock, setLlamaMlock] = useState(false)
-  const [llamaMmap, setLlamaMmap] = useState(true)
-  const [llamaSeed, setLlamaSeed] = useState("")
-  const [llamaNoKvOffload, setLlamaNoKvOffload] = useState(false)
-  const [llamaRopeFreqBase, setLlamaRopeFreqBase] = useState("")
-  const [llamaRopeFreqScale, setLlamaRopeFreqScale] = useState("")
+  const [llamaAdvancedOpen, setLlamaAdvancedOpen] = useState(false);
+  const [llamaThreads, setLlamaThreads] = useState("");
+  const [llamaBatchSize, setLlamaBatchSize] = useState("");
+  const [llamaUbatchSize, setLlamaUbatchSize] = useState("");
+  const [llamaMlock, setLlamaMlock] = useState(false);
+  const [llamaMmap, setLlamaMmap] = useState(true);
+  const [llamaSeed, setLlamaSeed] = useState("");
+  const [llamaNoKvOffload, setLlamaNoKvOffload] = useState(false);
+  const [llamaRopeFreqBase, setLlamaRopeFreqBase] = useState("");
+  const [llamaRopeFreqScale, setLlamaRopeFreqScale] = useState("");
   // Sprint 17.2 — KV cache quantization
-  const [llamaCacheTypeK, setLlamaCacheTypeK] = useState<string>("")
-  const [llamaCacheTypeV, setLlamaCacheTypeV] = useState<string>("")
+  const [llamaCacheTypeK, setLlamaCacheTypeK] = useState<string>("");
+  const [llamaCacheTypeV, setLlamaCacheTypeV] = useState<string>("");
   // Sprint 17.3: Multi-GPU + MoE state.
   const [llamaSplitStrategy, setLlamaSplitStrategy] = useState<
     "evenly" | "favor_main" | "single" | "custom" | ""
-  >("")
-  const [llamaMainGpu, setLlamaMainGpu] = useState<number | "">("")
-  const [llamaSplitMode, setLlamaSplitMode] = useState<"layer" | "row" | "none" | "">("")
-  const [llamaDisabledGpus, setLlamaDisabledGpus] = useState<Set<number>>(new Set())
+  >("");
+  const [llamaMainGpu, setLlamaMainGpu] = useState<number | "">("");
+  const [llamaSplitMode, setLlamaSplitMode] = useState<
+    "layer" | "row" | "none" | ""
+  >("");
+  const [llamaDisabledGpus, setLlamaDisabledGpus] = useState<Set<number>>(
+    new Set(),
+  );
   // tensor_split is keyed by GPU index → ratio string so the input survives
   // checkboxing GPUs on/off without losing user-typed values.
-  const [llamaTensorSplit, setLlamaTensorSplit] = useState<Record<number, string>>({})
-  const [llamaNCpuMoe, setLlamaNCpuMoe] = useState("")
-  const [llamaOverrideTensor, setLlamaOverrideTensor] = useState("")
+  const [llamaTensorSplit, setLlamaTensorSplit] = useState<
+    Record<number, string>
+  >({});
+  const [llamaNCpuMoe, setLlamaNCpuMoe] = useState("");
+  const [llamaOverrideTensor, setLlamaOverrideTensor] = useState("");
   // --- Sprint 17.4 ---
-  const [llamaDraftModelId, setLlamaDraftModelId] = useState("")
-  const [llamaDraftN, setLlamaDraftN] = useState("")
-  const [llamaDraftMin, setLlamaDraftMin] = useState("")
-  const [llamaDraftPMin, setLlamaDraftPMin] = useState("")
-  const [llamaRuntime, setLlamaRuntime] = useState<"" | "cuda" | "rocm" | "vulkan" | "cpu">("")
-  const [llamaParallelSlots, setLlamaParallelSlots] = useState("")
-  const [llamaContBatching, setLlamaContBatching] = useState(true)
-  const [llamaKeepAlive, setLlamaKeepAlive] = useState("")
+  const [llamaDraftModelId, setLlamaDraftModelId] = useState("");
+  const [llamaDraftN, setLlamaDraftN] = useState("");
+  const [llamaDraftMin, setLlamaDraftMin] = useState("");
+  const [llamaDraftPMin, setLlamaDraftPMin] = useState("");
+  const [llamaRuntime, setLlamaRuntime] = useState<
+    "" | "cuda" | "rocm" | "vulkan" | "cpu"
+  >("");
+  const [llamaParallelSlots, setLlamaParallelSlots] = useState("");
+  const [llamaKvUnified, setLlamaKvUnified] = useState<"" | "true" | "false">(
+    "",
+  );
+  const [llamaKvUnifiedPerSlot, setLlamaKvUnifiedPerSlot] = useState("");
+  const [llamaContBatching, setLlamaContBatching] = useState(true);
+  const [llamaKeepAlive, setLlamaKeepAlive] = useState("");
+  const [llamaMmprojModelId, setLlamaMmprojModelId] = useState("");
+  const [llamaVisionMode, setLlamaVisionMode] =
+    useState<LlamaCppVisionMode>("disabled");
   const [speculativeCandidates, setSpeculativeCandidates] = useState<
     { modelId: string; displayName: string }[]
-  >([])
+  >([]);
   const [installedRuntimes, setInstalledRuntimes] = useState<Set<string>>(
     new Set(["cuda"]),
-  )
+  );
 
-  const [bitnetGpuLayers, setBitnetGpuLayers] = useState("")
-  const [bitnetCtxSize, setBitnetCtxSize] = useState("")
-  const [bitnetFlashAttn, setBitnetFlashAttn] = useState(false)
+  const [bitnetGpuLayers, setBitnetGpuLayers] = useState("");
+  const [bitnetCtxSize, setBitnetCtxSize] = useState("");
+  const [bitnetFlashAttn, setBitnetFlashAttn] = useState(false);
 
-  const [trtMaxBatchSize, setTRTMaxBatchSize] = useState("")
-  const [trtContextLength, setTRTContextLength] = useState("")
-  const [trtTrustRemoteCode, setTRTTrustRemoteCode] = useState(false)
+  const [trtMaxBatchSize, setTRTMaxBatchSize] = useState("");
+  const [trtContextLength, setTRTContextLength] = useState("");
+  const [trtTrustRemoteCode, setTRTTrustRemoteCode] = useState(false);
 
-  const [whisperDiarizationEnabled, setWhisperDiarizationEnabled] = useState(false)
-  const [whisperDiarizationModelId, setWhisperDiarizationModelId] = useState("")
-  const [whisperNumWorkers, setWhisperNumWorkers] = useState("5")
-  const [memoryEstimate, setMemoryEstimate] = useState<ModelMemoryEstimate | null>(null)
-  const [memoryEstimateError, setMemoryEstimateError] = useState<string | null>(null)
-  const [estimatingMemory, setEstimatingMemory] = useState(false)
-  const [probingMemory, setProbingMemory] = useState(false)
+  const [whisperDiarizationEnabled, setWhisperDiarizationEnabled] =
+    useState(false);
+  const [whisperDiarizationModelId, setWhisperDiarizationModelId] =
+    useState("");
+  const [whisperNumWorkers, setWhisperNumWorkers] = useState("5");
+  const [memoryEstimate, setMemoryEstimate] =
+    useState<ModelMemoryEstimate | null>(null);
+  const [memoryEstimateError, setMemoryEstimateError] = useState<string | null>(
+    null,
+  );
+  const [estimatingMemory, setEstimatingMemory] = useState(false);
+  const [probingMemory, setProbingMemory] = useState(false);
 
-  const vllm = model ? getVllmConfig(model) : null
-  const sglang = model ? getSGLangConfig(model) : null
-  const llamaCpp = model ? getLlamaCppConfig(model) : null
-  const bitnet = model ? getBitNetConfig(model) : null
-  const tensorrt = model ? getTensorRTLLMConfig(model) : null
-  const whisper = model ? getWhisperConfig(model) : null
+  const vllm = model ? getVllmConfig(model) : null;
+  const sglang = model ? getSGLangConfig(model) : null;
+  const llamaCpp = model ? getLlamaCppConfig(model) : null;
+  const bitnet = model ? getBitNetConfig(model) : null;
+  const tensorrt = model ? getTensorRTLLMConfig(model) : null;
+  const whisper = model ? getWhisperConfig(model) : null;
 
-  const recipeId = vllm?.recipeId ?? null
-  const recipeNotes = (vllm?.recipeNotes ?? []) as string[]
-  const recipeModelImpl = vllm?.recipeModelImpl ?? null
-  const recipeRunner = vllm?.recipeRunner ?? null
-  const recipeSuggestedConfig = (vllm?.suggestedConfig ?? {}) as Record<string, unknown>
-  const recipeSuggestedTuning = (vllm?.suggestedTuning ?? {}) as Record<string, unknown>
-  const probeStatus = vllm?.probeStatus ?? null
-  const probeReason = vllm?.probeReason ?? null
-  const probeObservedAt = vllm?.probeObservedAt ?? null
-  const probeRecommendedModelImpl = vllm?.probeRecommendedModelImpl ?? null
-  const probeRecommendedRunner = vllm?.probeRecommendedRunner ?? null
+  const recipeId = vllm?.recipeId ?? null;
+  const recipeNotes = (vllm?.recipeNotes ?? []) as string[];
+  const recipeModelImpl = vllm?.recipeModelImpl ?? null;
+  const recipeRunner = vllm?.recipeRunner ?? null;
+  const recipeSuggestedConfig = (vllm?.suggestedConfig ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const recipeSuggestedTuning = (vllm?.suggestedTuning ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const probeStatus = vllm?.probeStatus ?? null;
+  const probeReason = vllm?.probeReason ?? null;
+  const probeObservedAt = vllm?.probeObservedAt ?? null;
+  const probeRecommendedModelImpl = vllm?.probeRecommendedModelImpl ?? null;
+  const probeRecommendedRunner = vllm?.probeRecommendedRunner ?? null;
 
   useEffect(() => {
-    if (!model) return
-    setLoadPolicy(model.loadPolicy)
-    setPreferredGpu(model.preferredGpu)
-    setPinPermanent(model.pinPermanent)
-    setSchedules(model.schedules ?? [])
-    setUseCaseActive(Boolean((model.extraConfig as Record<string, unknown> | undefined)?.use_case))
+    if (!model) return;
+    setLoadPolicy(model.loadPolicy);
+    setPreferredGpu(model.preferredGpu);
+    setPinPermanent(model.pinPermanent);
+    setSchedules(model.schedules ?? []);
+    setUseCaseActive(
+      Boolean(
+        (model.extraConfig as Record<string, unknown> | undefined)?.use_case,
+      ),
+    );
 
-    setModelImpl(vllm?.modelImpl == null ? "" : vllm.modelImpl)
-    setRunner(vllm?.runner == null ? "" : vllm.runner)
-    setTensorParallelSize(vllm?.tensorParallelSize == null ? "" : String(vllm.tensorParallelSize))
-    setMaxModelLen(vllm?.maxModelLen == null ? "" : String(vllm.maxModelLen))
-    setMaxNumSeqs(vllm?.maxNumSeqs == null ? "" : String(vllm.maxNumSeqs))
-    setGpuMemoryUtilization(vllm?.gpuMemoryUtilization == null ? "" : String(vllm.gpuMemoryUtilization))
-    setEnablePrefixCaching(vllm?.enablePrefixCaching ?? true)
-    setTrustRemoteCode(Boolean(vllm?.trustRemoteCode))
+    setModelImpl(vllm?.modelImpl == null ? "" : vllm.modelImpl);
+    setRunner(vllm?.runner == null ? "" : vllm.runner);
+    setTensorParallelSize(
+      vllm?.tensorParallelSize == null ? "" : String(vllm.tensorParallelSize),
+    );
+    setMaxModelLen(vllm?.maxModelLen == null ? "" : String(vllm.maxModelLen));
+    setMaxNumSeqs(vllm?.maxNumSeqs == null ? "" : String(vllm.maxNumSeqs));
+    setGpuMemoryUtilization(
+      vllm?.gpuMemoryUtilization == null
+        ? ""
+        : String(vllm.gpuMemoryUtilization),
+    );
+    setEnablePrefixCaching(vllm?.enablePrefixCaching ?? true);
+    setTrustRemoteCode(Boolean(vllm?.trustRemoteCode));
     setHfOverrides(
       vllm?.hfOverrides == null
         ? ""
         : typeof vllm.hfOverrides === "string"
           ? vllm.hfOverrides
           : JSON.stringify(vllm.hfOverrides),
-    )
-    setChatTemplate(vllm?.chatTemplate == null ? "" : String(vllm.chatTemplate))
-    setToolCallParser(vllm?.toolCallParser == null ? "" : String(vllm.toolCallParser))
-    setReasoningParser(vllm?.reasoningParser == null ? "" : String(vllm.reasoningParser))
-    const vllmRaw = (vllm ?? {}) as Record<string, unknown>
+    );
+    setChatTemplate(
+      vllm?.chatTemplate == null ? "" : String(vllm.chatTemplate),
+    );
+    setToolCallParser(
+      vllm?.toolCallParser == null ? "" : String(vllm.toolCallParser),
+    );
+    setReasoningParser(
+      vllm?.reasoningParser == null ? "" : String(vllm.reasoningParser),
+    );
+    const vllmRaw = (vllm ?? {}) as Record<string, unknown>;
     const mmRaw =
       (vllm?.limitMmPerPrompt as Record<string, unknown> | null | undefined) ??
-      (vllmRaw.limit_mm_per_prompt as Record<string, unknown> | null | undefined) ??
-      null
-    const mmImage = mmRaw && typeof mmRaw.image === "number" ? mmRaw.image : null
-    const mmAudio = mmRaw && typeof mmRaw.audio === "number" ? mmRaw.audio : null
-    const mmVideo = mmRaw && typeof mmRaw.video === "number" ? mmRaw.video : null
-    setLimitMmImage(mmImage == null ? "" : String(mmImage))
-    setLimitMmAudio(mmAudio == null ? "" : String(mmAudio))
-    setLimitMmVideo(mmVideo == null ? "" : String(mmVideo))
+      (vllmRaw.limit_mm_per_prompt as
+        Record<string, unknown> | null | undefined) ??
+      null;
+    const mmImage =
+      mmRaw && typeof mmRaw.image === "number" ? mmRaw.image : null;
+    const mmAudio =
+      mmRaw && typeof mmRaw.audio === "number" ? mmRaw.audio : null;
+    const mmVideo =
+      mmRaw && typeof mmRaw.video === "number" ? mmRaw.video : null;
+    setLimitMmImage(mmImage == null ? "" : String(mmImage));
+    setLimitMmAudio(mmAudio == null ? "" : String(mmAudio));
+    setLimitMmVideo(mmVideo == null ? "" : String(mmVideo));
 
     setSGLangTensorParallelSize(
-      sglang?.tensorParallelSize == null ? "" : String(sglang.tensorParallelSize),
-    )
-    setSGLangContextLength(sglang?.contextLength == null ? "" : String(sglang.contextLength))
+      sglang?.tensorParallelSize == null
+        ? ""
+        : String(sglang.tensorParallelSize),
+    );
+    setSGLangContextLength(
+      sglang?.contextLength == null ? "" : String(sglang.contextLength),
+    );
     setSGLangMemFractionStatic(
       sglang?.memFractionStatic == null ? "" : String(sglang.memFractionStatic),
-    )
-    setSGLangTrustRemoteCode(Boolean(sglang?.trustRemoteCode))
-    setDisableRadixCache(Boolean(sglang?.disableRadixCache))
+    );
+    setSGLangTrustRemoteCode(Boolean(sglang?.trustRemoteCode));
+    setDisableRadixCache(Boolean(sglang?.disableRadixCache));
 
-    setLlamaGpuLayers(llamaCpp?.gpuLayers == null ? "" : String(llamaCpp.gpuLayers))
-    setLlamaCtxSize(llamaCpp?.ctxSize == null ? "" : String(llamaCpp.ctxSize))
-    setLlamaFlashAttn(Boolean(llamaCpp?.flashAttn))
-    setLlamaEmbedding(Boolean(llamaCpp?.embedding))
-    setLlamaThreads(llamaCpp?.threads == null ? "" : String(llamaCpp.threads))
-    setLlamaBatchSize(llamaCpp?.batchSize == null ? "" : String(llamaCpp.batchSize))
-    setLlamaUbatchSize(llamaCpp?.ubatchSize == null ? "" : String(llamaCpp.ubatchSize))
-    setLlamaMlock(Boolean(llamaCpp?.mlock))
+    setLlamaGpuLayers(
+      llamaCpp?.gpuLayers == null ? "" : String(llamaCpp.gpuLayers),
+    );
+    setLlamaCtxSize(llamaCpp?.ctxSize == null ? "" : String(llamaCpp.ctxSize));
+    setLlamaFlashAttn(Boolean(llamaCpp?.flashAttn));
+    setLlamaEmbedding(Boolean(llamaCpp?.embedding));
+    setLlamaThreads(llamaCpp?.threads == null ? "" : String(llamaCpp.threads));
+    setLlamaBatchSize(
+      llamaCpp?.batchSize == null ? "" : String(llamaCpp.batchSize),
+    );
+    setLlamaUbatchSize(
+      llamaCpp?.ubatchSize == null ? "" : String(llamaCpp.ubatchSize),
+    );
+    setLlamaMlock(Boolean(llamaCpp?.mlock));
     // mmap defaults to true (use mmap); only persist false explicitly.
-    setLlamaMmap(llamaCpp?.mmap !== false)
-    setLlamaSeed(llamaCpp?.seed == null ? "" : String(llamaCpp.seed))
-    setLlamaNoKvOffload(Boolean(llamaCpp?.noKvOffload))
+    setLlamaMmap(llamaCpp?.mmap !== false);
+    setLlamaSeed(llamaCpp?.seed == null ? "" : String(llamaCpp.seed));
+    setLlamaNoKvOffload(Boolean(llamaCpp?.noKvOffload));
     setLlamaRopeFreqBase(
       llamaCpp?.ropeFreqBase == null ? "" : String(llamaCpp.ropeFreqBase),
-    )
+    );
     setLlamaRopeFreqScale(
       llamaCpp?.ropeFreqScale == null ? "" : String(llamaCpp.ropeFreqScale),
-    )
-    setLlamaCacheTypeK(llamaCpp?.cacheTypeK == null ? "" : String(llamaCpp.cacheTypeK))
-    setLlamaCacheTypeV(llamaCpp?.cacheTypeV == null ? "" : String(llamaCpp.cacheTypeV))
+    );
+    setLlamaCacheTypeK(
+      llamaCpp?.cacheTypeK == null ? "" : String(llamaCpp.cacheTypeK),
+    );
+    setLlamaCacheTypeV(
+      llamaCpp?.cacheTypeV == null ? "" : String(llamaCpp.cacheTypeV),
+    );
     // Sprint 17.3 — Multi-GPU + MoE state hydration
-    setLlamaMainGpu(llamaCpp?.mainGpu == null ? "" : llamaCpp.mainGpu)
-    setLlamaSplitMode((llamaCpp?.splitMode as "layer" | "row" | "none" | undefined) ?? "")
-    setLlamaDisabledGpus(new Set(llamaCpp?.disabledGpus ?? []))
-    setLlamaNCpuMoe(llamaCpp?.nCpuMoe == null ? "" : String(llamaCpp.nCpuMoe))
-    setLlamaOverrideTensor(llamaCpp?.overrideTensor ?? "")
-    if (Array.isArray(llamaCpp?.tensorSplit) && llamaCpp.tensorSplit.length > 0) {
-      const ratios: Record<number, string> = {}
+    setLlamaMainGpu(llamaCpp?.mainGpu == null ? "" : llamaCpp.mainGpu);
+    setLlamaSplitMode(
+      (llamaCpp?.splitMode as "layer" | "row" | "none" | undefined) ?? "",
+    );
+    setLlamaDisabledGpus(new Set(llamaCpp?.disabledGpus ?? []));
+    setLlamaNCpuMoe(llamaCpp?.nCpuMoe == null ? "" : String(llamaCpp.nCpuMoe));
+    setLlamaOverrideTensor(llamaCpp?.overrideTensor ?? "");
+    if (
+      Array.isArray(llamaCpp?.tensorSplit) &&
+      llamaCpp.tensorSplit.length > 0
+    ) {
+      const ratios: Record<number, string> = {};
       llamaCpp.tensorSplit.forEach((value, idx) => {
-        ratios[idx] = String(value)
-      })
-      setLlamaTensorSplit(ratios)
-      setLlamaSplitStrategy("custom")
+        ratios[idx] = String(value);
+      });
+      setLlamaTensorSplit(ratios);
+      setLlamaSplitStrategy("custom");
     } else {
-      setLlamaTensorSplit({})
-      const persisted = llamaCpp?.splitStrategy
+      setLlamaTensorSplit({});
+      const persisted = llamaCpp?.splitStrategy;
       if (persisted === "evenly" || persisted === "favor_main") {
-        setLlamaSplitStrategy(persisted)
+        setLlamaSplitStrategy(persisted);
       } else if (
-        (llamaCpp?.splitMode === "none") ||
-        (llamaCpp?.disabledGpus != null && llamaCpp.disabledGpus.length === Math.max(0, gpus.length - 1))
+        llamaCpp?.splitMode === "none" ||
+        (llamaCpp?.disabledGpus != null &&
+          llamaCpp.disabledGpus.length === Math.max(0, gpus.length - 1))
       ) {
-        setLlamaSplitStrategy("single")
+        setLlamaSplitStrategy("single");
       } else {
-        setLlamaSplitStrategy("")
+        setLlamaSplitStrategy("");
       }
     }
     // --- Sprint 17.4 ---
-    setLlamaDraftModelId(llamaCpp?.speculative?.draftModelId ?? "")
+    setLlamaDraftModelId(llamaCpp?.speculative?.draftModelId ?? "");
     setLlamaDraftN(
-      llamaCpp?.speculative?.draftN == null ? "" : String(llamaCpp.speculative.draftN),
-    )
+      llamaCpp?.speculative?.draftN == null
+        ? ""
+        : String(llamaCpp.speculative.draftN),
+    );
     setLlamaDraftMin(
-      llamaCpp?.speculative?.draftMin == null ? "" : String(llamaCpp.speculative.draftMin),
-    )
+      llamaCpp?.speculative?.draftMin == null
+        ? ""
+        : String(llamaCpp.speculative.draftMin),
+    );
     setLlamaDraftPMin(
       llamaCpp?.speculative?.draftPMin == null
         ? ""
         : String(llamaCpp.speculative.draftPMin),
-    )
-    setLlamaRuntime(llamaCpp?.runtime ?? "")
+    );
+    setLlamaRuntime(llamaCpp?.runtime ?? "");
     setLlamaParallelSlots(
       llamaCpp?.parallelSlots == null ? "" : String(llamaCpp.parallelSlots),
-    )
+    );
+    setLlamaKvUnified(
+      llamaCpp?.kvUnified == null ? "" : llamaCpp.kvUnified ? "true" : "false",
+    );
+    setLlamaKvUnifiedPerSlot(
+      llamaCpp?.kvUnifiedPerSlot == null
+        ? ""
+        : String(llamaCpp.kvUnifiedPerSlot),
+    );
     setLlamaContBatching(
       llamaCpp?.contBatching == null ? true : Boolean(llamaCpp.contBatching),
-    )
+    );
     setLlamaKeepAlive(
-      llamaCpp?.keepAliveSeconds == null ? "" : String(llamaCpp.keepAliveSeconds),
-    )
+      llamaCpp?.keepAliveSeconds == null
+        ? ""
+        : String(llamaCpp.keepAliveSeconds),
+    );
+    const mmprojModelId = llamaCpp?.mmprojModelId ?? "";
+    setLlamaMmprojModelId(mmprojModelId);
+    setLlamaVisionMode(
+      llamaCpp?.visionMode ?? (mmprojModelId ? "enabled" : "disabled"),
+    );
 
-    setBitnetGpuLayers(bitnet?.gpuLayers == null ? "" : String(bitnet.gpuLayers))
-    setBitnetCtxSize(bitnet?.ctxSize == null ? "" : String(bitnet.ctxSize))
-    setBitnetFlashAttn(Boolean(bitnet?.flashAttn))
+    setBitnetGpuLayers(
+      bitnet?.gpuLayers == null ? "" : String(bitnet.gpuLayers),
+    );
+    setBitnetCtxSize(bitnet?.ctxSize == null ? "" : String(bitnet.ctxSize));
+    setBitnetFlashAttn(Boolean(bitnet?.flashAttn));
 
-    setTRTMaxBatchSize(tensorrt?.maxBatchSize == null ? "" : String(tensorrt.maxBatchSize))
-    setTRTContextLength(tensorrt?.contextLength == null ? "" : String(tensorrt.contextLength))
-    setTRTTrustRemoteCode(Boolean(tensorrt?.trustRemoteCode))
+    setTRTMaxBatchSize(
+      tensorrt?.maxBatchSize == null ? "" : String(tensorrt.maxBatchSize),
+    );
+    setTRTContextLength(
+      tensorrt?.contextLength == null ? "" : String(tensorrt.contextLength),
+    );
+    setTRTTrustRemoteCode(Boolean(tensorrt?.trustRemoteCode));
 
-    setWhisperDiarizationEnabled(Boolean(whisper?.diarizationEnabled))
+    setWhisperDiarizationEnabled(Boolean(whisper?.diarizationEnabled));
     setWhisperDiarizationModelId(
-      whisper?.diarizationModelId == null ? "" : String(whisper.diarizationModelId),
-    )
-    setWhisperNumWorkers(whisper?.numWorkers == null ? "5" : String(whisper.numWorkers))
+      whisper?.diarizationModelId == null
+        ? ""
+        : String(whisper.diarizationModelId),
+    );
+    setWhisperNumWorkers(
+      whisper?.numWorkers == null ? "5" : String(whisper.numWorkers),
+    );
     // Re-hidratar si cambia el modelo o aparece/desaparece una GPU. Depender de
     // la referencia completa `gpus` reiniciaba el formulario cada ~2s con los
     // broadcasts; ignorarla del todo dejaba un split erróneo si llegaba tarde.
-  }, [model, gpus.length])
+  }, [model, gpus.length]);
 
   // Sprint 17.4 — fetch speculative candidates + installed llama.cpp runtimes
   // when the modal opens for a llama.cpp model.
   useEffect(() => {
-    if (!open || !model || model.backendType !== "llama_cpp") return
-    let cancelled = false
+    if (!open || !model || model.backendType !== "llama_cpp") return;
+    let cancelled = false;
     void (async () => {
       try {
         const [candidates, backendsList] = await Promise.all([
           api.models.speculativeCandidates(model.modelId).catch(() => []),
           api.backends.list().catch(() => []),
-        ])
-        if (cancelled) return
+        ]);
+        if (cancelled) return;
         setSpeculativeCandidates(
-          candidates.map((c) => ({ modelId: c.modelId, displayName: c.displayName })),
-        )
-        const installed = new Set<string>()
-        for (const b of backendsList as Array<{ backendType: string; installStatus?: string }>) {
-          if (!b?.backendType?.startsWith("llama_cpp")) continue
-          if (b.installStatus !== "installed") continue
+          candidates.map((c) => ({
+            modelId: c.modelId,
+            displayName: c.displayName,
+          })),
+        );
+        const installed = new Set<string>();
+        for (const b of backendsList as Array<{
+          backendType: string;
+          installStatus?: string;
+        }>) {
+          if (!b?.backendType?.startsWith("llama_cpp")) continue;
+          if (b.installStatus !== "installed") continue;
           if (b.backendType === "llama_cpp") {
-            installed.add("cuda")
-            continue
+            installed.add("cuda");
+            continue;
           }
-          const runtime = b.backendType.split("_").pop()
-          if (runtime) installed.add(runtime)
+          const runtime = b.backendType.split("_").pop();
+          if (runtime) installed.add(runtime);
         }
-        if (installed.size === 0) installed.add("cuda")
-        setInstalledRuntimes(installed)
+        if (installed.size === 0) installed.add("cuda");
+        setInstalledRuntimes(installed);
       } catch {
         // Best-effort — silent failure leaves the defaults in place.
       }
-    })()
+    })();
     return () => {
-      cancelled = true
-    }
-  }, [open, model])
+      cancelled = true;
+    };
+  }, [open, model]);
 
   // Load groups for system_admin when modal opens
   useEffect(() => {
-    if (!open || !model || !isAdmin) return
-    let cancelled = false
-    setLoadingGroups(true)
+    if (!open || !model || !isAdmin) return;
+    let cancelled = false;
+    setLoadingGroups(true);
     void (async () => {
       try {
         const [groups, modelGroupIds] = await Promise.all([
           api.groups.list(),
           api.groups.getModelGroups(model.modelId),
-        ])
-        if (cancelled) return
-        setAllGroups(groups)
-        const idSet = new Set(modelGroupIds)
-        setSelectedGroupIds(new Set(idSet))
-        setInitialGroupIds(new Set(idSet))
+        ]);
+        if (cancelled) return;
+        setAllGroups(groups);
+        const idSet = new Set(modelGroupIds);
+        setSelectedGroupIds(new Set(idSet));
+        setInitialGroupIds(new Set(idSet));
       } catch (err) {
         if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : "No se pudieron cargar los grupos")
+          toast.error(
+            err instanceof Error
+              ? err.message
+              : "No se pudieron cargar los grupos",
+          );
         }
       } finally {
-        if (!cancelled) setLoadingGroups(false)
+        if (!cancelled) setLoadingGroups(false);
       }
-    })()
-    return () => { cancelled = true }
-  }, [open, model, isAdmin])
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, model, isAdmin]);
 
   const applyRecipeSuggestedConfig = () => {
-    const suggested = recipeSuggestedConfig
+    const suggested = recipeSuggestedConfig;
     if (modelImpl === "" && vllm && typeof vllm.modelImpl === "string") {
-      setModelImpl(vllm.modelImpl)
+      setModelImpl(vllm.modelImpl);
     }
     if (runner === "" && vllm && typeof vllm.runner === "string") {
-      setRunner(vllm.runner)
+      setRunner(vllm.runner);
     }
-    if (typeof suggested.toolCallParser === "string") setToolCallParser(suggested.toolCallParser)
-    if (typeof suggested.reasoningParser === "string") setReasoningParser(suggested.reasoningParser)
-    if (typeof suggested.reasoning_parser === "string") setReasoningParser(suggested.reasoning_parser)
-    if (typeof suggested.tool_call_parser === "string") setToolCallParser(suggested.tool_call_parser)
-    if (typeof suggested.chatTemplate === "string") setChatTemplate(suggested.chatTemplate)
-    if (typeof suggested.chat_template === "string") setChatTemplate(suggested.chat_template)
-    if (typeof suggested.hfOverrides === "string") setHfOverrides(suggested.hfOverrides)
-    if (typeof suggested.hf_overrides === "string") setHfOverrides(suggested.hf_overrides)
-    if (typeof suggested.hfOverrides === "object" && suggested.hfOverrides !== null) {
-      setHfOverrides(JSON.stringify(suggested.hfOverrides))
+    if (typeof suggested.toolCallParser === "string")
+      setToolCallParser(suggested.toolCallParser);
+    if (typeof suggested.reasoningParser === "string")
+      setReasoningParser(suggested.reasoningParser);
+    if (typeof suggested.reasoning_parser === "string")
+      setReasoningParser(suggested.reasoning_parser);
+    if (typeof suggested.tool_call_parser === "string")
+      setToolCallParser(suggested.tool_call_parser);
+    if (typeof suggested.chatTemplate === "string")
+      setChatTemplate(suggested.chatTemplate);
+    if (typeof suggested.chat_template === "string")
+      setChatTemplate(suggested.chat_template);
+    if (typeof suggested.hfOverrides === "string")
+      setHfOverrides(suggested.hfOverrides);
+    if (typeof suggested.hf_overrides === "string")
+      setHfOverrides(suggested.hf_overrides);
+    if (
+      typeof suggested.hfOverrides === "object" &&
+      suggested.hfOverrides !== null
+    ) {
+      setHfOverrides(JSON.stringify(suggested.hfOverrides));
     }
-    if (typeof suggested.hf_overrides === "object" && suggested.hf_overrides !== null) {
-      setHfOverrides(JSON.stringify(suggested.hf_overrides))
+    if (
+      typeof suggested.hf_overrides === "object" &&
+      suggested.hf_overrides !== null
+    ) {
+      setHfOverrides(JSON.stringify(suggested.hf_overrides));
     }
-  }
+  };
 
   const applyRecipeSuggestedTuning = () => {
-    const tuning = recipeSuggestedTuning
-    if (typeof tuning.max_num_seqs === "number") setMaxNumSeqs(String(tuning.max_num_seqs))
-    if (typeof tuning.maxNumSeqs === "number") setMaxNumSeqs(String(tuning.maxNumSeqs))
-    if (typeof tuning.max_model_len === "number") setMaxModelLen(String(tuning.max_model_len))
-    if (typeof tuning.maxModelLen === "number") setMaxModelLen(String(tuning.maxModelLen))
+    const tuning = recipeSuggestedTuning;
+    if (typeof tuning.max_num_seqs === "number")
+      setMaxNumSeqs(String(tuning.max_num_seqs));
+    if (typeof tuning.maxNumSeqs === "number")
+      setMaxNumSeqs(String(tuning.maxNumSeqs));
+    if (typeof tuning.max_model_len === "number")
+      setMaxModelLen(String(tuning.max_model_len));
+    if (typeof tuning.maxModelLen === "number")
+      setMaxModelLen(String(tuning.maxModelLen));
     if (typeof tuning.gpu_memory_utilization === "number") {
-      setGpuMemoryUtilization(String(tuning.gpu_memory_utilization))
+      setGpuMemoryUtilization(String(tuning.gpu_memory_utilization));
     }
     if (typeof tuning.gpuMemoryUtilization === "number") {
-      setGpuMemoryUtilization(String(tuning.gpuMemoryUtilization))
+      setGpuMemoryUtilization(String(tuning.gpuMemoryUtilization));
     }
-    if (typeof tuning.enable_prefix_caching === "boolean") setEnablePrefixCaching(tuning.enable_prefix_caching)
-    if (typeof tuning.enablePrefixCaching === "boolean") setEnablePrefixCaching(tuning.enablePrefixCaching)
-  }
+    if (typeof tuning.enable_prefix_caching === "boolean")
+      setEnablePrefixCaching(tuning.enable_prefix_caching);
+    if (typeof tuning.enablePrefixCaching === "boolean")
+      setEnablePrefixCaching(tuning.enablePrefixCaching);
+  };
 
   const applyProbeRecommendation = () => {
-    if (probeRecommendedModelImpl != null) setModelImpl(probeRecommendedModelImpl)
-    if (probeRecommendedRunner != null) setRunner(probeRecommendedRunner)
-  }
+    if (probeRecommendedModelImpl != null)
+      setModelImpl(probeRecommendedModelImpl);
+    if (probeRecommendedRunner != null) setRunner(probeRecommendedRunner);
+  };
 
   const differsFromProbe =
-    (probeRecommendedModelImpl != null && modelImpl !== "" && probeRecommendedModelImpl !== modelImpl) ||
-    (probeRecommendedRunner != null && runner !== "" && probeRecommendedRunner !== runner)
+    (probeRecommendedModelImpl != null &&
+      modelImpl !== "" &&
+      probeRecommendedModelImpl !== modelImpl) ||
+    (probeRecommendedRunner != null &&
+      runner !== "" &&
+      probeRecommendedRunner !== runner);
   const recipeDiffersFromProbe =
-    (recipeModelImpl != null && probeRecommendedModelImpl != null && recipeModelImpl !== probeRecommendedModelImpl) ||
-    (recipeRunner != null && probeRecommendedRunner != null && recipeRunner !== probeRecommendedRunner)
-  const probeStatusLabel = getProbeStatusLabel(probeStatus)
-  const probeOverrideHint = getProbeOverrideHint(probeStatus)
-  const context = model ? getModelContextSummary(model) : null
+    (recipeModelImpl != null &&
+      probeRecommendedModelImpl != null &&
+      recipeModelImpl !== probeRecommendedModelImpl) ||
+    (recipeRunner != null &&
+      probeRecommendedRunner != null &&
+      recipeRunner !== probeRecommendedRunner);
+  const probeStatusLabel = getProbeStatusLabel(probeStatus);
+  const probeOverrideHint = getProbeOverrideHint(probeStatus);
+  const context = model ? getModelContextSummary(model) : null;
   const showVLLMCompatibility =
     model?.backendType === "vllm" &&
     (Boolean(trustRemoteCode) ||
@@ -629,23 +831,27 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
       toolCallParser.trim() !== "" ||
       reasoningParser.trim() !== "" ||
       Boolean(recipeId) ||
-      Boolean(probeStatus))
+      Boolean(probeStatus));
 
   const buildExtraConfig = (): BackendExtraConfig | undefined => {
-    if (!model) return undefined
-    const current = getWritableExtraConfig(model)
+    if (!model) return undefined;
+    const current = getWritableExtraConfig(model);
 
     if (model.backendType === "vllm") {
-      const mmImageNum = limitMmImage === "" ? 0 : Number(limitMmImage)
-      const mmAudioNum = limitMmAudio === "" ? 0 : Number(limitMmAudio)
-      const mmVideoNum = limitMmVideo === "" ? 0 : Number(limitMmVideo)
-      const mmPayload: { image?: number; audio?: number; video?: number } = {}
-      if (Number.isFinite(mmImageNum) && mmImageNum > 0) mmPayload.image = mmImageNum
-      if (Number.isFinite(mmAudioNum) && mmAudioNum > 0) mmPayload.audio = mmAudioNum
-      if (Number.isFinite(mmVideoNum) && mmVideoNum > 0) mmPayload.video = mmVideoNum
-      const limitMmPerPrompt = Object.keys(mmPayload).length > 0 ? mmPayload : null
-      const vllmBase = { ...(vllm ?? {}) } as Record<string, unknown>
-      delete vllmBase.limit_mm_per_prompt
+      const mmImageNum = limitMmImage === "" ? 0 : Number(limitMmImage);
+      const mmAudioNum = limitMmAudio === "" ? 0 : Number(limitMmAudio);
+      const mmVideoNum = limitMmVideo === "" ? 0 : Number(limitMmVideo);
+      const mmPayload: { image?: number; audio?: number; video?: number } = {};
+      if (Number.isFinite(mmImageNum) && mmImageNum > 0)
+        mmPayload.image = mmImageNum;
+      if (Number.isFinite(mmAudioNum) && mmAudioNum > 0)
+        mmPayload.audio = mmAudioNum;
+      if (Number.isFinite(mmVideoNum) && mmVideoNum > 0)
+        mmPayload.video = mmVideoNum;
+      const limitMmPerPrompt =
+        Object.keys(mmPayload).length > 0 ? mmPayload : null;
+      const vllmBase = { ...(vllm ?? {}) } as Record<string, unknown>;
+      delete vllmBase.limit_mm_per_prompt;
       const next = setNestedConfig(
         current,
         "vllm",
@@ -664,7 +870,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           probeRecommendedRunner,
           modelImpl: modelImpl === "" ? null : modelImpl,
           runner: runner === "" ? null : runner,
-          tensorParallelSize: tensorParallelSize === "" ? null : Number(tensorParallelSize),
+          tensorParallelSize:
+            tensorParallelSize === "" ? null : Number(tensorParallelSize),
           maxModelLen: maxModelLen === "" ? null : Number(maxModelLen),
           maxNumSeqs: maxNumSeqs === "" ? null : Number(maxNumSeqs),
           gpuMemoryUtilization:
@@ -678,8 +885,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           limitMmPerPrompt,
         } satisfies VLLMConfig,
         VLLM_ROOT_KEYS,
-      )
-      return Object.keys(next).length > 0 ? next : undefined
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
     }
 
     if (model.backendType === "sglang") {
@@ -689,55 +896,68 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         {
           ...(sglang ?? {}),
           tensorParallelSize:
-            sglangTensorParallelSize === "" ? null : Number(sglangTensorParallelSize),
-          contextLength: sglangContextLength === "" ? null : Number(sglangContextLength),
+            sglangTensorParallelSize === ""
+              ? null
+              : Number(sglangTensorParallelSize),
+          contextLength:
+            sglangContextLength === "" ? null : Number(sglangContextLength),
           memFractionStatic:
-            sglangMemFractionStatic === "" ? null : Number(sglangMemFractionStatic),
+            sglangMemFractionStatic === ""
+              ? null
+              : Number(sglangMemFractionStatic),
           trustRemoteCode: sglangTrustRemoteCode,
           disableRadixCache,
         },
         SGLANG_ROOT_KEYS,
-      )
-      return Object.keys(next).length > 0 ? next : undefined
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
     }
 
     if (model.backendType === "llama_cpp") {
       // Resolve enabled GPUs (everything not toggled off in the modal).
-      const enabledGpus = gpus.map((g) => g.index).filter((idx) => !llamaDisabledGpus.has(idx))
-      const disabledList = gpus.map((g) => g.index).filter((idx) => llamaDisabledGpus.has(idx))
+      const enabledGpus = gpus
+        .map((g) => g.index)
+        .filter((idx) => !llamaDisabledGpus.has(idx));
+      const disabledList = gpus
+        .map((g) => g.index)
+        .filter((idx) => llamaDisabledGpus.has(idx));
 
       // Strategy → backend payload.
       let mainGpuOut: number | null =
-        llamaMainGpu === "" ? null : Number(llamaMainGpu)
+        llamaMainGpu === "" ? null : Number(llamaMainGpu);
       // Drop main_gpu if it points at a disabled GPU (defensive — UI also
       // filters the dropdown but a stale persisted value might still leak).
       if (mainGpuOut !== null && llamaDisabledGpus.has(mainGpuOut)) {
-        mainGpuOut = null
+        mainGpuOut = null;
       }
-      let strategyOut: "evenly" | "favor_main" | null = null
-      let tensorSplitOut: number[] | null = null
+      let strategyOut: "evenly" | "favor_main" | null = null;
+      let tensorSplitOut: number[] | null = null;
       let splitModeOut: "layer" | "row" | "none" | null =
-        llamaSplitMode === "" ? null : llamaSplitMode
+        llamaSplitMode === "" ? null : llamaSplitMode;
 
       if (llamaSplitStrategy === "evenly") {
-        strategyOut = "evenly"
+        strategyOut = "evenly";
       } else if (llamaSplitStrategy === "favor_main") {
-        strategyOut = "favor_main"
+        strategyOut = "favor_main";
       } else if (llamaSplitStrategy === "custom") {
         const ratios = enabledGpus
           .map((idx) => Number(llamaTensorSplit[idx] ?? ""))
-          .filter((value) => Number.isFinite(value) && value >= 0)
-        if (ratios.length === enabledGpus.length && ratios.some((value) => value > 0)) {
-          tensorSplitOut = ratios
+          .filter((value) => Number.isFinite(value) && value >= 0);
+        if (
+          ratios.length === enabledGpus.length &&
+          ratios.some((value) => value > 0)
+        ) {
+          tensorSplitOut = ratios;
         }
       } else if (llamaSplitStrategy === "single") {
         // Force single-GPU layout via split_mode=none and a chosen main_gpu.
-        if (splitModeOut == null) splitModeOut = "none"
+        if (splitModeOut == null) splitModeOut = "none";
       }
 
-      const nCpuMoeOut: number | null = llamaNCpuMoe === "" ? null : Number(llamaNCpuMoe)
+      const nCpuMoeOut: number | null =
+        llamaNCpuMoe === "" ? null : Number(llamaNCpuMoe);
       const overrideTensorOut: string | null =
-        llamaOverrideTensor.trim() === "" ? null : llamaOverrideTensor.trim()
+        llamaOverrideTensor.trim() === "" ? null : llamaOverrideTensor.trim();
 
       // Sprint 17.4 — speculative decoding payload
       const speculative =
@@ -748,7 +968,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               draftN: llamaDraftN === "" ? null : Number(llamaDraftN),
               draftMin: llamaDraftMin === "" ? null : Number(llamaDraftMin),
               draftPMin: llamaDraftPMin === "" ? null : Number(llamaDraftPMin),
-            }
+            };
       const next = setNestedConfig(
         current,
         "llama_cpp",
@@ -768,8 +988,10 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           mmap: llamaMmap ? null : false,
           seed: llamaSeed === "" ? null : Number(llamaSeed),
           noKvOffload: llamaNoKvOffload,
-          ropeFreqBase: llamaRopeFreqBase === "" ? null : Number(llamaRopeFreqBase),
-          ropeFreqScale: llamaRopeFreqScale === "" ? null : Number(llamaRopeFreqScale),
+          ropeFreqBase:
+            llamaRopeFreqBase === "" ? null : Number(llamaRopeFreqBase),
+          ropeFreqScale:
+            llamaRopeFreqScale === "" ? null : Number(llamaRopeFreqScale),
           // Sprint 17.2 — KV cache quantization
           cache_type_k: llamaCacheTypeK === "" ? null : llamaCacheTypeK,
           cache_type_v: llamaCacheTypeV === "" ? null : llamaCacheTypeV,
@@ -784,13 +1006,20 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           // Sprint 17.4
           speculative,
           runtime: llamaRuntime === "" ? null : llamaRuntime,
-          parallelSlots: llamaParallelSlots === "" ? null : Number(llamaParallelSlots),
+          parallelSlots:
+            llamaParallelSlots === "" ? null : Number(llamaParallelSlots),
+          kvUnified: llamaKvUnified === "" ? null : llamaKvUnified === "true",
+          kvUnifiedPerSlot:
+            llamaKvUnifiedPerSlot === "" ? null : Number(llamaKvUnifiedPerSlot),
           contBatching: llamaContBatching,
-          keepAliveSeconds: llamaKeepAlive === "" ? null : Number(llamaKeepAlive),
+          keepAliveSeconds:
+            llamaKeepAlive === "" ? null : Number(llamaKeepAlive),
+          mmprojModelId: llamaMmprojModelId.trim() || null,
+          visionMode: llamaVisionMode,
         },
         LLAMA_CPP_ROOT_KEYS,
-      )
-      return Object.keys(next).length > 0 ? next : undefined
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
     }
 
     if (model.backendType === "bitnet") {
@@ -804,8 +1033,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           flashAttn: bitnetFlashAttn,
         },
         BITNET_ROOT_KEYS,
-      )
-      return Object.keys(next).length > 0 ? next : undefined
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
     }
 
     if (model.backendType === "tensorrt_llm") {
@@ -815,12 +1044,13 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         {
           ...(tensorrt ?? {}),
           maxBatchSize: trtMaxBatchSize === "" ? null : Number(trtMaxBatchSize),
-          contextLength: trtContextLength === "" ? null : Number(trtContextLength),
+          contextLength:
+            trtContextLength === "" ? null : Number(trtContextLength),
           trustRemoteCode: trtTrustRemoteCode,
         },
         TENSORRT_LLM_ROOT_KEYS,
-      )
-      return Object.keys(next).length > 0 ? next : undefined
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
     }
 
     if (model.backendType === "whisper") {
@@ -831,60 +1061,75 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
           ...(whisper ?? {}),
           diarizationEnabled: whisperDiarizationEnabled,
           diarizationModelId:
-            whisperDiarizationModelId.trim() === "" ? null : whisperDiarizationModelId.trim(),
-          numWorkers: whisperNumWorkers.trim() === "" ? null : Number(whisperNumWorkers),
+            whisperDiarizationModelId.trim() === ""
+              ? null
+              : whisperDiarizationModelId.trim(),
+          numWorkers:
+            whisperNumWorkers.trim() === "" ? null : Number(whisperNumWorkers),
         },
         WHISPER_ROOT_KEYS,
-      )
-      return Object.keys(next).length > 0 ? next : undefined
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
     }
 
-    return Object.keys(current).length > 0 ? current : undefined
-  }
+    return Object.keys(current).length > 0 ? current : undefined;
+  };
 
   const estimateMemory = async (runProbe = false) => {
-    if (!model) return
+    if (!model) return;
     if (runProbe) {
-      setProbingMemory(true)
+      setProbingMemory(true);
     } else {
-      setEstimatingMemory(true)
+      setEstimatingMemory(true);
     }
-    setMemoryEstimateError(null)
+    setMemoryEstimateError(null);
     try {
       const next = await api.models.estimateMemory(model.modelId, {
         preferredGpu,
         extraConfig: buildExtraConfig(),
         runProbe,
-      })
-      setMemoryEstimate(next)
+      });
+      setMemoryEstimate(next);
     } catch (error) {
-      setMemoryEstimateError(error instanceof Error ? error.message : "No se pudo calcular la estimación")
+      setMemoryEstimateError(
+        error instanceof Error
+          ? error.message
+          : "No se pudo calcular la estimación",
+      );
     } finally {
       if (runProbe) {
-        setProbingMemory(false)
+        setProbingMemory(false);
       } else {
-        setEstimatingMemory(false)
+        setEstimatingMemory(false);
       }
     }
-  }
+  };
 
   const estimateKey = JSON.stringify({
     modelId: model?.modelId ?? null,
     preferredGpu,
-    extraConfig: model ? buildExtraConfig() ?? null : null,
-  })
+    extraConfig: model ? (buildExtraConfig() ?? null) : null,
+  });
 
   useEffect(() => {
-    if (!open || !model) return
+    if (!open || !model) return;
     const timer = window.setTimeout(() => {
-      void estimateMemory(false)
-    }, 300)
-    return () => window.clearTimeout(timer)
-  }, [estimateKey, open, model])
+      void estimateMemory(false);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [estimateKey, open, model]);
 
   const handleSave = async () => {
-    if (!model) return
-    setSaving(true)
+    if (!model) return;
+    if (
+      model.backendType === "llama_cpp" &&
+      llamaVisionMode !== "disabled" &&
+      llamaMmprojModelId.trim() === ""
+    ) {
+      toast.error("Indica un projector multimodal para activar la visión.");
+      return;
+    }
+    setSaving(true);
     try {
       const savePromise = onSave(model.modelId, {
         loadPolicy,
@@ -892,24 +1137,32 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         pinPermanent,
         schedules,
         extraConfig: buildExtraConfig(),
-      })
+      });
 
       // Sync group assignments if admin and groups changed
-      let groupSyncPromise: Promise<void> = Promise.resolve()
+      let groupSyncPromise: Promise<void> = Promise.resolve();
       if (isAdmin && allGroups.length > 0) {
-        const addGroupIds = [...selectedGroupIds].filter((id) => !initialGroupIds.has(id))
-        const removeGroupIds = [...initialGroupIds].filter((id) => !selectedGroupIds.has(id))
+        const addGroupIds = [...selectedGroupIds].filter(
+          (id) => !initialGroupIds.has(id),
+        );
+        const removeGroupIds = [...initialGroupIds].filter(
+          (id) => !selectedGroupIds.has(id),
+        );
         if (addGroupIds.length > 0 || removeGroupIds.length > 0) {
-          groupSyncPromise = api.groups.updateModelGroups(model.modelId, addGroupIds, removeGroupIds)
+          groupSyncPromise = api.groups.updateModelGroups(
+            model.modelId,
+            addGroupIds,
+            removeGroupIds,
+          );
         }
       }
 
-      await Promise.all([savePromise, groupSyncPromise])
-      onOpenChange(false)
+      await Promise.all([savePromise, groupSyncPromise]);
+      onOpenChange(false);
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
-  }
+  };
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -918,7 +1171,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[88vh] w-[95vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
           <div className="mb-4 flex items-start justify-between">
             <div>
-              <Dialog.Title className="text-lg font-semibold">Configurar modelo</Dialog.Title>
+              <Dialog.Title className="text-lg font-semibold">
+                Configurar modelo
+              </Dialog.Title>
               <Dialog.Description className="text-sm text-muted-foreground">
                 {model?.displayName ?? ""}
               </Dialog.Description>
@@ -926,52 +1181,76 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
                   {model.releaseDate && (
                     <span title={new Date(model.releaseDate).toLocaleString()}>
-                      Release: <span className="text-foreground">{new Date(model.releaseDate).toLocaleDateString()}</span>
+                      Release:{" "}
+                      <span className="text-foreground">
+                        {new Date(model.releaseDate).toLocaleDateString()}
+                      </span>
                     </span>
                   )}
                   {model.lastUpdated && (
                     <span title={new Date(model.lastUpdated).toLocaleString()}>
-                      Última actualización: <span className="text-foreground">{new Date(model.lastUpdated).toLocaleDateString()}</span>
+                      Última actualización:{" "}
+                      <span className="text-foreground">
+                        {new Date(model.lastUpdated).toLocaleDateString()}
+                      </span>
                     </span>
                   )}
                   {model.metadataFetchedAt && (
-                    <span className="opacity-70" title={new Date(model.metadataFetchedAt).toLocaleString()}>
-                      (consultado {new Date(model.metadataFetchedAt).toLocaleDateString()})
+                    <span
+                      className="opacity-70"
+                      title={new Date(model.metadataFetchedAt).toLocaleString()}
+                    >
+                      (consultado{" "}
+                      {new Date(model.metadataFetchedAt).toLocaleDateString()})
                     </span>
                   )}
                 </div>
               )}
             </div>
-            <Dialog.Close className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close">
+            <Dialog.Close
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+              aria-label="Close"
+            >
               <X size={16} />
             </Dialog.Close>
           </div>
 
           <div className="space-y-4">
-            {model && (model.profiles ?? []).some((profile) => profile.runtimePresets.some((preset) => preset.enabled)) && (
-              <div className="rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-100">
-                <div className="flex items-start gap-2">
-                  <Layers3 size={14} className="mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    Los presets de contexto están debajo. Para gestión global de perfiles (alias, categoría, políticas) usa{" "}
-                    <Link to="/profiles" className="font-medium underline underline-offset-2 hover:text-white">
-                      Profiles
-                    </Link>
-                    .
+            {model &&
+              (model.profiles ?? []).some((profile) =>
+                profile.runtimePresets.some((preset) => preset.enabled),
+              ) && (
+                <div className="rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-100">
+                  <div className="flex items-start gap-2">
+                    <Layers3 size={14} className="mt-0.5 shrink-0" />
+                    <div className="flex-1">
+                      Los presets de contexto están debajo. Para gestión global
+                      de perfiles (alias, categoría, políticas) usa{" "}
+                      <Link
+                        to="/profiles"
+                        className="font-medium underline underline-offset-2 hover:text-white"
+                      >
+                        Profiles
+                      </Link>
+                      .
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
             <FieldSection
               title="General"
               description="Politica de carga y afinidad de GPU."
             >
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="block text-sm">
-                  <span className="mb-1 block text-muted-foreground">Load policy</span>
+                  <span className="mb-1 block text-muted-foreground">
+                    Load policy
+                  </span>
                   <select
                     value={loadPolicy}
-                    onChange={(event) => setLoadPolicy(event.target.value as LoadPolicy)}
+                    onChange={(event) =>
+                      setLoadPolicy(event.target.value as LoadPolicy)
+                    }
                     className="w-full rounded-md border border-border bg-background px-3 py-2"
                   >
                     <option value="pin">pin</option>
@@ -979,17 +1258,26 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <option value="on_demand">on_demand</option>
                   </select>
                   <FieldHint>
-                    `pin` se precarga al arrancar el servidor y se recarga solo en cuanto hay hueco
-                    tras un desalojo; `warm` solo carga con la primera petición pero no se recarga
-                    solo; `on_demand` además se descarga por inactividad.
+                    `pin` se precarga al arrancar el servidor y se recarga solo
+                    en cuanto hay hueco tras un desalojo; `warm` solo carga con
+                    la primera petición pero no se recarga solo; `on_demand`
+                    además se descarga por inactividad.
                   </FieldHint>
                 </label>
 
                 <label className="block text-sm">
-                  <span className="mb-1 block text-muted-foreground">GPU preferida</span>
+                  <span className="mb-1 block text-muted-foreground">
+                    GPU preferida
+                  </span>
                   <select
                     value={preferredGpu === null ? "" : String(preferredGpu)}
-                    onChange={(event) => setPreferredGpu(event.target.value === "" ? null : Number(event.target.value))}
+                    onChange={(event) =>
+                      setPreferredGpu(
+                        event.target.value === ""
+                          ? null
+                          : Number(event.target.value),
+                      )
+                    }
                     className="w-full rounded-md border border-border bg-background px-3 py-2"
                   >
                     <option value="">Default del servidor</option>
@@ -999,7 +1287,10 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       </option>
                     ))}
                   </select>
-                  <FieldHint>Fija una GPU preferida si quieres evitar que el scheduler elija otra.</FieldHint>
+                  <FieldHint>
+                    Fija una GPU preferida si quieres evitar que el scheduler
+                    elija otra.
+                  </FieldHint>
                 </label>
               </div>
 
@@ -1015,155 +1306,224 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               )}
             </FieldSection>
 
-            {model && ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(model.backendType) && (() => {
-              const hasEnabledPresets = (model.profiles ?? []).some((profile) =>
+            {model &&
+              ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(
+                model.backendType,
+              ) &&
+              (() => {
+                const hasEnabledPresets = (model.profiles ?? []).some(
+                  (profile) =>
+                    profile.runtimePresets.some((preset) => preset.enabled),
+                );
+                return (
+                  <FieldSection
+                    title="Memoria y contexto"
+                    description={
+                      hasEnabledPresets
+                        ? "Predicción de contexto máximo por slot y curva de VRAM. El caso de uso (contexto, paralelismo, KV cache) lo maneja el preset activo del profile — edítalo en Profiles."
+                        : model.backendType === "llama_cpp" &&
+                            llamaCpp?.kvUnified === true
+                          ? `Pool KV total compartido por ${llamaCpp.parallelSlots ?? 1} slots. Cada petición puede usar el remanente disponible hasta el pool completo; la tabla inferior es una estimación conservadora por arquitectura.`
+                          : "Contexto máximo por slot/concurrencia y curva de VRAM (predicción por arquitectura); configura el caso de uso (contexto, paralelismo, KV cache) que se aplica al cargar. La estimación por probe de runtime va justo debajo."
+                    }
+                  >
+                    <CapacityPanel
+                      modelId={model.modelId}
+                      gpus={gpus}
+                      extraConfig={model.extraConfig}
+                      onUseCaseChange={setUseCaseActive}
+                      hideUseCase={hasEnabledPresets}
+                    />
+                  </FieldSection>
+                );
+              })()}
+
+            {model &&
+              (model.profiles ?? [])
+                .filter((profile) => profile.profileKind === "execution")
+                .map((profile) => (
+                  <FieldSection
+                    key={profile.profileId}
+                    title={`Presets de contexto · ${profile.displayName || profile.profileId}`}
+                    description="Variantes internas (contexto, slots, KV cache). El preset predeterminado es el que arranca por defecto; «Medir frío» descarga y vuelve a cargar midiendo tiempo real."
+                  >
+                    <RuntimePresetsPanel
+                      profile={profile}
+                      onChanged={() => {}}
+                    />
+                  </FieldSection>
+                ))}
+
+            {model &&
+              !(model.profiles ?? []).some((profile) =>
                 profile.runtimePresets.some((preset) => preset.enabled),
-              )
-              return (
+              ) && (
                 <FieldSection
-                  title="Memoria y contexto"
-                  description={
-                    hasEnabledPresets
-                      ? "Predicción de contexto máximo por slot y curva de VRAM. El caso de uso (contexto, paralelismo, KV cache) lo maneja el preset activo del profile — edítalo en Profiles."
-                      : "Contexto máximo por slot/concurrencia y curva de VRAM (predicción por arquitectura); configura el caso de uso (contexto, paralelismo, KV cache) que se aplica al cargar. La estimación por probe de runtime va justo debajo."
-                  }
+                  title="Estimación por probe (runtime)"
+                  description="Medición real opcional del engine para la configuración actual; complementa la predicción por arquitectura de arriba."
                 >
-                  <CapacityPanel
-                    modelId={model.modelId}
-                    gpus={gpus}
-                    extraConfig={model.extraConfig}
-                    onUseCaseChange={setUseCaseActive}
-                    hideUseCase={hasEnabledPresets}
-                  />
-                </FieldSection>
-              )
-            })()}
-
-            {model && (model.profiles ?? []).filter((profile) => profile.profileKind === "execution").map((profile) => (
-              <FieldSection
-                key={profile.profileId}
-                title={`Presets de contexto · ${profile.displayName || profile.profileId}`}
-                description="Variantes internas (contexto, slots, KV cache). El preset predeterminado es el que arranca por defecto; «Medir frío» descarga y vuelve a cargar midiendo tiempo real."
-              >
-                <RuntimePresetsPanel profile={profile} onChanged={() => {}} />
-              </FieldSection>
-            ))}
-
-            {model && !(model.profiles ?? []).some((profile) => profile.runtimePresets.some((preset) => preset.enabled)) && (
-              <FieldSection
-                title="Estimación por probe (runtime)"
-                description="Medición real opcional del engine para la configuración actual; complementa la predicción por arquitectura de arriba."
-              >
-                <div className="space-y-3 text-sm">
-                  {(estimatingMemory || probingMemory) && (
-                    <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                      {probingMemory ? "Ejecutando validación real del engine..." : "Recalculando estimación..."}
-                    </div>
-                  )}
-                  {memoryEstimate && (() => {
-                    const usedMb =
-                      memoryEstimate.modelLoadingMemoryMb ??
-                      memoryEstimate.estimatedEngineMbPerGpu ??
-                      memoryEstimate.estimatedWeightsMb
-                    const capMb = memoryEstimate.totalVramMb
-                    const fraction = usedMb != null && capMb ? Math.min(1, usedMb / capMb) : 0
-                    const barColor =
-                      memoryEstimate.fitsCurrentGpu === false
-                        ? "bg-red-500"
-                        : fraction > 0.85
-                          ? "bg-amber-500"
-                          : "bg-emerald-500"
-                    return (
-                      <>
-                        {usedMb != null && capMb != null && (
-                          <div
-                            className={`rounded-md border px-3 py-2 text-xs ${
-                              memoryEstimate.fitsCurrentGpu === false
-                                ? "border-red-500/30 bg-red-500/5"
-                                : "border-emerald-500/30 bg-emerald-500/5"
-                            }`}
-                          >
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="font-medium">
-                                {memoryEstimate.fitsCurrentGpu === false ? "No cabe" : "Cabe"} en GPU #{memoryEstimate.gpuIndex ?? "-"}
-                              </span>
-                              <span className="text-muted-foreground">
-                                {mbToGb(usedMb)} / {mbToGb(capMb)} GB
-                              </span>
-                            </div>
-                            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div className="space-y-3 text-sm">
+                    {(estimatingMemory || probingMemory) && (
+                      <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                        {probingMemory
+                          ? "Ejecutando validación real del engine..."
+                          : "Recalculando estimación..."}
+                      </div>
+                    )}
+                    {memoryEstimate &&
+                      (() => {
+                        const usedMb =
+                          memoryEstimate.modelLoadingMemoryMb ??
+                          memoryEstimate.estimatedEngineMbPerGpu ??
+                          memoryEstimate.estimatedWeightsMb;
+                        const capMb = memoryEstimate.totalVramMb;
+                        const fraction =
+                          usedMb != null && capMb
+                            ? Math.min(1, usedMb / capMb)
+                            : 0;
+                        const barColor =
+                          memoryEstimate.fitsCurrentGpu === false
+                            ? "bg-red-500"
+                            : fraction > 0.85
+                              ? "bg-amber-500"
+                              : "bg-emerald-500";
+                        return (
+                          <>
+                            {usedMb != null && capMb != null && (
                               <div
-                                className={`h-full transition-all ${barColor}`}
-                                style={{ width: `${Math.max(4, fraction * 100)}%` }}
-                              />
+                                className={`rounded-md border px-3 py-2 text-xs ${
+                                  memoryEstimate.fitsCurrentGpu === false
+                                    ? "border-red-500/30 bg-red-500/5"
+                                    : "border-emerald-500/30 bg-emerald-500/5"
+                                }`}
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="font-medium">
+                                    {memoryEstimate.fitsCurrentGpu === false
+                                      ? "No cabe"
+                                      : "Cabe"}{" "}
+                                    en GPU #{memoryEstimate.gpuIndex ?? "-"}
+                                  </span>
+                                  <span className="text-muted-foreground">
+                                    {mbToGb(usedMb)} / {mbToGb(capMb)} GB
+                                  </span>
+                                </div>
+                                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                  <div
+                                    className={`h-full transition-all ${barColor}`}
+                                    style={{
+                                      width: `${Math.max(4, fraction * 100)}%`,
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                              {memoryEstimate.estimatedWeightsMb != null && (
+                                <Chip
+                                  label="Pesos"
+                                  value={`${mbToGb(memoryEstimate.estimatedWeightsMb)} GB`}
+                                />
+                              )}
+                              {memoryEstimate.estimatedEngineMbPerGpu !=
+                                null && (
+                                <Chip
+                                  label="Engine/GPU"
+                                  value={`${mbToGb(memoryEstimate.estimatedEngineMbPerGpu)} GB`}
+                                />
+                              )}
+                              {memoryEstimate.estimatedKvCacheMb != null && (
+                                <Chip
+                                  label="KV cache"
+                                  value={`${memoryEstimate.estimatedKvCacheMb} MB`}
+                                />
+                              )}
+                              {memoryEstimate.requestedContextLength !=
+                                null && (
+                                <Chip
+                                  label="Contexto pedido"
+                                  value={formatTokenCount(
+                                    memoryEstimate.requestedContextLength,
+                                  )}
+                                />
+                              )}
+                              {memoryEstimate.estimatedMaxContextLength !=
+                                null && (
+                                <Chip
+                                  label="Contexto máximo"
+                                  value={formatTokenCount(
+                                    memoryEstimate.estimatedMaxContextLength,
+                                  )}
+                                />
+                              )}
+                              {memoryEstimate.maximumConcurrency != null && (
+                                <Chip
+                                  label="Concurrencia máx."
+                                  value={`${memoryEstimate.maximumConcurrency.toFixed(2)}x`}
+                                />
+                              )}
+                              {memoryEstimate.budgetVramMb != null && (
+                                <Chip
+                                  label="Budget VRAM"
+                                  value={`${mbToGb(memoryEstimate.budgetVramMb)} GB`}
+                                />
+                              )}
+                              {memoryEstimate.enginePresent != null && (
+                                <Chip
+                                  label="Engine presente"
+                                  value={
+                                    memoryEstimate.enginePresent ? "sí" : "no"
+                                  }
+                                />
+                              )}
                             </div>
-                          </div>
-                        )}
 
-                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                          {memoryEstimate.estimatedWeightsMb != null && (
-                            <Chip label="Pesos" value={`${mbToGb(memoryEstimate.estimatedWeightsMb)} GB`} />
-                          )}
-                          {memoryEstimate.estimatedEngineMbPerGpu != null && (
-                            <Chip label="Engine/GPU" value={`${mbToGb(memoryEstimate.estimatedEngineMbPerGpu)} GB`} />
-                          )}
-                          {memoryEstimate.estimatedKvCacheMb != null && (
-                            <Chip label="KV cache" value={`${memoryEstimate.estimatedKvCacheMb} MB`} />
-                          )}
-                          {memoryEstimate.requestedContextLength != null && (
-                            <Chip label="Contexto pedido" value={formatTokenCount(memoryEstimate.requestedContextLength)} />
-                          )}
-                          {memoryEstimate.estimatedMaxContextLength != null && (
-                            <Chip label="Contexto máximo" value={formatTokenCount(memoryEstimate.estimatedMaxContextLength)} />
-                          )}
-                          {memoryEstimate.maximumConcurrency != null && (
-                            <Chip label="Concurrencia máx." value={`${memoryEstimate.maximumConcurrency.toFixed(2)}x`} />
-                          )}
-                          {memoryEstimate.budgetVramMb != null && (
-                            <Chip label="Budget VRAM" value={`${mbToGb(memoryEstimate.budgetVramMb)} GB`} />
-                          )}
-                          {memoryEstimate.enginePresent != null && (
-                            <Chip label="Engine presente" value={memoryEstimate.enginePresent ? "sí" : "no"} />
-                          )}
-                        </div>
+                            <div className="text-[11px] text-muted-foreground">
+                              {`fuente: ${MEMORY_ESTIMATE_SOURCE_LABELS[memoryEstimate.source]} · estado: ${memoryEstimate.status}`}
+                            </div>
 
-                        <div className="text-[11px] text-muted-foreground">
-                          {`fuente: ${MEMORY_ESTIMATE_SOURCE_LABELS[memoryEstimate.source]} · estado: ${memoryEstimate.status}`}
-                        </div>
-
-                        {memoryEstimate.warning && <p className="text-xs text-amber-300">{memoryEstimate.warning}</p>}
-                        {memoryEstimate.notes.length > 0 && (
-                          <div className="space-y-1 text-xs text-muted-foreground">
-                            {memoryEstimate.notes.map((note, index) => (
-                              <p key={`memory-note-${index}`}>{note}</p>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    )
-                  })()}
-                  {memoryEstimateError && <p className="text-xs text-amber-300">{memoryEstimateError}</p>}
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => void estimateMemory(false)}
-                      className="rounded-md border border-border px-3 py-2 text-xs text-foreground hover:bg-muted"
-                    >
-                      Recalcular estimación
-                    </button>
-                    {model.backendType === "vllm" && (
+                            {memoryEstimate.warning && (
+                              <p className="text-xs text-amber-300">
+                                {memoryEstimate.warning}
+                              </p>
+                            )}
+                            {memoryEstimate.notes.length > 0 && (
+                              <div className="space-y-1 text-xs text-muted-foreground">
+                                {memoryEstimate.notes.map((note, index) => (
+                                  <p key={`memory-note-${index}`}>{note}</p>
+                                ))}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    {memoryEstimateError && (
+                      <p className="text-xs text-amber-300">
+                        {memoryEstimateError}
+                      </p>
+                    )}
+                    <div>
                       <button
                         type="button"
-                        onClick={() => void estimateMemory(true)}
-                        className="ml-2 rounded-md border border-sky-500/40 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/10"
+                        onClick={() => void estimateMemory(false)}
+                        className="rounded-md border border-border px-3 py-2 text-xs text-foreground hover:bg-muted"
                       >
-                        Validar con engine
+                        Recalcular estimación
                       </button>
-                    )}
+                      {model.backendType === "vllm" && (
+                        <button
+                          type="button"
+                          onClick={() => void estimateMemory(true)}
+                          className="ml-2 rounded-md border border-sky-500/40 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/10"
+                        >
+                          Validar con engine
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </FieldSection>
-            )}
+                </FieldSection>
+              )}
 
             {model?.backendType === "vllm" && (
               <>
@@ -1175,7 +1535,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <div className="space-y-3 text-sm">
                       <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-emerald-100">
                         {`recipe=${recipeId}`}
-                        {recipeModelImpl ? ` · model_impl=${recipeModelImpl}` : ""}
+                        {recipeModelImpl
+                          ? ` · model_impl=${recipeModelImpl}`
+                          : ""}
                         {recipeRunner ? ` · runner=${recipeRunner}` : ""}
                       </div>
                       {recipeNotes.length > 0 && (
@@ -1188,7 +1550,10 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       {Object.keys(recipeSuggestedConfig).length > 0 && (
                         <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
                           {Object.entries(recipeSuggestedConfig)
-                            .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+                            .map(
+                              ([key, value]) =>
+                                `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`,
+                            )
                             .join(", ")}
                         </div>
                       )}
@@ -1196,7 +1561,10 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
                           tuning:{" "}
                           {Object.entries(recipeSuggestedTuning)
-                            .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+                            .map(
+                              ([key, value]) =>
+                                `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`,
+                            )
                             .join(", ")}
                         </div>
                       )}
@@ -1222,7 +1590,11 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   </FieldSection>
                 )}
 
-                {(probeStatus || probeRecommendedModelImpl || probeRecommendedRunner || probeReason || probeObservedAt) && (
+                {(probeStatus ||
+                  probeRecommendedModelImpl ||
+                  probeRecommendedRunner ||
+                  probeReason ||
+                  probeObservedAt) && (
                   <FieldSection
                     title="Probe"
                     description="Recomendacion verificada por probe para esta instalacion."
@@ -1233,12 +1605,17 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                           {`probe=${probeStatusLabel}`}
                         </div>
                       )}
-                      {(probeRecommendedModelImpl || probeRecommendedRunner) && (
+                      {(probeRecommendedModelImpl ||
+                        probeRecommendedRunner) && (
                         <>
                           <div className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
                             {`recomendacion verificada`}
-                            {probeRecommendedModelImpl ? ` · model_impl=${probeRecommendedModelImpl}` : ""}
-                            {probeRecommendedRunner ? ` · runner=${probeRecommendedRunner}` : ""}
+                            {probeRecommendedModelImpl
+                              ? ` · model_impl=${probeRecommendedModelImpl}`
+                              : ""}
+                            {probeRecommendedRunner
+                              ? ` · runner=${probeRecommendedRunner}`
+                              : ""}
                           </div>
                           <div>
                             <button
@@ -1253,21 +1630,29 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       )}
                       {differsFromProbe && (
                         <p className="text-xs text-amber-300">
-                          La configuracion activa difiere de la recomendacion verificada por probe.
+                          La configuracion activa difiere de la recomendacion
+                          verificada por probe.
                         </p>
                       )}
                       {recipeDiffersFromProbe && (
                         <p className="text-xs text-amber-300">
-                          La recipe base y la recomendacion final del probe no coinciden.
+                          La recipe base y la recomendacion final del probe no
+                          coinciden.
                         </p>
                       )}
                       {probeObservedAt && (
                         <p className="text-xs text-muted-foreground">{`observado=${probeObservedAt}`}</p>
                       )}
                       {probeOverrideHint && (
-                        <p className="text-xs text-amber-300">{probeOverrideHint}</p>
+                        <p className="text-xs text-amber-300">
+                          {probeOverrideHint}
+                        </p>
                       )}
-                      {probeReason && <p className="text-xs text-muted-foreground">{probeReason}</p>}
+                      {probeReason && (
+                        <p className="text-xs text-muted-foreground">
+                          {probeReason}
+                        </p>
+                      )}
                     </div>
                   </FieldSection>
                 )}
@@ -1276,22 +1661,36 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   title="vLLM Runtime"
                   description="Solo knobs con impacto operativo directo: compatibilidad, contexto, memoria y concurrencia."
                 >
-                  {useCaseActive && <UseCaseManagedNotice fields="Max model len y KV cache" />}
+                  {useCaseActive && (
+                    <UseCaseManagedNotice fields="Max model len y KV cache" />
+                  )}
                   {context && (
                     <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
-                      nativo {formatTokenCount(context.nativeContext)} · configurado {formatTokenCount(context.configuredContext)} ·
-                      ventana operativa {formatTokenCount(context.maxInputTokens)} input / {formatTokenCount(context.maxOutputTokens)} output.
-                      {" "}Input y output comparten la misma ventana total.
+                      <span className="font-medium text-foreground">
+                        Contexto del modelo:
+                      </span>{" "}
+                      nativo {formatTokenCount(context.nativeContext)} ·
+                      configurado {formatTokenCount(context.configuredContext)}{" "}
+                      · ventana operativa{" "}
+                      {formatTokenCount(context.maxInputTokens)} input /{" "}
+                      {formatTokenCount(context.maxOutputTokens)} output. Input
+                      y output comparten la misma ventana total.
                     </div>
                   )}
 
                   <div className="grid gap-4 md:grid-cols-2">
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Model impl</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Model impl
+                      </span>
                       <select
                         value={modelImpl}
-                        onChange={(event) => setModelImpl(event.target.value as "auto" | "vllm" | "transformers" | "")}
+                        onChange={(event) =>
+                          setModelImpl(
+                            event.target.value as
+                              "auto" | "vllm" | "transformers" | "",
+                          )
+                        }
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       >
                         <option value="">heredar / auto</option>
@@ -1299,38 +1698,59 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <option value="vllm">vllm</option>
                         <option value="transformers">transformers</option>
                       </select>
-                      <FieldHint>`transformers` amplia cobertura; `vllm` fuerza la implementacion nativa si sabes que el modelo la soporta.</FieldHint>
+                      <FieldHint>
+                        `transformers` amplia cobertura; `vllm` fuerza la
+                        implementacion nativa si sabes que el modelo la soporta.
+                      </FieldHint>
                     </label>
 
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Runner</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Runner
+                      </span>
                       <select
                         value={runner}
-                        onChange={(event) => setRunner(event.target.value as "generate" | "pooling" | "")}
+                        onChange={(event) =>
+                          setRunner(
+                            event.target.value as "generate" | "pooling" | "",
+                          )
+                        }
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       >
                         <option value="">autodetectar</option>
                         <option value="generate">generate</option>
                         <option value="pooling">pooling</option>
                       </select>
-                      <FieldHint>`pooling` es para embeddings/rerank; no sirve chat generativo.</FieldHint>
+                      <FieldHint>
+                        `pooling` es para embeddings/rerank; no sirve chat
+                        generativo.
+                      </FieldHint>
                     </label>
 
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Tensor parallel size</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Tensor parallel size
+                      </span>
                       <input
                         type="number"
                         min="1"
                         value={tensorParallelSize}
-                        onChange={(event) => setTensorParallelSize(event.target.value)}
+                        onChange={(event) =>
+                          setTensorParallelSize(event.target.value)
+                        }
                         placeholder="heredar / auto"
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       />
-                      <FieldHint>Cuantas GPUs reparte el modelo. Si lo dejas vacio, `oCabra` usa lo que asigne el scheduler.</FieldHint>
+                      <FieldHint>
+                        Cuantas GPUs reparte el modelo. Si lo dejas vacio,
+                        `oCabra` usa lo que asigne el scheduler.
+                      </FieldHint>
                     </label>
 
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Max model len</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Max model len
+                      </span>
                       <input
                         type="number"
                         min="1"
@@ -1340,13 +1760,20 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         placeholder="usar el del modelo"
                         className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                       />
-                      <FieldHint>Bajarlo ayuda a que un modelo quepa y reduce presion de KV cache.</FieldHint>
+                      <FieldHint>
+                        Bajarlo ayuda a que un modelo quepa y reduce presion de
+                        KV cache.
+                      </FieldHint>
                     </label>
 
                     <PresetNumberField
                       label="GPU memory utilization"
                       value={gpuMemoryUtilization}
-                      onValueChange={(value) => setGpuMemoryUtilization(clampDecimalInput(value, 0.1, 0.99))}
+                      onValueChange={(value) =>
+                        setGpuMemoryUtilization(
+                          clampDecimalInput(value, 0.1, 0.99),
+                        )
+                      }
                       presets={VLLM_GPU_MEMORY_UTILIZATION_PRESETS}
                       placeholder="heredar global"
                       min={0.1}
@@ -1358,7 +1785,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <PresetNumberField
                       label="Max concurrent sequences"
                       value={maxNumSeqs}
-                      onValueChange={(value) => setMaxNumSeqs(clampIntegerInput(value, 1))}
+                      onValueChange={(value) =>
+                        setMaxNumSeqs(clampIntegerInput(value, 1))
+                      }
                       presets={VLLM_MAX_NUM_SEQS_PRESETS}
                       placeholder="heredar global"
                       min={1}
@@ -1371,7 +1800,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <input
                       type="checkbox"
                       checked={enablePrefixCaching}
-                      onChange={(event) => setEnablePrefixCaching(event.target.checked)}
+                      onChange={(event) =>
+                        setEnablePrefixCaching(event.target.checked)
+                      }
                     />
                     prefix caching
                   </label>
@@ -1383,42 +1814,60 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 >
                   <div className="grid gap-4 md:grid-cols-3">
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">image</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        image
+                      </span>
                       <input
                         type="number"
                         min="0"
                         step="1"
                         value={limitMmImage}
                         onChange={(event) =>
-                          setLimitMmImage(event.target.value === "" ? "" : clampIntegerInput(event.target.value, 0))
+                          setLimitMmImage(
+                            event.target.value === ""
+                              ? ""
+                              : clampIntegerInput(event.target.value, 0),
+                          )
                         }
                         placeholder="0"
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       />
                     </label>
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">audio</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        audio
+                      </span>
                       <input
                         type="number"
                         min="0"
                         step="1"
                         value={limitMmAudio}
                         onChange={(event) =>
-                          setLimitMmAudio(event.target.value === "" ? "" : clampIntegerInput(event.target.value, 0))
+                          setLimitMmAudio(
+                            event.target.value === ""
+                              ? ""
+                              : clampIntegerInput(event.target.value, 0),
+                          )
                         }
                         placeholder="0"
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       />
                     </label>
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">video</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        video
+                      </span>
                       <input
                         type="number"
                         min="0"
                         step="1"
                         value={limitMmVideo}
                         onChange={(event) =>
-                          setLimitMmVideo(event.target.value === "" ? "" : clampIntegerInput(event.target.value, 0))
+                          setLimitMmVideo(
+                            event.target.value === ""
+                              ? ""
+                              : clampIntegerInput(event.target.value, 0),
+                          )
                         }
                         placeholder="0"
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
@@ -1426,7 +1875,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </label>
                   </div>
                   <FieldHint>
-                    Valores en 0 o vacíos se omiten del payload. Si las tres están en 0, no se envía `limit_mm_per_prompt`.
+                    Valores en 0 o vacíos se omiten del payload. Si las tres
+                    están en 0, no se envía `limit_mm_per_prompt`.
                   </FieldHint>
                 </FieldSection>
 
@@ -1440,36 +1890,50 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <input
                           type="checkbox"
                           checked={trustRemoteCode}
-                          onChange={(event) => setTrustRemoteCode(event.target.checked)}
+                          onChange={(event) =>
+                            setTrustRemoteCode(event.target.checked)
+                          }
                         />
                         trust remote code
                       </label>
 
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">Tool call parser</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          Tool call parser
+                        </span>
                         <input
                           value={toolCallParser}
-                          onChange={(event) => setToolCallParser(event.target.value)}
+                          onChange={(event) =>
+                            setToolCallParser(event.target.value)
+                          }
                           placeholder="hermes, qwen3_json, granite..."
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
 
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">Reasoning parser</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          Reasoning parser
+                        </span>
                         <input
                           value={reasoningParser}
-                          onChange={(event) => setReasoningParser(event.target.value)}
+                          onChange={(event) =>
+                            setReasoningParser(event.target.value)
+                          }
                           placeholder="deepseek_r1, qwen3..."
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
 
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">HF overrides (JSON)</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          HF overrides (JSON)
+                        </span>
                         <textarea
                           value={hfOverrides}
-                          onChange={(event) => setHfOverrides(event.target.value)}
+                          onChange={(event) =>
+                            setHfOverrides(event.target.value)
+                          }
                           placeholder='{"architectures":["LlamaForCausalLM"]}'
                           rows={4}
                           className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
@@ -1478,15 +1942,22 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </div>
 
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Chat template</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Chat template
+                      </span>
                       <textarea
                         value={chatTemplate}
-                        onChange={(event) => setChatTemplate(event.target.value)}
+                        onChange={(event) =>
+                          setChatTemplate(event.target.value)
+                        }
                         placeholder="ruta a template o contenido inline"
                         rows={4}
                         className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs"
                       />
-                      <FieldHint>Solo para repos que no traen `chat_template` correcto o cuando el probe lo pida.</FieldHint>
+                      <FieldHint>
+                        Solo para repos que no traen `chat_template` correcto o
+                        cuando el probe lo pida.
+                      </FieldHint>
                     </label>
                   </FieldSection>
                 )}
@@ -1500,29 +1971,40 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               >
                 {context && (
                   <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                    <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
-                    nativo {formatTokenCount(context.nativeContext)} · configurado {formatTokenCount(context.configuredContext)}.
+                    <span className="font-medium text-foreground">
+                      Contexto del modelo:
+                    </span>{" "}
+                    nativo {formatTokenCount(context.nativeContext)} ·
+                    configurado {formatTokenCount(context.configuredContext)}.
                   </div>
                 )}
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">Tensor parallel size</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      Tensor parallel size
+                    </span>
                     <input
                       type="number"
                       min="1"
                       value={sglangTensorParallelSize}
-                      onChange={(event) => setSGLangTensorParallelSize(event.target.value)}
+                      onChange={(event) =>
+                        setSGLangTensorParallelSize(event.target.value)
+                      }
                       placeholder="auto"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
                   </label>
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">Context length</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      Context length
+                    </span>
                     <input
                       type="number"
                       min="1"
                       value={sglangContextLength}
-                      onChange={(event) => setSGLangContextLength(event.target.value)}
+                      onChange={(event) =>
+                        setSGLangContextLength(event.target.value)
+                      }
                       placeholder="usar el del modelo"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
@@ -1530,7 +2012,11 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   <PresetNumberField
                     label="Mem fraction static"
                     value={sglangMemFractionStatic}
-                    onValueChange={(value) => setSGLangMemFractionStatic(clampDecimalInput(value, 0.1, 0.99))}
+                    onValueChange={(value) =>
+                      setSGLangMemFractionStatic(
+                        clampDecimalInput(value, 0.1, 0.99),
+                      )
+                    }
                     presets={[0.7, 0.75, 0.8, 0.85, 0.9]}
                     placeholder="global"
                     min={0.1}
@@ -1544,7 +2030,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <input
                       type="checkbox"
                       checked={sglangTrustRemoteCode}
-                      onChange={(event) => setSGLangTrustRemoteCode(event.target.checked)}
+                      onChange={(event) =>
+                        setSGLangTrustRemoteCode(event.target.checked)
+                      }
                     />
                     trust remote code
                   </label>
@@ -1552,7 +2040,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <input
                       type="checkbox"
                       checked={disableRadixCache}
-                      onChange={(event) => setDisableRadixCache(event.target.checked)}
+                      onChange={(event) =>
+                        setDisableRadixCache(event.target.checked)
+                      }
                     />
                     disable radix cache
                   </label>
@@ -1565,28 +2055,41 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 title="llama.cpp Runtime"
                 description="Lo relevante aquí es cuánto sube a GPU, el contexto y si actúa como modelo de embeddings."
               >
-                {useCaseActive && <UseCaseManagedNotice fields="Context size, parallel slots y cache type K/V" />}
+                {useCaseActive && (
+                  <UseCaseManagedNotice fields="Context size, parallel slots y cache type K/V" />
+                )}
                 {context && (
                   <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                    <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
-                    nativo {formatTokenCount(context.nativeContext)} · configurado {formatTokenCount(context.configuredContext)}.
+                    <span className="font-medium text-foreground">
+                      Contexto del modelo:
+                    </span>{" "}
+                    nativo {formatTokenCount(context.nativeContext)} ·
+                    configurado {formatTokenCount(context.configuredContext)}.
                   </div>
                 )}
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">GPU layers</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      GPU layers
+                    </span>
                     <input
                       type="number"
                       min="0"
                       value={llamaGpuLayers}
-                      onChange={(event) => setLlamaGpuLayers(event.target.value)}
+                      onChange={(event) =>
+                        setLlamaGpuLayers(event.target.value)
+                      }
                       placeholder="global"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
-                    <FieldHint>`0` fuerza CPU; subirlo mueve más capas a GPU.</FieldHint>
+                    <FieldHint>
+                      `0` fuerza CPU; subirlo mueve más capas a GPU.
+                    </FieldHint>
                   </label>
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">Context size</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      Context size
+                    </span>
                     <input
                       type="number"
                       min="1"
@@ -1603,7 +2106,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <input
                       type="checkbox"
                       checked={llamaFlashAttn}
-                      onChange={(event) => setLlamaFlashAttn(event.target.checked)}
+                      onChange={(event) =>
+                        setLlamaFlashAttn(event.target.checked)
+                      }
                     />
                     flash attention
                   </label>
@@ -1611,16 +2116,76 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     <input
                       type="checkbox"
                       checked={llamaEmbedding}
-                      onChange={(event) => setLlamaEmbedding(event.target.checked)}
+                      onChange={(event) =>
+                        setLlamaEmbedding(event.target.checked)
+                      }
                     />
                     embedding mode
                   </label>
+                </div>
+                <div className="space-y-3 rounded-md border border-border/50 bg-muted/20 p-3">
+                  <div>
+                    <h4 className="text-xs font-medium text-foreground">
+                      Visión
+                    </h4>
+                    <p className="text-xs text-muted-foreground">
+                      Controla cuándo se carga el projector multimodal y su
+                      coste de VRAM.
+                    </p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">
+                        Projector multimodal (mmproj)
+                      </span>
+                      <input
+                        type="text"
+                        value={llamaMmprojModelId}
+                        onChange={(event) =>
+                          setLlamaMmprojModelId(event.target.value)
+                        }
+                        placeholder="ruta o model ID del mmproj"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-muted-foreground">
+                        Política de visión
+                      </span>
+                      <select
+                        value={llamaVisionMode}
+                        onChange={(event) =>
+                          setLlamaVisionMode(
+                            event.target.value as LlamaCppVisionMode,
+                          )
+                        }
+                        className="w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        <option value="disabled">Desactivada</option>
+                        <option value="enabled">Activada al cargar</option>
+                        <option value="on_demand">Bajo demanda</option>
+                      </select>
+                    </label>
+                  </div>
+                  <FieldHint>
+                    Bajo demanda arranca solo con texto y carga el projector al
+                    recibir la primera imagen; permanece activo hasta descargar
+                    el worker.
+                  </FieldHint>
+                  {llamaVisionMode !== "disabled" &&
+                    llamaMmprojModelId.trim() === "" && (
+                      <p className="text-xs text-amber-500">
+                        Esta política requiere un projector multimodal.
+                      </p>
+                    )}
                 </div>
                 <details
                   className="rounded-md border border-border/70 bg-background/40"
                   open={llamaAdvancedOpen}
                   onToggle={(event) =>
-                    setLlamaAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)
+                    setLlamaAdvancedOpen(
+                      (event.currentTarget as HTMLDetailsElement).open,
+                    )
                   }
                 >
                   <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">
@@ -1629,34 +2194,46 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   <div className="space-y-4 px-3 pb-3 pt-1">
                     <div className="grid gap-4 md:grid-cols-3">
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">Threads</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          Threads
+                        </span>
                         <input
                           type="number"
                           min="1"
                           value={llamaThreads}
-                          onChange={(event) => setLlamaThreads(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaThreads(event.target.value)
+                          }
                           placeholder="auto"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">Batch size</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          Batch size
+                        </span>
                         <input
                           type="number"
                           min="1"
                           value={llamaBatchSize}
-                          onChange={(event) => setLlamaBatchSize(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaBatchSize(event.target.value)
+                          }
                           placeholder="global"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">Ubatch size</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          Ubatch size
+                        </span>
                         <input
                           type="number"
                           min="1"
                           value={llamaUbatchSize}
-                          onChange={(event) => setLlamaUbatchSize(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaUbatchSize(event.target.value)
+                          }
                           placeholder="global"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
@@ -1664,7 +2241,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </div>
                     <div className="grid gap-4 md:grid-cols-2">
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">Seed</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          Seed
+                        </span>
                         <input
                           type="number"
                           value={llamaSeed}
@@ -1672,26 +2251,36 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                           placeholder="random"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
-                        <FieldHint>Fija la semilla del RNG para resultados reproducibles.</FieldHint>
+                        <FieldHint>
+                          Fija la semilla del RNG para resultados reproducibles.
+                        </FieldHint>
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">RoPE freq base</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          RoPE freq base
+                        </span>
                         <input
                           type="number"
                           step="0.1"
                           value={llamaRopeFreqBase}
-                          onChange={(event) => setLlamaRopeFreqBase(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaRopeFreqBase(event.target.value)
+                          }
                           placeholder="del modelo"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">RoPE freq scale</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          RoPE freq scale
+                        </span>
                         <input
                           type="number"
                           step="0.1"
                           value={llamaRopeFreqScale}
-                          onChange={(event) => setLlamaRopeFreqScale(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaRopeFreqScale(event.target.value)
+                          }
                           placeholder="del modelo"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
@@ -1702,7 +2291,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <input
                           type="checkbox"
                           checked={llamaMlock}
-                          onChange={(event) => setLlamaMlock(event.target.checked)}
+                          onChange={(event) =>
+                            setLlamaMlock(event.target.checked)
+                          }
                         />
                         mlock (pin VRAM)
                       </label>
@@ -1710,7 +2301,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <input
                           type="checkbox"
                           checked={llamaMmap}
-                          onChange={(event) => setLlamaMmap(event.target.checked)}
+                          onChange={(event) =>
+                            setLlamaMmap(event.target.checked)
+                          }
                         />
                         mmap (recomendado)
                       </label>
@@ -1718,7 +2311,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <input
                           type="checkbox"
                           checked={llamaNoKvOffload}
-                          onChange={(event) => setLlamaNoKvOffload(event.target.checked)}
+                          onChange={(event) =>
+                            setLlamaNoKvOffload(event.target.checked)
+                          }
                         />
                         no KV offload
                       </label>
@@ -1728,18 +2323,25 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 {/* Sprint 17.2 — KV cache quantization */}
                 <div className="space-y-3 rounded-md border border-border/50 bg-muted/20 p-3">
                   <div>
-                    <h4 className="text-xs font-medium text-foreground">KV cache</h4>
+                    <h4 className="text-xs font-medium text-foreground">
+                      KV cache
+                    </h4>
                     <p className="text-xs text-muted-foreground">
                       Cuantizar la KV cache reduce VRAM por token de contexto.
-                      `q8_0` ahorra ~50% sin pérdida apreciable; `q4_0` baja a un cuarto a costa de algo de calidad.
+                      `q8_0` ahorra ~50% sin pérdida apreciable; `q4_0` baja a
+                      un cuarto a costa de algo de calidad.
                     </p>
                   </div>
                   <div className="grid gap-3 md:grid-cols-2">
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">cache_type_k</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        cache_type_k
+                      </span>
                       <select
                         value={llamaCacheTypeK}
-                        onChange={(event) => setLlamaCacheTypeK(event.target.value)}
+                        onChange={(event) =>
+                          setLlamaCacheTypeK(event.target.value)
+                        }
                         disabled={useCaseActive}
                         className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
                         title="Tipo de cuantización de la cache K (keys)."
@@ -1753,13 +2355,22 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       </select>
                     </label>
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">cache_type_v</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        cache_type_v
+                      </span>
                       <select
                         value={llamaCacheTypeV}
-                        onChange={(event) => setLlamaCacheTypeV(event.target.value)}
+                        onChange={(event) =>
+                          setLlamaCacheTypeV(event.target.value)
+                        }
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                         title="Tipo de cuantización de la cache V (values). Requiere flash attention si != f16."
-                        disabled={useCaseActive || (!llamaFlashAttn && llamaCacheTypeV !== "" && llamaCacheTypeV !== "f16")}
+                        disabled={
+                          useCaseActive ||
+                          (!llamaFlashAttn &&
+                            llamaCacheTypeV !== "" &&
+                            llamaCacheTypeV !== "f16")
+                        }
                       >
                         <option value="">auto (f16)</option>
                         {LLAMA_KV_CACHE_TYPES.map((value) => (
@@ -1772,11 +2383,15 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                           </option>
                         ))}
                       </select>
-                      {!llamaFlashAttn && llamaCacheTypeV !== "" && llamaCacheTypeV !== "f16" && (
-                        <FieldHint>
-                          cache_type_v cuantizado requiere `flash attention` activo. Marca el checkbox de arriba o vuelve a `f16`.
-                        </FieldHint>
-                      )}
+                      {!llamaFlashAttn &&
+                        llamaCacheTypeV !== "" &&
+                        llamaCacheTypeV !== "f16" && (
+                          <FieldHint>
+                            cache_type_v cuantizado requiere `flash attention`
+                            activo. Marca el checkbox de arriba o vuelve a
+                            `f16`.
+                          </FieldHint>
+                        )}
                     </label>
                   </div>
                 </div>
@@ -1789,44 +2404,54 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 description="Reparto de capas entre GPUs, GPU principal y exclusión selectiva de dispositivos."
               >
                 <div className="space-y-2">
-                  <span className="block text-sm text-muted-foreground">GPUs habilitadas</span>
+                  <span className="block text-sm text-muted-foreground">
+                    GPUs habilitadas
+                  </span>
                   <div className="space-y-2">
                     {gpus.map((gpu) => {
-                      const disabled = llamaDisabledGpus.has(gpu.index)
+                      const disabled = llamaDisabledGpus.has(gpu.index);
                       return (
-                        <label key={gpu.index} className="flex items-center gap-2 text-sm">
+                        <label
+                          key={gpu.index}
+                          className="flex items-center gap-2 text-sm"
+                        >
                           <input
                             type="checkbox"
                             checked={!disabled}
                             onChange={(event) => {
                               setLlamaDisabledGpus((prev) => {
-                                const next = new Set(prev)
+                                const next = new Set(prev);
                                 if (event.target.checked) {
-                                  next.delete(gpu.index)
+                                  next.delete(gpu.index);
                                 } else {
-                                  next.add(gpu.index)
+                                  next.add(gpu.index);
                                 }
-                                return next
-                              })
+                                return next;
+                              });
                             }}
                           />
                           <span className="font-medium">GPU {gpu.index}</span>
-                          <span className="text-muted-foreground">{gpu.name}</span>
+                          <span className="text-muted-foreground">
+                            {gpu.name}
+                          </span>
                           <span className="text-xs text-muted-foreground">
                             ({gpu.totalVramMb} MB)
                           </span>
                         </label>
-                      )
+                      );
                     })}
                   </div>
                   <FieldHint>
-                    Las GPUs deshabilitadas se excluyen de `CUDA_VISIBLE_DEVICES`.
+                    Las GPUs deshabilitadas se excluyen de
+                    `CUDA_VISIBLE_DEVICES`.
                   </FieldHint>
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <fieldset className="space-y-2">
-                    <legend className="text-sm text-muted-foreground">Estrategia de split</legend>
+                    <legend className="text-sm text-muted-foreground">
+                      Estrategia de split
+                    </legend>
                     {(
                       [
                         ["evenly", "Even split (auto-balanceado por VRAM)"],
@@ -1834,7 +2459,10 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         ["single", "Single GPU"],
                       ] as const
                     ).map(([value, label]) => (
-                      <label key={value} className="flex items-center gap-2 text-sm">
+                      <label
+                        key={value}
+                        className="flex items-center gap-2 text-sm"
+                      >
                         <input
                           type="radio"
                           name="llama-split-strategy"
@@ -1846,18 +2474,25 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       </label>
                     ))}
                     <FieldHint>
-                      `Even split` calcula ratios proporcionales al VRAM total de cada GPU al
-                      cargar el modelo. `Single GPU` fija `split_mode=none`.
+                      `Even split` calcula ratios proporcionales al VRAM total
+                      de cada GPU al cargar el modelo. `Single GPU` fija
+                      `split_mode=none`.
                     </FieldHint>
                   </fieldset>
 
                   <div className="space-y-3">
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Main GPU</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Main GPU
+                      </span>
                       <select
                         value={llamaMainGpu === "" ? "" : String(llamaMainGpu)}
                         onChange={(event) =>
-                          setLlamaMainGpu(event.target.value === "" ? "" : Number(event.target.value))
+                          setLlamaMainGpu(
+                            event.target.value === ""
+                              ? ""
+                              : Number(event.target.value),
+                          )
                         }
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       >
@@ -1871,16 +2506,21 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                           ))}
                       </select>
                       <FieldHint>
-                        GPU que aloja los tensores no repartidos. Mapea a `--main-gpu`.
+                        GPU que aloja los tensores no repartidos. Mapea a
+                        `--main-gpu`.
                       </FieldHint>
                     </label>
 
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Split mode</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Split mode
+                      </span>
                       <select
                         value={llamaSplitMode}
                         onChange={(event) =>
-                          setLlamaSplitMode(event.target.value as "layer" | "row" | "none" | "")
+                          setLlamaSplitMode(
+                            event.target.value as "layer" | "row" | "none" | "",
+                          )
                         }
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       >
@@ -1890,8 +2530,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         <option value="none">none</option>
                       </select>
                       <FieldHint>
-                        `layer` reparte por capas (default), `row` reparte dentro de cada capa,
-                        `none` mantiene todo en una GPU.
+                        `layer` reparte por capas (default), `row` reparte
+                        dentro de cada capa, `none` mantiene todo en una GPU.
                       </FieldHint>
                     </label>
                   </div>
@@ -1899,7 +2539,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
 
                 {llamaSplitStrategy === "custom" && (
                   <div className="space-y-2">
-                    <span className="block text-sm text-muted-foreground">Ratios por GPU</span>
+                    <span className="block text-sm text-muted-foreground">
+                      Ratios por GPU
+                    </span>
                     <div className="grid gap-2 md:grid-cols-2">
                       {gpus
                         .filter((gpu) => !llamaDisabledGpus.has(gpu.index))
@@ -1926,8 +2568,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         ))}
                     </div>
                     <FieldHint>
-                      Ratios sin normalizar. Por ejemplo `3,1` da el 75% a la primera GPU
-                      habilitada y el 25% a la segunda.
+                      Ratios sin normalizar. Por ejemplo `3,1` da el 75% a la
+                      primera GPU habilitada y el 25% a la segunda.
                     </FieldHint>
                   </div>
                 )}
@@ -1941,7 +2583,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               >
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">n_cpu_moe</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      n_cpu_moe
+                    </span>
                     <input
                       type="number"
                       min="0"
@@ -1953,7 +2597,8 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
                     <FieldHint>
-                      Número de capas MoE que se quedan en CPU. `0` desactiva el offload.
+                      Número de capas MoE que se quedan en CPU. `0` desactiva el
+                      offload.
                     </FieldHint>
                   </label>
 
@@ -1966,13 +2611,16 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </span>
                     <input
                       value={llamaOverrideTensor}
-                      onChange={(event) => setLlamaOverrideTensor(event.target.value)}
+                      onChange={(event) =>
+                        setLlamaOverrideTensor(event.target.value)
+                      }
                       placeholder="exps=CPU"
                       className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
                     />
                     <FieldHint>
-                      Texto libre forwarded a `--override-tensor`. Formato `regex=DEVICE`. Solo
-                      para usuarios que conocen los nombres de tensores del modelo.
+                      Texto libre forwarded a `--override-tensor`. Formato
+                      `regex=DEVICE`. Solo para usuarios que conocen los nombres
+                      de tensores del modelo.
                     </FieldHint>
                   </label>
                 </div>
@@ -1986,16 +2634,21 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               >
                 {speculativeCandidates.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
-                    No hay candidatos compatibles. Indexa otro GGUF con el mismo tokenizer
-                    (vocab_size + bos/eos) para habilitar speculative decoding.
+                    No hay candidatos compatibles. Indexa otro GGUF con el mismo
+                    tokenizer (vocab_size + bos/eos) para habilitar speculative
+                    decoding.
                   </p>
                 ) : (
                   <>
                     <label className="block text-sm">
-                      <span className="mb-1 block text-muted-foreground">Draft model</span>
+                      <span className="mb-1 block text-muted-foreground">
+                        Draft model
+                      </span>
                       <select
                         value={llamaDraftModelId}
-                        onChange={(event) => setLlamaDraftModelId(event.target.value)}
+                        onChange={(event) =>
+                          setLlamaDraftModelId(event.target.value)
+                        }
                         className="w-full rounded-md border border-border bg-background px-3 py-2"
                       >
                         <option value="">— ninguno —</option>
@@ -2008,36 +2661,48 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                     </label>
                     <div className="grid gap-3 md:grid-cols-3">
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">draft_n</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          draft_n
+                        </span>
                         <input
                           type="number"
                           min="1"
                           value={llamaDraftN}
-                          onChange={(event) => setLlamaDraftN(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaDraftN(event.target.value)
+                          }
                           placeholder="default"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">draft_min</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          draft_min
+                        </span>
                         <input
                           type="number"
                           min="0"
                           value={llamaDraftMin}
-                          onChange={(event) => setLlamaDraftMin(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaDraftMin(event.target.value)
+                          }
                           placeholder="default"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
                       </label>
                       <label className="block text-sm">
-                        <span className="mb-1 block text-muted-foreground">draft_p_min</span>
+                        <span className="mb-1 block text-muted-foreground">
+                          draft_p_min
+                        </span>
                         <input
                           type="number"
                           min="0"
                           max="1"
                           step="0.05"
                           value={llamaDraftPMin}
-                          onChange={(event) => setLlamaDraftPMin(event.target.value)}
+                          onChange={(event) =>
+                            setLlamaDraftPMin(event.target.value)
+                          }
                           placeholder="default"
                           className="w-full rounded-md border border-border bg-background px-3 py-2"
                         />
@@ -2055,7 +2720,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               >
                 <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                   {(["cuda", "rocm", "vulkan", "cpu"] as const).map((rt) => {
-                    const installed = installedRuntimes.has(rt)
+                    const installed = installedRuntimes.has(rt);
                     return (
                       <label
                         key={rt}
@@ -2079,7 +2744,7 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                         />
                         {rt}
                       </label>
-                    )
+                    );
                   })}
                   <label className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
                     <input
@@ -2097,17 +2762,23 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
             {model?.backendType === "llama_cpp" && (
               <FieldSection
                 title="Concurrencia"
-                description="Slots paralelos y batching continuo para servir múltiples peticiones a la vez."
+                description="Slots paralelos, pool KV compartido y batching continuo para servir múltiples peticiones a la vez."
               >
-                {useCaseActive && <UseCaseManagedNotice fields="parallel_slots" />}
+                {useCaseActive && (
+                  <UseCaseManagedNotice fields="parallel_slots" />
+                )}
                 <div className="grid gap-4 md:grid-cols-3">
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">parallel_slots</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      parallel_slots
+                    </span>
                     <input
                       type="number"
                       min="1"
                       value={llamaParallelSlots}
-                      onChange={(event) => setLlamaParallelSlots(event.target.value)}
+                      onChange={(event) =>
+                        setLlamaParallelSlots(event.target.value)
+                      }
                       disabled={useCaseActive}
                       placeholder="1"
                       className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
@@ -2121,21 +2792,67 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                       type="number"
                       min="0"
                       value={llamaKeepAlive}
-                      onChange={(event) => setLlamaKeepAlive(event.target.value)}
+                      onChange={(event) =>
+                        setLlamaKeepAlive(event.target.value)
+                      }
                       placeholder="global"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
                     <FieldHint>
-                      Override del idle eviction global. `0` desactiva la evicción.
+                      Override del idle eviction global. `0` desactiva la
+                      evicción.
                     </FieldHint>
                   </label>
                   <label className="inline-flex items-center gap-2 self-end pb-2 text-sm text-muted-foreground">
                     <input
                       type="checkbox"
                       checked={llamaContBatching}
-                      onChange={(event) => setLlamaContBatching(event.target.checked)}
+                      onChange={(event) =>
+                        setLlamaContBatching(event.target.checked)
+                      }
                     />
                     cont batching
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-muted-foreground">
+                      kv_unified
+                    </span>
+                    <select
+                      value={llamaKvUnified}
+                      onChange={(event) =>
+                        setLlamaKvUnified(
+                          event.target.value as "" | "true" | "false",
+                        )
+                      }
+                      className="w-full rounded-md border border-border bg-background px-3 py-2"
+                    >
+                      <option value="">default</option>
+                      <option value="true">activada</option>
+                      <option value="false">desactivada</option>
+                    </select>
+                    <FieldHint>
+                      Un solo pool físico repartido dinámicamente entre los
+                      slots.
+                    </FieldHint>
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-muted-foreground">
+                      kv_unified_per_slot
+                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={llamaKvUnifiedPerSlot}
+                      onChange={(event) =>
+                        setLlamaKvUnifiedPerSlot(event.target.value)
+                      }
+                      disabled={llamaKvUnified !== "true"}
+                      placeholder="sin límite por slot"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 disabled:opacity-50"
+                    />
+                    <FieldHint>
+                      Vacío permite a una petición usar todo el pool disponible.
+                    </FieldHint>
                   </label>
                 </div>
               </FieldSection>
@@ -2146,27 +2863,38 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 title="BitNet Runtime"
                 description="BitNet comparte casi todos los knobs relevantes con los runtimes GGUF: capas en GPU y contexto."
               >
-                {useCaseActive && <UseCaseManagedNotice fields="Context size" />}
+                {useCaseActive && (
+                  <UseCaseManagedNotice fields="Context size" />
+                )}
                 {context && (
                   <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                    <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
-                    nativo {formatTokenCount(context.nativeContext)} · configurado {formatTokenCount(context.configuredContext)}.
+                    <span className="font-medium text-foreground">
+                      Contexto del modelo:
+                    </span>{" "}
+                    nativo {formatTokenCount(context.nativeContext)} ·
+                    configurado {formatTokenCount(context.configuredContext)}.
                   </div>
                 )}
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">GPU layers</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      GPU layers
+                    </span>
                     <input
                       type="number"
                       min="0"
                       value={bitnetGpuLayers}
-                      onChange={(event) => setBitnetGpuLayers(event.target.value)}
+                      onChange={(event) =>
+                        setBitnetGpuLayers(event.target.value)
+                      }
                       placeholder="global"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
                   </label>
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">Context size</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      Context size
+                    </span>
                     <input
                       type="number"
                       min="1"
@@ -2182,7 +2910,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   <input
                     type="checkbox"
                     checked={bitnetFlashAttn}
-                    onChange={(event) => setBitnetFlashAttn(event.target.checked)}
+                    onChange={(event) =>
+                      setBitnetFlashAttn(event.target.checked)
+                    }
                   />
                   flash attention
                 </label>
@@ -2196,29 +2926,40 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
               >
                 {context && (
                   <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                    <span className="font-medium text-foreground">Contexto del modelo:</span>{" "}
-                    nativo {formatTokenCount(context.nativeContext)} · configurado {formatTokenCount(context.configuredContext)}.
+                    <span className="font-medium text-foreground">
+                      Contexto del modelo:
+                    </span>{" "}
+                    nativo {formatTokenCount(context.nativeContext)} ·
+                    configurado {formatTokenCount(context.configuredContext)}.
                   </div>
                 )}
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">Max batch size</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      Max batch size
+                    </span>
                     <input
                       type="number"
                       min="1"
                       value={trtMaxBatchSize}
-                      onChange={(event) => setTRTMaxBatchSize(event.target.value)}
+                      onChange={(event) =>
+                        setTRTMaxBatchSize(event.target.value)
+                      }
                       placeholder="global"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
                   </label>
                   <label className="block text-sm">
-                    <span className="mb-1 block text-muted-foreground">Context length</span>
+                    <span className="mb-1 block text-muted-foreground">
+                      Context length
+                    </span>
                     <input
                       type="number"
                       min="1"
                       value={trtContextLength}
-                      onChange={(event) => setTRTContextLength(event.target.value)}
+                      onChange={(event) =>
+                        setTRTContextLength(event.target.value)
+                      }
                       placeholder="deducido del engine"
                       className="w-full rounded-md border border-border bg-background px-3 py-2"
                     />
@@ -2228,7 +2969,9 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   <input
                     type="checkbox"
                     checked={trtTrustRemoteCode}
-                    onChange={(event) => setTRTTrustRemoteCode(event.target.checked)}
+                    onChange={(event) =>
+                      setTRTTrustRemoteCode(event.target.checked)
+                    }
                   />
                   trust remote code
                 </label>
@@ -2244,49 +2987,67 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                   <input
                     type="checkbox"
                     checked={whisperDiarizationEnabled}
-                    onChange={(event) => setWhisperDiarizationEnabled(event.target.checked)}
+                    onChange={(event) =>
+                      setWhisperDiarizationEnabled(event.target.checked)
+                    }
                   />
                   habilitar diarización
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-muted-foreground">Diarization model id</span>
+                  <span className="mb-1 block text-muted-foreground">
+                    Diarization model id
+                  </span>
                   <input
                     value={whisperDiarizationModelId}
-                    onChange={(event) => setWhisperDiarizationModelId(event.target.value)}
+                    onChange={(event) =>
+                      setWhisperDiarizationModelId(event.target.value)
+                    }
                     placeholder="pyannote/speaker-diarization-3.1"
                     className="w-full rounded-md border border-border bg-background px-3 py-2"
                   />
-                  <FieldHint>Déjalo vacío para usar el modelo por defecto del servidor.</FieldHint>
+                  <FieldHint>
+                    Déjalo vacío para usar el modelo por defecto del servidor.
+                  </FieldHint>
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-muted-foreground">num_workers</span>
+                  <span className="mb-1 block text-muted-foreground">
+                    num_workers
+                  </span>
                   <input
                     type="number"
                     min={1}
                     value={whisperNumWorkers}
-                    onChange={(event) => setWhisperNumWorkers(event.target.value)}
+                    onChange={(event) =>
+                      setWhisperNumWorkers(event.target.value)
+                    }
                     className="w-full rounded-md border border-border bg-background px-3 py-2"
                   />
                   <FieldHint>
-                    Peticiones concurrentes que CTranslate2 puede procesar a la vez. Los pesos se
-                    comparten entre workers (barato en VRAM), pero el límite real es de cómputo: con
-                    large-v3-turbo en una RTX 3060 medimos ~14 workers como el punto en que cada
-                    petición deja de ir a tiempo real. 5 deja margen cómodo por defecto.
+                    Peticiones concurrentes que CTranslate2 puede procesar a la
+                    vez. Los pesos se comparten entre workers (barato en VRAM),
+                    pero el límite real es de cómputo: con large-v3-turbo en una
+                    RTX 3060 medimos ~14 workers como el punto en que cada
+                    petición deja de ir a tiempo real. 5 deja margen cómodo por
+                    defecto.
                   </FieldHint>
                 </label>
               </FieldSection>
             )}
 
-            {model && ["diffusers", "tts", "ollama", "acestep"].includes(model.backendType) && (
-              <FieldSection
-                title="Sin tuning per-model"
-                description="Para este backend no estamos exponiendo knobs per-model porque los relevantes hoy son globales, request-level o internos al runtime."
-              >
-                <p className="text-sm text-muted-foreground">
-                  Si aparece una necesidad operativa real, añadiremos el parámetro concreto en lugar de abrir todo el runtime.
-                </p>
-              </FieldSection>
-            )}
+            {model &&
+              ["diffusers", "tts", "ollama", "acestep"].includes(
+                model.backendType,
+              ) && (
+                <FieldSection
+                  title="Sin tuning per-model"
+                  description="Para este backend no estamos exponiendo knobs per-model porque los relevantes hoy son globales, request-level o internos al runtime."
+                >
+                  <p className="text-sm text-muted-foreground">
+                    Si aparece una necesidad operativa real, añadiremos el
+                    parámetro concreto en lugar de abrir todo el runtime.
+                  </p>
+                </FieldSection>
+              )}
 
             {isAdmin && (
               <FieldSection
@@ -2296,33 +3057,43 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
                 {loadingGroups ? (
                   <div className="space-y-2">
                     {Array.from({ length: 3 }).map((_, i) => (
-                      <div key={`group-skel-${i}`} className="h-6 animate-pulse rounded bg-muted" />
+                      <div
+                        key={`group-skel-${i}`}
+                        className="h-6 animate-pulse rounded bg-muted"
+                      />
                     ))}
                   </div>
                 ) : allGroups.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No hay grupos configurados.</p>
+                  <p className="text-sm text-muted-foreground">
+                    No hay grupos configurados.
+                  </p>
                 ) : (
                   <div className="space-y-2">
                     {allGroups.map((group) => (
-                      <label key={group.id} className="flex items-center gap-2 text-sm">
+                      <label
+                        key={group.id}
+                        className="flex items-center gap-2 text-sm"
+                      >
                         <input
                           type="checkbox"
                           checked={selectedGroupIds.has(group.id)}
                           onChange={(e) => {
                             setSelectedGroupIds((prev) => {
-                              const next = new Set(prev)
+                              const next = new Set(prev);
                               if (e.target.checked) {
-                                next.add(group.id)
+                                next.add(group.id);
                               } else {
-                                next.delete(group.id)
+                                next.delete(group.id);
                               }
-                              return next
-                            })
+                              return next;
+                            });
                           }}
                         />
                         <span className="font-medium">{group.name}</span>
                         {group.description && (
-                          <span className="text-muted-foreground">— {group.description}</span>
+                          <span className="text-muted-foreground">
+                            — {group.description}
+                          </span>
                         )}
                         {group.isDefault && (
                           <span className="rounded-full bg-blue-500/15 px-1.5 py-0.5 text-xs text-blue-600 dark:text-blue-400">
@@ -2355,5 +3126,5 @@ export function ModelConfigModal({ model, gpus, open, onOpenChange, onSave }: Mo
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-  )
+  );
 }

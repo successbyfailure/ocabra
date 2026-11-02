@@ -199,8 +199,16 @@ async def _ollama_inventory_loop(
             loaded_pool_url = {
                 item["name"]: str(item.get("pool_url") or "") for item in resident
             }
+            loaded_pool_gpus = {
+                item["name"]: [int(index) for index in item.get("pool_gpus", [])]
+                for item in resident
+            }
             added = await model_manager.sync_ollama_inventory(
-                installed, loaded, loaded_vram_mb, loaded_pool_url
+                installed,
+                loaded,
+                loaded_vram_mb,
+                loaded_pool_url,
+                loaded_pool_gpus,
             )
             # Auto-create default profiles for newly discovered models
             if added and profile_registry:

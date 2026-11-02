@@ -1019,6 +1019,27 @@ async def test_model_manager_syncs_ollama_loaded_runtime_state() -> None:
     assert state.worker_info is None
 
 
+@pytest.mark.asyncio
+async def test_ollama_inventory_prefers_authoritative_pool_gpu_mapping() -> None:
+    """A configured pool mapping must survive a transient NVML PID miss."""
+    manager = _dummy_manager()
+
+    await manager.sync_ollama_inventory(
+        ["qwen3-embedding:4b"],
+        ["qwen3-embedding:4b"],
+        loaded_vram_mb={"qwen3-embedding:4b": 5903},
+        loaded_pool_url={"qwen3-embedding:4b": "http://ollama-3060:11434"},
+        loaded_pool_gpus={"qwen3-embedding:4b": [0]},
+    )
+
+    state = await manager.get_state("ollama/qwen3-embedding:4b")
+    assert state is not None
+    assert state.current_gpu == [0]
+    assert state.worker_info is not None
+    assert state.worker_info.gpu_indices == [0]
+    assert state.worker_info.endpoint_url == "http://ollama-3060:11434"
+
+
 # ── Race regression: mid-load and just-loaded inventory sync ──
 
 

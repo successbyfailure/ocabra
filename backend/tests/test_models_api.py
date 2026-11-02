@@ -64,7 +64,9 @@ async def test_serialize_model_state_enriches_capabilities_from_backend():
             "capabilities": {"context_length": 0},
         },
     )
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(worker_pool=_FakeWorkerPool())))
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(worker_pool=_FakeWorkerPool()))
+    )
 
     payload = await models_api._serialize_model_state(request, state, {})
 
@@ -159,7 +161,71 @@ async def test_overlay_loaded_derived_state_surfaces_runtime_fields_on_base_entr
     assert result.capabilities.tools is True
 
 
-async def test_overlay_loaded_derived_state_leaves_already_loaded_base_alone():
+async def test_overlay_surfaces_loading_variant_slots_and_upsize_phase():
+    # llama.cpp catalog ids use ``repo::gguf-file`` before the runtime adds
+    # its own ``::<hash>`` suffix. Splitting at the first separator made Chaos
+    # invisible while it was actually loading/serving.
+    base_id = (
+        "llama_cpp/deadbydawn101/RavenXAiLabs-Chaos-Agent-Qwen3.8-27B-GGUF"
+        "::RavenX-Chaos-Agent-Q4_K_M"
+    )
+    base = ModelState(
+        model_id=base_id,
+        display_name="Chaos Agent",
+        backend_type="llama_cpp",
+        status=ModelStatus.CONFIGURED,
+        extra_config={"llama_cpp": {"parallel_slots": 4}},
+    )
+    resident = ModelState(
+        model_id=f"{base_id}::normal",
+        display_name="Chaos Agent normal",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADED,
+        current_gpu=[1],
+        extra_config={"_runtime": {"effective_context": 65_536, "parallelism": 4}},
+    )
+    loading = ModelState(
+        model_id=f"{base_id}::large",
+        display_name="Chaos Agent large",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADING,
+        extra_config={
+            "_runtime": {
+                "effective_context": 131_072,
+                "parallelism": 2,
+                "gpu_indices": [0, 1],
+            }
+        },
+    )
+    mm = _FakeManagerForOverlay([base], [resident, loading])
+
+    result = (await models_api._overlay_loaded_derived_state(mm, [base]))[0]
+
+    assert result.status == ModelStatus.LOADING
+    assert result.runtime_phase == "upsizing"
+    assert result.runtime_worker_id == loading.model_id
+    assert result.runtime_slots == 2
+    assert result.current_gpu == [0, 1]
+    assert result.can_cancel_load is True
+    assert result.can_downsize is False
+
+
+async def test_overlay_always_reports_configured_slots_without_runtime():
+    base = ModelState(
+        model_id="llama_cpp/gemma",
+        display_name="Gemma",
+        backend_type="llama_cpp",
+        extra_config={"use_case": {"slots": 4}},
+    )
+    mm = _FakeManagerForOverlay([base], [])
+
+    result = (await models_api._overlay_loaded_derived_state(mm, [base]))[0]
+
+    assert result.runtime_slots == 4
+    assert result.runtime_phase == "configured"
+
+
+async def test_overlay_loaded_derived_state_keeps_loaded_base_runtime():
     base = ModelState(
         model_id="ollama/mistral:7b",
         display_name="mistral:7b",
@@ -172,10 +238,13 @@ async def test_overlay_loaded_derived_state_leaves_already_loaded_base_alone():
 
     overlaid = await models_api._overlay_loaded_derived_state(mm, [base])
 
-    assert overlaid[0] is base
+    assert overlaid[0].model_id == base.model_id
+    assert overlaid[0].status == ModelStatus.LOADED
+    assert overlaid[0].runtime_phase == "loaded"
+    assert overlaid[0].runtime_worker_id == base.model_id
 
 
-async def test_overlay_loaded_derived_state_leaves_unloaded_base_without_derived_sibling():
+async def test_overlay_configured_base_without_derived_reports_runtime_defaults():
     base = ModelState(
         model_id="ollama/unused:7b",
         display_name="unused:7b",
@@ -186,10 +255,15 @@ async def test_overlay_loaded_derived_state_leaves_unloaded_base_without_derived
 
     overlaid = await models_api._overlay_loaded_derived_state(mm, [base])
 
-    assert overlaid[0] is base
+    assert overlaid[0].model_id == base.model_id
+    assert overlaid[0].status == ModelStatus.CONFIGURED
+    assert overlaid[0].runtime_phase == "configured"
+    assert overlaid[0].runtime_slots == 1
 
 
-async def test_serialize_model_state_uses_extra_config_model_path_for_disk_size(tmp_path, monkeypatch):
+async def test_serialize_model_state_uses_extra_config_model_path_for_disk_size(
+    tmp_path, monkeypatch
+):
     models_root = tmp_path / "models"
     models_root.mkdir()
     model_file = models_root / "weights.gguf"
@@ -218,6 +292,109 @@ async def test_serialize_model_state_uses_extra_config_model_path_for_disk_size(
     payload = await models_api._serialize_model_state(request, state, {})
 
     assert payload["disk_size_bytes"] == 10
+
+
+class _StatusManager:
+    def __init__(self, state, runtime_states=None):
+        self.state = state
+        self.runtime_states = runtime_states or [state]
+
+    async def get_state(self, model_id: str):
+        return self.state if model_id == self.state.model_id else None
+
+    async def list_states(self, *, include_derived: bool = False):
+        assert include_derived is True
+        return self.runtime_states
+
+    async def get_expected_load_seconds(self, model_id: str):
+        return 12.5
+
+
+class _StatusWorkerPool:
+    def __init__(self, snapshots):
+        self.snapshots = snapshots
+
+    def peek_queue_state(self, model_id: str):
+        return self.snapshots.get(model_id)
+
+
+async def test_get_model_status_exposes_weighted_admission_snapshot():
+    state = ModelState(
+        model_id="llama_cpp/gemma-12b",
+        display_name="Gemma 12B",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADED,
+    )
+    snapshot = {
+        "slots": 4,
+        "in_flight": 2,
+        "queued": 1,
+        "slot_saturated": False,
+        "kv_capacity_tokens": 98304,
+        "kv_reserved_tokens": 72000,
+        "kv_free_tokens": 26304,
+    }
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                model_manager=_StatusManager(state),
+                worker_pool=_StatusWorkerPool({state.model_id: snapshot}),
+            )
+        )
+    )
+
+    payload = await models_api.get_model_status(state.model_id, request, SimpleNamespace())
+
+    assert payload["admission"] == {
+        "slots": 4,
+        "activeRequests": 2,
+        "queuedRequests": 1,
+        "slotSaturated": False,
+        "kvCapacityTokens": 98304,
+        "kvReservedTokens": 72000,
+        "kvFreeTokens": 26304,
+    }
+
+
+async def test_get_model_status_resolves_single_loaded_runtime_gate_from_base_id():
+    base = ModelState(
+        model_id="llama_cpp/qwen-27b",
+        display_name="Qwen 27B",
+        backend_type="llama_cpp",
+        status=ModelStatus.CONFIGURED,
+    )
+    runtime = ModelState(
+        model_id="llama_cpp/qwen-27b::runtime",
+        display_name="Qwen 27B (override)",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADED,
+    )
+    snapshot = {
+        "slots": 4,
+        "in_flight": 1,
+        "queued": 0,
+        "slot_saturated": False,
+        "kv_capacity_tokens": 131072,
+        "kv_reserved_tokens": 32768,
+        "kv_free_tokens": 98304,
+    }
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                model_manager=_StatusManager(base, [base, runtime]),
+                worker_pool=_StatusWorkerPool({runtime.model_id: snapshot}),
+            )
+        )
+    )
+
+    payload = await models_api.get_model_status(base.model_id, request, SimpleNamespace())
+
+    assert payload["modelId"] == base.model_id
+    assert payload["loaded"] is True
+    assert payload["status"] == "loaded"
+    assert payload["expectedWaitSeconds"] is None
+    assert payload["admission"]["kvCapacityTokens"] == 131072
+    assert payload["admission"]["activeRequests"] == 1
 
 
 @pytest.mark.asyncio
@@ -307,7 +484,9 @@ def test_resolve_local_model_path_finds_matching_gguf(tmp_path, monkeypatch):
     monkeypatch.setattr(models_api.settings, "models_dir", str(models_root))
     monkeypatch.setattr(models_api.settings, "hf_cache_dir", "")
 
-    resolved = models_api._resolve_local_model_path("microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s")
+    resolved = models_api._resolve_local_model_path(
+        "microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s"
+    )
 
     assert resolved == gguf_path
 
@@ -529,7 +708,12 @@ def test_estimate_llama_cpp_memory_matches_vram_planner_for_a_dense_model(tmp_pa
 
     arch = vp.arch_from_gguf(str(gguf_path))
     expected_total = vp.plan_llama_cpp_vram_mb(
-        arch, 50.0, 8192, gpu_layers=999, kv_dtype_bytes=2.0, parallel_slots=1,
+        arch,
+        50.0,
+        8192,
+        gpu_layers=999,
+        kv_dtype_bytes=2.0,
+        parallel_slots=1,
     )
 
     assert result["source"] == "gguf_header"
@@ -551,26 +735,38 @@ def test_estimate_llama_cpp_memory_accounts_for_quantized_kv_cache(tmp_path, mon
     }
     f16 = models_api._estimate_llama_cpp_memory(
         estimate={"estimated_max_context_length": None, "notes": []},
-        state=state, extra_config=base_config, heuristic_mb=0, total_vram_mb=24576,
+        state=state,
+        extra_config=base_config,
+        heuristic_mb=0,
+        total_vram_mb=24576,
     )
 
     quantized_config = {
         "model_path": str(gguf_path),
         "llama_cpp": {
-            "gpu_layers": 999, "ctx_size": 32768, "parallel_slots": 1,
-            "flash_attn": True, "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+            "gpu_layers": 999,
+            "ctx_size": 32768,
+            "parallel_slots": 1,
+            "flash_attn": True,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "q8_0",
         },
     }
     q8 = models_api._estimate_llama_cpp_memory(
         estimate={"estimated_max_context_length": None, "notes": []},
-        state=state, extra_config=quantized_config, heuristic_mb=0, total_vram_mb=24576,
+        state=state,
+        extra_config=quantized_config,
+        heuristic_mb=0,
+        total_vram_mb=24576,
     )
 
     # q8_0 KV is half the bytes/element of f16 -> noticeably smaller KV cache.
     assert q8["estimated_kv_cache_mb"] < f16["estimated_kv_cache_mb"]
 
 
-def test_estimate_llama_cpp_memory_accounts_for_self_speculative_mtp_overhead(tmp_path, monkeypatch):
+def test_estimate_llama_cpp_memory_accounts_for_self_speculative_mtp_overhead(
+    tmp_path, monkeypatch
+):
     """The real production qwen3.8:27b config speculative={'spec_type': 'draft-mtp'}
     must widen the hybrid rs_cache and add the draft-context overhead, not just
     size a plain KV cache — this is what the old llama_cpp_estimator.py module
@@ -586,19 +782,27 @@ def test_estimate_llama_cpp_memory_accounts_for_self_speculative_mtp_overhead(tm
     }
     plain = models_api._estimate_llama_cpp_memory(
         estimate={"estimated_max_context_length": None, "notes": []},
-        state=state, extra_config=plain_config, heuristic_mb=0, total_vram_mb=24576,
+        state=state,
+        extra_config=plain_config,
+        heuristic_mb=0,
+        total_vram_mb=24576,
     )
 
     mtp_config = {
         "model_path": str(gguf_path),
         "llama_cpp": {
-            "gpu_layers": 999, "ctx_size": 32768, "parallel_slots": 3,
+            "gpu_layers": 999,
+            "ctx_size": 32768,
+            "parallel_slots": 3,
             "speculative": {"spec_type": "draft-mtp"},
         },
     }
     mtp = models_api._estimate_llama_cpp_memory(
         estimate={"estimated_max_context_length": None, "notes": []},
-        state=state, extra_config=mtp_config, heuristic_mb=0, total_vram_mb=24576,
+        state=state,
+        extra_config=mtp_config,
+        heuristic_mb=0,
+        total_vram_mb=24576,
     )
 
     assert mtp["model_loading_memory_mb"] > plain["model_loading_memory_mb"]
@@ -621,7 +825,9 @@ def test_estimate_llama_cpp_memory_falls_back_to_heuristic_when_gguf_missing(mon
     assert "heurística" in result["notes"][0]
 
 
-def test_estimate_llama_cpp_memory_resolves_ollama_blob_without_gguf_extension(tmp_path, monkeypatch):
+def test_estimate_llama_cpp_memory_resolves_ollama_blob_without_gguf_extension(
+    tmp_path, monkeypatch
+):
     """Real production models reuse weights pulled through Ollama, whose
     blob store names files by content hash ("sha256-<hash>", no extension)
     — requiring a literal ".gguf" suffix on the resolved file (the bug that
@@ -640,7 +846,9 @@ def test_estimate_llama_cpp_memory_resolves_ollama_blob_without_gguf_extension(t
     result = models_api._estimate_llama_cpp_memory(
         estimate={"estimated_max_context_length": None, "notes": []},
         state=state,
-        extra_config={"llama_cpp": {"model_path": str(blob_path), "gpu_layers": 999, "ctx_size": 8192}},
+        extra_config={
+            "llama_cpp": {"model_path": str(blob_path), "gpu_layers": 999, "ctx_size": 8192}
+        },
         heuristic_mb=0,
         total_vram_mb=24576,
     )
@@ -688,14 +896,10 @@ class TestModelsActivityLiveProgress:
             backend_type="ollama",
             load_policy=LoadPolicy.ON_DEMAND,
         )
-        request_id = mm.try_begin_request(
-            model_id, max_inflight=32, input_tokens_estimate=500
-        )
+        request_id = mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
         mm.update_request_progress(request_id, output_tokens_estimate=120)
 
-        fake_request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
-        )
+        fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
         result = await models_api.get_models_activity(fake_request, _user=None)
 
         entry = result["activity"][model_id]
@@ -725,9 +929,7 @@ class TestModelsActivityLiveProgress:
         )
         mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
 
-        fake_request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
-        )
+        fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
         result = await models_api.get_models_activity(fake_request, _user=None)
 
         [req_detail] = result["activity"][model_id]["requests"]
@@ -752,14 +954,15 @@ class TestModelsActivityLoadPhase:
         model_id = "ollama/test-model"
         mm._persisted_model_ids.add(model_id)
         mm._states[model_id] = ModelState(
-            model_id=model_id, display_name=model_id, backend_type="ollama",
-            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADING,
+            model_id=model_id,
+            display_name=model_id,
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+            status=ModelStatus.LOADING,
         )
         mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
 
-        fake_request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
-        )
+        fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
         result = await models_api.get_models_activity(fake_request, _user=None)
 
         [req_detail] = result["activity"][model_id]["requests"]
@@ -775,15 +978,16 @@ class TestModelsActivityLoadPhase:
         model_id = "ollama/test-model"
         mm._persisted_model_ids.add(model_id)
         mm._states[model_id] = ModelState(
-            model_id=model_id, display_name=model_id, backend_type="ollama",
-            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADING,
+            model_id=model_id,
+            display_name=model_id,
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+            status=ModelStatus.LOADING,
         )
         mm._eviction_wait_for[model_id] = "ollama/other-busy-model"
         mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=500)
 
-        fake_request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
-        )
+        fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
         result = await models_api.get_models_activity(fake_request, _user=None)
 
         [req_detail] = result["activity"][model_id]["requests"]
@@ -799,14 +1003,15 @@ class TestModelsActivityLoadPhase:
         model_id = "ollama/test-model"
         mm._persisted_model_ids.add(model_id)
         mm._states[model_id] = ModelState(
-            model_id=model_id, display_name=model_id, backend_type="ollama",
-            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADED,
+            model_id=model_id,
+            display_name=model_id,
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+            status=ModelStatus.LOADED,
         )
         mm.try_begin_request(model_id, max_inflight=32, input_tokens_estimate=18240)
 
-        fake_request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
-        )
+        fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
         result = await models_api.get_models_activity(fake_request, _user=None)
 
         [req_detail] = result["activity"][model_id]["requests"]
@@ -821,15 +1026,16 @@ class TestModelsActivityLoadPhase:
         model_id = "ollama/test-model"
         mm._persisted_model_ids.add(model_id)
         mm._states[model_id] = ModelState(
-            model_id=model_id, display_name=model_id, backend_type="ollama",
-            load_policy=LoadPolicy.ON_DEMAND, status=ModelStatus.LOADED,
+            model_id=model_id,
+            display_name=model_id,
+            backend_type="ollama",
+            load_policy=LoadPolicy.ON_DEMAND,
+            status=ModelStatus.LOADED,
         )
         request_id = mm.try_begin_request(model_id, max_inflight=32)
         mm.update_request_progress(request_id, output_tokens_estimate=50)
 
-        fake_request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(model_manager=mm))
-        )
+        fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
         result = await models_api.get_models_activity(fake_request, _user=None)
 
         [req_detail] = result["activity"][model_id]["requests"]

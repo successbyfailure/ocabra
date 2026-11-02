@@ -1,4 +1,13 @@
-from ocabra.core.vram_capacity import apply_use_case_flags
+from types import SimpleNamespace
+
+import pytest
+
+from ocabra.core.vram_capacity import (
+    ArchResolution,
+    apply_use_case_flags,
+    resolve_use_case,
+)
+from ocabra.core.vram_planner import ModelArch
 
 
 def test_llama_cpp_ctx_size_multiplies_back_out_by_slots():
@@ -17,6 +26,47 @@ def test_llama_cpp_ctx_size_unchanged_for_single_slot():
     merged = apply_use_case_flags({}, "llama_cpp", plan)
     assert merged["llama_cpp"]["ctx_size"] == 65536
     assert merged["llama_cpp"]["parallel_slots"] == 1
+
+
+def test_llama_cpp_unified_pool_is_not_multiplied_by_slots():
+    plan = {
+        "applied": True,
+        "effective_context": 96_000,
+        "slots": 4,
+        "context_is_pool": True,
+    }
+    merged = apply_use_case_flags({}, "llama_cpp", plan)
+    assert merged["llama_cpp"]["ctx_size"] == 96_000
+    assert merged["llama_cpp"]["parallel_slots"] == 4
+
+
+@pytest.mark.asyncio
+async def test_resolve_use_case_accounts_unified_context_as_aggregate(monkeypatch):
+    arch = ModelArch(layers=32, n_kv_heads=8, key_length=128, value_length=128)
+
+    async def fake_resolution(_state):
+        return ArchResolution(arch, 18_000, "test")
+
+    monkeypatch.setattr(
+        "ocabra.core.vram_capacity.resolve_arch_and_weights", fake_resolution
+    )
+    state = SimpleNamespace(
+        backend_type="llama_cpp",
+        extra_config={
+            "use_case": {
+                "context": 229_376,
+                "slots": 4,
+                "kv_dtype": "q8",
+                "context_is_pool": True,
+            }
+        },
+    )
+
+    plan = await resolve_use_case(state, gpu_total_mb=36_864)
+
+    assert plan is not None
+    assert plan["effective_context"] == 229_376
+    assert plan["context_is_pool"] is True
 
 
 def test_bitnet_gets_the_same_multiplication():

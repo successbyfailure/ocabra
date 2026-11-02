@@ -30,6 +30,10 @@ def parse_args() -> argparse.Namespace:
     # Sprint 17.2 — KV cache quantization
     parser.add_argument("--cache-type-k", default=None)
     parser.add_argument("--cache-type-v", default=None)
+    parser.add_argument("--kv-unified", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--kv-unified-per-slot", type=int, default=None)
+    parser.add_argument("--cache-ram", type=int, default=None)
+    parser.add_argument("--cache-idle-slots", action=argparse.BooleanOptionalAction, default=None)
     # --- Sprint 17.3 (Multi-GPU + MoE) ---
     parser.add_argument("--main-gpu", type=int, default=None)
     parser.add_argument("--tensor-split", default=None)
@@ -51,11 +55,20 @@ def parse_args() -> argparse.Namespace:
     # Multimodal projector (vision). See backend_load.py's
     # LlamaCppLoadConfig.mmproj_model_id docstring for resolution rules.
     parser.add_argument("--mmproj", default=None)
+    parser.add_argument("--props", action="store_true")
     # Chat template override forwarded to llama-server. Accepts built-in names
     # (llama3, llama2, chatml, mistral, gemma, …) or a full Jinja string. Needed
     # for GGUFs that ship without a baked ``tokenizer.chat_template`` — see the
     # backend's option docstring for context.
     parser.add_argument("--chat-template", default=None)
+    parser.add_argument("--jinja", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--reasoning", choices=("on", "off", "auto"), default=None)
+    parser.add_argument(
+        "--reasoning-format",
+        choices=("none", "deepseek", "deepseek-legacy", "auto"),
+        default=None,
+    )
+    parser.add_argument("--reasoning-budget", type=int, default=None)
     return parser.parse_args()
 
 
@@ -118,6 +131,14 @@ def build_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--cache-type-k", str(args.cache_type_k)])
     if args.cache_type_v:
         cmd.extend(["--cache-type-v", str(args.cache_type_v)])
+    if args.kv_unified is not None:
+        cmd.append("--kv-unified" if args.kv_unified else "--no-kv-unified")
+    if args.kv_unified_per_slot is not None:
+        cmd.extend(["--kv-unified-per-slot", str(args.kv_unified_per_slot)])
+    if args.cache_ram is not None:
+        cmd.extend(["--cache-ram", str(args.cache_ram)])
+    if args.cache_idle_slots is not None:
+        cmd.append("--cache-idle-slots" if args.cache_idle_slots else "--no-cache-idle-slots")
     # --- Sprint 17.3 (Multi-GPU + MoE) ---
     if args.main_gpu is not None:
         cmd.extend(["--main-gpu", str(args.main_gpu)])
@@ -147,8 +168,18 @@ def build_command(args: argparse.Namespace) -> list[str]:
         cmd.append("--cont-batching")
     if args.mmproj:
         cmd.extend(["--mmproj", args.mmproj])
+    if args.props:
+        cmd.append("--props")
     if args.chat_template:
         cmd.extend(["--chat-template", args.chat_template])
+    if args.jinja is not None:
+        cmd.append("--jinja" if args.jinja else "--no-jinja")
+    if args.reasoning is not None:
+        cmd.extend(["--reasoning", args.reasoning])
+    if args.reasoning_format is not None:
+        cmd.extend(["--reasoning-format", args.reasoning_format])
+    if args.reasoning_budget is not None:
+        cmd.extend(["--reasoning-budget", str(args.reasoning_budget)])
 
     return cmd
 

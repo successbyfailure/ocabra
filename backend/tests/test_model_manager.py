@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -67,6 +68,67 @@ async def test_load_model_full_cycle(model_manager):
 
 
 @pytest.mark.asyncio
+async def test_manual_unload_waits_for_fresh_vram_sample(worker_pool, monkeypatch):
+    """An immediate reload must not see hw-monitor's pre-unload VRAM sample."""
+    from ocabra.core.gpu_manager import GPUState
+    from ocabra.core.model_manager import ModelState
+
+    occupied = GPUState(
+        index=1,
+        name="RTX 3090",
+        total_vram_mb=24_576,
+        free_vram_mb=3_000,
+        used_vram_mb=21_576,
+        utilization_pct=0,
+        temperature_c=40,
+        power_draw_w=50,
+        power_limit_w=350,
+        locked_vram_mb=22_000,
+    )
+    released = GPUState(
+        index=1,
+        name="RTX 3090",
+        total_vram_mb=24_576,
+        free_vram_mb=24_000,
+        used_vram_mb=576,
+        utilization_pct=0,
+        temperature_c=40,
+        power_draw_w=50,
+        power_limit_w=350,
+        locked_vram_mb=0,
+    )
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states = AsyncMock(
+        side_effect=[[occupied], [occupied], [released]]
+    )
+    gpu_manager.unlock_vram = AsyncMock()
+
+    manager = ModelManager(worker_pool, gpu_manager=gpu_manager)
+    manager._states["mock/gemma"] = ModelState(
+        model_id="mock/gemma",
+        backend_model_id="gemma",
+        display_name="Gemma",
+        backend_type="mock",
+        status=ModelStatus.LOADED,
+        current_gpu=[1],
+        vram_used_mb=22_000,
+    )
+    manager._load_locks["mock/gemma"] = asyncio.Lock()
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("ocabra.core.model_manager.asyncio.sleep", sleep_mock)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        await manager.unload("mock/gemma", reason="manual")
+
+    assert manager._states["mock/gemma"].status == ModelStatus.UNLOADED
+    assert gpu_manager.get_all_states.await_count == 3
+    sleep_mock.assert_any_await(0.75)
+
+
+@pytest.mark.asyncio
 async def test_load_records_model_load_stat(model_manager):
     with (
         patch("ocabra.core.model_manager.publish", new=AsyncMock()),
@@ -104,6 +166,25 @@ async def test_pin_policy_loads_on_start(worker_pool):
 
         state = await mm.get_state("test/model")
         assert state.status == ModelStatus.LOADED
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_reload_reconciled_pin(worker_pool):
+    """A resident Ollama PIN stays evictable while the API starts."""
+    mm = ModelManager(worker_pool)
+
+    with (
+        patch.object(mm, "_load_configs_from_db", new=AsyncMock()),
+        patch.object(mm, "_hydrate_last_request_at_from_redis", new=AsyncMock()),
+        patch.object(mm, "_reconcile_ollama_state", new=AsyncMock()),
+        patch.object(mm, "_load_model", new=AsyncMock()) as load_model,
+    ):
+        state = await add_test_model(mm, load_policy="pin")
+        state.status = ModelStatus.LOADED
+        await mm.start()
+        await asyncio.sleep(0)
+
+    load_model.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -843,6 +924,71 @@ async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
 
 
 @pytest.mark.asyncio
+async def test_pressure_eviction_skips_impossible_aggregate_plan(worker_pool):
+    """Do not evict a resident model when all reclaimable VRAM is still short."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states.return_value = [
+        SimpleNamespace(index=0),
+        SimpleNamespace(index=1),
+    ]
+    gpu_manager.get_free_vram.side_effect = [2800, 1800]
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = InsufficientVRAMError("full")
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+
+    requested = await add_test_model(mm, model_id="test/requested")
+    requested.preferred_gpu = 1
+    candidate = await add_test_model(mm, model_id="test/candidate", load_policy="pin")
+    candidate.status = ModelStatus.LOADED
+    candidate.current_gpu = [1]
+    candidate.vram_used_mb = 23_632
+
+    with (
+        patch.object(mm, "unload", new=AsyncMock()) as unload_mock,
+        pytest.raises(InsufficientVRAMError, match="full"),
+    ):
+        await mm._assign_gpus_for_load(
+            "test/requested",
+            vram_needed=29_656,
+            preferred_gpu=1,
+            enforce_vllm_headroom=False,
+        )
+
+    unload_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unload_releases_lock_when_backend_lost_gpu_attribution(worker_pool):
+    """A stale lock must not survive an Ollama worker reporting ``gpu=[]``."""
+    gpu_manager = AsyncMock()
+    gpu_manager.locked_gpu_indices.return_value = [0]
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+    state = await add_test_model(mm, model_id="test/stale-lock")
+    state.status = ModelStatus.LOADED
+    state.current_gpu = []
+    state.vram_used_mb = 5903
+    state.worker_info = WorkerInfo(
+        backend_type="mock",
+        model_id=state.model_id,
+        gpu_indices=[],
+        port=0,
+        pid=0,
+        vram_used_mb=5903,
+    )
+    worker_pool.set_worker(state.model_id, state.worker_info)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        await mm.unload(state.model_id, reason="pressure")
+
+    gpu_manager.unlock_vram.assert_awaited_once_with(0, state.model_id)
+
+
+@pytest.mark.asyncio
 async def test_pressure_eviction_skips_wrong_gpu_and_cpu_only_candidates(worker_pool):
     """2026-10-31 live incident: a GPU1 shortfall evicted piper (no GPU at
     all) and a GPU0 model before ever reaching the GPU1 neighbour that
@@ -907,7 +1053,6 @@ async def test_update_config_applies_whitelisted_fields(model_manager):
         {
             "display_name": "renamed",
             "load_policy": "warm",
-            "auto_reload": True,
             "preferred_gpu": 1,
             "extra_config": {"foo": "bar"},
         },
@@ -916,7 +1061,6 @@ async def test_update_config_applies_whitelisted_fields(model_manager):
     assert updated is state
     assert state.display_name == "renamed"
     assert state.load_policy == LoadPolicy.WARM
-    assert state.auto_reload is True
     assert state.preferred_gpu == 1
     assert state.extra_config == {"foo": "bar"}
 
@@ -1229,6 +1373,304 @@ async def test_use_case_resolution_sums_capacity_across_forced_multi_gpu():
     assert load_kwargs["extra_config"]["llama_cpp"]["ctx_size"] == 131_072
 
 
+@pytest.mark.asyncio
+async def test_runtime_single_gpu_placement_bypasses_scheduler_spill():
+    """A forced one-GPU runtime remains on that GPU even when a generic
+    estimate would make the scheduler prefer a spill allocation."""
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    wp.register_backend("llama_cpp", backend)
+    mm = ModelManager(wp)
+    model_id = "llama_cpp/forced-single-gpu"
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[1])) as admit,
+    ):
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name="forced-single-gpu",
+            backend_type="llama_cpp",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={
+                "llama_cpp": {"ctx_size": 131_072, "parallel_slots": 4},
+                "_runtime": {"gpu_indices": [1]},
+            },
+        )
+        mm._load_locks[model_id] = asyncio.Lock()
+
+        state = await mm.load(model_id)
+
+    assert state.current_gpu == [1]
+    assert admit.await_args.kwargs["required_gpu_indices"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_admission_evicts_for_each_tensor_shard() -> None:
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram = AsyncMock(
+        # GPU0 before eviction, GPU0 after eviction, then GPU1.
+        side_effect=[5_000, 9_100, 24_000]
+    )
+    mm = ModelManager(WorkerPool(), gpu_manager=gpu_manager)
+
+    with (
+        patch.object(mm, "_reconcile_ollama_state", new=AsyncMock()) as reconcile,
+        patch.object(mm, "_evict_for_space", new=AsyncMock(return_value=0)),
+        patch.object(
+            mm,
+            "_evict_last_resort_for_space",
+            new=AsyncMock(return_value=4_000),
+        ) as last_resort,
+    ):
+        selected = await mm._admit_gpu_load(
+            model_id="llama_cpp/dual",
+            vram_needed=27_000,
+            preferred_gpu=None,
+            gpu_managed=True,
+            enforce_vllm_headroom=False,
+            vllm_gpu_memory_utilization=None,
+            required_gpu_indices=[0, 1],
+            required_gpu_vram_mb={0: 9_000, 1: 18_000},
+        )
+
+    assert selected == [0, 1]
+    assert reconcile.await_count == 2
+    last_resort.assert_awaited_once_with("llama_cpp/dual", 0, 4_000)
+
+
+@pytest.mark.asyncio
+async def test_validated_preset_uses_physical_capacity_at_measured_edge() -> None:
+    from ocabra.core.model_manager import ModelState
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram = AsyncMock(return_value=23_343)
+    gpu_manager.get_state = AsyncMock(
+        return_value=SimpleNamespace(free_vram_mb=24_159)
+    )
+    mm = ModelManager(WorkerPool(), gpu_manager=gpu_manager)
+    model_id = "llama_cpp/measured-edge"
+    mm._states[model_id] = ModelState(
+        model_id=model_id,
+        display_name="Measured edge",
+        backend_type="llama_cpp",
+        extra_config={"_runtime": {"capacity_validated": True}},
+    )
+
+    selected = await mm._admit_gpu_load(
+        model_id=model_id,
+        vram_needed=23_360,
+        preferred_gpu=1,
+        gpu_managed=True,
+        enforce_vllm_headroom=False,
+        vllm_gpu_memory_utilization=None,
+        required_gpu_indices=[1],
+    )
+
+    assert selected == [1]
+    gpu_manager.get_state.assert_awaited_once_with(1)
+    gpu_manager.get_free_vram.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_last_resort_waits_for_busy_soft_pin_to_drain(monkeypatch) -> None:
+    from ocabra.core.model_manager import ModelState
+
+    mm = ModelManager(WorkerPool())
+    candidate_id = "ollama/qwen3-embedding:4b"
+    mm._states[candidate_id] = ModelState(
+        model_id=candidate_id,
+        backend_model_id="qwen3-embedding:4b",
+        display_name="Embedding",
+        backend_type="ollama",
+        load_policy=LoadPolicy.PIN,
+        pin_permanent=False,
+        status=ModelStatus.LOADED,
+        current_gpu=[0],
+        vram_used_mb=5903,
+    )
+    mm._in_flight[candidate_id] = 1
+
+    async def finish_request(_delay: float) -> None:
+        mm._in_flight.pop(candidate_id, None)
+
+    monkeypatch.setattr("ocabra.core.model_manager.asyncio.sleep", finish_request)
+    mm.unload = AsyncMock()  # type: ignore[method-assign]
+    mm._wait_for_vram_released = AsyncMock()  # type: ignore[method-assign]
+
+    freed = await mm._evict_last_resort_for_space("llama_cpp/dual", 0, 5_000)
+
+    assert freed == 5903
+    mm.unload.assert_awaited_once_with(candidate_id, reason="vram_pressure")
+
+
+@pytest.mark.asyncio
+async def test_runtime_downgrade_recreates_missing_warm_default() -> None:
+    from ocabra.core.model_manager import ModelState
+
+    mm = ModelManager(WorkerPool())
+    base_id = "llama_cpp/gemma"
+    max_id = f"{base_id}::max"
+    default_id = f"{base_id}::normal"
+    mm._states[base_id] = ModelState(
+        model_id=base_id,
+        display_name="Gemma",
+        backend_type="llama_cpp",
+        backend_model_id="gemma",
+        load_policy=LoadPolicy.WARM,
+        extra_config={"llama_cpp": {"model_path": "/models/gemma.gguf"}},
+    )
+    mm._states[max_id] = ModelState(
+        model_id=max_id,
+        display_name="Gemma max",
+        backend_type="llama_cpp",
+        backend_model_id="gemma",
+        load_policy=LoadPolicy.ON_DEMAND,
+        status=ModelStatus.LOADED,
+        extra_config={
+            "_runtime": {
+                "profile_id": "gemma",
+                "base_model_id": base_id,
+                "effective_context": 262_144,
+                "default_context": 32_768,
+                "default_worker_key": default_id,
+                "default_load_overrides": {
+                    "use_case": {"context": 32_768, "slots": 4, "kv_dtype": "q8"},
+                    "_runtime": {
+                        "profile_id": "gemma",
+                        "base_model_id": base_id,
+                        "effective_context": 32_768,
+                        "gpu_indices": [1],
+                    },
+                },
+            }
+        },
+    )
+
+    async def _unload(model_id: str, reason: str) -> None:
+        assert mm.runtime_transition(base_id) == "downsizing"
+        mm._states[model_id].status = ModelStatus.UNLOADED
+
+    with (
+        patch.object(mm, "unload", new=_unload),
+        patch.object(mm, "_load_model", new=AsyncMock()) as load_model,
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        await mm._downgrade_runtime_variant(max_id)
+
+    default_state = mm._states[default_id]
+    assert default_state.load_policy == LoadPolicy.WARM
+    assert default_state.preferred_gpu == 1
+    assert default_state.extra_config["use_case"]["slots"] == 4
+    load_model.assert_awaited_once_with(default_id)
+    assert mm.runtime_transition(base_id) is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_load_cancels_derived_owner_task() -> None:
+    from ocabra.core.model_manager import ModelState
+
+    mm = ModelManager(WorkerPool())
+    base_id = "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M"
+    worker_id = f"{base_id}::large"
+    mm._states[base_id] = ModelState(
+        model_id=base_id,
+        display_name="Chaos",
+        backend_type="llama_cpp",
+    )
+    mm._states[worker_id] = ModelState(
+        model_id=worker_id,
+        display_name="Chaos large",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADING,
+        extra_config={"_runtime": {"base_model_id": base_id}},
+    )
+    started = asyncio.Event()
+
+    async def _owner() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_owner())
+    await started.wait()
+    mm._load_tasks[worker_id] = task
+
+    cancelled = await mm.cancel_load(base_id)
+
+    assert cancelled == [worker_id]
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_downsize_runtime_rejects_busy_multi_gpu_worker() -> None:
+    from ocabra.core.model_manager import ModelState
+
+    mm = ModelManager(WorkerPool())
+    worker_id = "llama_cpp/chaos::large"
+    mm._states[worker_id] = ModelState(
+        model_id=worker_id,
+        display_name="Chaos large",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADED,
+        current_gpu=[0, 1],
+        extra_config={
+            "_runtime": {
+                "effective_context": 131_072,
+                "default_context": 65_536,
+                "gpu_indices": [0, 1],
+                "default_load_overrides": {
+                    "_runtime": {"effective_context": 65_536, "gpu_indices": [1]}
+                },
+            }
+        },
+    )
+    mm._in_flight[worker_id] = 1
+
+    with pytest.raises(RuntimeError, match="active requests"):
+        await mm.downsize_runtime("llama_cpp/chaos")
+
+
+@pytest.mark.asyncio
+async def test_canonical_gguf_unload_reaches_loaded_derived_worker() -> None:
+    from ocabra.core.model_manager import ModelState
+
+    mm = ModelManager(WorkerPool())
+    base_id = "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M"
+    worker_id = f"{base_id}::runtime-hash"
+    mm._states[base_id] = ModelState(
+        model_id=base_id,
+        display_name="Chaos",
+        backend_type="llama_cpp",
+        status=ModelStatus.CONFIGURED,
+    )
+    mm._states[worker_id] = ModelState(
+        model_id=worker_id,
+        display_name="Chaos runtime",
+        backend_type="llama_cpp",
+        status=ModelStatus.LOADED,
+        extra_config={"_runtime": {"base_model_id": base_id}},
+    )
+    unloaded: list[str] = []
+
+    async def _unload(model_id: str, reason: str = "manual") -> None:
+        if model_id == base_id:
+            await ModelManager.unload(mm, model_id, reason)
+            return
+        unloaded.append(model_id)
+        mm._states[model_id].status = ModelStatus.UNLOADED
+
+    with patch.object(mm, "unload", new=_unload):
+        await _unload(base_id)
+
+    assert unloaded == [worker_id]
+
+
 class _FakeOllamaBackend(BackendInterface):
     """Minimal ollama-shaped backend exposing single_gpu_pool_candidates,
     for testing the preferred-GPU-busy fallback without the real
@@ -1458,9 +1900,8 @@ async def test_reconcile_ollama_state_adopts_untracked_resident_model():
 
 
 @pytest.mark.asyncio
-async def test_reconcile_ollama_state_leaves_already_loaded_model_alone():
-    """A model oCabra already correctly tracks as LOADED must not be
-    re-adopted/re-locked — reconciliation only fills in gaps."""
+async def test_reconcile_ollama_state_refreshes_loaded_model_without_relocking():
+    """Reconciliation repairs placement drift without double-locking VRAM."""
     from ocabra.core.model_manager import ModelState
 
     wp = WorkerPool()
@@ -1489,14 +1930,15 @@ async def test_reconcile_ollama_state_leaves_already_loaded_model_alone():
         load_policy=LoadPolicy.ON_DEMAND,
         preferred_gpu=1,
         status=ModelStatus.LOADED,
-        current_gpu=[1],
+        current_gpu=[],
         vram_used_mb=24_000,
     )
 
     await mm._reconcile_ollama_state()
 
     gpu_manager.lock_vram.assert_not_awaited()
-    assert wp.get_worker(model_id) is None
+    assert mm._states[model_id].current_gpu == [1]
+    assert wp.get_worker(model_id) is not None
 
 
 @pytest.mark.asyncio

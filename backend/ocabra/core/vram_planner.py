@@ -95,10 +95,16 @@ def kv_vram_mb(arch: ModelArch, context_tokens: int, kv_dtype_bytes: float = 2.0
 #: elems ≈ 1.0, q5_* ≈ 0.65, q4_* ≈ 0.5) — the single source of truth for this
 #: conversion; callers must not keep their own copy.
 KV_CACHE_TYPE_BYTES: dict[str, float] = {
-    "f16": 2.0, "fp16": 2.0, "bf16": 2.0,
-    "q8_0": 1.0, "q8": 1.0,
-    "q5_1": 0.65, "q5_0": 0.65,
-    "q4_1": 0.5, "q4_0": 0.5, "q4": 0.5,
+    "f16": 2.0,
+    "fp16": 2.0,
+    "bf16": 2.0,
+    "q8_0": 1.0,
+    "q8": 1.0,
+    "q5_1": 0.65,
+    "q5_0": 0.65,
+    "q4_1": 0.5,
+    "q4_0": 0.5,
+    "q4": 0.5,
     "iq4_nl": 0.5,
 }
 
@@ -229,7 +235,9 @@ def max_context_tokens(
 ) -> int:
     """Largest per-slot context that fits in ``free_mb`` given weights + overhead.
 
-    ``slots`` divides the KV budget (Ollama: NUM_PARALLEL; llama.cpp: --parallel).
+    ``slots`` divides the total KV pool into the context available to each
+    concurrent request. For llama.cpp, callers multiply this per-slot context
+    by ``--parallel`` when constructing the shared ``--ctx-size`` pool.
     ``safety_factor`` discounts the raw KV budget to leave headroom for runtime
     buffers the estimator doesn't model (CUDA graphs, Flash-Attention workspace,
     scratch allocations). Default 0.90. For hybrid SSM/attention architectures,
@@ -252,6 +260,7 @@ def max_context_tokens(
 # ---------------------------------------------------------------------------
 # Architecture extraction — HF config.json
 # ---------------------------------------------------------------------------
+
 
 def arch_from_hf_config(cfg: dict) -> ModelArch | None:
     try:
@@ -318,6 +327,7 @@ def _hybrid_rs_cache_mb_per_slot(
 # Architecture extraction — Ollama /api/show model_info
 # ---------------------------------------------------------------------------
 
+
 def arch_from_ollama_model_info(model_info: dict, arch_family: str) -> ModelArch | None:
     """``model_info`` is the ``/api/show`` block; keys are namespaced by family
     (e.g. ``qwen3.block_count``). ``arch_family`` comes from ``details.family``.
@@ -363,12 +373,8 @@ def arch_from_ollama_model_info(model_info: dict, arch_family: str) -> ModelArch
                 # Hybrid SSM/attention models allocate long KV only on their
                 # periodic full-attention blocks. The remaining (recurrent)
                 # layers hold a fixed-size state instead ("rs cache").
-                attention_layers = (
-                    layers + full_attention_interval - 1
-                ) // full_attention_interval
-                kv_elements_override = (
-                    attention_layers * n_kv * (key_len + val_len)
-                )
+                attention_layers = (layers + full_attention_interval - 1) // full_attention_interval
+                kv_elements_override = attention_layers * n_kv * (key_len + val_len)
                 recurrent_layers = layers - attention_layers
                 rs_cache_mb_per_slot = _hybrid_rs_cache_mb_per_slot(
                     recurrent_layers,
@@ -399,8 +405,17 @@ def arch_from_ollama_model_info(model_info: dict, arch_family: str) -> ModelArch
 _GGUF_MAGIC = b"GGUF"
 # scalar type id -> struct format
 _GGUF_SCALAR_FMT = {
-    0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i",
-    6: "<f", 7: "<B", 10: "<Q", 11: "<q", 12: "<d",
+    0: "<B",
+    1: "<b",
+    2: "<H",
+    3: "<h",
+    4: "<I",
+    5: "<i",
+    6: "<f",
+    7: "<B",
+    10: "<Q",
+    11: "<q",
+    12: "<d",
 }
 _GGUF_SCALAR_SIZE = {t: struct.calcsize(f) for t, f in _GGUF_SCALAR_FMT.items()}
 _GGUF_TYPE_STRING = 8
@@ -492,11 +507,7 @@ def arch_from_gguf(path: str | Path) -> ModelArch | None:
         # architectures without grouped-query attention (falls back to
         # head_count: full MHA, n_kv == n_heads).
         raw_n_kv = g("attention.head_count_kv")
-        n_kv_values = (
-            [int(v) for v in raw_n_kv]
-            if isinstance(raw_n_kv, list)
-            else None
-        )
+        n_kv_values = [int(v) for v in raw_n_kv] if isinstance(raw_n_kv, list) else None
         n_kv = max(n_kv_values) if n_kv_values else int(raw_n_kv or n_heads or 0)
         hidden = int(g("embedding_length") or 0)
         key_len = g("attention.key_length")
@@ -584,8 +595,16 @@ def arch_from_gguf(path: str | Path) -> ModelArch | None:
             fixed_load_overhead_mb = 1266.0
 
         return ModelArch(
-            layers, n_kv, key_len, val_len, hidden, ctx, 2.0,
-            kv_elements_override, rs_cache_mb_per_slot, fixed_load_overhead_mb,
+            layers,
+            n_kv,
+            key_len,
+            val_len,
+            hidden,
+            ctx,
+            2.0,
+            kv_elements_override,
+            rs_cache_mb_per_slot,
+            fixed_load_overhead_mb,
         )
     except (TypeError, ValueError):
         return None
@@ -594,6 +613,7 @@ def arch_from_gguf(path: str | Path) -> ModelArch | None:
 # ---------------------------------------------------------------------------
 # Per-backend translators
 # ---------------------------------------------------------------------------
+
 
 def plan_ollama_vram_mb(
     arch: ModelArch,
@@ -646,19 +666,28 @@ def plan_llama_cpp_vram_mb(
         return 0
     frac = offloaded / total_layers
     weights_mb = file_size_mb * frac
-    kv_arch = arch if offloaded == total_layers else ModelArch(
-        offloaded, arch.n_kv_heads, arch.key_length, arch.value_length,
-        arch.hidden_size, arch.context_length, arch.weight_dtype_bytes,
-        int(arch.kv_elements_per_token_override * frac) if arch.kv_elements_per_token_override else 0,
-        arch.rs_cache_mb_per_slot * frac,
-        arch.fixed_load_overhead_mb * frac,
+    kv_arch = (
+        arch
+        if offloaded == total_layers
+        else ModelArch(
+            offloaded,
+            arch.n_kv_heads,
+            arch.key_length,
+            arch.value_length,
+            arch.hidden_size,
+            arch.context_length,
+            arch.weight_dtype_bytes,
+            int(arch.kv_elements_per_token_override * frac)
+            if arch.kv_elements_per_token_override
+            else 0,
+            arch.rs_cache_mb_per_slot * frac,
+            arch.fixed_load_overhead_mb * frac,
+        )
     )
     # rs_rollback_snapshots > 0 is the same signal rs_cache_vram_mb() uses for
     # "this load self-speculates" — reuse it here instead of adding yet
     # another spec-type parameter.
-    draft_overhead_mb = (
-        mtp_draft_overhead_mb(parallel_slots) if rs_rollback_snapshots > 0 else 0.0
-    )
+    draft_overhead_mb = mtp_draft_overhead_mb(parallel_slots) if rs_rollback_snapshots > 0 else 0.0
     return estimate_total_vram_mb(
         weights_mb,
         kv_arch,
@@ -733,14 +762,22 @@ def capacity_rows(
     for s in slots:
         if backend_type in _POOLED_BACKENDS:
             ctx = vllm_max_model_len(
-                arch, weights_mb, gpu_total_mb,
+                arch,
+                weights_mb,
+                gpu_total_mb,
                 gpu_memory_utilization=gpu_memory_utilization,
-                concurrency=s, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+                concurrency=s,
+                kv_dtype_bytes=kv_dtype_bytes,
+                overhead_mb=overhead_mb,
             )
         else:
             ctx = max_context_tokens(
-                gpu_total_mb, weights_mb, arch,
-                slots=s, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+                gpu_total_mb,
+                weights_mb,
+                arch,
+                slots=s,
+                kv_dtype_bytes=kv_dtype_bytes,
+                overhead_mb=overhead_mb,
             )
         rows.append({"slots": s, "max_context": ctx, "max_context_capped": _cap(ctx, native)})
     return rows
@@ -775,17 +812,22 @@ def plan_use_case(
     native = arch.context_length or 0
     if backend_type in _POOLED_BACKENDS:
         max_ctx = vllm_max_model_len(
-            arch, weights_mb, gpu_total_mb,
+            arch,
+            weights_mb,
+            gpu_total_mb,
             gpu_memory_utilization=gpu_memory_utilization,
-            concurrency=slots, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb,
+            concurrency=slots,
+            kv_dtype_bytes=kv_dtype_bytes,
+            overhead_mb=overhead_mb,
         )
     else:
-        draft_overhead_mb = (
-            mtp_draft_overhead_mb(slots) if rs_rollback_snapshots > 0 else 0.0
-        )
+        draft_overhead_mb = mtp_draft_overhead_mb(slots) if rs_rollback_snapshots > 0 else 0.0
         max_ctx = max_context_tokens(
-            gpu_total_mb, weights_mb, arch,
-            slots=slots, kv_dtype_bytes=kv_dtype_bytes,
+            gpu_total_mb,
+            weights_mb,
+            arch,
+            slots=slots,
+            kv_dtype_bytes=kv_dtype_bytes,
             overhead_mb=overhead_mb + draft_overhead_mb,
             rs_rollback_snapshots=rs_rollback_snapshots,
         )
@@ -834,10 +876,12 @@ def vram_curve(
         if c in seen:
             continue
         seen.add(c)
-        out.append({
-            "context": c,
-            "vram_mb": estimate_total_vram_mb(
-                weights_mb, arch, c, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb
-            ),
-        })
+        out.append(
+            {
+                "context": c,
+                "vram_mb": estimate_total_vram_mb(
+                    weights_mb, arch, c, kv_dtype_bytes=kv_dtype_bytes, overhead_mb=overhead_mb
+                ),
+            }
+        )
     return out
