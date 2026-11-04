@@ -59,6 +59,7 @@ def make_fixtures(**settings_overrides):
     model_manager._publish_event = AsyncMock()
     model_manager._gpu_manager = MagicMock()
     model_manager._gpu_manager.unlock_vram = AsyncMock()
+    model_manager._wait_for_vram_released = AsyncMock()
 
     worker_pool = MagicMock()
     worker_pool._workers = {}
@@ -252,3 +253,33 @@ async def test_vram_freed_on_death():
     assert state.current_gpu == []
     assert state.vram_used_mb == 0
     assert state.worker_info is None
+
+
+@pytest.mark.asyncio
+async def test_auto_restart_waits_for_vram_release_before_reloading():
+    """2026-11-04 live incident: qwen3.8:27b's worker exited cleanly between
+    requests, and the auto-restart's immediate reload attempt raced the CUDA
+    driver reclaiming the dead process's physical VRAM — releasing
+    GPUManager's own (software) lock happens instantly, but that's not the
+    same as the hardware actually being free yet. The restart must wait for
+    the real release, scoped to the GPUs the dead worker held and the amount
+    it reported using, before calling load() again."""
+    bpm, model_manager, worker_pool, _ = make_fixtures()
+
+    state = FakeModelState(current_gpu=[0, 1], vram_used_mb=23_632)
+    model_manager.get_state.return_value = state
+
+    call_order: list[str] = []
+    model_manager._wait_for_vram_released = AsyncMock(
+        side_effect=lambda *a, **k: call_order.append("wait")
+    )
+    model_manager.load = AsyncMock(side_effect=lambda *a, **k: call_order.append("load"))
+
+    with patch("ocabra.redis_client.publish_system_alert", new=AsyncMock()):
+        await bpm._handle_worker_death("vllm/test-model", reason="pid_dead")
+
+    model_manager._wait_for_vram_released.assert_awaited_once_with(
+        23_632, gpu_indices=[0, 1]
+    )
+    model_manager.load.assert_awaited_once_with("vllm/test-model")
+    assert call_order == ["wait", "load"]

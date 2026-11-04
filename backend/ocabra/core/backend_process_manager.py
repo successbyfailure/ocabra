@@ -165,8 +165,10 @@ class BackendProcessManager:
         self._worker_pool.remove_worker(model_id)
 
         # 4. Release VRAM lock in gpu_manager
+        released_gpu_indices = list(state.current_gpu or []) if state else []
+        released_vram_mb = state.vram_used_mb if state else 0
         if state and self._model_manager._gpu_manager:
-            for gpu_idx in state.current_gpu or []:
+            for gpu_idx in released_gpu_indices:
                 await self._model_manager._gpu_manager.unlock_vram(gpu_idx, model_id)
 
         # 5. Reset GPU/VRAM state on model
@@ -206,6 +208,19 @@ class BackendProcessManager:
                 backoff_seconds=backoff,
             )
             await asyncio.sleep(backoff)
+            # The lock above is oCabra's own software bookkeeping — released
+            # it immediately so this restart can be admitted at all, but the
+            # CUDA driver reclaiming the dead process's physical VRAM is a
+            # separate, slower step. Without waiting for that too, the
+            # reload can pass oCabra's own free-VRAM check (lock already
+            # gone) and still hit a real cudaMalloc OOM because the hardware
+            # hasn't caught up yet. Reproduced live 2026-11-04 against
+            # qwen3.8:27b: the worker exited cleanly between requests, the
+            # very next load attempt raced the driver and lost.
+            if released_gpu_indices:
+                await self._model_manager._wait_for_vram_released(
+                    released_vram_mb, gpu_indices=released_gpu_indices
+                )
             self._restart_counts[model_id] = restart_count + 1
             try:
                 await self._model_manager.load(model_id)
