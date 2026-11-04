@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.26.0"
+    app_version: str = "0.28.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -602,6 +602,7 @@ class Settings(BaseSettings):
     # API access control
     require_api_key_openai: bool = True
     require_api_key_ollama: bool = True
+    new_user_group_names: list[str] = ["default", "Makers"]
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"
