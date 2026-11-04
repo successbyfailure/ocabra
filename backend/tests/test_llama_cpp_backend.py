@@ -1023,3 +1023,42 @@ def test_get_binary_path_missing_runtime_raises(tmp_path: Path) -> None:
         ):
             with pytest.raises(FileNotFoundError, match="rocm"):
                 backend._get_binary_path("rocm")
+
+
+def test_contains_image_detects_image_url_content_part() -> None:
+    body = {
+        "messages": [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}
+        ]
+    }
+    assert LlamaCppBackend._contains_image(body) is True
+
+
+def test_contains_image_false_for_plain_text_body() -> None:
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    assert LlamaCppBackend._contains_image(body) is False
+
+
+def test_contains_image_ignores_non_string_type_values() -> None:
+    """2026-11-04 production incident: a tool JSON schema with a union-typed
+    parameter (``"type": {"anyOf": [...]}}``, valid JSON Schema for nullable
+    fields) made ``value.get("type") in {"image_url", "input_image"}`` raise
+    ``TypeError: unhashable type: 'dict'`` for every llama.cpp chat request,
+    since ``_contains_image`` recurses through the *entire* request body
+    (tools included), not just message content parts."""
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": {"anyOf": [{"const": "a"}]}}},
+                    },
+                },
+            }
+        ],
+    }
+    assert LlamaCppBackend._contains_image(body) is False

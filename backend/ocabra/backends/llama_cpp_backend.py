@@ -817,7 +817,8 @@ class LlamaCppBackend(BackendInterface):
             return any(LlamaCppBackend._contains_image(item) for item in value)
         if not isinstance(value, dict):
             return False
-        if value.get("type") in {"image_url", "input_image"}:
+        content_type = value.get("type")
+        if isinstance(content_type, str) and content_type in {"image_url", "input_image"}:
             return True
         if isinstance(value.get("images"), list) and bool(value["images"]):
             return True
