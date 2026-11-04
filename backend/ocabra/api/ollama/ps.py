@@ -52,11 +52,7 @@ async def list_running(
     for profile in enabled_profiles:
         if getattr(profile, "profile_kind", "execution") != "execution":
             continue
-        if (
-            not user.is_admin
-            and profile.profile_id not in user.accessible_model_ids
-            and profile.base_model_id not in user.accessible_model_ids
-        ):
+        if not user.can_access_model(profile.profile_id, profile.base_model_id):
             continue
 
         base_state = await model_manager.get_state(profile.base_model_id)
@@ -67,8 +63,7 @@ async def list_running(
                 if state.status.value == "loaded"
                 and isinstance(state.extra_config, dict)
                 and isinstance(state.extra_config.get("_runtime"), dict)
-                and state.extra_config["_runtime"].get("profile_id")
-                == profile.profile_id
+                and state.extra_config["_runtime"].get("profile_id") == profile.profile_id
             ),
             None,
         )
@@ -119,7 +114,7 @@ async def list_running(
             continue
         if state.status.value != "loaded":
             continue
-        if not user.is_admin and state.model_id not in user.accessible_model_ids:
+        if not user.can_access_model(state.model_id):
             continue
 
         backend_model_id = state.backend_model_id or state.model_id
@@ -130,8 +125,7 @@ async def list_running(
                 "model": state.model_id,
                 "size": size_bytes,
                 "size_vram": int(max(0, state.vram_used_mb)) * 1024 * 1024,
-                "digest": "sha256:"
-                + hashlib.sha256(state.model_id.encode("utf-8")).hexdigest(),
+                "digest": "sha256:" + hashlib.sha256(state.model_id.encode("utf-8")).hexdigest(),
                 "details": {
                     "parent_model": "",
                     "format": _infer_format(backend_model_id),

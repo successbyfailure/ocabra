@@ -137,12 +137,19 @@ async def create_user(
         try:
             await session.flush()
 
-            # Add user to the default group so they can see models immediately.
-            default_group = (
-                await session.execute(select(Group).where(Group.is_default.is_(True)))
-            ).scalar_one_or_none()
-            if default_group is not None:
-                session.add(UserGroup(user_id=new_user.id, group_id=default_group.id))
+            # Apply the operator-configured initial memberships. Model access
+            # remains user-level and is inherited by every API key.
+            from ocabra.config import settings
+
+            initial_names = list(dict.fromkeys(settings.new_user_group_names))
+            if initial_names:
+                initial_groups = (
+                    (await session.execute(select(Group).where(Group.name.in_(initial_names))))
+                    .scalars()
+                    .all()
+                )
+                for group in initial_groups:
+                    session.add(UserGroup(user_id=new_user.id, group_id=group.id))
 
             await session.commit()
         except IntegrityError as exc:
@@ -387,9 +394,7 @@ async def list_user_api_keys(
             raise HTTPException(status_code=404, detail="User not found")
 
         result = await session.execute(
-            select(ApiKey)
-            .where(ApiKey.user_id == parsed_id)
-            .order_by(ApiKey.created_at.desc())
+            select(ApiKey).where(ApiKey.user_id == parsed_id).order_by(ApiKey.created_at.desc())
         )
         keys = result.scalars().all()
 
@@ -594,6 +599,7 @@ async def revoke_user_api_key(
 class CreateUserApiKeyRequest(BaseModel):
     name: str
     expires_in_days: int | None = None
+    # Deprecated compatibility input; permissions belong to the target user.
     group_id: str | None = None
 
 
@@ -609,7 +615,7 @@ async def create_user_api_key(
 
     Args:
         user_id: UUID of the target user.
-        body: { name, expires_in_days?, group_id? }
+        body: { name, expires_in_days? }
 
     Returns:
         { id, name, key_prefix, key, expires_at, created_at, group_id }
@@ -641,14 +647,8 @@ async def create_user_api_key(
         expires_at = None
         if body.expires_in_days:
             from datetime import timedelta
-            expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days)
 
-        parsed_group_id = None
-        if body.group_id:
-            try:
-                parsed_group_id = uuid.UUID(body.group_id)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail="Invalid group_id") from exc
+            expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days)
 
         api_key = ApiKey(
             user_id=parsed_id,
@@ -656,13 +656,18 @@ async def create_user_api_key(
             key_hash=key_hash,
             key_prefix=prefix,
             expires_at=expires_at,
-            group_id=parsed_group_id,
+            group_id=None,
         )
         session.add(api_key)
         await session.commit()
         await session.refresh(api_key)
 
-    logger.info("user_api_key_created_by_admin", target_user_id=user_id, key_name=body.name, by=caller.username)
+    logger.info(
+        "user_api_key_created_by_admin",
+        target_user_id=user_id,
+        key_name=body.name,
+        by=caller.username,
+    )
     return {
         "id": str(api_key.id),
         "name": api_key.name,

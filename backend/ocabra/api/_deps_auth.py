@@ -18,6 +18,8 @@ ROLE_HIERARCHY: dict[str, int] = {
     "system_admin": 2,
 }
 
+ALL_MODELS_ACCESS = "*"
+
 
 @dataclass
 class UserContext:
@@ -46,6 +48,12 @@ class UserContext:
     @property
     def is_admin(self) -> bool:
         return self.role == "system_admin"
+
+    def can_access_model(self, *model_ids: str | None) -> bool:
+        """Return whether this identity may use any supplied model/profile id."""
+        if self.is_admin or ALL_MODELS_ACCESS in self.accessible_model_ids:
+            return True
+        return any(model_id in self.accessible_model_ids for model_id in model_ids if model_id)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -230,6 +238,18 @@ async def _fetch_accessible_models(role: str, group_ids: list[str], session) -> 
         except ValueError:
             pass
 
+    if parsed_ids:
+        all_models_group = await session.execute(
+            select(Group.id)
+            .where(
+                Group.id.in_(parsed_ids),
+                Group.grants_all_models.is_(True),
+            )
+            .limit(1)
+        )
+        if all_models_group.scalar_one_or_none() is not None:
+            return {ALL_MODELS_ACCESS}
+
     # Always fetch the default group's models — these apply to every non-admin
     # user, even when the user has no other group memberships.
     default_models_result = await session.execute(
@@ -278,19 +298,23 @@ async def get_current_user(request: Request) -> UserContext:
                 from ocabra.db.auth import User, UserGroup
 
                 async with AsyncSessionLocal() as session:
-                    user = (await session.execute(
-                        select(User).where(User.id == _uuid.UUID(impersonate_id))
-                    )).scalar_one_or_none()
+                    user = (
+                        await session.execute(
+                            select(User).where(User.id == _uuid.UUID(impersonate_id))
+                        )
+                    ).scalar_one_or_none()
                     if user is not None and user.is_active:
                         group_ids = [
                             str(gid)
-                            for gid in (await session.execute(
-                                select(UserGroup.group_id).where(UserGroup.user_id == user.id)
-                            )).scalars().all()
+                            for gid in (
+                                await session.execute(
+                                    select(UserGroup.group_id).where(UserGroup.user_id == user.id)
+                                )
+                            )
+                            .scalars()
+                            .all()
                         ]
-                        accessible = await _fetch_accessible_models(
-                            user.role, group_ids, session
-                        )
+                        accessible = await _fetch_accessible_models(user.role, group_ids, session)
                         ctx = UserContext(
                             user_id=str(user.id),
                             username=user.username,
@@ -330,7 +354,7 @@ async def get_current_user(request: Request) -> UserContext:
         # 2. Authorization header (Bearer API key)
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
-            raw_key = auth_header[len("Bearer "):]
+            raw_key = auth_header[len("Bearer ") :]
             ctx = await _resolve_api_key(raw_key, session)
             if ctx is not None:
                 request.state.auth_user = ctx
@@ -342,9 +366,8 @@ async def get_current_user(request: Request) -> UserContext:
         # Anonymous mode is allowed when BOTH require_api_key flags are false,
         # or when the request path is not under the protected API prefixes.
         path = request.url.path
-        requires_key = (
-            (settings.require_api_key_openai and path.startswith("/v1/"))
-            or (settings.require_api_key_ollama and path.startswith("/api/"))
+        requires_key = (settings.require_api_key_openai and path.startswith("/v1/")) or (
+            settings.require_api_key_ollama and path.startswith("/api/")
         )
         if requires_key:
             raise HTTPException(

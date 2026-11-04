@@ -4,7 +4,7 @@ import * as Select from "@radix-ui/react-select"
 import { ChevronDown, ChevronUp, Plus, X, KeyRound, RotateCcw, Pencil, Trash2, ShieldOff, ShieldCheck } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import type { AdminUser, ApiKey, Group, UserRole } from "@/types"
+import type { AdminUser, ApiKey, UserRole } from "@/types"
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -529,18 +529,13 @@ interface CreateKeyForUserModalProps {
 function CreateKeyForUserModal({ user, onClose }: CreateKeyForUserModalProps) {
   const [name, setName] = useState("")
   const [expiresInDays, setExpiresInDays] = useState("")
-  const [groupId, setGroupId] = useState<string>("")
-  const [groups, setGroups] = useState<Group[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [createdKey, setCreatedKey] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user) return
-    setName(""); setExpiresInDays(""); setGroupId(""); setErr(null); setCreatedKey(null)
-    api.groups.list()
-      .then(setGroups)
-      .catch(() => setGroups([]))
+    setName(""); setExpiresInDays(""); setErr(null); setCreatedKey(null)
   }, [user])
 
   async function handleSubmit(e: FormEvent) {
@@ -553,7 +548,7 @@ function CreateKeyForUserModal({ user, onClose }: CreateKeyForUserModalProps) {
       const result = await api.users.createKeyForUser(user.id, {
         name: name.trim(),
         expiresInDays: expiresInDays ? Number(expiresInDays) : null,
-        groupId: groupId || null,
+        groupId: null,
       })
       setCreatedKey(result.key)
     } catch (e) {
@@ -571,7 +566,7 @@ function CreateKeyForUserModal({ user, onClose }: CreateKeyForUserModalProps) {
   }
 
   function handleClose() {
-    setName(""); setExpiresInDays(""); setGroupId(""); setErr(null); setCreatedKey(null)
+    setName(""); setExpiresInDays(""); setErr(null); setCreatedKey(null)
     onClose()
   }
 
@@ -642,20 +637,9 @@ function CreateKeyForUserModal({ user, onClose }: CreateKeyForUserModalProps) {
                   placeholder="30"
                 />
               </div>
-              <div>
-                <label htmlFor="ck-group" className="block text-sm font-medium mb-1">Grupo (opcional)</label>
-                <select
-                  id="ck-group"
-                  value={groupId}
-                  onChange={(e) => setGroupId(e.target.value)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                >
-                  <option value="">Sin grupo</option>
-                  {groups.map((g) => (
-                    <option key={g.id} value={g.id}>{g.name}</option>
-                  ))}
-                </select>
-              </div>
+              <p className="text-xs text-muted-foreground">
+                La key heredará los grupos y permisos del usuario.
+              </p>
               {err && <p className="text-sm text-destructive">{err}</p>}
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={handleClose} className="rounded-md px-4 py-2 text-sm border border-border hover:bg-muted">

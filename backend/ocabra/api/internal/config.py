@@ -126,6 +126,7 @@ class ServerConfigPatch(BaseModel):
     )
     require_api_key_openai: bool | None = Field(default=None, alias="requireApiKeyOpenai")
     require_api_key_ollama: bool | None = Field(default=None, alias="requireApiKeyOllama")
+    new_user_group_names: list[str] | None = Field(default=None, alias="newUserGroupNames")
     realtime_default_stt_model: str | None = Field(
         default=None,
         alias="realtimeDefaultSttModel",
@@ -163,9 +164,7 @@ class ServerConfigPatch(BaseModel):
     batch_preempt_min_elapsed_s: float | None = Field(
         default=None, alias="batchPreemptMinElapsedS", ge=0
     )
-    batch_preempt_grace_s: float | None = Field(
-        default=None, alias="batchPreemptGraceS", ge=0
-    )
+    batch_preempt_grace_s: float | None = Field(default=None, alias="batchPreemptGraceS", ge=0)
     batch_free_slots_pct: float | None = Field(
         default=None, alias="batchFreeSlotsPct", ge=0.0, le=1.0
     )
@@ -196,7 +195,9 @@ class ServerConfigPatch(BaseModel):
         default=None, alias="a1111GenerationGracePeriodS"
     )
     a1111_preferred_gpu: int | None = Field(default=None, alias="a1111PreferredGpu")
-    trellis2_idle_unload_seconds: int | None = Field(default=None, alias="trellis2IdleUnloadSeconds")
+    trellis2_idle_unload_seconds: int | None = Field(
+        default=None, alias="trellis2IdleUnloadSeconds"
+    )
     trellis2_generation_grace_period_s: int | None = Field(
         default=None, alias="trellis2GenerationGracePeriodS"
     )
@@ -313,6 +314,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "globalSchedules": [],
         "requireApiKeyOpenai": settings.require_api_key_openai,
         "requireApiKeyOllama": settings.require_api_key_ollama,
+        "newUserGroupNames": list(settings.new_user_group_names),
         "realtimeDefaultSttModel": settings.realtime_default_stt_model,
         "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
         "federationEnabled": settings.federation_enabled,
@@ -513,9 +515,7 @@ async def patch_config(
         settings.vllm_limit_mm_per_prompt_image = max(
             0, int(payload["vllm_limit_mm_per_prompt_image"])
         )
-        await _persist(
-            "vllm_limit_mm_per_prompt_image", settings.vllm_limit_mm_per_prompt_image
-        )
+        await _persist("vllm_limit_mm_per_prompt_image", settings.vllm_limit_mm_per_prompt_image)
     if "sglang_mem_fraction_static" in payload:
         settings.sglang_mem_fraction_static = float(payload["sglang_mem_fraction_static"])
         await _persist("sglang_mem_fraction_static", settings.sglang_mem_fraction_static)
@@ -586,6 +586,27 @@ async def patch_config(
     if "require_api_key_ollama" in payload:
         settings.require_api_key_ollama = bool(payload["require_api_key_ollama"])
         await _persist("require_api_key_ollama", settings.require_api_key_ollama)
+    if "new_user_group_names" in payload:
+        names = list(dict.fromkeys(str(name).strip() for name in payload["new_user_group_names"]))
+        names = [name for name in names if name]
+        from sqlalchemy import select
+
+        from ocabra.db.auth import Group
+
+        async with AsyncSessionLocal() as session:
+            existing = set(
+                (await session.execute(select(Group.name).where(Group.name.in_(names))))
+                .scalars()
+                .all()
+            )
+        missing = [name for name in names if name not in existing]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown new-user groups: {', '.join(missing)}",
+            )
+        settings.new_user_group_names = names
+        await _persist("new_user_group_names", names)
     if "realtime_default_stt_model" in payload:
         settings.realtime_default_stt_model = str(payload["realtime_default_stt_model"] or "")
         await _persist("realtime_default_stt_model", settings.realtime_default_stt_model)

@@ -209,7 +209,7 @@ async def resolve_model(
                 break
 
     if resolved_state is not None and user is not None:
-        if not user.is_admin and resolved_id not in user.accessible_model_ids:
+        if not user.can_access_model(resolved_id):
             return resolved_id, None
 
     return resolved_id, resolved_state
@@ -390,11 +390,8 @@ async def resolve_profile(
         # Access control: check both profile_id and base_model_id since
         # group_models stores canonical model_ids (e.g. "ollama/qwen3:8b")
         # while clients send profile_ids (e.g. "qwen3:8b").
-        if (
-            user is not None
-            and not user.is_admin
-            and profile.profile_id not in user.accessible_model_ids
-            and profile.base_model_id not in user.accessible_model_ids
+        if user is not None and not user.can_access_model(
+            profile.profile_id, profile.base_model_id
         ):
             raise _openai_error(
                 f"The model '{requested}' does not exist.",
@@ -504,7 +501,7 @@ async def resolve_profile(
     # APIs and persisted configuration advertise this stable identifier.
     model_state = await model_manager.get_state(requested)
     if model_state is not None:
-        if user is not None and not user.is_admin and requested not in user.accessible_model_ids:
+        if user is not None and not user.can_access_model(requested):
             raise _openai_error(
                 f"The model '{requested}' does not exist.",
                 "invalid_request_error",
@@ -952,12 +949,7 @@ async def lookup_profile(
                 code="model_not_found",
                 status_code=404,
             )
-        if (
-            user is not None
-            and not user.is_admin
-            and requested not in user.accessible_model_ids
-            and profile.base_model_id not in user.accessible_model_ids
-        ):
+        if user is not None and not user.can_access_model(requested, profile.base_model_id):
             raise _openai_error(
                 f"The model '{requested}' does not exist.",
                 "invalid_request_error",

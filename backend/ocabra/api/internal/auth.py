@@ -9,7 +9,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from ocabra.api._deps_auth import UserContext, get_current_user, require_role
+from ocabra.api._deps_auth import UserContext, require_role
 
 logger = structlog.get_logger(__name__)
 
@@ -33,6 +33,8 @@ class PasswordChangeRequest(BaseModel):
 class CreateApiKeyRequest(BaseModel):
     name: str
     expires_in_days: int | None = None
+    # Deprecated input kept so older clients do not fail validation. API keys
+    # always inherit the owning user's groups.
     group_id: str | None = None
 
 
@@ -293,9 +295,7 @@ async def list_api_keys(
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(ApiKey)
-            .where(ApiKey.user_id == user.user_id)
-            .order_by(ApiKey.created_at.desc())
+            select(ApiKey).where(ApiKey.user_id == user.user_id).order_by(ApiKey.created_at.desc())
         )
         keys = result.scalars().all()
 
@@ -321,10 +321,7 @@ async def list_api_keys(
         "Generate a new API key for the authenticated user. "
         "The raw key is returned only once in the response and cannot be recovered."
     ),
-    responses={
-        400: {"description": "Invalid group_id"},
-        401: {"description": "Not authenticated"},
-    },
+    responses={401: {"description": "Not authenticated"}},
 )
 async def create_api_key(
     body: CreateApiKeyRequest,
@@ -336,17 +333,14 @@ async def create_api_key(
     returned.  It is not stored and cannot be recovered.
 
     Args:
-        body: ``{ name, expires_in_days, group_id? }`` — ``expires_in_days=null`` means no expiry.
+        body: ``{ name, expires_in_days }`` — ``expires_in_days=null`` means no expiry.
 
     Returns:
         ``{ id, name, key_prefix, expires_at, key, group_id }``
 
     Raises:
         HTTP 401: If the caller is not authenticated.
-        HTTP 400: If group_id is provided but is not a valid UUID.
     """
-    import uuid
-
     from ocabra.core.auth_manager import generate_api_key
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
@@ -355,13 +349,6 @@ async def create_api_key(
     expires_at = None
     if body.expires_in_days is not None:
         expires_at = now + timedelta(days=body.expires_in_days)
-
-    parsed_group_id = None
-    if body.group_id:
-        try:
-            parsed_group_id = uuid.UUID(body.group_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid group_id") from exc
 
     raw_key, key_hash, prefix = generate_api_key()
 
@@ -372,7 +359,9 @@ async def create_api_key(
             key_hash=key_hash,
             key_prefix=prefix,
             expires_at=expires_at,
-            group_id=parsed_group_id,
+            # API keys inherit the owner's groups. ``group_id`` is retained in
+            # the database only for compatibility with historical rows.
+            group_id=None,
         )
         session.add(api_key)
         await session.commit()

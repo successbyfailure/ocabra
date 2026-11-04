@@ -89,14 +89,9 @@ async def _list_tags_from_profiles(
     entries_by_profile_id: dict[str, dict] = {}
 
     for profile in execution_profiles:
-        # Access control: check both profile_id and base_model_id since
-        # group_models stores canonical model_ids while clients use profile_ids.
-        if (
-            not user.is_admin
-            and profile.profile_id not in user.accessible_model_ids
-            and profile.base_model_id not in user.accessible_model_ids
-        ):
-            continue
+        # Keep private target metadata available to authorised routers without
+        # exposing those execution profiles as direct selector entries.
+        profile_visible = user.can_access_model(profile.profile_id, profile.base_model_id)
 
         base_state = await model_manager.get_state(profile.base_model_id)
 
@@ -114,9 +109,7 @@ async def _list_tags_from_profiles(
             "model": profile.profile_id,
             "modified_at": modified_at,
             "size": size_bytes,
-            "digest": "sha256:" + hashlib.sha256(
-                profile.profile_id.encode("utf-8")
-            ).hexdigest(),
+            "digest": "sha256:" + hashlib.sha256(profile.profile_id.encode("utf-8")).hexdigest(),
             "details": {
                 "parent_model": profile.base_model_id,
                 "format": _infer_format(backend_model_id),
@@ -131,21 +124,20 @@ async def _list_tags_from_profiles(
             try:
                 from ocabra.api.openai.models import _context_metadata
 
-                context = await _context_metadata(
-                    profile, model_manager, base_state
-                )
+                context = await _context_metadata(profile, model_manager, base_state)
                 if context is not None:
                     entry["details"]["context_length"] = context["effective_max"]
                     entry["ocabra"] = {"context": context}
             except Exception:  # noqa: BLE001 -- inventory remains best effort
                 pass
 
-        entry_index_by_model_id[profile.base_model_id] = len(models)
         entries_by_profile_id[profile.profile_id] = entry
-        models.append(entry)
+        if profile_visible:
+            entry_index_by_model_id[profile.base_model_id] = len(models)
+            models.append(entry)
 
     for profile in router_profiles:
-        if not user.is_admin and profile.profile_id not in user.accessible_model_ids:
+        if not user.can_access_model(profile.profile_id):
             continue
         target_entries = [
             entries_by_profile_id[target_id]
@@ -156,8 +148,7 @@ async def _list_tags_from_profiles(
             continue
         primary = target_entries[0]
         contexts = [
-            int(entry.get("details", {}).get("context_length") or 0)
-            for entry in target_entries
+            int(entry.get("details", {}).get("context_length") or 0) for entry in target_entries
         ]
         entry = {
             "name": profile.profile_id,
@@ -195,8 +186,7 @@ async def _list_tags_from_profiles(
                     models[idx]["federation"] = {
                         "remote": False,
                         "also_available_on": [
-                            {"node_name": p.name, "node_id": p.peer_id}
-                            for p in peers
+                            {"node_name": p.name, "node_id": p.peer_id} for p in peers
                         ],
                     }
             else:
@@ -224,9 +214,7 @@ async def _list_tags_from_profiles(
                         "model": display_id,
                         "modified_at": _to_iso_z(None),
                         "size": 0,
-                        "digest": "sha256:" + hashlib.sha256(
-                            model_id.encode("utf-8")
-                        ).hexdigest(),
+                        "digest": "sha256:" + hashlib.sha256(model_id.encode("utf-8")).hexdigest(),
                         "details": {
                             "parent_model": model_id,
                             "format": "unknown",
@@ -241,8 +229,7 @@ async def _list_tags_from_profiles(
                             "node_name": first_peer.name,
                             "node_id": first_peer.peer_id,
                             "available_on": [
-                                {"node_name": p.name, "node_id": p.peer_id}
-                                for p in peers
+                                {"node_name": p.name, "node_id": p.peer_id} for p in peers
                             ],
                         },
                     }
@@ -258,7 +245,7 @@ async def _list_tags_legacy(model_manager, user: UserContext) -> dict:
     if user.is_admin:
         filtered_states = all_states
     else:
-        filtered_states = [s for s in all_states if s.model_id in user.accessible_model_ids]
+        filtered_states = [s for s in all_states if user.can_access_model(s.model_id)]
 
     states = filtered_states
     by_id = {state.model_id: state for state in states}

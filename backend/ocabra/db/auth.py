@@ -27,9 +27,7 @@ class UserRole(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     email: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True, index=True)
     hashed_password: Mapped[str] = mapped_column(Text, nullable=False)
@@ -59,9 +57,7 @@ class User(Base):
 class ApiKey(Base):
     __tablename__ = "api_keys"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -71,12 +67,8 @@ class ApiKey(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     key_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_used_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -96,12 +88,13 @@ class ApiKey(Base):
 class Group(Base):
     __tablename__ = "groups"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    grants_all_models: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

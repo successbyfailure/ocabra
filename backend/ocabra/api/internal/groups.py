@@ -22,11 +22,13 @@ router = APIRouter(tags=["groups"])
 class CreateGroupRequest(BaseModel):
     name: str
     description: str = ""
+    grants_all_models: bool = False
 
 
 class PatchGroupRequest(BaseModel):
     name: str | None = None
     description: str | None = None
+    grants_all_models: bool | None = None
 
 
 class AddGroupModelRequest(BaseModel):
@@ -46,6 +48,7 @@ def _group_dict(group, member_count: int = 0, model_count: int = 0) -> dict:
         "name": group.name,
         "description": group.description,
         "is_default": group.is_default,
+        "grants_all_models": group.grants_all_models,
         "member_count": member_count,
         "model_count": model_count,
         "created_at": group.created_at.isoformat(),
@@ -58,6 +61,7 @@ def _group_dict_simple(group) -> dict:
         "name": group.name,
         "description": group.description,
         "is_default": group.is_default,
+        "grants_all_models": group.grants_all_models,
         "created_at": group.created_at.isoformat(),
     }
 
@@ -85,21 +89,20 @@ async def list_groups(
         groups = groups_result.scalars().all()
 
         member_counts_result = await session.execute(
-            select(UserGroup.group_id, func.count(UserGroup.user_id).label("cnt"))
-            .group_by(UserGroup.group_id)
+            select(UserGroup.group_id, func.count(UserGroup.user_id).label("cnt")).group_by(
+                UserGroup.group_id
+            )
         )
         member_counts = {row.group_id: row.cnt for row in member_counts_result}
 
         model_counts_result = await session.execute(
-            select(GroupModel.group_id, func.count(GroupModel.model_id).label("cnt"))
-            .group_by(GroupModel.group_id)
+            select(GroupModel.group_id, func.count(GroupModel.model_id).label("cnt")).group_by(
+                GroupModel.group_id
+            )
         )
         model_counts = {row.group_id: row.cnt for row in model_counts_result}
 
-    return [
-        _group_dict(g, member_counts.get(g.id, 0), model_counts.get(g.id, 0))
-        for g in groups
-    ]
+    return [_group_dict(g, member_counts.get(g.id, 0), model_counts.get(g.id, 0)) for g in groups]
 
 
 @router.post("/groups", status_code=201)
@@ -129,7 +132,12 @@ async def create_group(
         if existing.scalar_one_or_none() is not None:
             raise HTTPException(status_code=409, detail="Group name already exists")
 
-        new_group = Group(name=body.name, description=body.description, is_default=False)
+        new_group = Group(
+            name=body.name,
+            description=body.description,
+            is_default=False,
+            grants_all_models=body.grants_all_models,
+        )
         session.add(new_group)
         await session.commit()
         await session.refresh(new_group)
@@ -181,6 +189,13 @@ async def patch_group(
             group.name = body.name
         if body.description is not None:
             group.description = body.description
+        if body.grants_all_models is not None:
+            if group.is_default and body.grants_all_models:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The default group cannot grant all models",
+                )
+            group.grants_all_models = body.grants_all_models
 
         await session.commit()
         await session.refresh(group)
@@ -264,9 +279,7 @@ async def list_group_models(
         if group_check.scalar_one_or_none() is None:
             raise HTTPException(status_code=404, detail="Group not found")
 
-        result = await session.execute(
-            select(GroupModel).where(GroupModel.group_id == parsed_id)
-        )
+        result = await session.execute(select(GroupModel).where(GroupModel.group_id == parsed_id))
         entries = result.scalars().all()
 
     return [{"model_id": e.model_id} for e in entries]

@@ -458,10 +458,27 @@ POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]
 - `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
 - `globalSchedules`: `list[EvictionSchedule]` persistida en la tabla `eviction_schedules` y reconstruida por `GET /ocabra/config`
 - `modelsDir` proviene de `MODELS_DIR` y es de solo lectura en runtime
+- `newUserGroupNames`: nombres de los grupos que se asignan al crear un usuario.
+  El valor por defecto es `["default", "Makers"]`; se ignoran nombres que ya
+  no existan y el alta nunca crea grupos implícitamente.
 - `downloadDir` y `maxTemperatureC` siguen como overrides de proceso en `request.app.state.config_overrides`
 - `globalSchedules` se traduce internamente a dos filas por ventana en `eviction_schedules`: una acción `evict_all` al inicio y una acción `reload` al final
 - `check_schedule_reloads()` recarga cualquier modelo `pin`/`warm` que un schedule `reload` apunte (sin flag de opt-in por modelo — el propio schedule ya es el opt-in; el checkbox `auto_reload` que existía antes se eliminó el 2026-10-30)
 - `GET /ocabra/config` y `PATCH /ocabra/config` usan claves camelCase; no hay fallback legacy a snake_case o `localStorage`.
+
+### 5.6.1 Autorización por grupos y API keys
+
+- La pertenencia a grupos es propiedad del usuario. Todas sus API keys heredan
+  exactamente la misma ACL; `api_keys.group_id` es legado y no participa en
+  autorización.
+- El grupo `default` se aplica implícitamente a cualquier usuario no admin y al
+  acceso anónimo cuando está habilitado.
+- `groups.grants_all_models=true` concede acceso dinámico a cualquier modelo o
+  perfil, incluidos los que se registren después. No depende del nombre del
+  grupo ni de filas manuales en `group_models`.
+- Autorizar un perfil `router` autoriza su uso indirecto de targets, pero no
+  concede acceso directo a esos targets ni los añade por separado a `/v1/models`
+  o `/api/tags`.
 
 ### 5.7 Servicios interactivos
 

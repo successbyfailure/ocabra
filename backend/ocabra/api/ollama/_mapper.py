@@ -137,11 +137,7 @@ async def resolve_model(
         if parsed_backend == "ollama":
             exact_state = await model_manager.get_state(exact_name)
             if exact_state is not None:
-                if (
-                    user is not None
-                    and not user.is_admin
-                    and exact_name not in user.accessible_model_ids
-                ):
+                if user is not None and not user.can_access_model(exact_name):
                     return exact_name, None
                 return exact_name, exact_state
 
@@ -149,11 +145,7 @@ async def resolve_model(
             ollama_canonical = build_model_ref("ollama", exact_name)
             native_state = await model_manager.get_state(ollama_canonical)
             if native_state is not None:
-                if (
-                    user is not None
-                    and not user.is_admin
-                    and ollama_canonical not in user.accessible_model_ids
-                ):
+                if user is not None and not user.can_access_model(ollama_canonical):
                     return ollama_canonical, None
                 return ollama_canonical, native_state
 
@@ -167,7 +159,7 @@ async def resolve_model(
     model_id = mapper.to_internal(requested_name)
     mapped_state = await model_manager.get_state(model_id)
     if mapped_state is not None and user is not None:
-        if not user.is_admin and model_id not in user.accessible_model_ids:
+        if not user.can_access_model(model_id):
             return model_id, None
     return model_id, mapped_state
 

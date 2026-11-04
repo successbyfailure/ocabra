@@ -1325,6 +1325,11 @@ function toServerConfig(raw: unknown): ServerConfig {
     requireApiKeyOllama: Boolean(
       data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true,
     ),
+    newUserGroupNames: Array.isArray(
+      data.newUserGroupNames ?? data.new_user_group_names,
+    )
+      ? ((data.newUserGroupNames ?? data.new_user_group_names) as unknown[]).map(String)
+      : ["default", "Makers"],
     realtimeDefaultSttModel: String(
       data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? "",
     ),
@@ -1768,6 +1773,7 @@ function toGroup(raw: unknown): Group {
     name: String(d.name ?? ""),
     description: String(d.description ?? ""),
     isDefault: Boolean(d.is_default ?? d.isDefault ?? false),
+    grantsAllModels: Boolean(d.grants_all_models ?? d.grantsAllModels ?? false),
     memberCount: Number(d.member_count ?? d.memberCount ?? 0),
     modelCount: Number(d.model_count ?? d.modelCount ?? 0),
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
@@ -2995,6 +3001,7 @@ export const api = {
         await request<unknown>("POST", "/ocabra/groups", {
           name: data.name,
           description: data.description ?? "",
+          grants_all_models: data.grantsAllModels ?? false,
         }),
       ),
     update: async (id: string, data: UpdateGroupPayload): Promise<Group> =>
@@ -3005,6 +3012,7 @@ export const api = {
           {
             name: data.name,
             description: data.description,
+            grants_all_models: data.grantsAllModels,
           },
         ),
       ),

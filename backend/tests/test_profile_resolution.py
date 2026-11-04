@@ -439,25 +439,30 @@ async def test_ollama_resolve_profile_first(model_manager, enabled_profile):
 @pytest.mark.asyncio
 async def test_ollama_resolve_profile_with_user_access(model_manager, enabled_profile):
     """Profile resolution respects user access control."""
+    from ocabra.api._deps_auth import UserContext
     from ocabra.api.openai._deps import resolve_profile
 
     registry = _FakeProfileRegistry([enabled_profile])
 
     # User with access to this profile
-    user_ok = type("UserContext", (), {
-        "is_admin": False,
-        "accessible_model_ids": {"chat"},
-    })()
+    user_ok = UserContext(
+        user_id="user-1",
+        username="test-user",
+        role="user",
+        accessible_model_ids={"chat"},
+    )
     profile, state = await resolve_profile(
         "chat", model_manager, registry, user=user_ok
     )
     assert profile.profile_id == "chat"
 
     # User without access
-    user_no = type("UserContext", (), {
-        "is_admin": False,
-        "accessible_model_ids": set(),
-    })()
+    user_no = UserContext(
+        user_id="user-2",
+        username="test-user-no-access",
+        role="user",
+        accessible_model_ids=set(),
+    )
     with pytest.raises(Exception) as exc_info:
         await resolve_profile("chat", model_manager, registry, user=user_no)
     assert exc_info.value.status_code == 404
@@ -466,14 +471,17 @@ async def test_ollama_resolve_profile_with_user_access(model_manager, enabled_pr
 @pytest.mark.asyncio
 async def test_ollama_resolve_profile_admin_bypass(model_manager, enabled_profile):
     """Admin users can access any profile regardless of group membership."""
+    from ocabra.api._deps_auth import UserContext
     from ocabra.api.openai._deps import resolve_profile
 
     registry = _FakeProfileRegistry([enabled_profile])
 
-    admin_user = type("UserContext", (), {
-        "is_admin": True,
-        "accessible_model_ids": set(),
-    })()
+    admin_user = UserContext(
+        user_id="admin-1",
+        username="test-admin",
+        role="system_admin",
+        accessible_model_ids=set(),
+    )
     profile, state = await resolve_profile(
         "chat", model_manager, registry, user=admin_user
     )

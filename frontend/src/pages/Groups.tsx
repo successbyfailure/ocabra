@@ -66,10 +66,11 @@ interface CreateGroupModalProps {
 function CreateGroupModal({ open, onClose, onCreated }: CreateGroupModalProps) {
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
+  const [grantsAllModels, setGrantsAllModels] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
-  function reset() { setName(""); setDescription(""); setErr(null) }
+  function reset() { setName(""); setDescription(""); setGrantsAllModels(false); setErr(null) }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -77,7 +78,11 @@ function CreateGroupModal({ open, onClose, onCreated }: CreateGroupModalProps) {
     setBusy(true)
     setErr(null)
     try {
-      const group = await api.groups.create({ name: name.trim(), description: description.trim() || null })
+      const group = await api.groups.create({
+        name: name.trim(),
+        description: description.trim() || null,
+        grantsAllModels,
+      })
       onCreated(group)
       reset()
       onClose()
@@ -115,6 +120,20 @@ function CreateGroupModal({ open, onClose, onCreated }: CreateGroupModalProps) {
                 autoFocus
               />
             </div>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={grantsAllModels}
+                onChange={(event) => setGrantsAllModels(event.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-primary"
+              />
+              <span>
+                Acceso dinámico a todos los modelos
+                <span className="block text-xs text-muted-foreground">
+                  Incluye automáticamente modelos registrados en el futuro.
+                </span>
+              </span>
+            </label>
             <div>
               <label htmlFor="cg-desc" className="block text-sm font-medium mb-1">Descripción (opcional)</label>
               <textarea
@@ -277,6 +296,11 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
             {group.isDefault && (
               <span className="ml-2 inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300 px-2 py-0.5 text-xs font-medium">
                 Default
+              </span>
+            )}
+            {group.grantsAllModels && (
+              <span className="ml-2 inline-flex items-center rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-xs font-medium text-sky-300">
+                Todos los modelos
               </span>
             )}
             {group.description && (
@@ -589,6 +613,11 @@ export function Groups() {
                       {group.isDefault && (
                         <span className="inline-flex items-center rounded-full bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300 px-2 py-0.5 text-xs font-medium">
                           Default
+                        </span>
+                      )}
+                      {group.grantsAllModels && (
+                        <span className="inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900 dark:text-sky-300">
+                          Todos los modelos
                         </span>
                       )}
                     </div>

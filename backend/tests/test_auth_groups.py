@@ -38,6 +38,12 @@ def _scalars_result(items: list[str]) -> MagicMock:
     return res
 
 
+def _scalar_result(item=None) -> MagicMock:
+    res = MagicMock()
+    res.scalar_one_or_none.return_value = item
+    return res
+
+
 async def test_user_with_no_groups_gets_default_group_models():
     """A user with no explicit group memberships still inherits the default
     group's models (every user has implicit access to the default group)."""
@@ -59,7 +65,7 @@ async def test_user_gets_union_of_group_models_plus_default():
     explicit_result = _scalars_result(["model-a", "model-b"])
 
     mock_session = AsyncMock()
-    mock_session.execute.side_effect = [default_result, explicit_result]
+    mock_session.execute.side_effect = [_scalar_result(), default_result, explicit_result]
 
     result = await _fetch_accessible_models("user", [group_id], mock_session)
 
@@ -72,13 +78,25 @@ async def test_user_with_invalid_group_uuid_still_gets_default_models():
     mock_session = AsyncMock()
     mock_session.execute.return_value = _scalars_result(["default-only"])
 
-    result = await _fetch_accessible_models(
-        "user", ["not-a-uuid", "also-not-a-uuid"], mock_session
-    )
+    result = await _fetch_accessible_models("user", ["not-a-uuid", "also-not-a-uuid"], mock_session)
 
     assert result == {"default-only"}
     # Default group query was issued (exactly once).
     assert mock_session.execute.await_count == 1
+
+
+async def test_all_models_group_returns_dynamic_access_marker():
+    """A grants_all_models membership bypasses individual GroupModel rows."""
+    group_id = str(uuid.uuid4())
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = _scalar_result(uuid.UUID(group_id))
+
+    result = await _fetch_accessible_models("user", [group_id], mock_session)
+
+    assert result == {"*"}
+    assert UserContext(None, None, "user", accessible_model_ids=result).can_access_model(
+        "future/model"
+    )
 
 
 # ── _build_anonymous_context ──────────────────────────────────────────────────
@@ -90,9 +108,7 @@ async def test_anonymous_context_contains_default_group_models():
     model_id = "allowed-model"
 
     rows_result = MagicMock()
-    rows_result.__iter__ = MagicMock(
-        return_value=iter([(group_id, model_id)])
-    )
+    rows_result.__iter__ = MagicMock(return_value=iter([(group_id, model_id)]))
 
     mock_session = AsyncMock()
     mock_session.execute.return_value = rows_result
@@ -125,9 +141,7 @@ async def test_anonymous_context_filters_out_none_model_ids():
 
     rows_result = MagicMock()
     # One row where model_id is None (group exists but has no models)
-    rows_result.__iter__ = MagicMock(
-        return_value=iter([(group_id, None)])
-    )
+    rows_result.__iter__ = MagicMock(return_value=iter([(group_id, None)]))
 
     mock_session = AsyncMock()
     mock_session.execute.return_value = rows_result
@@ -180,9 +194,7 @@ async def test_anonymous_only_sees_default_group_models():
     allowed_model = "default-group-model"
 
     rows_result = MagicMock()
-    rows_result.__iter__ = MagicMock(
-        return_value=iter([(group_id, allowed_model)])
-    )
+    rows_result.__iter__ = MagicMock(return_value=iter([(group_id, allowed_model)]))
 
     mock_session = AsyncMock()
     mock_session.execute.return_value = rows_result
@@ -234,7 +246,7 @@ async def test_user_only_sees_models_in_their_groups_and_default():
     explicit_result = _scalars_result([allowed_model])
 
     mock_session = AsyncMock()
-    mock_session.execute.side_effect = [default_result, explicit_result]
+    mock_session.execute.side_effect = [_scalar_result(), default_result, explicit_result]
 
     ctx_accessible = await _fetch_accessible_models("user", [group_id], mock_session)
 
@@ -262,7 +274,7 @@ async def test_model_not_in_group_returns_404_not_403():
     explicit_result = _scalars_result(["allowed-model"])
 
     mock_session = AsyncMock()
-    mock_session.execute.side_effect = [default_result, explicit_result]
+    mock_session.execute.side_effect = [_scalar_result(), default_result, explicit_result]
 
     accessible = await _fetch_accessible_models("user", [group_id], mock_session)
 

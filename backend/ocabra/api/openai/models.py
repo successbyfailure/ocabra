@@ -267,15 +267,10 @@ async def list_models(
     entries_by_profile_id: dict[str, dict[str, Any]] = {}
 
     for profile in execution_profiles:
-        # Access control: non-admin users only see profiles in their set.
-        # Check both profile_id and base_model_id since group_models stores
-        # canonical model_ids while clients use profile_ids.
-        if (
-            not user.is_admin
-            and profile.profile_id not in user.accessible_model_ids
-            and profile.base_model_id not in user.accessible_model_ids
-        ):
-            continue
+        # Build metadata for every local execution profile so an authorised
+        # router can describe itself from private targets. Only append the
+        # execution profile itself when it is directly accessible.
+        profile_visible = user.can_access_model(profile.profile_id, profile.base_model_id)
 
         base_state = await model_manager.get_state(profile.base_model_id)
         if base_state is None:
@@ -343,15 +338,16 @@ async def list_models(
                 error=str(exc),
             )
 
-        entry_index_by_model_id[profile.base_model_id] = len(data)
         entries_by_profile_id[profile.profile_id] = entry
-        data.append(entry)
+        if profile_visible:
+            entry_index_by_model_id[profile.base_model_id] = len(data)
+            data.append(entry)
 
     # Routers are first-class public entries but own no physical model. Their
     # advertised context is the greatest request size any visible target can
     # route successfully; status/capabilities come from the first target.
     for profile in router_profiles:
-        if not user.is_admin and profile.profile_id not in user.accessible_model_ids:
+        if not user.can_access_model(profile.profile_id):
             continue
         target_entries = [
             entries_by_profile_id[target_id]

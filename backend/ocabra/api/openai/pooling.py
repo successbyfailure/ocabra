@@ -266,6 +266,8 @@ async def _resolve_and_forward(
         model_manager,
         profile_registry,
         user=user,
+        request_body=body,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
     )
     check_capability(state, capability, endpoint_label)
@@ -291,7 +293,9 @@ async def _resolve_and_forward(
     return JSONResponse(content=result, headers=resp_headers)
 
 
-@router.post("/pooling", summary="Run pooling on a model", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
+@router.post(
+    "/pooling", summary="Run pooling on a model", responses=NON_STREAMING_LOAD_RESPONSE_DOC
+)
 async def pooling(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -315,7 +319,9 @@ async def score(
     return await _resolve_and_forward(request, body, "score", "score", "/score", user)
 
 
-@router.post("/rerank", summary="Rerank documents for a query", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
+@router.post(
+    "/rerank", summary="Rerank documents for a query", responses=NON_STREAMING_LOAD_RESPONSE_DOC
+)
 async def rerank(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -327,7 +333,11 @@ async def rerank(
     return await _resolve_and_forward(request, body, "rerank", "rerank", "/rerank", user)
 
 
-@router.post("/classify", summary="Classify inputs with a classification model", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
+@router.post(
+    "/classify",
+    summary="Classify inputs with a classification model",
+    responses=NON_STREAMING_LOAD_RESPONSE_DOC,
+)
 async def classify(
     request: Request,
     user: Annotated[UserContext, Depends(get_openai_user)],

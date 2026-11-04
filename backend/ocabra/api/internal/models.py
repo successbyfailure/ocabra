@@ -125,14 +125,12 @@ async def list_models(
 
     async def _is_accessible(model_id: str) -> bool:
         """True if the user can access the model (admin or any of its profiles in their set)."""
-        if user.is_admin:
-            return True
-        if model_id in user.accessible_model_ids:
+        if user.can_access_model(model_id):
             return True
         if profile_registry is None:
             return False
         profiles = await profile_registry.list_by_model(model_id)
-        return any(p.profile_id in user.accessible_model_ids for p in profiles)
+        return any(user.can_access_model(p.profile_id) for p in profiles)
 
     local_model_ids: set[str] = set()
     payloads = []

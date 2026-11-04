@@ -75,6 +75,7 @@ const EMPTY_CONFIG: ServerConfig = {
   globalSchedules: [],
   requireApiKeyOpenai: true,
   requireApiKeyOllama: true,
+  newUserGroupNames: ["default", "Makers"],
   realtimeDefaultSttModel: "",
   realtimeDefaultTtsModel: "",
   federationEnabled: false,
