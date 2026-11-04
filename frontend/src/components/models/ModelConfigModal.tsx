@@ -367,6 +367,7 @@ export function ModelConfigModal({
   const [whisperDiarizationModelId, setWhisperDiarizationModelId] =
     useState("");
   const [whisperNumWorkers, setWhisperNumWorkers] = useState("5");
+  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState("");
   const [memoryEstimate, setMemoryEstimate] =
     useState<ModelMemoryEstimate | null>(null);
   const [memoryEstimateError, setMemoryEstimateError] = useState<string | null>(
@@ -601,6 +602,10 @@ export function ModelConfigModal({
     setWhisperNumWorkers(
       whisper?.numWorkers == null ? "5" : String(whisper.numWorkers),
     );
+    const rawReasoningDefault = model?.extraConfig?.defaultReasoningEffort;
+    setDefaultReasoningEffort(
+      typeof rawReasoningDefault === "string" ? rawReasoningDefault : "",
+    );
     // Re-hidratar si cambia el modelo o aparece/desaparece una GPU. Depender de
     // la referencia completa `gpus` reiniciaba el formulario cada ~2s con los
     // broadcasts; ignorarla del todo dejaba un split erróneo si llegaba tarde.
@@ -786,6 +791,12 @@ export function ModelConfigModal({
   const buildExtraConfig = (): BackendExtraConfig | undefined => {
     if (!model) return undefined;
     const current = getWritableExtraConfig(model);
+
+    if (defaultReasoningEffort) {
+      current.defaultReasoningEffort = defaultReasoningEffort;
+    } else {
+      delete current.defaultReasoningEffort;
+    }
 
     if (model.backendType === "vllm") {
       const mmImageNum = limitMmImage === "" ? 0 : Number(limitMmImage);
@@ -2417,6 +2428,37 @@ export function ModelConfigModal({
                     }
                   />
                   trust remote code
+                </label>
+              </FieldSection>
+            )}
+
+            {model?.capabilities.reasoning && (
+              <FieldSection
+                title="Reasoning"
+                description="Nivel de razonamiento aplicado cuando el cliente no manda reasoning_effort en la petición."
+              >
+                <label className="block text-sm">
+                  <span className="mb-1 block text-muted-foreground">
+                    Reasoning effort por defecto
+                  </span>
+                  <select
+                    value={defaultReasoningEffort}
+                    onChange={(event) =>
+                      setDefaultReasoningEffort(event.target.value)
+                    }
+                    className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  >
+                    <option value="">— Usar el global —</option>
+                    <option value="off">off</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                  <FieldHint>
+                    Deja "Usar el global" para heredar el ajuste de
+                    Configuración → General. Sobreescríbelo aquí si este
+                    modelo concreto necesita razonar más o menos por defecto.
+                  </FieldHint>
                 </label>
               </FieldSection>
             )}

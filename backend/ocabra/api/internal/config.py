@@ -127,6 +127,14 @@ class ServerConfigPatch(BaseModel):
     require_api_key_openai: bool | None = Field(default=None, alias="requireApiKeyOpenai")
     require_api_key_ollama: bool | None = Field(default=None, alias="requireApiKeyOllama")
     new_user_group_names: list[str] | None = Field(default=None, alias="newUserGroupNames")
+    default_reasoning_effort: str | None = Field(
+        default=None,
+        alias="defaultReasoningEffort",
+        description=(
+            "Effort applied to a chat request that omits reasoning_effort entirely, "
+            "for models advertising capabilities.reasoning. One of low/medium/high/off."
+        ),
+    )
     realtime_default_stt_model: str | None = Field(
         default=None,
         alias="realtimeDefaultSttModel",
@@ -315,6 +323,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "requireApiKeyOpenai": settings.require_api_key_openai,
         "requireApiKeyOllama": settings.require_api_key_ollama,
         "newUserGroupNames": list(settings.new_user_group_names),
+        "defaultReasoningEffort": settings.default_reasoning_effort,
         "realtimeDefaultSttModel": settings.realtime_default_stt_model,
         "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
         "federationEnabled": settings.federation_enabled,
@@ -607,6 +616,23 @@ async def patch_config(
             )
         settings.new_user_group_names = names
         await _persist("new_user_group_names", names)
+    if "default_reasoning_effort" in payload:
+        from ocabra.api.openai._deps import (
+            _REASONING_EFFORT_LEVELS,
+            _REASONING_EFFORT_OFF,
+        )
+
+        value = str(payload["default_reasoning_effort"]).strip().lower()
+        if value not in _REASONING_EFFORT_LEVELS and value not in _REASONING_EFFORT_OFF:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "defaultReasoningEffort must be one of "
+                    f"{sorted(_REASONING_EFFORT_LEVELS | _REASONING_EFFORT_OFF)}"
+                ),
+            )
+        settings.default_reasoning_effort = value
+        await _persist("default_reasoning_effort", value)
     if "realtime_default_stt_model" in payload:
         settings.realtime_default_stt_model = str(payload["realtime_default_stt_model"] or "")
         await _persist("realtime_default_stt_model", settings.realtime_default_stt_model)

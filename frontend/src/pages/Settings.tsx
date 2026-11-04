@@ -76,6 +76,7 @@ const EMPTY_CONFIG: ServerConfig = {
   requireApiKeyOpenai: true,
   requireApiKeyOllama: true,
   newUserGroupNames: ["default", "Makers"],
+  defaultReasoningEffort: "medium",
   realtimeDefaultSttModel: "",
   realtimeDefaultTtsModel: "",
   federationEnabled: false,

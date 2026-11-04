@@ -411,7 +411,11 @@ class TestLlamaCppReasoningControls:
         assert payload["reasoning_effort"] == "none"
         assert payload["chat_template_kwargs"] == {"enable_thinking": False}
 
-    def test_reasoning_effort_default_preserves_launch_default(self) -> None:
+    def test_reasoning_effort_default_applies_global_default(self) -> None:
+        """2026-11-05: 'default' (or omitting the field) now resolves to the
+        global defaultReasoningEffort setting ('medium' out of the box)
+        instead of leaving the request fully unbounded — see
+        _resolve_default_reasoning_effort."""
         from ocabra.api.openai._deps import to_backend_body
 
         payload = to_backend_body(
@@ -419,9 +423,38 @@ class TestLlamaCppReasoningControls:
             {"model": "gemma4:26b", "reasoning_effort": "default", "messages": []},
         )
 
+        assert payload["reasoning_effort"] == "medium"
+        assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+        assert payload["reasoning_format"] == "deepseek"
+
+    def test_reasoning_effort_default_uses_per_model_override(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        state = _llama_cpp_state()
+        state.extra_config = {"default_reasoning_effort": "low"}
+        payload = to_backend_body(state, {"model": "gemma4:26b", "messages": []})
+
+        assert payload["reasoning_effort"] == "low"
+
+    def test_reasoning_effort_default_off_disables_thinking(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        state = _llama_cpp_state()
+        state.extra_config = {"default_reasoning_effort": "off"}
+        payload = to_backend_body(state, {"model": "gemma4:26b", "messages": []})
+
+        assert payload["reasoning_effort"] == "none"
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_reasoning_effort_default_not_applied_without_reasoning_capability(self) -> None:
+        from ocabra.api.openai._deps import to_backend_body
+
+        state = _llama_cpp_state()
+        state.capabilities.reasoning = False
+        payload = to_backend_body(state, {"model": "gemma4:26b", "messages": []})
+
         assert "reasoning_effort" not in payload
         assert "chat_template_kwargs" not in payload
-        assert "reasoning_format" not in payload
 
     def test_reasoning_budget_forwarded_as_reasoning_budget_tokens(self) -> None:
         from ocabra.api.openai._deps import to_backend_body
@@ -456,14 +489,16 @@ class TestLlamaCppReasoningControls:
         assert "reasoning_budget" not in payload
         assert "reasoning_budget_tokens" not in payload
 
-    def test_no_reasoning_fields_means_no_injection(self) -> None:
-        """Default behaviour (nothing set) must stay untouched — the server's
-        own --reasoning-budget default (-1, unrestricted) still applies."""
+    def test_no_reasoning_fields_still_caps_reasoning_effort(self) -> None:
+        """2026-11-05: reasoning_effort is no longer left fully unbounded for
+        a reasoning model (see test_reasoning_effort_default_applies_global_default)
+        — reasoning_budget_tokens stays untouched since that's a separate,
+        purely opt-in hard cap."""
         from ocabra.api.openai._deps import to_backend_body
 
         payload = to_backend_body(_llama_cpp_state(), {"model": "gemma4:26b", "messages": []})
 
-        assert "reasoning_effort" not in payload
+        assert payload["reasoning_effort"] == "medium"
         assert "reasoning_budget" not in payload
         assert "reasoning_budget_tokens" not in payload
         assert "reasoning" not in payload

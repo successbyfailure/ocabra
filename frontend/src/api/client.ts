@@ -1330,6 +1330,9 @@ function toServerConfig(raw: unknown): ServerConfig {
     )
       ? ((data.newUserGroupNames ?? data.new_user_group_names) as unknown[]).map(String)
       : ["default", "Makers"],
+    defaultReasoningEffort: (String(
+      data.defaultReasoningEffort ?? data.default_reasoning_effort ?? "medium",
+    ) as ServerConfig["defaultReasoningEffort"]),
     realtimeDefaultSttModel: String(
       data.realtimeDefaultSttModel ?? data.realtime_default_stt_model ?? "",
     ),

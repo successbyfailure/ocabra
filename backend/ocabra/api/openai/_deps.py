@@ -1544,6 +1544,36 @@ def _apply_thinking_controls(state: ModelState, payload: dict) -> None:
 _REASONING_EFFORT_LEVELS = {"low", "medium", "high"}
 _REASONING_EFFORT_OFF = {"off", "none", "disabled", "no", "false"}
 _REASONING_EFFORT_DEFAULT = {"", "default"}
+# 2026-11-05: a caller that never sets reasoning_effort/reasoning_budget/
+# max_tokens can leave a reasoning model thinking indefinitely — confirmed
+# live against gemma4:26b, a request with no cap at all generated 14k+
+# tokens non-stop until oCabra's 1500s dispatch timeout killed it, three
+# retries in a row. "medium" gives the model's own chat template a bounded
+# hint instead of running with no guidance whatsoever. Hardcoded last-resort
+# fallback if settings/per-model config ever holds something invalid.
+DEFAULT_REASONING_EFFORT = "medium"
+
+
+def _resolve_default_reasoning_effort(state: ModelState) -> str:
+    """Pick the effort level to use when a caller doesn't set one.
+
+    Precedence: the model's own ``extra_config.default_reasoning_effort``
+    (set via the model edit UI) over the global ``GET/PATCH /ocabra/config``
+    ``defaultReasoningEffort`` setting. Falls back to
+    :data:`DEFAULT_REASONING_EFFORT` if neither resolves to a valid level.
+    """
+    from ocabra.config import settings
+
+    extra_config = getattr(state, "extra_config", None)
+    per_model = None
+    if isinstance(extra_config, dict):
+        per_model = extra_config.get("default_reasoning_effort") or extra_config.get(
+            "defaultReasoningEffort"
+        )
+    candidate = str(per_model if per_model else settings.default_reasoning_effort).strip().lower()
+    if candidate in _REASONING_EFFORT_LEVELS or candidate in _REASONING_EFFORT_OFF:
+        return candidate
+    return DEFAULT_REASONING_EFFORT
 
 
 def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
@@ -1561,19 +1591,25 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
       ``reasoning_effort`` and paired with the per-request Jinja override
       ``chat_template_kwargs.enable_thinking``. The boolean is required when
       the worker was launched with ``--reasoning off``: a level alone does not
-      override that launch default. ``default`` deliberately injects nothing.
+      override that launch default.
     - **Everything else**: silently dropped — no-op for backends with no
       native reasoning control.
+
+    When the caller omits the field (or sends ``default``/``""``) and the
+    model advertises ``capabilities.reasoning``, the effective default from
+    :func:`_resolve_default_reasoning_effort` is substituted instead of
+    leaving reasoning completely unbounded. A non-reasoning model (or an
+    explicit ``off``/``low``/``high``) is untouched.
 
     The input ``reasoning_effort`` key is always popped from the forwarded
     payload so unknown backends don't 400 on it.
     """
     raw = payload.pop("reasoning_effort", None)
-    if raw is None:
-        return
-    value = str(raw).strip().lower()
+    value = "" if raw is None else str(raw).strip().lower()
     if value in _REASONING_EFFORT_DEFAULT:
-        return
+        if not getattr(state.capabilities, "reasoning", False):
+            return
+        value = _resolve_default_reasoning_effort(state)
     if value in _REASONING_EFFORT_OFF:
         enabled = False
     elif value in _REASONING_EFFORT_LEVELS:

@@ -20,6 +20,7 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
   const [idleTimeoutSeconds, setIdleTimeoutSeconds] = useState(config.idleTimeoutSeconds)
   const [realtimeDefaultSttModel, setRealtimeDefaultSttModel] = useState(config.realtimeDefaultSttModel ?? "")
   const [realtimeDefaultTtsModel, setRealtimeDefaultTtsModel] = useState(config.realtimeDefaultTtsModel ?? "")
+  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(config.defaultReasoningEffort)
 
   const [sttModels, setSttModels] = useState<ModelOption[]>([])
   const [ttsModels, setTtsModels] = useState<ModelOption[]>([])
@@ -30,7 +31,15 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
     setIdleTimeoutSeconds(config.idleTimeoutSeconds)
     setRealtimeDefaultSttModel(config.realtimeDefaultSttModel ?? "")
     setRealtimeDefaultTtsModel(config.realtimeDefaultTtsModel ?? "")
-  }, [config.energyCostEurKwh, config.idleTimeoutSeconds, config.logLevel, config.realtimeDefaultSttModel, config.realtimeDefaultTtsModel])
+    setDefaultReasoningEffort(config.defaultReasoningEffort)
+  }, [
+    config.energyCostEurKwh,
+    config.idleTimeoutSeconds,
+    config.logLevel,
+    config.realtimeDefaultSttModel,
+    config.realtimeDefaultTtsModel,
+    config.defaultReasoningEffort,
+  ])
 
   useEffect(() => {
     // Filter by the model's real capabilities rather than a hardcoded
@@ -86,6 +95,7 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
         energyCostEurKwh,
         realtimeDefaultSttModel,
         realtimeDefaultTtsModel,
+        defaultReasoningEffort,
       })
       toast.success("General settings guardadas")
     } catch {
@@ -110,6 +120,26 @@ export function GeneralSettings({ config, onSave }: GeneralSettingsProps) {
           ]}
         />
         <p className="text-xs text-muted-foreground/70">Nivel de detalle de los logs del servidor</p>
+      </div>
+
+      <div className="space-y-1">
+        <span className="text-sm text-muted-foreground">Reasoning effort por defecto</span>
+        <StyledSelect
+          value={defaultReasoningEffort}
+          onValueChange={(value) => setDefaultReasoningEffort(value as typeof defaultReasoningEffort)}
+          className="w-full"
+          options={[
+            { value: "off", label: "off" },
+            { value: "low", label: "low" },
+            { value: "medium", label: "medium" },
+            { value: "high", label: "high" },
+          ]}
+        />
+        <p className="text-xs text-muted-foreground/70">
+          Se aplica cuando un cliente no manda reasoning_effort en modelos con razonamiento
+          (gemma4, qwen3.8...), para que no piensen sin límite. Cada modelo puede
+          sobreescribirlo en su configuración.
+        </p>
       </div>
 
       <div className="grid gap-2 md:grid-cols-2">

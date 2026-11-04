@@ -162,6 +162,34 @@ class TestPatchConfigRuntime:
 
         assert result["downloadDir"] == "/tmp/dl"
 
+    @pytest.mark.asyncio
+    async def test_default_reasoning_effort_applied(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        previous = settings.default_reasoning_effort
+
+        try:
+            patch = ServerConfigPatch.model_validate({"defaultReasoningEffort": "high"})
+
+            with patch_db_and_schedules():
+                result = await config_api.patch_config(patch, request)
+
+            assert result["defaultReasoningEffort"] == "high"
+            assert settings.default_reasoning_effort == "high"
+        finally:
+            settings.default_reasoning_effort = previous
+
+    @pytest.mark.asyncio
+    async def test_default_reasoning_effort_rejects_invalid_value(self):
+        from fastapi import HTTPException
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        patch = ServerConfigPatch.model_validate({"defaultReasoningEffort": "extreme"})
+
+        with patch_db_and_schedules(), pytest.raises(HTTPException) as exc_info:
+            await config_api.patch_config(patch, request)
+
+        assert exc_info.value.status_code == 400
+
 
 def patch_db_and_schedules():
     """Context manager to mock database persistence and schedule loading."""

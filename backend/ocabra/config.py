@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.29.0"
+    app_version: str = "0.30.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -610,6 +610,14 @@ class Settings(BaseSettings):
     require_api_key_openai: bool = True
     require_api_key_ollama: bool = True
     new_user_group_names: list[str] = ["default", "Makers"]
+
+    # Reasoning effort applied to a chat request that omits reasoning_effort
+    # entirely, for any model advertising capabilities.reasoning (see
+    # ocabra.api.openai._deps._apply_reasoning_effort). One of
+    # "low"/"medium"/"high"/"off". A per-model extra_config.default_reasoning_effort
+    # overrides this. Added 2026-11-05 after gemma4:26b reasoned unbounded
+    # (14k+ tokens, no stop) until oCabra's 1500s dispatch timeout killed it.
+    default_reasoning_effort: str = "medium"
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"

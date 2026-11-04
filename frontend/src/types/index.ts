@@ -555,6 +555,7 @@ export interface ServerConfig {
   requireApiKeyOpenai: boolean;
   requireApiKeyOllama: boolean;
   newUserGroupNames: string[];
+  defaultReasoningEffort: "low" | "medium" | "high" | "off";
   realtimeDefaultSttModel: string;
   realtimeDefaultTtsModel: string;
   federationEnabled: boolean;
