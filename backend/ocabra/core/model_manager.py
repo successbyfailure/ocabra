@@ -1932,10 +1932,54 @@ class ModelManager:
                             state.error_message = None
 
                             if gpu_managed and self._gpu_manager:
-                                vram_per_gpu = effective_vram_mb // max(1, len(actual_gpu_indices))
+                                fallback_per_gpu = effective_vram_mb // max(
+                                    1, len(actual_gpu_indices)
+                                )
+                                # An even split across GPUs is wrong whenever
+                                # a tensor-split worker doesn't actually land
+                                # evenly (the common case — layer counts and
+                                # KV share rarely divide cleanly). Prefer the
+                                # real per-GPU usage NVML already reports for
+                                # this worker's PID, which GPUManager samples
+                                # into GPUState.processes.
+                                #
+                                # Only trust it when every GPU this worker
+                                # touched has a reading — a partial one (hw-
+                                # monitor's poll hasn't caught up with the
+                                # just-spawned PID on every GPU yet) is worse
+                                # than the even-split fallback: locking 0 on
+                                # a GPU that's actually heavily used lets the
+                                # next admission over-subscribe it. Reproduced
+                                # live 2026-11-04: qwen3.8:27b split 8.3 GB/
+                                # 23.2 GB across two GPUs but got locked for
+                                # ~15.7 GB on *each*, making GPU0 register as
+                                # fully reserved (free computed as negative,
+                                # clamped to 0) while it actually had ~3.6 GB
+                                # physically free — starving an unrelated
+                                # whisper load that would have fit there.
+                                real_per_gpu_mb: dict[int, int] = {}
+                                if len(actual_gpu_indices) > 1 and worker_info.pid:
+                                    try:
+                                        for gpu_idx in actual_gpu_indices:
+                                            gpu_state = await self._gpu_manager.get_state(gpu_idx)
+                                            match = next(
+                                                (
+                                                    p
+                                                    for p in gpu_state.processes
+                                                    if p.pid == worker_info.pid
+                                                ),
+                                                None,
+                                            )
+                                            if match is not None:
+                                                real_per_gpu_mb[gpu_idx] = match.used_vram_mb
+                                    except Exception:  # noqa: BLE001
+                                        real_per_gpu_mb = {}
+                                use_real = len(real_per_gpu_mb) == len(actual_gpu_indices)
                                 for gpu_idx in actual_gpu_indices:
                                     await self._gpu_manager.lock_vram(
-                                        gpu_idx, vram_per_gpu, model_id
+                                        gpu_idx,
+                                        real_per_gpu_mb[gpu_idx] if use_real else fallback_per_gpu,
+                                        model_id,
                                     )
 
                             # Make the completed model visible to the next admission

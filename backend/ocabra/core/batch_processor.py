@@ -33,6 +33,25 @@ from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
 
 logger = structlog.get_logger(__name__)
 
+# Upstream error codes that mean "try again later", not "this line is
+# broken" — scoped narrowly (not every 409) so a genuinely permanent
+# conflict still fails the line instead of retrying forever.
+_TRANSIENT_BATCH_ERROR_CODES = frozenset({"insufficient_vram"})
+
+
+def _is_transient_batch_error(status_code: int, error_payload: dict[str, Any]) -> bool:
+    """Whether a batch line's upstream failure is worth requeuing instead of
+    recording as a permanent failure on the first attempt.
+
+    Reproduced live 2026-11-04: a batch line hit insufficient_vram once
+    while something else briefly held the GPU, and was recorded as a
+    permanent failure even though the same GPU had room again under a
+    minute later. Batches exist to be the patient, low-priority citizen —
+    a transient resource conflict should requeue the same way a priority
+    cooldown/preemption already does, not fail outright on bad timing.
+    """
+    return status_code == 409 and error_payload.get("code") in _TRANSIENT_BATCH_ERROR_CODES
+
 
 class BatchProcessor:
     """Drains ``validating`` and ``in_progress`` batches in the background."""
@@ -453,6 +472,17 @@ class BatchProcessor:
                     if handle is not None:
                         await coordinator.unregister(target_model, handle)
 
+                if error_payload is not None and _is_transient_batch_error(
+                    status_code, error_payload
+                ):
+                    logger.info(
+                        "batch_line_insufficient_vram_requeue",
+                        batch_id=str(batch_id),
+                        line_idx=idx,
+                        target_model=target_model,
+                    )
+                    return False
+
                 record: dict[str, Any] = {
                     "id": f"batch_req_{uuid.uuid4()}",
                     "custom_id": custom_id,
@@ -547,7 +577,8 @@ class BatchProcessor:
                     error_type = "batch_priority_preempted"
                     message = (
                         "Repeatedly preempted to free capacity for interactive "
-                        "traffic and gave up retrying within this batch run."
+                        "traffic, or retried past the requeue deadline waiting on "
+                        "GPU VRAM, and gave up retrying within this batch run."
                     )
                 for idx in pending_indices:
                     record = self._error_record(

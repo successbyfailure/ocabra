@@ -1524,6 +1524,54 @@ async def test_multi_gpu_admission_evicts_for_each_tensor_shard() -> None:
 
 
 @pytest.mark.asyncio
+async def test_multi_gpu_load_locks_real_per_gpu_vram_not_even_split(worker_pool) -> None:
+    """2026-11-04 live incident: a tensor-split worker (qwen3.8:27b) landed
+    unevenly across two GPUs (8.3 GB / 23.2 GB in production) but got
+    locked for an even split of the total on EACH GPU — making the lighter
+    GPU register as fully reserved (free computed negative, clamped to 0)
+    even though it had several GB physically free, starving an unrelated
+    load that would have fit there. lock_vram must use the real per-process
+    reading NVML already has for this worker's PID when it's available for
+    every GPU the worker touched."""
+    from ocabra.core.gpu_manager import GPUProcessInfo
+    from ocabra.core.model_manager import ModelState
+
+    real_usage_mb = {0: 8_292, 1: 23_214}
+    gpu_manager = AsyncMock()
+    gpu_manager.get_state = AsyncMock(
+        side_effect=lambda idx: SimpleNamespace(
+            processes=[
+                GPUProcessInfo(
+                    pid=12345,
+                    process_name="mock",
+                    process_type="C",
+                    used_vram_mb=real_usage_mb[idx],
+                )
+            ]
+        )
+    )
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+    model_id = "test/multi-gpu"
+    mm._states[model_id] = ModelState(
+        model_id=model_id,
+        display_name=model_id,
+        backend_type="mock",
+        load_policy=LoadPolicy.ON_DEMAND,
+    )
+    mm._load_locks[model_id] = asyncio.Lock()
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[0, 1])),
+    ):
+        await mm.load(model_id)
+
+    gpu_manager.lock_vram.assert_any_call(0, 8_292, model_id)
+    gpu_manager.lock_vram.assert_any_call(1, 23_214, model_id)
+
+
+@pytest.mark.asyncio
 async def test_validated_preset_uses_physical_capacity_at_measured_edge() -> None:
     from ocabra.core.model_manager import ModelState
 
