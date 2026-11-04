@@ -8,10 +8,13 @@ import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
 
 const CATEGORY_LABELS: Record<ProfileCategory, string> = {
   llm: "LLM",
+  embedding: "Embeddings",
+  rerank: "Reranking",
   tts: "TTS",
   stt: "STT",
   image: "Imagen",
   music: "Música",
+  video_upscaling: "Escalado de vídeo",
 }
 
 export function Profiles() {

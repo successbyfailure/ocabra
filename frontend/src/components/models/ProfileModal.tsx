@@ -25,21 +25,29 @@ interface ProfileModalProps {
 
 const CATEGORIES: { value: ProfileCategory; label: string }[] = [
   { value: "llm", label: "LLM" },
+  { value: "embedding", label: "Embedding" },
+  { value: "rerank", label: "Reranker" },
   { value: "tts", label: "TTS" },
   { value: "stt", label: "STT" },
   { value: "image", label: "Image" },
   { value: "music", label: "Music" },
+  { value: "video_upscaling", label: "Video upscaling" },
 ]
 
 const CATEGORY_COLORS: Record<ProfileCategory, string> = {
   llm: "bg-blue-500/20 text-blue-300 border-blue-500/40",
+  embedding: "bg-cyan-500/20 text-cyan-300 border-cyan-500/40",
+  rerank: "bg-indigo-500/20 text-indigo-300 border-indigo-500/40",
   tts: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
   stt: "bg-amber-500/20 text-amber-300 border-amber-500/40",
   image: "bg-purple-500/20 text-purple-300 border-purple-500/40",
   music: "bg-pink-500/20 text-pink-300 border-pink-500/40",
+  video_upscaling: "bg-orange-500/20 text-orange-300 border-orange-500/40",
 }
 
 function inferDefaultCategory(model: ModelState): ProfileCategory {
+  if (model.capabilities.rerank) return "rerank"
+  if (model.capabilities.embeddings) return "embedding"
   if (model.capabilities.tts) return "tts"
   if (model.capabilities.audioTranscription) return "stt"
   if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
