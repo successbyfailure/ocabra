@@ -72,6 +72,7 @@ FAMILY_DEFAULT_S: dict[str, dict[str, float]] = {
     "bitnet":       {"p50": 10.0, "p95": 120.0},
     "ollama":       {"p50": 14.0, "p95": 250.0},
     "whisper":      {"p50":  5.0, "p95":  60.0},
+    "whisper_cpp":  {"p50":  8.0, "p95":  90.0},
     "vibeasr":      {"p50":  3.0, "p95":  30.0},
     "tts":          {"p50":  2.0, "p95":  10.0},
     "voxtral":      {"p50":  4.0, "p95":  20.0},
@@ -173,6 +174,7 @@ _WORK_UNIT_EXTRACTORS: dict[str, tuple[str, "callable[[dict], float | None]"]] =
     # Whisper/faster-whisper/vibeasr/voxtral/parakeet all scale ~linearly
     # with input audio duration on a single GPU.
     "whisper":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
+    "whisper_cpp": ("audio_seconds",  lambda m: _pos_float(m.get("audio_seconds"))),
     "vibeasr":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
     "voxtral":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
     # TTS: characters synthesised. Simple, robust, and works whether the

@@ -486,6 +486,7 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.vibeasr_backend import VibeAsrBackend
     from ocabra.backends.voxtral_backend import VoxtralBackend
     from ocabra.backends.whisper_backend import WhisperBackend
+    from ocabra.backends.whispercpp_backend import WhisperCppBackend
 
     worker_pool = WorkerPool()
     worker_pool.register_backend("acestep", AceStepBackend())
@@ -496,6 +497,7 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("ollama", OllamaBackend())
     worker_pool.register_backend("sglang", SGLangBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
+    worker_pool.register_backend("whisper_cpp", WhisperCppBackend())
     worker_pool.register_backend("vibeasr", VibeAsrBackend())
     worker_pool.register_backend("tts", TTSBackend())
     worker_pool.register_backend("chatterbox", ChatterboxBackend())
@@ -908,12 +910,13 @@ Los modelos se cargan **bajo demanda**. Una petición a un modelo frío mantiene
 
 ## Transcripción (STT)
 
-`POST /v1/audio/transcriptions` acepta, además de los campos OpenAI, dos form-params de faster-whisper para mitigar los bucles de alucinación de Whisper:
+`POST /v1/audio/transcriptions` acepta, además de los campos OpenAI, estos form-params propios de oCabra (**no estándar OpenAI** — un cliente/SDK oficial no los reconoce):
 
 | Campo | Default | Efecto |
 |-------|---------|--------|
-| `vad_filter` | `true` | Descarta los tramos sin voz (VAD) antes de transcribir. |
+| `vad_filter` | `true` | Descarta los tramos sin voz (VAD) antes de transcribir (mitiga alucinaciones de Whisper). |
 | `condition_on_previous_text` | `false` | Evita que un bucle de repetición se propague vía el contexto del decoder (como WhisperX). |
+| `diarize` | `false` | Identificación de hablantes (pyannote); cada segmento de `verbose_json` lleva `speaker`. Funciona contra cualquier perfil whisper, no solo uno `*-diarized` — sin ese perfil, pyannote se carga de forma perezosa en la primera petición (coste de latencia único) y requiere `HF_TOKEN` accesible en el entorno del worker. |
 
 Límite de subida: 256 MB por parte (configurable). Para audio largo, sube comprimido (`mp3`/`opus`/`flac`) en vez de WAV.
 
@@ -1043,7 +1046,7 @@ def _custom_openapi():
                                 "response_format": {"type": "string", "enum": ["json", "text", "srt", "vtt", "verbose_json"], "default": "json"},
                                 "temperature": {"type": "number", "default": 0.0},
                                 "timestamp_granularities[]": {"type": "array", "items": {"type": "string", "enum": ["segment", "word"]}},
-                                "diarize": {"type": "boolean", "description": "Diarización de hablantes (perfiles -diarized)."},
+                                "diarize": {"type": "boolean", "description": "Identificación de hablantes (pyannote, extensión oCabra). Funciona contra cualquier perfil whisper, no solo uno '*-diarized' — sin ese perfil carga pyannote de forma perezosa en la primera petición."},
                                 "vad_filter": {"type": "boolean", "default": True, "description": "Descarta tramos sin voz (VAD) antes de transcribir."},
                                 "condition_on_previous_text": {"type": "boolean", "default": False, "description": "Evita que un bucle de alucinación se propague vía el contexto del decoder."},
                             },

@@ -331,8 +331,21 @@ file=@audio.wav
 language=es           # opcional, auto-deteccion si vacio
 response_format=json  # json, verbose_json, text, srt, vtt
 temperature=0.0
-diarize=true          # opcional, requiere perfil con diarizacion
+diarize=true          # opcional — extensión oCabra, no estándar OpenAI
 ```
+
+`diarize` **no** forma parte de la API real de OpenAI — no soporta
+diarización en absoluto, ni este parámetro ni ningún equivalente; un
+cliente/SDK oficial no lo reconoce. Activa el mismo pipeline
+(pyannote) tanto si el perfil es un `*-diarized` como si no: contra
+cualquier perfil whisper normal, `diarize=true` carga pyannote **de
+forma perezosa en esa primera petición** (coste de latencia único, y
+requiere `HF_TOKEN` ya accesible en el entorno del worker — si falta,
+400). Un perfil `*-diarized` no es necesario para que funcione, es una
+optimización operativa: precarga pyannote al arrancar el worker (sin
+penalizar la primera petición) y reserva ~1200 MB de VRAM extra en el
+planificador de GPU — ver `load_overrides.diarization_enabled` más
+abajo.
 
 ### Audio — Music Generation
 
@@ -723,7 +736,11 @@ Un perfil es ahora de uno de dos tipos (`profile_kind`):
 > - `recomendado-sota` — calidad prioritaria: el LLM de mejor calidad
 >   disponible, con fallback ordenado a otros si el primero no está cargado.
 > - `recomendado-stt` — transcripción recomendada, con fallback gestionado
->   por el router en vez de fijar un modelo Whisper concreto.
+>   por el router en vez de fijar un modelo Whisper concreto. Sus
+>   `routing_targets` incluyen, como último escalón, un modelo
+>   `whisper_cpp` (CPU, sufijo `-cpu`) — el router prueba primero los
+>   Whisper en GPU y solo cae a CPU si están todos ocupados, dando balanceo
+>   por ocupación gratis sin tocar el scheduler.
 >
 > Cualquier cliente puede usarlos igual que un `profile_id` normal en
 > `model=` — incluidos dentro de un lote de Batches (ver más abajo), donde
@@ -782,7 +799,10 @@ Ejemplo de perfil TTS con voz fija:
 }
 ```
 
-Ejemplo de perfil STT con diarizacion:
+Ejemplo de perfil STT con diarización precargada (opcional — ver nota
+sobre `diarize` más arriba; sin este perfil, `diarize=true` funciona
+igual contra un perfil whisper normal, solo con la carga perezosa de
+pyannote en la primera petición en vez de al arrancar el worker):
 ```json
 {
   "profile_id": "whisper-diarized",
@@ -1190,6 +1210,8 @@ Eventos emitidos (JSON):
 | **ollama** | LLM, Embeddings | Ollama registry | Externo |
 | **tensorrt_llm** | LLM | TRT-LLM engines | Si |
 | **whisper** | STT | faster-whisper, Whisper | Si |
+| **whisper_cpp** | STT | whisper.cpp (GGML, CPU) | No |
+| **vibeasr** | STT | VibeVoice-ASR-BitNet (ternario) | No |
 | **tts** | TTS | Kokoro, Bark, Qwen3-TTS | Si |
 | **chatterbox** | TTS | Chatterbox (voice clone) | Si |
 | **voxtral** | TTS | Voxtral (vllm-omni) | Si |

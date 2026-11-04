@@ -66,6 +66,7 @@ export type BackendType =
   | "diffusers"
   | "mage"
   | "whisper"
+  | "whisper_cpp"
   | "vibeasr"
   | "tts"
   | "chatterbox"
@@ -553,6 +554,7 @@ export interface ServerConfig {
   globalSchedules: EvictionSchedule[];
   requireApiKeyOpenai: boolean;
   requireApiKeyOllama: boolean;
+  newUserGroupNames: string[];
   realtimeDefaultSttModel: string;
   realtimeDefaultTtsModel: string;
   federationEnabled: boolean;
@@ -1048,6 +1050,7 @@ export interface Group {
   name: string;
   description: string;
   isDefault: boolean;
+  grantsAllModels: boolean;
   memberCount: number;
   modelCount: number;
   createdAt: string;
@@ -1085,15 +1088,25 @@ export interface UpdateUserPayload {
 export interface CreateGroupPayload {
   name: string;
   description?: string | null;
+  grantsAllModels?: boolean;
 }
 
 export interface UpdateGroupPayload {
   name?: string;
   description?: string | null;
+  grantsAllModels?: boolean;
 }
 
 // Model profiles
-export type ProfileCategory = "llm" | "tts" | "stt" | "image" | "music";
+export type ProfileCategory =
+  | "llm"
+  | "embedding"
+  | "rerank"
+  | "tts"
+  | "stt"
+  | "image"
+  | "music"
+  | "video_upscaling";
 
 export interface RuntimePolicy {
   selection: "prefer_loaded" | "prefer_default";

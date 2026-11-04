@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.28.0"
+    app_version: str = "0.29.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -341,6 +341,13 @@ class Settings(BaseSettings):
     vibeasr_stream_server_bin: str = "/usr/local/bin/asr_stream_server"
     vibeasr_threads: int = 8
     vibeasr_startup_timeout_s: int = 300
+    # whisper.cpp — native CPU STT via whisper-server, used as a fallback
+    # target in recomendado-stt (occupancy balancing via RouterResolver, not
+    # new scheduling code). No venv: whisper-server is a standalone binary.
+    whispercpp_custom_server_bin: str | None = None
+    whispercpp_server_bin: str = "/usr/local/bin/whisper-server"
+    whispercpp_threads: int = 8
+    whispercpp_startup_timeout_s: int = 120
     # TensorRT-LLM
     tensorrt_llm_enabled: bool = False
     tensorrt_llm_launch_mode: str = "binary"

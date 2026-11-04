@@ -714,7 +714,7 @@ class ProfileRegistry:
     _BACKEND_CATEGORY: dict[str, str] = {
         "vllm": "llm", "llama_cpp": "llm", "sglang": "llm",
         "tensorrt_llm": "llm", "bitnet": "llm", "ollama": "llm",
-        "whisper": "stt", "vibeasr": "stt", "tts": "tts", "voxtral": "tts",
+        "whisper": "stt", "whisper_cpp": "stt", "vibeasr": "stt", "tts": "tts", "voxtral": "tts",
         "chatterbox": "tts", "piper": "tts", "diffusers": "image", "acestep": "music",
     }
 
