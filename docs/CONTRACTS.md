@@ -8,7 +8,15 @@ Si necesitas cambiar un contrato, documenta el cambio aquí antes de implementar
 
 ## 1. BackendInterface — Contrato de backends de inferencia
 
-Todo backend de inferencia (vLLM, Diffusers, Whisper, TTS, Ollama, llama.cpp, SGLang, TensorRT-LLM, BitNet, ACE-Step) debe implementar esta interfaz abstracta.
+Todo backend de inferencia (vLLM, Diffusers, Whisper, whisper.cpp, VibeASR, TTS, Ollama, llama.cpp, SGLang, TensorRT-LLM, BitNet, ACE-Step) debe implementar esta interfaz abstracta.
+
+No todo backend necesita un worker Python propio: cuando el proceso nativo
+ya expone HTTP (`whisper-server`, `llama-server`), `load()` lo lanza
+directamente como el worker y `forward_request`/`forward_stream` apuntan a
+su puerto — ver `whispercpp_backend.py` (usa `--inference-path /transcribe`
+para que el binario sirva exactamente el path que `audio.py` golpea) frente
+a `whisper_backend.py` (sí necesita `workers/whisper_worker.py` porque
+envuelve faster-whisper, una librería Python, no un servidor HTTP nativo).
 
 ```python
 # backend/ocabra/backends/base.py
@@ -39,7 +47,7 @@ class BackendCapabilities:
 
 @dataclass
 class WorkerInfo:
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "mage" | "whisper" | "whisper_cpp" | "vibeasr" | "tts" | "chatterbox" | "piper" | "voxtral" | "upscaler" | "flashvsr" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     model_id: str
     gpu_indices: list[int]
     port: int
@@ -182,7 +190,7 @@ class ModelState:
                             # Formato legacy sin prefijo ya no es válido.
     backend_model_id: str       # Backend-native id (without prefix), e.g. "mistral-7b-instruct"
     display_name: str
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "whisper" | "tts" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
+    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "mage" | "whisper" | "whisper_cpp" | "vibeasr" | "tts" | "chatterbox" | "piper" | "voxtral" | "upscaler" | "flashvsr" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     status: ModelStatus
     load_policy: LoadPolicy
     pin_permanent: bool         # Solo aplica si load_policy == PIN — ver arriba
