@@ -989,6 +989,43 @@ async def test_unload_releases_lock_when_backend_lost_gpu_attribution(worker_poo
 
 
 @pytest.mark.asyncio
+async def test_unload_releases_lock_for_model_stuck_in_error_status(worker_pool):
+    """2026-11-04 live incident: gemma4:26b sat in ERROR status after a
+    generation timeout, with its backend process still alive and its VRAM
+    lock still held — unload() used to no-op on anything but LOADED, so
+    there was no way to recover short of killing the process by hand. Every
+    other model's load on that GPU failed with "insufficient VRAM" until
+    then. unload() must now also act on ERROR status."""
+    gpu_manager = AsyncMock()
+    gpu_manager.locked_gpu_indices.return_value = [1]
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+    state = await add_test_model(mm, model_id="llama_cpp/stuck-model", load_policy="pin")
+    state.status = ModelStatus.ERROR
+    state.current_gpu = [1]
+    state.vram_used_mb = 23632
+    state.worker_info = WorkerInfo(
+        backend_type="mock",
+        model_id=state.model_id,
+        gpu_indices=[1],
+        port=0,
+        pid=0,
+        vram_used_mb=23632,
+    )
+    worker_pool.set_worker(state.model_id, state.worker_info)
+
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+    ):
+        await mm.unload(state.model_id, reason="manual")
+
+    gpu_manager.unlock_vram.assert_awaited_once_with(1, state.model_id)
+    assert state.status == ModelStatus.UNLOADED
+    assert state.current_gpu == []
+    assert state.vram_used_mb == 0
+
+
+@pytest.mark.asyncio
 async def test_pressure_eviction_skips_wrong_gpu_and_cpu_only_candidates(worker_pool):
     """2026-10-31 live incident: a GPU1 shortfall evicted piper (no GPU at
     all) and a GPU0 model before ever reaching the GPU1 neighbour that

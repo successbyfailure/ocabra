@@ -1326,6 +1326,20 @@ class ModelManager:
             # it temporarily invisible to pressure eviction even though it is
             # still consuming physical VRAM.
             if state.load_policy == LoadPolicy.PIN and state.status != ModelStatus.LOADED:
+                if state.status == ModelStatus.ERROR:
+                    # Persisted ERROR state can mean last run's backend
+                    # process (and its VRAM lock) is still alive — see
+                    # unload()'s ERROR-handling above. Clear it first so
+                    # the reload below doesn't immediately collide with its
+                    # own stale lock on every restart.
+                    try:
+                        await self.unload(model_id, reason="startup_error_recovery")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "startup_error_recovery_unload_failed",
+                            model_id=model_id,
+                            error=str(exc),
+                        )
                 logger.info(
                     "auto_loading_managed_model",
                     model_id=model_id,
@@ -3039,7 +3053,20 @@ class ModelManager:
         state = self._states.get(model_id)
         if not state:
             return
-        if state.status != ModelStatus.LOADED:
+        if state.status not in (ModelStatus.LOADED, ModelStatus.ERROR):
+            # ERROR is included alongside LOADED: a model can reach ERROR
+            # while its backend process is still alive and its VRAM lock
+            # still held (e.g. a generation timeout or health-check failure
+            # that never went through a clean unload) — unload() must still
+            # be able to kill that process and release the lock, or it's
+            # stuck forever (the lock lives only in GPUManager's in-memory
+            # dict, so even a container restart re-derives the same stuck
+            # state from the model's last-known DB row). Reproduced live
+            # 2026-11-04: gemma4:26b sat in ERROR holding 23632 MB on GPU1
+            # — every other model's load attempt on that GPU failed with
+            # "insufficient VRAM" until the process was killed by hand,
+            # because unload() no-opped here before this fix.
+            #
             # Runtime presets load a derived worker key (``model_id::<hash>``,
             # see add_model/_load_model), never the canonical id itself — the
             # canonical entry's own status can sit at CONFIGURED/UNLOADED
