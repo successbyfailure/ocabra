@@ -58,6 +58,7 @@ async def _resolve_inflight_auth_meta(request: Request) -> dict:
         "api_key_name": ctx.api_key_name,
     }
 
+
 logger = structlog.get_logger(__name__)
 
 _TRACKED_API_PATHS = {
@@ -405,10 +406,7 @@ def _extract_usage_tokens_detailed(
             message = choices[0].get("message") if isinstance(choices[0], dict) else None
             reasoning_text: str | None = None
             if isinstance(message, dict):
-                reasoning_text = (
-                    message.get("reasoning_content")
-                    or message.get("reasoning")
-                )
+                reasoning_text = message.get("reasoning_content") or message.get("reasoning")
             if reasoning_text:
                 reason_tok = _approx_text_tokens(reasoning_text)
 
@@ -416,9 +414,7 @@ def _extract_usage_tokens_detailed(
     if request_kind == "audio_transcription" and out_tok is None and isinstance(payload, dict):
         out_tok = _approx_text_tokens(payload.get("text"))
 
-    in_tok, out_tok = _apply_token_kind_defaults(
-        in_tok, out_tok, request_kind, request_payload
-    )
+    in_tok, out_tok = _apply_token_kind_defaults(in_tok, out_tok, request_kind, request_payload)
     return in_tok, out_tok, cached_tok, reason_tok
 
 
@@ -491,9 +487,7 @@ def _mark_stream_first_token(
     telemetry = getattr(request.state, "runtime_telemetry", None)
     if not isinstance(telemetry, RequestRuntimeTelemetry) or telemetry.ttft_ms is not None:
         return
-    output_tokens = _stream_output_tokens(
-        b"".join(chunks), content_type, include_reasoning=True
-    )
+    output_tokens = _stream_output_tokens(b"".join(chunks), content_type, include_reasoning=True)
     if output_tokens is not None and output_tokens > 0:
         telemetry.mark_first_token(now_monotonic)
 
@@ -876,6 +870,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             async def tee_and_record():
                 chunks: list[bytes] = []
                 error_msg: str | None = None
+                stream_cancelled = False
                 last_progress_at = 0.0
                 try:
                     async for chunk in original_iterator:
@@ -899,23 +894,50 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                     inflight_request_id,
                                     output_tokens_estimate=out_tok,
                                 )
+                except asyncio.CancelledError:
+                    # Once response headers have been sent, a downstream
+                    # disconnect cancels this body iterator rather than the
+                    # call_next() await above. CancelledError inherits from
+                    # BaseException, so the generic handler does not see it.
+                    # Preserve partial usage while marking the request as the
+                    # canonical 499 instead of a misleading successful 200.
+                    stream_cancelled = True
+                    error_msg = "stream_cancelled"
+                    raise
                 except Exception as exc:
                     error_msg = str(exc)
                     raise
                 finally:
+                    # Cancelling an outer async generator does not guarantee
+                    # that the iterator it was consuming is closed.  That is
+                    # especially important here: the inner OpenAI/Ollama
+                    # stream owns the fair-slot/KV lease.  If a client drops
+                    # after response headers, Starlette cancels this tee; an
+                    # unclosed inner iterator would keep that lease forever
+                    # and make every later request look one slot busier.
+                    #
+                    # Close on every exit.  ``aclose`` is idempotent for async
+                    # generators and also lets backend response iterators
+                    # release their HTTP connection promptly on errors.
+                    close_iterator = getattr(original_iterator, "aclose", None)
+                    if close_iterator is not None:
+                        try:
+                            await close_iterator()
+                        except Exception:  # noqa: BLE001 - cleanup must not hide the stream result
+                            logger.exception("stream_iterator_close_failed", model_id=model_id)
                     duration_ms = (time.monotonic() - start) * 1000
                     if mm and inflight_model_id:
                         mm.end_request(
-                            getattr(
-                                request.state, "inflight_model_id", inflight_model_id
-                            ),
+                            getattr(request.state, "inflight_model_id", inflight_model_id),
                             inflight_request_id,
                         )
                     if model_id:
                         all_body = b"".join(chunks)
                         stream_error = _extract_stream_error(all_body, content_type)
                         recorded_status = status_code
-                        if error_msg:
+                        if stream_cancelled:
+                            recorded_status = 499
+                        elif error_msg:
                             recorded_status = 500
                         elif stream_error is not None:
                             error_msg, error_code = stream_error
@@ -993,8 +1015,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
             )
             generation_ms = _extract_generation_ms(response_payload)
             _update_engine_runtime_telemetry(request, response_payload)
-            draft_n, draft_n_accepted, predicted_tps, prompt_tps = (
-                _extract_speculative_stats(response_payload)
+            draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
+                response_payload
             )
             # Transcription output: JSON formats are proxied above; for non-JSON
             # (srt/vtt/text) count words from the raw body. Empty/silence → 0
@@ -1119,7 +1141,9 @@ async def _resolve_inflight_model_id(request: Request, requested: str | None) ->
                 # See resolve_profile() in api/openai/_deps.py for the
                 # same alias-then-direct-lookup order this mirrors.
                 alias_resolver = getattr(registry, "resolve_alias", None)
-                alias_target = await alias_resolver(requested) if alias_resolver is not None else None
+                alias_target = (
+                    await alias_resolver(requested) if alias_resolver is not None else None
+                )
                 profile = alias_target[0] if alias_target is not None else None
             if profile is not None and profile.enabled:
                 if getattr(profile, "profile_kind", "execution") == "router":
@@ -1318,8 +1342,7 @@ async def _record_stat(
                     (
                         s
                         for s in states
-                        if s.model_id == resolved_model_id
-                        or s.backend_model_id == model_id
+                        if s.model_id == resolved_model_id or s.backend_model_id == model_id
                     ),
                     None,
                 )
@@ -1453,9 +1476,7 @@ async def _record_stat(
                 via_router_profile_id=via_router_profile_id,
                 runtime_preset=getattr(request.state, "runtime_preset_key", None),
                 runtime_key=getattr(request.state, "runtime_key", None),
-                effective_context=getattr(
-                    request.state, "runtime_effective_context", None
-                ),
+                effective_context=getattr(request.state, "runtime_effective_context", None),
                 is_batch=is_batch,
             )
             session.add(stat)

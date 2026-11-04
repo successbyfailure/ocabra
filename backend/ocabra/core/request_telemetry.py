@@ -27,6 +27,7 @@ class RequestRuntimeTelemetry:
     physical_slots: int | None = None
     admission_limit: int | None = None
     admission_concurrency: int | None = None
+    admission_lease_id: int | None = None
 
     def mark_load(self, duration_ms: int) -> None:
         self.load_ms = max(0, int(duration_ms))
@@ -48,5 +49,6 @@ class RequestRuntimeTelemetry:
             "physical_slots": self.physical_slots,
             "admission_limit": self.admission_limit,
             "admission_concurrency": self.admission_concurrency,
+            "admission_lease_id": self.admission_lease_id,
         }
         return {key: int(value) for key, value in values.items() if value is not None}

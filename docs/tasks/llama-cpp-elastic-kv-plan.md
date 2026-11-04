@@ -1151,6 +1151,26 @@ cambios de pool que mantengan la misma colocación.
   menos de 500 ms podía eludir TTFT; se corrigió y el segundo smoke registró
   ``load_ms=93379``, ``ttft_ms=93772`` y ``prefill_ms=188``.
 
+### RavenX real: leases y contención de prefill (2026-11-03)
+
+- Una ráfaga de 21 peticiones a RavenX completó 20 y rechazó preventivamente
+  una reserva de 267.693 tokens sobre un pool de 245.760, sin OOM ni caída del
+  worker. Con dos admisiones, la mediana observada fue 71,5 tok/s por petición
+  frente a unos 118 tok/s aislada.
+- Un prompt estimado en 96.812 tokens coincidió con otro de 7.578 y elevó el
+  TTFT del pequeño a 47,8 s. El gate conserva cuatro slots físicos, pero desde
+  esta revisión serializa la fase de prefill cuando interviene un prompt de al
+  menos 32k; al primer chunk abre de nuevo los slots restantes para decode.
+- Se localizó un stream iniciado a las 01:54:52 que adquirió capacidad pero no
+  llegó a ``request_stats`` y dejó ``in_flight=1`` en admisiones posteriores.
+  La causa era el cierre incompleto del iterador interior al cancelar el tee
+  del middleware. Ahora el tee ejecuta ``aclose()``, los leases tienen identidad
+  y liberación idempotente, y el gate recupera una tarea propietaria terminada
+  antes de admitir trabajo nuevo.
+- La cobertura automatizada reproduce desconexión después de cabeceras,
+  cancelación directa, doble liberación tardía, recuperación de propietario y
+  apertura de concurrencia decode al primer chunk.
+
 ## Cuestiones abiertas
 
 - [ ] ¿Qué margen productivo aplicar a los máximos ya medidos (Gemma 12B y

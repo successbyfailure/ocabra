@@ -515,9 +515,7 @@ class WorkerPool:
             **snapshot,
             "kv_saturated": kv_saturated,
             "compute_saturated": compute_saturated,
-            "saturated": bool(
-                snapshot["slot_saturated"] or kv_saturated or compute_saturated
-            ),
+            "saturated": bool(snapshot["slot_saturated"] or kv_saturated or compute_saturated),
         }
 
     def peek_gate_priority(
@@ -547,9 +545,7 @@ class WorkerPool:
             model_id,
             slots,
             kv_capacity_tokens,
-            medium_prefill_tokens=(
-                settings.llama_cpp_medium_prefill_tokens if adaptive else None
-            ),
+            medium_prefill_tokens=(settings.llama_cpp_medium_prefill_tokens if adaptive else None),
             medium_prefill_max_concurrency=(
                 settings.llama_cpp_medium_prefill_max_concurrency if adaptive else None
             ),
@@ -582,6 +578,7 @@ class WorkerPool:
         telemetry.physical_slots = admission.physical_slots
         telemetry.admission_limit = admission.admission_limit
         telemetry.admission_concurrency = admission.admission_concurrency
+        telemetry.admission_lease_id = admission.lease_id
 
     def _record_forward_failure(self, model_id: str) -> None:
         self._consecutive_failures[model_id] = self._consecutive_failures.get(model_id, 0) + 1
@@ -834,14 +831,13 @@ class WorkerPool:
             return
         gate = self._fair_gate(model_id, slots, kv_capacity_tokens)
         prompt_tokens = self._prompt_tokens(body)
-        await self._preempt_batch_if_saturated(
-            model_id, gate, is_batch, kv_tokens, prompt_tokens
-        )
+        await self._preempt_batch_if_saturated(model_id, gate, is_batch, kv_tokens, prompt_tokens)
         async with gate.slot(
             user_key,
             is_batch=is_batch,
             kv_tokens=kv_tokens,
             prompt_tokens=prompt_tokens,
+            track_prefill=gate.medium_prefill_tokens is not None,
         ) as admission:
             self._record_admission(
                 telemetry,
@@ -849,7 +845,11 @@ class WorkerPool:
                 prompt_tokens=prompt_tokens,
                 kv_tokens=kv_tokens,
             )
+            first_chunk = True
             async for chunk in self._forward_stream_unfair(model_id, path, body):
+                if first_chunk:
+                    first_chunk = False
+                    await gate.mark_prefill_complete(admission.lease_id)
                 yield chunk
 
     async def _forward_stream_unfair(

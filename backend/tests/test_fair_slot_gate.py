@@ -245,6 +245,43 @@ async def test_cancelling_granted_weighted_slot_releases_kv_reservation():
     assert gate.snapshot()["kv_reserved_tokens"] == 0
 
 
+@pytest.mark.asyncio
+async def test_context_lease_release_is_idempotent():
+    gate = FairSlotGate(slots=2, kv_capacity_tokens=100)
+    admission = await gate.acquire("alice", kv_tokens=40)
+
+    await gate.release(kv_tokens=40, lease_id=admission.lease_id)
+    await gate.release(kv_tokens=40, lease_id=admission.lease_id)
+
+    snapshot = gate.snapshot()
+    assert snapshot["in_flight"] == 0
+    assert snapshot["active_leases"] == 0
+    assert snapshot["kv_reserved_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_finished_owner_task_is_reaped_before_next_admission():
+    gate = FairSlotGate(slots=1, kv_capacity_tokens=100)
+
+    async def abandon_after_acquire():
+        return await gate.acquire("alice", kv_tokens=80, _track_owner=True)
+
+    abandoned = await asyncio.create_task(abandon_after_acquire())
+    assert gate.snapshot()["in_flight"] == 1
+
+    replacement = await asyncio.wait_for(
+        gate.acquire("bob", kv_tokens=20),
+        timeout=0.5,
+    )
+    assert replacement.admission_concurrency == 1
+    assert gate.snapshot()["kv_reserved_tokens"] == 20
+
+    # A late close from the abandoned generator cannot decrement Bob's lease.
+    await gate.release(kv_tokens=80, lease_id=abandoned.lease_id)
+    assert gate.snapshot()["in_flight"] == 1
+    await gate.release(kv_tokens=20, lease_id=replacement.lease_id)
+
+
 def test_worker_pool_fair_gates_resizes_on_kv_capacity_change():
     registry = WorkerPoolFairGates()
     gate_a = registry.get("worker-1", slots=4, kv_capacity_tokens=96_000)
@@ -328,3 +365,49 @@ async def test_medium_prefill_allows_three_of_four_physical_slots():
 
     release.set()
     await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_large_stream_prefill_blocks_small_until_first_chunk_then_allows_decode():
+    gate = FairSlotGate(
+        slots=4,
+        medium_prefill_tokens=32_000,
+        medium_prefill_max_concurrency=3,
+        large_prefill_tokens=64_000,
+        large_prefill_max_concurrency=2,
+    )
+    large = await gate.acquire(
+        "large",
+        prompt_tokens=80_000,
+        _track_prefill=True,
+    )
+    small_task = asyncio.create_task(
+        gate.acquire("small", prompt_tokens=4_000, _track_prefill=True)
+    )
+    await asyncio.sleep(0)
+    assert not small_task.done()
+
+    await gate.mark_prefill_complete(large.lease_id)
+    small = await asyncio.wait_for(small_task, timeout=0.5)
+    assert small.admission_concurrency == 2
+
+    await gate.release(lease_id=small.lease_id)
+    await gate.release(lease_id=large.lease_id)
+
+
+@pytest.mark.asyncio
+async def test_small_stream_prefills_can_still_run_in_parallel():
+    gate = FairSlotGate(
+        slots=4,
+        medium_prefill_tokens=32_000,
+        medium_prefill_max_concurrency=3,
+    )
+    first = await gate.acquire("first", prompt_tokens=4_000, _track_prefill=True)
+    second = await asyncio.wait_for(
+        gate.acquire("second", prompt_tokens=8_000, _track_prefill=True),
+        timeout=0.5,
+    )
+
+    assert second.admission_concurrency == 2
+    await gate.release(lease_id=second.lease_id)
+    await gate.release(lease_id=first.lease_id)

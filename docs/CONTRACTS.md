@@ -406,6 +406,12 @@ GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str   → OverviewStats
 - `totalRequests`, `errorRate`, `avgDurationMs`, `p50DurationMs`, `p95DurationMs`
 - `series`: `[{ timestamp, count }]`
 
+Una respuesta streaming cancelada después de enviar sus cabeceras se registra
+como `status_code = 499` y `error = "stream_cancelled"`, aunque el estado HTTP
+que alcanzó a ver el cliente fuese inicialmente 200. Los tokens parciales que
+ya hayan atravesado el middleware se conservan; si el upstream no emitió ningún
+chunk, `output_tokens` permanece `NULL`.
+
 `TokenStats`:
 - `totalInputTokens`, `totalOutputTokens`
 - `byBackend`: `[{ backendType, inputTokens, outputTokens }]`
@@ -1240,6 +1246,20 @@ rodeado por tres admisiones nuevas. Los umbrales son configurables mediante
 ``llama_cpp``. La dimensión computacional se concede atómicamente junto con
 slot, KV y prioridad justa; no existe una segunda cola con orden diferente.
 
+En streaming, el gate conoce además la frontera real entre prefill y decode:
+si el candidato o un prefill activo supera el umbral medio, no inicia otro
+prefill hasta que el stream activo entrega su primer chunk. En ese momento el
+lease cambia a decode y los slots restantes vuelven a estar disponibles. Los
+prefills pequeños pueden solaparse entre sí. El camino non-streaming conserva
+la admisión anterior porque no expone una frontera TTFT intermedia.
+
+Cada lease contextual tiene un identificador monotónico por worker. Su
+liberación es idempotente y queda ligada a la tarea propietaria; antes de una
+nueva admisión se recuperan leases cuya tarea haya terminado sin ejecutar el
+``finally`` normal. Además, el middleware de stats cierra explícitamente el
+iterador interior ante desconexión para propagar la cancelación hasta el
+backend y liberar slot, KV y conexión HTTP.
+
 Cada fila completada puede persistir ``runtime_telemetry`` con estas claves
 opcionales:
 
@@ -1254,7 +1274,8 @@ opcionales:
   "slot_id": 2,
   "physical_slots": 4,
   "admission_limit": 2,
-  "admission_concurrency": 2
+  "admission_concurrency": 2,
+  "admission_lease_id": 37
 }
 ```
 

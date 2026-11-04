@@ -57,7 +57,22 @@ class _Waiter:
     prompt_tokens: int
     admission_limit: int
     queued_at: float
+    owner_task: asyncio.Task | None = None
+    track_prefill: bool = False
     granted: bool = False
+    lease_id: int | None = None
+
+
+@dataclass
+class _ActiveLease:
+    lease_id: int
+    is_batch: bool
+    kv_tokens: int
+    admission_limit: int
+    prompt_tokens: int
+    prefill_pending: bool
+    acquired_at: float
+    owner_task: asyncio.Task | None
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,7 @@ class AdmissionTelemetry:
     physical_slots: int
     admission_limit: int
     admission_concurrency: int
+    lease_id: int
 
 
 class FairSlotGate:
@@ -106,14 +122,12 @@ class FairSlotGate:
         # by real interactive traffic" without walking a task registry.
         self._in_flight_batch = 0
         self.medium_prefill_tokens = self._positive_or_none(medium_prefill_tokens)
-        self.medium_prefill_max_concurrency = self._bounded_limit(
-            medium_prefill_max_concurrency
-        )
+        self.medium_prefill_max_concurrency = self._bounded_limit(medium_prefill_max_concurrency)
         self.large_prefill_tokens = self._positive_or_none(large_prefill_tokens)
-        self.large_prefill_max_concurrency = self._bounded_limit(
-            large_prefill_max_concurrency
-        )
+        self.large_prefill_max_concurrency = self._bounded_limit(large_prefill_max_concurrency)
         self._admission_limits_in_flight: dict[int, int] = {}
+        self._active_leases: dict[int, _ActiveLease] = {}
+        self._lease_seq = 1
         # user_key -> queue of not-yet-granted waiters for that user.
         self._queues: dict[str, deque[_Waiter]] = {}
         # Dispatch priority key per user_key: (batch_tier, served_tier, seq).
@@ -158,6 +172,26 @@ class FairSlotGate:
     def _fits_compute(self, admission_limit: int) -> bool:
         effective_limit = min(self.slots, admission_limit, self._active_admission_limit())
         return self._in_flight < effective_limit
+
+    def _fits_prefill(self, prompt_tokens: int, *, track_prefill: bool) -> bool:
+        """Keep medium/large prefills from competing with another prefill.
+
+        Small prefills may still start together.  Once a streamed request
+        emits its first upstream chunk, WorkerPool marks its prefill complete
+        and queued work can use the remaining physical slots for concurrent
+        decode.  Non-streaming calls do not expose that phase boundary and
+        therefore retain the previous admission behaviour.
+        """
+        if not track_prefill or self.medium_prefill_tokens is None:
+            return True
+        active_prefills = [lease for lease in self._active_leases.values() if lease.prefill_pending]
+        if not active_prefills:
+            return True
+        candidate_is_medium = prompt_tokens >= self.medium_prefill_tokens
+        active_has_medium = any(
+            lease.prompt_tokens >= self.medium_prefill_tokens for lease in active_prefills
+        )
+        return not (candidate_is_medium or active_has_medium)
 
     def _priority_key(self, user_key: str, *, is_batch: bool) -> tuple[int, int, int]:
         batch_tier = 1 if is_batch else 0
@@ -206,15 +240,30 @@ class FairSlotGate:
 
     def compute_saturated(self, prompt_tokens: int = 0) -> bool:
         """Whether a candidate prompt is blocked by adaptive admission."""
-        return not self._fits_compute(self._admission_limit_for(prompt_tokens))
+        return not self._fits_compute(
+            self._admission_limit_for(prompt_tokens)
+        ) or not self._fits_prefill(prompt_tokens, track_prefill=True)
 
     def snapshot(self) -> dict[str, int | bool | None]:
         """Return logical admission state without exposing mutable internals."""
         capacity = self.kv_capacity_tokens
         free = None if capacity is None else max(0, capacity - self._kv_tokens_in_flight)
         active_limit = self._active_admission_limit()
+        now = time.monotonic()
+        oldest_lease_ms = (
+            max(
+                0,
+                int(
+                    (now - min(lease.acquired_at for lease in self._active_leases.values())) * 1000
+                ),
+            )
+            if self._active_leases
+            else None
+        )
         return {
             "in_flight": self._in_flight,
+            "active_leases": len(self._active_leases),
+            "oldest_lease_ms": oldest_lease_ms,
             "queued": sum(len(queue) for queue in self._queues.values()),
             "slots": self.slots,
             "slot_saturated": self._in_flight >= self.slots,
@@ -242,6 +291,8 @@ class FairSlotGate:
         is_batch: bool = False,
         kv_tokens: int = 0,
         prompt_tokens: int = 0,
+        _track_owner: bool = False,
+        _track_prefill: bool = False,
     ) -> AdmissionTelemetry:
         kv_tokens = max(0, int(kv_tokens))
         if self.kv_capacity_tokens is not None and kv_tokens > self.kv_capacity_tokens:
@@ -256,8 +307,11 @@ class FairSlotGate:
             prompt_tokens=max(0, int(prompt_tokens)),
             admission_limit=self._admission_limit_for(prompt_tokens),
             queued_at=time.monotonic(),
+            owner_task=asyncio.current_task() if _track_owner else None,
+            track_prefill=_track_prefill,
         )
         async with self._lock:
+            self._reap_finished_leases_locked()
             if user_key not in self._first_seen:
                 self._first_seen[user_key] = self._seq
                 self._seq += 1
@@ -276,7 +330,10 @@ class FairSlotGate:
             async with self._lock:
                 if waiter.granted:
                     self._release_locked(
-                        waiter.is_batch, waiter.kv_tokens, waiter.admission_limit
+                        waiter.is_batch,
+                        waiter.kv_tokens,
+                        waiter.admission_limit,
+                        lease_id=waiter.lease_id,
                     )
                     self._dispatch_locked()
                 else:
@@ -308,6 +365,10 @@ class FairSlotGate:
                 if queue
                 and self._fits_kv(queue[0].kv_tokens)
                 and self._fits_compute(queue[0].admission_limit)
+                and self._fits_prefill(
+                    queue[0].prompt_tokens,
+                    track_prefill=queue[0].track_prefill,
+                )
             ]
             if not candidates:
                 break
@@ -330,6 +391,19 @@ class FairSlotGate:
                 self._admission_limits_in_flight.get(waiter.admission_limit, 0) + 1
             )
             waiter.granted = True
+            lease_id = self._lease_seq
+            self._lease_seq += 1
+            waiter.lease_id = lease_id
+            self._active_leases[lease_id] = _ActiveLease(
+                lease_id=lease_id,
+                is_batch=waiter.is_batch,
+                kv_tokens=waiter.kv_tokens,
+                admission_limit=waiter.admission_limit,
+                prompt_tokens=waiter.prompt_tokens,
+                prefill_pending=waiter.track_prefill,
+                acquired_at=time.monotonic(),
+                owner_task=waiter.owner_task,
+            )
             if waiter.is_batch:
                 self._in_flight_batch += 1
                 self._kv_tokens_in_flight_batch += waiter.kv_tokens
@@ -338,10 +412,9 @@ class FairSlotGate:
                     AdmissionTelemetry(
                         queue_ms=max(0, int((time.monotonic() - waiter.queued_at) * 1000)),
                         physical_slots=self.slots,
-                        admission_limit=min(
-                            waiter.admission_limit, self._active_admission_limit()
-                        ),
+                        admission_limit=min(waiter.admission_limit, self._active_admission_limit()),
                         admission_concurrency=self._in_flight,
+                        lease_id=lease_id,
                     )
                 )
             else:
@@ -349,9 +422,79 @@ class FairSlotGate:
                 # we just handed out was never actually claimed; give it
                 # back and keep dispatching.
                 waiter.granted = False
-                self._release_locked(waiter.is_batch, waiter.kv_tokens, waiter.admission_limit)
+                self._release_locked(
+                    waiter.is_batch,
+                    waiter.kv_tokens,
+                    waiter.admission_limit,
+                    lease_id=waiter.lease_id,
+                )
 
-    def _release_locked(self, is_batch: bool, kv_tokens: int, admission_limit: int) -> None:
+    def _reap_finished_leases_locked(self) -> None:
+        """Recover context-managed leases whose owning task has vanished.
+
+        Normal completion always releases in :meth:`slot`'s ``finally``.
+        This is a last line of defence for middleware/client-disconnect bugs
+        that abandon an async generator without closing it.  Plain
+        ``acquire`` callers are deliberately not tracked because callers may
+        transfer that lease to another task before releasing it.
+        """
+        stale_ids = [
+            lease_id
+            for lease_id, lease in self._active_leases.items()
+            if lease.owner_task is not None and lease.owner_task.done()
+        ]
+        for lease_id in stale_ids:
+            lease = self._active_leases.get(lease_id)
+            if lease is not None:
+                self._release_locked(
+                    lease.is_batch,
+                    lease.kv_tokens,
+                    lease.admission_limit,
+                    lease_id=lease_id,
+                )
+
+    def _release_locked(
+        self,
+        is_batch: bool,
+        kv_tokens: int,
+        admission_limit: int,
+        *,
+        lease_id: int | None = None,
+    ) -> bool:
+        if lease_id is not None:
+            lease = self._active_leases.pop(lease_id, None)
+            if lease is None:
+                return False
+            is_batch = lease.is_batch
+            kv_tokens = lease.kv_tokens
+            admission_limit = lease.admission_limit
+        else:
+            # Backward-compatible path for direct acquire/release users.
+            # Remove a matching anonymous lease so diagnostics remain exact.
+            matching_id = next(
+                (
+                    active_id
+                    for active_id, lease in self._active_leases.items()
+                    if lease.owner_task is None
+                    and lease.is_batch == is_batch
+                    and lease.kv_tokens == kv_tokens
+                    and lease.admission_limit == admission_limit
+                ),
+                None,
+            )
+            if matching_id is None:
+                matching_id = next(
+                    (
+                        active_id
+                        for active_id, lease in self._active_leases.items()
+                        if lease.owner_task is None
+                        and lease.is_batch == is_batch
+                        and lease.kv_tokens == kv_tokens
+                    ),
+                    None,
+                )
+            if matching_id is not None:
+                self._active_leases.pop(matching_id, None)
         self._in_flight = max(0, self._in_flight - 1)
         self._kv_tokens_in_flight = max(0, self._kv_tokens_in_flight - kv_tokens)
         count = self._admission_limits_in_flight.get(admission_limit, 0)
@@ -362,6 +505,7 @@ class FairSlotGate:
         if is_batch:
             self._in_flight_batch = max(0, self._in_flight_batch - 1)
             self._kv_tokens_in_flight_batch = max(0, self._kv_tokens_in_flight_batch - kv_tokens)
+        return True
 
     async def release(
         self,
@@ -369,13 +513,24 @@ class FairSlotGate:
         is_batch: bool = False,
         kv_tokens: int = 0,
         admission_limit: int | None = None,
+        lease_id: int | None = None,
     ) -> None:
         async with self._lock:
             self._release_locked(
                 is_batch,
                 max(0, int(kv_tokens)),
                 self.slots if admission_limit is None else int(admission_limit),
+                lease_id=lease_id,
             )
+            self._dispatch_locked()
+
+    async def mark_prefill_complete(self, lease_id: int) -> None:
+        """Open decode concurrency after a streamed request reaches TTFT."""
+        async with self._lock:
+            lease = self._active_leases.get(lease_id)
+            if lease is None or not lease.prefill_pending:
+                return
+            lease.prefill_pending = False
             self._dispatch_locked()
 
     @asynccontextmanager
@@ -386,12 +541,15 @@ class FairSlotGate:
         is_batch: bool = False,
         kv_tokens: int = 0,
         prompt_tokens: int = 0,
+        track_prefill: bool = False,
     ) -> AsyncIterator[AdmissionTelemetry]:
         admission = await self.acquire(
             user_key,
             is_batch=is_batch,
             kv_tokens=kv_tokens,
             prompt_tokens=prompt_tokens,
+            _track_owner=True,
+            _track_prefill=track_prefill,
         )
         try:
             yield admission
@@ -400,6 +558,7 @@ class FairSlotGate:
                 is_batch=is_batch,
                 kv_tokens=kv_tokens,
                 admission_limit=self._admission_limit_for(prompt_tokens),
+                lease_id=admission.lease_id,
             )
 
 
@@ -439,7 +598,9 @@ class WorkerPoolFairGates:
             or gate.kv_capacity_tokens != normalized_capacity
             or gate.medium_prefill_tokens != medium_prefill_tokens
             or gate.medium_prefill_max_concurrency
-            != min(normalized_slots, max(1, int(medium_prefill_max_concurrency or normalized_slots)))
+            != min(
+                normalized_slots, max(1, int(medium_prefill_max_concurrency or normalized_slots))
+            )
             or gate.large_prefill_tokens != large_prefill_tokens
             or gate.large_prefill_max_concurrency
             != min(normalized_slots, max(1, int(large_prefill_max_concurrency or normalized_slots)))

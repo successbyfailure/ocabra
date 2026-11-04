@@ -638,6 +638,66 @@ async def test_weighted_stream_cancellation_releases_reservation(pool, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_large_stream_prefill_releases_queued_small_request_at_first_chunk(pool, monkeypatch):
+    from ocabra.backends.base import WorkerInfo
+
+    pool.set_worker(
+        "test/llama",
+        WorkerInfo(
+            backend_type="llama_cpp",
+            model_id="test/llama",
+            gpu_indices=[1],
+            port=18044,
+            pid=322,
+            vram_used_mb=0,
+        ),
+    )
+    monkeypatch.setattr(pool, "_prompt_tokens", lambda body: body["_prompt_tokens"])
+    large_may_emit = asyncio.Event()
+    large_may_finish = asyncio.Event()
+    entered: list[str] = []
+
+    async def controlled_stream(_model_id, _path, body):
+        tag = body["_tag"]
+        entered.append(tag)
+        if tag == "large":
+            await large_may_emit.wait()
+            yield b"data: first-large-token\n\n"
+            await large_may_finish.wait()
+        else:
+            yield b"data: small-token\n\n"
+
+    monkeypatch.setattr(pool, "_forward_stream_unfair", controlled_stream)
+
+    async def consume(tag: str, prompt_tokens: int) -> None:
+        async for _chunk in pool.forward_stream(
+            "test/llama",
+            "/v1/chat/completions",
+            {"_tag": tag, "_prompt_tokens": prompt_tokens},
+            user_key=tag,
+            slots=4,
+            kv_capacity_tokens=245_760,
+            kv_tokens=prompt_tokens + 4_096,
+        ):
+            pass
+
+    large = asyncio.create_task(consume("large", 80_000))
+    await asyncio.sleep(0)
+    small = asyncio.create_task(consume("small", 4_000))
+    await asyncio.sleep(0)
+    assert entered == ["large"]
+
+    large_may_emit.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert entered == ["large", "small"]
+
+    await small
+    large_may_finish.set()
+    await large
+
+
+@pytest.mark.asyncio
 async def test_forward_request_records_admission_telemetry(pool, monkeypatch):
     monkeypatch.setattr(
         "ocabra.core.worker_pool.httpx.AsyncClient",
@@ -661,5 +721,6 @@ async def test_forward_request_records_admission_telemetry(pool, monkeypatch):
     assert telemetry.physical_slots == 4
     assert telemetry.admission_limit == 4
     assert telemetry.admission_concurrency == 1
+    assert telemetry.admission_lease_id is not None
     assert telemetry.kv_tokens_reserved == 8_000
     assert telemetry.prompt_tokens_estimate is not None

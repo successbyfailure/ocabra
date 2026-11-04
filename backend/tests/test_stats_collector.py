@@ -1,8 +1,9 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 
@@ -29,7 +30,9 @@ from ocabra.stats.collector import (
 )
 
 
-def _fake_request(headers: dict[str, str], *, peer_host: str | None = "172.22.0.13") -> SimpleNamespace:
+def _fake_request(
+    headers: dict[str, str], *, peer_host: str | None = "172.22.0.13"
+) -> SimpleNamespace:
     return SimpleNamespace(
         headers=headers,
         client=SimpleNamespace(host=peer_host) if peer_host else None,
@@ -44,9 +47,7 @@ class TestClientAddr:
     absent."""
 
     def test_prefers_x_real_ip_over_x_forwarded_for(self) -> None:
-        req = _fake_request(
-            {"x-real-ip": "79.117.117.14", "x-forwarded-for": "10.0.8.5"}
-        )
+        req = _fake_request({"x-real-ip": "79.117.117.14", "x-forwarded-for": "10.0.8.5"})
         assert _client_addr(req) == "79.117.117.14"
 
     def test_falls_back_to_x_forwarded_for_without_x_real_ip(self) -> None:
@@ -79,18 +80,12 @@ class TestStreamOutputTokensReasoningVisibility:
     relies on."""
 
     def test_sse_reasoning_only_delta_is_invisible_by_default(self) -> None:
-        body = (
-            b'data: {"choices":[{"delta":{"reasoning_content":"pensando mucho"}}]}\n\n'
-        )
+        body = b'data: {"choices":[{"delta":{"reasoning_content":"pensando mucho"}}]}\n\n'
         assert _stream_output_tokens(body, "text/event-stream") is None
 
     def test_sse_reasoning_delta_counted_when_requested(self) -> None:
-        body = (
-            b'data: {"choices":[{"delta":{"reasoning_content":"pensando mucho rato"}}]}\n\n'
-        )
-        result = _stream_output_tokens(
-            body, "text/event-stream", include_reasoning=True
-        )
+        body = b'data: {"choices":[{"delta":{"reasoning_content":"pensando mucho rato"}}]}\n\n'
+        result = _stream_output_tokens(body, "text/event-stream", include_reasoning=True)
         assert result == 3
 
     def test_sse_content_and_reasoning_both_counted(self) -> None:
@@ -98,9 +93,7 @@ class TestStreamOutputTokensReasoningVisibility:
             b'data: {"choices":[{"delta":{"reasoning_content":"pensando"}}]}\n\n'
             b'data: {"choices":[{"delta":{"content":"hola mundo"}}]}\n\n'
         )
-        result = _stream_output_tokens(
-            body, "text/event-stream", include_reasoning=True
-        )
+        result = _stream_output_tokens(body, "text/event-stream", include_reasoning=True)
         assert result == 3
 
     def test_ndjson_thinking_only_is_invisible_by_default(self) -> None:
@@ -109,9 +102,7 @@ class TestStreamOutputTokensReasoningVisibility:
 
     def test_ndjson_thinking_counted_when_requested(self) -> None:
         body = b'{"message":{"thinking":"pensando mucho rato"}}\n'
-        result = _stream_output_tokens(
-            body, "application/x-ndjson", include_reasoning=True
-        )
+        result = _stream_output_tokens(body, "application/x-ndjson", include_reasoning=True)
         assert result == 3
 
 
@@ -137,9 +128,7 @@ class TestCountInputTokensIncludesTools:
             ],
         }
         with_tools = _count_input_tokens(payload, "chat")
-        without_tools = _count_input_tokens(
-            {"messages": payload["messages"]}, "chat"
-        )
+        without_tools = _count_input_tokens({"messages": payload["messages"]}, "chat")
         assert with_tools > without_tools
 
     def test_no_tools_field_is_unaffected(self) -> None:
@@ -172,9 +161,7 @@ class TestExtractSpeculativeStats:
                 "prompt_per_second": 410.2,
             }
         }
-        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
-            payload
-        )
+        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(payload)
         assert draft_n == 16
         assert draft_n_accepted == 13
         assert predicted_tps == 82.4
@@ -184,9 +171,7 @@ class TestExtractSpeculativeStats:
         """A normal (non-self-speculative) llama.cpp load still reports
         predicted_per_second/prompt_per_second, just no draft_n."""
         payload = {"timings": {"predicted_per_second": 34.1, "prompt_per_second": 900.0}}
-        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
-            payload
-        )
+        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(payload)
         assert draft_n is None
         assert draft_n_accepted is None
         assert predicted_tps == 34.1
@@ -205,9 +190,7 @@ class TestExtractSpeculativeStats:
 
     def test_non_numeric_values_are_dropped_not_raised(self) -> None:
         payload = {"timings": {"draft_n": "not-a-number", "predicted_per_second": None}}
-        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
-            payload
-        )
+        draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(payload)
         assert draft_n is None
         assert draft_n_accepted is None
         assert predicted_tps is None
@@ -274,15 +257,11 @@ def test_stream_ttft_is_captured_before_progress_throttle() -> None:
     request = SimpleNamespace(state=SimpleNamespace(runtime_telemetry=telemetry))
     chunks = [b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n']
 
-    _mark_stream_first_token(
-        request, chunks, "text/event-stream", now_monotonic=10.1
-    )
+    _mark_stream_first_token(request, chunks, "text/event-stream", now_monotonic=10.1)
     assert telemetry.ttft_ms is None
 
     chunks.append(b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n')
-    _mark_stream_first_token(
-        request, chunks, "text/event-stream", now_monotonic=10.25
-    )
+    _mark_stream_first_token(request, chunks, "text/event-stream", now_monotonic=10.25)
     assert telemetry.ttft_ms == 250
 
 
@@ -564,3 +543,88 @@ def test_stats_middleware_records_in_band_sse_error_status() -> None:
     assert response.status_code == 200
     assert record_stat.await_args.kwargs["status_code"] == 409
     assert record_stat.await_args.kwargs["error_message"] == "not enough memory"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("streamed_chunk", "expected_output_tokens"),
+    [
+        (b"", None),
+        (b'data: {"choices":[{"delta":{"content":"hola mundo"}}]}\n\n', 2),
+    ],
+)
+async def test_stats_middleware_records_cancelled_stream_as_499(
+    streamed_chunk: bytes,
+    expected_output_tokens: int | None,
+) -> None:
+    """A disconnect happens while Starlette consumes the response body, after
+    ``dispatch`` has already returned the initial HTTP 200 response. The body
+    tee must catch that cancellation itself and retain any streamed usage."""
+    app = FastAPI()
+    app.state.profile_registry = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        list_by_model=AsyncMock(return_value=[]),
+    )
+    app.state.model_manager = None
+
+    request_body = b'{"model":"ollama/qwen3-coder:30b","messages":[]}'
+    request_sent = False
+
+    async def _receive() -> dict:
+        nonlocal request_sent
+        if request_sent:
+            return {"type": "http.disconnect"}
+        request_sent = True
+        return {"type": "http.request", "body": request_body, "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/chat/completions",
+            "raw_path": b"/v1/chat/completions",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "app": app,
+        },
+        _receive,
+    )
+    keep_stream_open = asyncio.Event()
+    body_closed = asyncio.Event()
+
+    async def _body():
+        try:
+            if streamed_chunk:
+                yield streamed_chunk
+            await keep_stream_open.wait()
+        finally:
+            body_closed.set()
+
+    async def _call_next(_request: Request) -> StreamingResponse:
+        return StreamingResponse(_body(), media_type="text/event-stream")
+
+    middleware = StatsMiddleware(app)
+    record_stat = AsyncMock()
+
+    with patch("ocabra.stats.collector._record_stat", new=record_stat):
+        response = await middleware.dispatch(request, _call_next)
+
+        async def _consume() -> None:
+            async for _chunk in response.body_iterator:
+                pass
+
+        consumer = asyncio.create_task(_consume())
+        await asyncio.sleep(0)
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        await asyncio.sleep(0)
+
+    assert body_closed.is_set()
+    assert record_stat.await_args.kwargs["status_code"] == 499
+    assert record_stat.await_args.kwargs["error_message"] == "stream_cancelled"
+    assert record_stat.await_args.kwargs["output_tokens"] == expected_output_tokens
