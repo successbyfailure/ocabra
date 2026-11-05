@@ -35,6 +35,19 @@ from ._federation import try_proxy_json, try_proxy_multipart
 router = APIRouter()
 logger = structlog.get_logger(__name__)
 
+# Only the faster-whisper backend wires diarize=true to an actual pyannote
+# pipeline (workers/whisper_worker.py). whisper.cpp and VibeASR have no
+# speaker-diarization code at all — they just drop the field, so a client
+# gets a normal transcription back with zero speakers identified and no
+# error, which reads as "diarization silently did nothing" (reported live
+# 2026-11-05: an agent got diarize=true accepted by two whisper.cpp profiles
+# with no speaker labels in the response).
+_DIARIZATION_CAPABLE_BACKENDS = {"whisper"}
+
+
+def _is_diarize_requested(raw: str | None) -> bool:
+    return raw is not None and raw.strip().lower() not in {"", "0", "false", "no"}
+
 _AUDIO_CONTENT_TYPES = {
     "mp3": "audio/mpeg",
     "opus": "audio/opus",
@@ -182,6 +195,15 @@ async def transcriptions(
         request_state=request.state,
     )
     check_capability(state, "audio_transcription", "audio transcription")
+    if _is_diarize_requested(diarize) and state.backend_type not in _DIARIZATION_CAPABLE_BACKENDS:
+        raise _openai_error(
+            f"The model '{state.model_id}' (backend '{state.backend_type}') does not "
+            "support diarize=true — speaker diarization only runs on faster-whisper "
+            "profiles (backend_type='whisper').",
+            "invalid_request_error",
+            param="diarize",
+            code="diarization_not_supported",
+        )
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
     request.state.stats_model_id = worker_key
 

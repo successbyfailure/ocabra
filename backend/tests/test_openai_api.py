@@ -2366,3 +2366,101 @@ async def test_unloaded_derived_worker_refreshes_mutable_base_config() -> None:
     assert resolved.extra_config["use_case"] == {"context": 65536}
     assert resolved.preferred_gpu == 1
     assert resolved.load_policy == LoadPolicy.PIN
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/audio/transcriptions — diarize=true capability gate
+# ---------------------------------------------------------------------------
+
+
+def _audio_state(backend_type: str):
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id=f"{backend_type}/demo-stt",
+        backend_model_id="demo-stt",
+        display_name="Demo STT",
+        backend_type=backend_type,
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(audio_transcription=True, streaming=False),
+    )
+
+
+class TestTranscriptionDiarizeCapabilityGate:
+    """2026-11-05: an agent reported that whisper.cpp profiles accepted
+    diarize=true and silently returned zero speakers — neither whisper.cpp
+    nor VibeASR wire the field to anything (no pyannote-equivalent pipeline),
+    unlike the faster-whisper backend. The request must fail loudly instead
+    of pretending diarization ran."""
+
+    def test_diarize_true_rejected_for_whispercpp(self):
+        app = _make_app(model_state=_audio_state("whisper_cpp"))
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "whisper_cpp/demo-stt", "diarize": "true"},
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "diarization_not_supported"
+
+    def test_diarize_true_rejected_for_vibeasr(self):
+        app = _make_app(model_state=_audio_state("vibeasr"))
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "vibeasr/demo-stt", "diarize": "true"},
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["code"] == "diarization_not_supported"
+
+    @staticmethod
+    def _wire_unhealthy_backend(app) -> None:
+        # Enough to get the gate check evaluated and past the
+        # await worker_pool.get_backend(...) call without a real worker
+        # process — the request still 503s downstream (no live worker),
+        # which is fine: the gate check runs strictly before that.
+        backend = MagicMock()
+        backend.health_check = AsyncMock(return_value=False)
+        app.state.worker_pool.get_backend = AsyncMock(return_value=backend)
+        app.state.model_manager.unload = AsyncMock()
+
+    def test_diarize_false_allowed_for_whispercpp(self):
+        # The capability gate must not block it (no diarization_not_supported
+        # 400) — whatever happens downstream against the fake worker is not
+        # what this test is about.
+        app = _make_app(model_state=_audio_state("whisper_cpp"))
+        self._wire_unhealthy_backend(app)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "whisper_cpp/demo-stt", "diarize": "false"},
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        assert resp.status_code != 400 or resp.json()["detail"]["error"]["code"] != (
+            "diarization_not_supported"
+        )
+
+    def test_diarize_true_allowed_for_faster_whisper(self):
+        app = _make_app(model_state=_audio_state("whisper"))
+        self._wire_unhealthy_backend(app)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "whisper/demo-stt", "diarize": "true"},
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        assert resp.status_code != 400 or resp.json()["detail"]["error"]["code"] != (
+            "diarization_not_supported"
+        )

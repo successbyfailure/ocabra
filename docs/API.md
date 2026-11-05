@@ -336,16 +336,22 @@ diarize=true          # opcional — extensión oCabra, no estándar OpenAI
 
 `diarize` **no** forma parte de la API real de OpenAI — no soporta
 diarización en absoluto, ni este parámetro ni ningún equivalente; un
-cliente/SDK oficial no lo reconoce. Activa el mismo pipeline
-(pyannote) tanto si el perfil es un `*-diarized` como si no: contra
-cualquier perfil whisper normal, `diarize=true` carga pyannote **de
-forma perezosa en esa primera petición** (coste de latencia único, y
+cliente/SDK oficial no lo reconoce. Solo lo implementa el backend
+`whisper` (faster-whisper, vía pyannote) — activa el mismo pipeline
+tanto si el perfil es un `*-diarized` como si no: contra cualquier
+perfil `whisper` normal, `diarize=true` carga pyannote **de forma
+perezosa en esa primera petición** (coste de latencia único, y
 requiere `HF_TOKEN` ya accesible en el entorno del worker — si falta,
 400). Un perfil `*-diarized` no es necesario para que funcione, es una
 optimización operativa: precarga pyannote al arrancar el worker (sin
 penalizar la primera petición) y reserva ~1200 MB de VRAM extra en el
 planificador de GPU — ver `load_overrides.diarization_enabled` más
 abajo.
+
+Los backends `whisper_cpp` y `vibeasr` **no** implementan diarización
+(no tienen pyannote ni equivalente) — `diarize=true` contra uno de
+esos perfiles responde `400 diarization_not_supported` en vez de
+aceptarse en silencio sin identificar hablantes.
 
 ### Audio — Music Generation
 

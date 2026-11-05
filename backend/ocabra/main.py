@@ -916,7 +916,7 @@ Los modelos se cargan **bajo demanda**. Una petición a un modelo frío mantiene
 |-------|---------|--------|
 | `vad_filter` | `true` | Descarta los tramos sin voz (VAD) antes de transcribir (mitiga alucinaciones de Whisper). |
 | `condition_on_previous_text` | `false` | Evita que un bucle de repetición se propague vía el contexto del decoder (como WhisperX). |
-| `diarize` | `false` | Identificación de hablantes (pyannote); cada segmento de `verbose_json` lleva `speaker`. Funciona contra cualquier perfil whisper, no solo uno `*-diarized` — sin ese perfil, pyannote se carga de forma perezosa en la primera petición (coste de latencia único) y requiere `HF_TOKEN` accesible en el entorno del worker. |
+| `diarize` | `false` | Identificación de hablantes (pyannote); cada segmento de `verbose_json` lleva `speaker`. Solo soportado por perfiles del backend `whisper` (faster-whisper) — funciona contra cualquiera de ellos, no solo uno `*-diarized`, sin ese perfil pyannote se carga de forma perezosa en la primera petición (coste de latencia único) y requiere `HF_TOKEN` accesible en el entorno del worker. Los backends `whisper_cpp` y `vibeasr` no implementan diarización: `diarize=true` contra esos perfiles responde 400 (`diarization_not_supported`), no se ignora en silencio. |
 
 Límite de subida: 256 MB por parte (configurable). Para audio largo, sube comprimido (`mp3`/`opus`/`flac`) en vez de WAV.
 
@@ -1046,7 +1046,7 @@ def _custom_openapi():
                                 "response_format": {"type": "string", "enum": ["json", "text", "srt", "vtt", "verbose_json"], "default": "json"},
                                 "temperature": {"type": "number", "default": 0.0},
                                 "timestamp_granularities[]": {"type": "array", "items": {"type": "string", "enum": ["segment", "word"]}},
-                                "diarize": {"type": "boolean", "description": "Identificación de hablantes (pyannote, extensión oCabra). Funciona contra cualquier perfil whisper, no solo uno '*-diarized' — sin ese perfil carga pyannote de forma perezosa en la primera petición."},
+                                "diarize": {"type": "boolean", "description": "Identificación de hablantes (pyannote, extensión oCabra). Solo soportado por perfiles del backend whisper (faster-whisper) — funciona contra cualquiera de ellos, no solo uno '*-diarized', sin ese perfil carga pyannote de forma perezosa en la primera petición. Contra whisper_cpp/vibeasr responde 400."},
                                 "vad_filter": {"type": "boolean", "default": True, "description": "Descarta tramos sin voz (VAD) antes de transcribir."},
                                 "condition_on_previous_text": {"type": "boolean", "default": False, "description": "Evita que un bucle de alucinación se propague vía el contexto del decoder."},
                             },
