@@ -7,6 +7,13 @@ a lower-priority fallback target inside the ``recomendado-stt`` router — see
 [[project_multi_gpu_vram_race_incidents]] context: RouterResolver's existing
 warm/cold-start logic gives occupancy-based CPU/GPU balancing for free, no
 new scheduling code needed.
+
+Speaker diarization (``diarize=true``) has no equivalent inside whisper.cpp
+itself — ``whisper-server`` is a native binary with no Python to lazy-load
+pyannote into, unlike ``workers/whisper_worker.py`` (faster-whisper). Instead,
+diarization requests are forwarded to ``workers/diarization_worker.py``, a
+small pyannote-only sidecar process launched lazily on first use and reused
+for the life of this model's worker — see ``_ensure_diarization_worker``.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import asyncio
 import json
 import os
 import signal
+import socket
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +44,8 @@ from ocabra.core.backend_installer import read_backend_metadata
 logger = structlog.get_logger(__name__)
 
 _INFERENCE_PATH = "/transcribe"
+_DEFAULT_DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-3.1"
+_DIARIZATION_WORKER_PATH = Path(__file__).resolve().parents[2] / "workers" / "diarization_worker.py"
 
 
 def _worker_log_path(model_id: str) -> str:
@@ -43,8 +53,33 @@ def _worker_log_path(model_id: str) -> str:
     return f"/tmp/whispercpp-worker-{safe}.log"
 
 
+def _diarization_log_path(model_id: str) -> str:
+    safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
+    return f"/tmp/whispercpp-diarize-{safe}.log"
+
+
+def _reserve_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
+
+
+def _is_diarize_requested(raw: Any) -> bool:
+    if raw is None:
+        return False
+    return str(raw).strip().lower() not in {"", "0", "false", "no"}
+
+
 @dataclass
 class _WhisperCppWorker:
+    process: asyncio.subprocess.Process
+    port: int
+    log_file: Any
+
+
+@dataclass
+class _DiarizationSidecar:
     process: asyncio.subprocess.Process
     port: int
     log_file: Any
@@ -90,6 +125,9 @@ class WhisperCppBackend(BackendInterface):
 
     def __init__(self) -> None:
         self._processes: dict[str, _WhisperCppWorker] = {}
+        self._diarization_workers: dict[str, _DiarizationSidecar] = {}
+        self._diarization_locks: dict[str, asyncio.Lock] = {}
+        self._extra_configs: dict[str, dict[str, Any]] = {}
 
     def _resolve_server_bin(self) -> str:
         """Pick the ``whisper-server`` binary path.
@@ -148,6 +186,125 @@ class WhisperCppBackend(BackendInterface):
             f"whisper.cpp GGML model not found for '{model_id}' under {models_dir}"
         )
 
+    def _resolve_diarization_python_bin(self) -> str:
+        """pyannote.audio lives in the ``whisper`` backend's own venv (it's
+        already a declared dependency there, see whisper_backend.py's
+        install_spec) — reuse it instead of installing a second copy just
+        for whisper.cpp's diarization sidecar."""
+        meta = read_backend_metadata(settings.backends_dir, "whisper")
+        python_bin = meta.get("python_bin") if isinstance(meta, dict) else None
+        if isinstance(python_bin, str) and python_bin and Path(python_bin).is_file():
+            return python_bin
+        raise FileNotFoundError(
+            "whisper_cpp diarization requires the 'whisper' backend to be installed "
+            "(pyannote.audio lives in its venv) — install it from the /backends page."
+        )
+
+    async def _ensure_diarization_worker(
+        self, model_id: str, extra_config: dict[str, Any]
+    ) -> _DiarizationSidecar:
+        existing = self._diarization_workers.get(model_id)
+        if existing and existing.process.returncode is None:
+            return existing
+
+        lock = self._diarization_locks.setdefault(model_id, asyncio.Lock())
+        async with lock:
+            # Re-check after acquiring the lock — a concurrent caller may have
+            # already finished launching it while we were waiting.
+            existing = self._diarization_workers.get(model_id)
+            if existing and existing.process.returncode is None:
+                return existing
+
+            cfg = extra_config.get("whisper_cpp") if isinstance(extra_config, dict) else None
+            cfg = cfg if isinstance(cfg, dict) else {}
+            diarization_model_id = str(
+                cfg.get("diarization_model_id") or _DEFAULT_DIARIZATION_MODEL_ID
+            )
+            python_bin = self._resolve_diarization_python_bin()
+            port = _reserve_free_port()
+
+            env = os.environ.copy()
+            if settings.hf_token and not env.get("HF_TOKEN"):
+                env["HF_TOKEN"] = settings.hf_token
+            env["CUDA_VISIBLE_DEVICES"] = ""
+
+            args = [
+                python_bin,
+                str(_DIARIZATION_WORKER_PATH),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--diarization-model-id",
+                diarization_model_id,
+                "--device",
+                "cpu",
+            ]
+
+            log_path = _diarization_log_path(model_id)
+            log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — sidecar-lifetime handle
+
+            logger.info("whispercpp_diarization_starting", model_id=model_id, port=port)
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                env=env,
+                stdout=log_file,
+                stderr=log_file,
+            )
+            sidecar = _DiarizationSidecar(process=process, port=port, log_file=log_file)
+            self._diarization_workers[model_id] = sidecar
+
+            timeout_s = int(settings.whispercpp_diarization_startup_timeout_s)
+            deadline = asyncio.get_running_loop().time() + timeout_s
+            url = f"http://127.0.0.1:{port}/health"
+            healthy = False
+            while asyncio.get_running_loop().time() < deadline:
+                if process.returncode is not None:
+                    break
+                try:
+                    async with httpx.AsyncClient(timeout=2.0) as client:
+                        response = await client.get(url)
+                    if response.status_code == 200:
+                        healthy = True
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
+            if not healthy:
+                self._diarization_workers.pop(model_id, None)
+                log_tail = self._read_log_tail(_diarization_log_path(model_id))
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+                finally:
+                    log_file.close()
+                raise RuntimeError(
+                    f"whisper.cpp diarization sidecar for '{model_id}' did not become "
+                    f"healthy within {timeout_s}s. log_tail={log_tail}"
+                )
+
+            logger.info("whispercpp_diarization_started", model_id=model_id, port=port)
+            return sidecar
+
+    async def _kill_diarization_worker(self, model_id: str) -> None:
+        sidecar = self._diarization_workers.pop(model_id, None)
+        if not sidecar:
+            return
+        process = sidecar.process
+        try:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=10.0)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+        finally:
+            sidecar.log_file.close()
+
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs: Any) -> WorkerInfo:
         existing = self._processes.get(model_id)
         if existing and existing.process.returncode is None:
@@ -167,6 +324,7 @@ class WhisperCppBackend(BackendInterface):
         extra_config = kwargs.get("extra_config") or {}
         cfg = extra_config.get("whisper_cpp") if isinstance(extra_config, dict) else None
         cfg = cfg if isinstance(cfg, dict) else {}
+        self._extra_configs[model_id] = extra_config
         model_file = self._resolve_model_file(model_id, extra_config)
         threads = int(cfg.get("threads") or settings.whispercpp_threads)
         server_bin = self._resolve_server_bin()
@@ -234,6 +392,9 @@ class WhisperCppBackend(BackendInterface):
 
     async def unload(self, model_id: str) -> None:
         await self._kill_process(model_id, graceful=True)
+        await self._kill_diarization_worker(model_id)
+        self._extra_configs.pop(model_id, None)
+        self._diarization_locks.pop(model_id, None)
 
     async def health_check(self, model_id: str) -> bool:
         entry = self._processes.get(model_id)
@@ -258,7 +419,14 @@ class WhisperCppBackend(BackendInterface):
             raise KeyError(f"No whisper.cpp worker for model '{model_id}'")
 
         endpoint = path if path.startswith("/") else f"/{path}"
-        files, form_data = _build_transcription_multipart(body)
+        requested_format = str(body.get("response_format", "json")).lower()
+        diarize_requested = _is_diarize_requested(body.get("diarize"))
+
+        # Diarizing needs whisper.cpp's own segments (with word timestamps) to
+        # merge speaker labels into, regardless of what the caller actually
+        # asked for — the real requested_format is applied after merging.
+        transcribe_body = {**body, "response_format": "verbose_json"} if diarize_requested else body
+        files, form_data = _build_transcription_multipart(transcribe_body)
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
@@ -268,10 +436,31 @@ class WhisperCppBackend(BackendInterface):
             )
         response.raise_for_status()
 
-        response_format = str(body.get("response_format", "json")).lower()
-        if response_format in {"json", "verbose_json"}:
-            return response.json()
-        return response.text
+        if not diarize_requested:
+            if requested_format in {"json", "verbose_json"}:
+                return response.json()
+            return response.text
+
+        result = response.json()
+        sidecar = await self._ensure_diarization_worker(
+            model_id, self._extra_configs.get(model_id) or {}
+        )
+        file_name, file_bytes, content_type = _extract_audio_file(body)
+        diar_files = {"file": (file_name, file_bytes, content_type)}
+        diar_data = {
+            "segments_json": json.dumps(result.get("segments", [])),
+            "response_format": requested_format,
+        }
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            diar_response = await client.post(
+                f"http://127.0.0.1:{sidecar.port}/diarize",
+                files=diar_files,
+                data=diar_data,
+            )
+        diar_response.raise_for_status()
+        if requested_format in {"json", "verbose_json"}:
+            return diar_response.json()
+        return diar_response.text
 
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         payload = await self.forward_request(model_id, path, body)
@@ -291,7 +480,7 @@ class WhisperCppBackend(BackendInterface):
             entry = self._processes.get(model_id)
             if entry and entry.process.returncode is not None:
                 rc = entry.process.returncode
-                log_tail = self._read_log_tail(model_id)
+                log_tail = self._read_log_tail(_worker_log_path(model_id))
                 suffix = f" log_tail={log_tail}" if log_tail else ""
                 if rc in {-signal.SIGKILL, 137}:
                     raise MemoryError(
@@ -331,7 +520,7 @@ class WhisperCppBackend(BackendInterface):
                 logger.warning(
                     "whispercpp_sigterm_timeout",
                     model_id=model_id,
-                    log_tail=self._read_log_tail(model_id),
+                    log_tail=self._read_log_tail(_worker_log_path(model_id)),
                 )
 
         try:
@@ -342,9 +531,8 @@ class WhisperCppBackend(BackendInterface):
         finally:
             entry.log_file.close()
 
-    def _read_log_tail(self, model_id: str, limit: int = 4000) -> str:
+    def _read_log_tail(self, path: str, limit: int = 4000) -> str:
         try:
-            path = _worker_log_path(model_id)
             size = os.path.getsize(path)
             with open(path, "rb") as f:
                 if size > limit:

@@ -162,45 +162,5 @@ def test_run_transcription_segment_granularity_omits_words():
     assert model.calls[0]["word_timestamps"] is False
 
 
-def test_split_segments_by_speaker_splits_on_turn_change():
-    turns = [
-        {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
-        {"start": 5.0, "end": 10.0, "speaker": "SPEAKER_01"},
-        {"start": 10.0, "end": 15.0, "speaker": "SPEAKER_00"},
-    ]
-    segments = [
-        {
-            "id": 0,
-            "start": 0.0,
-            "end": 12.0,
-            "text": "hola mundo adios gente vale",
-            "words": [
-                {"word": " hola", "start": 0.5, "end": 1.0},
-                {"word": " mundo", "start": 1.0, "end": 2.0},
-                {"word": " adios", "start": 6.0, "end": 7.0},
-                {"word": " gente", "start": 7.0, "end": 8.0},
-                {"word": " vale", "start": 11.0, "end": 12.0},
-            ],
-        }
-    ]
-
-    out = whisper_worker._split_segments_by_speaker(segments, turns)
-
-    assert [s["speaker"] for s in out] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]
-    assert [s["id"] for s in out] == [0, 1, 2]
-    assert out[0]["text"] == "hola mundo"
-    assert out[1]["text"] == "adios gente"
-    assert out[1]["start"] == 6.0 and out[1]["end"] == 8.0
-
-
-def test_split_segments_by_speaker_without_words_uses_overlap():
-    turns = [
-        {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
-        {"start": 5.0, "end": 10.0, "speaker": "SPEAKER_01"},
-    ]
-    segments = [{"id": 0, "start": 5.5, "end": 9.0, "text": "x"}]
-
-    out = whisper_worker._split_segments_by_speaker(segments, turns)
-
-    assert len(out) == 1
-    assert out[0]["speaker"] == "SPEAKER_01"
+# Speaker-splitting logic moved to workers/diarization_lib.py (shared with the
+# whisper.cpp diarization sidecar) — see tests/test_diarization_lib.py.

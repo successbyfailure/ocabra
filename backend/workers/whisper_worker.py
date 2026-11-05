@@ -1,7 +1,7 @@
 import argparse
 import asyncio
-import logging
 import os
+import sys
 import tempfile
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
@@ -13,7 +13,25 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-DEFAULT_DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-3.1"
+# diarization_lib.py is a sibling script, not an installed package. Running
+# this file directly (python .../whisper_worker.py, the production path) puts
+# its own directory on sys.path[0] automatically; importing it as
+# workers.whisper_worker (tests, via the implicit namespace package) does not
+# — only the repo's backend/ root is on sys.path then. Make the sibling
+# directory resolvable in both cases instead of relying on which one happens
+# to already be the case.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from diarization_lib import (  # noqa: E402
+    DEFAULT_DIARIZATION_MODEL_ID,
+    diarize_audio_file,
+    load_diarization_pipeline,
+    parse_optional_bool,
+    split_segments_by_speaker,
+    to_srt,
+    to_text,
+    to_vtt,
+)
 # CTranslate2 shares model weights across workers on the same device — extra
 # workers cost ~tens-to-low-hundreds of MB each (measured empirically), not a
 # full model copy. Compute is the real limit, not VRAM: on an RTX 3060 with
@@ -76,7 +94,7 @@ def create_app(
             runtime.diarization_error = None
             if runtime.diarize_default:
                 runtime.diarization_pipeline = await asyncio.to_thread(
-                    _load_diarization_pipeline,
+                    load_diarization_pipeline,
                     runtime.diarization_model_id,
                     runtime.device,
                     os.getenv("HF_TOKEN", "").strip() or None,
@@ -136,9 +154,9 @@ def create_app(
             raise HTTPException(status_code=503, detail=runtime.error or "Whisper model not loaded")
 
         try:
-            diarize_request = _parse_optional_bool(diarize)
-            vad_request = _parse_optional_bool(vad_filter)
-            condition_request = _parse_optional_bool(condition_on_previous_text)
+            diarize_request = parse_optional_bool(diarize)
+            vad_request = parse_optional_bool(vad_filter)
+            condition_request = parse_optional_bool(condition_on_previous_text)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -153,7 +171,7 @@ def create_app(
         if use_diarization and runtime.diarization_pipeline is None:
             try:
                 runtime.diarization_pipeline = await asyncio.to_thread(
-                    _load_diarization_pipeline,
+                    load_diarization_pipeline,
                     runtime.diarization_model_id,
                     runtime.device,
                     os.getenv("HF_TOKEN", "").strip() or None,
@@ -222,11 +240,11 @@ def create_app(
         detected_language = result["language"]
 
         if normalized_format == "text":
-            return PlainTextResponse(_to_text(segments))
+            return PlainTextResponse(to_text(segments))
         if normalized_format == "srt":
-            return PlainTextResponse(_to_srt(segments))
+            return PlainTextResponse(to_srt(segments))
         if normalized_format == "vtt":
-            return PlainTextResponse(_to_vtt(segments))
+            return PlainTextResponse(to_vtt(segments))
         if normalized_format == "verbose_json":
             payload = {
                 "text": text,
@@ -606,51 +624,15 @@ def _run_transcription(
     speakers: list[str] = []
     speaker_embeddings: dict[str, list[float]] = {}
     if diarizing:
-        # pyannote ≥4.0 uses torchcodec (requires FFmpeg shared libs) for
-        # audio I/O. Since torchcodec may not be available, load the audio
-        # via PyAV (bundled with faster-whisper) and pass a waveform dict.
-        import av as _av
-        import numpy as _np
-        import torch as _torch
-
-        _sr_target = 16000
-        _frames: list[_np.ndarray] = []
-        with _av.open(audio_path) as _container:
-            _resampler = _av.audio.resampler.AudioResampler(
-                format="fltp", layout="mono", rate=_sr_target
-            )
-            for _frame in _container.decode(audio=0):
-                for _rf in _resampler.resample(_frame):
-                    _frames.append(_rf.to_ndarray())
-        _waveform_np = _np.concatenate(_frames, axis=1) if _frames else _np.zeros((1, 1), dtype=_np.float32)
-        _waveform = _torch.from_numpy(_waveform_np)
-        _audio_input: Any = {"waveform": _waveform, "sample_rate": _sr_target}
-        annotation = diarization_pipeline(_audio_input)
-        diarization_turns = _collect_diarization_turns(annotation)
+        diar_result = diarize_audio_file(diarization_pipeline, audio_path)
+        diarization_turns = diar_result["turns"]
         # Split segments on speaker turns (using word timestamps when present)
         # so each segment carries the speaker that actually spoke it.
-        segment_list = _split_segments_by_speaker(segment_list, diarization_turns)
+        segment_list = split_segments_by_speaker(segment_list, diarization_turns)
         # The speaker roster reflects every speaker in the diarization track,
         # not just the ones that happened to win a segment.
-        speakers = sorted({turn["speaker"] for turn in diarization_turns})
-
-        # Per-speaker embeddings (for session-wide speaker matching / consistent
-        # diarization across streaming segments). Computed over each speaker's
-        # longest turn with the pipeline's own embedding model. Optional — on any
-        # failure callers fall back to per-segment labels.
-        if diarization_turns:
-            _by_spk: dict[str, list[dict[str, Any]]] = {}
-            for _turn in diarization_turns:
-                _by_spk.setdefault(_turn["speaker"], []).append(_turn)
-            for _spk, _turns in _by_spk.items():
-                _lg = max(_turns, key=lambda t: t["end"] - t["start"])
-                _a = int(float(_lg["start"]) * _sr_target)
-                _b = int(float(_lg["end"]) * _sr_target)
-                if _b - _a < int(_sr_target * 0.3):  # need ≥0.3 s for a stable embedding
-                    continue
-                _vec = _embed_waveform(diarization_pipeline, _waveform[:, _a:_b], _sr_target)
-                if _vec:
-                    speaker_embeddings[str(_spk)] = _vec
+        speakers = diar_result["speakers"]
+        speaker_embeddings = diar_result["embeddings"]
 
     # Drop the internal word data unless the caller asked for word granularity.
     if not expose_words:
@@ -658,7 +640,7 @@ def _run_transcription(
             segment.pop("words", None)
 
     if diarization_turns is not None:
-        final_text = _to_text(segment_list)
+        final_text = to_text(segment_list)
     else:
         final_text = " ".join(part.strip() for part in text_parts if part).strip()
 
@@ -678,326 +660,6 @@ def _run_transcription(
             payload["speaker_embeddings"] = speaker_embeddings
     return payload
 
-
-def _patch_torchaudio_compat() -> None:
-    import torchaudio
-
-    if not hasattr(torchaudio, "AudioMetaData"):
-        class _CompatAudioMetaData:  # pragma: no cover
-            def __init__(
-                self,
-                sample_rate: int,
-                num_frames: int,
-                num_channels: int,
-                bits_per_sample: int = 0,
-                encoding: str = "PCM_S",
-            ) -> None:
-                self.sample_rate = sample_rate
-                self.num_frames = num_frames
-                self.num_channels = num_channels
-                self.bits_per_sample = bits_per_sample
-                self.encoding = encoding
-
-        torchaudio.AudioMetaData = _CompatAudioMetaData
-
-    if not hasattr(torchaudio, "list_audio_backends"):
-        torchaudio.list_audio_backends = lambda: ["ffmpeg"]
-    if not hasattr(torchaudio, "get_audio_backend"):
-        torchaudio.get_audio_backend = lambda: "ffmpeg"
-    if not hasattr(torchaudio, "set_audio_backend"):
-        torchaudio.set_audio_backend = lambda backend: None
-    if not hasattr(torchaudio, "info"):
-        import soundfile as sf
-
-        def _compat_info(path: str, backend: str | None = None):  # pragma: no cover
-            del backend
-            metadata = sf.info(path)
-            return torchaudio.AudioMetaData(
-                sample_rate=int(metadata.samplerate),
-                num_frames=int(metadata.frames),
-                num_channels=int(metadata.channels),
-                bits_per_sample=0,
-                encoding="PCM_S",
-            )
-
-        torchaudio.info = _compat_info
-
-
-logger = logging.getLogger("ocabra.whisper_worker")
-
-
-def _embed_waveform(pipeline: Any, waveform: Any, sample_rate: int) -> list[float] | None:
-    """Compute a single speaker embedding for a mono 16 kHz waveform crop, reusing
-    the diarization pipeline's OWN (already-loaded) ``PretrainedSpeakerEmbedding``
-    — avoids a second gated download and matches how the pipeline clusters speakers.
-    Its call signature is ``embedder(batch=(B, channels, samples)) -> (B, dim)``.
-    Returns a plain float list, or None if unavailable."""
-    import numpy as _np
-
-    emb = getattr(pipeline, "_embedding", None)
-    if emb is None:
-        return None
-    try:
-        wf = waveform
-        if hasattr(wf, "dim"):
-            if wf.dim() == 1:
-                wf = wf.unsqueeze(0)  # (samples,) -> (1, samples)
-            batch = wf.unsqueeze(0)  # (channels, samples) -> (1, channels, samples)
-        else:
-            import torch as _torch
-
-            batch = _torch.as_tensor(wf, dtype=_torch.float32).reshape(1, 1, -1)
-        out = emb(batch)  # ndarray (1, dim)
-        arr = _np.asarray(getattr(out, "data", out), dtype=float)
-        if arr.ndim > 1:
-            arr = arr.reshape(-1, arr.shape[-1]).mean(axis=0)
-        arr = arr.ravel()
-        if arr.size == 0 or bool(_np.any(_np.isnan(arr))):
-            return None
-        return [float(x) for x in arr.tolist()]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("whisper_embedding_extract_failed: %s", exc)
-        return None
-
-
-def _load_diarization_pipeline(model_id: str, device: str, hf_token: str | None) -> Any:
-    _patch_torchaudio_compat()
-    os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-
-    try:
-        from pyannote.audio import Pipeline
-    except ImportError as exc:
-        raise RuntimeError(
-            "Diarization requested but pyannote.audio is not installed. "
-            "Install backend extras '[audio]' including pyannote.audio."
-        ) from exc
-
-    kwargs: dict[str, Any] = {}
-    if hf_token:
-        kwargs["token"] = hf_token
-
-    # Resolve local model directory before attempting a remote download.
-    pipeline_source: str = model_id
-    models_dir = os.environ.get("MODELS_DIR", "")
-    if models_dir:
-        local_hf = Path(models_dir) / "huggingface" / model_id.replace("/", "--")
-        if local_hf.is_dir() and (local_hf / "config.yaml").exists():
-            pipeline_source = str(local_hf)
-            kwargs.pop("token", None)  # local path needs no auth
-
-    try:
-        import torch
-        from torch.torch_version import TorchVersion
-
-        torch.serialization.add_safe_globals([TorchVersion])
-    except Exception:
-        pass
-
-    # pyannote ≥4.0 always calls get_plda() even for AgglomerativeClustering
-    # which doesn't use PLDA. Patch it to return None on download failures so
-    # the pipeline still loads when PLDA is unavailable (gated HF access).
-    _patch_targets: list[Any] = []
-    try:
-        import pyannote.audio.pipelines.speaker_diarization as _sd_mod
-        from pyannote.audio.pipelines.utils import getter as _getter
-
-        _orig_get_plda = _getter.get_plda
-
-        def _safe_get_plda(plda, **kw):  # type: ignore[override]
-            try:
-                return _orig_get_plda(plda, **kw)
-            except Exception:
-                return None
-
-        # Must patch both the canonical location and the imported reference.
-        _getter.get_plda = _safe_get_plda
-        _sd_mod.get_plda = _safe_get_plda
-        _patch_targets = [(_getter, "get_plda"), (_sd_mod, "get_plda")]
-    except Exception:
-        pass
-
-    try:
-        pipeline = Pipeline.from_pretrained(pipeline_source, **kwargs)
-    finally:
-        for _mod, _attr in _patch_targets:
-            setattr(_mod, _attr, _orig_get_plda)
-
-    try:
-        import torch
-
-        target_device = torch.device("cuda" if device == "cuda" else "cpu")
-        pipeline.to(target_device)
-    except Exception:
-        pass
-
-    return pipeline
-
-
-def _collect_diarization_turns(annotation: Any) -> list[dict[str, Any]]:
-    # pyannote ≥4.0 returns DiarizeOutput; pyannote 3.x returns Annotation directly.
-    if hasattr(annotation, "speaker_diarization"):
-        annotation = annotation.speaker_diarization
-    turns: list[dict[str, Any]] = []
-    for segment, _, speaker in annotation.itertracks(yield_label=True):
-        turns.append(
-            {
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "speaker": str(speaker),
-            }
-        )
-    turns.sort(key=lambda item: item["start"])
-    return turns
-
-
-def _speaker_for_interval(
-    start: float,
-    end: float,
-    diarization_turns: list[dict[str, Any]],
-) -> str | None:
-    """Return the speaker whose diarization turn overlaps [start, end] most."""
-    best_speaker: str | None = None
-    best_overlap = 0.0
-    for turn in diarization_turns:
-        overlap = max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best_speaker = turn["speaker"]
-    return best_speaker
-
-
-def _split_segments_by_speaker(
-    segments: list[dict[str, Any]],
-    diarization_turns: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Re-segment the transcript so each segment maps to a single speaker.
-
-    When a segment has word-level timestamps, consecutive words are grouped by
-    their overlapping diarization speaker and emitted as separate segments on
-    speaker changes. Segments without words fall back to whole-segment overlap.
-    """
-    result: list[dict[str, Any]] = []
-    next_id = 0
-
-    for segment in segments:
-        words = segment.get("words")
-        if not words:
-            speaker = _speaker_for_interval(
-                float(segment["start"]), float(segment["end"]), diarization_turns
-            )
-            new_segment = {**segment, "id": next_id}
-            if speaker is not None:
-                new_segment["speaker"] = speaker
-            result.append(new_segment)
-            next_id += 1
-            continue
-
-        group_words: list[dict[str, Any]] = []
-        group_speaker: str | None = None
-        for word in words:
-            speaker = _speaker_for_interval(
-                float(word["start"]), float(word["end"]), diarization_turns
-            )
-            if group_words and speaker != group_speaker:
-                result.append(_segment_from_words(next_id, group_words, group_speaker))
-                next_id += 1
-                group_words = []
-            group_speaker = speaker
-            group_words.append(word)
-
-        if group_words:
-            result.append(_segment_from_words(next_id, group_words, group_speaker))
-            next_id += 1
-
-    return result
-
-
-def _segment_from_words(
-    segment_id: int,
-    words: list[dict[str, Any]],
-    speaker: str | None,
-) -> dict[str, Any]:
-    segment: dict[str, Any] = {
-        "id": segment_id,
-        "start": float(words[0]["start"]),
-        "end": float(words[-1]["end"]),
-        "text": "".join(word["word"] for word in words).strip(),
-        "words": words,
-    }
-    if speaker is not None:
-        segment["speaker"] = speaker
-    return segment
-
-
-def _parse_optional_bool(value: str | None) -> bool | None:
-    if value is None:
-        return None
-
-    normalized = value.strip().lower()
-    if normalized == "":
-        return None
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-
-    raise ValueError("Invalid 'diarize' value. Use true/false.")
-
-
-def _to_text(segments: Sequence[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    current_speaker: str | None = None
-    for segment in segments:
-        speaker = segment.get("speaker")
-        text = segment["text"].strip()
-        if speaker:
-            if speaker != current_speaker:
-                current_speaker = speaker
-                lines.append(f"[{speaker}] {text}")
-            else:
-                lines.append(text)
-        else:
-            lines.append(text)
-    return "\n".join(lines)
-
-
-def _to_srt(segments: Sequence[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for i, segment in enumerate(segments, start=1):
-        lines.append(str(i))
-        lines.append(f"{_format_srt_ts(segment['start'])} --> {_format_srt_ts(segment['end'])}")
-        speaker = segment.get("speaker")
-        text = segment["text"].strip()
-        lines.append(f"[{speaker}] {text}" if speaker else text)
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _to_vtt(segments: Sequence[dict[str, Any]]) -> str:
-    lines = ["WEBVTT", ""]
-    for segment in segments:
-        lines.append(f"{_format_vtt_ts(segment['start'])} --> {_format_vtt_ts(segment['end'])}")
-        speaker = segment.get("speaker")
-        text = segment["text"].strip()
-        lines.append(f"<v {speaker}>{text}" if speaker else text)
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _format_srt_ts(value: float) -> str:
-    hours = int(value // 3600)
-    minutes = int((value % 3600) // 60)
-    seconds = int(value % 60)
-    millis = int((value - int(value)) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
-
-
-def _format_vtt_ts(value: float) -> str:
-    hours = int(value // 3600)
-    minutes = int((value % 3600) // 60)
-    seconds = int(value % 60)
-    millis = int((value - int(value)) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
 def main() -> None:

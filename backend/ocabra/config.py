@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.30.1"
+    app_version: str = "0.31.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -348,6 +348,11 @@ class Settings(BaseSettings):
     whispercpp_server_bin: str = "/usr/local/bin/whisper-server"
     whispercpp_threads: int = 8
     whispercpp_startup_timeout_s: int = 120
+    # diarize=true against a whisper_cpp model launches workers/diarization_worker.py
+    # (a pyannote-only sidecar — see whispercpp_backend.py docstring). Reuses the
+    # "whisper" backend's own venv (pyannote.audio already lives there), so that
+    # backend must be installed for whisper_cpp diarization to work.
+    whispercpp_diarization_startup_timeout_s: int = 180
     # TensorRT-LLM
     tensorrt_llm_enabled: bool = False
     tensorrt_llm_launch_mode: str = "binary"

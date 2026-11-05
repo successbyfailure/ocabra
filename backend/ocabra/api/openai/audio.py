@@ -35,14 +35,16 @@ from ._federation import try_proxy_json, try_proxy_multipart
 router = APIRouter()
 logger = structlog.get_logger(__name__)
 
-# Only the faster-whisper backend wires diarize=true to an actual pyannote
-# pipeline (workers/whisper_worker.py). whisper.cpp and VibeASR have no
-# speaker-diarization code at all — they just drop the field, so a client
-# gets a normal transcription back with zero speakers identified and no
-# error, which reads as "diarization silently did nothing" (reported live
-# 2026-11-05: an agent got diarize=true accepted by two whisper.cpp profiles
-# with no speaker labels in the response).
-_DIARIZATION_CAPABLE_BACKENDS = {"whisper"}
+# faster-whisper wires diarize=true to pyannote in-process
+# (workers/whisper_worker.py); whisper_cpp forwards it to a dedicated pyannote
+# sidecar instead (workers/diarization_worker.py, launched lazily by
+# WhisperCppBackend — see its module docstring). VibeASR has no
+# speaker-diarization code at all — it just drops the field, so a client gets
+# a normal transcription back with zero speakers identified and no error,
+# which reads as "diarization silently did nothing" (reported live 2026-11-05:
+# an agent got diarize=true accepted by two whisper.cpp profiles with no
+# speaker labels in the response — whisper_cpp support added the same day).
+_DIARIZATION_CAPABLE_BACKENDS = {"whisper", "whisper_cpp"}
 
 
 def _is_diarize_requested(raw: str | None) -> bool:
@@ -195,11 +197,12 @@ async def transcriptions(
         request_state=request.state,
     )
     check_capability(state, "audio_transcription", "audio transcription")
-    if _is_diarize_requested(diarize) and state.backend_type not in _DIARIZATION_CAPABLE_BACKENDS:
+    diarize_requested = _is_diarize_requested(diarize)
+    if diarize_requested and state.backend_type not in _DIARIZATION_CAPABLE_BACKENDS:
         raise _openai_error(
             f"The model '{state.model_id}' (backend '{state.backend_type}') does not "
-            "support diarize=true — speaker diarization only runs on faster-whisper "
-            "profiles (backend_type='whisper').",
+            f"support diarize=true — speaker diarization is only available on "
+            f"{sorted(_DIARIZATION_CAPABLE_BACKENDS)} backends.",
             "invalid_request_error",
             param="diarize",
             code="diarization_not_supported",
@@ -208,8 +211,15 @@ async def transcriptions(
     request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool
+    # whisper.cpp has no in-process pyannote to lazy-load diarization into
+    # (whisper-server is a native binary) — WhisperCppBackend.forward_request()
+    # owns that orchestration (launching/reusing the diarization sidecar and
+    # merging its output), so route through it instead of this endpoint's own
+    # direct worker call, which only knows how to talk to whisper-server.
+    via_backend_forward = diarize_requested and state.backend_type == "whisper_cpp"
 
     resp: httpx.Response | None = None
+    sidecar_result: Any = None
     last_error: Exception | None = None
 
     inflight_request_id = model_manager.begin_request(worker_key)
@@ -234,39 +244,63 @@ async def transcriptions(
                     headers={"Retry-After": "10"},
                 )
 
-            url = f"http://127.0.0.1:{worker.port}/transcribe"
-
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
-                    form_data: dict[str, Any] = {
+                if via_backend_forward:
+                    body: dict[str, Any] = {
+                        "file": (
+                            file.filename or "audio",
+                            audio_bytes,
+                            file.content_type or "audio/mpeg",
+                        ),
                         "response_format": response_format,
-                        "temperature": str(temperature),
+                        "temperature": temperature,
+                        "diarize": diarize,
                     }
                     if language:
-                        form_data["language"] = language
+                        body["language"] = language
                     if prompt:
-                        form_data["prompt"] = prompt
-                    if diarize is not None:
-                        form_data["diarize"] = diarize
+                        body["prompt"] = prompt
                     if granularities:
-                        form_data["timestamp_granularities"] = granularities
-                    if vad_filter is not None:
-                        form_data["vad_filter"] = vad_filter
-                    if condition_on_previous_text is not None:
-                        form_data["condition_on_previous_text"] = condition_on_previous_text
-
-                    resp = await client.post(
-                        url,
-                        files={
-                            "file": (
-                                file.filename or "audio",
-                                audio_bytes,
-                                file.content_type or "audio/mpeg",
-                            )
-                        },
-                        data=form_data,
+                        body["timestamp_granularities"] = granularities
+                    # WhisperCppBackend (like AceStep below) keys its own
+                    # _processes by backend_model_id (the short suffix), not
+                    # the canonical worker_key — see the ACE-Step call further
+                    # down for the same gotcha.
+                    sidecar_result = await backend.forward_request(
+                        state.backend_model_id, "/transcribe", body
                     )
-                    resp.raise_for_status()
+                else:
+                    url = f"http://127.0.0.1:{worker.port}/transcribe"
+                    async with httpx.AsyncClient(timeout=300.0) as client:
+                        form_data: dict[str, Any] = {
+                            "response_format": response_format,
+                            "temperature": str(temperature),
+                        }
+                        if language:
+                            form_data["language"] = language
+                        if prompt:
+                            form_data["prompt"] = prompt
+                        if diarize is not None:
+                            form_data["diarize"] = diarize
+                        if granularities:
+                            form_data["timestamp_granularities"] = granularities
+                        if vad_filter is not None:
+                            form_data["vad_filter"] = vad_filter
+                        if condition_on_previous_text is not None:
+                            form_data["condition_on_previous_text"] = condition_on_previous_text
+
+                        resp = await client.post(
+                            url,
+                            files={
+                                "file": (
+                                    file.filename or "audio",
+                                    audio_bytes,
+                                    file.content_type or "audio/mpeg",
+                                )
+                            },
+                            data=form_data,
+                        )
+                        resp.raise_for_status()
                 break
             except httpx.TransportError as exc:
                 last_error = exc
@@ -294,7 +328,7 @@ async def transcriptions(
     finally:
         model_manager.end_request(worker_key, inflight_request_id)
 
-    if resp is None:
+    if resp is None and sidecar_result is None:
         raise _openai_error(
             f"Failed to reach Whisper worker for model '{worker_key}': {last_error}",
             "server_error",
@@ -310,6 +344,10 @@ async def transcriptions(
     )
     # OpenAI format: {"text": "..."}
     normalized_format = str(response_format).lower()
+    if via_backend_forward:
+        if isinstance(sidecar_result, str):
+            return PlainTextResponse(sidecar_result, headers=stt_headers)
+        return JSONResponse(content=sidecar_result, headers=stt_headers)
     if normalized_format in {"text", "srt", "vtt"}:
         return PlainTextResponse(resp.text, headers=stt_headers)
     return JSONResponse(content=resp.json(), headers=stt_headers)

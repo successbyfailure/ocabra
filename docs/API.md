@@ -348,10 +348,20 @@ penalizar la primera petición) y reserva ~1200 MB de VRAM extra en el
 planificador de GPU — ver `load_overrides.diarization_enabled` más
 abajo.
 
-Los backends `whisper_cpp` y `vibeasr` **no** implementan diarización
-(no tienen pyannote ni equivalente) — `diarize=true` contra uno de
-esos perfiles responde `400 diarization_not_supported` en vez de
-aceptarse en silencio sin identificar hablantes.
+El backend `whisper_cpp` también soporta `diarize=true` (desde
+2026-11-05), pero por un camino distinto: `whisper-server` es un
+binario nativo sin Python dentro donde cargar pyannote, así que
+oCabra lanza un sidecar aparte (`workers/diarization_worker.py`,
+reutilizando el venv del backend `whisper` — debe estar instalado) la
+primera vez que se pide diarización contra ese modelo, y lo mantiene
+vivo para peticiones siguientes. Mismo coste de latencia único que el
+camino lazy de faster-whisper, misma forma de respuesta
+(`speakers`/`diarization`/texto con prefijo `[SPEAKER_NN]`).
+
+`vibeasr` sigue sin implementar diarización (no tiene pyannote ni
+equivalente) — `diarize=true` contra un perfil vibeasr responde
+`400 diarization_not_supported` en vez de aceptarse en silencio sin
+identificar hablantes.
 
 ### Audio — Music Generation
 

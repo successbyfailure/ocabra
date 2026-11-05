@@ -2390,13 +2390,16 @@ def _audio_state(backend_type: str):
 
 class TestTranscriptionDiarizeCapabilityGate:
     """2026-11-05: an agent reported that whisper.cpp profiles accepted
-    diarize=true and silently returned zero speakers — neither whisper.cpp
-    nor VibeASR wire the field to anything (no pyannote-equivalent pipeline),
-    unlike the faster-whisper backend. The request must fail loudly instead
-    of pretending diarization ran."""
+    diarize=true and silently returned zero speakers. whisper.cpp now forwards
+    diarization to a dedicated pyannote sidecar (WhisperCppBackend, same day
+    fix) — VibeASR still has no speaker-diarization code at all, so it must
+    keep failing loudly instead of pretending diarization ran."""
 
-    def test_diarize_true_rejected_for_whispercpp(self):
+    def test_diarize_true_allowed_for_whispercpp(self):
+        # The capability gate must not block it — whisper_cpp forwards
+        # diarization to its sidecar now (see WhisperCppBackend).
         app = _make_app(model_state=_audio_state("whisper_cpp"))
+        self._wire_unhealthy_backend(app)
         client = TestClient(app)
 
         resp = client.post(
@@ -2405,8 +2408,9 @@ class TestTranscriptionDiarizeCapabilityGate:
             files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
         )
 
-        assert resp.status_code == 400
-        assert resp.json()["detail"]["error"]["code"] == "diarization_not_supported"
+        assert resp.status_code != 400 or resp.json()["detail"]["error"]["code"] != (
+            "diarization_not_supported"
+        )
 
     def test_diarize_true_rejected_for_vibeasr(self):
         app = _make_app(model_state=_audio_state("vibeasr"))
@@ -2464,3 +2468,92 @@ class TestTranscriptionDiarizeCapabilityGate:
         assert resp.status_code != 400 or resp.json()["detail"]["error"]["code"] != (
             "diarization_not_supported"
         )
+
+
+class TestTranscriptionDiarizeRouting:
+    """2026-11-05: the capability gate alone wasn't enough — the endpoint's
+    main path posts directly to the worker's own /transcribe (bypassing
+    backend.forward_request() entirely), which is where WhisperCppBackend's
+    diarization-sidecar orchestration actually lives. Caught live: diarize=true
+    against a loaded whisper_cpp model returned 200 with whisper.cpp's own
+    native 'speaker: "?"' stub, never touching the sidecar at all, because the
+    endpoint's direct-call path has no idea the sidecar exists. Must route
+    through backend.forward_request() specifically when backend_type is
+    whisper_cpp and diarize is requested; every other combination keeps using
+    the original direct call unchanged."""
+
+    @staticmethod
+    def _make_whispercpp_app(diarize_result: object):
+        app = _make_app(model_state=_audio_state("whisper_cpp"))
+        backend = MagicMock()
+        backend.health_check = AsyncMock(return_value=True)
+        backend.forward_request = AsyncMock(return_value=diarize_result)
+        app.state.worker_pool.get_backend = AsyncMock(return_value=backend)
+        return app, backend
+
+    def test_diarize_true_routes_through_backend_forward_request(self):
+        app, backend = self._make_whispercpp_app(
+            {"text": "[SPEAKER_00] hola", "segments": [], "speakers": ["SPEAKER_00"]}
+        )
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={
+                "model": "whisper_cpp/demo-stt",
+                "diarize": "true",
+                "response_format": "verbose_json",
+            },
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["speakers"] == ["SPEAKER_00"]
+        backend.forward_request.assert_awaited_once()
+        call_args = backend.forward_request.await_args
+        # Regression: WhisperCppBackend (like AceStep) keys its own _processes
+        # by backend_model_id (the short suffix), not the canonical
+        # worker_key — passing worker_key here raised a live KeyError
+        # ("No whisper.cpp worker for model ...") the first time this was
+        # tried against the real API, which this test's earlier version
+        # didn't catch because it never asserted on args[0].
+        assert call_args.args[0] == "demo-stt"
+        assert call_args.args[1] == "/transcribe"
+        body = call_args.args[2]
+        assert body["diarize"] == "true"
+        assert body["response_format"] == "verbose_json"
+
+    def test_diarize_true_plain_text_result_returned_as_plain_text(self):
+        app, backend = self._make_whispercpp_app("[SPEAKER_00] hola")
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={
+                "model": "whisper_cpp/demo-stt",
+                "diarize": "true",
+                "response_format": "text",
+            },
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        assert resp.text == "[SPEAKER_00] hola"
+
+    def test_diarize_false_does_not_route_through_backend_forward_request(self):
+        app, backend = self._make_whispercpp_app({"text": "hola"})
+        # The direct-call path targets a real port nothing is listening on in
+        # this test — only asserting that forward_request is never reached,
+        # not that the round trip itself succeeds, so just let its transport
+        # failure take the existing reload-and-retry branch without erroring.
+        app.state.model_manager.unload = AsyncMock()
+        app.state.model_manager.load = AsyncMock()
+        client = TestClient(app)
+
+        client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "whisper_cpp/demo-stt", "diarize": "false"},
+            files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
+        )
+
+        backend.forward_request.assert_not_awaited()
