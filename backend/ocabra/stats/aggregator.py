@@ -457,6 +457,28 @@ async def get_performance_stats(
             for v in (_telemetry_int(r, "queue_ms") for r in model_rows)
             if v is not None and v >= 0
         ]
+        # ``ttft_ms`` is measured from HTTP arrival, so it bundles three very
+        # different things: waiting for an admission slot, loading the model,
+        # and the engine actually producing a token. Reporting only the total
+        # makes a cold start look like a slow engine — measured 2026-11-06, a
+        # 68.7s "TTFT" on qwen3:8b that was 68.2s of model load and ~0.5s of
+        # engine. Subtracting both gives the number that answers "how fast does
+        # this model respond once it is up", which is the one worth comparing
+        # across models; the raw total stays alongside it because that is what
+        # the user actually waited.
+        load_values = [
+            v for v in (_telemetry_int(r, "load_ms") for r in model_rows) if v is not None and v > 0
+        ]
+        engine_ttft_values = sorted(
+            max(
+                0,
+                (_telemetry_int(r, "ttft_ms") or 0)
+                - (_telemetry_int(r, "load_ms") or 0)
+                - (_telemetry_int(r, "queue_ms") or 0),
+            )
+            for r in model_rows
+            if _telemetry_int(r, "ttft_ms") is not None
+        )
 
         # Self-speculative decoding (--spec-type draft-mtp) health, straight
         # from the engine's own timings block — see RequestStat.draft_n's
@@ -537,8 +559,22 @@ async def get_performance_stats(
                 "ttftP95Ms": _percentile(ttft_values, 95) if ttft_values else None,
                 # Queue wait is the part of the latency the user paid for
                 # contention rather than for their own request.
+                # Engine-only: what the model took once it had a slot and was
+                # resident. Compare this across models, not ttftP*.
+                "ttftEngineP50Ms": (
+                    _percentile(engine_ttft_values, 50) if engine_ttft_values else None
+                ),
+                "ttftEngineP95Ms": (
+                    _percentile(engine_ttft_values, 95) if engine_ttft_values else None
+                ),
                 "queuedRequests": sum(1 for v in queue_values if v > 1000),
                 "maxQueueMs": max(queue_values) if queue_values else 0,
+                "queueP95Ms": _percentile(sorted(queue_values), 95) if queue_values else None,
+                # Cold starts, the other half of the gap between the raw TTFT
+                # and the engine figure.
+                "coldStartRequests": len(load_values),
+                "loadP50Ms": _percentile(sorted(load_values), 50) if load_values else None,
+                "maxLoadMs": max(load_values) if load_values else 0,
             }
         )
 
