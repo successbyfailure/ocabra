@@ -59,6 +59,14 @@ async def _idle_eviction_loop(model_manager, stop_event: asyncio.Event) -> None:
         except Exception as exc:
             logger.warning("idle_eviction_loop_error", error=str(exc))
 
+        # Same cadence: both are "the placement we chose earlier may no longer
+        # be the right one" checks, and this one is a no-op unless a model is
+        # sitting off its preferred GPU with that GPU now free.
+        try:
+            await model_manager.check_preferred_gpu_replacements()
+        except Exception as exc:
+            logger.warning("preferred_gpu_replacement_loop_error", error=str(exc))
+
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
         except TimeoutError:

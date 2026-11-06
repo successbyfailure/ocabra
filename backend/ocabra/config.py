@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.37.0"
+    app_version: str = "0.38.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -500,6 +500,22 @@ class Settings(BaseSettings):
     # Model lifecycle
     idle_timeout_seconds: int = 300
     idle_eviction_check_interval_seconds: int = 15
+    # Placement is decided from whatever is free at load time, so a model whose
+    # preferred GPU was momentarily full lands elsewhere and stays there —
+    # nothing used to bring it back. Seen 2026-11-06: whisper (preferred_gpu=0,
+    # PIN) ran 17 minutes on GPU 1 while GPU 0 sat empty. This moves it back,
+    # but only when the move costs nothing: the model is idle, no other load is
+    # in flight, and the preferred GPU already has room WITHOUT evicting
+    # anything. A move is an unload plus a cold start, so the bar is high on
+    # purpose — the point is to recover from an unlucky placement, not to chase
+    # the optimum. Set to False to disable entirely.
+    preferred_gpu_replacement_enabled: bool = True
+    # How long a model must have been settled before it may be moved, and how
+    # long to wait after moving it before considering it again. Together they
+    # stop a model from ping-ponging when the two GPUs keep swapping who is
+    # free.
+    preferred_gpu_replacement_min_residency_s: int = 180
+    preferred_gpu_replacement_cooldown_s: int = 900
     # How long (seconds) ensure_loaded waits for a model that is currently loading.
     # Covers: eviction of a busy model (drain) + actual model startup time.
     # Large models (vLLM 70B, Whisper large-v3 + diarization) can take 10+ minutes.

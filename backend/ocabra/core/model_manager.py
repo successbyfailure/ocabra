@@ -284,6 +284,8 @@ class ModelManager:
         # ``_load_in_progress``: model_id set of loads currently active.
         self._load_queue_waiters: int = 0
         self._load_in_progress: set[str] = set()
+        # model_id -> epoch of the last preferred-GPU move (cooldown).
+        self._preferred_gpu_move_at: dict[str, float] = {}
         # Exact task owning each load, so an administrator can cancel a cold
         # start without guessing which user request triggered the derived
         # runtime. Entries are removed in _load_model's finally block.
@@ -3461,6 +3463,92 @@ class ModelManager:
                     break
             except Exception:
                 continue
+
+    async def check_preferred_gpu_replacements(self) -> None:
+        """Move a model back to its preferred GPU once that GPU can hold it.
+
+        ``find_gpu_for_model`` decides placement from whatever is free at that
+        instant, which is right, but nothing revisited the decision afterwards:
+        a model whose preferred GPU was briefly full landed elsewhere and
+        stayed. Observed 2026-11-06 — whisper (``preferred_gpu=0``, PIN) ran
+        17 minutes on GPU 1 while GPU 0 was empty.
+
+        Every condition here exists to make the move free of collateral,
+        because a move is an unload plus a cold start:
+
+        * the model is idle and no other load is running — never compete with
+          real traffic for the GPU;
+        * the preferred GPU already fits it **without evicting anything**, so
+          this cannot start an eviction cascade (which is exactly what the
+          pressure heuristic in the scheduler is there to avoid);
+        * it is a single-GPU placement — a tensor-split model has no single
+          "preferred" GPU to return to;
+        * a forced runtime preset wins, since that placement was chosen
+          explicitly and is already honoured;
+        * minimum residency plus a per-model cooldown, so two GPUs taking
+          turns at being free cannot make a model ping-pong.
+        """
+        if not settings.preferred_gpu_replacement_enabled or self._gpu_manager is None:
+            return
+        if self._load_in_progress:
+            return
+
+        now = time.time()
+        min_residency = max(0, int(settings.preferred_gpu_replacement_min_residency_s))
+        cooldown = max(0, int(settings.preferred_gpu_replacement_cooldown_s))
+
+        for model_id, state in list(self._states.items()):
+            if state.status != ModelStatus.LOADED or state.preferred_gpu is None:
+                continue
+            if len(state.current_gpu or []) != 1 or state.current_gpu[0] == state.preferred_gpu:
+                continue
+            if self.is_busy(model_id) or self.inflight_count(model_id) > 0:
+                continue
+            runtime = (
+                state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
+            )
+            if isinstance(runtime, dict) and runtime.get("gpu_indices"):
+                continue  # forced by a runtime preset; that placement is deliberate
+            if now - self._preferred_gpu_move_at.get(model_id, 0.0) < cooldown:
+                continue
+            loaded_at = state.loaded_at
+            if loaded_at is not None and (
+                datetime.now(UTC) - loaded_at
+            ).total_seconds() < min_residency:
+                continue
+
+            target = int(state.preferred_gpu)
+            if self._gpu_manager.has_service_lock(target):
+                continue
+            needed = max(0, int(state.vram_estimate_mb or state.vram_used_mb or 0))
+            if needed <= 0:
+                continue
+            try:
+                free = await self._gpu_manager.get_free_vram(target)
+            except Exception:  # noqa: BLE001 -- best effort, never break the loop
+                continue
+            if free < needed:
+                continue
+
+            logger.info(
+                "preferred_gpu_replacement",
+                model_id=model_id,
+                from_gpu=state.current_gpu[0],
+                to_gpu=target,
+                needed_mb=needed,
+                free_mb=free,
+            )
+            self._preferred_gpu_move_at[model_id] = now
+            try:
+                await self.unload(model_id, reason="preferred_gpu_replacement")
+                await self.load(model_id, force_gpu=target)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "preferred_gpu_replacement_failed", model_id=model_id, error=str(exc)
+                )
+            # One move per pass: the next tick re-reads real free VRAM instead
+            # of acting on figures this move just invalidated.
+            return
 
     async def check_idle_evictions(self) -> None:
         global_timeout = int(settings.idle_timeout_seconds)
