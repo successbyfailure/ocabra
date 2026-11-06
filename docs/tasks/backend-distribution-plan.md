@@ -1,7 +1,7 @@
 # Plan: distribución y actualización de backends · `llama_cpp_mks`
 
 **Fecha de apertura:** 2026-11-06
-**Estado:** 🔵 diseño — sin trabajo iniciado
+**Estado:** 🟡 diseño; Paso 0 (fork publicado) completado 2026-11-06
 **Relacionado:** [`modular-backends-plan.md`](modular-backends-plan.md) (Bloque 15),
 [`llama-cpp-elastic-kv-plan.md`](llama-cpp-elastic-kv-plan.md)
 
@@ -35,12 +35,44 @@ versiones menores en silencio. Se reconcilió en v0.31.3 (`43d24ca`), pero nada
 impide que vuelva a pasar con cualquier otro backend: la UI no compara lo
 declarado con lo instalado.
 
-## Paso 0 — bloqueante: el trabajo custom no está en ningún repositorio
+## Paso 0 — ✅ HECHO (2026-11-06): el trabajo custom ya está en un repositorio
 
-Antes de cualquier diseño, hay un riesgo de pérdida total. La personalización de
-llama.cpp (KV elástica: `cache_reuse`, `n_cache_reuse`, `has_active_slot`,
-endpoints `get_slots`/`post_slots`) son **226 inserciones y 50 borrados en 5
-ficheros de `tools/server/`** que existen **solo como cambios sin commitear**:
+**Resuelto.** Fork creado y trabajo subido:
+
+- **`makespacemadrid/llama.cpp-mks`**, rama **`ocabra/elastic-kv`**, commit
+  `743e3ee6e` sobre el upstream `74bca3950`. 7 ficheros, 242 inserciones.
+- Se hizo como **fork de GitHub**, no repo nuevo: comparte almacenamiento con el
+  padre, así que solo se subió el delta (el clon local es parcial, `blob:none`,
+  90 MB para 11.870 commits; uno completo serían ~1,5 GB y habría exigido traer
+  todos los blobs). Además es el camino necesario para las propuestas upstream
+  de las Fases 4 y 7 del plan de KV elástica. Al ser fork de un repo público,
+  **es público**; llama.cpp es MIT.
+
+### Qué contiene realmente ese commit (corrección)
+
+No es el trabajo del pool KV, como se asumió al principio por el nombre de la
+rama. Es **visión bajo demanda**, o sea la **Fase 1b** del plan de KV elástica:
+
+- `SERVER_TASK_TYPE_SET_VISION` con `vision_mmproj_path` y un resultado
+  `server_task_result_vision { bool active }`: carga o suelta el `mmproj` en
+  caliente, sin reiniciar el proceso ni recargar los pesos.
+- Llama a `mtmd_get_memory_usage()` antes de activar para limitar
+  `image_max_tokens` a lo que quepa de verdad, y refresca
+  `allow_image`/`allow_audio`/`allow_video` desde el contexto cargado.
+- El proyector queda protegido por un `std::shared_mutex` (`mutex_mtmd`); los
+  handlers se envuelven con `with_mtmd_read_lock()` (variantes normal y
+  websocket) para sostener el lock compartido durante la peticion, mientras el
+  cambio toma el lado exclusivo. **Las 79 líneas de `server.cpp` son ese
+  envoltorio**, no reformateo.
+- El cambio se rechaza con `ERROR_TYPE_UNAVAILABLE` si hay algún slot activo.
+
+Verificado que los 5 ficheros de servidor eran idénticos entre el fork y
+`ocabra-src`, así que **lo subido es exactamente lo que corre en producción**.
+
+### Situación anterior, para el registro
+
+Eran **226 inserciones y 50 borrados en 5 ficheros de `tools/server/`** que
+existían **solo como cambios sin commitear**:
 
 - `/docker/llama.cpp-ocabra` — rama `ocabra/elastic-kv`, 7 ficheros sucios
   (incluye los tests). `git log master..ocabra/elastic-kv` está **vacío**: la
@@ -53,10 +85,22 @@ líneas de diff; solo difiere la longitud de los hashes abreviados). No hay stas
 no hay `.patch` en el repo de oCabra, el remoto `upstream` está marcado
 `no_push` y no hay fork configurado al que empujar.
 
-**Acción:** commitear en `ocabra/elastic-kv` y empujar a un fork propio
-(`llama.cpp-mks`). Es gratis, elimina el riesgo y además es el **prerequisito
-técnico** de todo lo demás: en cuanto exista ese fork, `git_repo` + `git_ref` del
-spec distribuyen el backend por la vía de fuente que ya funciona, sin maquinaria
+### Lo que queda de este paso
+
+`/data/backends/llama_cpp/ocabra-src` **sigue con sus 5 ficheros sin commitear**
+y su `origin` apuntando a una ruta local (`/data/backends/llama_cpp/src`). Lo
+limpio es que pase a seguir el fork, pero es el árbol desde el que se construye
+el binario de producción, así que no se tocó sin decisión explícita.
+
+Con el fork ya publicado, el `install_spec` del backend nuevo puede usar
+directamente:
+
+```python
+git_repo="https://github.com/makespacemadrid/llama.cpp-mks"
+git_ref="ocabra/elastic-kv"
+```
+
+y la distribución funciona por la vía de fuente que ya existe, sin maquinaria
 nueva.
 
 Efecto secundario deseable: `LLAMA_CPP_CUSTOM_SERVER_BIN` desaparece.

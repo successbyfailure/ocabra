@@ -6,7 +6,11 @@
 **Backend inicial:** `llama_cpp` nativo
 **Modelos iniciales:** Gemma 4 12B, Gemma 4 26B-A4B y Qwen3.8 27B
 **Hardware objetivo:** RTX 3060 12 GB, RTX 3090 24 GB y ambas combinadas
-**Fork local:** `/docker/llama.cpp-ocabra`, rama `ocabra/elastic-kv`
+**Fork:** `makespacemadrid/llama.cpp-mks`, rama `ocabra/elastic-kv`
+(clon de trabajo en `/docker/llama.cpp-ocabra`). Publicado 2026-11-06 con el
+commit `743e3ee6e` de visión bajo demanda (Fase 1b); hasta entonces la rama no
+tenía ningún commit y el trabajo vivía sin commitear en el árbol. Ver
+[`backend-distribution-plan.md`](backend-distribution-plan.md).
 
 Este trabajo busca mantener los pesos de un modelo residentes y reservar el
 mayor pool KV seguro en cada colocación de hardware para repartirlo
