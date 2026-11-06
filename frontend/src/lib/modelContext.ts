@@ -138,7 +138,7 @@ export function getModelContextSummary(model: ModelState): ModelContextSummary {
       break
     }
     case "llama_cpp":
-    case "llama_cpp_mks": {
+    case "llamacpp_mks": {
       const llamaCpp = getLlamaCppConfig(model)
       configuredContext = toPositiveNumber(llamaCpp?.ctxSize ?? (llamaCpp as Record<string, unknown> | null)?.ctx_size)
       break

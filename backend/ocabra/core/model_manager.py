@@ -4010,7 +4010,7 @@ _TEXT_LLM_BACKENDS = {
     "vllm",
     "sglang",
     "llama_cpp",
-    "llama_cpp_mks",
+    "llamacpp_mks",
     "bitnet",
     "tensorrt_llm",
     "ollama",

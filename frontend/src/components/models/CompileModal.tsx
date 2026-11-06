@@ -22,7 +22,7 @@ function defaultEngineName(modelId: string, dtype: string): string {
   const slash = name.indexOf("/")
   if (slash !== -1) {
     const prefix = name.slice(0, slash)
-    if (["vllm", "tensorrt_llm", "llama_cpp", "llama_cpp_mks", "sglang"].includes(prefix)) {
+    if (["vllm", "tensorrt_llm", "llama_cpp", "llamacpp_mks", "sglang"].includes(prefix)) {
       name = name.slice(slash + 1)
     }
   }

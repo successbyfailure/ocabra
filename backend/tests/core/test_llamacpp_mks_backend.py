@@ -9,12 +9,13 @@ pool sizing and so on without any error.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from ocabra.backends.llama_cpp_backend import LlamaCppBackend
-from ocabra.backends.llama_cpp_mks_backend import FORK_REF, FORK_REPO, LlamaCppMksBackend
+from ocabra.backends.llamacpp_mks_backend import FORK_REF, FORK_REPO, LlamaCppMksBackend
 from ocabra.core.model_ref import (
     KNOWN_BACKEND_TYPES,
     LLAMA_CPP_CONFIG_SECTION,
@@ -25,22 +26,27 @@ from ocabra.core.model_ref import (
 
 
 def test_family_covers_both_and_nothing_else() -> None:
-    assert LLAMA_CPP_FAMILY == {"llama_cpp", "llama_cpp_mks"}
+    assert LLAMA_CPP_FAMILY == {"llama_cpp", "llamacpp_mks"}
     assert is_llama_cpp_family("llama_cpp")
-    assert is_llama_cpp_family("llama_cpp_mks")
+    assert is_llama_cpp_family("llamacpp_mks")
     # Case/whitespace tolerant: several call sites previously did their own
     # .strip().lower() before comparing, and that behaviour must survive.
-    assert is_llama_cpp_family("  LLAMA_CPP_MKS  ")
+    assert is_llama_cpp_family("  LLAMACPP_MKS  ")
     for other in ("bitnet", "ollama", "vllm", "", None, "llama_cpp_vulkan"):
         assert not is_llama_cpp_family(other), other
+    # The fork is spelled WITHOUT the underscore after "llama" so it cannot be
+    # confused with upstream's llama_cpp_<runtime> build variants. Guard the
+    # spelling: "llama_cpp_mks" must not be a member, or the collision is back.
+    assert not is_llama_cpp_family("llama_cpp_mks")
+    assert not "llamacpp_mks".startswith("llama_cpp")
 
 
 def test_backend_type_is_a_known_canonical_prefix() -> None:
     """Model ids are ``<backend_type>/<model>``; an unknown prefix makes
     _split_canonical_model_ref return None and the id stops resolving."""
-    assert "llama_cpp_mks" in KNOWN_BACKEND_TYPES
-    assert _split_canonical_model_ref("llama_cpp_mks/gemma4-26b") == (
-        "llama_cpp_mks",
+    assert "llamacpp_mks" in KNOWN_BACKEND_TYPES
+    assert _split_canonical_model_ref("llamacpp_mks/gemma4-26b") == (
+        "llamacpp_mks",
         "gemma4-26b",
     )
 
@@ -48,9 +54,9 @@ def test_backend_type_is_a_known_canonical_prefix() -> None:
 def test_identity_differs_from_upstream() -> None:
     upstream, fork = LlamaCppBackend(), LlamaCppMksBackend()
     assert isinstance(fork, LlamaCppBackend), "must inherit all runtime behaviour"
-    assert fork.BACKEND_TYPE == "llama_cpp_mks" != upstream.BACKEND_TYPE
+    assert fork.BACKEND_TYPE == "llamacpp_mks" != upstream.BACKEND_TYPE
     # Separate install directories, or installing one would clobber the other.
-    assert fork.BACKEND_DIR_NAME == "llama_cpp_mks" != upstream.BACKEND_DIR_NAME
+    assert fork.BACKEND_DIR_NAME == "llamacpp_mks" != upstream.BACKEND_DIR_NAME
 
 
 def test_install_spec_points_at_the_fork_and_reuses_the_build_recipe() -> None:
@@ -107,11 +113,11 @@ def test_fork_refuses_to_fall_back_to_the_upstream_binary(monkeypatch, tmp_path)
 
 def test_fork_resolves_its_own_installed_binary(monkeypatch, tmp_path) -> None:
     backends = tmp_path / "backends"
-    bin_path = backends / "llama_cpp_mks" / "bin" / "llama-server"
+    bin_path = backends / "llamacpp_mks" / "bin" / "llama-server"
     bin_path.parent.mkdir(parents=True)
     bin_path.write_text("#!/bin/sh\nexit 0\n")
-    (backends / "llama_cpp_mks" / "metadata.json").write_text(
-        '{"backend_type": "llama_cpp_mks", "extra_bins": {"server": "%s"}}' % bin_path
+    (backends / "llamacpp_mks" / "metadata.json").write_text(
+        json.dumps({"backend_type": "llamacpp_mks", "extra_bins": {"server": str(bin_path)}})
     )
     monkeypatch.setattr(
         "ocabra.backends.llama_cpp_backend.settings.llama_cpp_custom_server_bin", ""
@@ -132,4 +138,4 @@ def test_registered_in_the_worker_pool() -> None:
     """A backend_type nobody registered resolves to nothing at load time."""
     main_py = Path(__file__).resolve().parents[2] / "ocabra" / "main.py"
     source = main_py.read_text(encoding="utf-8")
-    assert 'register_backend("llama_cpp_mks", LlamaCppMksBackend())' in source
+    assert 'register_backend("llamacpp_mks", LlamaCppMksBackend())' in source

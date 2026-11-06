@@ -635,12 +635,20 @@ export function ModelConfigModal({
           backendType: string;
           installStatus?: string;
         }>) {
-          if (!b?.backendType?.startsWith("llama_cpp")) continue;
+          // Upstream encodes its build variant in the suffix
+          // (llama_cpp_<cuda|rocm|vulkan|cpu>, bare llama_cpp = cuda). The
+          // Makespace fork is deliberately named `llamacpp_mks` — no
+          // underscore after "llama" — precisely so it does NOT match that
+          // prefix and cannot be misread as a runtime called "mks". It still
+          // has to be counted here, hence the explicit family check.
+          if (
+            !b?.backendType?.startsWith("llama_cpp") &&
+            !isLlamaCppFamily(b?.backendType)
+          )
+            continue;
           if (b.installStatus !== "installed") continue;
           if (isLlamaCppFamily(b.backendType)) {
-            // Both are CUDA builds. The fork is a separate backend, NOT a
-            // llama_cpp_<runtime> variant, so it must not fall through to the
-            // suffix parsing below — that would register a runtime "mks".
+            // Both are CUDA builds, and neither carries a runtime suffix.
             installed.add("cuda");
             continue;
           }

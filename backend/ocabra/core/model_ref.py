@@ -4,7 +4,7 @@ KNOWN_BACKEND_TYPES = {
     "vllm",
     "acestep",
     "llama_cpp",
-    "llama_cpp_mks",
+    "llamacpp_mks",
     "sglang",
     "tensorrt_llm",
     "bitnet",
@@ -24,13 +24,13 @@ KNOWN_BACKEND_TYPES = {
 
 
 # Backends that run a llama.cpp ``llama-server``: upstream and the Makespace
-# fork (``llama_cpp_mks``, https://github.com/makespacemadrid/llama.cpp-mks).
+# fork (``llamacpp_mks``, https://github.com/makespacemadrid/llama.cpp-mks).
 # They are separate backend types so both can be installed at once and
 # compared A/B, but every runtime behaviour keyed off "this is llama.cpp"
 # must treat them alike — the fork is upstream plus extra endpoints, not a
 # different engine. Use this instead of ``== "llama_cpp"`` for behaviour;
 # a bare equality check silently excludes the fork.
-LLAMA_CPP_FAMILY = frozenset({"llama_cpp", "llama_cpp_mks"})
+LLAMA_CPP_FAMILY = frozenset({"llama_cpp", "llamacpp_mks"})
 
 # Both backends share the SAME ``extra_config`` section name. Their options
 # are the same llama-server flags, and sharing the key means a model can be

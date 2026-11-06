@@ -1,4 +1,4 @@
-"""Makespace fork of the llama.cpp backend (``llama_cpp_mks``).
+"""Makespace fork of the llama.cpp backend (``llamacpp_mks``).
 
 A separate ``backend_type`` from upstream ``llama_cpp`` on purpose, so both can
 be installed at the same time and compared A/B, with per-model rollback by
@@ -28,8 +28,8 @@ FORK_REF = "ocabra/elastic-kv"
 
 
 class LlamaCppMksBackend(LlamaCppBackend):
-    BACKEND_TYPE = "llama_cpp_mks"
-    BACKEND_DIR_NAME = "llama_cpp_mks"
+    BACKEND_TYPE = "llamacpp_mks"
+    BACKEND_DIR_NAME = "llamacpp_mks"
     # ``llama_cpp_custom_server_bin`` is upstream's pre-fork workaround for the
     # install path not being able to build a custom binary. This backend builds
     # its own, so honouring that setting here would point both backends at the

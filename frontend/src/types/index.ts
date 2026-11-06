@@ -77,7 +77,7 @@ export type BackendType =
   | "ollama"
   | "tensorrt_llm"
   | "llama_cpp"
-  | "llama_cpp_mks"
+  | "llamacpp_mks"
   | "sglang";
 
 /**
@@ -85,14 +85,17 @@ export type BackendType =
  * Separate backend types so both can be installed and compared A/B, but UI
  * that keys off "this is llama.cpp" must treat them alike.
  *
- * Careful: `llama_cpp_mks` is a FORK, not a `llama_cpp_<runtime>` build
- * variant. Code that derives a runtime from the backend-type suffix (cuda /
- * rocm / vulkan / cpu) must special-case it, or it reads as a runtime "mks".
+ * The fork is named `llamacpp_mks` — no underscore after "llama" — on
+ * purpose: upstream's build variants are `llama_cpp_<cuda|rocm|vulkan|cpu>`,
+ * so a `llama_cpp_mks` would have been parsed as a runtime called "mks" by
+ * code that splits on the suffix. The spelling keeps the two namespaces
+ * disjoint, but it also means `startsWith("llama_cpp")` does not match the
+ * fork: use this helper instead.
  */
-export const LLAMA_CPP_FAMILY: readonly BackendType[] = ["llama_cpp", "llama_cpp_mks"];
+export const LLAMA_CPP_FAMILY: readonly BackendType[] = ["llama_cpp", "llamacpp_mks"];
 
 export function isLlamaCppFamily(backendType: string | undefined | null): boolean {
-  return backendType === "llama_cpp" || backendType === "llama_cpp_mks";
+  return backendType === "llama_cpp" || backendType === "llamacpp_mks";
 }
 
 export interface ModelCapabilities {

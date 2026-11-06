@@ -1,4 +1,4 @@
-# Plan: distribución y actualización de backends · `llama_cpp_mks`
+# Plan: distribución y actualización de backends · `llamacpp_mks`
 
 **Fecha de apertura:** 2026-11-06
 **Estado:** 🟡 diseño; Paso 0 (fork publicado) completado 2026-11-06
@@ -11,7 +11,7 @@
 
 **El llama.cpp custom es un backend distinto del upstream**, no una variante del
 mismo. Decisión del usuario (2026-11-06), tomada conociendo el coste: implica un
-`backend_type` nuevo (`llama_cpp_mks`) y auditar los sitios que hoy comparan
+`backend_type` nuevo (`llamacpp_mks`) y auditar los sitios que hoy comparan
 contra `"llama_cpp"` literal. A cambio permite tener los dos instalados a la vez,
 comparar A/B y hacer rollback por modelo.
 
@@ -108,7 +108,7 @@ Efecto secundario deseable: `LLAMA_CPP_CUSTOM_SERVER_BIN` desaparece.
 instalación no puede producir el binario custom; con el fork instalado, la
 prioridad 2 (`metadata.json` → `extra_bins.server`) basta.
 
-## Trabajo para `llama_cpp_mks`
+## Trabajo para `llamacpp_mks`
 
 `LlamaCppMksBackend` debería **heredar de `LlamaCppBackend`** y sobrescribir solo
 `install_spec` (con `git_repo` = fork mks, `git_ref` = rama) y el nombre del
@@ -151,7 +151,7 @@ sin entrada en `group_models`).
 
 El backend **forma parte del id canónico**: `model_id = "<backend_type>/<modelo>"`
 (`core/model_ref.py`). Así que mover un modelo del upstream al fork es un
-**rename**, no un flag: `llama_cpp/gemma4-26b` → `llama_cpp_mks/gemma4-26b`.
+**rename**, no un flag: `llama_cpp/gemma4-26b` → `llamacpp_mks/gemma4-26b`.
 Afecta a `model_configs.model_id`, `model_profiles.base_model_id`, los alias de
 perfil, las entradas de `group_models` y el historial de `request_stats`.
 
@@ -165,7 +165,7 @@ dos perfiles apuntando a los dos backends, con un router delante.
 
 1. **Flujo de actualización.** Endpoint que, para un backend instalado desde
    fuente, reinstale con un pin o `git_ref` nuevo, mostrando antes la versión
-   instalada frente a la declarada. Para `llama_cpp_mks` esto es además el
+   instalada frente a la declarada. Para `llamacpp_mks` esto es además el
    mecanismo de despliegue del fork: cambiar `git_ref` y actualizar.
 2. **Decidir el futuro de OCI.** O se completa la Fase 3 **con CI que construya
    y publique las imágenes**, o se elimina `oci_image`/`oci_tags` de los specs y

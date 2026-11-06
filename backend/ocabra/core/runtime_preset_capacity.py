@@ -25,7 +25,7 @@ from ocabra.core.vram_capacity import KV_DTYPES, resolve_arch_and_weights
 # requested GPUs' capacity with the same single-GPU formula is a faithful
 # model — validated empirically for llama_cpp against a real asymmetric
 # 3060+3090 load (2026-10-26).
-_PROPORTIONAL_MULTI_GPU_BACKENDS = {"ollama", "llama_cpp", "llama_cpp_mks", "bitnet"}
+_PROPORTIONAL_MULTI_GPU_BACKENDS = {"ollama", "llama_cpp", "llamacpp_mks", "bitnet"}
 
 
 @dataclass(frozen=True)

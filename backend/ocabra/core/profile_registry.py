@@ -713,7 +713,7 @@ class ProfileRegistry:
     # ── Auto-seed default profiles for models without any ─────
 
     _BACKEND_CATEGORY: dict[str, str] = {
-        "vllm": "llm", "llama_cpp": "llm", "llama_cpp_mks": "llm", "sglang": "llm",
+        "vllm": "llm", "llama_cpp": "llm", "llamacpp_mks": "llm", "sglang": "llm",
         "tensorrt_llm": "llm", "bitnet": "llm", "ollama": "llm",
         "whisper": "stt", "whisper_cpp": "stt", "vibeasr": "stt", "tts": "tts", "voxtral": "tts",
         "chatterbox": "tts", "piper": "tts", "diffusers": "image", "acestep": "music",
