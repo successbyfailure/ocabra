@@ -1760,6 +1760,10 @@ async def _overlay_loaded_derived_state(mm, states: list) -> list:
                 status=derived.status,
                 current_gpu=_runtime_gpus(derived),
                 vram_used_mb=derived.vram_used_mb,
+                # The reservation belongs to the derived worker too; without
+                # this the canonical entry reported 0 and the UI could not
+                # compare real usage against what the scheduler held.
+                vram_estimate_mb=derived.vram_estimate_mb,
                 loaded_at=derived.loaded_at,
                 last_request_at=derived.last_request_at or state.last_request_at,
                 worker_info=derived.worker_info,
