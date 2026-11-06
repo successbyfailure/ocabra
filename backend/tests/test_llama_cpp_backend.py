@@ -27,7 +27,6 @@ def _stub_settings(mock_settings: MagicMock, models_dir: str) -> None:
     """Apply the standard llama_cpp settings stub used across tests."""
     mock_settings.models_dir = models_dir
     mock_settings.llama_cpp_server_bin = "/usr/local/bin/llama-server"
-    mock_settings.llama_cpp_custom_server_bin = None
     mock_settings.llama_cpp_gpu_layers = 16
     mock_settings.llama_cpp_ctx_size = 8192
     mock_settings.llama_cpp_threads = 8
@@ -974,28 +973,6 @@ def test_get_binary_path_default_uses_resolve_server_bin(tmp_path: Path) -> None
     with patch.object(backend, "_resolve_server_bin", return_value="/opt/cuda/llama-server"):
         assert backend._get_binary_path(None) == "/opt/cuda/llama-server"
         assert backend._get_binary_path("cuda") == "/opt/cuda/llama-server"
-
-
-def test_resolve_server_bin_prefers_explicit_custom_binary(tmp_path: Path) -> None:
-    custom = tmp_path / "llama-server"
-    custom.write_bytes(b"custom")
-    backend = LlamaCppBackend()
-
-    with patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings:
-        mock_settings.llama_cpp_custom_server_bin = str(custom)
-        assert backend._resolve_server_bin() == str(custom)
-
-
-def test_resolve_server_bin_rejects_missing_custom_binary(tmp_path: Path) -> None:
-    backend = LlamaCppBackend()
-    missing = tmp_path / "missing-llama-server"
-
-    with (
-        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
-        pytest.raises(FileNotFoundError, match="Custom llama-server not found"),
-    ):
-        mock_settings.llama_cpp_custom_server_bin = str(missing)
-        backend._resolve_server_bin()
 
 
 def test_get_binary_path_alternate_runtime(tmp_path: Path) -> None:

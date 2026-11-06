@@ -55,9 +55,12 @@ pruebas y registrar la evidencia en este documento o en un fichero enlazado de
   quedan protegidas durante la transición.
 - `llama-server` compiló completo en CPU y CUDA (`sm_86`). Un smoke real devolvió
   `400` para un projector ausente y `501` para descarga no soportada.
-- El build CUDA compatible con la imagen API vive en
-  `/data/backends/llama_cpp/ocabra-src/build-cuda/bin/llama-server`; generó en
-  la RTX 3060 y oCabra lo selecciona mediante `LLAMA_CPP_CUSTOM_SERVER_BIN`.
+- El build CUDA vivía en `/data/backends/llama_cpp/ocabra-src/build-cuda/`,
+  construido a mano y seleccionado con `LLAMA_CPP_CUSTOM_SERVER_BIN`.
+  **Obsoleto desde 2026-11-06**: el fork es el backend `llamacpp_mks`, que
+  instala su propio binario desde `makespacemadrid/llama.cpp-mks`; el árbol a
+  mano y el env var se eliminaron. Ver
+  [`backend-distribution-plan.md`](backend-distribution-plan.md).
 - Gemma 4 26B se validó end-to-end en la RTX 3090: `enabled` sirvió imagen,
   `disabled` la rechazó con HTTP 400 en 13 ms y `on_demand` activó el projector
   sin recargar pesos. Con el worker cargado, la primera imagen tardó 2,343 s y

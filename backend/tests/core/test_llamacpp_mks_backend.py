@@ -71,33 +71,11 @@ def test_install_spec_points_at_the_fork_and_reuses_the_build_recipe() -> None:
     assert fork.display_name != upstream.display_name
 
 
-def test_fork_ignores_the_custom_server_bin_setting(monkeypatch, tmp_path) -> None:
-    """``llama_cpp_custom_server_bin`` is upstream's pre-fork workaround for
-    the install path not being able to build a custom binary. If the fork
-    honoured it too, both backends would run the same file while reporting
-    different types — the A/B comparison would silently be a no-op."""
-    sentinel = tmp_path / "llama-server"
-    sentinel.write_text("#!/bin/sh\nexit 0\n")
-    monkeypatch.setattr(
-        "ocabra.backends.llama_cpp_backend.settings.llama_cpp_custom_server_bin",
-        str(sentinel),
-    )
-    monkeypatch.setattr(
-        "ocabra.backends.llama_cpp_backend.settings.backends_dir", str(tmp_path / "backends")
-    )
-
-    assert LlamaCppBackend()._resolve_server_bin() == str(sentinel)
-    with pytest.raises(FileNotFoundError):
-        LlamaCppMksBackend()._resolve_server_bin()
-
 
 def test_fork_refuses_to_fall_back_to_the_upstream_binary(monkeypatch, tmp_path) -> None:
     """Upstream falls back to the fat-image path; the fork must not, since
     serving upstream's binary under the fork's name would advertise fork-only
     capabilities (on-demand vision) that the running server lacks."""
-    monkeypatch.setattr(
-        "ocabra.backends.llama_cpp_backend.settings.llama_cpp_custom_server_bin", ""
-    )
     monkeypatch.setattr(
         "ocabra.backends.llama_cpp_backend.settings.backends_dir", str(tmp_path / "nope")
     )
@@ -118,9 +96,6 @@ def test_fork_resolves_its_own_installed_binary(monkeypatch, tmp_path) -> None:
     bin_path.write_text("#!/bin/sh\nexit 0\n")
     (backends / "llamacpp_mks" / "metadata.json").write_text(
         json.dumps({"backend_type": "llamacpp_mks", "extra_bins": {"server": str(bin_path)}})
-    )
-    monkeypatch.setattr(
-        "ocabra.backends.llama_cpp_backend.settings.llama_cpp_custom_server_bin", ""
     )
     monkeypatch.setattr("ocabra.backends.llama_cpp_backend.settings.backends_dir", str(backends))
 

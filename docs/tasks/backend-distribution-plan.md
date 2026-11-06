@@ -85,12 +85,15 @@ líneas de diff; solo difiere la longitud de los hashes abreviados). No hay stas
 no hay `.patch` en el repo de oCabra, el remoto `upstream` está marcado
 `no_push` y no hay fork configurado al que empujar.
 
-### Lo que queda de este paso
+### Cerrado del todo (2026-11-06)
 
-`/data/backends/llama_cpp/ocabra-src` **sigue con sus 5 ficheros sin commitear**
-y su `origin` apuntando a una ruta local (`/data/backends/llama_cpp/src`). Lo
-limpio es que pase a seguir el fork, pero es el árbol desde el que se construye
-el binario de producción, así que no se tocó sin decisión explícita.
+`ocabra-src` pasó a seguir la rama del fork y, una vez migrados los 14 modelos
+a `llamacpp_mks` (que instala su propio binario), el árbol construido a mano se
+**eliminó** junto con `LLAMA_CPP_CUSTOM_SERVER_BIN` y el setting
+`llama_cpp_custom_server_bin`: mantenerlos habría dejado una segunda vía
+silenciosa de cambiar el binario bajo cualquiera de los dos backends.
+`llama_cpp` queda instalado, sin modelos y en upstream puro (`74bca39`) como
+línea base para comparar A/B.
 
 Con el fork ya publicado, el `install_spec` del backend nuevo puede usar
 directamente:

@@ -30,11 +30,6 @@ FORK_REF = "ocabra/elastic-kv"
 class LlamaCppMksBackend(LlamaCppBackend):
     BACKEND_TYPE = "llamacpp_mks"
     BACKEND_DIR_NAME = "llamacpp_mks"
-    # ``llama_cpp_custom_server_bin`` is upstream's pre-fork workaround for the
-    # install path not being able to build a custom binary. This backend builds
-    # its own, so honouring that setting here would point both backends at the
-    # same file.
-    HONOUR_CUSTOM_SERVER_BIN_SETTING = False
     # No fat-image fallback: that path holds the upstream binary, and silently
     # serving it would make this backend indistinguishable from llama_cpp while
     # reporting fork capabilities it does not have.

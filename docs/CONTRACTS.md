@@ -1408,10 +1408,16 @@ La compatibilidad OpenAI elimina de ``message.content`` y de los deltas SSE
 preserva; cuando thinking se solicita explícitamente, el parser lo publica como
 ``reasoning_content``.
 
-El binario custom se selecciona con ``LLAMA_CPP_CUSTOM_SERVER_BIN``. Si queda
-vacío, se conserva el orden normal: instalación modular y, como fallback,
-``LLAMA_CPP_SERVER_BIN``. Una ruta custom inexistente falla explícitamente en
-vez de arrancar un runtime upstream sin hot-mmproj.
+El fork de Makespace es desde 2026-11-06 un backend propio, ``llamacpp_mks``,
+que instala su propio binario (``git_repo`` + ``git_ref`` del install_spec).
+``LLAMA_CPP_CUSTOM_SERVER_BIN`` se eliminó con él: era el apaño previo para que
+este backend apuntase a un árbol construido a mano, y mantenerlo habría dejado
+una segunda vía silenciosa de cambiar el binario bajo cualquiera de los dos
+backends. Cada uno resuelve ahora el suyo por su propia instalación modular
+(``metadata.json`` → ``extra_bins.server``); ``llama_cpp`` cae a
+``LLAMA_CPP_SERVER_BIN`` como último recurso y ``llamacpp_mks`` falla explícito,
+porque servir el binario de upstream bajo el nombre del fork anunciaría
+capacidades —visión on-demand— que el proceso no tiene.
 
 Con KV unificada, ``ctx_size`` dimensiona un único pool físico y cada slot puede
 direccionar hasta todo el pool. ``kv_unified_per_slot`` no reserva memoria por

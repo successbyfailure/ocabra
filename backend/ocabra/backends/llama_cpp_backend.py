@@ -110,11 +110,6 @@ class LlamaCppBackend(BackendInterface):
     # ``ocabra.core.model_ref.LLAMA_CPP_FAMILY``.
     BACKEND_TYPE = "llama_cpp"
     BACKEND_DIR_NAME = "llama_cpp"
-    # Only upstream honours ``settings.llama_cpp_custom_server_bin``. That
-    # setting is a pre-fork workaround for the install path not being able to
-    # produce a custom binary; the fork backend installs its own, so letting
-    # it apply there would silently point both backends at the same binary.
-    HONOUR_CUSTOM_SERVER_BIN_SETTING = True
     # Last-resort binary when there is no modular install: the legacy
     # fat-image path. ``None`` means "no fallback" — the fork must come from
     # its own install, because falling back here would hand it upstream's
@@ -179,24 +174,19 @@ class LlamaCppBackend(BackendInterface):
         """Pick the ``llama-server`` binary path.
 
         Priority:
-        1. ``settings.llama_cpp_custom_server_bin``, only when
-           ``HONOUR_CUSTOM_SERVER_BIN_SETTING`` (upstream backend only).
-        2. ``<backends_dir>/<BACKEND_DIR_NAME>/metadata.json`` ->
+        1. ``<backends_dir>/<BACKEND_DIR_NAME>/metadata.json`` ->
            ``extra_bins.server`` (modular install via
            :class:`BackendInstaller`).
-        3. ``LEGACY_SERVER_BIN_SETTING`` (fat-image path), or
+        2. ``LEGACY_SERVER_BIN_SETTING`` (fat-image path), or
            :class:`FileNotFoundError` when that is ``None``.
+
+        There used to be a higher-priority ``llama_cpp_custom_server_bin``
+        setting: a workaround from before the Makespace fork was a backend of
+        its own, when the only way to run a custom build was to point this
+        backend at a hand-built tree. ``llamacpp_mks`` installs its own binary
+        now, so the setting was removed (2026-11-06) rather than left as a
+        second, silent way to swap the binary under either backend.
         """
-        custom_bin = (
-            getattr(settings, "llama_cpp_custom_server_bin", None)
-            if self.HONOUR_CUSTOM_SERVER_BIN_SETTING
-            else None
-        )
-        if isinstance(custom_bin, str) and custom_bin.strip():
-            custom_path = Path(custom_bin)
-            if not custom_path.is_file():
-                raise FileNotFoundError(f"Custom llama-server not found at '{custom_path}'")
-            return str(custom_path)
         meta = read_backend_metadata(settings.backends_dir, self.BACKEND_DIR_NAME)
         if meta is not None:
             extra = meta.get("extra_bins") if isinstance(meta, dict) else None
