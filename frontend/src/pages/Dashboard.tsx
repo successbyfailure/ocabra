@@ -31,6 +31,7 @@ import { agentStatsApi } from "@/api/agents"
 import type { AgentStatRow } from "@/types/agents"
 import { api } from "@/api/client"
 import { BackendBadge } from "@/components/models/BackendBadge"
+import { CapabilityIcons } from "@/components/models/CapabilityIcons"
 import { EmptyState } from "@/components/common/EmptyState"
 import { GpuCard } from "@/components/gpu/GpuCard"
 import { LoadedModelList } from "@/components/gpu/LoadedModelList"
@@ -189,7 +190,6 @@ function HostStatsCard({
   models = [],
   activity = {},
   stuckThreshold = 300,
-  idleTimeoutSeconds,
   ollamaRuntime = {},
   tokenStats = null,
 }: {
@@ -199,7 +199,6 @@ function HostStatsCard({
   models?: ModelState[]
   activity?: Record<string, ModelActivity>
   stuckThreshold?: number
-  idleTimeoutSeconds?: number
   ollamaRuntime?: Record<string, OllamaRuntimeInfo>
   tokenStats?: TokenGpuStats | null
 }) {
@@ -294,7 +293,6 @@ function HostStatsCard({
           models={models}
           activity={activity}
           stuckThreshold={stuckThreshold}
-          idleTimeoutSeconds={idleTimeoutSeconds}
           ollamaRuntime={ollamaRuntime}
           emptyLabel="Sin modelos gestionados fuera de las GPUs"
         />
@@ -1008,6 +1006,7 @@ export function Dashboard() {
                   <div className="flex items-center gap-2">
                     <BackendBadge backendType={model.backendType} />
                     <p className="truncate text-[14.5px] font-semibold tracking-tight">{model.displayName}</p>
+                    <CapabilityIcons model={model} />
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <ModelStatusBadge status={model.runtimePhase ?? model.status} />
@@ -1236,8 +1235,7 @@ export function Dashboard() {
               models={loadedModels}
               activity={activity}
               stuckThreshold={stuckThreshold}
-              idleTimeoutSeconds={idleTimeoutSeconds}
-              tokenStats={tokenStatsByDevice.byGpu.get(gpu.index)}
+                  tokenStats={tokenStatsByDevice.byGpu.get(gpu.index)}
             />
           ))}
           {hostStats && (
@@ -1248,8 +1246,7 @@ export function Dashboard() {
               models={untrackedGpuModels}
               activity={activity}
               stuckThreshold={stuckThreshold}
-              idleTimeoutSeconds={idleTimeoutSeconds}
-              ollamaRuntime={ollamaRuntime}
+                  ollamaRuntime={ollamaRuntime}
               tokenStats={tokenStatsByDevice.host}
             />
           )}

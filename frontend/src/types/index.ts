@@ -137,6 +137,11 @@ export interface ModelState {
   preferredGpu: number | null;
   currentGpu: number[];
   vramUsedMb: number;
+  /** Live state of the multimodal projector, for backends that can load and
+   *  drop it at runtime (the Makespace llama.cpp fork). "active" | "inactive",
+   *  or null when the question does not apply — supporting vision and having
+   *  it currently loaded are different things there. */
+  visionState?: "active" | "inactive" | null;
   /** VRAM the scheduler reserved for this load. vramUsedMb is
    *  max(measured, reserved), so a measured value above this means the model
    *  is running on borrowed margin. 0 when not loaded. */

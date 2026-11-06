@@ -14,6 +14,27 @@ interface MemoryBarsProps {
   //  - "aside": it's a separate memory space (host swap) → NOT stacked into the
   //    bar (that would misread as "part of RAM"); shown only as a legend stat.
   secondaryMode?: "component" | "aside"
+  /** Per-consumer breakdown of the occupied span. When given, the fill is
+   *  split into one slice per entry instead of a single status-coloured bar,
+   *  so it is visible *what* is holding the memory, not just how much.
+   *  Percentages are of the total, and anything the caller cannot attribute
+   *  should be passed as its own entry rather than silently dropped. */
+  segments?: MemorySegment[]
+}
+
+export interface MemorySegment {
+  key: string
+  label: string
+  pct: number
+  color: string
+  /** Tooltip; falls back to "label · pct%". Used to spell out when a figure is
+   *  an estimate rather than a measurement. */
+  title?: string
+  /** Rendered hatched/faded: memory reserved by the scheduler but not
+   *  actually resident. On the Makespace llama.cpp fork this is normal — the
+   *  multimodal projector is reserved up front but only loaded on demand — so
+   *  it must read as "held, not used" rather than as real occupancy. */
+  pending?: boolean
 }
 
 const clamp = (n: number) => Math.max(0, Math.min(100, n))
@@ -29,6 +50,7 @@ export function MemoryBars({
   secondaryName,
   secondaryPct,
   secondaryMode = "component",
+  segments,
 }: MemoryBarsProps) {
   const used = clamp(usedPct)
   const secondary = clamp(secondaryPct)
@@ -51,6 +73,21 @@ export function MemoryBars({
       </div>
 
       <div className="flex h-[11px] w-full overflow-hidden rounded-[6px] bg-muted">
+        {segments && segments.length > 0 ? (
+          segments.map((s) => (
+            <div
+              key={s.key}
+              className="h-full transition-all"
+              title={s.title ?? `${s.label} · ${s.pct.toFixed(1)}%`}
+              style={{
+                width: `${clamp(s.pct)}%`,
+                background: s.color,
+                opacity: s.pending ? 0.4 : 1,
+              }}
+            />
+          ))
+        ) : (
+          <>
         {reservedResident > 0 && (
           <div className="h-full transition-all" style={{ width: `${reservedResident}%`, background: METRIC.memLocked }} />
         )}
@@ -60,9 +97,23 @@ export function MemoryBars({
         {reservedPending > 0 && (
           <div className="h-full transition-all" style={{ width: `${reservedPending}%`, background: METRIC.memLocked, opacity: 0.4 }} />
         )}
+          </>
+        )}
       </div>
 
       <div className="mt-[7px] flex flex-wrap items-center gap-x-4 gap-y-1 text-[10.5px] text-muted-foreground">
+        {segments && segments.length > 0
+          ? segments.map((s) => (
+              <span key={s.key} className="flex items-center gap-[5px]" title={s.title ?? s.label}>
+                <i
+                  className="inline-block h-2 w-2 rounded-sm"
+                  style={{ background: s.color, opacity: s.pending ? 0.4 : 1 }}
+                />
+                <span className="max-w-[9rem] truncate">{s.label}</span>
+                <span className="tabular-nums text-foreground/80">{s.pct.toFixed(0)}%</span>
+              </span>
+            ))
+          : null}
         <span className="flex items-center gap-[5px]">
           <i className="inline-block h-2 w-2 rounded-sm" style={{ background: status }} />
           en uso <span className="tabular-nums text-foreground/80">{Math.round(used)}%</span>

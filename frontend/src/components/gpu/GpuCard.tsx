@@ -1,17 +1,23 @@
 import type { GPUState, ModelState, TokenGpuStats } from "@/types"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
 import { ConcentricGauge } from "./ConcentricGauge"
-import { MemoryBars } from "./MemoryBars"
+import { MemoryBars, type MemorySegment } from "./MemoryBars"
 import { MiniTrends } from "./MiniTrends"
 import { LoadedModelList } from "./LoadedModelList"
 import { METRIC, pct, tempColor } from "./metrics"
+
+// Per-model slice hues for the VRAM breakdown. Deliberately distinct from the
+// METRIC identities (a slice is "which model", not "which metric") and from
+// the status greens/ambers/reds, so a crowded card never reads a model colour
+// as an alarm. Ordered for adjacent-pair contrast and picked to stay
+// distinguishable under the common forms of colour-vision deficiency.
+const MODEL_HUES = ["#2a78d6", "#1baf7a", "#b07cf0", "#e0a93b", "#4ec9d6", "#d4679a"] as const
 
 interface GpuCardProps {
   gpu: GPUState
   models?: ModelState[]
   activity?: Record<string, { inFlight: number; oldestSeconds: number }>
   stuckThreshold?: number
-  idleTimeoutSeconds?: number
   tokenStats?: TokenGpuStats | null
 }
 
@@ -39,7 +45,6 @@ export function GpuCard({
   models = [],
   activity = {},
   stuckThreshold = 300,
-  idleTimeoutSeconds,
   tokenStats = null,
 }: GpuCardProps) {
   const raw = useGpuStore((s) => s.history[gpu.index] ?? EMPTY_HISTORY)
@@ -53,6 +58,59 @@ export function GpuCard({
   const gpuModels = models.filter(
     (m) => m.status === "loaded" && (m.currentGpu ?? []).includes(gpu.index),
   )
+  // Per-consumer breakdown of this card's VRAM bar. Every model that lists
+  // this GPU contributes a slice, and whatever is occupied but unattributable
+  // (driver, other processes, anything outside oCabra) becomes "otros" rather
+  // than being silently folded into a model.
+  const vramSegments = (() => {
+    if (gpu.totalVramMb <= 0) return undefined
+    const segs: MemorySegment[] = []
+    let attributed = 0
+    gpuModels.forEach((m, i) => {
+      const gpus = (m.currentGpu ?? []).length || 1
+      // A tensor-split model reports one total across its GPUs and oCabra has
+      // no per-GPU breakdown, so this divides evenly and says so. Do NOT read
+      // it as measured: assuming an even split is exactly the mistake that
+      // produced a real multi-GPU VRAM bug (2026-11-04).
+      const share = m.vramUsedMb / gpus
+      attributed += share
+      segs.push({
+        key: m.modelId,
+        label: m.displayName || m.modelId,
+        pct: pct(share, gpu.totalVramMb),
+        color: MODEL_HUES[i % MODEL_HUES.length],
+        title:
+          gpus > 1
+            ? `${m.displayName || m.modelId} — ${(share / 1024).toFixed(1)} GB estimados (reparte ${(m.vramUsedMb / 1024).toFixed(1)} GB entre ${gpus} GPUs a partes iguales; oCabra no conoce el reparto real del tensor-split)`
+            : `${m.displayName || m.modelId} — ${(share / 1024).toFixed(1)} GB`,
+      })
+    })
+    if (segs.length === 0) return undefined
+    const others = gpu.usedVramMb - attributed
+    if (others > gpu.totalVramMb * 0.005) {
+      segs.push({
+        key: "otros",
+        label: "otros",
+        pct: pct(others, gpu.totalVramMb),
+        color: "#6b7280",
+        title: `${(others / 1024).toFixed(1)} GB ocupados fuera de los modelos de oCabra (driver, otros procesos)`,
+      })
+    } else if (others < -gpu.totalVramMb * 0.005) {
+      // Model figures are max(measured, reserved): the scheduler can hold more
+      // than is resident. On the Makespace fork that is routine — the
+      // multimodal projector is reserved up front and only loaded on demand.
+      segs.push({
+        key: "reservado",
+        label: "reservado sin residir",
+        pct: pct(-others, gpu.totalVramMb),
+        color: METRIC.memLocked,
+        pending: true,
+        title: `${(-others / 1024).toFixed(1)} GB reservados por el scheduler que no están residentes en la tarjeta`,
+      })
+    }
+    return segs
+  })()
+
   const inputTokens = tokenStats?.inputTokens ?? 0
   const outputTokens = tokenStats?.outputTokens ?? 0
   const totalTokens = inputTokens + outputTokens
@@ -86,6 +144,7 @@ export function GpuCard({
             usedPct={vramPct}
             secondaryName="bloqueada"
             secondaryPct={lockedPct}
+            segments={vramSegments}
           />
           <div className="mt-3">
             <MiniTrends
@@ -134,7 +193,6 @@ export function GpuCard({
           models={gpuModels}
           activity={activity}
           stuckThreshold={stuckThreshold}
-          idleTimeoutSeconds={idleTimeoutSeconds}
           emptyLabel="Sin modelos gestionados en esta GPU"
         />
       </div>

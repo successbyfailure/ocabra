@@ -954,6 +954,10 @@ function toModelState(raw: unknown): ModelState {
       : [],
     vramUsedMb: Number(data.vram_used_mb ?? data.vramUsedMb ?? 0),
     vramEstimateMb: Number(data.vram_estimate_mb ?? data.vramEstimateMb ?? 0),
+    visionState: (data.vision_state ?? data.visionState ?? null) as
+      | "active"
+      | "inactive"
+      | null,
     ramUsedMb: Number(data.ram_used_mb ?? data.ramUsedMb ?? 0),
     diskSizeBytes:
       data.disk_size_bytes == null && data.diskSizeBytes == null

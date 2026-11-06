@@ -813,6 +813,27 @@ class LlamaCppBackend(BackendInterface):
             raise ValueError("reasoning_budget must be -1 or greater")
         return options
 
+    def vision_state(self, model_id: str) -> str | None:
+        """Whether the multimodal projector is resident *right now*.
+
+        The fork loads and drops it at runtime, so unlike upstream — where
+        vision is fixed at launch — "supports vision" and "has vision loaded"
+        are different questions, and only this one answers the second. Returns
+        ``"active"``/``"inactive"`` for a running worker, or ``None`` when the
+        model is not loaded here (nothing to report).
+
+        Kept read-only and side-effect free: it is polled by the models API.
+        """
+        if model_id not in self._processes:
+            return None
+        options = self._model_configs.get(model_id) or {}
+        mode = options.get("vision_mode")
+        if mode == "disabled":
+            return "inactive"
+        if mode == "enabled" or model_id in self._vision_active:
+            return "active"
+        return "inactive"
+
     @staticmethod
     def _normalize_vision_mode(value: Any, mmproj_model_id: str | None) -> str:
         if value is None:

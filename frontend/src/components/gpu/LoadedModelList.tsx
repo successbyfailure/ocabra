@@ -2,7 +2,6 @@ import type { ModelState, ModelActivity, OllamaRuntimeInfo } from "@/types"
 import { BackendBadge } from "@/components/models/BackendBadge"
 
 const gb = (mb: number) => (mb / 1024).toFixed(1)
-const tok = (n: number) => (n >= 1000 ? `${Math.round(n / 1024)}k` : String(n))
 // Spanish labels for the phases the backend reports (ModelManager.get_load_phase).
 const PHASE_LABEL: Record<string, string> = {
   generating: "generando",
@@ -29,16 +28,12 @@ export function LoadedModelList({
   activity = {},
   stuckThreshold = 300,
   ollamaRuntime = {},
-  idleTimeoutSeconds,
 }: {
   models: ModelState[]
   emptyLabel?: string
   activity?: Record<string, ModelActivity>
   stuckThreshold?: number
   ollamaRuntime?: Record<string, OllamaRuntimeInfo>
-  /** From the activity payload, same as stuckThreshold. Omit to hide the
-   *  idle-unload countdown. */
-  idleTimeoutSeconds?: number
 }) {
   if (models.length === 0) {
     return emptyLabel ? <p className="text-[11.5px] text-muted-foreground">{emptyLabel}</p> : null
@@ -50,33 +45,18 @@ export function LoadedModelList({
         const inFlight = act?.inFlight ?? 0
         const stuck = inFlight > 0 && (act?.oldestSeconds ?? 0) >= stuckThreshold
         const rt = m.backendType === "ollama" ? ollamaRuntime[ollamaName(m.modelId)] : undefined
+        // Deliberately lighter than the "Modelos activos" card: this one is
+        // nested inside a GPU card and is about what is happening *right now*
+        // on it. Configuration-flavoured data (KV pool bar, runtime preset,
+        // VRAM reservation, idle countdown) lives only in the big card, which
+        // has full-width rows. Seven fields duplicated across both was the
+        // actual overload.
         const adm = act?.admission
-        // KV pool occupancy. Only llama.cpp workers with the unified cache
-        // publish a capacity, so this is absent for Ollama/vLLM/encoders and
-        // the bar simply does not render.
-        const kvCap = adm?.kvCapacityTokens ?? null
-        const kvUsed = adm?.kvReservedTokens ?? null
-        const kvPct = kvCap && kvCap > 0 && kvUsed != null ? Math.min(100, (kvUsed / kvCap) * 100) : null
         const queued = adm?.queuedRequests ?? 0
         const saturated = Boolean(adm?.slotSaturated || adm?.computeSaturated)
         const tpsTotal = act?.tokensPerSecondTotal ?? null
         const genCount = act?.generatingCount ?? 0
         const phaseMix = Object.entries(act?.phases ?? {}).filter(([, n]) => n > 0)
-        // Reservation the scheduler held vs what the worker actually uses.
-        // Under-reservation is what caused the gemma4 CUDA OOMs, so showing
-        // both makes that class of problem visible. Often unset.
-        // The reservation the scheduler computed for this load (from the GGUF
-        // size and the layer split). Not the optional manual override in
-        // extra_config, which almost no model sets.
-        const reservedMb = Number(m.vramEstimateMb ?? 0)
-        const overReserved = reservedMb > 0 && m.vramUsedMb > reservedMb * 1.02
-        // Idle-unload countdown. Only on_demand models are evicted on idle;
-        // warm/pin are not, so showing a countdown for them would be a lie.
-        let idleLeft: number | null = null
-        if (idleTimeoutSeconds && m.loadPolicy === "on_demand" && inFlight === 0 && m.lastRequestAt) {
-          const since = (Date.now() - new Date(m.lastRequestAt).getTime()) / 1000
-          if (Number.isFinite(since)) idleLeft = Math.max(0, Math.round(idleTimeoutSeconds - since))
-        }
         return (
           <div key={m.modelId} className="rounded-lg bg-muted/50 px-2.5 py-1.5 text-[11.5px]">
             <div className="flex items-center justify-between gap-2">
@@ -126,46 +106,14 @@ export function LoadedModelList({
                   </span>
                 )}
                 {m.vramUsedMb > 0 && (
-                  <span
-                    className={`tabular-nums ${overReserved ? "text-amber-500" : "text-muted-foreground"}`}
-                    title={
-                      reservedMb > 0
-                        ? `${gb(m.vramUsedMb)} GB en uso frente a ${gb(reservedMb)} GB reservados por el scheduler${overReserved ? " — el uso real supera la reserva, riesgo de OOM" : ""}`
-                        : "VRAM en uso"
-                    }
-                  >
-                    {gb(m.vramUsedMb)} GB{reservedMb > 0 ? `/${gb(reservedMb)}` : ""}
-                  </span>
+                  <span className="tabular-nums text-muted-foreground">{gb(m.vramUsedMb)} GB</span>
                 )}
                 {m.ramUsedMb > 0 && (
                   <span className="tabular-nums text-muted-foreground">{gb(m.ramUsedMb)} GB RAM</span>
                 )}
               </span>
             </div>
-            {kvPct != null && (
-              <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-                <span
-                  className="flex-1 overflow-hidden rounded-full bg-muted"
-                  title={`Pool KV compartido por los slots: ${kvUsed} de ${kvCap} tokens reservados. No es el contexto de una petición, es la ocupación total de la caché.`}
-                >
-                  <span className="flex h-1.5">
-                    <span
-                      style={{
-                        width: `${kvPct}%`,
-                        background: kvPct > 85 ? "#dc2626" : kvPct > 60 ? "#eda100" : "#16a34a",
-                      }}
-                      className="h-full"
-                    />
-                  </span>
-                </span>
-                <span className="shrink-0 tabular-nums">
-                  ctx {tok(kvUsed ?? 0)}/{tok(kvCap ?? 0)}
-                  {act?.runtimePreset ? ` · ${act.runtimePreset}` : ""}
-                  {act?.effectiveContext ? ` · ${tok(act.effectiveContext)} por slot` : ""}
-                </span>
-              </div>
-            )}
-            {(phaseMix.length > 0 || idleLeft != null) && (
+            {phaseMix.length > 0 && (
               <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
                 {phaseMix.length > 0 && (
                   <span className="truncate">
@@ -173,14 +121,6 @@ export function LoadedModelList({
                       .map(([phase, n]) => `${n} ${PHASE_LABEL[phase] ?? phase}`)
                       .join(" · ")}
                     {adm?.slots ? ` de ${adm.slots} slots` : ""}
-                  </span>
-                )}
-                {idleLeft != null && (
-                  <span
-                    className="ml-auto shrink-0 tabular-nums"
-                    title="Se descargará por inactividad si no recibe peticiones"
-                  >
-                    descarga en {fmtAge(idleLeft)}
                   </span>
                 )}
               </div>

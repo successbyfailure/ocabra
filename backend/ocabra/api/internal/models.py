@@ -1787,6 +1787,22 @@ async def _serialize_model_state(
     schedules: list[dict] | None = None,
 ) -> dict:
     item = state.to_dict()
+    # Live capability state, as opposed to the static "supports vision" flag.
+    # The Makespace llama.cpp fork loads and drops the multimodal projector at
+    # runtime, so a model can support vision while not currently holding it —
+    # worth a distinct indicator, and it costs a dict lookup on a backend that
+    # already has the answer. None for everything else, which the UI reads as
+    # "not applicable" rather than "off".
+    item["vision_state"] = None
+    worker_pool = getattr(request.app.state, "worker_pool", None)
+    if worker_pool is not None and is_llama_cpp_family(state.backend_type):
+        try:
+            backend = await worker_pool.get_backend(state.backend_type)
+            reader = getattr(backend, "vision_state", None)
+            if callable(reader):
+                item["vision_state"] = reader(state.backend_model_id)
+        except Exception:  # noqa: BLE001 -- never break the model list over this
+            item["vision_state"] = None
     item["disk_size_bytes"] = await _resolve_disk_size_bytes(state, ollama_sizes)
     item["capabilities"] = await _resolve_capabilities_payload(request, state, item["capabilities"])
 
