@@ -189,6 +189,7 @@ function HostStatsCard({
   models = [],
   activity = {},
   stuckThreshold = 300,
+  idleTimeoutSeconds,
   ollamaRuntime = {},
   tokenStats = null,
 }: {
@@ -198,6 +199,7 @@ function HostStatsCard({
   models?: ModelState[]
   activity?: Record<string, ModelActivity>
   stuckThreshold?: number
+  idleTimeoutSeconds?: number
   ollamaRuntime?: Record<string, OllamaRuntimeInfo>
   tokenStats?: TokenGpuStats | null
 }) {
@@ -292,6 +294,7 @@ function HostStatsCard({
           models={models}
           activity={activity}
           stuckThreshold={stuckThreshold}
+          idleTimeoutSeconds={idleTimeoutSeconds}
           ollamaRuntime={ollamaRuntime}
           emptyLabel="Sin modelos gestionados fuera de las GPUs"
         />
@@ -661,6 +664,7 @@ export function Dashboard() {
   const [energy, setEnergy] = useState<EnergyStats | null>(null)
   const [activity, setActivity] = useState<Record<string, ModelActivity>>({})
   const [stuckThreshold, setStuckThreshold] = useState(300)
+  const [idleTimeoutSeconds, setIdleTimeoutSeconds] = useState<number | undefined>(undefined)
   const [ollamaRuntime, setOllamaRuntime] = useState<Record<string, OllamaRuntimeInfo>>({})
 
   useWebSocket()
@@ -814,6 +818,7 @@ export function Dashboard() {
         if (!cancelled) {
           setActivity(act.activity)
           setStuckThreshold(act.stuckThresholdSeconds)
+          setIdleTimeoutSeconds(act.idleTimeoutSeconds)
           setOllamaRuntime(ort)
         }
       } catch {
@@ -1127,6 +1132,7 @@ export function Dashboard() {
               models={loadedModels}
               activity={activity}
               stuckThreshold={stuckThreshold}
+              idleTimeoutSeconds={idleTimeoutSeconds}
               tokenStats={tokenStatsByDevice.byGpu.get(gpu.index)}
             />
           ))}
@@ -1138,6 +1144,7 @@ export function Dashboard() {
               models={untrackedGpuModels}
               activity={activity}
               stuckThreshold={stuckThreshold}
+              idleTimeoutSeconds={idleTimeoutSeconds}
               ollamaRuntime={ollamaRuntime}
               tokenStats={tokenStatsByDevice.host}
             />

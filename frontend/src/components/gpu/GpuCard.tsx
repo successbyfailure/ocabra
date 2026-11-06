@@ -11,6 +11,7 @@ interface GpuCardProps {
   models?: ModelState[]
   activity?: Record<string, { inFlight: number; oldestSeconds: number }>
   stuckThreshold?: number
+  idleTimeoutSeconds?: number
   tokenStats?: TokenGpuStats | null
 }
 
@@ -38,6 +39,7 @@ export function GpuCard({
   models = [],
   activity = {},
   stuckThreshold = 300,
+  idleTimeoutSeconds,
   tokenStats = null,
 }: GpuCardProps) {
   const raw = useGpuStore((s) => s.history[gpu.index] ?? EMPTY_HISTORY)
@@ -132,6 +134,7 @@ export function GpuCard({
           models={gpuModels}
           activity={activity}
           stuckThreshold={stuckThreshold}
+          idleTimeoutSeconds={idleTimeoutSeconds}
           emptyLabel="Sin modelos gestionados en esta GPU"
         />
       </div>

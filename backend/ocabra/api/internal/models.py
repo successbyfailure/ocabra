@@ -242,6 +242,12 @@ async def get_models_activity(
 ) -> dict:
     """Live in-flight counts + oldest age keyed by model_id."""
     mm = request.app.state.model_manager
+    # Read-only: the fair-share gate is the only place that knows the real KV
+    # pool occupancy and the queue depth behind a busy worker. Both were
+    # already computed for the per-model status endpoint and nothing surfaced
+    # them on the dashboard, where "N en curso" could not distinguish a busy
+    # worker from one that is about to queue or reject.
+    worker_pool = getattr(request.app.state, "worker_pool", None)
     snapshot = mm.inflight_snapshot()
     ages = mm.active_request_ages()
     sources = mm.activity_sources()
@@ -263,6 +269,7 @@ async def get_models_activity(
     all_states = await mm.list_states(include_derived=True)
     canonical_ids = {state.model_id for state in states}
     runtime_by_canonical: dict[str, int] = {}
+    preset_by_canonical: dict[str, dict] = {}
     for s in all_states:
         base = _canonical_runtime_id(s.model_id, canonical_ids)
         if base is None or base == s.model_id:
@@ -278,6 +285,20 @@ async def get_models_activity(
             # Guardar el mayor por si hay varios derivados activos (distintos
             # presets) — es la capacidad real de slots concurrentes.
             runtime_by_canonical[base] = max(runtime_by_canonical.get(base, 0), p)
+        # El preset activo y su contexto efectivo tambien viven solo en el
+        # derivado. Sin ellos la barra de KV es un numero sin referencia: no
+        # se sabe si 240k de pool vienen del preset de 32k o del de 128k.
+        preset_key = meta.get("preset_key")
+        effective_context = meta.get("effective_context")
+        if preset_key or effective_context:
+            preset_by_canonical[base] = {
+                "presetKey": str(preset_key) if preset_key else None,
+                "effectiveContext": (
+                    int(effective_context)
+                    if isinstance(effective_context, (int, float)) and effective_context
+                    else None
+                ),
+            }
     derived_keys_by_canonical: dict[str, list[str]] = {}
     for key in snapshot:
         base = _canonical_runtime_id(key, canonical_ids)
@@ -375,16 +396,81 @@ async def get_models_activity(
                             "waitingOnModelId": waiting_on,
                         }
                     )
-            activity[state.model_id] = {
+            # Fair-share gate snapshot. Keyed by whichever id actually runs
+            # the worker, so try the same candidates as the in-flight count.
+            admission = None
+            if worker_pool is not None:
+                for key in keys:
+                    try:
+                        gate = worker_pool.peek_queue_state(key)
+                    except Exception:  # noqa: BLE001 -- read-only, never break the card
+                        gate = None
+                    if gate is not None:
+                        admission = {
+                            "slots": gate["slots"],
+                            "queuedRequests": gate["queued"],
+                            "slotSaturated": gate["slot_saturated"],
+                            "computeSaturated": gate.get("compute_saturated", False),
+                            "admissionLimit": gate.get("admission_limit", gate["slots"]),
+                            "kvCapacityTokens": gate["kv_capacity_tokens"],
+                            "kvReservedTokens": gate["kv_reserved_tokens"],
+                            "kvFreeTokens": gate["kv_free_tokens"],
+                        }
+                        break
+            # The gate's slot count is authoritative for backends that really
+            # serve concurrent slots, so it is a legitimate fallback when
+            # ``_runtime.parallelism`` is missing. It is NOT a replacement for
+            # the deliberate ``None`` above: backends with no slot pool never
+            # create a gate, so they still report None and clients keep
+            # rendering an honest "N en curso" instead of a made-up ratio.
+            if slots is None and admission is not None:
+                gate_slots = admission.get("slots")
+                if isinstance(gate_slots, int) and gate_slots > 0:
+                    slots = gate_slots
+
+            # Aggregate phase mix. Per-request phases were already exposed but
+            # only readable one line at a time; the mix is what tells you at a
+            # glance whether a model is generating or stuck in prompt eval.
+            phases: dict[str, int] = {}
+            tps_total = 0.0
+            generating_count = 0
+            for detail in requests_detail:
+                phase_name = str(detail.get("phase") or "unknown")
+                phases[phase_name] = phases.get(phase_name, 0) + 1
+                tps = detail.get("tokensPerSecond")
+                if isinstance(tps, (int, float)) and tps > 0:
+                    tps_total += float(tps)
+                    generating_count += 1
+
+            entry = {
                 "inFlight": count,
                 "oldestSeconds": round(oldest, 1),
                 "sources": source_counts,
                 "slots": slots,
                 "requests": requests_detail,
+                "phases": phases,
+                # Sum across requests that are actually emitting tokens, plus
+                # how many those are. The count matters: tokensPerSecond is
+                # null outside the ``generating`` phase, so a model saturated
+                # with prompt-eval work would otherwise read as 0 t/s while
+                # being at full load.
+                "tokensPerSecondTotal": round(tps_total, 1) if generating_count else None,
+                "generatingCount": generating_count,
             }
+            if admission is not None:
+                entry["admission"] = admission
+            preset_info = preset_by_canonical.get(state.model_id)
+            if preset_info:
+                entry["runtimePreset"] = preset_info["presetKey"]
+                entry["effectiveContext"] = preset_info["effectiveContext"]
+            activity[state.model_id] = entry
     return {
         "activity": activity,
         "stuckThresholdSeconds": int(getattr(settings, "busy_timeout_seconds", 300)),
+        # Same delivery as stuckThresholdSeconds: the card needs it to show the
+        # idle-unload countdown, and shipping it here avoids threading server
+        # config through GpuCard/Dashboard just for one number.
+        "idleTimeoutSeconds": int(getattr(settings, "idle_timeout_seconds", 300)),
     }
 
 

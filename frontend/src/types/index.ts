@@ -650,16 +650,45 @@ export interface ActiveRequestProgress {
   waitingOnModelId: string | null;
 }
 
+/** Fair-share gate snapshot: queue depth and KV pool occupancy. Only present
+ *  for backends that really serve concurrent slots and have had traffic —
+ *  others never create a gate, so consumers must degrade gracefully. */
+export interface ModelAdmission {
+  slots: number;
+  queuedRequests: number;
+  slotSaturated: boolean;
+  computeSaturated: boolean;
+  admissionLimit: number;
+  /** null when the worker does not publish a unified KV pool. */
+  kvCapacityTokens: number | null;
+  kvReservedTokens: number | null;
+  kvFreeTokens: number | null;
+}
+
 export interface ModelActivity {
   inFlight: number;
   oldestSeconds: number;
   slots?: number | null;
   requests?: ActiveRequestProgress[];
+  /** How many in-flight requests sit in each phase. */
+  phases?: Record<string, number>;
+  /** Sum over requests actually emitting tokens; null when none are. Pair it
+   *  with generatingCount — tokensPerSecond is null outside `generating`, so a
+   *  model busy in prompt-eval would otherwise read as 0 t/s at full load. */
+  tokensPerSecondTotal?: number | null;
+  generatingCount?: number;
+  admission?: ModelAdmission;
+  /** Active runtime preset and its resolved context, read from the derived
+   *  worker state. Without these the KV bar is a number with no reference. */
+  runtimePreset?: string | null;
+  effectiveContext?: number | null;
 }
 
 export interface ModelActivityMap {
   activity: Record<string, ModelActivity>;
   stuckThresholdSeconds: number;
+  /** Seconds of inactivity after which an on_demand model is unloaded. */
+  idleTimeoutSeconds?: number;
 }
 
 export interface OllamaRuntimeInfo {
