@@ -772,6 +772,71 @@ async def test_effective_inflight_cap_skips_slot_scaling_for_embedding_models(
     assert model_manager.try_begin_request(model_id, max_inflight=32) is None
 
 
+@pytest.mark.asyncio
+async def test_effective_inflight_cap_exempts_encoder_endpoints_without_capabilities(
+    model_manager, monkeypatch
+):
+    """2026-11-06 incident: ``bge-reranker-v2-m3`` only ever executes on a
+    federation peer, so its local ModelState never reaches LOADED and its
+    ``capabilities`` stay at the all-false default. The capability-based
+    exemption above therefore never fired and admission fell back to the
+    generative 1-slot assumption, capping /v1/rerank at 4 concurrent
+    requests (measured live: 8 parallel calls -> 4x200 + 4x429) while the
+    remote worker had capacity to spare. The endpoint being called is known
+    with certainty at admission time, so it is the signal we trust."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = "vllm/BAAI/bge-reranker-v2-m3"
+    state = await add_test_model(model_manager, model_id=model_id)
+    # Exactly the broken situation: never loaded locally, nothing to infer from.
+    state.capabilities = BackendCapabilities()
+    assert state.status != ModelStatus.LOADED
+
+    assert model_manager.effective_inflight_cap(model_id, 32) == 4
+    assert model_manager.effective_inflight_cap(model_id, 32, request_kind="rerank") == 32
+
+    results = [
+        model_manager.try_begin_request(model_id, max_inflight=32, request_kind="rerank")
+        for _ in range(32)
+    ]
+    assert results.count(None) == 0
+    assert model_manager.try_begin_request(model_id, max_inflight=32, request_kind="rerank") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_kind", ["embedding", "ollama_embedding", "rerank", "pooling", "score", "classify"]
+)
+async def test_effective_inflight_cap_exempts_every_encoder_kind(
+    model_manager, monkeypatch, request_kind
+):
+    """Every single-pass encoder endpoint gets the flat ceiling. /v1/pooling,
+    /v1/score and /v1/classify used to classify as "other" and so could not
+    be exempted at all."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = f"test/encoder-{request_kind}"
+    state = await add_test_model(model_manager, model_id=model_id)
+    state.capabilities = BackendCapabilities()
+
+    assert model_manager.effective_inflight_cap(model_id, 32, request_kind=request_kind) == 32
+
+
+@pytest.mark.asyncio
+async def test_effective_inflight_cap_still_scales_down_generative_kinds(
+    model_manager, monkeypatch
+):
+    """The exemption must not leak to generative endpoints: a single-slot
+    worker still has a real KV cache to exhaust, so chat/completion keep the
+    slot-scaled cap."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = "test/generative-model"
+    state = await add_test_model(model_manager, model_id=model_id)
+    state.capabilities = BackendCapabilities(chat=True)
+
+    assert model_manager.effective_inflight_cap(model_id, 32, request_kind="chat") == 4
+    assert model_manager.effective_inflight_cap(model_id, 32, request_kind="other") == 4
+    assert model_manager.effective_inflight_cap(model_id, 32) == 4
+
+
 def test_maintenance_toggle_covers_derived_worker_keys(model_manager):
     canonical = "ollama/qwen3.8:27b"
     derived = f"{canonical}::abc123"

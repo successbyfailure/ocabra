@@ -79,6 +79,9 @@ def _classify_request_kind(path: str) -> str:
         "/v1/audio/transcriptions": "audio_transcription",
         "/v1/audio/speech": "tts",
         "/v1/rerank": "rerank",
+        "/v1/pooling": "pooling",
+        "/v1/score": "score",
+        "/v1/classify": "classify",
         "/api/chat": "ollama_chat",
         "/api/generate": "ollama_generate",
         "/api/embeddings": "ollama_embedding",
@@ -191,7 +194,7 @@ def _apply_token_kind_defaults(
     elif request_kind == "audio_transcription":
         if in_tok is None:
             in_tok = 0  # audio input carries no text tokens
-    elif request_kind in ("rerank", "ollama_embedding"):
+    elif request_kind in ("rerank", "ollama_embedding", "pooling", "score", "classify"):
         if out_tok is None:
             out_tok = 0
     elif request_kind == "image_generation":
@@ -647,12 +650,18 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 # isn't known until the backend responds) — same heuristic
                 # used for the completed-request row further down.
                 input_tokens_estimate=_count_input_tokens(request_payload, request_kind),
+                # Lets admission exempt single-pass encoder endpoints from the
+                # generative slot scaling without depending on whether the
+                # model happens to be loaded locally.
+                request_kind=request_kind,
             )
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
                 # rather than pile on so one client's burst can't starve others.
                 effective_cap = mm.effective_inflight_cap(
-                    inflight_model_id, settings.max_inflight_per_model
+                    inflight_model_id,
+                    settings.max_inflight_per_model,
+                    request_kind=request_kind,
                 )
                 asyncio.create_task(
                     _record_stat(

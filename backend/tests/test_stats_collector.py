@@ -469,6 +469,7 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
         api_key_name=None,
         profile_id="gemma-public",
         input_tokens_estimate=None,
+        request_kind="chat",
     )
     model_manager.end_request.assert_called_once_with(
         "ollama/gemma:12b",

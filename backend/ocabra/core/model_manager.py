@@ -63,6 +63,18 @@ def _deep_merge_dicts(base: dict, patch: dict) -> dict:
     return merged
 
 
+# Request kinds served by single-pass encoder models (see
+# ``ocabra.stats.collector._classify_request_kind``). They have no per-slot KV
+# cache to exhaust, so the low-concurrency slot scaling in
+# ``effective_inflight_cap`` must never apply to them. This is keyed off the
+# *endpoint* rather than the model's capabilities because the endpoint is known
+# with certainty at admission time, while ``ModelState.capabilities`` is only
+# populated after a local load (see that method's docstring).
+ENCODER_REQUEST_KINDS = frozenset(
+    {"embedding", "ollama_embedding", "rerank", "pooling", "score", "classify"}
+)
+
+
 class ModelStatus(str, Enum):
     DISCOVERED = "discovered"
     CONFIGURED = "configured"
@@ -421,7 +433,9 @@ class ModelManager:
                 pass
         return audit
 
-    def effective_inflight_cap(self, model_id: str, max_inflight: int) -> int:
+    def effective_inflight_cap(
+        self, model_id: str, max_inflight: int, *, request_kind: str | None = None
+    ) -> int:
         """Scale ``max_inflight`` down for models with few concurrency slots.
 
         ``max_inflight`` is a flat ceiling shared by every model regardless of
@@ -442,8 +456,25 @@ class ModelManager:
         ``_runtime`` metadata recorded, model was unloaded) and ~91 got
         rejected with 429 against a cap of only 4. For these, skip the
         per-slot scaling entirely and use the flat ``max_inflight`` ceiling.
+
+        ``capabilities`` alone turned out not to be a dependable signal: it is
+        only populated by a local load (or restored from the Redis cache of a
+        past one), so a model that only ever executes on a federation peer
+        keeps an all-false default and silently fell back to the 4-concurrent
+        generative cap. ``request_kind`` (the endpoint, see
+        ``ENCODER_REQUEST_KINDS``) is therefore checked first; the capability
+        test stays as the fallback for callers that have no request kind to
+        offer, such as the Batches runner.
         """
         if max_inflight <= 0:
+            return max_inflight
+        # Primary signal: the endpoint being called. Always available, and
+        # correct even for a model that has never been loaded in this process
+        # — notably one served by a federation peer, whose local ModelState
+        # stays CONFIGURED with all-false capabilities forever. Without this,
+        # the remote-only reranker was admitted at 1 slot x max_queued_per_slot
+        # = 4 concurrent and rejected the rest with 429 (found 2026-11-06).
+        if request_kind is not None and request_kind in ENCODER_REQUEST_KINDS:
             return max_inflight
         canonical = self._canonical_runtime_model_id(model_id)
         state = self._states.get(canonical) or self._states.get(model_id)
@@ -497,6 +528,7 @@ class ModelManager:
         api_key_name: str | None = None,
         profile_id: str | None = None,
         input_tokens_estimate: int | None = None,
+        request_kind: str | None = None,
     ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
@@ -509,7 +541,9 @@ class ModelManager:
         -flight row, instead of showing "anónimo" while the request is still
         running.
         """
-        effective_max = self.effective_inflight_cap(model_id, max_inflight)
+        effective_max = self.effective_inflight_cap(
+            model_id, max_inflight, request_kind=request_kind
+        )
         with self._in_flight_lock:
             current = self._in_flight.get(model_id, 0)
             if effective_max > 0 and current >= effective_max:

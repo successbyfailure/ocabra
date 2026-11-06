@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.31.0"
+    app_version: str = "0.31.1"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -410,7 +410,18 @@ class Settings(BaseSettings):
     diffusers_offload_mode: str = "sequential"
     diffusers_allow_tf32: bool = True
     vram_buffer_mb: int = 512
-    vram_pressure_threshold_pct: float = 90.0
+    # Umbral de VRAM LIBRE (%) por debajo del cual GPUScheduler.find_gpu_for_model
+    # marca una GPU "bajo presión" y la deja fuera del primer pase de selección.
+    # NO dispara evicción: solo altera el orden en que se prueban las GPUs — pero
+    # si la GPU preferida cae fuera de ese primer grupo, su preferred_gpu ni
+    # llega a evaluarse. Al ser porcentual penaliza a la tarjeta pequeña: un PIN
+    # de ~3 GB pesa 27% en una 12 GB y solo 13% en una 24 GB, así que con 80-90
+    # una GPU pequeña con un PIN dentro NUNCA cuenta como sana y su preferred_gpu
+    # se ignora siempre (incidente real 2026-11-06: embeddings con preferred_gpu=0
+    # cargando en la otra tarjeta — el 90 anterior exigía usar ≤707 MB de una 3060
+    # que ya tenía 3.2 GB de whisper PIN). 20 deja el filtro activo solo ante
+    # saturación real (~75% de uso).
+    vram_pressure_threshold_pct: float = 20.0
     # hw-monitor (separate service, ``hw-monitor/hw_monitor.py``) only
     # persists one gpu_stats row every PERSIST_INTERVAL_POLLS * POLL_INTERVAL_S
     # seconds (defaults 30 * 2 = 60s) — it polls NVML more often but doesn't
