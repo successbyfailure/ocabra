@@ -2,6 +2,12 @@
 
 Última actualización: 2026-04-12
 
+> **Nota (2026-11-06):** este documento es el diseño original. Los huecos que
+> ha dejado al descubierto la evolución posterior de oCabra (paralelismo,
+> presets de runtime, control de admisión) y lo que hace falta revisar antes de
+> sumar un equipo de memoria unificada están en
+> [`federation-modernizacion-plan.md`](federation-modernizacion-plan.md).
+
 ---
 
 ## Concepto
