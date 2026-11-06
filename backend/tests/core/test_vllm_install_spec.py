@@ -28,9 +28,27 @@ def test_install_spec_shape() -> None:
     assert spec.estimated_size_mb >= 5000
 
 
-def test_install_spec_uses_cuda_index() -> None:
-    urls = " ".join(VLLMBackend().install_spec.pip_extra_index_urls)
-    assert "download.pytorch.org/whl/cu" in urls
+def test_install_spec_declares_no_extra_torch_index() -> None:
+    """vLLM ships its own CUDA wheels from PyPI, so the spec deliberately
+    declares no extra index. The ``download.pytorch.org/whl/cu124`` entry this
+    test used to require was dropped on purpose in 9936b74 (2026-07-26) when
+    vLLM was upgraded; the test kept asserting it and had been failing ever
+    since. Keeping it pinned would now be actively wrong — the backend runs
+    CUDA 13.0, so a cu124 index would resolve mismatched wheels."""
+    spec = VLLMBackend().install_spec
+    assert spec.pip_extra_index_urls == []
+    # The nvcc components are what actually pins the CUDA toolchain.
+    assert any(p.startswith("nvidia-cuda-nvcc==") for p in spec.pip_packages)
+
+
+def test_install_spec_pins_vllm_to_the_installed_version() -> None:
+    """The declared pin is the installer's source of truth, so letting it drift
+    behind the venv means a reinstall silently downgrades the backend — which
+    is exactly what happened: the venv reached 0.32.0 while the spec still said
+    0.29.0 (reconciled 2026-11-06). This asserts the pin is exact, not that it
+    is any particular number, so a deliberate bump does not break the test."""
+    pins = [p for p in VLLMBackend().install_spec.pip_packages if p.startswith("vllm==")]
+    assert len(pins) == 1, f"expected exactly one exact vllm pin, got {pins}"
 
 
 def test_resolve_python_bin_defaults_to_sys_executable(

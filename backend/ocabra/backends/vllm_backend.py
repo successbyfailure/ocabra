@@ -151,21 +151,37 @@ class VLLMBackend(BackendInterface):
                 "g++",
             ],
             pip_packages=[
-                # 0.29.0 (2026-09-09) — added Qwen3.8-Flash-Next, Model Runner V2
-                # as default, FP8 KV cache officially supported, prefix caching
-                # optimised for Mamba/DeltaNet hybrid architectures.
-                "vllm==0.29.0",
-                # vLLM 0.29 keeps CUDA 13.0 wheels as default. Pin the nvcc
-                # components so pip doesn't pull mismatched PTX ISA.
+                # 0.32.0 (release 2026-10-18). This pin is set to match what
+                # is actually installed in the venv, which had drifted ahead of
+                # the declared 0.29.0 out of band. The two disagreed by three
+                # minor versions, so a reinstall would silently *downgrade* the
+                # backend — reconciled 2026-11-06.
+                #
+                # NOT on 0.33.0 (release 2026-11-02) deliberately: it pulls
+                # torch 2.14.0 / torchvision 0.29.0 / Triton 3.8.0 into a ~16 GB
+                # venv, and the only model on this backend is the bge reranker,
+                # which in practice always executes on a federation peer — so
+                # there is nothing local to gain. Its notes mention neither
+                # /v1/rerank nor /v1/score. Revisit if a generative vLLM model
+                # is ever served locally. 0.33 also makes unsupported
+                # ``vllm serve`` flags fail instead of being ignored; the flags
+                # built in _build_command were checked against its removals and
+                # none appear, so that upgrade is not blocked, just not worth it.
+                "vllm==0.32.0",
+                # CUDA 13.0 wheels are the default. Pin the nvcc components so
+                # pip doesn't pull mismatched PTX ISA.
                 "nvidia-cuda-nvcc==13.0.88",
                 "nvidia-nvvm==13.0.88",
                 "nvidia-cuda-crt==13.0.88",
                 "sentencepiece>=0.2",
-                # vLLM 0.29.0 has an insufficient pin on openai; imports
-                # ``NamespaceTool`` from ``openai.types.responses`` which
-                # only exists in openai>=2.25.0. See vllm issue #49103.
-                # Without this override pip resolves openai==2.24.0 and
-                # every worker boot fails with ImportError at start.
+                # Floor needed by 0.29.0, which had an insufficient pin on
+                # openai: it imports ``NamespaceTool`` from
+                # ``openai.types.responses``, which only exists in
+                # openai>=2.25.0. See vllm issue #49103. Without the override
+                # pip resolved openai==2.24.0 and every worker boot failed with
+                # an ImportError at start. Kept because it is harmless (the
+                # venv resolves openai 3.13.0 today); whether 0.32 still needs
+                # it has not been verified.
                 "openai>=2.25.0",
             ],
             pip_extra_index_urls=[],
