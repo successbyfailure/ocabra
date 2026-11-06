@@ -20,6 +20,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from ocabra.config import settings
+from ocabra.core.background_tasks import spawn
 from ocabra.core.model_manager_helpers import compute_worker_key
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 from ocabra.core.runtime_coordinator import _text_size
@@ -605,7 +606,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             # traffic contending for the same GPU/worker. Requests already
             # admitted before the window opened are untouched — this check
             # runs before try_begin_request ever marks one in-flight.
-            asyncio.create_task(
+            spawn(
                 _record_stat(
                     request=request,
                     model_id=inflight_model_id,
@@ -667,7 +668,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     request_kind=request_kind,
                     remote_bound=remote_bound,
                 )
-                asyncio.create_task(
+                spawn(
                     _record_stat(
                         request=request,
                         model_id=inflight_model_id,
@@ -714,7 +715,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
-                asyncio.create_task(
+                spawn(
                     _record_stat(
                         request=request,
                         model_id=model_id,
@@ -756,7 +757,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
-                asyncio.create_task(
+                spawn(
                     _record_stat(
                         request=request,
                         model_id=model_id,
@@ -801,7 +802,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
-                asyncio.create_task(
+                spawn(
                     _record_stat(
                         request=request,
                         model_id=model_id,
@@ -824,7 +825,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
-                asyncio.create_task(
+                spawn(
                     _record_stat(
                         request=request,
                         model_id=model_id,
@@ -975,7 +976,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         work_size_meta = _extract_work_size_meta(
                             request_kind, request_payload, last_payload
                         )
-                        asyncio.create_task(
+                        spawn(
                             _record_stat(
                                 request=request,
                                 model_id=model_id,
@@ -1050,7 +1051,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             # request.state is shared). NULL when the request didn't go
             # through a router — most direct calls.
             via_router = getattr(request.state, "via_router_profile_id", None)
-            asyncio.create_task(
+            spawn(
                 _record_stat(
                     request=request,
                     model_id=model_id,

@@ -71,7 +71,6 @@ def test_install_spec_points_at_the_fork_and_reuses_the_build_recipe() -> None:
     assert fork.display_name != upstream.display_name
 
 
-
 def test_fork_refuses_to_fall_back_to_the_upstream_binary(monkeypatch, tmp_path) -> None:
     """Upstream falls back to the fat-image path; the fork must not, since
     serving upstream's binary under the fork's name would advertise fork-only
