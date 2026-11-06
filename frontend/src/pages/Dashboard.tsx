@@ -977,8 +977,11 @@ export function Dashboard() {
             const kvPct =
               kvCap && kvCap > 0 && kvUsed != null ? Math.min(100, (kvUsed / kvCap) * 100) : null
             // Reservation the scheduler computed for this load. vramUsedMb is
-            // max(measured, reserved), so a value above the reservation means
-            // the model is on borrowed margin — the gemma4 CUDA OOM pattern.
+            // max(measured, reserved), so in the healthy case the two are
+            // identical and printing both would be noise. They only diverge
+            // when the measured figure overshoots the reservation — the
+            // gemma4 CUDA OOM pattern — which is exactly when it is worth
+            // showing, so the pair is rendered only then.
             const reservedMb = model.vramEstimateMb ?? 0
             const overReserved = reservedMb > 0 && model.vramUsedMb > reservedMb * 1.02
             // Only on_demand models are evicted on idle; warm/pin are not, so
@@ -1026,7 +1029,7 @@ export function Dashboard() {
                         }
                       >
                         {model.vramUsedMb.toLocaleString()}
-                        {reservedMb > 0 ? ` / ${reservedMb.toLocaleString()}` : ""} MB
+                        {overReserved ? ` / ${reservedMb.toLocaleString()} reservados` : ""} MB
                       </span>
                     )}
                     {slots != null && (
