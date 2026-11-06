@@ -11,6 +11,7 @@ import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from fastapi import Request, Response
@@ -634,6 +635,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             )
         if mm and inflight_model_id:
             auth_meta = await _resolve_inflight_auth_meta(request)
+            remote_bound = await _request_bound_for_peer(request, mm, inflight_model_id)
             inflight_request_id = mm.try_begin_request(
                 inflight_model_id,
                 settings.max_inflight_per_model,
@@ -654,6 +656,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 # generative slot scaling without depending on whether the
                 # model happens to be loaded locally.
                 request_kind=request_kind,
+                remote_bound=remote_bound,
             )
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
@@ -662,6 +665,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     inflight_model_id,
                     settings.max_inflight_per_model,
                     request_kind=request_kind,
+                    remote_bound=remote_bound,
                 )
                 asyncio.create_task(
                     _record_stat(
@@ -1124,6 +1128,42 @@ def _extract_model_id(request: Request, body: dict | None) -> str | None:
         return str(model_id_from_state)
 
     return None
+
+
+async def _request_bound_for_peer(request: Request, mm: Any, model_id: str) -> bool:
+    """True when this request is headed for a federation peer rather than a
+    local worker.
+
+    Mirrors step 2 of ``ocabra.core.federation.resolve_federated``: the model
+    is not LOADED here but at least one online peer has it loaded, so the
+    handler will proxy it out. That matters for admission because the local
+    slot-derived cap in ``effective_inflight_cap`` describes a local worker's
+    KV cache — a worker this request will never touch. Left unchecked, a
+    generative model that only ever runs on a peer inherits the 1-slot
+    assumption and gets throttled to ``max_queued_per_slot`` (4) concurrent
+    requests, no matter how much headroom the peer actually has. The peer runs
+    its own admission control, so the flat ceiling is the right local guard.
+
+    Admission runs in this middleware, *before* the handler resolves
+    federation, so this is necessarily a prediction rather than an
+    observation. It is deliberately conservative: when the model is loaded
+    locally we never skip the cap, even though ``select_target`` could still
+    pick a peer. Best effort — any failure falls back to local accounting.
+    """
+    from ocabra.core.model_manager import ModelStatus
+
+    if not settings.federation_enabled:
+        return False
+    federation_manager = getattr(request.app.state, "federation_manager", None)
+    if federation_manager is None:
+        return False
+    try:
+        state = await mm.get_state(model_id)
+        if state is not None and state.status == ModelStatus.LOADED:
+            return False
+        return bool(federation_manager.get_remote_models().get(model_id))
+    except Exception:  # noqa: BLE001 -- federation stays best effort
+        return False
 
 
 async def _resolve_inflight_model_id(request: Request, requested: str | None) -> str | None:

@@ -470,6 +470,7 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
         profile_id="gemma-public",
         input_tokens_estimate=None,
         request_kind="chat",
+        remote_bound=False,
     )
     model_manager.end_request.assert_called_once_with(
         "ollama/gemma:12b",
@@ -629,3 +630,85 @@ async def test_stats_middleware_records_cancelled_stream_as_499(
     assert record_stat.await_args.kwargs["status_code"] == 499
     assert record_stat.await_args.kwargs["error_message"] == "stream_cancelled"
     assert record_stat.await_args.kwargs["output_tokens"] == expected_output_tokens
+
+
+# ── _request_bound_for_peer ─────────────────────────────────────────────
+
+
+def _peer_request(federation_manager):
+    """Minimal stand-in for a Request carrying app.state."""
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(federation_manager=federation_manager))
+    )
+
+
+def _mm_with_status(status):
+    mm = MagicMock()
+    mm.get_state = AsyncMock(return_value=SimpleNamespace(status=status) if status else None)
+    return mm
+
+
+@pytest.mark.asyncio
+async def test_request_bound_for_peer_true_when_local_cold_and_peer_warm():
+    """Step 2 of resolve_federated: not loaded here, loaded on a peer."""
+    from ocabra.core.model_manager import ModelStatus
+    from ocabra.stats.collector import _request_bound_for_peer
+
+    fed = MagicMock()
+    fed.get_remote_models.return_value = {"vllm/some-model": [MagicMock()]}
+    mm = _mm_with_status(ModelStatus.CONFIGURED)
+
+    with patch("ocabra.stats.collector.settings.federation_enabled", True):
+        assert await _request_bound_for_peer(_peer_request(fed), mm, "vllm/some-model") is True
+
+
+@pytest.mark.asyncio
+async def test_request_bound_for_peer_false_when_loaded_locally():
+    """Deliberately conservative: a locally-loaded model keeps its slot cap,
+    even though select_target could in principle still choose a peer."""
+    from ocabra.core.model_manager import ModelStatus
+    from ocabra.stats.collector import _request_bound_for_peer
+
+    fed = MagicMock()
+    fed.get_remote_models.return_value = {"vllm/some-model": [MagicMock()]}
+    mm = _mm_with_status(ModelStatus.LOADED)
+
+    with patch("ocabra.stats.collector.settings.federation_enabled", True):
+        assert await _request_bound_for_peer(_peer_request(fed), mm, "vllm/some-model") is False
+
+
+@pytest.mark.asyncio
+async def test_request_bound_for_peer_false_when_no_peer_has_it():
+    from ocabra.core.model_manager import ModelStatus
+    from ocabra.stats.collector import _request_bound_for_peer
+
+    fed = MagicMock()
+    fed.get_remote_models.return_value = {}
+    mm = _mm_with_status(ModelStatus.CONFIGURED)
+
+    with patch("ocabra.stats.collector.settings.federation_enabled", True):
+        assert await _request_bound_for_peer(_peer_request(fed), mm, "vllm/some-model") is False
+
+
+@pytest.mark.asyncio
+async def test_request_bound_for_peer_respects_kill_switch_and_failures():
+    """Off when federation is disabled or absent, and never raises into the
+    admission path — federation stays best effort here."""
+    from ocabra.core.model_manager import ModelStatus
+    from ocabra.stats.collector import _request_bound_for_peer
+
+    fed = MagicMock()
+    fed.get_remote_models.return_value = {"vllm/some-model": [MagicMock()]}
+    mm = _mm_with_status(ModelStatus.CONFIGURED)
+
+    with patch("ocabra.stats.collector.settings.federation_enabled", False):
+        assert await _request_bound_for_peer(_peer_request(fed), mm, "vllm/some-model") is False
+
+    with patch("ocabra.stats.collector.settings.federation_enabled", True):
+        assert await _request_bound_for_peer(_peer_request(None), mm, "vllm/some-model") is False
+
+        exploding = MagicMock()
+        exploding.get_state = AsyncMock(side_effect=RuntimeError("boom"))
+        assert (
+            await _request_bound_for_peer(_peer_request(fed), exploding, "vllm/some-model") is False
+        )

@@ -434,7 +434,12 @@ class ModelManager:
         return audit
 
     def effective_inflight_cap(
-        self, model_id: str, max_inflight: int, *, request_kind: str | None = None
+        self,
+        model_id: str,
+        max_inflight: int,
+        *,
+        request_kind: str | None = None,
+        remote_bound: bool = False,
     ) -> int:
         """Scale ``max_inflight`` down for models with few concurrency slots.
 
@@ -474,6 +479,15 @@ class ModelManager:
         # stays CONFIGURED with all-false capabilities forever. Without this,
         # the remote-only reranker was admitted at 1 slot x max_queued_per_slot
         # = 4 concurrent and rejected the rest with 429 (found 2026-11-06).
+        if remote_bound:
+            # Headed for a federation peer (see
+            # ``stats.collector._request_bound_for_peer``). The slot scaling
+            # below models a *local* worker's KV cache, which this request
+            # will never touch, and the peer applies its own admission
+            # control. Without this, a generative model that only runs on a
+            # peer inherits the 1-slot assumption and is throttled to 4
+            # concurrent requests however much headroom the peer has.
+            return max_inflight
         if request_kind is not None and request_kind in ENCODER_REQUEST_KINDS:
             return max_inflight
         canonical = self._canonical_runtime_model_id(model_id)
@@ -529,6 +543,7 @@ class ModelManager:
         profile_id: str | None = None,
         input_tokens_estimate: int | None = None,
         request_kind: str | None = None,
+        remote_bound: bool = False,
     ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
@@ -542,7 +557,7 @@ class ModelManager:
         running.
         """
         effective_max = self.effective_inflight_cap(
-            model_id, max_inflight, request_kind=request_kind
+            model_id, max_inflight, request_kind=request_kind, remote_bound=remote_bound
         )
         with self._in_flight_lock:
             current = self._in_flight.get(model_id, 0)

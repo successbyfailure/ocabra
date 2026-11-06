@@ -803,6 +803,40 @@ async def test_effective_inflight_cap_exempts_encoder_endpoints_without_capabili
 
 
 @pytest.mark.asyncio
+async def test_effective_inflight_cap_skips_slot_scaling_when_bound_for_a_peer(
+    model_manager, monkeypatch
+):
+    """A model that only ever runs on a federation peer has no local worker,
+    so the slot-derived cap describes a KV cache the request never touches.
+    This is the gap that would bite a generative model hosted remotely (e.g.
+    on a unified-memory box joined to the cluster): it would inherit the
+    1-slot assumption and be throttled to 4 concurrent requests regardless of
+    the peer's real capacity, which applies its own admission control."""
+    monkeypatch.setattr("ocabra.core.model_manager.settings.max_queued_per_slot", 4)
+    model_id = "remote/big-generative-model"
+    state = await add_test_model(model_manager, model_id=model_id)
+    state.capabilities = BackendCapabilities(chat=True)
+
+    # Generative + not remote: the local slot cap still protects a real KV cache.
+    assert model_manager.effective_inflight_cap(model_id, 32, request_kind="chat") == 4
+    # Same model, same kind, but headed for a peer.
+    assert (
+        model_manager.effective_inflight_cap(
+            model_id, 32, request_kind="chat", remote_bound=True
+        )
+        == 32
+    )
+
+    results = [
+        model_manager.try_begin_request(
+            model_id, max_inflight=32, request_kind="chat", remote_bound=True
+        )
+        for _ in range(32)
+    ]
+    assert results.count(None) == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "request_kind", ["embedding", "ollama_embedding", "rerank", "pooling", "score", "classify"]
 )
