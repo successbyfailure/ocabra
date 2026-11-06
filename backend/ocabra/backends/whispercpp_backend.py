@@ -133,17 +133,18 @@ class WhisperCppBackend(BackendInterface):
         """Pick the ``whisper-server`` binary path.
 
         Priority:
-        1. ``settings.whispercpp_custom_server_bin`` (explicit custom fork).
-        2. ``<backends_dir>/whisper_cpp/metadata.json`` -> ``extra_bins.server``
+        1. ``<backends_dir>/whisper_cpp/metadata.json`` -> ``extra_bins.server``
            (modular install via :class:`BackendInstaller`).
-        3. ``settings.whispercpp_server_bin`` (legacy fat-image path).
+        2. ``settings.whispercpp_server_bin`` (legacy fat-image path).
+
+        There was a higher-priority ``whispercpp_custom_server_bin`` setting,
+        mirroring the llama.cpp one. Removed unused (2026-11-06): it was never
+        set anywhere — not in ``.env``, not in ``.env.example``, and the live
+        process read ``None`` — while whisper.cpp, unlike llama.cpp, has no
+        Makespace fork that would have justified it. A custom build belongs in
+        its own backend with its own install_spec, the way ``llamacpp_mks``
+        does it, rather than in a second silent way to swap the binary.
         """
-        custom_bin = settings.whispercpp_custom_server_bin
-        if isinstance(custom_bin, str) and custom_bin.strip():
-            custom_path = Path(custom_bin)
-            if not custom_path.is_file():
-                raise FileNotFoundError(f"Custom whisper-server not found at '{custom_path}'")
-            return str(custom_path)
         meta = read_backend_metadata(settings.backends_dir, "whisper_cpp")
         if meta is not None:
             extra = meta.get("extra_bins") if isinstance(meta, dict) else None

@@ -36,23 +36,6 @@ def test_install_spec_native_build() -> None:
     assert spec.include_core_runtime is False
 
 
-def test_resolve_server_bin_custom_override(tmp_path: Path) -> None:
-    custom = tmp_path / "whisper-server"
-    custom.write_bytes(b"binary")
-    backend = WhisperCppBackend()
-    with patch("ocabra.backends.whispercpp_backend.settings") as mock_settings:
-        mock_settings.whispercpp_custom_server_bin = str(custom)
-        assert backend._resolve_server_bin() == str(custom)
-
-
-def test_resolve_server_bin_custom_override_missing_raises(tmp_path: Path) -> None:
-    backend = WhisperCppBackend()
-    with patch("ocabra.backends.whispercpp_backend.settings") as mock_settings:
-        mock_settings.whispercpp_custom_server_bin = str(tmp_path / "missing")
-        with pytest.raises(FileNotFoundError):
-            backend._resolve_server_bin()
-
-
 def test_resolve_model_file_explicit_config_wins(tmp_path: Path) -> None:
     model_file = tmp_path / "ggml-custom.bin"
     model_file.write_bytes(b"GGML")
