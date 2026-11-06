@@ -1013,7 +1013,7 @@ async def delete_model(
 
     deleted_path: str | None = None
     if delete_files:
-        deleted_path = await _delete_model_files(model_id, state.backend_type)
+        deleted_path = await _delete_model_files(model_id, state.backend_type, state.extra_config)
         # Drop the LocalScanner cache so the user sees the deletion reflected
         # in /registry/local without having to wait for the TTL.
         from ocabra.api.internal.registry import invalidate_local_scan
@@ -1023,9 +1023,38 @@ async def delete_model(
     return {"ok": True, "deleted_path": deleted_path}
 
 
-async def _delete_model_files(model_id: str, backend_type: str) -> str | None:
+async def _delete_model_files(
+    model_id: str, backend_type: str, extra_config: dict | None = None
+) -> str | None:
     """Delete model files from disk based on backend type."""
     import asyncio
+
+    if backend_type == "piper":
+        # Piper voices are registered with explicit absolute file paths
+        # (extra_config.piper.onnx_path / config_path) rather than a
+        # predictable HF-repo-derived directory name, so the generic
+        # HF-layout cleanup below never matches them and silently leaves
+        # the .onnx/.onnx.json orphaned on disk. Delete the two files
+        # directly instead of the whole parent directory, since a shared
+        # directory could in principle hold sibling voices.
+        piper_cfg = (extra_config or {}).get("piper") or {}
+        models_dir = Path(settings.models_dir or "/data/models")
+        deleted_paths: list[str] = []
+        for key in ("onnx_path", "config_path"):
+            raw_path = piper_cfg.get(key)
+            if not raw_path:
+                continue
+            candidate = Path(raw_path)
+            if not candidate.exists():
+                continue
+            if not _is_path_within_base(candidate, models_dir):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Refusing to delete '{candidate}' outside its configured base",
+                )
+            await asyncio.to_thread(candidate.unlink)
+            deleted_paths.append(str(candidate))
+        return ",".join(deleted_paths) if deleted_paths else None
 
     if backend_type == "ollama":
         # Ollama manages its own storage in a separate service, so we must call
