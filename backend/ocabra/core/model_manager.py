@@ -25,6 +25,7 @@ from ocabra.core.model_manager_helpers import (
     resolve_bitnet_gpu_layers,
     resolve_bitnet_option,
     resolve_llama_cpp_gpu_layers,
+    resolve_worker_slots,
 )
 from ocabra.core.model_ref import (
     build_model_ref,
@@ -117,6 +118,12 @@ class ModelState:
     # static snapshot, not continuously polled. Backends that run on GPU
     # leave this at 0 — vram_used_mb is the number that matters for them.
     ram_used_mb: int = 0
+    # VRAM the scheduler actually reserved for this load, kept separate from
+    # ``vram_used_mb`` (which is max(measured, reserved), so the reservation
+    # is otherwise invisible). Exposed so the UI can show real-vs-reserved:
+    # when the measured figure exceeds the reservation the model is running on
+    # borrowed margin, which is what produced the gemma4 CUDA OOMs.
+    vram_estimate_mb: int = 0
     capabilities: BackendCapabilities = field(default_factory=BackendCapabilities)
     last_request_at: datetime | None = None
     loaded_at: datetime | None = None
@@ -169,6 +176,7 @@ class ModelState:
             "preferred_gpu": self.preferred_gpu,
             "current_gpu": self.current_gpu,
             "vram_used_mb": self.vram_used_mb,
+            "vram_estimate_mb": self.vram_estimate_mb,
             "ram_used_mb": self.ram_used_mb,
             "capabilities": self.capabilities.to_dict(),
             "last_request_at": (self.last_request_at.isoformat() if self.last_request_at else None),
@@ -501,23 +509,14 @@ class ModelManager:
             caps = state.capabilities
             if caps.embeddings or caps.pooling or caps.rerank or caps.classification or caps.score:
                 return max_inflight
-        slots = 1
-        if state is not None and state.backend_type == "piper":
-            # No runtime-preset ladder to populate _runtime.parallelism from
-            # (see settings.piper_parallelism) — declare it directly instead
-            # of falling back to the generic 1-slot assumption.
-            slots = max(1, int(settings.piper_parallelism))
-        elif state is not None:
-            meta = (
-                state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
-            )
-            if isinstance(meta, dict):
-                try:
-                    parallelism = int(meta.get("parallelism") or 0)
-                except (TypeError, ValueError):
-                    parallelism = 0
-                if parallelism > 0:
-                    slots = parallelism
+        # Shared with the fair-share gate (see resolve_worker_slots). This used
+        # to read only ``_runtime.parallelism`` and otherwise assume 1 slot,
+        # while the gate already fell back to the configured llama.cpp
+        # ``parallel_slots``. Since only the runtime-preset coordinator writes
+        # ``_runtime.parallelism``, every llama.cpp model without a preset
+        # ladder got a 4-slot gate and an admission cap of 4 — the 5th
+        # concurrent request was rejected with 429 while three slots sat idle.
+        slots = (resolve_worker_slots(state) or 1) if state is not None else 1
         per_slot_cap = max(1, int(settings.max_queued_per_slot))
         return min(max_inflight, slots * per_slot_cap)
 
@@ -1975,6 +1974,7 @@ class ModelManager:
                             # weights-only report so KV cache is represented too.
                             effective_vram_mb = max(worker_info.vram_used_mb, vram_needed)
                             state.vram_used_mb = effective_vram_mb
+                            state.vram_estimate_mb = max(0, int(vram_needed or 0))
                             state.ram_used_mb = (
                                 await _measure_process_ram_mb(worker_info.pid)
                                 if not actual_gpu_indices
@@ -3237,6 +3237,7 @@ class ModelManager:
             state.status = ModelStatus.UNLOADED
             state.current_gpu = []
             state.vram_used_mb = 0
+            state.vram_estimate_mb = 0
             state.ram_used_mb = 0
             state.worker_info = None
             state.loaded_at = None
@@ -3809,6 +3810,7 @@ class ModelManager:
                 state.status = ModelStatus.UNLOADED
                 state.current_gpu = []
                 state.vram_used_mb = 0
+                state.vram_estimate_mb = 0
                 state.ram_used_mb = 0
                 state.worker_info = None
                 state.loaded_at = None

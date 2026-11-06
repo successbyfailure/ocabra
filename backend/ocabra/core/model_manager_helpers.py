@@ -180,6 +180,60 @@ def resolve_llama_cpp_option(state, key: str, default):
         return extra[camel_key]
     return default
 
+def resolve_worker_slots(state) -> int | None:
+    """How many requests this model's worker genuinely serves in parallel.
+
+    Single source of truth, because there used to be two and they drifted.
+    ``fairness_slots`` (the fair-share gate) already fell back to the
+    configured llama.cpp ``parallel_slots``, while
+    ``ModelManager.effective_inflight_cap`` (admission) only ever read
+    ``_runtime.parallelism`` and otherwise assumed 1. Since
+    ``_runtime.parallelism`` is written only by the runtime-preset coordinator,
+    every llama.cpp model without a preset ladder ended up with a 4-slot gate
+    and an admission cap of 1 x ``max_queued_per_slot`` = 4 — so the 5th
+    concurrent request got a 429 even though the worker had three idle slots
+    and room to queue twelve more (measured 2026-11-06: cap 4 where it should
+    be 16, on every llamacpp_mks model, all of which set parallel_slots=4).
+
+    Returns ``None`` when the backend has no real slot pool. Callers that need
+    a number use ``or 1``; callers that report to the UI keep the ``None`` and
+    render an honest "N en curso" rather than a fabricated ratio — see the
+    whisper "1/32" note in ``api/internal/models.py``.
+    """
+    from ocabra.config import settings
+    from ocabra.core.model_ref import is_llama_cpp_family
+
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    runtime_meta = extra.get("_runtime")
+    if isinstance(runtime_meta, dict):
+        try:
+            parallelism = int(runtime_meta.get("parallelism") or 0)
+        except (TypeError, ValueError):
+            parallelism = 0
+        if parallelism > 0:
+            return parallelism
+
+    backend_type = getattr(state, "backend_type", "")
+    if is_llama_cpp_family(backend_type) or backend_type == "bitnet":
+        configured = resolve_llama_cpp_option(state, "parallel_slots", None)
+        if configured is None:
+            use_case = extra.get("use_case")
+            if isinstance(use_case, dict):
+                configured = use_case.get("slots")
+        try:
+            resolved = int(configured or 0)
+        except (TypeError, ValueError):
+            resolved = 0
+        if resolved > 0:
+            return resolved
+
+    # Piper has no preset ladder but does declare a real concurrency ceiling.
+    if backend_type == "piper":
+        return max(1, int(settings.piper_parallelism))
+
+    return None
+
+
 
 def resolve_llama_cpp_gpu_layers(state, default_gpu_layers: int) -> int:
     try:

@@ -1394,33 +1394,19 @@ def fairness_user_key(user: UserContext) -> str:
 
 def fairness_slots(state: ModelState) -> int:
     """How many requests this model's worker can run concurrently, for
-    sizing the fair-share gate. Reads the resolved runtime preset's
-    parallelism (``_runtime.parallelism`` — the coordinator always sets
-    this in extra_config right before a load, see
-    ``runtime_coordinator.py``); models that never go through the preset
-    system fall back to configured llama.cpp ``parallel_slots`` or
-    ``use_case.slots``. Unknown backends remain conservatively one-at-a-time.
-    """
-    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
-    runtime_meta = extra.get("_runtime")
-    if isinstance(runtime_meta, dict):
-        try:
-            return max(1, int(runtime_meta.get("parallelism") or 1))
-        except (TypeError, ValueError):
-            return 1
-    if is_llama_cpp_family(state.backend_type):
-        from ocabra.core.model_manager_helpers import resolve_llama_cpp_option
+    sizing the fair-share gate.
 
-        configured = resolve_llama_cpp_option(state, "parallel_slots", None)
-        if configured is None:
-            use_case = extra.get("use_case")
-            if isinstance(use_case, dict):
-                configured = use_case.get("slots")
-        try:
-            return max(1, int(configured or 1))
-        except (TypeError, ValueError):
-            return 1
-    return 1
+    Thin wrapper over ``resolve_worker_slots``, which is also what admission
+    (``ModelManager.effective_inflight_cap``) and the dashboard card use. They
+    were three separate implementations and two of them disagreed: admission
+    assumed a single slot whenever the runtime-preset coordinator had not
+    written ``_runtime.parallelism``, so a llama.cpp model with
+    ``parallel_slots=4`` ran on a 4-slot gate while being admitted as if it had
+    one. Unknown backends stay conservatively one-at-a-time.
+    """
+    from ocabra.core.model_manager_helpers import resolve_worker_slots
+
+    return resolve_worker_slots(state) or 1
 
 
 def fairness_kv_budget(

@@ -137,6 +137,10 @@ export interface ModelState {
   preferredGpu: number | null;
   currentGpu: number[];
   vramUsedMb: number;
+  /** VRAM the scheduler reserved for this load. vramUsedMb is
+   *  max(measured, reserved), so a measured value above this means the model
+   *  is running on borrowed margin. 0 when not loaded. */
+  vramEstimateMb?: number;
   ramUsedMb: number;
   diskSizeBytes: number | null;
   capabilities: ModelCapabilities;

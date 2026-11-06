@@ -65,9 +65,10 @@ export function LoadedModelList({
         // Reservation the scheduler held vs what the worker actually uses.
         // Under-reservation is what caused the gemma4 CUDA OOMs, so showing
         // both makes that class of problem visible. Often unset.
-        const reservedMb = Number(
-          (m.extraConfig as Record<string, unknown> | undefined)?.vram_estimate_mb ?? 0,
-        )
+        // The reservation the scheduler computed for this load (from the GGUF
+        // size and the layer split). Not the optional manual override in
+        // extra_config, which almost no model sets.
+        const reservedMb = Number(m.vramEstimateMb ?? 0)
         const overReserved = reservedMb > 0 && m.vramUsedMb > reservedMb * 1.02
         // Idle-unload countdown. Only on_demand models are evicted on idle;
         // warm/pin are not, so showing a countdown for them would be a lie.

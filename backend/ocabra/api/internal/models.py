@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
+from ocabra.core.model_manager_helpers import resolve_worker_slots as _resolve_worker_slots
 from ocabra.core.model_ref import LLAMA_CPP_FAMILY, is_llama_cpp_family, parse_model_ref
 from ocabra.core.vram_capacity import resolve_arch_and_weights
 from ocabra.db.model_config import (
@@ -338,25 +339,15 @@ async def get_models_activity(
             # parallelism that doesn't exist. Leaving ``slots=None`` lets
             # clients render an honest "N en curso" instead of a fabricated
             # ratio (found live 2026-10-30 chasing exactly that "32").
+            # Derived-state parallelism first (the active preset, most
+            # accurate), then the shared resolver — which also covers the
+            # configured llama.cpp ``parallel_slots`` and piper's declared
+            # ceiling, and is the same function admission and the fair-share
+            # gate use, so the card can no longer show a slot count that
+            # disagrees with the one requests are admitted against.
             slots: int | None = runtime_by_canonical.get(state.model_id) or None
             if slots is None:
-                runtime_meta = (
-                    state.extra_config.get("_runtime")
-                    if isinstance(state.extra_config, dict)
-                    else None
-                )
-                if isinstance(runtime_meta, dict):
-                    try:
-                        slots = int(runtime_meta.get("parallelism") or 0) or None
-                    except (TypeError, ValueError):
-                        slots = None
-            # Piper has no preset ladder to populate _runtime.parallelism
-            # from, but it DOES have a real, declared concurrency ceiling
-            # (settings.piper_parallelism, same value effective_inflight_cap
-            # admits against) — unlike whisper above, this one is an actual
-            # admission-relevant number, not a fabricated ratio (2026-10-30).
-            if slots is None and state.backend_type == "piper":
-                slots = max(1, int(settings.piper_parallelism))
+                slots = _resolve_worker_slots(state)
             # Per-request progress for the "is this hung or still working"
             # indicator on the model/GPU card (2026-10-29). ``tokensPerSecond``
             # is None until at least one output token has streamed — division
