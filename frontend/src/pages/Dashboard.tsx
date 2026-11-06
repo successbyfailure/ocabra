@@ -968,6 +968,34 @@ export function Dashboard() {
             // (2026-10-30).
             const whisperWorkers = slots == null ? getWhisperConfig(model)?.numWorkers ?? null : null
             const ctx = getModelContextSummary(model).configuredContext
+            const adm = act?.admission
+            // Live occupancy of the shared KV pool. Only llama.cpp workers
+            // with the unified cache publish a capacity, so this is absent
+            // for Ollama/vLLM/encoders and the bar simply does not render.
+            const kvCap = adm?.kvCapacityTokens ?? null
+            const kvUsed = adm?.kvReservedTokens ?? null
+            const kvPct =
+              kvCap && kvCap > 0 && kvUsed != null ? Math.min(100, (kvUsed / kvCap) * 100) : null
+            // Reservation the scheduler computed for this load. vramUsedMb is
+            // max(measured, reserved), so a value above the reservation means
+            // the model is on borrowed margin — the gemma4 CUDA OOM pattern.
+            const reservedMb = model.vramEstimateMb ?? 0
+            const overReserved = reservedMb > 0 && model.vramUsedMb > reservedMb * 1.02
+            // Only on_demand models are evicted on idle; warm/pin are not, so
+            // a countdown there would be a lie.
+            let idleLeft: number | null = null
+            if (
+              idleTimeoutSeconds &&
+              model.loadPolicy === "on_demand" &&
+              model.status === "loaded" &&
+              !(act && act.inFlight > 0) &&
+              model.lastRequestAt
+            ) {
+              const since = (nowMs - new Date(model.lastRequestAt).getTime()) / 1000
+              if (Number.isFinite(since)) {
+                idleLeft = Math.max(0, Math.round(idleTimeoutSeconds - since))
+              }
+            }
             return (
               <div
                 key={model.modelId}
@@ -988,11 +1016,30 @@ export function Dashboard() {
                     {model.ramUsedMb > 0 ? (
                       <span>{model.ramUsedMb.toLocaleString()} MB RAM</span>
                     ) : (
-                      <span>{model.vramUsedMb.toLocaleString()} MB</span>
+                      <span
+                        className={overReserved ? "text-amber-400" : undefined}
+                        title={
+                          reservedMb > 0
+                            ? `${model.vramUsedMb.toLocaleString()} MB en uso frente a ${reservedMb.toLocaleString()} MB reservados por el scheduler` +
+                              (overReserved ? " — el uso supera la reserva, riesgo de OOM" : "")
+                            : "VRAM en uso"
+                        }
+                      >
+                        {model.vramUsedMb.toLocaleString()}
+                        {reservedMb > 0 ? ` / ${reservedMb.toLocaleString()}` : ""} MB
+                      </span>
                     )}
                     {slots != null && (
-                      <span className="rounded-md bg-muted px-2 py-0.5">
+                      <span
+                        className="rounded-md bg-muted px-2 py-0.5"
+                        title={
+                          act?.runtimePreset
+                            ? `Preset de runtime activo: ${act.runtimePreset}`
+                            : "Slots concurrentes y contexto configurado"
+                        }
+                      >
                         {slots} slot{slots === 1 ? "" : "s"} · {formatTokenCount(ctx)} ctx
+                        {act?.runtimePreset ? ` · ${act.runtimePreset}` : ""}
                       </span>
                     )}
                     {whisperWorkers != null && (
@@ -1012,7 +1059,12 @@ export function Dashboard() {
                       // "N en curso" count instead.
                       const slots = act.slots
                       const processing = slots != null ? Math.min(act.inFlight, slots) : act.inFlight
-                      const queued = slots != null ? Math.max(0, act.inFlight - slots) : 0
+                      // Real queue depth from the fair-share gate when it is
+                      // available; the inFlight-minus-slots arithmetic below
+                      // is only an approximation of it.
+                      const queued =
+                        adm?.queuedRequests ??
+                        (slots != null ? Math.max(0, act.inFlight - slots) : 0)
                       const label =
                         slots != null
                           ? `${processing}/${slots} procesando`
@@ -1042,6 +1094,35 @@ export function Dashboard() {
                         </span>
                       )
                     })()}
+                    {act?.tokensPerSecondTotal != null && act.tokensPerSecondTotal > 0 && (
+                      <span
+                        className="rounded-md bg-muted px-2 py-0.5 tabular-nums"
+                        title={`Suma de ${act.generatingCount} petición${act.generatingCount === 1 ? "" : "es"} generando. Las que procesan prompt no aportan t/s.`}
+                      >
+                        {act.tokensPerSecondTotal} t/s
+                        {(act.generatingCount ?? 0) > 1 ? ` ×${act.generatingCount}` : ""}
+                      </span>
+                    )}
+                    {(adm?.slotSaturated || adm?.computeSaturated) && (
+                      <span
+                        className="rounded-md bg-amber-500/15 px-2 py-0.5 text-amber-300"
+                        title={
+                          adm?.computeSaturated && !adm?.slotSaturated
+                            ? `Límite de cómputo alcanzado (${adm?.admissionLimit} de ${adm?.slots} slots)`
+                            : "Todos los slots ocupados: las siguientes peticiones esperarán en cola"
+                        }
+                      >
+                        al límite
+                      </span>
+                    )}
+                    {idleLeft != null && (
+                      <span
+                        className="rounded-md bg-muted px-2 py-0.5 tabular-nums"
+                        title="Se descargará por inactividad si no recibe peticiones"
+                      >
+                        descarga en {idleLeft >= 60 ? `${Math.floor(idleLeft / 60)}m${idleLeft % 60}s` : `${idleLeft}s`}
+                      </span>
+                    )}
                     {loadedMeta(model.loadedAt, nowMs) && (
                       <span className="rounded-md bg-muted px-2 py-0.5">
                         Cargado {loadedMeta(model.loadedAt, nowMs)!.at} ·{" "}
@@ -1049,6 +1130,26 @@ export function Dashboard() {
                       </span>
                     )}
                   </div>
+                  {kvPct != null && (
+                    <div className="flex items-center gap-2 pt-0.5 text-[10px] text-muted-foreground">
+                      <span
+                        className="h-1.5 w-40 overflow-hidden rounded-full bg-muted"
+                        title={`Pool KV compartido por los slots: ${kvUsed} de ${kvCap} tokens reservados. Es la ocupación total de la caché, no el contexto de una petición.`}
+                      >
+                        <span
+                          className="block h-full"
+                          style={{
+                            width: `${kvPct}%`,
+                            background: kvPct > 85 ? "#dc2626" : kvPct > 60 ? "#eda100" : "#16a34a",
+                          }}
+                        />
+                      </span>
+                      <span className="tabular-nums">
+                        KV {formatTokenCount(kvUsed ?? 0)}/{formatTokenCount(kvCap ?? 0)} (
+                        {kvPct.toFixed(0)}%)
+                      </span>
+                    </div>
+                  )}
                 </div>
                 {model.status === "loaded" && (
                   <button
