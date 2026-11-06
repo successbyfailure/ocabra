@@ -1095,7 +1095,7 @@ export function ModelConfigModal({
   const handleSave = async () => {
     if (!model) return;
     if (
-      model.backendType === "llama_cpp" &&
+      isLlamaCppFamily(model.backendType) &&
       llamaVisionMode !== "disabled" &&
       llamaMmprojModelId.trim() === ""
     ) {
@@ -1280,7 +1280,7 @@ export function ModelConfigModal({
             </FieldSection>
 
             {model &&
-              ["ollama", "llama_cpp", "vllm", "sglang", "bitnet"].includes(
+              ["ollama", "llama_cpp", "llamacpp_mks", "vllm", "sglang", "bitnet"].includes(
                 model.backendType,
               ) && (
                 <FieldSection
@@ -1288,7 +1288,7 @@ export function ModelConfigModal({
                   description={
                     hasEnabledPresets
                       ? "Predicción de contexto máximo por slot y curva de VRAM. El caso de uso (contexto, paralelismo, KV cache) lo maneja el preset activo del profile — edítalo abajo o en Profiles."
-                      : model.backendType === "llama_cpp" &&
+                      : isLlamaCppFamily(model.backendType) &&
                           llamaCpp?.kvUnified === true
                         ? `Pool KV total compartido por ${llamaCpp.parallelSlots ?? 1} slots. Cada petición puede usar el remanente disponible hasta el pool completo; la tabla es una estimación conservadora por arquitectura.`
                         : "Contexto máximo por slot/concurrencia, curva de VRAM, y — para llama.cpp — cache, placement de GPU y slots."
@@ -1309,7 +1309,7 @@ export function ModelConfigModal({
                     onRecalculate={() => void estimateMemory(false)}
                     onProbe={() => void estimateMemory(true)}
                     llamaCpp={
-                      model.backendType === "llama_cpp"
+                      isLlamaCppFamily(model.backendType)
                         ? {
                             disabledGpus: llamaDisabledGpus,
                             onDisabledGpusChange: setLlamaDisabledGpus,
@@ -1868,7 +1868,7 @@ export function ModelConfigModal({
               </FieldSection>
             )}
 
-            {model?.backendType === "llama_cpp" && (
+            {isLlamaCppFamily(model?.backendType) && (
               <FieldSection
                 title="llama.cpp Runtime"
                 description="Lo relevante aquí es cuánto sube a GPU, el contexto y si actúa como modelo de embeddings."
@@ -2141,7 +2141,7 @@ export function ModelConfigModal({
               </FieldSection>
             )}
 
-            {model?.backendType === "llama_cpp" && (
+            {isLlamaCppFamily(model?.backendType) && (
               <FieldSection
                 title="MoE / CPU offload"
                 description="Mantén capas de expertos en CPU para liberar VRAM en modelos Mixture-of-Experts."
@@ -2192,7 +2192,7 @@ export function ModelConfigModal({
               </FieldSection>
             )}
 
-            {model?.backendType === "llama_cpp" && (
+            {isLlamaCppFamily(model?.backendType) && (
               <FieldSection
                 title="Speculative decoding"
                 description="Acelera la generación usando un modelo borrador con tokenizer idéntico."
@@ -2278,6 +2278,10 @@ export function ModelConfigModal({
               </FieldSection>
             )}
 
+            {/* Upstream only, deliberately: this picks among installed
+              llama_cpp_<cuda|rocm|vulkan|cpu> builds, and the Makespace fork
+              ships a single CUDA build from its own install, so offering a
+              runtime choice there would be misleading. */}
             {model?.backendType === "llama_cpp" && (
               <FieldSection
                 title="Runtime"

@@ -3575,7 +3575,9 @@ class ModelManager:
             rows = (
                 (
                     await session.execute(
-                        select(ModelConfig).where(ModelConfig.backend_type == "llama_cpp")
+                        select(ModelConfig).where(
+                            ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY)
+                        )
                     )
                 )
                 .scalars()

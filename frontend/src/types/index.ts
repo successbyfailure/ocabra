@@ -432,6 +432,8 @@ export interface DownloadJob {
   registerConfig?: {
     displayName?: string;
     loadPolicy?: LoadPolicy;
+    /** Explicit backend choice; omit to let the server infer one. */
+    backendType?: BackendType;
     pinPermanent?: boolean;
     preferredGpu?: number | null;
     extraConfig?: BackendExtraConfig;

@@ -67,7 +67,7 @@ export function HFModelCard({ model, onInstall }: HFModelCardProps) {
         {model.backendOptions && model.backendOptions.length > 1 ? (
           <span
             className="rounded bg-muted px-2 py-0.5"
-            title="Este repositorio se puede servir con varios backends. Eliges en el modal de variantes."
+            title="Este repositorio se puede servir con varios backends. Eliges cuál en el modal de instalación."
           >
             backends {model.backendOptions.join(" · ")}
           </span>

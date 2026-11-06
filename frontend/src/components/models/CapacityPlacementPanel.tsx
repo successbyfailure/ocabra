@@ -57,7 +57,7 @@ interface CapacityPlacementPanelProps {
   onRecalculate: () => void;
   onProbe: () => void;
 
-  // Present only for backendType === "llama_cpp".
+  // Present only for the llama.cpp family (upstream and the Makespace fork).
   llamaCpp?: LlamaCppPlacementProps;
 }
 

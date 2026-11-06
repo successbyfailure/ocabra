@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { toast } from "sonner"
-import type { LocalModel, ServerConfig } from "@/types"
+import { api } from "@/api/client"
+import type { BackendType, LocalModel, ServerConfig } from "@/types"
+
+// Backends that can serve a bare GGUF file. Both llama.cpp backends read the
+// same config section, so the same file works with either; bitnet only makes
+// sense for ternary quants but the user is the one who knows.
+const GGUF_BACKENDS: BackendType[] = ["llamacpp_mks", "llama_cpp", "bitnet"]
 
 interface StorageSettingsProps {
   localModels: LocalModel[]
@@ -12,6 +18,26 @@ interface StorageSettingsProps {
 export function StorageSettings({ localModels, config, onSave }: StorageSettingsProps) {
   const [downloadDir, setDownloadDir] = useState(config.downloadDir)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  // Per-file backend choice for the "register" action, keyed by path.
+  const [backendChoice, setBackendChoice] = useState<Record<string, BackendType>>({})
+  const [registering, setRegistering] = useState<string | null>(null)
+
+  const registerLocal = async (model: LocalModel) => {
+    const backendType = backendChoice[model.path] ?? GGUF_BACKENDS[0]
+    setRegistering(model.path)
+    try {
+      await api.registry.registerLocal({
+        modelRef: model.modelId,
+        path: model.path,
+        backendType,
+      })
+      toast.success(`${model.modelId} registrado en ${backendType}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo registrar")
+    } finally {
+      setRegistering(null)
+    }
+  }
 
   useEffect(() => {
     setDownloadDir(config.downloadDir)
@@ -55,7 +81,7 @@ export function StorageSettings({ localModels, config, onSave }: StorageSettings
                   {isOllamaShared && (
                     <span
                       className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-sky-200"
-                      title="Compartido desde Ollama: el blob GGUF que Ollama ya tiene bajado se puede servir con nuestro backend llama.cpp sin volver a descargarlo."
+                      title="Compartido desde Ollama: el blob GGUF que Ollama ya tiene bajado se puede servir con nuestro llama.cpp sin volver a descargarlo. Usa «registrar» para darlo de alta."
                     >
                       via Ollama
                     </span>
@@ -64,7 +90,39 @@ export function StorageSettings({ localModels, config, onSave }: StorageSettings
                     {model.backendType}
                   </span>
                 </span>
-                <span className="shrink-0">{model.sizeGb.toFixed(2)} GB</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {(model.source === "gguf" || isOllamaShared) && (
+                    <>
+                      <select
+                        value={backendChoice[model.path] ?? GGUF_BACKENDS[0]}
+                        onChange={(event) =>
+                          setBackendChoice((prev) => ({
+                            ...prev,
+                            [model.path]: event.target.value as BackendType,
+                          }))
+                        }
+                        className="rounded border border-border bg-background px-1 py-0.5 text-[10px]"
+                        title="Backend con el que se servirá este fichero"
+                      >
+                        {GGUF_BACKENDS.map((backend) => (
+                          <option key={backend} value={backend}>
+                            {backend}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void registerLocal(model)}
+                        disabled={registering === model.path}
+                        className="rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-muted disabled:opacity-50"
+                        title="Dar de alta este fichero como modelo, sin volver a descargarlo"
+                      >
+                        {registering === model.path ? "..." : "registrar"}
+                      </button>
+                    </>
+                  )}
+                  {model.sizeGb.toFixed(2)} GB
+                </span>
               </div>
               <div className="h-2 rounded-full bg-muted">
                 <div

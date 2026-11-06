@@ -4,6 +4,7 @@
 
 import type {
   BackendType,
+  LoadPolicy,
   GPUState,
   GPUStatHistory,
   ModelState,
@@ -2356,7 +2357,21 @@ export const api = {
         source,
         model_ref: modelRef,
         artifact: artifact ?? null,
-        register_config: registerConfig ?? null,
+        // The wire format is snake_case and `request` does a plain
+        // JSON.stringify, so the mapping has to happen here. It did not, and
+        // the server — which reads snake_case — silently discarded every
+        // field: the load policy and display name picked in the install modal,
+        // and the vLLM recipe preconfiguration in extraConfig.
+        register_config: registerConfig
+          ? {
+              display_name: registerConfig.displayName,
+              load_policy: registerConfig.loadPolicy,
+              backend_type: registerConfig.backendType,
+              pin_permanent: registerConfig.pinPermanent,
+              preferred_gpu: registerConfig.preferredGpu,
+              extra_config: registerConfig.extraConfig,
+            }
+          : null,
       }).then(toDownloadJob),
     cancel: (jobId: string) =>
       request<void>("DELETE", `/ocabra/downloads/${encodeURIComponent(jobId)}`),
@@ -2370,6 +2385,29 @@ export const api = {
   },
 
   registry: {
+    /**
+     * Register weights already on disk under an explicitly chosen backend.
+     * Covers what the download flow cannot: attaching an Ollama-downloaded
+     * GGUF to a llama.cpp backend without re-downloading several GB, or
+     * serving the same file with a different backend than the scanner
+     * inferred.
+     */
+    registerLocal: (body: {
+      modelRef: string;
+      path: string;
+      backendType: BackendType;
+      displayName?: string;
+      loadPolicy?: LoadPolicy;
+      preferredGpu?: number | null;
+    }): Promise<unknown> =>
+      request<unknown>("POST", "/ocabra/registry/local/register", {
+        model_ref: body.modelRef,
+        path: body.path,
+        backend_type: body.backendType,
+        display_name: body.displayName ?? null,
+        load_policy: body.loadPolicy ?? "on_demand",
+        preferred_gpu: body.preferredGpu ?? null,
+      }),
     searchHF: async (
       q: string,
       task?: string,

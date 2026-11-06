@@ -10,6 +10,7 @@ import { SearchFilters } from "@/components/explore/SearchFilters"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useDownloadStore } from "@/stores/downloadStore"
 import type {
+  BackendType,
   DownloadSource,
   HFModelCard as HFCardType,
   HFModelVariant,
@@ -24,6 +25,11 @@ interface InstallTarget {
   modelRef: string
   title: string
   ollamaBase?: string
+  // Backends the repo can be served with, when more than one applies (e.g.
+  // safetensors + GGUF in one upload, or upstream llama.cpp vs the Makespace
+  // fork). The registration used to always re-infer a single backend and
+  // ignore the choice; it now honours `backend_type` in register_config.
+  backendOptions?: BackendType[]
 }
 
 function AdvancedDetails({ children }: { children: React.ReactNode }) {
@@ -90,13 +96,20 @@ function toRecipeRegisterConfig(
   title: string,
   loadPolicy: LoadPolicy,
   variant: HFModelVariant | null,
+  backendType?: BackendType | null,
 ) {
   const support = variant?.vllmSupport
+  // camelCase here, like the rest of the frontend; api/client.ts maps the
+  // payload to the snake_case keys the backend reads. It used to ship this
+  // object verbatim, so every field was silently dropped — including the
+  // whole vLLM recipe preconfiguration.
+  const base = {
+    displayName: title,
+    loadPolicy,
+    ...(backendType ? { backendType } : {}),
+  }
   if (!support) {
-    return {
-      displayName: title,
-      loadPolicy,
-    }
+    return base
   }
 
   const vllmConfig: VLLMConfig = {
@@ -128,8 +141,7 @@ function toRecipeRegisterConfig(
   }
 
   return {
-    displayName: title,
-    loadPolicy,
+    ...base,
     extraConfig: {
       vllm: vllmConfig,
     },
@@ -148,6 +160,7 @@ export function Explore() {
   const [bitnetResults, setBitnetResults] = useState<HFCardType[]>([])
   const [loading, setLoading] = useState(false)
   const [installTarget, setInstallTarget] = useState<InstallTarget | null>(null)
+  const [selectedBackendType, setSelectedBackendType] = useState<BackendType | "">("")
   const [ollamaVariants, setOllamaVariants] = useState<OllamaModelVariant[]>([])
   const [hfVariants, setHfVariants] = useState<HFModelVariant[]>([])
   const [selectedHFVariantId, setSelectedHFVariantId] = useState("")
@@ -360,12 +373,24 @@ export function Explore() {
       return
     }
 
+    // Explicit choice first, then the variant's own backend, then nothing
+    // (the backend infers). Ollama downloads are always served by Ollama.
+    const chosenBackend: BackendType | null =
+      installTarget.source === "ollama"
+        ? null
+        : ((selectedBackendType || selectedHFVariant?.backendType || null) as BackendType | null)
     const registerConfig =
       installTarget.source === "huggingface"
-        ? toRecipeRegisterConfig(installTarget.title, loadPolicy, selectedHFVariant)
+        ? toRecipeRegisterConfig(
+            installTarget.title,
+            loadPolicy,
+            selectedHFVariant,
+            chosenBackend,
+          )
         : {
             displayName: installTarget.title,
             loadPolicy,
+            ...(chosenBackend ? { backendType: chosenBackend } : {}),
           }
     try {
       const job = await api.downloads.enqueue(
@@ -465,13 +490,17 @@ export function Explore() {
                 <HFModelCard
                   key={model.repoId}
                   model={model}
-                  onInstall={(item) =>
+                  onInstall={(item) => {
                     setInstallTarget({
                       source: "huggingface",
                       modelRef: item.repoId,
                       title: item.modelName,
+                      backendOptions: item.backendOptions,
                     })
-                  }
+                    // Reset so a previous repo's choice never leaks into the
+                    // next install; the selector defaults to options[0].
+                    setSelectedBackendType("")
+                  }}
                 />
               ))}
             </div>
@@ -728,6 +757,41 @@ export function Explore() {
                   className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
                 />
               </label>
+              {installTarget?.source !== "ollama" &&
+                (() => {
+                  // Options the repo actually supports, falling back to the
+                  // selected variant's own backend. Only worth a selector when
+                  // there is a real choice to make.
+                  const options =
+                    installTarget?.backendOptions && installTarget.backendOptions.length > 0
+                      ? installTarget.backendOptions
+                      : selectedHFVariant?.backendType
+                        ? [selectedHFVariant.backendType]
+                        : []
+                  if (options.length < 2) return null
+                  return (
+                    <label className="block text-sm text-muted-foreground">
+                      backend
+                      <select
+                        value={selectedBackendType || options[0]}
+                        onChange={(event) =>
+                          setSelectedBackendType(event.target.value as BackendType)
+                        }
+                        className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+                      >
+                        {options.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="mt-1 block text-xs">
+                        Este repositorio se puede servir con varios backends. El elegido
+                        queda fijado al registrar el modelo.
+                      </span>
+                    </label>
+                  )
+                })()}
               <label className="block text-sm text-muted-foreground">
                 load_policy
                 <select

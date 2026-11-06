@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import re
 import shutil
 import uuid
 from collections.abc import AsyncGenerator
@@ -15,7 +16,7 @@ from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
-from ocabra.core.model_ref import build_model_ref, is_llama_cpp_family
+from ocabra.core.model_ref import KNOWN_BACKEND_TYPES, build_model_ref, is_llama_cpp_family
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -32,6 +33,25 @@ class DownloadCreateRequest(BaseModel):
     model_ref: str
     artifact: str | None = None
     register_config: dict | None = None
+
+
+def _rc_get(register_config: dict, snake: str, default=None):
+    """Read a ``register_config`` key accepting snake_case or camelCase.
+
+    The UI builds this payload client-side and ``api/client.ts`` ships it with
+    ``JSON.stringify`` — no case conversion anywhere — so it arrives camelCased
+    while every reader here expects snake_case. The keys therefore all missed:
+    the load policy and display name picked in the Explore install modal were
+    silently discarded, and worse, ``extraConfig`` carrying the whole vLLM
+    recipe preconfiguration was dropped, so the "con preconfiguracion" toast
+    was never true (verified 2026-11-06: zero registered vLLM models carry a
+    recipeId). Accepting both spellings fixes it regardless of client version.
+    """
+    camel = re.sub(r"_([a-z])", lambda m: m.group(1).upper(), snake)
+    value = register_config.get(snake)
+    if value is None:
+        value = register_config.get(camel)
+    return default if value is None else value
 
 
 class DownloadManager:
@@ -321,20 +341,34 @@ class DownloadManager:
         try:
             mm = self._app.state.model_manager
             backend_model_id = self._job_model_id(job)
-            if job.source == "ollama":
+            register_config = job.register_config or {}
+            # An explicit choice from the UI wins over inference. The same repo
+            # can legitimately be served by more than one backend (safetensors
+            # + GGUF in one upload, or upstream llama.cpp vs the Makespace
+            # fork), and ``infer_backend_for_repo`` can only ever return one of
+            # them. Validated against KNOWN_BACKEND_TYPES so a typo degrades to
+            # inference instead of registering an unservable model id.
+            requested_backend = _rc_get(register_config, "backend_type")
+            if isinstance(requested_backend, str) and requested_backend in KNOWN_BACKEND_TYPES:
+                backend_type = requested_backend
+            elif job.source == "ollama":
                 backend_type = "ollama"
             elif job.source == "bitnet":
                 backend_type = "bitnet"
             else:
                 backend_type = await self._hf_registry.infer_backend_for_repo(job.model_ref, artifact=job.artifact)
+                if isinstance(requested_backend, str) and requested_backend:
+                    logger.warning(
+                        "download_register_unknown_backend_requested",
+                        requested=requested_backend,
+                        fell_back_to=backend_type,
+                    )
 
             model_id = build_model_ref(backend_type, backend_model_id)
             existing = await mm.get_state(model_id)
             if existing:
                 return
-
-            register_config = job.register_config or {}
-            extra_config = register_config.get("extra_config") or {}
+            extra_config = _rc_get(register_config, "extra_config") or {}
             # Single-file weights (BitNet / llama.cpp GGUF) are stored under
             # ``huggingface/<repo-->--<artifact stem>/<artifact>``. Pin the exact
             # path: the backends can't derive it from the ``repo::artifact``
@@ -359,11 +393,10 @@ class DownloadManager:
             await mm.add_model(
                 model_id=model_id,
                 backend_type=backend_type,
-                display_name=register_config.get("display_name")
-                or backend_model_id,
-                load_policy=register_config.get("load_policy", "on_demand"),
-                pin_permanent=bool(register_config.get("pin_permanent", False)),
-                preferred_gpu=register_config.get("preferred_gpu"),
+                display_name=_rc_get(register_config, "display_name") or backend_model_id,
+                load_policy=_rc_get(register_config, "load_policy", "on_demand"),
+                pin_permanent=bool(_rc_get(register_config, "pin_permanent", False)),
+                preferred_gpu=_rc_get(register_config, "preferred_gpu"),
                 extra_config=extra_config or None,
             )
             # Playground / /v1/models look up by profile_id; without a default

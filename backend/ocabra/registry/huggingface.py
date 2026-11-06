@@ -11,6 +11,7 @@ from huggingface_hub import hf_hub_download, list_models, model_info, snapshot_d
 
 from ocabra.backends.vllm_recipes import get_vllm_recipe
 from ocabra.config import settings
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.registry.vllm_runtime_probe import VLLMRuntimeProbeService
 from ocabra.schemas.registry import (
     HFModelCard,
@@ -514,12 +515,18 @@ class HuggingFaceRegistry:
         lowered = [name.lower() for name in names]
         # If the primary is not llama.cpp but there are .gguf files alongside,
         # surface llama.cpp as an alternative.
-        if primary != "llama_cpp" and any(name.endswith(".gguf") for name in lowered):
-            options.append("llama_cpp")
+        if not is_llama_cpp_family(primary) and any(
+            name.endswith(".gguf") for name in lowered
+        ):
+            # Offer BOTH llama.cpp backends: upstream and the Makespace fork.
+            # The fork is a strict superset (on-demand vision), but upstream
+            # stays the inferred primary so a deployment that only has it
+            # installed keeps working out of the box.
+            options.extend(["llama_cpp", "llamacpp_mks"])
         # If the primary is llama.cpp but transformers weights are also
         # present (rare but possible — base model + GGUF mirror in one repo),
         # offer vllm as an alternative.
-        if primary == "llama_cpp" and any(
+        if is_llama_cpp_family(primary) and any(
             name.endswith((".safetensors", ".bin")) for name in lowered
         ):
             options.append("vllm")
@@ -542,7 +549,7 @@ class HuggingFaceRegistry:
             return any(name.endswith((".safetensors", ".bin")) for name in lowered)
         if backend_hint == "whisper":
             return any(name.endswith((".safetensors", ".bin", ".pt", ".nemo")) for name in lowered)
-        if backend_hint == "llama_cpp":
+        if is_llama_cpp_family(backend_hint):
             return any(name.endswith(".gguf") for name in lowered)
         return any(name.endswith((".safetensors", ".bin")) for name in lowered)
 
@@ -644,7 +651,7 @@ class HuggingFaceRegistry:
                 "LICENSE*",
             ]
 
-        if backend_hint == "llama_cpp":
+        if is_llama_cpp_family(backend_hint):
             # When no specific artifact was requested, allow every GGUF in the
             # repo plus the usual tokenizer/config files. Most GGUF mirror
             # repos ship a single quantization, so this matches the common
@@ -706,7 +713,7 @@ class HuggingFaceRegistry:
             return ".safetensors|.bin"
         if backend_hint == "whisper":
             return ".nemo|.safetensors|.bin|.pt"
-        if backend_hint == "llama_cpp":
+        if is_llama_cpp_family(backend_hint):
             return ".gguf"
         return ".safetensors|.bin"
 
