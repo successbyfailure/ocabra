@@ -12,6 +12,7 @@ import structlog
 from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import WorkerPoolFairGates
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 from ocabra.core.runtime_coordinator import estimate_prompt_tokens
 
@@ -538,7 +539,7 @@ class WorkerPool:
         worker = self._workers.get(model_id)
         adaptive = bool(
             worker
-            and worker.backend_type == "llama_cpp"
+            and is_llama_cpp_family(worker.backend_type)
             and settings.llama_cpp_adaptive_admission_enabled
         )
         return self._fair_gates.get(

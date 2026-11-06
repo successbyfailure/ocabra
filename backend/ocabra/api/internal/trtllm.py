@@ -352,7 +352,7 @@ def _estimate_vram(
     # ── Derive HF config path ────────────────────────────────────
     raw = model_id
     parts = raw.split("/", 1)
-    if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
+    if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "llama_cpp_mks", "sglang"}:
         raw = parts[1]
     hf_dir = raw.replace("/", "--")
     models_dir = _Path(settings.models_dir or "/data/models")

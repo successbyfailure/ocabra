@@ -102,6 +102,25 @@ def _compose_visible_devices(
 
 
 class LlamaCppBackend(BackendInterface):
+    # ── Identity, overridden by LlamaCppMksBackend ───────────────────────
+    # Reported in WorkerInfo and used to resolve this backend's own install
+    # directory. Kept as class attributes rather than literals so the fork
+    # subclass inherits every behaviour and overrides only what differs.
+    # Keep in sync with the registration in main.py and with
+    # ``ocabra.core.model_ref.LLAMA_CPP_FAMILY``.
+    BACKEND_TYPE = "llama_cpp"
+    BACKEND_DIR_NAME = "llama_cpp"
+    # Only upstream honours ``settings.llama_cpp_custom_server_bin``. That
+    # setting is a pre-fork workaround for the install path not being able to
+    # produce a custom binary; the fork backend installs its own, so letting
+    # it apply there would silently point both backends at the same binary.
+    HONOUR_CUSTOM_SERVER_BIN_SETTING = True
+    # Last-resort binary when there is no modular install: the legacy
+    # fat-image path. ``None`` means "no fallback" — the fork must come from
+    # its own install, because falling back here would hand it upstream's
+    # binary and make the A/B comparison meaningless without any error.
+    LEGACY_SERVER_BIN_SETTING: str | None = "llama_cpp_server_bin"
+
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION, ModalityType.EMBEDDINGS}
@@ -160,25 +179,40 @@ class LlamaCppBackend(BackendInterface):
         """Pick the ``llama-server`` binary path.
 
         Priority:
-        1. ``settings.llama_cpp_custom_server_bin`` (explicit custom fork).
-        2. ``<backends_dir>/llama_cpp/metadata.json`` -> ``extra_bins.server``
-           (modular install via :class:`BackendInstaller`).
-        3. ``settings.llama_cpp_server_bin`` (legacy fat-image path).
+        1. ``settings.llama_cpp_custom_server_bin``, only when
+           ``HONOUR_CUSTOM_SERVER_BIN_SETTING`` (upstream backend only).
+        2. ``<backends_dir>/<BACKEND_DIR_NAME>/metadata.json`` ->
+           ``extra_bins.server`` (modular install via
+           :class:`BackendInstaller`).
+        3. ``LEGACY_SERVER_BIN_SETTING`` (fat-image path), or
+           :class:`FileNotFoundError` when that is ``None``.
         """
-        custom_bin = getattr(settings, "llama_cpp_custom_server_bin", None)
+        custom_bin = (
+            getattr(settings, "llama_cpp_custom_server_bin", None)
+            if self.HONOUR_CUSTOM_SERVER_BIN_SETTING
+            else None
+        )
         if isinstance(custom_bin, str) and custom_bin.strip():
             custom_path = Path(custom_bin)
             if not custom_path.is_file():
                 raise FileNotFoundError(f"Custom llama-server not found at '{custom_path}'")
             return str(custom_path)
-        meta = read_backend_metadata(settings.backends_dir, "llama_cpp")
+        meta = read_backend_metadata(settings.backends_dir, self.BACKEND_DIR_NAME)
         if meta is not None:
             extra = meta.get("extra_bins") if isinstance(meta, dict) else None
             if isinstance(extra, dict):
                 bin_path = extra.get("server")
                 if bin_path and Path(bin_path).is_file():
                     return str(bin_path)
-        return settings.llama_cpp_server_bin
+        if self.LEGACY_SERVER_BIN_SETTING is None:
+            raise FileNotFoundError(
+                f"Backend '{self.BACKEND_TYPE}' has no installed llama-server: "
+                f"'{Path(settings.backends_dir) / self.BACKEND_DIR_NAME / 'metadata.json'}' "
+                "is missing or has no extra_bins.server. Install the backend "
+                "first — there is deliberately no fallback, since using the "
+                "upstream binary here would silently serve the wrong build."
+            )
+        return getattr(settings, self.LEGACY_SERVER_BIN_SETTING)
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
@@ -405,7 +439,7 @@ class LlamaCppBackend(BackendInterface):
 
         vram_used_mb = await self.get_vram_estimate_mb(model_id)
         return WorkerInfo(
-            backend_type="llama_cpp",
+            backend_type=self.BACKEND_TYPE,
             model_id=model_id,
             gpu_indices=visible_gpus or gpu_indices,
             port=port,

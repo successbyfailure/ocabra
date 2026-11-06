@@ -433,7 +433,7 @@ class TrtllmCompileManager:
         raw_model = state.source_model
         if "/" in raw_model:
             parts = raw_model.split("/", 1)
-            if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
+            if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "llama_cpp_mks", "sglang"}:
                 raw_model = parts[1]
         hf_dir_name = raw_model.replace("/", "--")
         model_dir = f"{models_container}/huggingface/{hf_dir_name}"
@@ -492,7 +492,7 @@ class TrtllmCompileManager:
         )
         raw = state.source_model
         parts = raw.split("/", 1)
-        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
+        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "llama_cpp_mks", "sglang"}:
             raw = parts[1]
         hf_dir_name = raw.replace("/", "--")
         cfg_path = _Path(models_dir) / "huggingface" / hf_dir_name / "config.json"
@@ -508,7 +508,7 @@ class TrtllmCompileManager:
         """Derive the HuggingFace model directory from source_model (used as tokenizer)."""
         raw = source_model
         parts = raw.split("/", 1)
-        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "sglang"}:
+        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "llama_cpp_mks", "sglang"}:
             raw = parts[1]
         hf_dir_name = raw.replace("/", "--")
         models_container = settings.tensorrt_llm_engines_dir.rsplit("/tensorrt_llm", 1)[0] \

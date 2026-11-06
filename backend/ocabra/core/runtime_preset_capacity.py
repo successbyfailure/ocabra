@@ -14,6 +14,7 @@ from ocabra.core.model_manager_helpers import (
     _resolve_rs_rollback_snapshots,
     resolve_llama_cpp_option,
 )
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.runtime_presets import build_runtime_key
 from ocabra.core.vram_capacity import KV_DTYPES, resolve_arch_and_weights
 
@@ -24,7 +25,7 @@ from ocabra.core.vram_capacity import KV_DTYPES, resolve_arch_and_weights
 # requested GPUs' capacity with the same single-GPU formula is a faithful
 # model — validated empirically for llama_cpp against a real asymmetric
 # 3060+3090 load (2026-10-26).
-_PROPORTIONAL_MULTI_GPU_BACKENDS = {"ollama", "llama_cpp", "bitnet"}
+_PROPORTIONAL_MULTI_GPU_BACKENDS = {"ollama", "llama_cpp", "llama_cpp_mks", "bitnet"}
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,7 @@ def _uses_unified_kv_pool(state: Any) -> bool:
     exposed to selection is the aggregate pool, not ``pool / slots``.
     """
 
-    if str(getattr(state, "backend_type", "")).lower() != "llama_cpp":
+    if not is_llama_cpp_family(getattr(state, "backend_type", "")):
         return False
     raw = resolve_llama_cpp_option(state, "kv_unified", False)
     if isinstance(raw, str):

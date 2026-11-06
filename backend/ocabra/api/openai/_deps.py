@@ -20,6 +20,7 @@ from fastapi import Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, get_current_user
 from ocabra.core.model_manager_helpers import compute_worker_key  # noqa: F401
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.runtime_coordinator import (
     OutputTokenLimitError,
     RuntimePlan,
@@ -1407,7 +1408,7 @@ def fairness_slots(state: ModelState) -> int:
             return max(1, int(runtime_meta.get("parallelism") or 1))
         except (TypeError, ValueError):
             return 1
-    if state.backend_type == "llama_cpp":
+    if is_llama_cpp_family(state.backend_type):
         from ocabra.core.model_manager_helpers import resolve_llama_cpp_option
 
         configured = resolve_llama_cpp_option(state, "parallel_slots", None)
@@ -1434,7 +1435,7 @@ def fairness_kv_budget(
     that explicitly enabled the unified cache publish a capacity. Every other
     backend receives ``(None, 0)`` and keeps the historical slot-only gate.
     """
-    if state.backend_type != "llama_cpp" or required_tokens is None:
+    if not is_llama_cpp_family(state.backend_type) or required_tokens is None:
         return None, 0
 
     from ocabra.core.model_manager_helpers import resolve_llama_cpp_option
@@ -1639,7 +1640,7 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
         # Ollama passes unknown top-level keys to the chat template so the
         # same key still works.
         payload.setdefault("think", enabled)
-    elif backend == "llama_cpp":
+    elif is_llama_cpp_family(backend):
         template_kwargs = payload.get("chat_template_kwargs")
         template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
         template_kwargs["enable_thinking"] = enabled
@@ -1685,7 +1686,7 @@ def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:
         budget = int(raw)
     except (TypeError, ValueError):
         return
-    if getattr(state, "backend_type", "") == "llama_cpp":
+    if is_llama_cpp_family(getattr(state, "backend_type", "")):
         payload.setdefault("reasoning_budget_tokens", budget)
 
 

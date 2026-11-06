@@ -11,6 +11,7 @@ import structlog
 
 from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key, resolve_llama_cpp_option
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.output_limits import resolve_max_output_tokens
 from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
 from ocabra.core.runtime_presets import (
@@ -184,7 +185,7 @@ def _apply_llama_cpp_preset_placement(
     this translation a dual preset cloned ``disabled_gpus=[0]`` from a normal
     3090-only base profile and silently remained single-GPU.
     """
-    if str(getattr(state, "backend_type", "")).lower() != "llama_cpp":
+    if not is_llama_cpp_family(getattr(state, "backend_type", "")):
         return
     selected = list(dict.fromkeys(int(index) for index in preset.gpu_indices))
     if not selected:
@@ -419,7 +420,7 @@ async def plan_profile_runtime(
         candidate_overrides = dict(profile.load_overrides or {})
         _apply_llama_cpp_preset_placement(candidate_overrides, state, candidate, gpu_states)
         unified_pool = False
-        if str(getattr(state, "backend_type", "")).lower() == "llama_cpp":
+        if is_llama_cpp_family(getattr(state, "backend_type", "")):
             section = candidate_overrides.get("llama_cpp")
             raw_unified = (
                 section.get("kv_unified", section.get("kvUnified"))

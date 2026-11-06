@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { Layers3, X } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/api/client";
+import { isLlamaCppFamily } from "@/types";
 import {
   formatTokenCount,
   getBitNetConfig,
@@ -614,7 +615,7 @@ export function ModelConfigModal({
   // Sprint 17.4 — fetch speculative candidates + installed llama.cpp runtimes
   // when the modal opens for a llama.cpp model.
   useEffect(() => {
-    if (!open || !model || model.backendType !== "llama_cpp") return;
+    if (!open || !model || !isLlamaCppFamily(model.backendType)) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -636,7 +637,10 @@ export function ModelConfigModal({
         }>) {
           if (!b?.backendType?.startsWith("llama_cpp")) continue;
           if (b.installStatus !== "installed") continue;
-          if (b.backendType === "llama_cpp") {
+          if (isLlamaCppFamily(b.backendType)) {
+            // Both are CUDA builds. The fork is a separate backend, NOT a
+            // llama_cpp_<runtime> variant, so it must not fall through to the
+            // suffix parsing below — that would register a runtime "mks".
             installed.add("cuda");
             continue;
           }
@@ -874,7 +878,7 @@ export function ModelConfigModal({
       return Object.keys(next).length > 0 ? next : undefined;
     }
 
-    if (model.backendType === "llama_cpp") {
+    if (isLlamaCppFamily(model.backendType)) {
       // Resolve enabled GPUs (everything not toggled off in the modal).
       const enabledGpus = gpus
         .map((g) => g.index)

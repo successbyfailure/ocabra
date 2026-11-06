@@ -1,3 +1,4 @@
+import { isLlamaCppFamily } from "@/types";
 import type {
   BackendExtraConfig,
   BitNetConfig,
@@ -47,7 +48,9 @@ export function getSGLangConfig(model: ModelState): SGLangConfig | null {
 }
 
 export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
-  if (model.backendType !== "llama_cpp") return null
+  // Upstream llama.cpp and the Makespace fork share the same config
+  // section, so both read the same options here.
+  if (!isLlamaCppFamily(model.backendType)) return null
   const raw = getConfigSection<Record<string, unknown>>(model, "llama_cpp")
   if (raw == null) return null
   // Accept both camelCase (frontend write path) and snake_case (backend
@@ -134,7 +137,8 @@ export function getModelContextSummary(model: ModelState): ModelContextSummary {
       configuredContext = toPositiveNumber(sglang?.contextLength ?? (sglang as Record<string, unknown> | null)?.context_length)
       break
     }
-    case "llama_cpp": {
+    case "llama_cpp":
+    case "llama_cpp_mks": {
       const llamaCpp = getLlamaCppConfig(model)
       configuredContext = toPositiveNumber(llamaCpp?.ctxSize ?? (llamaCpp as Record<string, unknown> | null)?.ctx_size)
       break

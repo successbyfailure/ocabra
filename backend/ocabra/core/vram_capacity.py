@@ -17,6 +17,7 @@ import httpx
 
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.vram_planner import (
     ModelArch,
     arch_from_gguf,
@@ -182,7 +183,7 @@ async def resolve_use_case(state, gpu_total_mb: float) -> dict | None:
 
     context_is_pool = bool(uc.get("context_is_pool", False))
     requested_context = uc.get("context")
-    unified_llama_pool = backend == "llama_cpp" and context_is_pool
+    unified_llama_pool = is_llama_cpp_family(backend) and context_is_pool
     planner_context = requested_context
     if unified_llama_pool and requested_context != "max":
         try:
@@ -227,7 +228,7 @@ def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> d
         return extra_config
     merged = copy.deepcopy(extra_config) if isinstance(extra_config, dict) else {}
 
-    if backend in ("llama_cpp", "bitnet"):
+    if is_llama_cpp_family(backend) or backend == "bitnet":
         sect = merged.setdefault("llama_cpp", {})
         # Legacy presets express context per slot and therefore materialize
         # ``ctx * slots``. Unified-KV adaptive presets express the aggregate
@@ -262,7 +263,7 @@ async def resolve_arch_and_weights(state) -> ArchResolution:
         return ArchResolution(None, 0.0, f"backend '{backend}' sin KV que escale con el contexto")
     if backend == "ollama":
         return await _resolve_ollama(state.backend_model_id)
-    if backend in ("llama_cpp", "bitnet"):
+    if is_llama_cpp_family(backend) or backend == "bitnet":
         return _resolve_llama_cpp(state)
     if backend in ("vllm", "sglang"):
         return _resolve_hf(state)

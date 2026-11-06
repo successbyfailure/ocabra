@@ -15,7 +15,7 @@ from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
-from ocabra.core.model_ref import build_model_ref
+from ocabra.core.model_ref import build_model_ref, is_llama_cpp_family
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -341,7 +341,7 @@ class DownloadManager:
             # model_id (the '::' separator and dots in version names defeat the
             # directory/stem heuristics), so without this the model registers
             # fine but fails to load with "GGUF model not found".
-            if job.artifact and (job.source == "bitnet" or backend_type in ("bitnet", "llama_cpp")):
+            if job.artifact and (job.source == "bitnet" or (is_llama_cpp_family(backend_type) or backend_type == "bitnet")):
                 stem = Path(job.artifact).stem.replace("/", "_")
                 model_path = (
                     Path(settings.models_dir)

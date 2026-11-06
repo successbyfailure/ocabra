@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
-from ocabra.core.model_ref import parse_model_ref
+from ocabra.core.model_ref import LLAMA_CPP_FAMILY, is_llama_cpp_family, parse_model_ref
 from ocabra.core.vram_capacity import resolve_arch_and_weights
 from ocabra.db.model_config import (
     get_all_model_schedule_rows,
@@ -932,7 +932,7 @@ async def list_speculative_candidates(
             (
                 await session.execute(
                     sa.select(ModelConfig).where(
-                        ModelConfig.backend_type == "llama_cpp",
+                        ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY),
                         ModelConfig.model_id != model_id,
                         ModelConfig.vocab_size == target.vocab_size,
                         ModelConfig.bos_id == target.bos_id,
@@ -1323,7 +1323,7 @@ async def _build_model_memory_estimate(
                 )
         return estimate
 
-    if state.backend_type == "llama_cpp":
+    if is_llama_cpp_family(state.backend_type):
         # Sprint 17.2 — deterministic GGUF estimator.
         return _estimate_llama_cpp_memory(
             estimate=estimate,

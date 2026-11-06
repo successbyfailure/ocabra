@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.api.internal.downloads import DownloadCreateRequest, download_manager
-from ocabra.core.model_ref import parse_model_ref
+from ocabra.core.model_ref import is_llama_cpp_family, parse_model_ref
 from ocabra.registry.metadata import fetch_registry_metadata
 from ocabra.schemas.registry import DownloadJob
 
@@ -59,7 +59,7 @@ def _build_update_request(state) -> tuple[DownloadCreateRequest | None, str | No
             None,
         )
 
-    if backend_type == "llama_cpp":
+    if is_llama_cpp_family(backend_type):
         if not artifact:
             return None, "local-only GGUF (no remote artifact recorded)"
         return (

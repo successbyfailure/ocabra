@@ -26,7 +26,12 @@ from ocabra.core.model_manager_helpers import (
     resolve_bitnet_option,
     resolve_llama_cpp_gpu_layers,
 )
-from ocabra.core.model_ref import build_model_ref, normalize_model_ref, parse_model_ref
+from ocabra.core.model_ref import (
+    build_model_ref,
+    is_llama_cpp_family,
+    normalize_model_ref,
+    parse_model_ref,
+)
 from ocabra.db.model_config import ModelConfig
 from ocabra.db.stats import ModelLoadStat
 from ocabra.redis_client import get_key, publish, publish_system_alert, set_key
@@ -1640,7 +1645,7 @@ class ModelManager:
                 )
                 if state.backend_type == "bitnet":
                     vram_needed = self._estimate_bitnet_vram_from_config(state)
-                elif state.backend_type == "llama_cpp":
+                elif is_llama_cpp_family(state.backend_type):
                     # The llama.cpp backend can only estimate VRAM after load
                     # (its option cache is filled in load()); estimate from the
                     # GGUF size + config so the scheduler sees the real need and
@@ -1695,7 +1700,7 @@ class ModelManager:
                     state.backend_type == "bitnet" and self._resolve_bitnet_gpu_layers(state) <= 0
                 )
                 llama_cpp_cpu_only = (
-                    state.backend_type == "llama_cpp"
+                    is_llama_cpp_family(state.backend_type)
                     and resolve_llama_cpp_gpu_layers(state, settings.llama_cpp_gpu_layers) <= 0
                 )
                 gpu_managed = (
@@ -1751,7 +1756,7 @@ class ModelManager:
                                     except (TypeError, ValueError):
                                         required_gpu_indices = None
                             if (
-                                state.backend_type == "llama_cpp"
+                                is_llama_cpp_family(state.backend_type)
                                 and required_gpu_indices
                                 and len(required_gpu_indices) > 1
                             ):
@@ -3856,7 +3861,7 @@ class ModelManager:
         # so /speculative-candidates can match draft↔target models without
         # waiting for the first load. Best-effort: failures yield (None,None,None).
         vocab_size = bos_id = eos_id = None
-        if normalized_backend == "llama_cpp":
+        if is_llama_cpp_family(normalized_backend):
             vocab_size, bos_id, eos_id = await self._extract_llama_cpp_fingerprint(
                 normalized_model_id, extra_config or {}
             )
@@ -4005,6 +4010,7 @@ _TEXT_LLM_BACKENDS = {
     "vllm",
     "sglang",
     "llama_cpp",
+    "llama_cpp_mks",
     "bitnet",
     "tensorrt_llm",
     "ollama",
@@ -4027,7 +4033,7 @@ def configured_reasoning_default(state: "ModelState") -> str | None:
     launched with thinking off can still enable it for an individual request.
     """
 
-    if (state.backend_type or "").strip().lower() != "llama_cpp":
+    if not is_llama_cpp_family(state.backend_type):
         return None
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
     llama_cpp = extra.get("llama_cpp")

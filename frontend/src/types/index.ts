@@ -77,7 +77,23 @@ export type BackendType =
   | "ollama"
   | "tensorrt_llm"
   | "llama_cpp"
+  | "llama_cpp_mks"
   | "sglang";
+
+/**
+ * Backends that run a llama.cpp server: upstream and the Makespace fork.
+ * Separate backend types so both can be installed and compared A/B, but UI
+ * that keys off "this is llama.cpp" must treat them alike.
+ *
+ * Careful: `llama_cpp_mks` is a FORK, not a `llama_cpp_<runtime>` build
+ * variant. Code that derives a runtime from the backend-type suffix (cuda /
+ * rocm / vulkan / cpu) must special-case it, or it reads as a runtime "mks".
+ */
+export const LLAMA_CPP_FAMILY: readonly BackendType[] = ["llama_cpp", "llama_cpp_mks"];
+
+export function isLlamaCppFamily(backendType: string | undefined | null): boolean {
+  return backendType === "llama_cpp" || backendType === "llama_cpp_mks";
+}
 
 export interface ModelCapabilities {
   chat: boolean;

@@ -4,6 +4,7 @@ KNOWN_BACKEND_TYPES = {
     "vllm",
     "acestep",
     "llama_cpp",
+    "llama_cpp_mks",
     "sglang",
     "tensorrt_llm",
     "bitnet",
@@ -20,6 +21,27 @@ KNOWN_BACKEND_TYPES = {
     "upscaler",
     "flashvsr",
 }
+
+
+# Backends that run a llama.cpp ``llama-server``: upstream and the Makespace
+# fork (``llama_cpp_mks``, https://github.com/makespacemadrid/llama.cpp-mks).
+# They are separate backend types so both can be installed at once and
+# compared A/B, but every runtime behaviour keyed off "this is llama.cpp"
+# must treat them alike — the fork is upstream plus extra endpoints, not a
+# different engine. Use this instead of ``== "llama_cpp"`` for behaviour;
+# a bare equality check silently excludes the fork.
+LLAMA_CPP_FAMILY = frozenset({"llama_cpp", "llama_cpp_mks"})
+
+# Both backends share the SAME ``extra_config`` section name. Their options
+# are the same llama-server flags, and sharing the key means a model can be
+# moved between them (the A/B that motivates the split) without rewriting its
+# config. Decided 2026-11-06; see docs/tasks/backend-distribution-plan.md.
+LLAMA_CPP_CONFIG_SECTION = "llama_cpp"
+
+
+def is_llama_cpp_family(backend_type: object) -> bool:
+    """True for upstream llama.cpp and the Makespace fork alike."""
+    return str(backend_type or "").strip().lower() in LLAMA_CPP_FAMILY
 
 
 def _split_canonical_model_ref(model_ref: str) -> tuple[str, str] | None:

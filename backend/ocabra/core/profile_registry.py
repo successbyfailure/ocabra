@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.db.model_config import (
     ModelConfig,
     ModelProfile,
@@ -712,7 +713,7 @@ class ProfileRegistry:
     # ── Auto-seed default profiles for models without any ─────
 
     _BACKEND_CATEGORY: dict[str, str] = {
-        "vllm": "llm", "llama_cpp": "llm", "sglang": "llm",
+        "vllm": "llm", "llama_cpp": "llm", "llama_cpp_mks": "llm", "sglang": "llm",
         "tensorrt_llm": "llm", "bitnet": "llm", "ollama": "llm",
         "whisper": "stt", "whisper_cpp": "stt", "vibeasr": "stt", "tts": "tts", "voxtral": "tts",
         "chatterbox": "tts", "piper": "tts", "diffusers": "image", "acestep": "music",
@@ -749,7 +750,9 @@ class ProfileRegistry:
         if any(p.base_model_id == model.model_id for p in self._profiles.values()):
             return None
         # Skip legacy diarized variants (but not GGUF models that use :: as file separator).
-        if "::" in model.model_id and model.backend_type not in ("bitnet", "llama_cpp"):
+        if "::" in model.model_id and not (
+            is_llama_cpp_family(model.backend_type) or model.backend_type == "bitnet"
+        ):
             return None
 
         raw_name = model.display_name or model.model_id
