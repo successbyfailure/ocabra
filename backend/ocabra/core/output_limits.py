@@ -32,3 +32,54 @@ def resolve_max_output_tokens(
     if context_length > 0:
         return min(limit, context_length)
     return limit
+
+
+#: Campos con los que un cliente OpenAI fija su propio tope de salida.
+_OPENAI_OUTPUT_FIELDS = ("max_completion_tokens", "max_tokens")
+
+
+def _client_set_a_limit(payload: dict, *, ollama_native: bool) -> bool:
+    """Whether the caller already chose its own output limit."""
+    if ollama_native:
+        options = payload.get("options")
+        if isinstance(options, dict) and options.get("num_predict") is not None:
+            return True
+        return payload.get("num_predict") is not None
+    return any(payload.get(field) is not None for field in _OPENAI_OUTPUT_FIELDS)
+
+
+def apply_declared_output_limit(
+    profile: Any,
+    payload: dict,
+    *,
+    ollama_native: bool = False,
+) -> int | None:
+    """Inyecta el tope de salida declarado del perfil cuando el cliente no fija uno.
+
+    ``max_output_tokens`` se usaba solo para dos cosas: anunciarlo en
+    ``/v1/models`` y rechazar peticiones que pidiesen mas. Nunca se enviaba al
+    backend, asi que una peticion sin ``max_tokens`` generaba sin limite alguno
+    y el tope declarado era decorativo.
+
+    Incidente del 2026-11-07: gemma4:26b (``max_output_tokens`` 65536) recibio
+    una peticion sin ``max_tokens``, entro en una generacion desbocada y
+    produjo **132.263 tokens** durante 26 minutos hasta que el timeout de
+    inferencia de oCabra la corto con un 504 y el cliente se quedo sin
+    respuesta. Con el tope inyectado, el mismo caso termina acotado y con
+    ``finish_reason: "length"``, que es un resultado que el cliente puede usar.
+
+    Devuelve el limite aplicado, o ``None`` si no habia que tocar nada.
+    """
+    if _client_set_a_limit(payload, ollama_native=ollama_native):
+        return None
+    limit = resolve_max_output_tokens(profile)
+    if limit is None:
+        return None
+    if ollama_native:
+        options = payload.get("options")
+        payload["options"] = {**options, "num_predict": limit} if isinstance(options, dict) else {
+            "num_predict": limit
+        }
+    else:
+        payload["max_tokens"] = limit
+    return limit

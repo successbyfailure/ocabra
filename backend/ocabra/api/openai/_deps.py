@@ -1563,6 +1563,26 @@ def _resolve_default_reasoning_effort(state: ModelState) -> str:
     return DEFAULT_REASONING_EFFORT
 
 
+def _reasoning_budget_for_level(level: str) -> int | None:
+    """Tope duro de tokens de pensamiento para un nivel de ``reasoning_effort``.
+
+    ``None`` = ese nivel no lleva tope (``high`` por defecto: quien pide
+    esfuerzo alto quiere justamente que piense sin prisa).
+    """
+    from ocabra.config import settings
+
+    por_nivel = {
+        "low": settings.reasoning_budget_low_tokens,
+        "medium": settings.reasoning_budget_medium_tokens,
+        "high": settings.reasoning_budget_high_tokens,
+    }
+    try:
+        budget = int(por_nivel.get(level) or 0)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
 def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
     """Translate the OpenAI-style ``reasoning_effort`` field into whatever the
     target backend understands. The field is already in the ChatCompletionRequest
@@ -1637,6 +1657,19 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
             # not expose empty think tags. An explicit reasoning request wants
             # the standard split field consumed by OpenAI-compatible clients.
             payload.setdefault("reasoning_format", "deepseek")
+            # El nivel, por si solo, no limita nada: ni la plantilla de gemma4
+            # menciona ``reasoning_effort`` (verificado leyendo la plantilla que
+            # publica el propio llama-server en /props), asi que "low",
+            # "medium" y "high" daban resultados identicos. Se traduce a
+            # ``reasoning_budget_tokens``, que es el unico tope duro: al
+            # agotarse, llama.cpp corta el pensamiento y fuerza la respuesta.
+            # Sin esto, una peticion sin max_tokens podia pensar hasta agotar
+            # la salida (incidente 2026-11-07: 132.263 tokens en 26 minutos).
+            # Un presupuesto explicito del cliente manda sobre el derivado.
+            if "reasoning_budget_tokens" not in payload and "reasoning_budget" not in payload:
+                derivado = _reasoning_budget_for_level(value)
+                if derivado is not None:
+                    payload["reasoning_budget_tokens"] = derivado
 
 
 def _apply_reasoning_budget(state: ModelState, payload: dict) -> None:

@@ -33,6 +33,7 @@ from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
 from ocabra.agents.resolver import is_agent_model, resolve_agent
 from ocabra.api._deps_auth import UserContext
 from ocabra.core.fair_slot_gate import KVCapacityError
+from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 from ocabra.database import AsyncSessionLocal
 
@@ -334,6 +335,10 @@ async def chat_completions(
         check_capability(state, "video_input", "video input")
 
     merged_body = merge_profile_defaults(profile, body)
+    # El tope de salida declarado del perfil no se enviaba al backend: una
+    # peticion sin max_tokens generaba sin limite (incidente 2026-11-07,
+    # 132.263 tokens hasta el timeout). Ver apply_declared_output_limit.
+    apply_declared_output_limit(profile, merged_body)
     worker_key = state.model_id
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
@@ -673,6 +678,10 @@ async def _stream_chat_with_load(
         return
 
     merged_body = merge_profile_defaults(profile, body)
+    # El tope de salida declarado del perfil no se enviaba al backend: una
+    # peticion sin max_tokens generaba sin limite (incidente 2026-11-07,
+    # 132.263 tokens hasta el timeout). Ver apply_declared_output_limit.
+    apply_declared_output_limit(profile, merged_body)
     backend_body = to_backend_body(state, merged_body)
     slots = fairness_slots(state)
     kv_capacity, kv_tokens = fairness_kv_budget(

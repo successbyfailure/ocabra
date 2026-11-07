@@ -9,6 +9,7 @@ import httpx
 import structlog
 
 from ocabra.config import settings
+from ocabra.core.background_tasks import spawn
 from ocabra.redis_client import get_key, publish, set_key
 
 if TYPE_CHECKING:
@@ -551,7 +552,7 @@ class ServiceManager:
         # Detect generation end → persist event
         if not state.is_generating and was_generating and state._generation_started_at is not None:
             logger.info("generation_finished", service_id=state.service_id)
-            asyncio.create_task(self._persist_generation_event(state, evicted=False))
+            spawn(self._persist_generation_event(state, evicted=False))
 
     async def _refresh_container_stats(self, state: ServiceState) -> None:
         """Read container CPU % and memory from docker stats. Never raises."""
@@ -661,7 +662,7 @@ class ServiceManager:
         if state.status in ("building", "starting"):
             return state  # already in progress
         if (state.docker_container_name or state.compose_service_name) and not state.service_alive:
-            asyncio.create_task(self._start_container_bg(state))
+            spawn(self._start_container_bg(state))
         return state
 
     async def unload(self, service_id: str, reason: str = "manual") -> ServiceState:
@@ -674,7 +675,7 @@ class ServiceManager:
             grace_finished = await self._wait_for_generation_grace(state, reason=reason)
             if not grace_finished:
                 # Grace period expired — force evict, mark generation as interrupted
-                asyncio.create_task(self._persist_generation_event(state, evicted=True))
+                spawn(self._persist_generation_event(state, evicted=True))
 
         if not state.unload_path:
             if not state.docker_container_name:
@@ -799,7 +800,7 @@ class ServiceManager:
                         state, reason="idle"
                     )
                     if not grace_finished:
-                        asyncio.create_task(
+                        spawn(
                             self._persist_generation_event(state, evicted=True)
                         )
 
@@ -873,7 +874,7 @@ class ServiceManager:
                 state, reason="pressure", max_wait_s=max_wait
             )
             if not grace_finished:
-                asyncio.create_task(self._persist_generation_event(state, evicted=True))
+                spawn(self._persist_generation_event(state, evicted=True))
 
         if state.docker_container_name:
             if state.idle_action == "restart":

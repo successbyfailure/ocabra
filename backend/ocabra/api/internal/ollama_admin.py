@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
+from ocabra.core.background_tasks import spawn
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 logger = structlog.get_logger(__name__)
@@ -130,7 +131,7 @@ async def start_server_update(
     if _update_state.status in {"pulling", "restarting"}:
         raise HTTPException(status_code=409, detail="An Ollama update is already running")
 
-    asyncio.create_task(_run_server_update(), name="ollama-server-update")
+    spawn(_run_server_update(), name="ollama-server-update")
     return UpdateStartResponse(status="pulling", detail="update started")
 
 

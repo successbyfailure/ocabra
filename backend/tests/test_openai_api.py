@@ -507,17 +507,28 @@ class TestLlamaCppReasoningControls:
         assert "reasoning_budget_tokens" not in payload
 
     def test_no_reasoning_fields_still_caps_reasoning_effort(self) -> None:
-        """2026-11-05: reasoning_effort is no longer left fully unbounded for
-        a reasoning model (see test_reasoning_effort_default_applies_global_default)
-        — reasoning_budget_tokens stays untouched since that's a separate,
-        purely opt-in hard cap."""
+        """Una peticion sin campos de razonamiento sale con nivel por defecto Y
+        con tope duro.
+
+        El 2026-11-05 se decidio que ``reasoning_budget_tokens`` fuese opt-in y
+        que bastase con enviar el nivel. No basto: el nivel viaja como
+        ``reasoning_effort`` y como ``chat_template_kwargs.enable_thinking``,
+        que son sugerencias, y la plantilla de gemma4 **no menciona**
+        ``reasoning_effort`` (comprobado en la que publica llama-server en
+        ``/props``), asi que "low", "medium" y "high" daban resultados
+        identicos. El 2026-11-07 una peticion por esta misma ruta genero
+        132.263 tokens en 26 minutos hasta morir con un 504. El nivel ahora se
+        traduce al unico tope que corta de verdad.
+        """
         from ocabra.api.openai._deps import to_backend_body
+        from ocabra.config import settings
 
         payload = to_backend_body(_llama_cpp_state(), {"model": "gemma4:26b", "messages": []})
 
         assert payload["reasoning_effort"] == "medium"
+        assert payload["reasoning_budget_tokens"] == settings.reasoning_budget_medium_tokens
+        # La extension de oCabra se consume, no se reenvia.
         assert "reasoning_budget" not in payload
-        assert "reasoning_budget_tokens" not in payload
         assert "reasoning" not in payload
 
 

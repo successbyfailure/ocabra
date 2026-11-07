@@ -1,4 +1,3 @@
-import asyncio
 import json as _json
 import re
 import time
@@ -11,6 +10,7 @@ import structlog
 
 from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
+from ocabra.core.background_tasks import spawn
 from ocabra.core.fair_slot_gate import WorkerPoolFairGates
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry
@@ -801,7 +801,7 @@ class WorkerPool:
         if settings.langfuse_enabled:
             from ocabra.integrations.langfuse_tracer import trace_generation
 
-            asyncio.create_task(
+            spawn(
                 trace_generation(
                     model_id=model_id,
                     path=path,

@@ -33,6 +33,7 @@ import httpx
 import structlog
 from starlette.websockets import WebSocketState
 
+from ocabra.core.background_tasks import spawn
 from ocabra.core.vad import SimpleVAD, VadEvent
 
 if TYPE_CHECKING:
@@ -944,13 +945,13 @@ class RealtimeSession:
             if stt_needed and not will_use_native:
                 await self._load_model_with_progress("stt", self.stt_model_id)
             elif stt_needed and will_use_native:
-                asyncio.create_task(
+                spawn(
                     self._load_model_with_progress("stt", self.stt_model_id),
                     name="realtime-session-update-stt",
                 )
         if "tts_model" in session_cfg and self.tts_model_id:
             self._tts_ready.clear()
-            asyncio.create_task(self._load_remaining_models())
+            spawn(self._load_remaining_models())
 
         # VAD configuration
         turn_detection = session_cfg.get("turn_detection")
@@ -1338,7 +1339,7 @@ class RealtimeSession:
                 },
             )
             if self._transcribe_user_audio and self.stt_model_id:
-                asyncio.create_task(
+                spawn(
                     self._emit_parallel_user_transcript(pcm_data, item_id),
                     name="realtime-parallel-stt",
                 )

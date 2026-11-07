@@ -26,6 +26,7 @@ from ocabra.api.openai._deps import (
     resolve_profile,
 )
 from ocabra.core.fair_slot_gate import KVCapacityError
+from ocabra.core.output_limits import apply_declared_output_limit
 
 from ._mapper import resolve_model
 from ._shared import (
@@ -140,6 +141,10 @@ async def generate(
             request_state=request.state,
         )
         merged_body = merge_profile_defaults(profile, body)
+        # El tope de salida declarado del perfil no se enviaba al backend: una
+        # peticion sin max_tokens generaba sin limite (incidente 2026-11-07,
+        # 132.263 tokens hasta el timeout). Ver apply_declared_output_limit.
+        apply_declared_output_limit(profile, merged_body, ollama_native=True)
         worker_key = state.model_id
     except HTTPException as profile_exc:
         if profile_exc.status_code != 404:

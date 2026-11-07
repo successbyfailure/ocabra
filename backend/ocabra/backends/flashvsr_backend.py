@@ -135,7 +135,7 @@ class FlashVSRBackend(BackendInterface):
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=open(f"/tmp/flashvsr_worker_{model_id.replace('/', '_')}.log", "wb"),  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
+            stderr=open(f"/tmp/flashvsr_worker_{model_id.replace('/', '_')}.log", "ab"),  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
             env=env,
         )
 

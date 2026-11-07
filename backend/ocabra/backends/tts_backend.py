@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,10 +70,16 @@ FORMAT_CONTENT_TYPES = {
 WORKER_PATH = Path(__file__).resolve().parents[2] / "workers" / "tts_worker.py"
 
 
+def _worker_log_path(model_id: str) -> str:
+    safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
+    return f"/tmp/tts-worker-{safe}.log"
+
+
 @dataclass
 class _TTSWorker:
     process: asyncio.subprocess.Process
     info: WorkerInfo
+    log_file: Any | None = None
 
 
 class TTSBackend(BackendInterface):
@@ -162,6 +169,11 @@ class TTSBackend(BackendInterface):
             existing = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
+        log_path = _worker_log_path(model_id)
+        # noqa SIM115/ASYNC230: fd real y de vida larga que consume
+        # create_subprocess_exec; se cierra en unload().
+        log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
+
         process = await asyncio.create_subprocess_exec(
             self._resolve_python_bin(),
             str(WORKER_PATH),
@@ -174,8 +186,14 @@ class TTSBackend(BackendInterface):
             "--gpu-indices",
             ",".join(str(i) for i in gpu_indices),
             env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            # stdout/stderr a un fichero real, no a PIPE: nadie leia esas
+            # tuberias durante el servicio normal, asi que un worker
+            # suficientemente hablador llena el buffer del kernel, se bloquea
+            # en su propio write() y se queda colgado mientras /health sigue
+            # respondiendo (mismo fallo ya corregido en llama_cpp y sglang el
+            # 2026-10-30; este backend se quedo sin arreglar).
+            stdout=log_file,
+            stderr=log_file,
         )
 
         info = WorkerInfo(
@@ -187,7 +205,7 @@ class TTSBackend(BackendInterface):
             vram_used_mb=await self.get_vram_estimate_mb(model_id),
         )
 
-        self._workers[model_id] = _TTSWorker(process=process, info=info)
+        self._workers[model_id] = _TTSWorker(process=process, info=info, log_file=log_file)
 
         if not await self._wait_until_healthy(model_id):
             await self.unload(model_id)
@@ -211,6 +229,9 @@ class TTSBackend(BackendInterface):
         except TimeoutError:
             process.kill()
             await process.wait()
+        if worker.log_file:
+            with suppress(Exception):
+                worker.log_file.close()
 
     async def health_check(self, model_id: str) -> bool:
         worker = self._workers.get(model_id)

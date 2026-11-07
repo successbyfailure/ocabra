@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.40.0"
+    app_version: str = "0.41.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -648,6 +648,31 @@ class Settings(BaseSettings):
     # overrides this. Added 2026-11-05 after gemma4:26b reasoned unbounded
     # (14k+ tokens, no stop) until oCabra's 1500s dispatch timeout killed it.
     default_reasoning_effort: str = "medium"
+
+    # Tope DURO de tokens de pensamiento por nivel de reasoning_effort, para la
+    # familia llama.cpp (``reasoning_budget_tokens``, el unico mecanismo que
+    # corta el razonamiento de verdad; cuando se agota, llama.cpp fuerza la
+    # respuesta final). Hasta el 2026-11-07 el nivel no se traducia a ningun
+    # tope: se enviaba como ``reasoning_effort`` y como
+    # ``chat_template_kwargs.enable_thinking``, que son sugerencias que la
+    # plantilla puede ignorar — y la de gemma4 ni menciona reasoning_effort, asi
+    # que "low", "medium" y "high" daban exactamente el mismo resultado
+    # (verificado: 1178 caracteres de razonamiento en los tres). El nivel era
+    # decorativo y nada impedia pensar hasta agotar la salida.
+    # 0 o negativo = sin tope para ese nivel. "high" no lleva tope a proposito:
+    # quien pide esfuerzo alto esta pidiendo justamente que piense sin prisa.
+    #
+    # Los valores salen de medir 21 dias de trafico real (razonamiento p90 por
+    # modelo): gemma4:26b 1.768, qwen3.8:27b 1.780, nemotron3:33b 2.306,
+    # qwen3-vl:8b 4.274 y ravenx 13.455. "medium" es el nivel que se aplica
+    # cuando el cliente no pide nada, asi que va por encima del p90 mas alto
+    # observado para no degradar en silencio a quien razona mucho de verdad
+    # (ravenx): cortarlo en 4096 habria truncado su operacion normal. Aun asi
+    # atrapa la fuga que motivo esto, de 62.072 tokens de razonamiento.
+    # "low" si corta de verdad, que es lo que significa pedir esfuerzo bajo.
+    reasoning_budget_low_tokens: int = 2048
+    reasoning_budget_medium_tokens: int = 16384
+    reasoning_budget_high_tokens: int = 0
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"

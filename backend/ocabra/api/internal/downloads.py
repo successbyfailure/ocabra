@@ -16,6 +16,7 @@ from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
+from ocabra.core.background_tasks import spawn
 from ocabra.core.model_ref import KNOWN_BACKEND_TYPES, build_model_ref, is_llama_cpp_family
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
 from ocabra.registry.huggingface import HuggingFaceRegistry
@@ -265,7 +266,7 @@ class DownloadManager:
                 )
                 try:
                     asyncio.get_running_loop()
-                    asyncio.create_task(self._save_and_publish(updated))
+                    spawn(self._save_and_publish(updated))
                 except RuntimeError:
                     loop.call_soon_threadsafe(loop.create_task, self._save_and_publish(updated))
 
