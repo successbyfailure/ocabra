@@ -19,7 +19,15 @@
     handle /ready {
         reverse_proxy api:8000
     }
+    # /docs y todo lo que cuelga: ademas del Swagger estan las paginas en prosa
+    # (/docs/changelog, /docs/models, y sus variantes .md) y el
+    # /docs/oauth2-redirect de Swagger. Con "handle /docs" a secas solo casaba
+    # la ruta exacta y las subrutas se caian al SPA del frontend, que devolvia
+    # 404.
     handle /docs {
+        reverse_proxy api:8000
+    }
+    handle /docs/* {
         reverse_proxy api:8000
     }
     handle /redoc {
