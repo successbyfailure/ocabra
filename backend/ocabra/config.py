@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.41.0"
+    app_version: str = "0.42.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -673,6 +673,16 @@ class Settings(BaseSettings):
     reasoning_budget_low_tokens: int = 2048
     reasoning_budget_medium_tokens: int = 16384
     reasoning_budget_high_tokens: int = 0
+
+    # Traduccion del nivel de OpenAI (low/medium/high) al vocabulario que
+    # esperan las plantillas de chat. Las de Qwen 3.5 (qwen3.8:27b, su
+    # abliterated y RavenX-Chaos-Agent) validan
+    # ``reasoning_effort not in ('xhigh','medium','low')`` y lanzan excepcion
+    # con cualquier otra cosa, asi que "high" hay que mandarlo como "xhigh".
+    # Las once plantillas restantes del parque no leen el campo, y Jinja ignora
+    # las variables de contexto que no usa, asi que enviarlo es inocuo para
+    # ellas. Mapa vacio = enviar el nivel tal cual.
+    reasoning_effort_template_aliases: dict[str, str] = {"high": "xhigh"}
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"

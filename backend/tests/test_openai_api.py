@@ -414,7 +414,12 @@ class TestLlamaCppReasoningControls:
         )
 
         assert payload["reasoning_effort"] == "low"
-        assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+        # El nivel va tambien dentro de chat_template_kwargs: es el unico sitio
+        # desde el que llama-server lo pasa a la plantilla.
+        assert payload["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "reasoning_effort": "low",
+        }
         assert payload["reasoning_format"] == "deepseek"
 
     def test_reasoning_effort_off_disables_thinking_for_request(self) -> None:
@@ -441,7 +446,10 @@ class TestLlamaCppReasoningControls:
         )
 
         assert payload["reasoning_effort"] == "medium"
-        assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+        assert payload["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "reasoning_effort": "medium",
+        }
         assert payload["reasoning_format"] == "deepseek"
 
     def test_reasoning_effort_default_uses_per_model_override(self) -> None:

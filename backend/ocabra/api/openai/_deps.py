@@ -1611,6 +1611,8 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
     The input ``reasoning_effort`` key is always popped from the forwarded
     payload so unknown backends don't 400 on it.
     """
+    from ocabra.config import settings
+
     raw = payload.pop("reasoning_effort", None)
     value = "" if raw is None else str(raw).strip().lower()
     if value in _REASONING_EFFORT_DEFAULT:
@@ -1650,7 +1652,21 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
         template_kwargs = payload.get("chat_template_kwargs")
         template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
         template_kwargs["enable_thinking"] = enabled
+        if enabled:
+            # El nivel tiene que ir DENTRO de chat_template_kwargs: llama-server
+            # no reenvia a la plantilla los campos de primer nivel (comprobado
+            # en vivo — ``enable_thinking`` de primer nivel se ignora y dentro
+            # de chat_template_kwargs funciona). Enviandolo solo arriba, las
+            # plantillas que si leen el nivel caian a su propio default, que en
+            # Qwen 3.5 es ``xhigh``: esos modelos recibian siempre el esfuerzo
+            # maximo pidieras lo que pidieras. El alias traduce el vocabulario
+            # de OpenAI al de la plantilla (high -> xhigh).
+            template_kwargs["reasoning_effort"] = settings.reasoning_effort_template_aliases.get(
+                value, value
+            )
         payload["chat_template_kwargs"] = template_kwargs
+        # Se sigue enviando arriba por compatibilidad con backends que si lo
+        # leen desde ahi (vLLM lo expone como parametro propio).
         payload["reasoning_effort"] = value if enabled else "none"
         if enabled:
             # Chaos starts with reasoning_format=none so ordinary requests do
