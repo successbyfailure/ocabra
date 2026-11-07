@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -54,7 +55,12 @@ def _inline(texto: str) -> str:
 
 
 def _slug(texto: str) -> str:
-    limpio = re.sub(r"[^a-z0-9]+", "-", texto.lower()).strip("-")
+    # Plegamos los acentos antes de limpiar: sin esto "Qué falla y por qué"
+    # daba "qu-falla-y-por-qu" y los enlaces internos de la propia página no
+    # casaban con el id del encabezado al que apuntaban.
+    plano = unicodedata.normalize("NFKD", texto.lower())
+    plano = "".join(c for c in plano if not unicodedata.combining(c))
+    limpio = re.sub(r"[^a-z0-9]+", "-", plano).strip("-")
     return limpio or "seccion"
 
 
@@ -101,7 +107,12 @@ def markdown_to_html(fuente: str) -> str:
             continue
 
         # tabla: cabecera + separador + filas
-        if pelada.startswith("|") and i + 1 < n and re.fullmatch(r"[|\-: ]+", lineas[i + 1].strip()):
+        if (
+            pelada.startswith("|")
+            and i + 1 < n
+            and re.fullmatch(r"[|\-: ]+", lineas[i + 1].strip())
+        ):
+
             def celdas(fila: str) -> list[str]:
                 return [c.strip() for c in fila.strip().strip("|").split("|")]
 

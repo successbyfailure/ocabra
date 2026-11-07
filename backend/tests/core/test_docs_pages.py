@@ -6,6 +6,8 @@ formatos desde la misma fuente: HTML para personas y Markdown crudo (sufijo
 ``.md``) para agentes.
 """
 
+import re
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -87,6 +89,22 @@ def test_encabezados_con_ancla():
     assert '<h2 id="cambios-de-comportamiento">' in html
 
 
+def test_el_ancla_de_un_encabezado_pliega_los_acentos():
+    # Sin plegar, "Qué falla y por qué" daba "qu-falla-y-por-qu" y los enlaces
+    # internos de la propia pagina apuntaban a un id que no existia.
+    html = markdown_to_html("## Qué falla y por qué")
+    assert '<h2 id="que-falla-y-por-que">' in html
+
+
+def test_los_enlaces_internos_de_cada_pagina_apuntan_a_un_encabezado_real():
+    for nombre, _ in PAGES.values():
+        fuente = (CONTENT_DIR / nombre).read_text(encoding="utf-8")
+        html = markdown_to_html(fuente)
+        ids = set(re.findall(r'<h[1-4] id="([^"]+)"', html))
+        for destino in re.findall(r'href="#([^"]+)"', html):
+            assert destino in ids, f"{nombre}: ancla #{destino} sin encabezado"
+
+
 def test_negrita_y_codigo_en_linea():
     html = markdown_to_html("Pon **max_tokens** o usa `reasoning_effort`.")
     assert "<strong>max_tokens</strong>" in html
@@ -111,7 +129,7 @@ def test_lista_ordenada():
 
 
 def test_bloque_de_codigo_no_se_interpreta():
-    html = markdown_to_html('```\n## no es un encabezado\n**ni negrita**\n```')
+    html = markdown_to_html("```\n## no es un encabezado\n**ni negrita**\n```")
     assert "<pre><code>" in html
     assert "<h2" not in html
     assert "<strong>" not in html

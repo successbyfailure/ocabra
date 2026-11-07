@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.47.1 — 2026-11-07
+
+### Documentación
+
+- **[`/docs/models`](/docs/models) ya tiene datos.** Por modelo: tokens por
+  segundo y velocidad de prefill medidos sobre el tráfico real de este
+  servidor, contexto por defecto y presets, cuáles arrancan en frío y cuánto
+  tardan, qué modelos distinguen de verdad los niveles de `reasoning_effort`
+  (solo tres) y cuáles solo tienen interruptor, dimensiones de los embeddings,
+  y qué significan los `409`, `429` y `504` que puedes recibir. La copia sin
+  maquetar para agentes está en `GET /docs/models.md`.
+
+---
+
 ## 0.47.0 — 2026-11-07
 
 ### Cambios de comportamiento
