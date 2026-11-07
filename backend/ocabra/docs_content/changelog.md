@@ -6,22 +6,37 @@ cliente — cambios de comportamiento, parámetros nuevos y errores que estabas
 sufriendo sin saberlo.
 
 Cada versión marca con **Acción** lo que puede requerir que toques tu código.
-La versión que estás usando la devuelve `GET /health`.
+Si algo dejó de funcionar o empezó a comportarse raro, busca aquí la versión
+que estás usando y lee hacia arriba: la devuelve `GET /health`.
+
+Para leerlo desde un agente hay una copia en Markdown sin maquetar en
+`GET /docs/changelog.md`, que es la misma fuente que genera esta página. La
+referencia completa de los endpoints está en `GET /docs` y `GET /openapi.json`,
+y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
 ## 0.46.1 — 2026-11-07
 
+### Cambios de comportamiento
+
+- **`nemotron-3-nano:30b` pasa a 512k tokens de contexto** (antes 64k). Es el
+  modelo con la ventana más grande del servidor; su techo de arquitectura es
+  1.048.576 y cabe entero en las GPUs, así que puede subirse más si lo
+  necesitas. Ten en cuenta que leer un prompt de ese tamaño lleva varios
+  minutos antes de que empiece a responder: para uso interactivo, 256k es un
+  punto más cómodo.
+
 ### Arreglos
 
-- **Los modelos hibridos Mamba/atencion ya pueden usar contextos largos.** El
-  planificador de VRAM solo reconocia dos formas de declarar que un modelo
-  mezcla capas recurrentes con capas de atencion, y `nemotron-3-nano:30b` usa
-  una tercera: marcar sus 46 capas Mamba con cero cabezas KV. Al no verla,
-  contaba las 52 capas como si todas guardaran cache y sobreestimaba su VRAM
-  8,67 veces, de modo que a partir de ~300k tokens de contexto el modelo se
-  rechazaba con `insufficient_vram` aunque cupiese de sobra. Su contexto
-  utilizable pasa de ~262k a su maximo nativo de 1.048.576.
+- **Las páginas de `/docs/changelog` y `/docs/models` devolvían 404.** Se
+  anunciaron en 0.45.0 pero el proxy no enrutaba las subrutas de `/docs`, así
+  que nunca llegaron a verse desde fuera. Afectaba igual a
+  `/docs/oauth2-redirect`, el retorno de OAuth del Swagger.
+- **`nemotron-3-nano:30b` se rechazaba con `insufficient_vram`** al pedirle más
+  de unos 300k tokens de contexto, aunque cupiese de sobra: el cálculo de
+  memoria no reconocía que la mayor parte de sus capas no guardan caché de
+  atención y le reservaba casi nueve veces lo que necesita.
 
 ---
 
@@ -127,9 +142,10 @@ que sí distinguen niveles caían a su valor por defecto — `xhigh` en la famil
 Qwen 3.5, el esfuerzo máximo. En esos modelos `low`, `medium` y `high` daban
 exactamente el mismo resultado; ahora no.
 
-De las plantillas del parque, **solo las de la familia Qwen 3.5 distinguen
-niveles** (`qwen3.8:27b` y sus variantes). El resto, incluida la de Gemma 4,
-solo tienen interruptor de encendido/apagado: en ellas el nivel sigue siendo
+De los modelos de este servidor, **solo tres distinguen niveles**:
+`qwen3.8:27b`, `qwen3.8:27b-abliterated` y `ravenx-chaos-agent`, todos de la
+familia Qwen 3.5. El resto, incluidos los Gemma 4 y `ravenx`, solo tienen
+interruptor de encendido/apagado: en ellos el nivel sigue siendo
 indistinguible, pero sí cambia el tope duro de pensamiento (ver 0.41.0).
 
 **Acción**: si usabas `high` contra un modelo Qwen 3.5 esperando el máximo, lo
@@ -160,7 +176,6 @@ pensamiento se comió el presupuesto: sube `max_tokens` o baja
 
 ### Arreglos
 
-- **`POST /ocabra/models/refresh-tokenizer-fingerprints` devolvía 500 siempre.**
 - **Realtime: los ids de hablante podían corromperse a mitad de sesión.** Al
   reanudar con `conversation_id` un registro guardado por otro modelo de
   diarización, el centroide se truncaba en silencio y dos hablantes distintos
@@ -169,9 +184,6 @@ pensamiento se comió el presupuesto: sube `max_tokens` o baja
   y las imágenes de cada línea, y la escritura de los artefactos generados,
   bloqueaban el servidor entero mientras duraban. Afectaba al tiempo de
   respuesta de **todas** las peticiones concurrentes, no solo a los batches.
-- **TRT-LLM: la estimación de VRAM se quedaba hasta 4 veces corta** al compilar
-  motores (un modelo de 14B se estimaba como de 4B, uno de 27B como de 7B), lo
-  que provocaba fallos de memoria.
 
 ---
 
@@ -203,6 +215,9 @@ Si recibías `429` en ráfagas, probablemente era esto:
   generativos que se les aplicaba por error.
 - **Los modelos llama.cpp sin preset de runtime también estaban capados a 4**,
   en lugar de a sus slots reales (hasta 16).
+- **Las peticiones que se iban a un servidor federado heredaban el límite de
+  concurrencia del local**, en vez del que tuviera el modelo en el servidor que
+  de verdad las atendía.
 
 ---
 
@@ -226,11 +241,3 @@ Si recibías `429` en ráfagas, probablemente era esto:
   tumbaba la conversación entera.
 - **Al cancelar un stream se cierra la conexión con el motor**, que aborta la
   generación y libera la GPU en lugar de seguir generando para nadie.
-
----
-
-## Cómo leer esta página desde un agente
-
-Hay una versión en Markdown sin maquetar en `GET /docs/changelog.md`, que es la
-misma fuente que genera esta página. La referencia completa de la API está en
-`GET /docs` (OpenAPI/Swagger) y `GET /openapi.json`.
