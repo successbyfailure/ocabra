@@ -38,6 +38,10 @@ decide este servidor, y puede cambiarlo sin que tengas que tocar tu cliente. Lo
 que sí cambia con el motor es el rendimiento, y eso es justo lo que miden las
 tablas de abajo: son del despliegue que está configurado ahora.
 
+Si tienes una razón para fijar el motor —comparar dos, o reproducir un
+resultado— pídelo como `<motor>/<modelo>`: `ollama/gemma4:26b`,
+`ollama/qwen3-embedding:8b`. No salen en la lista, pero resuelven.
+
 ## El hardware
 
 | GPU | Tarjeta | VRAM |

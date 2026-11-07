@@ -40,10 +40,13 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   administración y puede cambiar sin avisarte. Tú pides `gemma4:26b` y recibes
   el despliegue que esté configurado en ese momento.
 - **Cada modelo aparece una sola vez en `GET /v1/models` y `GET /api/tags`**,
-  con el nombre que tienes que usar. **Acción:** si tu cliente tiene guardado
-  un nombre con sufijo de motor —`gemma4:26b-ollama`,
-  `whisper-cpp-large-v3-turbo-cpu` y similares—, cámbialo por el nombre a
-  secas. Es el único que vas a seguir viendo en la lista.
+  con el nombre que tienes que usar.
+- **Si de verdad necesitas un motor concreto, pídelo como
+  `<motor>/<modelo>`**: `ollama/gemma4:26b`, `ollama/qwen3-embedding:8b`. Esa
+  es la forma de hacerlo. **Acción:** los nombres con el motor como sufijo
+  (`<modelo>-ollama` y similares) están de salida; si tu cliente tiene alguno
+  guardado, pásalo al nombre del modelo o, si necesitas ese motor en
+  particular, a `<motor>/<modelo>`.
 - **El acceso se concede por modelo**, no por motor: si tu clave puede usar un
   modelo, lo puede usar sea cual sea el backend que lo sirva.
 
