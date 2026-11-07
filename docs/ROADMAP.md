@@ -723,7 +723,7 @@ consumir todo el pool si las demás no lo están usando; el
 ``llama_context`` conservando pesos queda como optimización posterior, no como
 requisito del reparto flexible. 256k de Raven queda 74 MiB por encima del
 presupuesto con el margen configurado.
-Las variantes Ollama se conservan como ``*-ollama``. Quedan la tokenización
+Las variantes Ollama se conservan como ``*-ollama`` (desde v0.47.0, variantes ocultas del modelo; ver Bloque 23). Quedan la tokenización
 exacta cuando exista
 una vía pre-load fiable y el soak largo solicitado por el operador. La UI ya
 permite configurar KV unificada y el cap opcional por slot; dejar este último
@@ -766,6 +766,15 @@ corrección para el estado Mamba con tokens especulativos:
   calidad y benchmark sostenido.
 
 ---
+
+## ✅ Bloque 23 — Un modelo, varios backends (2026-11-07, v0.46.0–v0.47.x)
+
+Plan y estado: [`docs/tasks/model-backends-unification-plan.md`](tasks/model-backends-unification-plan.md).
+El modelo (nombre público, tabla `models`) se separa de sus despliegues por backend
+(`<backend>/<model_key>`); el backend por defecto sirve el nombre público y los demás quedan como
+nombres ocultos. Sustituye a la convención manual `*-ollama` (que sigue resolviendo como variante
+oculta). Hecho: migración 0034, cambio de backend por defecto, añadir/quitar despliegues,
+compatibilidad formato→backends en la búsqueda, permisos por modelo, descarga multi-backend.
 
 ## Orden de ejecución
 

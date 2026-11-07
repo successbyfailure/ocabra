@@ -186,9 +186,13 @@ class LoadPolicy(str, Enum):
 
 @dataclass
 class ModelState:
-    model_id: str               # Canonical: "backend/model" (e.g. "vllm/mistral-7b-instruct")
+    model_id: str               # Despliegue: "<backend>/<model_key>" (p. ej. "llamacpp_mks/gemma4:26b").
                             # Formato legacy sin prefijo ya no es válido.
-    backend_model_id: str       # Backend-native id (without prefix), e.g. "mistral-7b-instruct"
+    model_key: str | None       # Modelo lógico (tabla `models`, = nombre público), p. ej. "gemma4:26b".
+                            # None solo en estados en memoria (inventario Ollama, workers derivados).
+    artifact: dict | None       # Qué fichero sirve: ver ocabra/core/artifacts.py. Las rutas
+                            # (model_path, mmproj, draft) se derivan de aquí en memoria y no se persisten.
+    backend_model_id: str       # Lo que recibe el backend: artifact.ref (tag de Ollama, repo HF, voz...)
     display_name: str
     backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "mage" | "whisper" | "whisper_cpp" | "vibeasr" | "tts" | "chatterbox" | "piper" | "voxtral" | "upscaler" | "flashvsr" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
     status: ModelStatus
@@ -306,7 +310,43 @@ Los endpoints de compatibilidad OpenAI y Ollama usan sus propios envelopes de er
 GET    /ocabra/models                    → list[ModelState]  # model_id is canonical backend/model; no legacy bare-name fallback at this boundary
 GET    /ocabra/models/storage            → ModelsStorageStats
 
-Nota OpenAI `/v1/*`: el campo `model` acepta `model_id` canónico y también `backend_model_id` como alias. Si hay múltiples coincidencias de alias, se usa la primera.
+Nota OpenAI `/v1/*` y Ollama `/api/*`: el campo `model` acepta, por este orden, un alias oculto, un `profile_id` (el nombre público de un modelo es el `profile_id` de su perfil por defecto, igual a su `model_key`), un id de despliegue `<backend>/<model_key>` (resuelve al perfil de ese despliegue) y, en la vía legacy, un `backend_model_id`/`model_key`; si varios despliegues coinciden, gana el **despliegue por defecto** del modelo (antes, el primero del diccionario).
+
+### 5.1.1 Modelos lógicos (unificación modelo/backends, v0.47.0)
+
+Un **modelo** (`models.model_key`, nombre público) tiene un **despliegue** por backend
+(`model_configs`, id `<backend>/<model_key>`, único por `(model_key, backend_type)`) y un
+`default_backend`. Invariantes (ver `ocabra/core/model_deployments.py`):
+
+- Los perfiles públicos (`backend IS NULL`) del modelo apuntan al despliegue por defecto.
+- Todo despliegue tiene al menos un perfil; los de despliegues no-default están **fijados**
+  (`model_profiles.backend`) y son **ocultos**: resuelven, no se listan en `/v1/models` ni `/api/tags`.
+- Solo el despliegue por defecto lleva la `load_policy`/`pin` del modelo.
+- `runtime_policy.validated_*` describe siempre el backend al que apunta el perfil; al cambiar de
+  backend se aparca en `runtime_policy.validated_by_backend[<backend>]`.
+- Permisos: `group_models` guarda `model_key` (o ids de router / perfiles sueltos); conceder un
+  `model_key` concede sus despliegues, perfiles y alias (`_expand_model_grants`).
+
+```
+GET    /ocabra/logical-models                                → list[LogicalModel]
+GET    /ocabra/logical-models/{model_key}                    → LogicalModel
+PATCH  /ocabra/logical-models/{model_key}                    {defaultBackend?, displayName?} → LogicalModel
+GET    /ocabra/logical-models/{model_key}/compatibility      → list[CompatibleBackend]
+POST   /ocabra/logical-models/{model_key}/deployments        {backend, sourceBackend?, extraConfig?} → 201 LogicalModel
+DELETE /ocabra/logical-models/{model_key}/deployments/{backend} → {modelKey, removed, newDefaultBackend}
+
+LogicalModel = {modelKey, displayName, category, defaultBackend,
+                deployments: [{modelId, backend, isDefault, installed, status, loadPolicy,
+                               pinPermanent, artifact, profiles}],
+                compatibleBackends: [CompatibleBackend & {deployed}],
+                publicProfiles, hiddenProfiles, registryMetadata}
+CompatibleBackend = {backend, status: "compatible"|"probable", installed, reason}
+```
+
+Las respuestas de búsqueda del registro (HF, BitNet, Ollama: tarjetas, detalle y variantes)
+llevan `compatible_backends: list[CompatibleBackend]` (reglas en `ocabra/core/compatibility.py`).
+La descarga acepta en `register_config`: `model_key`, `default_backend` y `backends` (despliegues
+extra del mismo fichero).
 
 GET    /ocabra/models/{model_id}         → ModelState
 POST   /ocabra/models/{model_id}/load    → ModelState
@@ -907,7 +947,8 @@ class ModelProfile(Base):
 
     profile_id: str           # PK, slug sin /, lowercase, solo guiones y alfanuméricos
     profile_kind: str         # "execution" | "router"
-    base_model_id: str | None # requerido en execution; NULL en router
+    base_model_id: str | None # requerido en execution (id de despliegue); NULL en router
+    backend: str | None       # fija el perfil a un despliegue no-default → perfil oculto (no listado)
     display_name: str
     description: str | None
     category: str             # "llm" | "tts" | "stt" | "image" | "music"
@@ -938,9 +979,11 @@ Validaciones:
 
 async def resolve_profile(profile_id: str) -> tuple[ModelProfile, ModelState]:
     """
+    0. Alias oculto (model_profile_aliases) → su perfil (+ preset fijado)
     1. Buscar profile_id en ProfileRegistry (cache + BD)
-    2. Si coincide con un model_id canónico (backend/modelo), resolver su
+    2. Si coincide con un id de despliegue (<backend>/<model_key>), resolver su
        perfil default habilitado; si no hay default, el primer perfil habilitado
+       (todo despliegue tiene al menos uno: los no-default, uno oculto fijado)
     3. Si no existe, está disabled o no tiene perfil habilitado → HTTPException 404
     4. ensure_loaded(base_model_id, load_overrides=profile.load_overrides)
     5. Retornar (profile, state)
