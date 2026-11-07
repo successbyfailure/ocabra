@@ -448,14 +448,32 @@ def build_plan(snap: dict) -> dict:
             return target
         return None
 
+    # A target that pointed at a non-default deployment (an old ``-ollama``
+    # profile) becomes the generic model, so the router follows the model's
+    # default backend (user, 2026-11-07: recomendado-ha-chatbots must use the
+    # default versions). Exception: when the same model is already a target of
+    # that router, pinning the backend IS the point — e.g. the whisper.cpp CPU
+    # fallback after the GPU whisper in recomendado-stt — so the explicit
+    # deployment id is kept, in its original position.
     router_actions = []
     for rid in sorted(routers):
         old = list(profiles[rid].get("routing_targets") or [])
+        generic_models = {
+            profile_actions[t]["model_key"]
+            for t in old
+            if t in profile_actions and profile_actions[t]["action"] != "alias"
+        }
         new = []
         for t in old:
-            mapped = map_target(t)
+            act = profile_actions.get(t)
+            if act and act["action"] == "alias" and act["model_key"] not in generic_models:
+                mapped = act["model_key"]
+            else:
+                mapped = map_target(t)
             if mapped is None:
                 warnings.append(f"router {rid}: target {t!r} no existe — se elimina")
+            elif mapped in new:
+                warnings.append(f"router {rid}: target {t!r} duplica {mapped!r} — se elimina")
             else:
                 new.append(mapped)
         router_actions.append({"router": rid, "old": old, "new": new})

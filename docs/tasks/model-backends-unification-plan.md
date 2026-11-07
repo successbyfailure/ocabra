@@ -169,8 +169,8 @@ aplicar; backup `pg_dump` antes de `alembic upgrade`):
   (32k/64k/128k/max) se descartan: el modelo conserva los presets del perfil público actual
   (llama.cpp), que se aplican también al despliegue Ollama.
 - **Routers** que apuntaban a `*-ollama` (`recomendado-ha-chatbots`: `qwen3.8:27b-abliterated-ollama`,
-  `gemma4:12b-ollama`) → id de despliegue `ollama/<model_key>`, para conservar el comportamiento
-  actual (posible motivo: audio nativo de gemma4 validado en Ollama).
+  `gemma4:12b-ollama`) → **modelo genérico** (`qwen3.8:27b-abliterated`, `gemma4:12b`), que sigue su
+  backend por defecto (decisión del usuario 2026-11-07).
 - **whisper_cpp**: dos perfiles para el mismo despliegue (`whisper-cpp-large-v3-turbo-cpu` y
   `whisper.cpp-large-v3-turbo-q8-0-cpu`) → se queda uno como alias.
 - ~~**`whisper/microsoft/VibeVoice-ASR-BitNet`**~~: **borrado 2026-11-07** (solo BD, sin ficheros).
@@ -200,9 +200,9 @@ Resultado sobre producción:
   con dos tags (`hf.co/huihui-ai/…:UD-Q5_K_XL` y `qwen3.8:27b-abliterated`) sobre el mismo fichero.
 - 13 perfiles `-ollama` y 2 de whisper.cpp → alias ocultos con backend fijado. Se descartan las
   escaleras de presets de 6 de ellos (32k/64k/128k/max de Ollama).
-- Routers: solo cambian `recomendado-ha-chatbots` (→ `ollama/qwen3.8:27b-abliterated`,
-  `ollama/gemma4:12b`) y `recomendado-stt` (→ `whisper_cpp/whisper-large-v3-turbo`), conservando el
-  backend que usan hoy.
+- Routers (decisión del usuario 2026-11-07): `recomendado-ha-chatbots` pasa a los modelos **genéricos** (`qwen3.8:27b-abliterated`,
+  `gemma4:12b`), que siguen su backend por defecto; `recomendado-stt` conserva el despliegue CPU
+  `whisper_cpp/whisper-large-v3-turbo` como fallback tras los de GPU. Regla: alias → modelo genérico, salvo que el modelo ya sea destino del router.
 - ACL: todo pasa a `model_key`; **sin ampliación real de acceso** (los únicos grupos con variantes
   `-diarized` ya tenían también el modelo base).
 - `request_stats.model_id` está **mezclado** (la mayoría guarda el nombre público, algunos el id

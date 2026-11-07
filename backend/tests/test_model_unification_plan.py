@@ -134,12 +134,24 @@ def test_manual_group_puts_whisper_cpp_under_the_whisper_model():
     }
 
 
-def test_router_targets_keep_backend_choice_and_drop_ghosts():
+def test_router_alias_targets_become_generic_unless_model_already_targeted():
     plan = plan_mod.build_plan(_snapshot())
 
     router = next(r for r in plan["routers"] if r["router"] == "recomendado")
-    assert router["new"] == ["ollama/gemma:x", "gemma:x", "whisper_cpp/whisper-large-v3-turbo"]
+    # gemma:x is also targeted generically → the ollama pin is deliberate, kept in place;
+    # whisper-cpp-cpu: its model is not otherwise targeted → becomes the generic model
+    assert router["new"] == ["ollama/gemma:x", "gemma:x", "whisper-large-v3-turbo"]
     assert any("ghost" in w for w in plan["warnings"])
+
+
+def test_router_keeps_cpu_fallback_deployment_after_its_gpu_model():
+    snap = _snapshot()
+    snap["model_profiles"] = [p for p in snap["model_profiles"] if p["profile_id"] != "recomendado"]
+    snap["model_profiles"].append(_router("stt", ["whisper-large-v3-turbo", "whisper-cpp-cpu"]))
+    plan = plan_mod.build_plan(snap)
+
+    router = next(r for r in plan["routers"] if r["router"] == "stt")
+    assert router["new"] == ["whisper-large-v3-turbo", "whisper_cpp/whisper-large-v3-turbo"]
 
 
 def test_acl_maps_everything_to_model_keys_and_reports_widening():
