@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -125,6 +126,107 @@ def estimate_prompt_tokens(body: dict[str, Any]) -> int:
     return max(1, prompt_estimate)
 
 
+def output_reservation(body: dict[str, Any], default_reservation: int) -> int:
+    """Tokens de salida que hay que reservar para esta peticion.
+
+    Factorizado aparte porque el planificador necesita recombinarlo con un
+    conteo de prompt *exacto* cuando lo consigue del tokenizador del worker.
+    """
+    options = body.get("options") if isinstance(body.get("options"), dict) else {}
+    output_value = body.get(
+        "max_completion_tokens",
+        body.get(
+            "max_tokens",
+            options.get("num_predict", default_reservation),
+        ),
+    )
+    try:
+        return max(1, int(output_value))
+    except (TypeError, ValueError):
+        return default_reservation
+
+
+def _prompt_text(body: dict[str, Any]) -> str:
+    """Texto plano del prompt, para pedir su conteo exacto al tokenizador."""
+    piezas: list[str] = []
+    if isinstance(body.get("messages"), list):
+        for mensaje in body["messages"]:
+            if not isinstance(mensaje, dict):
+                continue
+            contenido = mensaje.get("content")
+            if isinstance(contenido, str):
+                piezas.append(contenido)
+            elif isinstance(contenido, list):
+                for parte in contenido:
+                    if isinstance(parte, dict) and isinstance(parte.get("text"), str):
+                        piezas.append(parte["text"])
+    else:
+        origen = body.get("prompt", body.get("input", ""))
+        if isinstance(origen, str):
+            piezas.append(origen)
+        elif isinstance(origen, list):
+            piezas.extend(x for x in origen if isinstance(x, str))
+    if body.get("tools"):
+        piezas.append(json.dumps(body["tools"], ensure_ascii=False))
+    return "\n".join(piezas)
+
+
+async def exact_prompt_tokens(model_manager: Any, profile: Any, body: dict[str, Any]) -> int | None:
+    """Conteo exacto de tokens pedido al worker del propio modelo.
+
+    Los heuristicos de caracteres y palabras no sirven para decidir un rechazo:
+    medidos contra el tokenizador real, ``chars/3`` va de 0,94x a 2,42x del
+    valor verdadero segun el contenido (subestima en prosa densa, sobreestima
+    2,4x con palabras largas). Cuando el worker ya esta cargado, el que cuenta
+    bien esta a un POST de distancia.
+
+    Devuelve ``None`` si no hay ningun runtime de este modelo cargado, si el
+    backend no es de la familia llama.cpp o si la llamada falla: en esos casos
+    el que llama NO debe rechazar por estimacion.
+    """
+    base = getattr(profile, "base_model_id", None)
+    if not base:
+        return None
+    try:
+        estados = await model_manager.list_states(include_derived=True)
+    except Exception:  # noqa: BLE001 — es una optimizacion, nunca un fallo
+        return None
+    for estado in estados:
+        model_id = getattr(estado, "model_id", "")
+        # Cualquier runtime del mismo modelo base comparte tokenizador, asi que
+        # vale tambien un derivado (``<base>::<hash>``) de otro preset.
+        if model_id != base and not model_id.startswith(f"{base}::"):
+            continue
+        if getattr(getattr(estado, "status", None), "value", "") != "loaded":
+            continue
+        if not is_llama_cpp_family(getattr(estado, "backend_type", "") or ""):
+            continue
+        worker = getattr(estado, "worker_info", None)
+        puerto = getattr(worker, "port", None)
+        if not puerto:
+            continue
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=settings.tokenize_timeout_s) as cliente:
+                respuesta = await cliente.post(
+                    f"http://127.0.0.1:{int(puerto)}/tokenize",
+                    json={"content": _prompt_text(body)},
+                )
+            respuesta.raise_for_status()
+            tokens = respuesta.json().get("tokens")
+            if not isinstance(tokens, list):
+                return None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("exact_tokenize_failed", model_id=model_id, error=str(exc))
+            return None
+        # El prompt no viaja pelado: la plantilla añade marcas de rol por
+        # mensaje. Se suma el mismo margen estructural que usa el heuristico.
+        estructural = 16 * len(body["messages"]) if isinstance(body.get("messages"), list) else 8
+        return len(tokens) + estructural
+    return None
+
+
 def estimate_request_token_budget(
     body: dict[str, Any], *, default_output_reservation: int | None = None
 ) -> int:
@@ -143,19 +245,8 @@ def estimate_request_token_budget(
         else settings.runtime_preset_default_output_reservation_tokens
     )
     prompt_estimate = estimate_prompt_tokens(body)
-
+    reserved_output = output_reservation(body, default_reservation)
     options = body.get("options") if isinstance(body.get("options"), dict) else {}
-    output_value = body.get(
-        "max_completion_tokens",
-        body.get(
-            "max_tokens",
-            options.get("num_predict", default_reservation),
-        ),
-    )
-    try:
-        reserved_output = max(1, int(output_value))
-    except (TypeError, ValueError):
-        reserved_output = default_reservation
     estimated = max(1, prompt_estimate + reserved_output)
     try:
         requested_context = max(0, int(options.get("num_ctx") or 0))
@@ -344,6 +435,50 @@ async def plan_profile_runtime(
             fits_by_key={row["preset_key"]: row.get("fits") for row in rows},
         )
         raise ContextCapacityError("profile has no enabled runtime preset that fits")
+
+    # Un rechazo por tamano no puede decidirse con el heuristico: medido
+    # contra el tokenizador real va de 0,94x a 2,42x del valor verdadero. Asi
+    # que el heuristico sirve para ELEGIR ventana (equivocarse ahi solo carga
+    # una ventana mas grande de lo necesario) pero antes de RECHAZAR se busca
+    # un numero de verdad:
+    #
+    #   1. Si hay un runtime de este modelo cargado, se le pide el conteo
+    #      exacto a su tokenizador y se decide con eso.
+    #   2. Si no hay ninguno, no se rechaza: se intenta con la ventana mas
+    #      grande disponible y, si de verdad no cabe, lo dice el motor, que es
+    #      el unico que cuenta bien.
+    #
+    # Reportado 2026-11-07: un prompt de ~32k tokens reales se estimaba en
+    # ~55k y qwen3:32b (ventana de 40.960) lo rechazaba con 400 aunque cabia.
+    mayor_contexto = max(item.effective_context for item in candidates)
+    if required_tokens > mayor_contexto:
+        exacto = await exact_prompt_tokens(model_manager, profile, body)
+        if exacto is not None:
+            # Misma resolucion que estimate_request_token_budget: el valor
+            # del perfil si lo declara, el global si no. Un ``or 0`` aqui
+            # dejaria sin reserva de salida a quien no manda max_tokens.
+            reserva_por_defecto = (
+                default_output_reservation
+                if default_output_reservation is not None
+                else settings.runtime_preset_default_output_reservation_tokens
+            )
+            medido = exacto + output_reservation(body, reserva_por_defecto)
+            logger.info(
+                "token_budget_measured",
+                profile_id=profile.profile_id,
+                estimated=required_tokens,
+                measured=medido,
+                largest_context=mayor_contexto,
+            )
+            required_tokens = medido
+        if required_tokens > mayor_contexto and exacto is None:
+            logger.info(
+                "token_budget_unverified_attempt",
+                profile_id=profile.profile_id,
+                estimated=required_tokens,
+                largest_context=mayor_contexto,
+            )
+            required_tokens = mayor_contexto
 
     explicit_key = _requested_preset_key(body)
     loaded_keys: set[str] = set()

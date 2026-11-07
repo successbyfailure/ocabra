@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.50.1"
+    app_version: str = "0.51.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -528,6 +528,11 @@ class Settings(BaseSettings):
     # harmless since allow_pressure_eviction=False makes that attempt a
     # no-op, but still a wasted attempt worth avoiding).
     pin_reload_poll_interval_s: int = 120
+    # Tope para el POST /tokenize con el que el planificador consigue un
+    # conteo exacto antes de rechazar un prompt por tamano. Corto a
+    # proposito: si el worker no contesta ya, se prefiere intentar la
+    # peticion antes que rechazarla por una estimacion.
+    tokenize_timeout_s: float = 5.0
     # Max seconds to wait for in-flight requests to drain before pressure-evicting a model.
     pressure_eviction_drain_timeout_s: int = 60
 

@@ -16,6 +16,37 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.0 — 2026-11-07
+
+### Arreglos
+
+- **Un prompt que cabía podía recibir `400` `context_length_exceeded`.** El
+  tamaño del prompt se decidía con un cálculo aproximado sobre caracteres y
+  palabras que, medido contra el tokenizador de verdad, se queda entre el 0,94x
+  y el 2,42x del valor real según el contenido: con texto de palabras largas se
+  pasaba más del doble. Un prompt de ~32.000 tokens reales se estimaba en
+  ~55.000 y `qwen3:32b` (ventana de 40.960) lo rechazaba aunque entraba de
+  sobra. Afectaba igual a `qwen3:8b` y a cualquier modelo cuya ventana
+  estuvieras aprovechando a fondo.
+
+  Ahora, antes de rechazar: si hay un runtime del modelo cargado se le pide el
+  conteo **exacto** a su tokenizador y se decide con ese número; y si no hay
+  ninguno cargado no se rechaza por estimación — se intenta con la ventana más
+  grande disponible y, si de verdad no cabe, el error lo da el motor, que es el
+  único que cuenta bien. El cálculo aproximado se sigue usando para elegir qué
+  ventana cargar, donde equivocarse no cuesta nada.
+
+- **`gemma4:26b` podía quedarse inalcanzable con `409` durante horas.** Su pin
+  es evictable: cuando otro modelo grande (`qwen3.8:27b`, `ravenx`) se queda la
+  tarjeta, `gemma4:26b` sale. Para eso hay un vigilante que lo vuelve a cargar
+  en cuanto hay sitio, pero **se rendía a los 12 minutos**: a quien se quedase
+  la tarjeta le bastaba con aguantarla ese rato y `gemma4:26b` no volvía hasta
+  el siguiente reinicio del servidor. Ahora el vigilante no tiene plazo:
+  reintenta mientras el modelo siga fijado y descargado, y entra solo cuando la
+  tarjeta queda libre de verdad (nunca desaloja para colarse).
+
+---
+
 ## 0.50.1 — 2026-11-07
 
 ### Arreglos

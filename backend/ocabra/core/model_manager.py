@@ -319,6 +319,9 @@ class ModelManager:
         # represented by ModelStatus; only elastic changes need a distinct
         # phase for the UI.
         self._runtime_transitions: dict[str, str] = {}
+        # Modelos con un vigilante de recarga de PIN en marcha, para no
+        # arrancar dos (un unload puede notificarse por dos vias).
+        self._pin_reload_watchers: set[str] = set()
         self._persisted_model_ids: set[str] = set()
         # model_key → default backend (``models.default_backend``); kept in sync
         # by set_default_backend().
@@ -3492,11 +3495,36 @@ class ModelManager:
             await self._publish_event(base_id, "runtime_downsize_complete")
 
     async def _watch_and_reload(self, model_id: str) -> None:
+        """Reclaim the GPU for a soft-pinned model as soon as there is room.
+
+        **No deadline on purpose.** This used to give up after
+        ``model_load_wait_timeout_s`` (720 s): whatever took the GPU only had
+        to hold it for 12 minutes and the PIN was gone until the next process
+        restart. That is exactly what a benchmark —or any sustained use of
+        another large model— does, and it turned "always loaded" into "loaded
+        until someone else asks for something big once". Reproduced
+        2026-11-07: gemma4:26b (23.600 MB of the 3090's 24.576) was evicted by
+        a single qwen3.8:27b request and answered 409 to every call afterwards.
+
+        Polling for as long as the model stays pinned and unloaded is cheap
+        (one task per pinned model, one check every
+        ``pin_reload_poll_interval_s``) and it never fights the model that won
+        the card: ``allow_pressure_eviction=False`` means it loads only when
+        the GPU is genuinely free.
+        """
         if not self._gpu_scheduler:
             return
-        deadline = datetime.now(UTC) + timedelta(
-            seconds=max(30, int(settings.model_load_wait_timeout_s))
-        )
+        if model_id in self._pin_reload_watchers:
+            # An unload can be reported twice (manual + pressure); a second
+            # watcher would double the polling and race itself into two loads.
+            return
+        self._pin_reload_watchers.add(model_id)
+        try:
+            await self._watch_and_reload_loop(model_id)
+        finally:
+            self._pin_reload_watchers.discard(model_id)
+
+    async def _watch_and_reload_loop(self, model_id: str) -> None:
         while not self._stopped and model_id in self._states:
             state = self._states.get(model_id)
             if not state or state.load_policy != LoadPolicy.PIN:
@@ -3505,19 +3533,11 @@ class ModelManager:
                 return
             # A caller (e.g. ModelManager.ensure_vram_free, on behalf of a
             # service like Hunyuan/TRELLIS.2) may have asked to hold off
-            # auto-reload for a while — extend our own deadline to match so
-            # we don't give up on reloading just because the hold is long,
-            # then keep sleeping until the hold expires.
+            # auto-reload for a while — respect the hold and keep waiting.
             suppressed_until = state.reload_suppressed_until
-            if suppressed_until is not None:
-                if suppressed_until > deadline:
-                    deadline = suppressed_until
-                if datetime.now(UTC) < suppressed_until:
-                    await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
-                    continue
-            if datetime.now(UTC) >= deadline:
-                logger.warning("watch_and_reload_timeout", model_id=model_id)
-                return
+            if suppressed_until is not None and datetime.now(UTC) < suppressed_until:
+                await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
+                continue
             await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
             state = self._states.get(model_id)
             if (
