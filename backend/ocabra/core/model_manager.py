@@ -3187,14 +3187,10 @@ class ModelManager:
             return False
         default_overrides = runtime.get("default_load_overrides")
         override_runtime = (
-            default_overrides.get("_runtime")
-            if isinstance(default_overrides, dict)
-            else None
+            default_overrides.get("_runtime") if isinstance(default_overrides, dict) else None
         )
         override_gpus = (
-            override_runtime.get("gpu_indices")
-            if isinstance(override_runtime, dict)
-            else None
+            override_runtime.get("gpu_indices") if isinstance(override_runtime, dict) else None
         )
         if isinstance(override_gpus, list) and len(override_gpus) == 1:
             return True
@@ -3220,9 +3216,7 @@ class ModelManager:
             if self._canonical_runtime_model_id(state.model_id) != base_id:
                 continue
             runtime = (
-                state.extra_config.get("_runtime")
-                if isinstance(state.extra_config, dict)
-                else None
+                state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
             )
             if state.status != ModelStatus.LOADED or not isinstance(runtime, dict):
                 continue
@@ -3606,9 +3600,10 @@ class ModelManager:
             if now - self._preferred_gpu_move_at.get(model_id, 0.0) < cooldown:
                 continue
             loaded_at = state.loaded_at
-            if loaded_at is not None and (
-                datetime.now(UTC) - loaded_at
-            ).total_seconds() < min_residency:
+            if (
+                loaded_at is not None
+                and (datetime.now(UTC) - loaded_at).total_seconds() < min_residency
+            ):
                 continue
 
             target = int(state.preferred_gpu)
@@ -3758,9 +3753,7 @@ class ModelManager:
             rows = (
                 (
                     await session.execute(
-                        select(ModelConfig).where(
-                            ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY)
-                        )
+                        select(ModelConfig).where(ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY))
                     )
                 )
                 .scalars()
@@ -4223,10 +4216,15 @@ class ModelManager:
                 await session.commit()
             for other in self._states.values():
                 if other.model_key == state.model_key:
-                    other.extra_config = {**(other.extra_config or {}), "registry_metadata": metadata}
+                    other.extra_config = {
+                        **(other.extra_config or {}),
+                        "registry_metadata": metadata,
+                    }
         else:
             existing = state.extra_config if isinstance(state.extra_config, dict) else {}
-            await self.update_config(model_id, {"extra_config": {**existing, "registry_metadata": metadata}})
+            await self.update_config(
+                model_id, {"extra_config": {**existing, "registry_metadata": metadata}}
+            )
         await self._publish_event(model_id, "metadata_updated")
         return True
 
@@ -4248,7 +4246,10 @@ class ModelManager:
         if isinstance(patch.get("extra_config"), dict):
             # One spelling per key (snake_case). In an incoming edit the
             # camelCase twin is what the UI form just wrote, so it wins.
-            patch = {**patch, "extra_config": normalize_case(patch["extra_config"], prefer="camel")[0]}
+            patch = {
+                **patch,
+                "extra_config": normalize_case(patch["extra_config"], prefer="camel")[0],
+            }
 
         if model_id in self._persisted_model_ids:
             async with database.AsyncSessionLocal() as session:
@@ -4279,8 +4280,13 @@ class ModelManager:
                                 # The UI round-trips what GET returned, derived
                                 # paths and registry metadata included; those
                                 # are owned by the artifact / the model row.
-                                incoming = model_artifacts.strip_derived(state.backend_type, incoming) or {}
-                                incoming = {k: v for k, v in incoming.items() if k != "registry_metadata"}
+                                incoming = (
+                                    model_artifacts.strip_derived(state.backend_type, incoming)
+                                    or {}
+                                )
+                                incoming = {
+                                    k: v for k, v in incoming.items() if k != "registry_metadata"
+                                }
                             setattr(cfg, key, _deep_merge_dicts(existing_extra, incoming))
                         else:
                             setattr(cfg, key, val)
@@ -4321,7 +4327,9 @@ class ModelManager:
                     .where(ModelConfig.model_key == model_key)
                 )
                 if not remaining:
-                    await session.execute(sa.delete(LogicalModel).where(LogicalModel.model_key == model_key))
+                    await session.execute(
+                        sa.delete(LogicalModel).where(LogicalModel.model_key == model_key)
+                    )
             await session.commit()
 
         self._states.pop(model_id, None)
