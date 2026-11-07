@@ -174,3 +174,15 @@ def test_la_descripcion_llega_al_openapi():
 
     descripcion = app.openapi().get("info", {}).get("description", "")
     assert "/docs/changelog" in descripcion
+
+
+def test_la_referencia_documenta_todos_los_endpoints_de_batches():
+    """La lista de endpoints admitidos en lote vive en el codigo; la tabla de
+    /docs se escribe a mano. Ya se han desincronizado antes: rerank, score,
+    pooling, classify y audio/generate se añadieron a ALLOWED_ENDPOINTS sin
+    aparecer en la documentacion, asi que nadie sabia que podia usarlos."""
+    from ocabra.api.openai.batches import ALLOWED_ENDPOINTS
+    from ocabra.main import _API_DESCRIPTION
+
+    sin_documentar = sorted(e for e in ALLOWED_ENDPOINTS if f"`{e}`" not in _API_DESCRIPTION)
+    assert not sin_documentar, f"endpoints de Batches sin documentar en /docs: {sin_documentar}"

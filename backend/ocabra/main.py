@@ -886,19 +886,44 @@ reintenta sola, no cuenta como fallo).
 
 Flujo: sube un JSONL con `POST /v1/files` (`purpose="batch"`, una linea por
 peticion: `{"custom_id", "method": "POST", "url", "body"}`) y crea el lote con
-`POST /v1/batches` (`input_file_id`, `endpoint`). Soporta
-`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-`/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/generate`,
-`/v1/pooling`, `/v1/score`, `/v1/rerank`, `/v1/classify` y, como extensiones
-propias fuera del estandar OpenAI (el endpoint real es multipart, no cabe en
-una linea JSON), `/v1/audio/transcriptions` y `/v1/images/edits`: la linea
-referencia ficheros subidos antes con `purpose="batch_input_audio"` /
-`purpose="batch_input_image"` en vez de binarios inline (`file_id` para
-transcripciones; `image_file_id` + opcionalmente `mask_file_id` /
-`image_ref_{1,2,3}_file_id` para edicion de imagenes). Respuestas binarias
-(TTS, musica) tampoco se inlinean: el resultado referencia un `file_id`
-descargable via `GET /v1/files/{id}/content`. Consulta progreso con
+`POST /v1/batches` (`input_file_id`, `endpoint`). Consulta el progreso con
 `GET /v1/batches/{id}`.
+
+### Endpoints admitidos en lote
+
+**oCabra admite en lotes bastante mas que el estandar de Batches de OpenAI.**
+Los tres primeros son los clasicos de ese estandar; los otros nueve son
+extension de oCabra. Cinco de ellos ni siquiera existen como endpoint en la API
+de OpenAI (`rerank`, `score`, `pooling`, `classify` y `audio/generate`), y los
+cuatro restantes son endpoints suyos que aqui ademas se pueden lotear: imagenes,
+voz, transcripciones y edicion de imagenes.
+
+| `endpoint` | Entrada de la linea | Salida de la linea |
+|------------|---------------------|--------------------|
+| `/v1/chat/completions` | JSON | JSON |
+| `/v1/completions` | JSON | JSON |
+| `/v1/embeddings` | JSON | JSON |
+| `/v1/rerank` | JSON | JSON |
+| `/v1/score` | JSON | JSON |
+| `/v1/pooling` | JSON | JSON |
+| `/v1/classify` | JSON | JSON |
+| `/v1/images/generations` | JSON | **`file_id`** (imagen) |
+| `/v1/audio/speech` | JSON | **`file_id`** (audio) |
+| `/v1/audio/generate` | JSON | **`file_id`** (audio/musica) |
+| `/v1/audio/transcriptions` | **`file_id`** (audio) | JSON |
+| `/v1/images/edits` | **`file_id`** (imagen) | **`file_id`** (imagen) |
+
+Las dos mecanicas que se salen del JSON plano:
+
+- **Entrada binaria por referencia.** `transcriptions` y `images/edits` son
+  multipart en su forma sincrona, y un binario no cabe en una linea JSON. Sube
+  el fichero antes con `POST /v1/files` usando
+  `purpose="batch_input_audio"` o `purpose="batch_input_image"`, y pon su id en
+  el `body` de la linea: `file_id` para transcripciones; `image_file_id` y,
+  opcionalmente, `mask_file_id` o `image_ref_{1,2,3}_file_id` para edicion.
+- **Salida binaria por referencia.** Las respuestas de imagen, voz y musica no
+  se inlinean en el JSONL de resultados: cada linea trae un `file_id` que
+  descargas con `GET /v1/files/{id}/content`.
 
 ## Routers "recomendado-*": modelos que el servidor mantiene calientes
 
