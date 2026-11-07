@@ -10,6 +10,21 @@ La versión que estás usando la devuelve `GET /health`.
 
 ---
 
+## 0.46.1 — 2026-11-07
+
+### Arreglos
+
+- **Los modelos hibridos Mamba/atencion ya pueden usar contextos largos.** El
+  planificador de VRAM solo reconocia dos formas de declarar que un modelo
+  mezcla capas recurrentes con capas de atencion, y `nemotron-3-nano:30b` usa
+  una tercera: marcar sus 46 capas Mamba con cero cabezas KV. Al no verla,
+  contaba las 52 capas como si todas guardaran cache y sobreestimaba su VRAM
+  8,67 veces, de modo que a partir de ~300k tokens de contexto el modelo se
+  rechazaba con `insufficient_vram` aunque cupiese de sobra. Su contexto
+  utilizable pasa de ~262k a su maximo nativo de 1.048.576.
+
+---
+
 ## 0.46.0 — 2026-11-07
 
 ### Cambios de comportamiento

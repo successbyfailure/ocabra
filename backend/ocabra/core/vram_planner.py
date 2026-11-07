@@ -367,6 +367,17 @@ def arch_from_ollama_model_info(model_info: dict, arch_family: str) -> ModelArch
                 for heads, sliding in zip(n_kv_values, sliding_pattern, strict=True)
                 if not sliding
             )
+        elif 0 in n_kv_values:
+            # Capas recurrentes marcadas con cero cabezas KV (nemotron_h_moe).
+            # Misma convencion y mismo razonamiento que en arch_from_gguf().
+            kv_elements_override = sum(heads * (key_len + val_len) for heads in n_kv_values)
+            rs_cache_mb_per_slot = _hybrid_rs_cache_mb_per_slot(
+                sum(1 for heads in n_kv_values if heads == 0),
+                int(g("ssm.conv_kernel") or 0),
+                int(g("ssm.inner_size") or 0),
+                int(g("ssm.state_size") or 0),
+                int(g("ssm.group_count") or 0),
+            )
         else:
             full_attention_interval = int(g("full_attention_interval") or 0)
             if full_attention_interval > 1:
@@ -540,6 +551,29 @@ def arch_from_gguf(path: str | Path) -> ModelArch | None:
                 heads * (key_len + val_len)
                 for heads, sliding in zip(per_layer_n_kv, sliding_pattern, strict=True)
                 if not sliding
+            )
+        elif n_kv_values and len(n_kv_values) == layers and 0 in n_kv_values:
+            # Tercera convencion para hibridos SSM/atencion: en vez de declarar
+            # un intervalo (``full_attention_interval``, qwen35) o un patron de
+            # ventana deslizante (gemma4), el GGUF marca cada capa recurrente
+            # con **cero cabezas KV** dentro del array ``head_count_kv``. Es la
+            # que usa nemotron_h_moe: 46 de sus 52 capas van a cero y solo 6
+            # llevan atencion real, con 2 cabezas cada una.
+            #
+            # Sin esta rama se caia al camino generico, que toma
+            # ``max(head_count_kv)`` y lo multiplica por TODAS las capas, con lo
+            # que nemotron-3-nano:30b se estimaba 52/6 = 8,67 veces por encima
+            # de lo real: 36.859 MB para 512K de contexto frente a los ~25.000
+            # que dan sus metadatos. Con 33.656 MB disponibles en esta maquina
+            # el planificador lo rechazaba con insufficient_vram y el modelo no
+            # podia cargarse a ese contexto (comprobado 2026-11-07).
+            kv_elements_override = sum(heads * (key_len + val_len) for heads in n_kv_values)
+            rs_cache_mb_per_slot = _hybrid_rs_cache_mb_per_slot(
+                sum(1 for heads in n_kv_values if heads == 0),
+                int(g("ssm.conv_kernel") or 0),
+                int(g("ssm.inner_size") or 0),
+                int(g("ssm.state_size") or 0),
+                int(g("ssm.group_count") or 0),
             )
         else:
             full_attention_interval = int(g("full_attention_interval") or 0)

@@ -620,3 +620,88 @@ def test_arch_extractors_return_none_on_garbage():
     assert vp.arch_from_hf_config({}) is None
     assert vp.arch_from_ollama_model_info({}, "qwen3") is None
     assert vp.arch_from_ollama_model_info({"x.block_count": 1}, "") is None
+
+
+# ── Hibridos que marcan las capas recurrentes con cero cabezas KV ────────────
+# Metadatos reales de nemotron-3-nano:30b (arch "nemotron_h_moe"), leidos del
+# blob de produccion. A diferencia de qwen35 (que declara
+# full_attention_interval) y de gemma4 (que declara sliding_window_pattern),
+# aqui las capas Mamba se marcan poniendo su head_count_kv a CERO: 46 ceros y
+# solo 6 capas con atencion real, de 2 cabezas cada una.
+
+NEMOTRON_H_REAL_GGUF_KV = {
+    "general.architecture": "nemotron_h_moe",
+    "nemotron_h_moe.block_count": 52,
+    "nemotron_h_moe.attention.head_count": 32,
+    "nemotron_h_moe.attention.head_count_kv": [
+        0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
+        2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    "nemotron_h_moe.attention.key_length": 128,
+    "nemotron_h_moe.attention.value_length": 128,
+    "nemotron_h_moe.ssm.conv_kernel": 4,
+    "nemotron_h_moe.ssm.inner_size": 4096,
+    "nemotron_h_moe.ssm.state_size": 128,
+    "nemotron_h_moe.ssm.group_count": 8,
+    "nemotron_h_moe.embedding_length": 2688,
+    "nemotron_h_moe.context_length": 1048576,
+}
+
+CAPAS_CON_ATENCION = 6
+CABEZAS_KV = 2
+DIMS = 128 + 128
+
+
+def test_solo_las_capas_con_atencion_cuentan_para_el_kv(tmp_path):
+    """Sin esto se tomaba max(head_count_kv)=2 y se multiplicaba por las 52
+    capas, sobreestimando 52/6 = 8,67 veces. Para nemotron-3-nano:30b eso eran
+    36.859 MB a 512K de contexto frente a ~25.000 reales, por encima de los
+    33.656 MB disponibles: el planificador lo rechazaba con insufficient_vram
+    y el modelo no podia cargarse a ese contexto."""
+    arch = vp.arch_from_gguf(_write_gguf(tmp_path, NEMOTRON_H_REAL_GGUF_KV))
+    assert arch is not None
+    assert arch.kv_elements_per_token_override == CAPAS_CON_ATENCION * CABEZAS_KV * DIMS
+    # lo que daba antes del arreglo, para dejar constancia de la magnitud
+    ingenuo = 52 * CABEZAS_KV * DIMS
+    assert arch.kv_elements_per_token_override * 8 < ingenuo
+
+
+def test_las_capas_mamba_reservan_estado_recurrente(tmp_path):
+    """Las 46 capas sin KV no son gratis: guardan un estado por secuencia."""
+    arch = vp.arch_from_gguf(_write_gguf(tmp_path, NEMOTRON_H_REAL_GGUF_KV))
+    esperado = vp._hybrid_rs_cache_mb_per_slot(52 - CAPAS_CON_ATENCION, 4, 4096, 128, 8)
+    assert arch.rs_cache_mb_per_slot == pytest.approx(esperado)
+    assert arch.rs_cache_mb_per_slot > 0
+
+
+def test_el_mismo_gguf_por_la_via_de_ollama_da_lo_mismo(tmp_path):
+    """arch_from_ollama_model_info replica la logica de arch_from_gguf; las dos
+    tienen que coincidir o el mismo modelo se estimaria distinto segun el
+    backend que lo sirva."""
+    # arch_from_ollama_model_info espera las claves CON el prefijo de la
+    # familia, igual que las devuelve /api/show de Ollama.
+    info = {k: v for k, v in NEMOTRON_H_REAL_GGUF_KV.items() if k != "general.architecture"}
+    desde_ollama = vp.arch_from_ollama_model_info(info, "nemotron_h_moe")
+    desde_gguf = vp.arch_from_gguf(_write_gguf(tmp_path, NEMOTRON_H_REAL_GGUF_KV))
+    assert desde_ollama is not None
+    assert desde_ollama.kv_elements_per_token_override == desde_gguf.kv_elements_per_token_override
+    assert desde_ollama.rs_cache_mb_per_slot == pytest.approx(desde_gguf.rs_cache_mb_per_slot)
+
+
+def test_un_modelo_sin_ceros_no_entra_por_esta_rama(tmp_path):
+    """Un transformer normal con head_count_kv uniforme sigue como estaba."""
+    kv = dict(NEMOTRON_H_REAL_GGUF_KV)
+    kv["nemotron_h_moe.attention.head_count_kv"] = [2] * 52
+    arch = vp.arch_from_gguf(_write_gguf(tmp_path, kv))
+    assert arch.kv_elements_per_token_override == 0  # sin override: escala con las 52 capas
+    assert arch.rs_cache_mb_per_slot == 0
+
+
+def test_qwen35_sigue_usando_su_propia_convencion(tmp_path):
+    """Regresion: la rama nueva no debe adelantarse a full_attention_interval
+    en los modelos que ya funcionaban."""
+    arch = vp.arch_from_gguf(_write_gguf(tmp_path, QWEN35_REAL_GGUF_KV))
+    assert arch is not None
+    # qwen35 declara head_count_kv como escalar, no como array con ceros
+    assert arch.kv_elements_per_token_override > 0
+    assert arch.rs_cache_mb_per_slot > 0
