@@ -19,11 +19,47 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ocabra.database import Base
 
 
+class LogicalModel(Base):
+    """A model as users see it: one public name served by one or more backends.
+
+    Its deployments (``ModelConfig`` rows, id ``<backend>/<model_key>``) carry
+    the backend-specific configuration and the artifact; ``default_backend``
+    says which one the public name resolves to. See
+    docs/tasks/model-backends-unification-plan.md (migration 0034).
+    """
+
+    __tablename__ = "models"
+
+    model_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    display_name: Mapped[str | None] = mapped_column(String(512))
+    default_backend: Mapped[str] = mapped_column(String(64), nullable=False)
+    registry_metadata: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ModelConfig(Base):
+    """One deployment of a :class:`LogicalModel` on one backend."""
+
     __tablename__ = "model_configs"
+    __table_args__ = (
+        UniqueConstraint("model_key", "backend_type", name="uq_model_configs_model_key_backend"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Always ``<backend_type>/<model_key>``.
     model_id: Mapped[str] = mapped_column(String(512), unique=True, nullable=False, index=True)
+    model_key: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey("models.model_key", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # What file(s) this deployment serves — see ocabra.core.artifacts. The
+    # paths the backends read are derived from it, never persisted.
+    artifact: Mapped[dict | None] = mapped_column(JSONB)
     display_name: Mapped[str | None] = mapped_column(String(512))
     backend_type: Mapped[str] = mapped_column(String(64), nullable=False)
     load_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="on_demand")
@@ -79,10 +115,13 @@ class ModelProfile(Base):
     )
     base_model_id: Mapped[str | None] = mapped_column(
         String(512),
-        ForeignKey("model_configs.model_id", ondelete="CASCADE"),
+        ForeignKey("model_configs.model_id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=True,
         index=True,
     )
+    # Variant pinned to one backend of its model (e.g. a CPU fallback);
+    # NULL = the model's default backend.
+    backend: Mapped[str | None] = mapped_column(String(64))
     display_name: Mapped[str | None] = mapped_column(String(512))
     description: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(32), nullable=False, default="llm")
@@ -145,6 +184,9 @@ class ModelProfileAlias(Base):
         index=True,
     )
     preset_key: Mapped[str | None] = mapped_column(String(64))
+    # Backend this alias forces (``<name>-ollama`` → the model's Ollama
+    # deployment); NULL = the profile's own backend.
+    backend: Mapped[str | None] = mapped_column(String(64))
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

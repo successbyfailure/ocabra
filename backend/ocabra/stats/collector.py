@@ -1381,6 +1381,12 @@ async def _record_stat(
         gpu_index: int | None = None
         backend_type: str | None = None
         energy_wh: float | None = None
+        # ``model_id`` of the row is the logical model (``models.model_key``),
+        # whatever name the client used — profile, alias, deployment id; that
+        # name goes to ``requested_model``. Before migration 0034 the column
+        # mixed public names, canonical ids and worker keys.
+        requested_model = model_id
+        stat_model_id = model_id
         try:
             mm = request.app.state.model_manager
             resolved_model_id = await _resolve_inflight_model_id(request, model_id)
@@ -1398,6 +1404,8 @@ async def _record_stat(
                 )
             if state:
                 backend_type = state.backend_type
+                if getattr(state, "model_key", None):
+                    stat_model_id = state.model_key
                 if state.current_gpu:
                     gpu_index = state.current_gpu[0]
                 elif backend_type == "ollama":
@@ -1487,7 +1495,8 @@ async def _record_stat(
 
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
-                model_id=model_id,
+                model_id=stat_model_id,
+                requested_model=requested_model,
                 backend_type=backend_type,
                 request_kind=request_kind,
                 endpoint_path=endpoint_path,

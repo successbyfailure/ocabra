@@ -29,7 +29,12 @@ def build_diarized_extra_config(base_extra_config: dict | None) -> dict:
     merged = dict(base_extra_config or {})
     merged["diarization_enabled"] = True
     whisper_cfg = merged.get("whisper") if isinstance(merged.get("whisper"), dict) else {}
-    merged["whisper"] = {**whisper_cfg, "diarizationEnabled": True}
+    # snake_case, and the camelCase twin removed: option readers check
+    # snake_case first, so a base ``diarization_enabled: false`` would beat a
+    # ``diarizationEnabled: true`` override and diarization would silently stay
+    # off (extra_config is snake_case since migration 0034).
+    whisper_cfg = {k: v for k, v in whisper_cfg.items() if k != "diarizationEnabled"}
+    merged["whisper"] = {**whisper_cfg, "diarization_enabled": True}
     return merged
 
 

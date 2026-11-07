@@ -5,6 +5,7 @@ and returns summary structures for the REST API.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from math import ceil
@@ -15,6 +16,13 @@ from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.stats import GpuStat, ModelLoadStat, RequestStat, ServerStat
 from ocabra.stats.cost_calculator import estimate_cost_for_rows
+
+_WORKER_HASH_RE = re.compile(r"::[0-9a-f]{12}$")
+
+
+def _model_key_of_worker(worker_id: str) -> str:
+    """``llamacpp_mks/gemma4:26b::0123456789ab`` → ``gemma4:26b``."""
+    return _WORKER_HASH_RE.sub("", worker_id).split("/", 1)[-1]
 
 
 def _normalize_window(
@@ -392,10 +400,15 @@ async def get_performance_stats(
             ModelLoadStat.started_at >= from_dt,
             ModelLoadStat.started_at <= to_dt,
         )
-        if model_id:
-            load_q = load_q.where(ModelLoadStat.model_id == model_id)
         load_result = await session.execute(load_q)
-        load_rows = load_result.scalars().all()
+        # Loads are recorded per deployment/worker (``<backend>/<key>[::hash]``)
+        # while requests are recorded per logical model (``<key>``): fold the
+        # loads onto their model so both land in the same row.
+        load_rows = [
+            row
+            for row in load_result.scalars().all()
+            if not model_id or _model_key_of_worker(row.model_id) == model_id
+        ]
 
     by_model: dict[str, list[RequestStat]] = {}
     for row in rows:
@@ -403,7 +416,7 @@ async def get_performance_stats(
 
     load_by_model: dict[str, list[ModelLoadStat]] = {}
     for row in load_rows:
-        load_by_model.setdefault(row.model_id, []).append(row)
+        load_by_model.setdefault(_model_key_of_worker(row.model_id), []).append(row)
 
     summaries = []
     for mid in sorted(set(by_model) | set(load_by_model)):

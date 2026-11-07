@@ -10,6 +10,33 @@ La versión que estás usando la devuelve `GET /health`.
 
 ---
 
+## 0.46.0 — 2026-11-07
+
+### Cambios de comportamiento
+
+**Los ids internos de los modelos cambian de forma; los nombres públicos no.**
+oCabra separa ahora el *modelo* (el nombre que usas: `gemma4:26b`,
+`whisper-large-v3-turbo`) de sus *despliegues*, uno por backend que lo sirve.
+Cada despliegue tiene id `<backend>/<modelo>`: `llamacpp_mks/gemma4:26b`,
+`ollama/gemma4:26b`, `whisper/whisper-large-v3-turbo`,
+`whisper_cpp/whisper-large-v3-turbo`, `vllm/bge-reranker-v2-m3`.
+
+- Los nombres públicos, los perfiles (incluidos los `<modelo>-ollama`), los
+  routers `recomendado-*` y los alias siguen funcionando igual.
+- **Los ids antiguos siguen funcionando** como alias ocultos que llevan al mismo
+  backend: `llamacpp_mks/gemma4-26b`, `whisper/openai/whisper-large-v3-turbo`,
+  `vllm/BAAI/bge-reranker-v2-m3`, `whisper_cpp/large-v3-turbo-q8_0-cpu`, etc.
+- `recomendado-ha-chatbots` usa ahora las versiones por defecto de sus modelos
+  (antes dos de sus destinos iban fijados a Ollama).
+- En las estadísticas (`/ocabra/stats/*`), `model_id` es siempre el nombre del
+  modelo y el backend va aparte; lo que pidió el cliente se guarda en
+  `requested_model`.
+
+**Acción**: ninguna si usas nombres públicos. Si guardabas ids internos
+(`backend/...`), siguen resolviendo, pero conviene pasar al nombre público.
+
+---
+
 ## 0.45.0 — 2026-11-07
 
 ### Nuevo

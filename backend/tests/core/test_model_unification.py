@@ -1,16 +1,9 @@
-"""Tests for the pure planning logic of scripts/model_unification_plan.py."""
+"""Tests for the model/backends unification planner (ocabra.core.model_unification)."""
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
-_SPEC = importlib.util.spec_from_file_location(
-    "model_unification_plan",
-    Path(__file__).resolve().parent.parent / "scripts" / "model_unification_plan.py",
-)
-plan_mod = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(plan_mod)
+from ocabra.core import artifacts
+from ocabra.core import model_unification as plan_mod
 
 BLOBS = "/data/ollama_models/blobs"
 
@@ -74,7 +67,7 @@ def _snapshot(**over):
                 request_defaults={"diarize": True},
             ),
             _profile("whisper-cpp-cpu", "whisper_cpp/large-v3-turbo-q8_0-cpu", is_default=False),
-            _router("recomendado", ["gemma:x-ollama", "gemma:x", "whisper-cpp-cpu", "ghost"]),
+            _router("recomendado", ["gemma:x-ollama", "whisper-cpp-cpu", "ghost"]),
         ],
         "model_profile_aliases": [],
         "profile_runtime_presets": [{"profile_id": "gemma:x-ollama", "preset_key": "32k"}],
@@ -114,12 +107,15 @@ def test_same_blob_under_two_tags_is_one_model_with_llamacpp_default():
     assert art["mmproj"] == {"source": "ollama", "layer": "projector"}
 
 
-def test_plain_profile_of_non_default_deployment_becomes_alias_and_loses_presets():
+def test_profile_of_non_default_deployment_stays_a_pinned_variant_with_its_presets():
+    """``<name>-ollama`` profiles are live client entry points (embeddings among
+    them): until aliases can force a backend they keep serving from Ollama."""
     plan = plan_mod.build_plan(_snapshot())
 
-    assert plan["profiles"]["gemma:x-ollama"]["action"] == "alias"
-    assert plan["profiles"]["gemma:x-ollama"]["backend"] == "ollama"
-    assert plan["dropped_presets"] == {"gemma:x-ollama": ["32k"]}
+    act = plan["profiles"]["gemma:x-ollama"]
+    assert act["action"] == "variant" and act["backend"] == "ollama" and act["door"] is True
+    assert act["new_base_model_id"] == "ollama/gemma:x"
+    assert plan["dropped_presets"] == {}
     assert plan["profiles"]["whisper-large-v3-turbo-diarized"]["action"] == "variant"
 
 
@@ -134,32 +130,43 @@ def test_manual_group_puts_whisper_cpp_under_the_whisper_model():
     }
 
 
-def test_router_alias_targets_become_generic_unless_model_already_targeted():
+def test_router_alias_targets_become_the_generic_model():
     plan = plan_mod.build_plan(_snapshot())
 
     router = next(r for r in plan["routers"] if r["router"] == "recomendado")
-    # gemma:x is also targeted generically → the ollama pin is deliberate, kept in place;
-    # whisper-cpp-cpu: its model is not otherwise targeted → becomes the generic model
-    assert router["new"] == ["ollama/gemma:x", "gemma:x", "whisper-large-v3-turbo"]
+    assert router["new"] == ["gemma:x", "whisper-large-v3-turbo"]
     assert any("ghost" in w for w in plan["warnings"])
 
 
-def test_router_keeps_cpu_fallback_deployment_after_its_gpu_model():
+def test_router_cpu_fallback_next_to_its_gpu_model_stays_a_pinned_variant():
+    """Routers only take profile ids, so the CPU fallback keeps its profile,
+    pinned to whisper_cpp, in its original position."""
     snap = _snapshot()
     snap["model_profiles"] = [p for p in snap["model_profiles"] if p["profile_id"] != "recomendado"]
     snap["model_profiles"].append(_router("stt", ["whisper-large-v3-turbo", "whisper-cpp-cpu"]))
     plan = plan_mod.build_plan(snap)
 
     router = next(r for r in plan["routers"] if r["router"] == "stt")
-    assert router["new"] == ["whisper-large-v3-turbo", "whisper_cpp/whisper-large-v3-turbo"]
+    assert router["new"] == ["whisper-large-v3-turbo", "whisper-cpp-cpu"]
+    act = plan["profiles"]["whisper-cpp-cpu"]
+    assert act["action"] == "variant" and act["backend"] == "whisper_cpp"
+    assert act["new_base_model_id"] == "whisper_cpp/whisper-large-v3-turbo"
 
 
-def test_acl_maps_everything_to_model_keys_and_reports_widening():
-    plan = plan_mod.build_plan(_snapshot())
+def test_acl_maps_ids_and_aliases_to_model_keys_but_keeps_variants():
+    snap = _snapshot()
+    snap["group_models"].append({"group_name": "g", "model_id": "whisper-large-v3-turbo-diarized"})
+    plan = plan_mod.build_plan(snap)
 
     acl = plan["acl"]["g"]
-    assert acl["new"] == ["gemma:x", "recomendado", "whisper-large-v3-turbo"]
-    assert any("gemma:x-ollama" in n and "modelo entero" in n for n in acl["notes"])
+    # alias profile and canonical id → model keys; the diarized variant keeps its own
+    # entry (granting a variant must not widen into the whole model); ghosts dropped
+    assert acl["new"] == [
+        "gemma:x-ollama",  # variants (the -ollama door, -diarized) keep their own entry
+        "recomendado",
+        "whisper-large-v3-turbo",
+        "whisper-large-v3-turbo-diarized",
+    ]
     assert any("gone" in n for n in acl["notes"])
 
 
@@ -204,11 +211,12 @@ def test_stats_map_every_known_name_to_its_model_key():
 
 
 def test_ollama_manifest_path_roundtrip():
-    rel = plan_mod.ollama_manifest_relpath("gemma4:26b")
+    rel = artifacts.ollama_manifest_relpath("gemma4:26b")
     assert rel == "registry.ollama.ai/library/gemma4/26b"
-    assert plan_mod.ollama_tag_from_relpath(rel) == "gemma4:26b"
+    assert artifacts.ollama_tag_from_relpath(rel) == "gemma4:26b"
     assert (
-        plan_mod.ollama_tag_from_relpath("hf.co/huihui-ai/X-GGUF/Q5") == "hf.co/huihui-ai/X-GGUF:Q5"
+        artifacts.ollama_tag_from_relpath("hf.co/huihui-ai/X-GGUF/Q5")
+        == "hf.co/huihui-ai/X-GGUF:Q5"
     )
 
 
@@ -265,3 +273,35 @@ def test_strongest_load_policy_of_the_deployments_wins():
 
     # llama.cpp default is on_demand, the Ollama copy was warm
     assert _model(plan, "gemma:x")["load_policy"] == "warm"
+
+
+def test_incoming_edit_prefers_camel_case_and_foreign_dicts_are_untouched():
+    from ocabra.core.config_keys import normalize_case
+
+    norm, _ = normalize_case(
+        {
+            "llama_cpp": {"ctx_size": 40960, "ctxSize": 229376, "speculative": {"draftN": 4}},
+            "hfOverrides": {"ropeTheta": 1},
+        },
+        prefer="camel",
+    )
+    assert norm == {
+        "llama_cpp": {"ctx_size": 229376, "speculative": {"draft_n": 4}},
+        "hf_overrides": {"ropeTheta": 1},
+    }
+
+
+def test_renamed_deployment_ids_stay_resolvable_through_hidden_aliases():
+    plan = plan_mod.build_plan(_snapshot())
+
+    legacy = {a["alias_id"]: a for a in plan["legacy_aliases"]}
+    # the default deployment's old id → the model's default profile
+    assert legacy["llamacpp_mks/gemma-x"] == {
+        "alias_id": "llamacpp_mks/gemma-x",
+        "profile_id": "gemma:x",
+        "backend": "llamacpp_mks",
+    }
+    # a non-default deployment's old id → its own pinned profile, not the GPU default
+    assert legacy["whisper_cpp/large-v3-turbo-q8_0-cpu"]["profile_id"] == "whisper-cpp-cpu"
+    # unchanged ids get no alias
+    assert "ollama/gemma:x" not in legacy

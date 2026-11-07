@@ -233,6 +233,45 @@ Resultado sobre producción:
   - cambiar el `ModelConfigModal` a leer/escribir snake_case (lee `whisper.diarizationEnabled`
     en `:597`, escribe `ctxSize` etc.), y validar `extra_config` con Pydantic al guardar.
 
+
+### Fase 1 — implementada 2026-11-07 (v0.46.0), pendiente de desplegar
+
+Migración `0034_models_and_deployments` (esquema + datos en un paso; el entrypoint la aplica al
+arrancar). La lógica vive en `ocabra/core/model_unification.py` (planificador puro +
+`apply_plan`), los artefactos en `ocabra/core/artifacts.py`, la normalización de claves en
+`ocabra/core/config_keys.py`.
+
+Cambios respecto al diseño original, todos para **no cambiar el comportamiento en producción**:
+
+- **Los perfiles `-ollama` NO pasan a alias**: se quedan como variantes fijadas a su despliegue
+  de Ollama, con sus presets. Motivo: 176 peticiones en 30 días desde hasta 6 claves de API, con
+  embeddings entre ellas (sus vectores deben seguir saliendo del mismo backend), y un alias no puede
+  fijar backend hasta la Fase 2. Pasan a alias en la Fase 2.
+- El fallback CPU de `recomendado-stt` también se queda como variante fijada (los routers solo
+  aceptan perfiles como destino hasta la Fase 2).
+- **Los ids antiguos siguen resolviendo**: un alias oculto por cada id de despliegue renombrado,
+  apuntando al perfil de ese mismo despliegue (29 en producción).
+- `backend_model_id` (lo que recibe el backend) = `artifact.ref`, que conserva el valor de antes en
+  todos los despliegues salvo los GGUF de Ollama en llama.cpp (pasa a ser el tag: cosmético, el
+  fichero se encuentra por la ruta resuelta).
+- `model_path`/`mmproj`/`draft` **no se persisten**: se derivan del artefacto al construir el
+  estado y en cada carga (sigue a un `ollama pull`). Una edición de esas rutas desde la UI
+  actualiza el artefacto (`apply_path_edits`).
+- `load_policy` se queda en el despliegue (el default lleva la del modelo, el resto `on_demand`):
+  `ollama/qwen3.8:27b` y `ollama/qwen3-embedding:8b` pasan de `warm` a `on_demand`.
+- ACL compatible con el chequeo actual: ids → `model_key`, variantes con entrada propia.
+- Escrituras de `extra_config` y `load_overrides` normalizadas a snake_case (en un PATCH gana la
+  grafía camelCase entrante, que es la edición). Diarización: `build_diarized_extra_config` escribe
+  snake_case. Los lectores con doble grafía se mantienen.
+- Stats: `request_stats.model_id` = `model_key`, `requested_model` = lo que pidió el cliente;
+  `model_load_stats` por despliegue (se pliega al modelo en el agregador). Al arrancar se purgan
+  las claves `model:state:*` de ids que ya no existen.
+
+**Verificación sobre un clon de producción** (`ocabra_migold` → `ocabra_migtest`): lo que recibe
+cada backend antes (código y datos actuales) y después (código nuevo sobre la base migrada) coincide
+en los 48 despliegues — referencia, fichero resuelto y todas las opciones de llama.cpp — salvo los
+cambios previstos de arriba. Script en `/home/makespace/ocabra-migcheck/`.
+
 ## Fases
 
 | Fase | Contenido | Riesgo |
@@ -285,4 +324,4 @@ ese emparejamiento y la federación está desactivada en este nodo (sin impacto 
   y datos reales de producción; este plan.
 - **Hecho (2026-11-07):** Fase 0; tests aislados en `ocabra_test` (`e5234cc`); VibeVoice duplicado borrado;
   `DIFFUSERS_OFFLOAD_MODE=model` en `.env` (sin efecto en los 2 modelos actuales, que fijan `none`).
-- **Pendiente:** Fases 1–6.
+- **Pendiente:** desplegar la Fase 1; Fases 2–6.

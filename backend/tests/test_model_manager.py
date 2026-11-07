@@ -1281,8 +1281,12 @@ async def test_update_config_deep_merges_extra_config_preserving_unmentioned_fie
 
     assert state.extra_config["llama_cpp"]["model_path"] == "/data/models/real-weights.gguf"
     assert state.extra_config["llama_cpp"]["gpu_layers"] == 99
-    assert state.extra_config["llama_cpp"]["ctxSize"] == 65536
-    assert state.extra_config["llama_cpp"]["flashAttn"] is True
+    # The UI's camelCase edit is normalised onto the stored snake_case key, so
+    # it takes effect. Before migration 0034 it was kept next to ``ctx_size``
+    # and the reader (snake first) went on applying 32768.
+    assert state.extra_config["llama_cpp"]["ctx_size"] == 65536
+    assert state.extra_config["llama_cpp"]["flash_attn"] is True
+    assert "ctxSize" not in state.extra_config["llama_cpp"]
     assert state.extra_config["registry_metadata"] == {"source": "huggingface"}
 
 
@@ -2511,4 +2515,17 @@ def test_build_diarized_extra_config() -> None:
     merged = build_diarized_extra_config({"base_model_id": "/path/model.nemo"})
     assert merged["diarization_enabled"] is True
     assert merged["base_model_id"] == "/path/model.nemo"
-    assert merged["whisper"]["diarizationEnabled"] is True
+    assert merged["whisper"]["diarization_enabled"] is True
+
+
+def test_build_diarized_extra_config_wins_over_a_snake_case_base() -> None:
+    """Regression: the base whisper section is snake_case since migration 0034;
+    a camelCase override lost against ``diarization_enabled: false`` because the
+    reader checks snake_case first, so diarized profiles stopped diarizing."""
+    from ocabra.backends.whisper_backend import _get_whisper_option
+    from ocabra.core.model_manager_helpers import build_diarized_extra_config
+
+    merged = build_diarized_extra_config({"whisper": {"diarization_enabled": False, "diarizationEnabled": False}})
+
+    assert _get_whisper_option(merged, "diarization_enabled") is True
+    assert "diarizationEnabled" not in merged["whisper"]

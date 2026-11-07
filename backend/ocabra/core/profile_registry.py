@@ -10,8 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ocabra.core.config_keys import normalize_case
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.db.model_config import (
+    LogicalModel,
     ModelConfig,
     ModelProfile,
     ModelProfileAlias,
@@ -205,6 +207,11 @@ class ProfileRegistry:
         if is_default and base_model_id is not None:
             await self._clear_default(session, base_model_id)
 
+        if isinstance(load_overrides, dict):
+            # Overrides are deep-merged onto the snake_case extra_config; a
+            # camelCase key would lose against the base's snake_case twin
+            # (readers check snake first) and the override would do nothing.
+            load_overrides = normalize_case(load_overrides, prefer="camel")[0]
         profile = ModelProfile(
             profile_id=profile_id,
             profile_kind=profile_kind,
@@ -275,6 +282,8 @@ class ProfileRegistry:
                 raise ValueError(f"Invalid category '{value}'.")
             if key == "is_default" and value and db_profile.base_model_id is not None:
                 await self._clear_default(session, db_profile.base_model_id)
+            if key == "load_overrides" and isinstance(value, dict):
+                value = normalize_case(value, prefer="camel")[0]
             setattr(db_profile, key, value)
 
         await session.commit()
@@ -749,6 +758,27 @@ class ProfileRegistry:
         # A model already has a profile? Nothing to do.
         if any(p.base_model_id == model.model_id for p in self._profiles.values()):
             return None
+        # Profiles belong to the logical model, not to each deployment: a
+        # non-default deployment (e.g. the Ollama copy of a llama.cpp model) is
+        # reached through its model's profile + backend pin, never through a
+        # profile of its own — recreating one here would bring back the old
+        # ``<name>-ollama`` duplicates on every startup.
+        model_key = getattr(model, "model_key", None)
+        if model_key:
+            sibling_ids = set(
+                (
+                    await session.execute(
+                        select(ModelConfig.model_id).where(ModelConfig.model_key == model_key)
+                    )
+                ).scalars()
+            )
+            if any(p.base_model_id in sibling_ids for p in self._profiles.values()):
+                return None
+            default_backend = await session.scalar(
+                select(LogicalModel.default_backend).where(LogicalModel.model_key == model_key)
+            )
+            if default_backend and default_backend != model.backend_type:
+                return None
         # Skip legacy diarized variants (but not GGUF models that use :: as file separator).
         if "::" in model.model_id and not (
             is_llama_cpp_family(model.backend_type) or model.backend_type == "bitnet"
@@ -771,6 +801,9 @@ class ProfileRegistry:
             slug = re.sub(r"-{2,}", "-", slug).strip("-")
         if not slug:
             return None
+        # Convention: the default profile of a model is named after its key.
+        if model_key and re.fullmatch(r"[a-z0-9][a-z0-9\-.:]*", model_key):
+            slug = model_key
 
         if slug in self._profiles or slug in self._aliases:
             # Display names are not unique ("Flux", "Whisper", …).  Skipping

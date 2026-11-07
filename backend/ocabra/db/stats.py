@@ -115,6 +115,9 @@ class RequestStat(Base):
     via_router_profile_id: Mapped[str | None] = mapped_column(
         String(512), nullable=True, index=True
     )
+    # Name the client sent (profile, alias, router target...). ``model_id`` is
+    # the logical model key and ``backend_type`` the backend that served it.
+    requested_model: Mapped[str | None] = mapped_column(String(512), nullable=True)
     runtime_preset: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
     )

@@ -18,6 +18,8 @@ import structlog
 import ocabra.database as database
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
+from ocabra.core import artifacts as model_artifacts
+from ocabra.core.config_keys import normalize_case
 from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
     estimate_llama_cpp_vram_from_config,
@@ -34,7 +36,7 @@ from ocabra.core.model_ref import (
     normalize_model_ref,
     parse_model_ref,
 )
-from ocabra.db.model_config import ModelConfig
+from ocabra.db.model_config import LogicalModel, ModelConfig
 from ocabra.db.stats import ModelLoadStat
 from ocabra.redis_client import (
     delete_keys_with_prefix,
@@ -112,6 +114,11 @@ class ModelState:
     backend_type: str
     # Backend-native identifier (without backend prefix)
     backend_model_id: str = ""
+    # Logical model this deployment belongs to (``models.model_key``) and the
+    # artifact it serves (see ocabra.core.artifacts). None for in-memory
+    # states with no row (Ollama tags discovered but not registered).
+    model_key: str | None = None
+    artifact: dict | None = None
     status: ModelStatus = ModelStatus.CONFIGURED
     load_policy: LoadPolicy = LoadPolicy.ON_DEMAND
     # Only meaningful for LoadPolicy.PIN — see ocabra.db.model_config.ModelConfig
@@ -1377,6 +1384,7 @@ class ModelManager:
     async def start(self) -> None:
         await self._load_configs_from_db()
         await self._hydrate_last_request_at_from_redis()
+        await self._purge_orphan_redis_states()
         await self._reconcile_ollama_state()
         for model_id, state in self._states.items():
             # PIN: always preload, never evictable.
@@ -1475,21 +1483,78 @@ class ModelManager:
 
             await session.commit()
 
+            registry_meta = {
+                row.model_key: row.registry_metadata
+                for row in (await session.execute(sa.select(LogicalModel))).scalars().all()
+            }
+
         for canonical_model_id, (cfg, backend_model_id) in canonical_map.items():
+            backend_type = str(cfg.backend_type or "").strip().lower()
             self._states[canonical_model_id] = ModelState(
                 model_id=canonical_model_id,
-                backend_model_id=backend_model_id,
+                # The id is ``<backend>/<model_key>``; what the backend needs
+                # (HF repo, Ollama tag, voice...) lives in the artifact.
+                backend_model_id=model_artifacts.backend_ref(cfg.artifact, backend_model_id),
+                model_key=cfg.model_key,
+                artifact=cfg.artifact,
                 display_name=cfg.display_name or backend_model_id,
-                backend_type=str(cfg.backend_type or "").strip().lower(),
+                backend_type=backend_type,
                 load_policy=LoadPolicy(cfg.load_policy),
                 pin_permanent=cfg.pin_permanent,
                 preferred_gpu=cfg.preferred_gpu,
-                extra_config=cfg.extra_config or {},
+                extra_config=self._derived_extra_config(
+                    backend_type,
+                    cfg.artifact,
+                    cfg.extra_config,
+                    registry_meta.get(cfg.model_key),
+                ),
                 created_at=cfg.created_at,
                 updated_at=cfg.updated_at,
             )
             self._load_locks[canonical_model_id] = asyncio.Lock()
             self._persisted_model_ids.add(canonical_model_id)
+
+    @staticmethod
+    def _derived_extra_config(
+        backend_type: str,
+        artifact: dict | None,
+        extra_config: dict | None,
+        registry_metadata: dict | None = None,
+    ) -> dict:
+        """In-memory extra_config: the persisted one plus what is derived and
+        never stored — the artifact's resolved file paths and the model's
+        upstream ``registry_metadata`` (kept here for the readers that expect
+        it in extra_config)."""
+        extra = model_artifacts.materialize(
+            backend_type, artifact, extra_config, model_artifacts.ollama_root()
+        )
+        if registry_metadata:
+            extra["registry_metadata"] = registry_metadata
+        return extra
+
+    async def _purge_orphan_redis_states(self) -> None:
+        """Drop ``model:state:*`` keys of models that no longer exist.
+
+        They never expire, so every rename or deletion that bypassed
+        delete_model (migration 0034 renames every llama.cpp id) left them
+        behind for good, and stats/UI kept showing phantom models.
+        """
+        try:
+            from ocabra.redis_client import get_redis
+
+            client = get_redis()
+            known = set(self._states)
+            removed = 0
+            async for key in client.scan_iter(match="model:state:*", count=500):
+                key_s = key.decode() if isinstance(key, bytes) else str(key)
+                model_id = key_s[len("model:state:") :]
+                base = model_id.split("::", 1)[0]
+                if model_id not in known and base not in known:
+                    removed += int(await client.delete(key_s))
+            if removed:
+                logger.info("orphan_model_states_purged", removed=removed)
+        except Exception as exc:  # noqa: BLE001 — housekeeping must never block startup
+            logger.warning("orphan_model_states_purge_failed", error=str(exc))
 
     async def _publish_event(self, model_id: str, event: str) -> None:
         state = self._states.get(model_id)
@@ -1647,6 +1712,15 @@ class ModelManager:
                 self._load_tasks[model_id] = load_task
 
             try:
+                if state.artifact:
+                    # Re-resolve on every load: an ``ollama pull`` that updated
+                    # the tag points it at a new blob, and the old one is gone.
+                    state.extra_config = model_artifacts.materialize(
+                        state.backend_type,
+                        state.artifact,
+                        state.extra_config,
+                        model_artifacts.ollama_root(),
+                    )
                 backend = await self._worker_pool.get_backend(state.backend_type)
                 vram_needed = await backend.get_vram_estimate_mb(
                     state.backend_model_id, extra_config=state.extra_config
@@ -3955,8 +4029,17 @@ class ModelManager:
         *,
         persist: bool = True,
         backend_model_id_override: str | None = None,
+        model_key: str | None = None,
+        artifact: dict | None = None,
     ) -> "ModelState":
         """Register a model with ModelManager.
+
+        A persisted model is a *deployment* (``<backend>/<model_key>``) of a
+        logical model; the ``models`` row is created on the fly when the key
+        is new, with this backend as its default. ``model_key`` defaults to
+        the id without the backend prefix. Without an explicit ``artifact``,
+        one is derived from the legacy ``model_path``-style keys in
+        ``extra_config`` (which are then not persisted: the artifact owns them).
 
         ``persist=True`` (default) writes a row to ``model_configs`` and
         marks the model as user-visible in ``/v1/models``. ``persist=False``
@@ -3967,12 +4050,41 @@ class ModelManager:
         second DB row would just clutter the model list and the estimator.
         """
         normalized_model_id, backend_model_id = normalize_model_ref(backend_type, model_id)
+        if isinstance(extra_config, dict) and persist:
+            extra_config = normalize_case(extra_config, prefer="camel")[0]
         if backend_model_id_override:
             backend_model_id = str(backend_model_id_override)
         normalized_backend = str(backend_type or "").strip().lower()
 
         if normalized_model_id in self._states:
             return self._states[normalized_model_id]
+
+        # Derived workers (``<id>::<hash>``, per-profile load overrides) inherit
+        # the base deployment's model and artifact so loads re-resolve paths.
+        derived_base = (
+            self._states.get(normalized_model_id.split("::", 1)[0])
+            if "::" in normalized_model_id
+            else None
+        )
+        if model_key is None:
+            if derived_base is not None:
+                model_key = derived_base.model_key
+            elif persist:
+                model_key = normalized_model_id.split("/", 1)[1]
+        if artifact is None:
+            if derived_base is not None:
+                artifact = derived_base.artifact
+            elif persist:
+                artifact = model_artifacts.artifact_from_legacy_extra(
+                    normalized_backend, backend_model_id, extra_config
+                )
+        persisted_extra = (
+            model_artifacts.strip_derived(normalized_backend, extra_config)
+            if persist and artifact
+            else extra_config
+        )
+        if not backend_model_id_override:
+            backend_model_id = model_artifacts.backend_ref(artifact, backend_model_id)
 
         # Sprint 17.4 — extract GGUF tokenizer fingerprint at registration time
         # so /speculative-candidates can match draft↔target models without
@@ -3984,15 +4096,28 @@ class ModelManager:
             )
 
         if persist:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
             async with database.AsyncSessionLocal() as session:
+                await session.execute(
+                    pg_insert(LogicalModel)
+                    .values(
+                        model_key=model_key,
+                        display_name=display_name or backend_model_id,
+                        default_backend=normalized_backend,
+                    )
+                    .on_conflict_do_nothing(index_elements=["model_key"])
+                )
                 cfg = ModelConfig(
                     model_id=normalized_model_id,
+                    model_key=model_key,
+                    artifact=artifact,
                     display_name=display_name or backend_model_id,
                     backend_type=normalized_backend,
                     load_policy=load_policy,
                     pin_permanent=pin_permanent,
                     preferred_gpu=preferred_gpu,
-                    extra_config=extra_config,
+                    extra_config=persisted_extra,
                     vocab_size=vocab_size,
                     bos_id=bos_id,
                     eos_id=eos_id,
@@ -4003,12 +4128,18 @@ class ModelManager:
         state = ModelState(
             model_id=normalized_model_id,
             backend_model_id=backend_model_id,
+            model_key=model_key,
+            artifact=artifact,
             display_name=display_name or backend_model_id,
             backend_type=normalized_backend,
             load_policy=LoadPolicy(load_policy),
             pin_permanent=pin_permanent,
             preferred_gpu=preferred_gpu,
-            extra_config=extra_config or {},
+            extra_config=(
+                self._derived_extra_config(normalized_backend, artifact, persisted_extra)
+                if persist
+                else extra_config or {}
+            ),
         )
         # The membership check at the top of this method is not enough to
         # make registration race-safe: it runs before the awaits above
@@ -4042,9 +4173,22 @@ class ModelManager:
         state = self._states.get(model_id)
         if not state:
             return False
-        existing = state.extra_config if isinstance(state.extra_config, dict) else {}
-        merged_extra = {**existing, "registry_metadata": metadata}
-        await self.update_config(model_id, {"extra_config": merged_extra})
+        if state.model_key and model_id in self._persisted_model_ids:
+            # Upstream metadata belongs to the logical model, not to one of
+            # its deployments; extra_config only mirrors it in memory.
+            async with database.AsyncSessionLocal() as session:
+                await session.execute(
+                    sa.update(LogicalModel)
+                    .where(LogicalModel.model_key == state.model_key)
+                    .values(registry_metadata=metadata)
+                )
+                await session.commit()
+            for other in self._states.values():
+                if other.model_key == state.model_key:
+                    other.extra_config = {**(other.extra_config or {}), "registry_metadata": metadata}
+        else:
+            existing = state.extra_config if isinstance(state.extra_config, dict) else {}
+            await self.update_config(model_id, {"extra_config": {**existing, "registry_metadata": metadata}})
         await self._publish_event(model_id, "metadata_updated")
         return True
 
@@ -4063,6 +4207,10 @@ class ModelManager:
         unsupported_fields = sorted(set(patch) - allowed_fields)
         if unsupported_fields:
             raise ValueError("Unsupported model config fields: " + ", ".join(unsupported_fields))
+        if isinstance(patch.get("extra_config"), dict):
+            # One spelling per key (snake_case). In an incoming edit the
+            # camelCase twin is what the UI form just wrote, so it wins.
+            patch = {**patch, "extra_config": normalize_case(patch["extra_config"], prefer="camel")[0]}
 
         if model_id in self._persisted_model_ids:
             async with database.AsyncSessionLocal() as session:
@@ -4082,7 +4230,20 @@ class ModelManager:
                             existing_extra = (
                                 cfg.extra_config if isinstance(cfg.extra_config, dict) else {}
                             )
-                            setattr(cfg, key, _deep_merge_dicts(existing_extra, val or {}))
+                            incoming = val or {}
+                            if cfg.artifact:
+                                new_artifact = model_artifacts.apply_path_edits(
+                                    state.backend_type, cfg.artifact, incoming, state.extra_config
+                                )
+                                if new_artifact != cfg.artifact:
+                                    cfg.artifact = new_artifact
+                                    state.artifact = new_artifact
+                                # The UI round-trips what GET returned, derived
+                                # paths and registry metadata included; those
+                                # are owned by the artifact / the model row.
+                                incoming = model_artifacts.strip_derived(state.backend_type, incoming) or {}
+                                incoming = {k: v for k, v in incoming.items() if k != "registry_metadata"}
+                            setattr(cfg, key, _deep_merge_dicts(existing_extra, incoming))
                         else:
                             setattr(cfg, key, val)
                     await session.commit()
@@ -4096,7 +4257,13 @@ class ModelManager:
                 setattr(state, key, bool(val))
             elif key == "extra_config":
                 existing_extra = state.extra_config if isinstance(state.extra_config, dict) else {}
-                setattr(state, key, _deep_merge_dicts(existing_extra, val or {}))
+                merged = _deep_merge_dicts(existing_extra, val or {})
+                if state.artifact:
+                    # paths always come from the (possibly just edited) artifact
+                    merged = model_artifacts.materialize(
+                        state.backend_type, state.artifact, merged, model_artifacts.ollama_root()
+                    )
+                setattr(state, key, merged)
             else:
                 setattr(state, key, val)
 
@@ -4106,8 +4273,17 @@ class ModelManager:
         if model_id in self._states and self._states[model_id].status == ModelStatus.LOADED:
             await self.unload(model_id)
 
+        model_key = self._states[model_id].model_key if model_id in self._states else None
         async with database.AsyncSessionLocal() as session:
             await session.execute(sa.delete(ModelConfig).where(ModelConfig.model_id == model_id))
+            if model_key:
+                remaining = await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(ModelConfig)
+                    .where(ModelConfig.model_key == model_key)
+                )
+                if not remaining:
+                    await session.execute(sa.delete(LogicalModel).where(LogicalModel.model_key == model_key))
             await session.commit()
 
         self._states.pop(model_id, None)
