@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
@@ -198,6 +199,7 @@ async def completions(
                     preferred_gpu=runtime_plan.preferred_gpu,
                     load_policy=runtime_plan.load_policy,
                     required_tokens=runtime_plan.required_tokens,
+                    effective_context=runtime_plan.effective_context,
                     body=body,
                     user_key=fairness_user_key(user),
                     telemetry=runtime_telemetry,
@@ -221,7 +223,12 @@ async def completions(
     # El tope de salida declarado del perfil no se enviaba al backend: una
     # peticion sin max_tokens generaba sin limite (incidente 2026-11-07,
     # 132.263 tokens hasta el timeout). Ver apply_declared_output_limit.
-    apply_declared_output_limit(profile, merged_body)
+    apply_declared_output_limit(
+        profile,
+        merged_body,
+        context_length=getattr(request.state, "runtime_effective_context", 0) or 0,
+        fallback_limit=settings.default_max_output_tokens,
+    )
     worker_key = state.model_id
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
@@ -449,6 +456,7 @@ async def _stream_completions_with_load(
     preferred_gpu: int | None,
     load_policy: str | None,
     required_tokens: int | None,
+    effective_context: int | None = None,
     body: dict,
     user_key: str | None = None,
     telemetry=None,
@@ -528,7 +536,12 @@ async def _stream_completions_with_load(
     # El tope de salida declarado del perfil no se enviaba al backend: una
     # peticion sin max_tokens generaba sin limite (incidente 2026-11-07,
     # 132.263 tokens hasta el timeout). Ver apply_declared_output_limit.
-    apply_declared_output_limit(profile, merged_body)
+    apply_declared_output_limit(
+        profile,
+        merged_body,
+context_length=effective_context or 0,
+fallback_limit=settings.default_max_output_tokens,
+    )
     backend_body = to_backend_body(state, merged_body)
     slots = fairness_slots(state)
     kv_capacity, kv_tokens = fairness_kv_budget(

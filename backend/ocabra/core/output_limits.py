@@ -53,6 +53,8 @@ def apply_declared_output_limit(
     payload: dict,
     *,
     ollama_native: bool = False,
+    context_length: int = 0,
+    fallback_limit: int = 0,
 ) -> int | None:
     """Inyecta el tope de salida declarado del perfil cuando el cliente no fija uno.
 
@@ -72,9 +74,24 @@ def apply_declared_output_limit(
     """
     if _client_set_a_limit(payload, ollama_native=ollama_native):
         return None
-    limit = resolve_max_output_tokens(profile)
+    # Acotado por el contexto efectivo del preset elegido: varios perfiles
+    # declaran 65536 de salida y tienen presets de 32k o 40960, asi que el tope
+    # declarado supera la ventana entera. Mientras no se inyectaba era inocuo;
+    # inyectandolo sin acotar se pediria mas salida que contexto disponible.
+    ctx = max(0, int(context_length or 0))
+    limit = resolve_max_output_tokens(profile, context_length=ctx)
     if limit is None:
-        return None
+        # El perfil no declara tope. Se usa el global para que ningun modelo
+        # generativo quede sin limite: nueve perfiles no lo declaran, entre
+        # ellos qwen3:32b y qwen3:8b. Ojo, esto NO se usa para rechazar
+        # peticiones que pidan mas; solo para rellenar cuando el cliente calla.
+        try:
+            respaldo = int(fallback_limit or 0)
+        except (TypeError, ValueError):
+            respaldo = 0
+        if respaldo <= 0:
+            return None
+        limit = min(respaldo, ctx) if ctx > 0 else respaldo
     if ollama_native:
         options = payload.get("options")
         payload["options"] = {**options, "num_predict": limit} if isinstance(options, dict) else {

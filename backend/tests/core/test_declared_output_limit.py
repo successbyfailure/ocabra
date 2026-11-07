@@ -92,3 +92,88 @@ def test_ollama_nativo_respeta_un_num_predict_de_menos_uno():
     body = {"messages": [], "options": {"num_predict": -1}}
     assert apply_declared_output_limit(_perfil(), body, ollama_native=True) is None
     assert body["options"]["num_predict"] == -1
+
+
+# ── Acotado por el contexto del preset ───────────────────────────────────────
+# Varios perfiles declaran 65536 de salida y tienen presets de 32k o 40960, asi
+# que el tope declarado supera la ventana entera. Mientras no se inyectaba era
+# inocuo; inyectandolo sin acotar se pediria mas salida que contexto hay.
+
+
+def test_el_tope_se_acota_al_contexto_del_preset():
+    body = {"messages": []}
+    # Caso real: qwen3.8:27b-ollama, preset de 32k, tope declarado de 64k.
+    assert apply_declared_output_limit(_perfil(65536), body, context_length=32768) == 32768
+    assert body["max_tokens"] == 32768
+
+
+def test_si_el_contexto_es_mayor_manda_el_tope_declarado():
+    body = {"messages": []}
+    assert apply_declared_output_limit(_perfil(16384), body, context_length=262144) == 16384
+
+
+def test_sin_contexto_conocido_se_usa_el_tope_tal_cual():
+    # context_length=0 significa "no lo se", no "cero".
+    body = {"messages": []}
+    assert apply_declared_output_limit(_perfil(TOPE), body, context_length=0) == TOPE
+
+
+def test_un_contexto_negativo_o_raro_no_rompe():
+    body = {"messages": []}
+    assert apply_declared_output_limit(_perfil(TOPE), body, context_length=-5) == TOPE
+
+
+def test_ollama_nativo_tambien_se_acota():
+    body = {"messages": []}
+    assert (
+        apply_declared_output_limit(_perfil(65536), body, ollama_native=True, context_length=32768)
+        == 32768
+    )
+    assert body["options"]["num_predict"] == 32768
+
+
+# ── Respaldo global cuando el perfil no declara tope ─────────────────────────
+# Nueve perfiles generativos no declaran ``max_output_tokens`` (qwen3:32b,
+# qwen3:8b, mistral:7b, nemotron-3-nano:30b, bonsai y sus gemelos de ollama),
+# asi que sin respaldo seguian generando sin limite.
+
+
+def test_el_respaldo_global_cubre_a_los_perfiles_sin_tope():
+    body = {"messages": []}
+    assert apply_declared_output_limit(_perfil(None), body, fallback_limit=65536) == 65536
+    assert body["max_tokens"] == 65536
+
+
+def test_el_tope_del_perfil_manda_sobre_el_respaldo():
+    body = {"messages": []}
+    assert apply_declared_output_limit(_perfil(8192), body, fallback_limit=65536) == 8192
+
+
+def test_el_respaldo_tambien_se_acota_al_contexto():
+    body = {"messages": []}
+    assert (
+        apply_declared_output_limit(_perfil(None), body, fallback_limit=65536, context_length=32768)
+        == 32768
+    )
+
+
+def test_un_respaldo_en_cero_significa_sin_respaldo():
+    body = {"messages": []}
+    assert apply_declared_output_limit(_perfil(None), body, fallback_limit=0) is None
+    assert "max_tokens" not in body
+
+
+def test_el_respaldo_no_pisa_el_limite_del_cliente():
+    body = {"messages": [], "max_tokens": 42}
+    assert apply_declared_output_limit(_perfil(None), body, fallback_limit=65536) is None
+    assert body["max_tokens"] == 42
+
+
+def test_el_respaldo_no_se_usa_para_rechazar():
+    """``resolve_max_output_tokens`` es lo que rechaza peticiones que piden mas,
+    y sigue devolviendo None sin tope de perfil: un cliente que pida 200k a un
+    modelo sin tope declarado se sigue aceptando, no se empieza a devolver 400
+    a quien hoy funciona."""
+    from ocabra.core.output_limits import resolve_max_output_tokens
+
+    assert resolve_max_output_tokens(_perfil(None)) is None

@@ -152,3 +152,62 @@ def test_los_alias_son_configurables(monkeypatch):
     payload = {"reasoning_effort": "low"}
     _apply_reasoning_effort(_estado(), payload)
     assert payload["chat_template_kwargs"]["reasoning_effort"] == "minimal"
+
+
+# ── vLLM: mismas reglas que llama.cpp ────────────────────────────────────────
+# vLLM pasa ``chat_template_kwargs`` tal cual a la plantilla, asi que le aplican
+# las mismas restricciones. La rama de vLLM enviaba ``reasoning_effort="off"``
+# a pelo y sin ``enable_thinking``; comprobado renderizando la plantilla oficial
+# de Qwen3.8-27B, tanto "off" como "high" dan "Unexpected reasoning effort".
+
+
+def _estado_vllm():
+    return SimpleNamespace(
+        backend_type="vllm", extra_config={}, capabilities=SimpleNamespace(reasoning=True)
+    )
+
+
+def _kwargs_vllm(payload):
+    return payload.get("extra_body", {}).get("chat_template_kwargs", {})
+
+
+def test_vllm_apaga_el_pensamiento_con_enable_thinking():
+    """Sin esta clave la plantilla entra a validar el nivel y "off" explota."""
+    payload = {"reasoning_effort": "off"}
+    _apply_reasoning_effort(_estado_vllm(), payload)
+    kwargs = _kwargs_vllm(payload)
+    assert kwargs["enable_thinking"] is False
+    assert "reasoning_effort" not in kwargs
+
+
+def test_vllm_traduce_high_a_xhigh():
+    payload = {"reasoning_effort": "high"}
+    _apply_reasoning_effort(_estado_vllm(), payload)
+    assert _kwargs_vllm(payload)["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.parametrize("nivel", ["low", "medium"])
+def test_vllm_enciende_el_pensamiento_con_su_nivel(nivel):
+    payload = {"reasoning_effort": nivel}
+    _apply_reasoning_effort(_estado_vllm(), payload)
+    kwargs = _kwargs_vllm(payload)
+    assert kwargs["enable_thinking"] is True
+    assert kwargs["reasoning_effort"] == nivel
+
+
+def test_vllm_no_recibe_el_tope_duro_de_llama_cpp():
+    """``reasoning_budget_tokens`` es nativo de llama-server."""
+    payload = {"reasoning_effort": "low"}
+    _apply_reasoning_effort(_estado_vllm(), payload)
+    assert "reasoning_budget_tokens" not in payload
+
+
+def test_vllm_respeta_los_kwargs_que_ya_trae_el_cliente():
+    payload = {
+        "reasoning_effort": "high",
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False, "otra": 1}},
+    }
+    _apply_reasoning_effort(_estado_vllm(), payload)
+    kwargs = _kwargs_vllm(payload)
+    assert kwargs["enable_thinking"] is False  # el del cliente manda
+    assert kwargs["otra"] == 1

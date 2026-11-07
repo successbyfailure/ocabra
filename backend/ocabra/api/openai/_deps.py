@@ -1638,9 +1638,24 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
         template_kwargs = extra.get("chat_template_kwargs")
         if not isinstance(template_kwargs, dict):
             template_kwargs = {}
-        # Preserve the full "low/medium/high/off" granularity for vLLM — some
-        # chat templates branch on the exact level, not just on/off.
-        template_kwargs.setdefault("reasoning_effort", value if enabled else "off")
+        # Mismo tratamiento que la familia llama.cpp: vLLM pasa
+        # ``chat_template_kwargs`` tal cual a la plantilla, asi que valen las
+        # mismas reglas.
+        #
+        # ``enable_thinking`` es obligatorio para apagar el pensamiento: la
+        # plantilla de Qwen 3.5 valida el nivel dentro de
+        # ``{% if enable_thinking is undefined or enable_thinking is true %}``,
+        # asi que sin esa clave entra a validar igual y un "off" explota.
+        # Comprobado renderizando la plantilla oficial de Qwen3.8-27B: tanto
+        # "off" como "high" dan "Unexpected reasoning effort"; con
+        # ``enable_thinking=False`` y con "xhigh" pasan. Antes se enviaba
+        # ``reasoning_effort="off"`` a pelo, que es justo el caso que rompe.
+        template_kwargs.setdefault("enable_thinking", enabled)
+        if enabled:
+            template_kwargs.setdefault(
+                "reasoning_effort",
+                settings.reasoning_effort_template_aliases.get(value, value),
+            )
         extra["chat_template_kwargs"] = template_kwargs
         payload["extra_body"] = extra
     elif backend == "ollama":

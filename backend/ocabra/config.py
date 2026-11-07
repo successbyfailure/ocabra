@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.43.1"
+    app_version: str = "0.44.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -683,6 +683,24 @@ class Settings(BaseSettings):
     # las variables de contexto que no usa, asi que enviarlo es inocuo para
     # ellas. Mapa vacio = enviar el nivel tal cual.
     reasoning_effort_template_aliases: dict[str, str] = {"high": "xhigh"}
+
+    # Tope de salida que se inyecta cuando el PERFIL no declara
+    # ``max_output_tokens``. Nueve perfiles generativos no lo declaran
+    # (qwen3:32b, qwen3:8b, mistral:7b, nemotron-3-nano:30b, bonsai y sus
+    # gemelos de ollama), asi que sin esto seguian generando sin limite: es la
+    # forma del incidente del 2026-11-07, 132.263 tokens en 26 minutos hasta el
+    # timeout. 65536 es el mismo valor que ya tienen los trece perfiles que si
+    # lo declaran, y se acota ademas por el contexto efectivo del preset.
+    #
+    # Solo afecta a la INYECCION, nunca al rechazo: una peticion que pida
+    # explicitamente mas sigue aceptandose si el perfil no declara tope, para
+    # no empezar a devolver 400 a clientes que hoy funcionan.
+    #
+    # Referencia de trafico real (44.342 peticiones generativas con exito):
+    # p50 180 tokens, p95 2.530, p99 18.905. Por encima de 65536 solo hay un
+    # punado de generaciones historicas, todas de los modelos que ya se
+    # desbocaron. 0 = sin tope por defecto.
+    default_max_output_tokens: int = 65536
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"

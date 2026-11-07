@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ocabra.api.openai._deps import fairness_kv_budget, fairness_slots
+from ocabra.config import settings
 
 
 @pytest.fixture(autouse=True)
@@ -2003,6 +2004,11 @@ class TestBackendAgnosticRouting:
             {
                 "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
                 "messages": [{"role": "user", "content": "Hi"}],
+                # El tope de salida se inyecta cuando el cliente no pone
+                # ninguno: sin perfil que lo declare entra el respaldo global
+                # (settings.default_max_output_tokens). Antes esta peticion
+                # salia sin limite de generacion.
+                "max_tokens": settings.default_max_output_tokens,
             },
             user_key="anonymous",
             slots=1,
@@ -2042,6 +2048,9 @@ class TestBackendAgnosticRouting:
             {
                 "model": state.backend_model_id,
                 "prompt": "Hello",
+                # Igual que en chat: el tope de salida se inyecta cuando el
+                # cliente no pone ninguno (respaldo global).
+                "max_tokens": settings.default_max_output_tokens,
             },
             user_key="anonymous",
             slots=1,
