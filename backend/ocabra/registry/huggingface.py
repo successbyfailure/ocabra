@@ -11,6 +11,7 @@ from huggingface_hub import hf_hub_download, list_models, model_info, snapshot_d
 
 from ocabra.backends.vllm_recipes import get_vllm_recipe
 from ocabra.config import settings
+from ocabra.core.compatibility import backends_for_files, is_ternary_gguf
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.registry.vllm_runtime_probe import VLLMRuntimeProbeService
 from ocabra.schemas.registry import (
@@ -128,7 +129,8 @@ class HuggingFaceRegistry:
         # GGUF artifacts go to llama.cpp directly without inspecting the repo
         # metadata — the format unambiguously identifies the runtime.
         if artifact and artifact.lower().endswith(".gguf"):
-            return "llama_cpp"
+            # Production llama.cpp is the Makespace fork; ternary quants are BitNet's.
+            return "bitnet" if is_ternary_gguf(artifact) else "llamacpp_mks"
         info = await asyncio.to_thread(
             lambda: model_info(
                 repo_id=repo_id, files_metadata=False, token=settings.hf_token or None
@@ -200,6 +202,13 @@ class HuggingFaceRegistry:
                     gated=bool(getattr(model, "gated", False)),
                     suggested_backend=primary_backend,
                     backend_options=self._backend_options(primary_backend, sibling_names),
+                    compatible_backends=backends_for_files(
+                        sibling_names,
+                        pipeline_tag=getattr(model, "pipeline_tag", None),
+                        library_name=getattr(model, "library_name", None),
+                        tags=list(getattr(model, "tags", []) or []),
+                        suggested=primary_backend,
+                    ),
                     compatibility=self._compatibility_from_vllm_support(vllm_support),
                     compatibility_reason=self._compatibility_reason_from_support(vllm_support),
                     vllm_support=vllm_support,
@@ -781,13 +790,16 @@ class HuggingFaceRegistry:
                     size_gb=(total_size / (1024**3)) if total_size > 0 else None,
                     format="gguf",
                     quantization=quant,
-                    backend_type="llama_cpp",
+                    # The Makespace llama.cpp fork is the production one; the
+                    # API layer falls back to upstream when it isn't installed.
+                    backend_type="bitnet" if is_ternary_gguf(primary["name"]) else "llamacpp_mks",
                     is_default=is_default,
                     installable=True,
                     compatibility="compatible",
                     compatibility_reason=(
                         f"GGUF artifact {primary['name']} for llama.cpp."
                     ),
+                    compatible_backends=backends_for_files([primary["name"]]),
                     vllm_support=None,
                 )
             )

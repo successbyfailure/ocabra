@@ -12,12 +12,28 @@ from __future__ import annotations
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from ocabra.api._deps_auth import (
     UserContext,
     _build_anonymous_context,
     _fetch_accessible_models,
     get_current_user,
 )
+
+
+
+@pytest.fixture(autouse=True)
+def _no_grant_expansion(monkeypatch: pytest.MonkeyPatch):
+    """These tests script the exact DB calls of the group union; the widening
+    of model grants to deployments/variants/aliases runs extra queries and is
+    covered against a real DB in tests/core/test_model_deployments_ops.py."""
+
+    async def _identity(granted, _session):
+        return granted
+
+    monkeypatch.setattr("ocabra.api._deps_auth._expand_model_grants", _identity)
+
 
 # ── _fetch_accessible_models ──────────────────────────────────────────────────
 

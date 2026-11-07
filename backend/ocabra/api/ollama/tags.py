@@ -92,6 +92,12 @@ async def _list_tags_from_profiles(
         # Keep private target metadata available to authorised routers without
         # exposing those execution profiles as direct selector entries.
         profile_visible = user.can_access_model(profile.profile_id, profile.base_model_id)
+        # Variants pinned to a non-default deployment (``gemma4:26b-ollama``,
+        # the whisper.cpp CPU build) stay resolvable by name and by their
+        # ``<backend>/<model_key>`` id but are not listed: the model is listed
+        # once, under its public name, served by its default backend.
+        if getattr(profile, "backend", None):
+            profile_visible = False
 
         base_state = await model_manager.get_state(profile.base_model_id)
 

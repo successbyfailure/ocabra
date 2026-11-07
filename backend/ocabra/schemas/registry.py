@@ -72,6 +72,9 @@ class HFModelCard(BaseModel):
     # explícita cuando el repo expone múltiples formatos (p.ej. safetensors
     # + GGUF en el mismo upload). G3 — añadido junto al soporte llama.cpp.
     backend_options: list[str] = Field(default_factory=list)
+    # Backends que pueden servir este fichero/repo, preferido primero:
+    # ``[{backend, status, installed, reason}]`` (ocabra.core.compatibility).
+    compatible_backends: list[dict[str, Any]] = Field(default_factory=list)
     compatibility: str = "unknown"
     compatibility_reason: str | None = None
     vllm_support: HFVLLMSupport | None = None
@@ -99,6 +102,9 @@ class HFModelVariant(BaseModel):
     compatibility: str = "unknown"
     compatibility_reason: str | None = None
     vllm_support: HFVLLMSupport | None = None
+    # Backends que pueden servir este fichero/repo, preferido primero:
+    # ``[{backend, status, installed, reason}]`` (ocabra.core.compatibility).
+    compatible_backends: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OllamaModelCard(BaseModel):
@@ -107,6 +113,9 @@ class OllamaModelCard(BaseModel):
     tags: list[str]
     size_gb: float | None
     pulls: int
+    # Backends que pueden servir este fichero/repo, preferido primero:
+    # ``[{backend, status, installed, reason}]`` (ocabra.core.compatibility).
+    compatible_backends: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OllamaModelVariant(BaseModel):
@@ -118,6 +127,9 @@ class OllamaModelVariant(BaseModel):
     context_window: str | None
     modality: str | None
     updated_hint: str | None
+    # Backends que pueden servir este fichero/repo, preferido primero:
+    # ``[{backend, status, installed, reason}]`` (ocabra.core.compatibility).
+    compatible_backends: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LocalModel(BaseModel):

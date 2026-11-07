@@ -1,7 +1,7 @@
 # Plan: un modelo, varios backends · modelo lógico + despliegues
 
 **Fecha de apertura:** 2026-11-07
-**Estado:** 🟢 Fase 0 y Fase 1 desplegadas (2026-11-07, v0.46.0); Fases 2–6 pendientes
+**Estado:** 🟢 Fases 0, 1, 2, 3 y backend de la 5 hechas (v0.47.0); pendientes UI (4, 5) y docs (6)
 **Relacionado:** [`backend-distribution-plan.md`](backend-distribution-plan.md) (backend en el id
 canónico, migración entre backends), [`llama-cpp-elastic-kv-plan.md`](llama-cpp-elastic-kv-plan.md)
 (convención `*-ollama` que este plan elimina), `docs/CONTRACTS.md` §ids canónicos
@@ -282,6 +282,42 @@ Cambios respecto al diseño original, todos para **no cambiar el comportamiento 
 cada backend antes (código y datos actuales) y después (código nuevo sobre la base migrada) coincide
 en los 48 despliegues — referencia, fichero resuelto y todas las opciones de llama.cpp — salvo los
 cambios previstos de arriba. Script en `/home/makespace/ocabra-migcheck/`.
+
+### Fase 2 + Fase 3 (API) + Fase 5 (backend) — implementadas 2026-11-07 (v0.47.0)
+
+Sin migración: reutiliza `model_profiles.backend` y `model_profile_aliases.backend` de la 0034.
+
+- **Invariante: cada despliegue tiene al menos un perfil.** Los perfiles con `backend` fijado son
+  variantes ocultas: resuelven por nombre y por `<backend>/<model_key>`, pero no se listan en
+  `/v1/models` ni `/api/tags`. `ensure_default_profiles` crea una variante oculta
+  (`<model_key>-<backend>`) para todo despliegue no-default sin perfil. Así la resolución de
+  nombres no necesita cambios: no se construyen perfiles "con backend forzado" al vuelo.
+- **Cambiar el backend por defecto** (`core/model_deployments.set_default_backend`, expuesto en
+  `PATCH /ocabra/logical-models/{key}`): reapunta los perfiles públicos (`backend IS NULL`) al
+  despliegue nuevo, mueve `load_policy`/`pin` al nuevo default (el viejo pasa a `on_demand`),
+  aparca/restaura la capacidad validada por backend (`runtime_policy.validated_by_backend`: los
+  lectores siguen leyendo los mapas planos, que siempre describen el backend actual) y da una
+  variante oculta al antiguo default. El worker viejo se deja a la expulsión por inactividad.
+- **Añadir/quitar despliegues** (`POST/DELETE /ocabra/logical-models/{key}/deployments`): el
+  artefacto se deriva del existente con `core/compatibility.derive_artifact` (solo backends que
+  pueden leer ese mismo fichero); quitar el default de un modelo con más despliegues cambia antes el
+  default (los perfiles caen en cascada con su despliegue). `DELETE /ocabra/models/{id}` usa la
+  misma lógica.
+- **ACL por modelo**: `_expand_model_grants` amplía en la autenticación cada `model_key` concedido a
+  sus despliegues, perfiles (ocultos incluidos) y alias; las 15 comprobaciones `can_access_model`
+  no cambian. Conceder solo una variante sigue concediendo solo esa variante.
+- `resolve_model` (Ollama/legacy) ya no toma el primer `backend_model_id` que coincide: prefiere el
+  despliegue default del modelo (`ModelManager.is_default_deployment`).
+- Federación con routers: elige el primer destino caliente (local o en un peer), como
+  `RouterResolver`, en vez del primero de la lista.
+- **Compatibilidad** (`core/compatibility.py`): una sola tabla de reglas. Las tarjetas y variantes
+  de HF/Ollama/BitNet llevan `compatible_backends` (`installed` según el instalador; si el
+  sugerido no está instalado se cae al primero compatible que sí). Las variantes GGUF sugieren
+  `llamacpp_mks` (antes `llama_cpp` fijo).
+- **Descarga**: `register_config` acepta `model_key`, `default_backend` y `backends`. Un pull de
+  Ollama se sirve por defecto con `llamacpp_mks` (artefacto = tag) y conserva el despliegue
+  `ollama` como respaldo.
+- Pendiente: Fase 4 (UI de modelos) y la parte de UI de la Fase 5.
 
 ## Fases
 

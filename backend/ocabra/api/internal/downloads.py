@@ -358,10 +358,22 @@ class DownloadManager:
             backend_model_id = self._job_model_id(job)
             register_config = job.register_config or {}
             backend_type = await self._resolve_job_backend(job)
-            model_id = build_model_ref(backend_type, backend_model_id)
+            model_key = self._job_model_key(job)
+            model_id = build_model_ref(backend_type, model_key)
             existing = await mm.get_state(model_id)
             if existing:
                 return
+            artifact = None
+            if job.source == "ollama" and backend_type != "ollama":
+                # An Ollama pull served by llama.cpp: read the tag's blob through
+                # its manifest on every load (follows future ``ollama pull``s).
+                from ocabra.core.compatibility import derive_artifact
+
+                artifact = derive_artifact(
+                    {"kind": "ollama_tag", "source": "ollama", "ref": job.model_ref}, backend_type
+                )
+            elif job.source == "ollama":
+                artifact = {"kind": "ollama_tag", "source": "ollama", "ref": job.model_ref}
             extra_config = _rc_get(register_config, "extra_config") or {}
             # Single-file weights (BitNet / llama.cpp GGUF) are stored under
             # ``huggingface/<repo-->--<artifact stem>/<artifact>``. Pin the exact
@@ -400,11 +412,14 @@ class DownloadManager:
             await mm.add_model(
                 model_id=model_id,
                 backend_type=backend_type,
-                display_name=_rc_get(register_config, "display_name") or backend_model_id,
+                display_name=_rc_get(register_config, "display_name") or model_key,
                 load_policy=_rc_get(register_config, "load_policy", "on_demand"),
                 pin_permanent=bool(_rc_get(register_config, "pin_permanent", False)),
                 preferred_gpu=_rc_get(register_config, "preferred_gpu"),
                 extra_config=extra_config or None,
+                model_key=model_key,
+                backend_model_id_override=backend_model_id if artifact is None else None,
+                artifact=artifact,
             )
             # Playground / /v1/models look up by profile_id; without a default
             # profile the freshly downloaded model can't be selected until the
@@ -412,6 +427,27 @@ class DownloadManager:
             profile_registry = getattr(self._app.state, "profile_registry", None)
             if profile_registry is not None:
                 await profile_registry.on_model_added(model_id)
+                # Extra deployments of the same file (e.g. the Ollama copy of a
+                # pull served by llama.cpp, or upstream llama.cpp next to the fork).
+                from ocabra.core import model_deployments as md
+
+                for extra_backend in self._job_extra_backends(job, backend_type):
+                    try:
+                        await md.add_deployment(
+                            model_key,
+                            extra_backend,
+                            model_manager=mm,
+                            profile_registry=profile_registry,
+                            source_backend=backend_type,
+                        )
+                    except Exception:  # noqa: BLE001 — the primary deployment is already usable
+                        logger.warning(
+                            "download_extra_deployment_failed",
+                            job_id=job.job_id,
+                            model_key=model_key,
+                            backend=extra_backend,
+                            exc_info=True,
+                        )
         except Exception:
             # Non-fatal (the model can be registered by hand), but it must be
             # visible: a silent ``pass`` here meant a finished download that
@@ -439,10 +475,19 @@ class DownloadManager:
         against KNOWN_BACKEND_TYPES so a typo degrades to inference instead of
         registering an unservable model id.
         """
-        requested_backend = _rc_get(job.register_config or {}, "backend_type")
+        register_config = job.register_config or {}
+        default_backend = _rc_get(register_config, "default_backend")
+        if isinstance(default_backend, str) and default_backend in KNOWN_BACKEND_TYPES:
+            return default_backend
+        requested_backend = _rc_get(register_config, "backend_type")
         if isinstance(requested_backend, str) and requested_backend in KNOWN_BACKEND_TYPES:
             return requested_backend
         if job.source == "ollama":
+            # Ollama is the distribution channel; serving goes to the
+            # production llama.cpp when it is installed (user, 2026-11-07).
+            installed = self._installed_backends()
+            if installed is None or "llamacpp_mks" in installed:
+                return "llamacpp_mks"
             return "ollama"
         if job.source == "bitnet":
             return "bitnet"
@@ -472,13 +517,53 @@ class DownloadManager:
             backend_model_id = self._job_model_id(job)
             backend_type = await self._resolve_job_backend(job)
 
-            model_id = build_model_ref(backend_type, backend_model_id)
-            metadata = await fetch_registry_metadata(backend_type, backend_model_id)
+            model_id = build_model_ref(backend_type, self._job_model_key(job))
+            metadata = await fetch_registry_metadata(
+                "ollama" if job.source == "ollama" else backend_type, backend_model_id
+            )
             if metadata is None:
                 return
             await mm.set_registry_metadata(model_id, metadata)
         except Exception:
             pass  # Non-fatal: metadata can be backfilled later.
+
+    def _installed_backends(self) -> set[str] | None:
+        if not self._app:
+            return None
+        from ocabra.core.model_deployments import installed_backends
+
+        return installed_backends(self._app.state)
+
+    def _job_model_key(self, job: DownloadJob) -> str:
+        """Public name of the downloaded model: ``register_config.model_key``,
+        else the Ollama tag / repo reference (the pre-unification id)."""
+        raw = _rc_get(job.register_config or {}, "model_key")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        return self._job_model_id(job)
+
+    def _job_extra_backends(self, job: DownloadJob, primary: str) -> list[str]:
+        """Backends to deploy besides the primary one.
+
+        ``register_config.backends`` when given; otherwise an Ollama pull
+        served by llama.cpp also keeps its Ollama deployment as fallback.
+        """
+        raw = _rc_get(job.register_config or {}, "backends")
+        if isinstance(raw, list):
+            wanted = [str(b) for b in raw if str(b) in KNOWN_BACKEND_TYPES]
+        elif job.source == "ollama" and primary != "ollama":
+            wanted = ["ollama"]
+        else:
+            wanted = []
+        installed = self._installed_backends()
+        out = []
+        for backend in wanted:
+            if backend == primary or backend in out:
+                continue
+            if installed is not None and backend not in installed:
+                continue
+            out.append(backend)
+        return out
 
     def _job_model_id(self, job: DownloadJob) -> str:
         if job.source not in {"huggingface", "bitnet"} or not job.artifact:

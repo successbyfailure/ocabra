@@ -61,6 +61,9 @@ async def test_auto_register_model_uses_register_config() -> None:
                 "tool_call_parser": "qwen3_json",
             }
         },
+        model_key="Qwen/Qwen3-8B-Instruct",
+        backend_model_id_override="Qwen/Qwen3-8B-Instruct",
+        artifact=None,
     )
 
 
@@ -263,3 +266,54 @@ async def test_sweep_old_jobs_deletes_past_retention_only(monkeypatch: pytest.Mo
     fake_redis.delete.assert_any_await("download:job:old-completed")
     fake_redis.delete.assert_any_await("download:job:old-failed")
     assert fake_redis.delete.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ollama_pull_is_served_by_llamacpp_mks_and_keeps_ollama_as_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama is the distribution channel; the production llama.cpp serves it
+    (reading the tag's blob through its manifest) and the Ollama deployment
+    stays as a second, non-default deployment of the same model."""
+    from ocabra.core import model_deployments as md
+
+    manager = DownloadManager()
+    model_manager = SimpleNamespace(get_state=AsyncMock(return_value=None), add_model=AsyncMock())
+    profile_registry = SimpleNamespace(on_model_added=AsyncMock(return_value="gemma4:e4b"))
+    installer_states = [
+        SimpleNamespace(backend_type=b, install_status=md_status)
+        for b, md_status in (("llamacpp_mks", "installed"), ("ollama", "installed"))
+    ]
+    manager._app = SimpleNamespace(
+        state=SimpleNamespace(
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            backend_installer=SimpleNamespace(list_states=lambda: installer_states),
+        )
+    )
+    monkeypatch.setattr(md, "installed_backends", lambda _state: {"llamacpp_mks", "ollama"})
+    add_deployment = AsyncMock()
+    monkeypatch.setattr(md, "add_deployment", add_deployment)
+
+    job = DownloadJob(
+        job_id="job-ollama-1",
+        source="ollama",
+        model_ref="gemma4:e4b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-07T00:00:00Z",
+        completed_at="2026-11-07T00:01:00Z",
+    )
+    await manager._auto_register_model(job)
+
+    call = model_manager.add_model.await_args.kwargs
+    assert call["model_id"] == "llamacpp_mks/gemma4:e4b"
+    assert call["model_key"] == "gemma4:e4b"
+    assert call["artifact"]["source"] == "ollama" and call["artifact"]["ref"] == "gemma4:e4b"
+    add_deployment.assert_awaited_once()
+    assert add_deployment.await_args.args == ("gemma4:e4b", "ollama")

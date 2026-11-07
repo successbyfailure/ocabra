@@ -709,7 +709,11 @@ async def test_hf_variants_exposes_standard_and_gguf(monkeypatch: pytest.MonkeyP
     gguf_variants = [v for v in variants if v.format == "gguf"]
     assert len(gguf_variants) == 2
     assert {v.artifact for v in gguf_variants} == {"model-q4_k_m.gguf", "model-q8_0.gguf"}
-    assert all(v.backend_type == "llama_cpp" for v in gguf_variants)
+    # the production llama.cpp (Makespace fork) is the default for GGUF
+    assert all(v.backend_type == "llamacpp_mks" for v in gguf_variants)
+    assert all(
+        [c["backend"] for c in v.compatible_backends] == ["llamacpp_mks", "llama_cpp"] for v in gguf_variants
+    )
     # When a standard safetensors variant is present, it remains the default.
     assert all(not v.is_default for v in gguf_variants)
 
@@ -828,14 +832,14 @@ async def test_hf_download_rejects_incompatible_tokenizer_repo(
 
 
 @pytest.mark.asyncio
-async def test_hf_infer_backend_for_repo_returns_llama_cpp_for_gguf_artifact() -> None:
+async def test_hf_infer_backend_for_repo_returns_llamacpp_mks_for_gguf_artifact() -> None:
     """G1: a .gguf artifact short-circuits to llama_cpp without inspecting metadata."""
     registry = HuggingFaceRegistry()
     backend = await registry.infer_backend_for_repo(
         repo_id="org/model",  # repo_id is irrelevant here
         artifact="model-q4_k_m.gguf",
     )
-    assert backend == "llama_cpp"
+    assert backend == "llamacpp_mks"
 
 
 @pytest.mark.asyncio

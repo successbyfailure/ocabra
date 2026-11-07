@@ -271,6 +271,12 @@ async def list_models(
         # router can describe itself from private targets. Only append the
         # execution profile itself when it is directly accessible.
         profile_visible = user.can_access_model(profile.profile_id, profile.base_model_id)
+        # Variants pinned to a non-default deployment (``gemma4:26b-ollama``,
+        # the whisper.cpp CPU build) stay resolvable by name and by their
+        # ``<backend>/<model_key>`` id but are not listed: the model is listed
+        # once, under its public name, served by its default backend.
+        if getattr(profile, "backend", None):
+            profile_visible = False
 
         base_state = await model_manager.get_state(profile.base_model_id)
         if base_state is None:

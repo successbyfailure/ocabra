@@ -85,6 +85,7 @@ async def _build_anonymous_context(session) -> UserContext:
             model_ids.add(model_id)
 
     group_ids = [str(default_group_id)] if default_group_id else []
+    model_ids = await _expand_model_grants(model_ids, session)
 
     # Empty set means "all models" (unrestricted) — used when the default
     # group has no explicit model assignments.
@@ -215,6 +216,64 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
     )
 
 
+async def _expand_model_grants(granted: set[str], session) -> set[str]:
+    """Widen ``group_models`` grants from logical models to everything they own.
+
+    ``group_models`` stores model keys (``gemma4:26b``), router profile ids and
+    the odd standalone profile. A request can name the same model in several
+    ways — its public profile, a hidden variant pinned to another backend
+    (``gemma4:26b-ollama``), a deployment id (``ollama/gemma4:26b``) or a
+    compatibility alias — and every ``can_access_model`` site checks only the
+    names it has at hand. Granting the model therefore grants all of those, so
+    the checks stay simple and a backend switch never changes who can use what.
+    Granting a single profile (e.g. only a ``-diarized`` variant) still grants
+    only that profile.
+    """
+    if not granted or ALL_MODELS_ACCESS in granted:
+        return granted
+    from ocabra.db.model_config import ModelConfig, ModelProfile, ModelProfileAlias
+
+    keys = set(
+        (
+            await session.execute(
+                select(ModelConfig.model_key).where(
+                    (ModelConfig.model_key.in_(granted)) | (ModelConfig.model_id.in_(granted))
+                )
+            )
+        ).scalars()
+    )
+    if not keys:
+        return granted
+    expanded = set(granted) | keys
+    deployments = set(
+        (
+            await session.execute(
+                select(ModelConfig.model_id).where(ModelConfig.model_key.in_(keys))
+            )
+        ).scalars()
+    )
+    expanded |= deployments
+    profile_ids = set(
+        (
+            await session.execute(
+                select(ModelProfile.profile_id).where(ModelProfile.base_model_id.in_(deployments))
+            )
+        ).scalars()
+    )
+    expanded |= profile_ids
+    if profile_ids:
+        expanded |= set(
+            (
+                await session.execute(
+                    select(ModelProfileAlias.alias_id).where(
+                        ModelProfileAlias.profile_id.in_(profile_ids)
+                    )
+                )
+            ).scalars()
+        )
+    return expanded
+
+
 async def _fetch_accessible_models(role: str, group_ids: list[str], session) -> set[str]:
     """Return the set of accessible model IDs.
 
@@ -266,7 +325,7 @@ async def _fetch_accessible_models(role: str, group_ids: list[str], session) -> 
         )
         accessible.update(explicit_result.scalars().all())
 
-    return accessible
+    return await _expand_model_grants(accessible, session)
 
 
 # ── Public dependencies ───────────────────────────────────────────────────────

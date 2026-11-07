@@ -1086,7 +1086,22 @@ async def delete_model(
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-    await mm.delete_model(model_id)
+    profile_registry = getattr(request.app.state, "profile_registry", None)
+    if getattr(state, "model_key", None) and profile_registry is not None:
+        # Deployment of a logical model: if it is the default and the model has
+        # other deployments, the public name moves to one of them first —
+        # profiles cascade with their deployment, so deleting it directly would
+        # take the public profile and its presets along.
+        from ocabra.core import model_deployments as md
+
+        await md.remove_deployment(
+            state.model_key,
+            state.backend_type,
+            model_manager=mm,
+            profile_registry=profile_registry,
+        )
+    else:
+        await mm.delete_model(model_id)
 
     deleted_path: str | None = None
     if delete_files:

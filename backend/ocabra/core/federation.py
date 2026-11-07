@@ -764,13 +764,33 @@ async def resolve_federated(
             profile = None
         if profile is not None:
             if getattr(profile, "profile_kind", "execution") == "router":
-                target = None
+                # Same first rule as RouterResolver.pick: a target that is
+                # already warm (here, or on a peer) beats an earlier cold one.
+                # Taking the first existing target sent every router request
+                # to its #1 even when #2 was loaded somewhere in the cluster.
+                remote_loaded = (
+                    federation_manager.get_remote_models() if federation_manager is not None else {}
+                )
+                candidates = []
                 for target_id in profile.routing_targets or []:
                     candidate = await profile_registry.get(target_id)
-                    if candidate is not None:
+                    if candidate is None and "/" in str(target_id):
+                        # deployment id target (``whisper_cpp/<model_key>``)
+                        listed = await profile_registry.list_by_model(str(target_id))
+                        candidate = listed[0] if listed else None
+                    if candidate is not None and candidate.base_model_id is not None:
+                        candidates.append(candidate)
+                target = None
+                for candidate in candidates:
+                    local_state = await model_manager.get_state(candidate.base_model_id)
+                    if (
+                        local_state is not None and local_state.status == ModelStatus.LOADED
+                    ) or remote_loaded.get(candidate.base_model_id):
                         target = candidate
                         break
-                if target is not None and target.base_model_id is not None:
+                if target is None and candidates:
+                    target = candidates[0]
+                if target is not None:
                     model_id = target.base_model_id
             elif profile.base_model_id is not None:
                 model_id = profile.base_model_id

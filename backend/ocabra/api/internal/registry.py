@@ -25,6 +25,67 @@ from ocabra.schemas.registry import (
     OllamaModelVariant,
 )
 
+# ── backend compatibility annotations (model/backends unification) ───────────
+
+
+def _installed(request: Request) -> set[str] | None:
+    from ocabra.core.model_deployments import installed_backends
+
+    return installed_backends(request.app.state)
+
+
+def _annotate_compat(
+    entries: list, installed: set[str] | None, *, hf_variant: bool = False
+) -> list:
+    """Mark which compatible backends are installed and, when the suggested
+    backend is not, fall back to the first compatible one that is.
+
+    Accepts schema objects or plain dicts (registry stubs in tests return dicts).
+    """
+    from ocabra.core.compatibility import backends_for_ollama_tag
+
+    def get(entry, key, default=None):
+        return entry.get(key, default) if isinstance(entry, dict) else getattr(entry, key, default)
+
+    def put(entry, key, value) -> None:
+        if isinstance(entry, dict):
+            entry[key] = value
+        else:
+            setattr(entry, key, value)
+
+    for entry in entries:
+        compat = list(get(entry, "compatible_backends") or [])
+        if not compat:
+            is_ollama = isinstance(entry, (OllamaModelCard, OllamaModelVariant)) or (
+                isinstance(entry, dict)
+                and "pulls" in entry
+                or (isinstance(entry, dict) and "tag" in entry)
+            )
+            if is_ollama:
+                compat = backends_for_ollama_tag(name=str(get(entry, "name", "")))
+            else:
+                backend = get(entry, "backend_type") or get(entry, "suggested_backend")
+                if backend:
+                    compat = [
+                        {
+                            "backend": backend,
+                            "status": "compatible",
+                            "installed": True,
+                            "reason": "",
+                        }
+                    ]
+        if installed is not None:
+            compat = [{**c, "installed": c["backend"] in installed} for c in compat]
+            field = "backend_type" if hf_variant else "suggested_backend"
+            current = get(entry, field)
+            if current and current not in installed:
+                fallback = next((c["backend"] for c in compat if c["installed"]), None)
+                if fallback:
+                    put(entry, field, fallback)
+        put(entry, "compatible_backends", compat)
+    return entries
+
+
 router = APIRouter(tags=["registry"])
 
 _hf_registry = HuggingFaceRegistry()
@@ -33,15 +94,20 @@ _local_scanner = LocalScanner()
 _bitnet_registry = BitnetRegistry()
 
 
-@router.get("/registry/hf/search", response_model=list[HFModelCard], summary="Search HuggingFace models")
+@router.get(
+    "/registry/hf/search", response_model=list[HFModelCard], summary="Search HuggingFace models"
+)
 @router.get("/registry/hf", response_model=list[HFModelCard], summary="Search HuggingFace models")
 async def search_hf_models(
+    request: Request,
     q: str = Query(default="", description="Text query"),
     task: str | None = Query(default=None, description="HF pipeline task"),
     limit: int = Query(default=20, ge=1, le=100),
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[HFModelCard]:
-    return await _hf_registry.search(query=q, task=task, limit=limit)
+    """Search HuggingFace; each card lists ``compatible_backends`` (installed flagged)."""
+    cards = await _hf_registry.search(query=q, task=task, limit=limit)
+    return _annotate_compat(cards, _installed(request))
 
 
 @router.get(
@@ -51,10 +117,13 @@ async def search_hf_models(
     description="Return downloadable variants (GGUF files, safetensors shards, etc.) for a HuggingFace repo.",
 )
 async def get_hf_variants(
+    request: Request,
     repo_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[HFModelVariant]:
-    return await _hf_registry.get_variants(repo_id)
+    """Variants of a repo; ``backend_type`` falls back to an installed compatible backend."""
+    variants = await _hf_registry.get_variants(repo_id)
+    return _annotate_compat(variants, _installed(request), hf_variant=True)
 
 
 @router.get(
@@ -64,22 +133,28 @@ async def get_hf_variants(
     description="Return detailed metadata for a single HuggingFace repository.",
 )
 async def get_hf_model_detail(
+    request: Request,
     repo_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> HFModelDetail:
-    return await _hf_registry.get_model_detail(repo_id)
+    """Repo detail with ``compatible_backends``."""
+    detail = await _hf_registry.get_model_detail(repo_id)
+    return _annotate_compat([detail], _installed(request))[0]
 
 
-
-
-@router.get("/registry/bitnet/search", response_model=list[HFModelCard], summary="Search BitNet models")
+@router.get(
+    "/registry/bitnet/search", response_model=list[HFModelCard], summary="Search BitNet models"
+)
 @router.get("/registry/bitnet", response_model=list[HFModelCard], summary="Search BitNet models")
 async def search_bitnet_models(
+    request: Request,
     q: str = Query(default="", description="Text query"),
     limit: int = Query(default=20, ge=1, le=100),
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[HFModelCard]:
-    return await _bitnet_registry.search(query=q, limit=limit)
+    """Search BitNet repos (always the ``bitnet`` backend)."""
+    cards = await _bitnet_registry.search(query=q, limit=limit)
+    return _annotate_compat(cards, _installed(request))
 
 
 @router.get(
@@ -89,18 +164,29 @@ async def search_bitnet_models(
     description="Return downloadable GGUF variants for a BitNet repository.",
 )
 async def get_bitnet_variants(
+    request: Request,
     repo_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[HFModelVariant]:
-    return await _bitnet_registry.get_variants(repo_id=repo_id)
+    """BitNet variants with ``compatible_backends``."""
+    variants = await _bitnet_registry.get_variants(repo_id=repo_id)
+    return _annotate_compat(variants, _installed(request), hf_variant=True)
 
-@router.get("/registry/ollama/search", response_model=list[OllamaModelCard], summary="Search Ollama models")
-@router.get("/registry/ollama", response_model=list[OllamaModelCard], summary="Search Ollama models")
+
+@router.get(
+    "/registry/ollama/search", response_model=list[OllamaModelCard], summary="Search Ollama models"
+)
+@router.get(
+    "/registry/ollama", response_model=list[OllamaModelCard], summary="Search Ollama models"
+)
 async def search_ollama_models(
+    request: Request,
     q: str = Query(default="", description="Text query"),
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[OllamaModelCard]:
-    return await _ollama_registry.search(query=q)
+    """Search ollama.com; a tag is a GGUF, servable by Ollama and both llama.cpp builds."""
+    cards = await _ollama_registry.search(query=q)
+    return _annotate_compat(cards, _installed(request))
 
 
 @router.get(
@@ -110,10 +196,13 @@ async def search_ollama_models(
     description="Return available tags/variants for an Ollama model.",
 )
 async def get_ollama_variants(
+    request: Request,
     model_name: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[OllamaModelVariant]:
-    return await _ollama_registry.get_variants(model_name=model_name)
+    """Tags of an Ollama model with ``compatible_backends``."""
+    variants = await _ollama_registry.get_variants(model_name=model_name)
+    return _annotate_compat(variants, _installed(request))
 
 
 @router.get(
@@ -133,9 +222,7 @@ async def list_local_models(
     if refresh:
         _local_scanner.invalidate()
     ollama_shared = (
-        Path(settings.ollama_shared_models_dir)
-        if settings.ollama_shared_models_dir
-        else None
+        Path(settings.ollama_shared_models_dir) if settings.ollama_shared_models_dir else None
     )
     return await _local_scanner.scan(Path(settings.models_dir), ollama_shared)
 

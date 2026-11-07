@@ -309,6 +309,9 @@ class ModelManager:
         # phase for the UI.
         self._runtime_transitions: dict[str, str] = {}
         self._persisted_model_ids: set[str] = set()
+        # model_key → default backend (``models.default_backend``); kept in sync
+        # by set_default_backend().
+        self._default_backends: dict[str, str] = {}
         self._event_listeners: list[Callable[[dict], Awaitable[None]]] = []
         # In-flight request tracking
         self._in_flight: dict[str, int] = {}
@@ -1483,10 +1486,9 @@ class ModelManager:
 
             await session.commit()
 
-            registry_meta = {
-                row.model_key: row.registry_metadata
-                for row in (await session.execute(sa.select(LogicalModel))).scalars().all()
-            }
+            logical_rows = (await session.execute(sa.select(LogicalModel))).scalars().all()
+            registry_meta = {row.model_key: row.registry_metadata for row in logical_rows}
+            self._default_backends = {row.model_key: row.default_backend for row in logical_rows}
 
         for canonical_model_id, (cfg, backend_model_id) in canonical_map.items():
             backend_type = str(cfg.backend_type or "").strip().lower()
@@ -3791,6 +3793,22 @@ class ModelManager:
             return value
         return int(global_default)
 
+    def default_backend_of(self, model_key: str | None) -> str | None:
+        """Backend that serves ``model_key``'s public name (None if unknown)."""
+        return self._default_backends.get(model_key) if model_key else None
+
+    def note_default_backend(self, model_key: str, backend: str) -> None:
+        self._default_backends[model_key] = backend
+
+    def is_default_deployment(self, state: "ModelState") -> bool:
+        """True for the deployment that serves its model's public name.
+
+        States without a model (in-memory Ollama inventory, derived workers)
+        count as default so legacy resolution keeps treating them as before.
+        """
+        default = self.default_backend_of(state.model_key)
+        return default is None or default == state.backend_type
+
     async def get_state(self, model_id: str) -> "ModelState | None":
         return self._states.get(model_id)
 
@@ -4107,6 +4125,15 @@ class ModelManager:
                         default_backend=normalized_backend,
                     )
                     .on_conflict_do_nothing(index_elements=["model_key"])
+                )
+                self._default_backends.setdefault(
+                    model_key,
+                    await session.scalar(
+                        sa.select(LogicalModel.default_backend).where(
+                            LogicalModel.model_key == model_key
+                        )
+                    )
+                    or normalized_backend,
                 )
                 cfg = ModelConfig(
                     model_id=normalized_model_id,

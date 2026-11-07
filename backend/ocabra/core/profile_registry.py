@@ -168,8 +168,13 @@ class ProfileRegistry:
         is_default: bool = False,
         routing_targets: list[str] | None = None,
         runtime_policy: dict | None = None,
+        backend: str | None = None,
     ) -> ModelProfile:
-        """Create a new profile, validate constraints, persist, and update cache."""
+        """Create a new profile, validate constraints, persist, and update cache.
+
+        ``backend`` pins the profile to one deployment of its model (a hidden
+        variant, e.g. the Ollama copy); ``None`` = the model's default backend.
+        """
         if not _is_valid_slug(profile_id):
             raise ValueError(
                 f"Invalid profile_id '{profile_id}': must be lowercase alphanumeric "
@@ -215,6 +220,7 @@ class ProfileRegistry:
         profile = ModelProfile(
             profile_id=profile_id,
             profile_kind=profile_kind,
+            backend=backend,
             base_model_id=base_model_id,
             display_name=display_name,
             description=description,
@@ -765,6 +771,16 @@ class ProfileRegistry:
         # ``<name>-ollama`` duplicates on every startup.
         model_key = getattr(model, "model_key", None)
         if model_key:
+            default_backend = await session.scalar(
+                select(LogicalModel.default_backend).where(LogicalModel.model_key == model_key)
+            )
+            if default_backend and default_backend != model.backend_type:
+                # Invariant: every deployment is reachable through at least one
+                # profile. A non-default deployment (the Ollama copy of a
+                # llama.cpp model, the CPU build of a whisper) gets a *hidden*
+                # variant pinned to it: resolvable by name and by its
+                # ``<backend>/<model_key>`` id, never listed in /v1/models.
+                return await self._create_pinned_variant(session, model, model_key)
             sibling_ids = set(
                 (
                     await session.execute(
@@ -772,12 +788,9 @@ class ProfileRegistry:
                     )
                 ).scalars()
             )
-            if any(p.base_model_id in sibling_ids for p in self._profiles.values()):
-                return None
-            default_backend = await session.scalar(
-                select(LogicalModel.default_backend).where(LogicalModel.model_key == model_key)
-            )
-            if default_backend and default_backend != model.backend_type:
+            if any(
+                p.base_model_id in sibling_ids and p.backend is None for p in self._profiles.values()
+            ):
                 return None
         # Skip legacy diarized variants (but not GGUF models that use :: as file separator).
         if "::" in model.model_id and not (
@@ -841,6 +854,46 @@ class ProfileRegistry:
             )
             return None
 
+    async def _create_pinned_variant(
+        self, session: AsyncSession, model: ModelConfig, model_key: str
+    ) -> str | None:
+        """Hidden variant of ``model_key`` pinned to deployment ``model``."""
+        backend = model.backend_type
+        stem = f"{model_key}-{backend.replace('_', '-')}"
+        slug = stem
+        if slug in self._profiles or slug in self._aliases or not _is_valid_slug(slug):
+            suffix = hashlib.sha256(model.model_id.encode()).hexdigest()[:8]
+            slug = f"{stem[: _MAX_PROFILE_ID_LEN - len(suffix) - 1].rstrip('-.: ')}-{suffix}"
+            if slug in self._profiles or slug in self._aliases or not _is_valid_slug(slug):
+                return None
+        public = self._profiles.get(model_key)
+        category = (
+            public.category
+            if public is not None and public.category
+            else self._BACKEND_CATEGORY.get(backend or "", "llm")
+        )
+        try:
+            await self.create(
+                session,
+                profile_id=slug,
+                base_model_id=model.model_id,
+                display_name=f"{model.display_name or model_key} ({backend})",
+                category=category,
+                enabled=True,
+                is_default=True,
+                backend=backend,
+            )
+        except Exception as exc:
+            logger.warning(
+                "pinned_variant_auto_create_failed",
+                profile_id=slug,
+                base_model_id=model.model_id,
+                error=str(exc),
+            )
+            return None
+        logger.info("pinned_variant_auto_created", profile_id=slug, base_model_id=model.model_id)
+        return slug
+
     async def on_model_added(self, model_id: str) -> str | None:
         """Post-registration hook: create a default profile for ``model_id``.
 
@@ -874,6 +927,19 @@ class ProfileRegistry:
             return None
 
     # ── Helpers ───────────────────────────────────────────────
+
+    def forget_model_profiles(self, base_model_id: str) -> list[str]:
+        """Drop from the cache the profiles (and their aliases) of a deleted deployment.
+
+        The rows are already gone (``ON DELETE CASCADE``); without this the
+        cache kept resolving names to a deployment that no longer exists.
+        """
+        gone = [pid for pid, p in self._profiles.items() if p.base_model_id == base_model_id]
+        for pid in gone:
+            self._profiles.pop(pid, None)
+        for alias_id in [a for a, al in self._aliases.items() if al.profile_id in gone]:
+            self._aliases.pop(alias_id, None)
+        return gone
 
     async def _clear_default(self, session: AsyncSession, base_model_id: str) -> None:
         """Clear is_default for all profiles of a given base model."""

@@ -16,6 +16,38 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.47.0 — 2026-11-07
+
+### Cambios de comportamiento
+
+- **Cada modelo aparece una sola vez en `GET /v1/models` y `GET /api/tags`.**
+  Un modelo puede servirse desde varios backends (por ejemplo `gemma4:26b`
+  desde llama.cpp y desde Ollama); el nombre público lo sirve el backend por
+  defecto, y las variantes fijadas a otro backend ya no se listan:
+  `gemma4:26b-ollama`, `qwen3-coder:30b-ollama`, `qwen3-embedding:4b-ollama` y
+  el resto de `*-ollama`, más `whisper-cpp-large-v3-turbo-cpu` y
+  `whisper.cpp-large-v3-turbo-q8-0-cpu`. **Siguen funcionando igual si las
+  nombras en el campo `model`**: mismo backend, mismos presets, mismos
+  vectores en el caso de los embeddings. **Acción:** solo si tu cliente elige
+  el modelo de la lista y buscaba uno de esos nombres; escríbelo a mano o usa
+  el nombre público.
+- **También puedes pedir un backend concreto con `<backend>/<modelo>`**, por
+  ejemplo `ollama/gemma4:26b` o `llamacpp_mks/gemma4:26b`. No se listan, pero
+  resuelven siempre al despliegue de ese backend.
+- **El acceso se concede por modelo.** Si tu clave tiene acceso a un modelo,
+  tiene acceso a todas sus formas: el nombre público, sus variantes fijadas a
+  otro backend, `<backend>/<modelo>` y los nombres antiguos que lo apuntan.
+
+### Arreglos
+
+- **En los endpoints de Ollama (`/api/chat`, `/api/generate`,
+  `/api/embeddings`, `/api/show`), un nombre que coincidía con dos backends a
+  la vez se resolvía al primero que apareciese**, que podía no ser el que
+  sirve el nombre público. Ahora gana siempre el backend por defecto del
+  modelo.
+
+---
+
 ## 0.46.1 — 2026-11-07
 
 ### Cambios de comportamiento

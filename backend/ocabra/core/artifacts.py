@@ -189,6 +189,10 @@ def resolve_paths(
                 sub_layers = read_ollama_manifest(str(sub["ref"]), ollama_root)
             layer = sub.get("layer") or ("projector" if label == "mmproj" else "draft")
             digest = (sub_layers or {}).get(layer)
+            if not digest and sub.get("optional"):
+                # Derived deployments ask for the projector/draft "if the tag
+                # ships one"; a text-only tag simply has none.
+                continue
             if not digest:
                 raise ArtifactResolutionError(
                     f"{label}: layer {layer!r} not found for {sub.get('ref') or artifact.get('ref')!r}"

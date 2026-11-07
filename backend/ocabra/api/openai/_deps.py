@@ -202,14 +202,29 @@ async def resolve_model(
         resolved_id = requested
         resolved_state = exact
     else:
+        # A model key or a backend reference can match several deployments
+        # (``gemma4:26b`` is the Ollama tag of ``ollama/gemma4:26b`` *and* the
+        # backend reference of ``llamacpp_mks/gemma4:26b``). Taking the first
+        # one made the answer depend on dict order; prefer the deployment that
+        # serves the model's public name, then a model-key match.
         states = await model_manager.list_states()
         resolved_id = requested
         resolved_state = None
-        for state in states:
-            if state.backend_model_id == requested:
-                resolved_id = state.model_id
-                resolved_state = state
-                break
+        candidates = [
+            s
+            for s in states
+            if s.backend_model_id == requested or getattr(s, "model_key", None) == requested
+        ]
+        if candidates:
+            is_default = getattr(model_manager, "is_default_deployment", None)
+
+            def _rank(s) -> tuple[int, int]:
+                default_rank = 0 if (is_default is None or is_default(s)) else 1
+                key_rank = 0 if getattr(s, "model_key", None) == requested else 1
+                return (default_rank, key_rank)
+
+            resolved_state = min(candidates, key=_rank)
+            resolved_id = resolved_state.model_id
 
     if resolved_state is not None and user is not None:
         if not user.can_access_model(resolved_id):
