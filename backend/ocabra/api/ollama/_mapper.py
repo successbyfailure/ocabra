@@ -8,8 +8,7 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from fastapi import HTTPException
-
+from ocabra.api.openai._deps import engine_suffixed_error
 from ocabra.api.openai._deps import resolve_model as resolve_openai_model
 from ocabra.core.model_ref import build_model_ref, parse_model_ref
 
@@ -189,16 +188,7 @@ async def resolve_ollama_profile(
     suffixed = getattr(profile_registry, "engine_suffixed_name", None)
     alternativa = await suffixed(requested_name.strip()) if suffixed is not None else None
     if alternativa is not None:
-        nombre, despliegue = alternativa
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": (
-                    f"model '{requested_name.strip()}' not found — use '{nombre}', "
-                    f"or '{despliegue}' if you need that specific engine"
-                )
-            },
-        )
+        raise engine_suffixed_error(requested_name.strip(), *alternativa)
 
     # Try profile resolution first (profile_id might be a slug like "chat")
     try:

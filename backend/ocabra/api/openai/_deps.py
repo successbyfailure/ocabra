@@ -91,6 +91,38 @@ async def _wait_for_service_gpu_and_retry_load(
         model_manager.clear_service_gpu_wait(model_id)
 
 
+class EngineSuffixedModelName(HTTPException):
+    """El cliente pidio un modelo nombrando el motor (``gemma4:26b-ollama``).
+
+    Es un 404, pero **no** uno cualquiera: los handlers de Ollama capturan el
+    404 de ``resolve_profile`` y reintentan por la via legacy, que acaba
+    respondiendo un "not found" pelado y se come el mensaje que dice los dos
+    nombres validos. Al ser una clase aparte, cada handler puede re-lanzarla
+    antes de entrar en ese fallback.
+    """
+
+
+def engine_suffixed_error(
+    requested: str, model_name: str, deployment_id: str
+) -> EngineSuffixedModelName:
+    """404 que nombra las dos salidas, para arreglarlo sin leer el changelog."""
+    return EngineSuffixedModelName(
+        status_code=404,
+        detail={
+            "error": {
+                "message": (
+                    f"The model '{requested}' does not exist. Use "
+                    f"'{model_name}', or '{deployment_id}' if you need that "
+                    "specific engine."
+                ),
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }
+        },
+    )
+
+
 def _openai_error(
     message: str,
     error_type: str,
@@ -393,15 +425,7 @@ async def resolve_profile(
     suffixed = getattr(profile_registry, "engine_suffixed_name", None)
     alternativa = await suffixed(requested) if suffixed is not None else None
     if alternativa is not None:
-        nombre, despliegue = alternativa
-        raise _openai_error(
-            f"The model '{requested}' does not exist. Use '{nombre}', or "
-            f"'{despliegue}' if you need that specific engine.",
-            "invalid_request_error",
-            param="model",
-            code="model_not_found",
-            status_code=404,
-        )
+        raise engine_suffixed_error(requested, *alternativa)
 
     # 1. Hidden compatibility alias, then direct profile lookup. Aliases may
     # pin a historical ``-ctx*`` id to one canonical runtime preset.

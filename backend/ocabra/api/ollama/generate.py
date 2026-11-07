@@ -15,6 +15,7 @@ from starlette.responses import StreamingResponse
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     ClientGoneError,
+    EngineSuffixedModelName,
     await_unless_client_gone,
     check_capability,
     ensure_loaded,
@@ -155,6 +156,10 @@ async def generate(
             fallback_limit=settings.default_max_output_tokens,
         )
         worker_key = state.model_id
+    except EngineSuffixedModelName:
+        # Nombre que lleva el motor dentro: no hay via legacy que
+        # probar, y su mensaje dice los dos nombres validos.
+        raise
     except HTTPException as profile_exc:
         if profile_exc.status_code != 404:
             raise
@@ -174,9 +179,7 @@ async def generate(
 
     worker_pool = request.app.state.worker_pool
     runtime_telemetry = getattr(request.state, "runtime_telemetry", None)
-    telemetry_admission = (
-        {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
-    )
+    telemetry_admission = {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
     if state.backend_type == "ollama":
         upstream_body = build_native_passthrough_body(
             merged_body,

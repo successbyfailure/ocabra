@@ -11,6 +11,7 @@ from fastapi.responses import Response
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
+    EngineSuffixedModelName,
     check_capability,
     compute_worker_key,
     ensure_loaded,
@@ -78,8 +79,7 @@ async def _run_embeddings(
                     request.state.federation_remote_node_id = None
                     resp = None
                 if resp is not None and (
-                    resp.status_code < 400
-                    or not should_fallback_to_local(resp.status_code)
+                    resp.status_code < 400 or not should_fallback_to_local(resp.status_code)
                 ):
                     try:
                         return _json.loads(resp.content)
@@ -111,6 +111,10 @@ async def _run_embeddings(
         )
         merged_body = merge_profile_defaults(profile, body)
         worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    except EngineSuffixedModelName:
+        # Nombre que lleva el motor dentro: no hay via legacy que
+        # probar, y su mensaje dice los dos nombres validos.
+        raise
     except HTTPException as profile_exc:
         # Fallback to legacy Ollama resolution for native Ollama models
         logger.debug(

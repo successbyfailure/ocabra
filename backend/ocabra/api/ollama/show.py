@@ -1,12 +1,14 @@
 """
 POST /api/show — return details for a model in Ollama format.
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.api.openai._deps import engine_suffixed_error
 
 from ._mapper import OllamaNameMapper, resolve_model
 from ._shared import get_ollama_user
@@ -35,13 +37,26 @@ async def show_model(
       - modelfile, parameters, template, details, model_info
     """
     model_manager = request.app.state.model_manager
+    # Este endpoint no pasa por los perfiles, asi que la puerta de los nombres
+    # con el motor dentro hay que ponerla aqui: si no, el nombre acaba en un
+    # 404 generico (no es un modelo nativo de Ollama) y el cliente no sabe por
+    # que dejo de funcionar.
+    registro = getattr(request.app.state, "profile_registry", None)
+    suffixed = getattr(registro, "engine_suffixed_name", None)
+    alternativa = await suffixed(body.name.strip()) if suffixed is not None else None
+    if alternativa is not None:
+        raise engine_suffixed_error(body.name.strip(), *alternativa)
     model_id, state = await resolve_model(model_manager, body.name, user=user)
     if state is None:
         state = await model_manager.get_state(model_id)
     if state is None:
         raise HTTPException(status_code=404, detail={"error": f"model '{body.name}' not found"})
 
-    ollama_name = state.backend_model_id if state.backend_type == "ollama" else _mapper.to_ollama(state.model_id)
+    ollama_name = (
+        state.backend_model_id
+        if state.backend_type == "ollama"
+        else _mapper.to_ollama(state.model_id)
+    )
     family = ollama_name.split(":", 1)[0]
 
     # Ollama exposes a top-level ``capabilities`` array (e.g.
@@ -74,7 +89,9 @@ async def show_model(
             "format": "safetensors",
             "family": family,
             "families": [family],
-            "parameter_size": ollama_name.split(":", 1)[1].upper() if ":" in ollama_name else "unknown",
+            "parameter_size": ollama_name.split(":", 1)[1].upper()
+            if ":" in ollama_name
+            else "unknown",
             "quantization_level": "F16",
         },
         "model_info": {

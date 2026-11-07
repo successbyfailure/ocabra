@@ -186,3 +186,89 @@ async def test_un_registro_sin_el_metodo_no_rompe_la_resolucion():
 class _Stub:
     async def get_state(self, _model_id):
         return None
+
+
+# ── Los endpoints de verdad ──────────────────────────────────
+#
+# Los tests de arriba llaman a los resolvedores directamente, y eso no basta:
+# en la verificacion en vivo los cuatro endpoints de Ollama devolvian 404 pero
+# con un "not found" pelado, porque sus handlers capturan el 404 de
+# ``resolve_profile`` y reintentan por la via legacy. El mensaje con los dos
+# nombres validos se perdia por el camino. Estos tests pasan por el handler.
+
+
+def _app(registro: ProfileRegistry):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import FastAPI
+
+    from ocabra.api._deps_auth import UserContext, get_current_user
+    from ocabra.api.ollama import router as ollama_router
+    from ocabra.api.ollama._shared import get_ollama_user
+    from ocabra.api.openai import router as openai_router
+    from ocabra.api.openai._deps import get_openai_user
+
+    admin = UserContext(
+        user_id=None,
+        username=None,
+        role="system_admin",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=False,
+    )
+
+    async def _usuario():
+        return admin
+
+    app = FastAPI()
+    app.include_router(ollama_router)
+    app.include_router(openai_router, prefix="/v1")
+    for dep in (get_current_user, get_ollama_user, get_openai_user):
+        app.dependency_overrides[dep] = _usuario
+
+    mm = MagicMock()
+    # Nada resuelve: si la puerta no corta, el handler cae en el 404 generico
+    # y el test lo detecta por el mensaje.
+    mm.get_state = AsyncMock(return_value=None)
+    mm.list_states = AsyncMock(return_value=[])
+    mm.touch_last_request_at = AsyncMock()
+    app.state.model_manager = mm
+    app.state.worker_pool = MagicMock()
+    app.state.profile_registry = registro
+    return app
+
+
+@pytest.mark.parametrize(
+    ("ruta", "cuerpo"),
+    [
+        (
+            "/v1/chat/completions",
+            {
+                "model": "gemma4:26b-ollama",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            },
+        ),
+        ("/v1/embeddings", {"model": "gemma4:26b-ollama", "input": "hola"}),
+        (
+            "/api/chat",
+            {
+                "model": "gemma4:26b-ollama",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            },
+        ),
+        ("/api/generate", {"model": "gemma4:26b-ollama", "prompt": "hi", "stream": False}),
+        ("/api/embeddings", {"model": "gemma4:26b-ollama", "prompt": "hola"}),
+        ("/api/show", {"name": "gemma4:26b-ollama"}),
+    ],
+)
+def test_cada_endpoint_devuelve_el_404_con_las_dos_salidas(registro, ruta, cuerpo):
+    from fastapi.testclient import TestClient
+
+    with TestClient(_app(registro)) as client:
+        respuesta = client.post(ruta, json=cuerpo)
+    assert respuesta.status_code == 404, respuesta.text
+    cuerpo_texto = respuesta.text
+    assert "gemma4:26b" in cuerpo_texto
+    assert "ollama/gemma4:26b" in cuerpo_texto, f"{ruta} perdio el mensaje: {cuerpo_texto}"
