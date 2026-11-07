@@ -255,6 +255,62 @@ def estimate_request_token_budget(
     return max(estimated, requested_context)
 
 
+async def refine_required_tokens(
+    model_manager: Any,
+    profile: Any,
+    body: dict[str, Any],
+    *,
+    required_tokens: int,
+    capacity: int,
+    default_output_reservation: int | None,
+) -> int:
+    """Afina el presupuesto de tokens antes de que pueda provocar un rechazo.
+
+    Un rechazo por tamaño no puede decidirse con el heuristico: medido contra
+    el tokenizador real va de 0,94x a 2,42x del valor verdadero segun el
+    contenido. Asi que el heuristico sirve para ELEGIR ventana —equivocarse
+    ahi solo carga una mas grande de lo necesario— pero antes de rechazar:
+
+    1. Si hay un runtime de este modelo cargado, se le pide el conteo exacto a
+       su tokenizador y se decide con ese numero.
+    2. Si no hay ninguno, no se rechaza: se devuelve justo la capacidad, se
+       intenta la peticion y, si de verdad no cabe, lo dice el motor, que es
+       el unico que cuenta bien.
+
+    ``capacity`` es con lo que se va a comparar aguas abajo: la ventana del
+    preset mayor cuando el perfil tiene presets, o el pool KV del propio
+    worker cuando no los tiene. Con ``capacity <= 0`` no hay nada que afinar.
+    """
+    if capacity <= 0 or required_tokens <= capacity:
+        return required_tokens
+    exacto = await exact_prompt_tokens(model_manager, profile, body)
+    if exacto is not None:
+        # Misma resolucion que estimate_request_token_budget: el valor del
+        # perfil si lo declara, el global si no. Un ``or 0`` aqui dejaria sin
+        # reserva de salida a quien no manda max_tokens.
+        reserva_por_defecto = (
+            default_output_reservation
+            if default_output_reservation is not None
+            else settings.runtime_preset_default_output_reservation_tokens
+        )
+        medido = exacto + output_reservation(body, reserva_por_defecto)
+        logger.info(
+            "token_budget_measured",
+            profile_id=getattr(profile, "profile_id", None),
+            estimated=required_tokens,
+            measured=medido,
+            largest_context=capacity,
+        )
+        return medido
+    logger.info(
+        "token_budget_unverified_attempt",
+        profile_id=getattr(profile, "profile_id", None),
+        estimated=required_tokens,
+        largest_context=capacity,
+    )
+    return capacity
+
+
 def _requested_preset_key(body: dict[str, Any]) -> str | None:
     extension = body.get("ocabra")
     if not isinstance(extension, dict):
@@ -384,6 +440,36 @@ async def plan_profile_runtime(
     ]
     if not enabled_presets:
         worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        # Sin presets no hay seleccion de ventana, pero `required_tokens` SI
+        # viaja hasta la puerta de admision (`fairness_kv_budget`), que lo
+        # compara con el pool KV del worker y rechaza con 400. Afinarlo aqui
+        # tambien: sin esto, los cuatro modelos sin presets —gemma4:26b,
+        # gemma4:12b, mistral:7b y ravenx— seguian rechazando por estimacion.
+        # Reproducido 2026-11-07 contra gemma4:26b: un prompt de 230.011
+        # tokens reales se estimaba en 705.372 y la puerta lo rechazaba con
+        # "request needs 705372 KV tokens but the pool holds 262144", 3,07x
+        # el tamaño verdadero.
+        # ``get_state`` con getattr: afinar es una mejora, no un requisito, y
+        # por esta via pasan ModelManager mas ligeros que no lo implementan.
+        # Sin estado no se puede saber el tamaño del pool, asi que se deja el
+        # presupuesto como estaba.
+        buscar_estado = getattr(model_manager, "get_state", None)
+        pool_kv = 0
+        if callable(buscar_estado):
+            try:
+                sin_presets = await buscar_estado(profile.base_model_id)
+                if sin_presets is not None:
+                    pool_kv = int(resolve_llama_cpp_option(sin_presets, "ctx_size", 0) or 0)
+            except (TypeError, ValueError, AttributeError):
+                pool_kv = 0
+        required_tokens = await refine_required_tokens(
+            model_manager,
+            profile,
+            body,
+            required_tokens=required_tokens,
+            capacity=pool_kv,
+            default_output_reservation=default_output_reservation,
+        )
         return RuntimePlan(
             worker_key=worker_key,
             load_overrides=profile.load_overrides,
@@ -451,34 +537,14 @@ async def plan_profile_runtime(
     # Reportado 2026-11-07: un prompt de ~32k tokens reales se estimaba en
     # ~55k y qwen3:32b (ventana de 40.960) lo rechazaba con 400 aunque cabia.
     mayor_contexto = max(item.effective_context for item in candidates)
-    if required_tokens > mayor_contexto:
-        exacto = await exact_prompt_tokens(model_manager, profile, body)
-        if exacto is not None:
-            # Misma resolucion que estimate_request_token_budget: el valor
-            # del perfil si lo declara, el global si no. Un ``or 0`` aqui
-            # dejaria sin reserva de salida a quien no manda max_tokens.
-            reserva_por_defecto = (
-                default_output_reservation
-                if default_output_reservation is not None
-                else settings.runtime_preset_default_output_reservation_tokens
-            )
-            medido = exacto + output_reservation(body, reserva_por_defecto)
-            logger.info(
-                "token_budget_measured",
-                profile_id=profile.profile_id,
-                estimated=required_tokens,
-                measured=medido,
-                largest_context=mayor_contexto,
-            )
-            required_tokens = medido
-        if required_tokens > mayor_contexto and exacto is None:
-            logger.info(
-                "token_budget_unverified_attempt",
-                profile_id=profile.profile_id,
-                estimated=required_tokens,
-                largest_context=mayor_contexto,
-            )
-            required_tokens = mayor_contexto
+    required_tokens = await refine_required_tokens(
+        model_manager,
+        profile,
+        body,
+        required_tokens=required_tokens,
+        capacity=mayor_contexto,
+        default_output_reservation=default_output_reservation,
+    )
 
     explicit_key = _requested_preset_key(body)
     loaded_keys: set[str] = set()

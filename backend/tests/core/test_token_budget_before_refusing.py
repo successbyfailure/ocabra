@@ -223,3 +223,118 @@ def test_el_heuristico_sobreestima_el_caso_reportado():
     )
     # Y el exceso basta para pasarse de la ventana de qwen3:32b.
     assert estimado > 40960
+
+
+# ── Los modelos SIN presets ──────────────────────────────────
+#
+# Cuatro modelos del parque no tienen presets: gemma4:26b, gemma4:12b,
+# mistral:7b y ravenx. `plan_profile_runtime` sale antes por una via corta, y
+# en la primera version del arreglo esa via se quedo sin afinar: el heuristico
+# viajaba crudo hasta `fairness_kv_budget`, que lo compara con el pool KV del
+# worker y rechaza con 400. Reproducido contra gemma4:26b el 2026-11-07: un
+# prompt de 230.011 tokens reales se estimaba en 705.372 y la puerta devolvia
+# "request needs 705372 KV tokens but the pool holds 262144" — 3,07x.
+
+
+@pytest.mark.asyncio
+async def test_sin_presets_tambien_se_afina_con_el_conteo_exacto(monkeypatch):
+    from ocabra.core import runtime_coordinator as rc
+
+    async def _exacto(mm, perfil, body):  # noqa: ARG001
+        return 230_011
+
+    monkeypatch.setattr(rc, "exact_prompt_tokens", _exacto)
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": [{"role": "user", "content": "x"}], "max_tokens": 8},
+        required_tokens=705_372,
+        capacity=262_144,
+        default_output_reservation=None,
+    )
+    # 230.011 medidos + 8 de salida: cabe de sobra en el pool de 262.144.
+    assert afinado == 230_019
+    assert afinado < 262_144
+
+
+@pytest.mark.asyncio
+async def test_sin_conteo_exacto_se_intenta_en_vez_de_rechazar(monkeypatch):
+    from ocabra.core import runtime_coordinator as rc
+
+    async def _sin_medir(mm, perfil, body):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(rc, "exact_prompt_tokens", _sin_medir)
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": []},
+        required_tokens=705_372,
+        capacity=262_144,
+        default_output_reservation=None,
+    )
+    # Justo la capacidad: no rechaza, y el motor decidira de verdad.
+    assert afinado == 262_144
+
+
+@pytest.mark.asyncio
+async def test_un_rechazo_medido_sigue_siendo_un_rechazo(monkeypatch):
+    """Lo que se mide por encima de la capacidad SI se rechaza: es el caso de
+    los cuatro 400 legitimos de la ronda del benchmark (46.860 medidos contra
+    ventanas de 32.768 y 40.960)."""
+    from ocabra.core import runtime_coordinator as rc
+
+    async def _exacto(mm, perfil, body):  # noqa: ARG001
+        return 42_764
+
+    monkeypatch.setattr(rc, "exact_prompt_tokens", _exacto)
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": []},
+        required_tokens=56_061,
+        capacity=40_960,
+        default_output_reservation=4096,
+    )
+    assert afinado == 46_860
+    assert afinado > 40_960  # aguas abajo esto lanza ContextCapacityError
+
+
+@pytest.mark.asyncio
+async def test_lo_que_ya_cabe_no_se_toca(monkeypatch):
+    """El camino rapido no paga ninguna llamada al tokenizador."""
+    from ocabra.core import runtime_coordinator as rc
+
+    llamado = {"n": 0}
+
+    async def _contador(mm, perfil, body):  # noqa: ARG001
+        llamado["n"] += 1
+        return 1
+
+    monkeypatch.setattr(rc, "exact_prompt_tokens", _contador)
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": []},
+        required_tokens=5_000,
+        capacity=32_768,
+        default_output_reservation=None,
+    )
+    assert afinado == 5_000
+    assert llamado["n"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacidad", [0, -1])
+async def test_sin_capacidad_conocida_no_hay_nada_que_afinar(capacidad):
+    from ocabra.core import runtime_coordinator as rc
+
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": []},
+        required_tokens=99_999,
+        capacity=capacidad,
+        default_output_reservation=None,
+    )
+    assert afinado == 99_999

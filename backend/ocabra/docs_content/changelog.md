@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.1 — 2026-11-08
+
+### Arreglos
+
+- **El arreglo del `400` de 0.51.0 se dejaba fuera a cuatro modelos**, entre
+  ellos `gemma4:26b`. Son los que no tienen presets de contexto
+  (`gemma4:26b`, `gemma4:12b`, `mistral:7b`, `ravenx`): su petición sale del
+  planificador por una vía más corta y el cálculo aproximado llegaba sin
+  corregir a la puerta de admisión, que lo compara con el pool de caché del
+  motor. Un prompt de 230.011 tokens reales contra `gemma4:26b` se estimaba
+  en 705.372 —3,07 veces el tamaño verdadero— y recibías
+  `request needs 705372 KV tokens but the pool holds 262144`, aunque cabía de
+  sobra en la ventana de 262.144. Ahora esos cuatro modelos pasan por la misma
+  corrección: conteo exacto si hay un runtime cargado, y si no, se intenta en
+  vez de rechazar.
+
+---
+
 ## 0.51.0 — 2026-11-07
 
 ### Arreglos
