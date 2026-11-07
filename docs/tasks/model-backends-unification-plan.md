@@ -199,7 +199,12 @@ aplicar; backup `pg_dump` antes de `alembic upgrade`):
 | **5** | Frontend Explore/descarga: iconos de compatibilidad en tarjetas (HF, Ollama, BitNet) y variantes; diálogo de descarga con qué despliegues crear y cuál es el default; registro local (`StorageSettings`) con el mismo motor. | medio |
 | **6** | Docs: `CONTRACTS.md` (ids, resolución), `ROADMAP.md`, este plan; bump MINOR. | bajo |
 
-### Fase 0 — fixes independientes
+### Fase 0 — fixes independientes · ✅ cerrada 2026-11-07 (`d222e34`, v0.43.1)
+
+Hechos: 1, 4, 5, 6 y un bug extra (bitnet solo leía `model_path` de la raíz y el registro local
+lo escribe en la sección `bitnet`). **Movidos a Fase 2**: 2 y 3, porque esa fase reescribe justo
+ese emparejamiento y la federación está desactivada en este nodo (sin impacto hoy).
+
 
 1. `_refresh_registry_metadata` (`api/internal/downloads.py:412`) re-infiere el backend e ignora
    el elegido por el usuario → metadata escrita a un `model_id` que no existe.
@@ -232,4 +237,6 @@ aplicar; backup `pg_dump` antes de `alembic upgrade`):
 
 - **Hecho (2026-11-07):** análisis de backends, artefactos, flujo de búsqueda/descarga/resolución
   y datos reales de producción; este plan.
-- **Pendiente:** todas las fases.
+- **Hecho (2026-11-07):** Fase 0; tests aislados en `ocabra_test` (`e5234cc`); VibeVoice duplicado borrado;
+  `DIFFUSERS_OFFLOAD_MODE=model` en `.env` (sin efecto en los 2 modelos actuales, que fijan `none`).
+- **Pendiente:** Fases 1–6.
