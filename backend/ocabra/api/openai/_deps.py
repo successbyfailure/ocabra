@@ -1723,6 +1723,11 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
         # same key still works.
         payload.setdefault("think", enabled)
     elif is_llama_cpp_family(backend):
+        # El vocabulario de la plantilla no es el de OpenAI: Qwen 3.5 valida
+        # (xhigh, medium, low) y lanza excepcion con cualquier otra cosa, asi
+        # que "high" hay que traducirlo antes de mandarlo a cualquiera de los
+        # dos sitios donde llama-server lo lee.
+        nivel_plantilla = settings.reasoning_effort_template_aliases.get(value, value)
         template_kwargs = payload.get("chat_template_kwargs")
         template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
         template_kwargs["enable_thinking"] = enabled
@@ -1735,13 +1740,17 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
             # Qwen 3.5 es ``xhigh``: esos modelos recibian siempre el esfuerzo
             # maximo pidieras lo que pidieras. El alias traduce el vocabulario
             # de OpenAI al de la plantilla (high -> xhigh).
-            template_kwargs["reasoning_effort"] = settings.reasoning_effort_template_aliases.get(
-                value, value
-            )
+            template_kwargs["reasoning_effort"] = nivel_plantilla
         payload["chat_template_kwargs"] = template_kwargs
-        # Se sigue enviando arriba por compatibilidad con backends que si lo
-        # leen desde ahi (vLLM lo expone como parametro propio).
-        payload["reasoning_effort"] = value if enabled else "none"
+        # Arriba va TAMBIEN el nivel traducido, no el crudo. ``reasoning_effort``
+        # de primer nivel es un parametro nativo de llama-server y **gana** al
+        # de ``chat_template_kwargs``: comprobado en vivo contra el worker de
+        # qwen3.8:27b, ``{top: high, kwargs: xhigh}`` da 500 ("Unexpected
+        # reasoning effort high") igual que ``high`` a secas, y solo pasa
+        # cuando arriba va ``xhigh``. Enviar aqui el crudo rompia
+        # ``reasoning_effort="high"`` en los tres modelos Qwen 3.5 del parque,
+        # cuyo vocabulario es (xhigh, medium, low).
+        payload["reasoning_effort"] = nivel_plantilla if enabled else "none"
         if enabled:
             # Chaos starts with reasoning_format=none so ordinary requests do
             # not expose empty think tags. An explicit reasoning request wants

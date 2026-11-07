@@ -140,11 +140,33 @@ def test_off_no_manda_nivel_a_la_plantilla():
     assert "reasoning_effort" not in payload["chat_template_kwargs"]
 
 
-def test_el_nivel_sigue_yendo_arriba_para_quien_lo_lea_de_ahi():
+def test_arriba_va_el_nivel_traducido_no_el_crudo():
+    """``reasoning_effort`` de primer nivel GANA al de ``chat_template_kwargs``.
+
+    Este test afirmaba lo contrario —que arriba iba el valor crudo "high"
+    porque solo lo leia vLLM— y por eso la suite estaba en verde mientras
+    produccion devolvia 500 a toda peticion con ``reasoning_effort: "high"``
+    contra los tres modelos Qwen 3.5 del parque. Comprobado en vivo contra el
+    worker de qwen3.8:27b: ``{top: "high", kwargs: "xhigh"}`` da el mismo
+    "Unexpected reasoning effort high" que ``high`` a secas, y solo responde
+    200 cuando arriba va ya traducido.
+    """
     payload = {"reasoning_effort": "high"}
     _apply_reasoning_effort(_estado(), payload)
-    # vLLM lo expone como parametro propio, asi que no se quita de arriba.
-    assert payload["reasoning_effort"] == "high"
+    assert payload["reasoning_effort"] == "xhigh"
+    assert payload["chat_template_kwargs"]["reasoning_effort"] == "xhigh"
+
+
+def test_los_dos_sitios_coinciden_siempre(monkeypatch):
+    """Mandar niveles distintos arriba y dentro es una incoherencia que la
+    plantilla resuelve a su manera; nunca puede pasar."""
+    monkeypatch.setattr(
+        settings, "reasoning_effort_template_aliases", {"high": "xhigh", "medium": "mid"}
+    )
+    for nivel in ("low", "medium", "high"):
+        payload = {"reasoning_effort": nivel}
+        _apply_reasoning_effort(_estado(), payload)
+        assert payload["reasoning_effort"] == payload["chat_template_kwargs"]["reasoning_effort"]
 
 
 def test_los_alias_son_configurables(monkeypatch):

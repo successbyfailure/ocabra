@@ -73,7 +73,7 @@ también son la opción más rápida en frío.
 
 | Modelo | Peticiones | tok/s (p50) | Prefill (tok/s) | Prompt medio | Contexto por defecto | Estado |
 |--------|-----------:|------------:|----------------:|-------------:|---------------------|--------|
-| `gemma4:26b` | 861 | **149** | 845 | 9.600 | 256k | siempre cargado |
+| `gemma4:26b` | 861 | **149** | 845 | 9.600 | 256k | fijado, pero ver abajo |
 | `nemotron-3-nano:30b` | 105 | **150** | 539 | 5.100 | 512k | bajo demanda, 2 GPUs |
 | `ravenx` | 465 | 109 | 730 | 34.600 | 240k | bajo demanda |
 | `gemma4:12b` | 231 | 105 | 656 | 6.700 | 256k | bajo demanda |
@@ -231,6 +231,16 @@ del periodo:
 Tres excepciones que no pagas casi nunca: `gemma4:26b` está **fijado** en la
 3090, `qwen3.8:27b` y `qwen3-embedding:8b` se mantienen **calientes**, y
 `whisper-large-v3-turbo` y dos voces Piper están fijados también.
+
+**El pin de `gemma4:26b` no es una garantía.** Es evictable: reserva 23.600 MB
+de los 24.576 de la 3090, y `qwen3.8:27b` (24.000), `ravenx` (23.237) y
+`nemotron-3-nano:30b` quieren prácticamente la misma tarjeta. Si uno de ellos
+se la lleva, `gemma4:26b` **no puede volver** hasta que la tarjeta quede libre
+otra vez: ni desalojando todo lo que hay se liberan los 23.600 que pide, así
+que el planificador ni lo intenta y responde `409`. Si tu carga alterna entre
+modelos grandes, cuenta con que `gemma4:26b` puede estar inalcanzable un rato
+largo; `recomendado-ha-chatbots` existe justo para eso y enruta al que esté
+cargado.
 
 El consejo práctico: si vas a hacer muchas peticiones, mándalas seguidas. Y si
 te da igual el modelo, usa un perfil `recomendado-*`, que prefiere lo que ya

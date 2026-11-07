@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.50.1 — 2026-11-07
+
+### Arreglos
+
+- **`reasoning_effort: "high"` devolvía `500` en los modelos Qwen 3.5**
+  (`qwen3.8:27b`, `qwen3.8:27b-abliterated`, `ravenx-chaos-agent`). Su
+  plantilla solo acepta `xhigh`, `medium` y `low`, y aunque oCabra ya traducía
+  `high` → `xhigh`, mandaba además el valor crudo en un segundo campo que el
+  motor lee con prioridad: la plantilla recibía `high` y lanzaba
+  "Unexpected reasoning effort high". Afectaba a toda petición con `high`,
+  desde 0.42.0. `low`, `medium` y `off` nunca estuvieron afectados.
+
+### Documentación
+
+- **[`/docs/models`](/docs/models) prometía que `gemma4:26b` está "siempre
+  cargado"**. No es cierto y conviene que lo sepas: su pin es evictable y
+  reserva 23.600 MB de los 24.576 de la tarjeta, así que cuando otro modelo
+  grande se la queda no puede volver hasta que quede libre, y entre tanto
+  responde `409`. La página lo explica ahora y apunta a
+  `recomendado-ha-chatbots`, que enruta al que esté cargado.
+
+---
+
 ## 0.50.0 — 2026-11-07
 
 ### Sin cambios para tu cliente
