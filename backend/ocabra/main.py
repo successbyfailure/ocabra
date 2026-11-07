@@ -1214,6 +1214,13 @@ from ocabra.api.health import router as health_router  # noqa: E402
 
 app.include_router(health_router)
 
+# Paginas de documentacion en prosa (/docs/changelog, /docs/models). Se montan
+# despues de las rutas de Swagger para que /docs y /docs/oauth2-redirect, que
+# FastAPI registra al crear la app, sigan ganando.
+from ocabra.api.docs_pages import router as docs_pages_router  # noqa: E402
+
+app.include_router(docs_pages_router)
+
 # ── Internal routers (hidden from /docs — admin dashboard only) ──
 from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
 from ocabra.api.internal.gpus import router as gpus_router  # noqa: E402
