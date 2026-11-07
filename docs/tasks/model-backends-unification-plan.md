@@ -187,6 +187,33 @@ aplicar; backup `pg_dump` antes de `alembic upgrade`):
 - Migración con `downgrade()` real (mapeo inverso guardado en una tabla temporal
   `_model_id_migration_0034`), para poder volver atrás.
 
+
+### Dry-run (2026-11-07) — `backend/scripts/model_unification_plan.py`
+
+Solo lectura (`SET TRANSACTION READ ONLY`). Ejecutar con
+`docker compose exec -T api python - [--json] < backend/scripts/model_unification_plan.py`.
+Resultado sobre producción:
+
+- **36 modelos**: 12 GGUF con `llamacpp_mks` ★ + `ollama`; `whisper-large-v3-turbo` con `whisper` ★ +
+  `whisper_cpp`; el resto, un despliegue. **Ningún nombre público cambia.**
+- Se agrupa por **digest del blob**, no por tag: `qwen3.8:27b-abliterated` estaba publicado en Ollama
+  con dos tags (`hf.co/huihui-ai/…:UD-Q5_K_XL` y `qwen3.8:27b-abliterated`) sobre el mismo fichero.
+- 13 perfiles `-ollama` y 2 de whisper.cpp → alias ocultos con backend fijado. Se descartan las
+  escaleras de presets de 6 de ellos (32k/64k/128k/max de Ollama).
+- Routers: solo cambian `recomendado-ha-chatbots` (→ `ollama/qwen3.8:27b-abliterated`,
+  `ollama/gemma4:12b`) y `recomendado-stt` (→ `whisper_cpp/whisper-large-v3-turbo`), conservando el
+  backend que usan hoy.
+- ACL: todo pasa a `model_key`; **sin ampliación real de acceso** (los únicos grupos con variantes
+  `-diarized` ya tenían también el modelo base).
+- `request_stats.model_id` está **mezclado** (la mayoría guarda el nombre público, algunos el id
+  canónico, otros el worker key `id::hash`). Propuesta: normalizar a `model_key` (`backend_type` ya
+  dice el backend) y guardar lo que pidió el cliente en una columna nueva `requested_model`.
+  ~10,8k filas de 185 nombres de modelos ya borrados se dejan como están.
+- **Bug encontrado:** `ModelConfigModal` escribe `ctxSize` (camelCase) pero el backend da prioridad a
+  `ctx_size`; con las dos claves presentes, la edición desde la UI se ignora en silencio.
+  `llamacpp_mks/qwen3.8-27b-abliterated`: UI 229376, efectivo 40960. La normalización debe resolverlo
+  y el frontend pasar a escribir snake_case.
+
 ## Fases
 
 | Fase | Contenido | Riesgo |
