@@ -49,6 +49,7 @@ MANUAL_GROUPS: dict[str, str] = {
 
 _CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
 _WORKER_KEY_RE = re.compile(r"::[0-9a-f]{12}$")
+_POLICY_RANK = {"on_demand": 0, "warm": 1, "pin": 2}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -140,6 +141,60 @@ def duplicate_key_report(extra: Any, path: str = "") -> tuple[int, list[str]]:
             dupes += d
             conflicts.extend(c)
     return dupes, conflicts
+
+
+def normalize_case(value: Any, depth: int = 2) -> tuple[Any, list[str]]:
+    """camelCase → snake_case on config keys; on a clash the snake_case value wins.
+
+    snake_case wins because every option reader (llama.cpp ``_get_option``,
+    ``resolve_llama_cpp_option``, ``_get_whisper_option``) checks it first, so
+    it is the value that is actually in effect today. Only the root and the
+    backend sections are touched (``depth``): deeper dicts such as
+    ``hf_overrides`` carry keys that belong to someone else's schema.
+    """
+    if not isinstance(value, dict) or depth <= 0:
+        return value, []
+    out: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, val in value.items():
+        snake = camel_to_snake(key)
+        if snake != key and snake in value:
+            if value[snake] != val:
+                dropped.append(f"{key}={val!r} (gana {snake}={value[snake]!r})")
+            continue
+        sub, sub_dropped = normalize_case(val, depth - 1)
+        out[snake] = sub
+        dropped.extend(f"{key}.{d}" for d in sub_dropped)
+    return out, dropped
+
+
+# Keys that leave extra_config in the new schema.
+_ARTIFACT_KEYS = ("model_path", "mmproj_model_id", "mmproj_path")
+
+
+def plan_extra_config(extra: Any, backend: str) -> dict | None:
+    """Normalised extra_config for a deployment: snake_case, without the keys
+    that move to ``artifact`` (file paths) or to ``models`` (registry_metadata)."""
+    if not isinstance(extra, dict):
+        return None
+    norm, _ = normalize_case(extra)
+    norm.pop("registry_metadata", None)
+    for key in _ARTIFACT_KEYS:
+        norm.pop(key, None)
+    section_key = LLAMA_CPP_SECTION if backend in LLAMA_CPP_FAMILY else backend
+    section = norm.get(section_key)
+    if isinstance(section, dict):
+        section.pop("registry_metadata", None)
+        for key in _ARTIFACT_KEYS:
+            section.pop(key, None)
+        spec = section.get("speculative")
+        if isinstance(spec, dict):
+            spec.pop("draft_model_id", None)
+            if not spec:
+                section.pop("speculative")
+        if not section:
+            norm.pop(section_key)
+    return norm or None
 
 
 # ── planning ─────────────────────────────────────────────────────────────────
@@ -336,9 +391,9 @@ def build_plan(snap: dict) -> dict:
             new_id = f"{cfg['backend_type']}/{model_key}"
             deployment_map[mid] = new_id
             model_of_config[mid] = model_key
-            dupes, conflicts = duplicate_key_report(cfg.get("extra_config"))
-            for c in conflicts:
-                warnings.append(f"{mid}: claves camel/snake con valores DISTINTOS: {c}")
+            dupes, _ = duplicate_key_report(cfg.get("extra_config"))
+            for c in normalize_case(cfg.get("extra_config"))[1]:
+                warnings.append(f"{mid}: claves camel/snake con valores DISTINTOS, se descarta {c}")
             deployments.append(
                 {
                     "old_model_id": mid,
@@ -348,6 +403,8 @@ def build_plan(snap: dict) -> dict:
                     "artifact": artifacts[mid],
                     "preferred_gpu": cfg.get("preferred_gpu"),
                     "duplicate_case_keys": dupes,
+                    "extra_config": plan_extra_config(cfg.get("extra_config"), cfg["backend_type"]),
+                    "registry_metadata": (cfg.get("extra_config") or {}).get("registry_metadata"),
                 }
             )
             for p in profiles_by_base.get(mid, []):
@@ -368,22 +425,34 @@ def build_plan(snap: dict) -> dict:
                     # a plain door into a non-default deployment (the old ``-ollama`` convention)
                     action = {"action": "alias", "alias_id": pid, "backend": cfg["backend_type"]}
                 action.update(model_key=model_key, old_base_model_id=mid)
+                if p.get("load_overrides"):
+                    norm, dropped = normalize_case(p["load_overrides"])
+                    action["load_overrides"] = norm
+                    for d in dropped:
+                        warnings.append(
+                            f"perfil {pid}: load_overrides camel/snake distintos, se descarta {d}"
+                        )
                 profile_actions[pid] = action
 
         default_row = configs[default_cfg]
+        # The strongest policy among the deployments wins (user, 2026-11-07:
+        # qwen3-embedding:8b stays warm although only its Ollama copy was).
         policies = {configs[m]["load_policy"] for m in group}
+        load_policy = max(policies, key=lambda pol: _POLICY_RANK.get(pol, 0))
         if len(policies) > 1:
             warnings.append(
-                f"{model_key}: load_policy distinta entre despliegues {sorted(policies)}; "
-                f"se queda la del default ({default_row['load_policy']})"
+                f"{model_key}: load_policy distinta entre despliegues {sorted(policies)}; se queda la más fuerte ({load_policy})"
             )
         models.append(
             {
                 "model_key": model_key,
                 "display_name": default_row.get("display_name"),
                 "default_backend": default_backend,
-                "load_policy": default_row["load_policy"],
-                "pin_permanent": default_row.get("pin_permanent", False),
+                "load_policy": load_policy,
+                "pin_permanent": any(configs[m].get("pin_permanent") for m in group),
+                "registry_metadata": (default_row.get("extra_config") or {}).get(
+                    "registry_metadata"
+                ),
                 "deployments": deployments,
             }
         )

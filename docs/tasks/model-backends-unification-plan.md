@@ -214,6 +214,25 @@ Resultado sobre producción:
   `llamacpp_mks/qwen3.8-27b-abliterated`: UI 229376, efectivo 40960. La normalización debe resolverlo
   y el frontend pasar a escribir snake_case.
 
+- **Decisiones del usuario (2026-11-07) sobre el dry-run:**
+  1. Contexto base de `qwen3.8:27b-abliterated` → **40960**. Los dos valores eran los dos presets
+     (`normal`: 40960 solo en la 3090, 4 slots con KV unificado, 23,8 GB validados; `extended`:
+     229376 en las dos GPUs, 32,9 GB). El base solo se usa al cargar sin preset. Regla general de la
+     normalización: **en un choque camel/snake gana snake_case**, que es lo que leen hoy todos los
+     lectores (`_get_option`, `resolve_llama_cpp_option`, `_get_whisper_option`).
+  2. `load_policy` del modelo = **la más fuerte** de sus despliegues (pin > warm > on_demand):
+     `qwen3-embedding:8b` queda `warm`.
+  3. `request_stats.model_id` → `model_key`, más columna nueva `requested_model` con lo que pidió el
+     cliente.
+- **Requisito de despliegue conjunto de la normalización** (si no, la diarización se apaga sin
+  avisar): los perfiles `-diarized` activan la diarización con `whisper.diarizationEnabled` en
+  `load_overrides`; con la base ya en `whisper.diarization_enabled: false` el lector (snake primero)
+  vería `false`. En el mismo despliegue que la migración hay que:
+  - normalizar también `model_profiles.load_overrides` (ya en el plan);
+  - cambiar a snake_case `build_diarized_extra_config` (`core/model_manager_helpers.py:32`);
+  - cambiar el `ModelConfigModal` a leer/escribir snake_case (lee `whisper.diarizationEnabled`
+    en `:597`, escribe `ctxSize` etc.), y validar `extra_config` con Pydantic al guardar.
+
 ## Fases
 
 | Fase | Contenido | Riesgo |

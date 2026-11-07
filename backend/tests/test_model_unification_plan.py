@@ -210,3 +210,58 @@ def test_ollama_manifest_path_roundtrip():
     assert (
         plan_mod.ollama_tag_from_relpath("hf.co/huihui-ai/X-GGUF/Q5") == "hf.co/huihui-ai/X-GGUF:Q5"
     )
+
+
+def test_normalize_case_snake_wins_and_deep_dicts_are_left_alone():
+    norm, dropped = plan_mod.normalize_case(
+        {
+            "llama_cpp": {
+                "ctxSize": 229376,
+                "ctx_size": 40960,
+                "gpuLayers": 99,
+                "hf_overrides": {"ropeTheta": 1},
+            }
+        }
+    )
+    assert norm == {
+        "llama_cpp": {"ctx_size": 40960, "gpu_layers": 99, "hf_overrides": {"ropeTheta": 1}}
+    }
+    assert dropped == ["llama_cpp.ctxSize=229376 (gana ctx_size=40960)"]
+
+
+def test_deployment_extra_config_is_normalised_without_artifact_paths():
+    plan = plan_mod.build_plan(_snapshot())
+
+    dep = next(d for d in _model(plan, "gemma:x")["deployments"] if d["backend"] == "llamacpp_mks")
+    assert dep["extra_config"] == {"llama_cpp": {"ctx_size": 2}}
+
+
+def test_diarized_profile_overrides_are_normalised_to_snake_case():
+    """The base whisper section becomes ``diarization_enabled: false``; a
+    camelCase ``diarizationEnabled: true`` override would then lose against it
+    (readers check snake_case first) and diarization would silently turn off."""
+    snap = _snapshot()
+    snap["model_configs"][2]["extra_config"] = {"whisper": {"diarizationEnabled": False}}
+    snap["model_profiles"][3]["load_overrides"] = {
+        "whisper": {"diarizationEnabled": True},
+        "diarization_enabled": True,
+    }
+    plan = plan_mod.build_plan(snap)
+
+    dep = next(
+        d
+        for d in _model(plan, "whisper-large-v3-turbo")["deployments"]
+        if d["backend"] == "whisper"
+    )
+    assert dep["extra_config"] == {"whisper": {"diarization_enabled": False}}
+    assert plan["profiles"]["whisper-large-v3-turbo-diarized"]["load_overrides"] == {
+        "whisper": {"diarization_enabled": True},
+        "diarization_enabled": True,
+    }
+
+
+def test_strongest_load_policy_of_the_deployments_wins():
+    plan = plan_mod.build_plan(_snapshot())
+
+    # llama.cpp default is on_demand, the Ollama copy was warm
+    assert _model(plan, "gemma:x")["load_policy"] == "warm"
