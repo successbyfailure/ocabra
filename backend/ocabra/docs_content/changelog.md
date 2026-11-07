@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.49.0 — 2026-11-07
+
+### Cambios de comportamiento
+
+- **Los nombres que llevan el motor como sufijo dejan de existir.**
+  `gemma4:26b-ollama`, `qwen3-coder:30b-ollama`, `qwen3-embedding:8b-ollama`,
+  `mistral:7b-llamacpp-mks` y el resto de esa forma devuelven ahora `404`, en
+  los endpoints de OpenAI y en los de Ollama. El error te dice los dos nombres
+  que sí valen, así que no hace falta volver aquí para arreglarlo.
+  **Acción:** cámbialos por el nombre del modelo (`gemma4:26b`), que es el
+  normal; o por `<motor>/<modelo>` (`ollama/gemma4:26b`) si de verdad
+  necesitas ese motor en concreto. Esa segunda forma no ha cambiado y sigue
+  dándote el mismo despliegue, con sus mismos presets de contexto.
+
+  Por qué: el motor que ejecuta un modelo es una decisión de este servidor y
+  puede cambiar. Un nombre que lo lleva dentro te deja fijado al lado perdedor
+  de ese cambio sin que te enteres.
+
+---
+
 ## 0.48.0 — 2026-11-07
 
 ### Sin cambios para tu cliente
@@ -53,10 +73,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   con el nombre que tienes que usar.
 - **Si de verdad necesitas un motor concreto, pídelo como
   `<motor>/<modelo>`**: `ollama/gemma4:26b`, `ollama/qwen3-embedding:8b`. Esa
-  es la forma de hacerlo. **Acción:** los nombres con el motor como sufijo
-  (`<modelo>-ollama` y similares) están de salida; si tu cliente tiene alguno
-  guardado, pásalo al nombre del modelo o, si necesitas ese motor en
-  particular, a `<motor>/<modelo>`.
+  es la forma de hacerlo (y desde 0.49.0, la única).
 - **El acceso se concede por modelo**, no por motor: si tu clave puede usar un
   modelo, lo puede usar sea cual sea el backend que lo sirva.
 

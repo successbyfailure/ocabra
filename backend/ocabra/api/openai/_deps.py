@@ -385,6 +385,24 @@ async def resolve_profile(
             status_code=404,
         )
 
+    # 0. Names that pin the engine (``gemma4:26b-ollama``) are rejected: the
+    # engine serving a model is a deployment decision that can change, and a
+    # client holding such a name pins itself to the losing side of it. The
+    # model name is the normal way in; ``<backend>/<modelo>`` is the way to
+    # ask for one engine on purpose.
+    suffixed = getattr(profile_registry, "engine_suffixed_name", None)
+    alternativa = await suffixed(requested) if suffixed is not None else None
+    if alternativa is not None:
+        nombre, despliegue = alternativa
+        raise _openai_error(
+            f"The model '{requested}' does not exist. Use '{nombre}', or "
+            f"'{despliegue}' if you need that specific engine.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+
     # 1. Hidden compatibility alias, then direct profile lookup. Aliases may
     # pin a historical ``-ctx*`` id to one canonical runtime preset.
     alias_resolver = getattr(profile_registry, "resolve_alias", None)

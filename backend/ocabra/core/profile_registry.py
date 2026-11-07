@@ -130,6 +130,38 @@ class ProfileRegistry:
         """Return all profiles for a given base model."""
         return [p for p in self._profiles.values() if p.base_model_id == base_model_id]
 
+    async def engine_suffixed_name(self, requested: str) -> tuple[str, str] | None:
+        """Detect an auto-derived ``<model_key>-<backend>`` name.
+
+        :meth:`_create_pinned_variant` mints one hidden profile per
+        non-default deployment so that every deployment is reachable, and
+        names it after the engine: ``gemma4:26b-ollama``,
+        ``mistral:7b-llamacpp-mks``. That name is **not** a public way to ask
+        for a model: which engine serves a model is a deployment decision that
+        can change, and a client holding such a name silently pins itself to
+        the losing side of that change. Callers reject it and point at the two
+        names that do survive.
+
+        Only the auto-derived shape counts. Variants with a name of their own
+        (``whisper-cpp-large-v3-turbo-cpu``, a routing target of
+        ``recomendado-stt``) are legitimate public profiles and are not
+        matched here.
+
+        Returns:
+            ``(model_name, deployment_id)`` to suggest instead, or ``None``
+            when *requested* is not one of those names.
+        """
+        profile = self._profiles.get(requested)
+        if profile is None or not profile.backend or not profile.base_model_id:
+            return None
+        prefijo = f"{profile.backend}/"
+        if not profile.base_model_id.startswith(prefijo):
+            return None
+        model_key = profile.base_model_id[len(prefijo) :]
+        if requested != f"{model_key}-{profile.backend.replace('_', '-')}":
+            return None
+        return model_key, profile.base_model_id
+
     async def list_enabled(self) -> list[ModelProfile]:
         """Return all enabled profiles."""
         hidden_alias_ids = {alias.alias_id for alias in self._aliases.values() if alias.hidden}

@@ -133,9 +133,7 @@ async def test_resolve_profile_no_toca_los_nombres_propios(registro):
     # No llega a resolver (el ModelManager es un stub), pero el fallo NO puede
     # ser el 404 de la puerta: tiene que pasar de largo.
     with pytest.raises(Exception) as exc:  # noqa: B017 — cualquier otro fallo sirve
-        await resolve_profile(
-            "whisper-cpp-large-v3-turbo-cpu", object(), registro, request_body={}
-        )
+        await resolve_profile("whisper-cpp-large-v3-turbo-cpu", object(), registro, request_body={})
     assert "if you need that specific engine" not in str(getattr(exc.value, "detail", ""))
 
 

@@ -8,6 +8,8 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException
+
 from ocabra.api.openai._deps import resolve_model as resolve_openai_model
 from ocabra.core.model_ref import build_model_ref, parse_model_ref
 
@@ -179,6 +181,24 @@ async def resolve_ollama_profile(
         Tuple of ``(profile | None, model_id, ModelState | None)``.
     """
     from ocabra.api.openai._deps import resolve_profile as _resolve_profile
+
+    # An engine-suffixed name (``gemma4:26b-ollama``) is not a public name.
+    # Checked here and not left to ``resolve_profile`` because the ``except``
+    # below swallows its 404 and the legacy fallback would answer with a bare
+    # "not found", losing the two names the caller should switch to.
+    suffixed = getattr(profile_registry, "engine_suffixed_name", None)
+    alternativa = await suffixed(requested_name.strip()) if suffixed is not None else None
+    if alternativa is not None:
+        nombre, despliegue = alternativa
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": (
+                    f"model '{requested_name.strip()}' not found — use '{nombre}', "
+                    f"or '{despliegue}' if you need that specific engine"
+                )
+            },
+        )
 
     # Try profile resolution first (profile_id might be a slug like "chat")
     try:
