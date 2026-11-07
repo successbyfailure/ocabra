@@ -22,7 +22,6 @@ from ocabra.api._deps_auth import (
 )
 
 
-
 @pytest.fixture(autouse=True)
 def _no_grant_expansion(monkeypatch: pytest.MonkeyPatch):
     """These tests script the exact DB calls of the group union; the widening
