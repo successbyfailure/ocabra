@@ -65,9 +65,7 @@ class ProfileRegistry:
         """Return a single profile by id, or None."""
         return self._profiles.get(profile_id)
 
-    async def resolve_alias(
-        self, alias_id: str
-    ) -> tuple[ModelProfile, str | None] | None:
+    async def resolve_alias(self, alias_id: str) -> tuple[ModelProfile, str | None] | None:
         alias = self._aliases.get(alias_id)
         if alias is None:
             return None
@@ -97,9 +95,7 @@ class ProfileRegistry:
         if preset_key and not any(
             preset.preset_key == preset_key for preset in profile.runtime_presets
         ):
-            raise ValueError(
-                f"Runtime preset '{preset_key}' not found in profile '{profile_id}'."
-            )
+            raise ValueError(f"Runtime preset '{preset_key}' not found in profile '{profile_id}'.")
         alias = ModelProfileAlias(
             alias_id=alias_id,
             profile_id=profile_id,
@@ -136,9 +132,7 @@ class ProfileRegistry:
 
     async def list_enabled(self) -> list[ModelProfile]:
         """Return all enabled profiles."""
-        hidden_alias_ids = {
-            alias.alias_id for alias in self._aliases.values() if alias.hidden
-        }
+        hidden_alias_ids = {alias.alias_id for alias in self._aliases.values() if alias.hidden}
         return [
             profile
             for profile in self._profiles.values()
@@ -337,18 +331,20 @@ class ProfileRegistry:
         # old id. Walk the full registry rather than issuing a jsonb query
         # because we also need the SQLAlchemy session-attached rows.
         other_rows = (
-            await session.execute(
-                select(ModelProfile).where(ModelProfile.profile_id != new_profile_id)
+            (
+                await session.execute(
+                    select(ModelProfile).where(ModelProfile.profile_id != new_profile_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         affected_routers: list[str] = []
         for row in other_rows:
             targets = row.routing_targets
             if not isinstance(targets, list) or old_profile_id not in targets:
                 continue
-            row.routing_targets = [
-                new_profile_id if t == old_profile_id else t for t in targets
-            ]
+            row.routing_targets = [new_profile_id if t == old_profile_id else t for t in targets]
             affected_routers.append(row.profile_id)
 
         await session.commit()
@@ -427,9 +423,7 @@ class ProfileRegistry:
                     kv_cache_dtype=preset.kv_cache_dtype,
                     placement_policy=preset.placement_policy,
                     preferred_gpus=(
-                        list(preset.preferred_gpus)
-                        if preset.preferred_gpus is not None
-                        else None
+                        list(preset.preferred_gpus) if preset.preferred_gpus is not None else None
                     ),
                     execution_policy=preset.execution_policy,
                     enabled=preset.enabled,
@@ -478,8 +472,7 @@ class ProfileRegistry:
         existing = await self.list_runtime_presets(profile_id)
         if any(p.preset_key == validated.preset_key for p in existing):
             raise ValueError(
-                f"Runtime preset '{validated.preset_key}' already exists in profile "
-                f"'{profile_id}'."
+                f"Runtime preset '{validated.preset_key}' already exists in profile '{profile_id}'."
             )
 
         payload = validated.model_dump()
@@ -634,9 +627,7 @@ class ProfileRegistry:
             raise ValueError("A router cannot target itself.")
         missing = [target for target in routing_targets if target not in self._profiles]
         if missing:
-            raise ValueError(
-                "Router target profile(s) not found: " + ", ".join(missing)
-            )
+            raise ValueError("Router target profile(s) not found: " + ", ".join(missing))
 
     async def update_assets(
         self,
@@ -728,10 +719,22 @@ class ProfileRegistry:
     # ── Auto-seed default profiles for models without any ─────
 
     _BACKEND_CATEGORY: dict[str, str] = {
-        "vllm": "llm", "llama_cpp": "llm", "llamacpp_mks": "llm", "sglang": "llm",
-        "tensorrt_llm": "llm", "bitnet": "llm", "ollama": "llm",
-        "whisper": "stt", "whisper_cpp": "stt", "vibeasr": "stt", "tts": "tts", "voxtral": "tts",
-        "chatterbox": "tts", "piper": "tts", "diffusers": "image", "acestep": "music",
+        "vllm": "llm",
+        "llama_cpp": "llm",
+        "llamacpp_mks": "llm",
+        "sglang": "llm",
+        "tensorrt_llm": "llm",
+        "bitnet": "llm",
+        "ollama": "llm",
+        "whisper": "stt",
+        "whisper_cpp": "stt",
+        "vibeasr": "stt",
+        "tts": "tts",
+        "voxtral": "tts",
+        "chatterbox": "tts",
+        "piper": "tts",
+        "diffusers": "image",
+        "acestep": "music",
     }
 
     async def ensure_default_profiles(self, session: AsyncSession) -> int:
@@ -789,7 +792,8 @@ class ProfileRegistry:
                 ).scalars()
             )
             if any(
-                p.base_model_id in sibling_ids and p.backend is None for p in self._profiles.values()
+                p.base_model_id in sibling_ids and p.backend is None
+                for p in self._profiles.values()
             ):
                 return None
         # Skip legacy diarized variants (but not GGUF models that use :: as file separator).
@@ -979,9 +983,7 @@ class ProfileRegistry:
         )
         preset = result.scalar_one_or_none()
         if preset is None:
-            raise ValueError(
-                f"Runtime preset '{preset_key}' not found in profile '{profile_id}'."
-            )
+            raise ValueError(f"Runtime preset '{preset_key}' not found in profile '{profile_id}'.")
         return preset
 
     async def _reload_profile(
