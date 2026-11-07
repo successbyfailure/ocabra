@@ -829,6 +829,19 @@ _API_DESCRIPTION = """
 
 Compatible con las APIs de **OpenAI** (`/v1/`) y **Ollama** (`/api/`).
 
+Esta pagina documenta la **forma** de cada endpoint. Lo que no cubre esta en
+dos paginas aparte, pensadas para quien construye sobre oCabra:
+
+| Pagina | Para que sirve |
+|--------|----------------|
+| [**Changelog**](/docs/changelog) | Cambios de comportamiento entre versiones, parametros nuevos y errores corregidos. Marca con **Accion** lo que requiere tocar tu codigo. Leelo si algo dejo de funcionar, o antes de subir de version. |
+| [**Modelos**](/docs/models) | Como rinde cada modelo en este despliegue: latencia, contexto util, soporte de herramientas y razonamiento. |
+
+Ambas se sirven tambien en Markdown crudo añadiendo `.md`
+([`/docs/changelog.md`](/docs/changelog.md),
+[`/docs/models.md`](/docs/models.md)) — misma fuente, sin maquetar, pensado
+para agentes y para `curl`.
+
 ## Autenticacion
 
 Todas las peticiones requieren API key en la cabecera:

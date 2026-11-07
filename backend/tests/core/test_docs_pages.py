@@ -149,3 +149,28 @@ def test_los_parrafos_se_juntan_hasta_la_linea_vacia():
     html = markdown_to_html("una linea\nsigue aqui\n\notro parrafo")
     assert html.count("<p>") == 2
     assert "una linea sigue aqui" in html
+
+
+# ── Descubribilidad desde /docs ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("pagina", sorted(PAGES))
+def test_la_referencia_de_la_api_enlaza_cada_pagina(pagina):
+    """Quien aterriza en el Swagger tiene que encontrar estas paginas.
+
+    La descripcion de /docs es un bloque largo de Markdown que se edita a mano;
+    sin esto, un enlace puede desaparecer en una reescritura sin que nadie se
+    entere.
+    """
+    from ocabra.main import _API_DESCRIPTION
+
+    assert f"(/docs/{pagina})" in _API_DESCRIPTION
+    assert f"(/docs/{pagina}.md)" in _API_DESCRIPTION
+
+
+def test_la_descripcion_llega_al_openapi():
+    """El enlace solo sirve si viaja en el esquema que renderiza Swagger."""
+    from ocabra.main import app
+
+    descripcion = app.openapi().get("info", {}).get("description", "")
+    assert "/docs/changelog" in descripcion
