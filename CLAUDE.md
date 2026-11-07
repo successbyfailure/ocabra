@@ -62,6 +62,56 @@ para fixes aislados, `MINOR` para features/cambios de comportamiento,
 `MAJOR` solo si el usuario lo pide explícitamente. Cambios triviales
 (typos, comentarios, refactor sin efecto observable) no requieren bump.
 
+Si el cambio que motiva el bump lo puede notar alguien que use la API, anota
+también la entrada en el changelog que sirve el servidor (ver la sección
+siguiente). Hay un test que falla si subes de versión sin hacerlo.
+
+## Documentación que sirve el propio servidor
+
+Además del Swagger en `/docs`, oCabra publica dos páginas en prosa dirigidas a
+**quien construye aplicaciones y agentes contra la API**, no a quien desarrolla
+oCabra:
+
+| Ruta | Contenido | Fuente |
+|------|-----------|--------|
+| `/docs/changelog` | Cambios de comportamiento entre versiones, parámetros nuevos y errores corregidos | `backend/ocabra/docs_content/changelog.md` |
+| `/docs/models` | Cómo rinde cada modelo en este despliegue | `backend/ocabra/docs_content/models.md` |
+
+Las dos se sirven también en Markdown crudo añadiendo `.md` (misma fuente, sin
+maquetar: es lo que consumen los agentes). El renderizador vive en
+`backend/ocabra/api/docs_pages.py` y soporta un subconjunto de Markdown a
+propósito —encabezados, párrafos, listas, reglas, bloques de código, tablas,
+negrita, código en línea y enlaces— para no añadir una dependencia; si
+necesitas más sintaxis, amplíalo ahí.
+
+**Cuándo tienes que actualizar el changelog.** Siempre que subas de versión por
+algo que un cliente pueda notar. En concreto:
+
+- Cambia lo que devuelve o acepta un endpoint, aunque sea compatible.
+- Cambia un valor por defecto, un límite o un tope (contexto, salida,
+  concurrencia, timeouts).
+- Arreglas un bug que el usuario estaba sufriendo: dilo aunque el arreglo sea
+  interno, porque es lo que le explica por qué algo fallaba.
+- Añades o retiras un endpoint, un backend o una capacidad.
+
+Marca con **Acción** lo que obligue a tocar código del cliente, y escribe desde
+su punto de vista: qué le pasaba antes y qué le pasa ahora. Los refactors,
+cambios de UI y deuda interna NO van aquí.
+
+Hay dos tests que lo sostienen y que fallarán si te lo saltas:
+
+- `test_el_changelog_menciona_la_version_mas_reciente` — el changelog tiene que
+  mencionar la serie de la versión servida, para que no se quede viejo al subir
+  versión.
+- `test_la_referencia_documenta_todos_los_endpoints_de_batches` — la tabla de
+  Batches de la descripción de `/docs` (en `backend/ocabra/main.py`,
+  `_API_DESCRIPTION`) tiene que listar todo lo que hay en `ALLOWED_ENDPOINTS`.
+
+Ojo con el proxy: las subrutas de `/docs` necesitan su propia regla en
+`caddy/Caddyfile` (`handle /docs/*`). Los tests cubren el enrutado de FastAPI,
+no el de Caddy, así que una página puede pasar los tests y dar 404 de puertas
+afuera.
+
 ## Convenciones obligatorias
 
 - Sigue `docs/CONVENTIONS.md` para nombres, estructura y estilo.
