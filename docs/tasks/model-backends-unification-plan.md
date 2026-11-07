@@ -1,7 +1,7 @@
 # Plan: un modelo, varios backends · modelo lógico + despliegues
 
 **Fecha de apertura:** 2026-11-07
-**Estado:** 🟡 diseño aprobado en sus decisiones de partida; implementación sin empezar
+**Estado:** 🟢 Fase 0 y Fase 1 desplegadas (2026-11-07, v0.46.0); Fases 2–6 pendientes
 **Relacionado:** [`backend-distribution-plan.md`](backend-distribution-plan.md) (backend en el id
 canónico, migración entre backends), [`llama-cpp-elastic-kv-plan.md`](llama-cpp-elastic-kv-plan.md)
 (convención `*-ollama` que este plan elimina), `docs/CONTRACTS.md` §ids canónicos
@@ -234,7 +234,19 @@ Resultado sobre producción:
     en `:597`, escribe `ctxSize` etc.), y validar `extra_config` con Pydantic al guardar.
 
 
-### Fase 1 — implementada 2026-11-07 (v0.46.0), pendiente de desplegar
+### Fase 1 — ✅ desplegada 2026-11-07 17:07 (v0.46.0)
+
+Despliegue: `pg_dump -Fc` previo en `/home/makespace/ocabra-backups/2026-11-07_pre-0034.dump`;
+comparación antes/después repetida sobre clones de la BD del momento (incluía un cambio de
+`nemotron-3-nano:30b` a 524288 de otra sesión, que sobrevive intacto): 48/48 despliegues, solo
+las 18 diferencias previstas (nombre interno de 12 llama.cpp, `load_policy` de 3, snake_case de 3
+whisper). Verificado en vivo como usuario real: `/v1/models` (60 entradas), chat `gemma4:26b`,
+`recomendado-ha-chatbots`, `recomendado-embedding` (carga en frío de `qwen3-embedding:4b` vía
+manifest de Ollama), id antiguo `llamacpp_mks/gemma4-26b` (alias), variante
+`qwen3-embedding:0.6b-ollama`; `request_stats` con `model_id`=modelo y `requested_model`
+rellenado en las 138k filas. Pendiente de UI: `ModelConfigModal.tsx:597` aún lee
+`whisper.diarizationEnabled` (camelCase) — hoy todos los base valen `false`, así que se ve bien
+por casualidad; arreglar en Fase 4.
 
 Migración `0034_models_and_deployments` (esquema + datos en un paso; el entrypoint la aplica al
 arrancar). La lógica vive en `ocabra/core/model_unification.py` (planificador puro +
@@ -324,4 +336,5 @@ ese emparejamiento y la federación está desactivada en este nodo (sin impacto 
   y datos reales de producción; este plan.
 - **Hecho (2026-11-07):** Fase 0; tests aislados en `ocabra_test` (`e5234cc`); VibeVoice duplicado borrado;
   `DIFFUSERS_OFFLOAD_MODE=model` en `.env` (sin efecto en los 2 modelos actuales, que fijan `none`).
-- **Pendiente:** desplegar la Fase 1; Fases 2–6.
+- **Hecho (2026-11-07):** Fase 1 desplegada y verificada en vivo.
+- **Pendiente:** Fases 2–6 (incluye pasar los perfiles `-ollama` a alias y la lectura snake_case de la UI).
