@@ -14,6 +14,8 @@ from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
+    ClientGoneError,
+    await_unless_client_gone,
     check_capability,
     ensure_loaded,
     fairness_kv_budget,
@@ -232,15 +234,27 @@ async def generate(
 
     started_ns = time.monotonic_ns()
     try:
-        result = await worker_pool.forward_request(
-            worker_key,
-            "/v1/completions",
-            vllm_body,
-            user_key=user_key,
-            slots=slots,
-            **telemetry_admission,
-            **kv_admission,
+        # Si el cliente se va, cancelar: en la via no de streaming FastAPI deja
+        # correr el handler hasta el final y el slot de admision mas la GPU se
+        # quedan ocupados por una respuesta que ya no lee nadie (medido el
+        # 2026-11-07: cliente rendido a los ~900 s, oCabra generando hasta los
+        # 1500 s de su propio timeout).
+        result = await await_unless_client_gone(
+            request,
+            worker_pool.forward_request(
+                worker_key,
+                "/v1/completions",
+                vllm_body,
+                user_key=user_key,
+                slots=slots,
+                **telemetry_admission,
+                **kv_admission,
+            ),
         )
+    except ClientGoneError:
+        # Cancelada por desconexion del cliente: el slot y la GPU ya estan
+        # libres. 499 es el codigo canonico de "client closed request".
+        raise HTTPException(status_code=499, detail="client disconnected") from None
     except KVCapacityError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     text = ""

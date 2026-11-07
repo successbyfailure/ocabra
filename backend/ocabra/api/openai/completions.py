@@ -22,6 +22,8 @@ from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
+    ClientGoneError,
+    await_unless_client_gone,
     build_model_status_headers,
     check_capability,
     ensure_worker_loaded,
@@ -290,16 +292,35 @@ async def completions(
         worker_pool.peek_queue_state(worker_key, kv_tokens=kv_tokens) if not is_batch else None
     )
     try:
-        result = await worker_pool.forward_request(
-            worker_key,
-            "/v1/completions",
-            to_backend_body(state, merged_body),
-            user_key=user_key,
-            slots=slots,
-            is_batch=is_batch,
-            **telemetry_admission,
-            **kv_admission,
+        # Si el cliente se va, cancelar: en la via no de streaming FastAPI deja
+        # correr el handler hasta el final y el slot de admision mas la GPU se
+        # quedan ocupados por una respuesta que ya no lee nadie (medido el
+        # 2026-11-07: cliente rendido a los ~900 s, oCabra generando hasta los
+        # 1500 s de su propio timeout).
+        result = await await_unless_client_gone(
+            request,
+            worker_pool.forward_request(
+                worker_key,
+                "/v1/completions",
+                to_backend_body(state, merged_body),
+                user_key=user_key,
+                slots=slots,
+                is_batch=is_batch,
+                **telemetry_admission,
+                **kv_admission,
+            ),
         )
+    except ClientGoneError:
+        # El cliente ya no esta: se cancelo la generacion y se solto el slot.
+        # 499 es el codigo canonico de "client closed request" que ya usa el
+        # colector para las cancelaciones de streaming.
+        raise HTTPException(status_code=499, detail={
+            "error": {
+                "message": "Client disconnected before the response was ready",
+                "type": "server_error",
+                "code": "client_disconnected",
+            }
+        }) from None
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
     except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:

@@ -497,7 +497,12 @@ class LlamaCppBackend(BackendInterface):
             )
         else:
             vision = any(token in normalized for token in ("llava", "vision", "minicpmv", "vl"))
-        reasoning = any(
+        # ``not embeddings`` igual que en ``chat`` y ``tools``: razonar es una
+        # propiedad de la generacion. Faltaba esta guarda y los GGUF de
+        # qwen3-embedding, construidos sobre la misma base, traen la plantilla
+        # de chat de qwen3 (con ``<think>``), asi que se anunciaban como
+        # modelos de razonamiento en /v1/models.
+        reasoning = not embeddings and any(
             token in normalized
             for token in (
                 "deepseek-r1",
@@ -522,8 +527,8 @@ class LlamaCppBackend(BackendInterface):
         tcaps = await self._template_caps(model_id)
         if tcaps is not None:
             tools = tcaps["tools"] and not embeddings
-            reasoning = tcaps["reasoning"]
-        if options.get("reasoning") == "on":
+            reasoning = tcaps["reasoning"] and not embeddings
+        if options.get("reasoning") == "on" and not embeddings:
             reasoning = True
         # native_context_length is the architectural ceiling (e.g. 262144 for
         # gemma4) read straight from the GGUF header — independent of

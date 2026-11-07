@@ -11,6 +11,8 @@ import asyncio
 import inspect
 import json
 import time
+from collections.abc import Coroutine
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -1751,6 +1753,94 @@ def _normalize_tool_call_entry(tool_call: object) -> object:
     return out
 
 
+class ClientGoneError(Exception):
+    """El cliente cerro la conexion antes de que llegase la respuesta."""
+
+
+async def await_unless_client_gone(
+    request: Request,
+    coro: Coroutine[Any, Any, Any],
+    *,
+    poll_seconds: float = 1.0,
+) -> Any:
+    """Espera ``coro``, cancelandola si el cliente se desconecta antes.
+
+    En la via de streaming Starlette ya cancela la tarea al desconectarse el
+    cliente, y esa cancelacion cierra la conexion con el worker, lo que hace
+    que el motor aborte la generacion y libere la GPU (ver el contrato en
+    ``WorkerPool._raw_stream``). En la via NO de streaming no ocurre: FastAPI
+    deja correr el handler hasta el final.
+
+    Consecuencia medida el 2026-11-07: un cliente se rindio a los ~900 s y
+    oCabra siguio generando hasta su propio timeout de 1500 s, con el slot de
+    admision y la GPU ocupados diez minutos de mas para una respuesta que ya no
+    iba a leer nadie. Cancelar al detectar la desconexion propaga lo mismo que
+    en streaming: el ``async with gate.slot(...)`` suelta la admision y httpx
+    cierra la conexion aguas arriba.
+    """
+    tarea = asyncio.ensure_future(coro)
+    try:
+        while True:
+            hecho, _ = await asyncio.wait({tarea}, timeout=poll_seconds)
+            if hecho:
+                return tarea.result()
+            try:
+                desconectado = await request.is_disconnected()
+            except Exception:  # noqa: BLE001 -- nunca romper por la sonda
+                desconectado = False
+            if desconectado:
+                tarea.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await tarea
+                raise ClientGoneError("client disconnected before the response was ready")
+    except asyncio.CancelledError:
+        tarea.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await tarea
+        raise
+
+
+def _flatten_text_only_content(messages: object) -> object:
+    """Colapsa las ``content parts`` de solo texto en la cadena llana que
+    esperan las plantillas de chat.
+
+    Varias plantillas asumen que ``message.content`` es una cadena y llaman a
+    ``.startswith()`` sobre ella. La que Ollama empaqueta para qwen3 es una
+    revision anterior a la oficial de Qwen, que añadio guardas
+    ``message.content is string`` justamente por esto: comprobado renderizando
+    las dos, con ``content`` como lista mas ``tools`` la de Ollama muere con
+    "'list object' has no attribute 'startswith'" y la oficial funciona. Afecta
+    a qwen3:32b y qwen3:8b, que comparten plantilla.
+
+    Aplanar aqui lo arregla para cualquier plantilla con esa debilidad, sin
+    tener que mantener copias de plantillas ajenas que se quedarian viejas en
+    silencio. El prompt resultante es identico: se comprobo contra el
+    ``/apply-template`` del propio llama-server que une las partes de texto
+    **sin separador**, y que una sola parte equivale byte a byte a la cadena.
+
+    Solo se aplana cuando TODAS las partes son de texto. Una lista con
+    imagenes, audio o video se deja intacta: esas rutas necesitan la estructura.
+    """
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    for raw in messages:
+        if not isinstance(raw, dict) or not isinstance(raw.get("content"), list):
+            out.append(raw)
+            continue
+        partes = raw["content"]
+        if not partes or not all(
+            isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+            for p in partes
+        ):
+            out.append(raw)
+            continue
+        msg = dict(raw)
+        msg["content"] = "".join(p["text"] for p in partes)
+        out.append(msg)
+    return out
+
+
 def _normalize_messages_for_backend(messages: object) -> object:
     if not isinstance(messages, list):
         return messages
@@ -1774,6 +1864,11 @@ def to_backend_body(state: ModelState, body: dict) -> dict:
     payload["model"] = state.backend_model_id
     if "messages" in payload:
         payload["messages"] = _normalize_messages_for_backend(payload["messages"])
+        if is_llama_cpp_family(getattr(state, "backend_type", "")):
+            # Solo la familia llama.cpp: es donde se ha comprobado que una
+            # plantilla desfasada revienta con content como lista. vLLM y
+            # Ollama parsean las content parts ellos mismos.
+            payload["messages"] = _flatten_text_only_content(payload["messages"])
     if payload.get("stream") is True:
         stream_options = payload.get("stream_options")
         if isinstance(stream_options, dict):

@@ -78,6 +78,28 @@ async def get_key(key: str) -> Any | None:
     return json.loads(value) if value else None
 
 
+async def delete_key(key: str) -> None:
+    """Borra una clave de Redis. No falla si no existe."""
+    await get_redis().delete(key)
+
+
+async def delete_keys_with_prefix(prefix: str) -> int:
+    """Borra ``prefix`` y todas las claves ``prefix::*``, devolviendo cuantas.
+
+    Los estados de modelo viven en ``model:state:<id>`` y sus workers derivados
+    por presets en ``model:state:<id>::<hash>``. Se usa SCAN y no KEYS para no
+    bloquear Redis.
+    """
+    cliente = get_redis()
+    borradas = 0
+    if await cliente.delete(prefix):
+        borradas += 1
+    async for clave in cliente.scan_iter(match=f"{prefix}::*", count=200):
+        if await cliente.delete(clave):
+            borradas += 1
+    return borradas
+
+
 async def lpush(queue: str, data: Any) -> None:
     await get_redis().lpush(queue, json.dumps(data))
 

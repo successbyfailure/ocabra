@@ -36,7 +36,13 @@ from ocabra.core.model_ref import (
 )
 from ocabra.db.model_config import ModelConfig
 from ocabra.db.stats import ModelLoadStat
-from ocabra.redis_client import get_key, publish, publish_system_alert, set_key
+from ocabra.redis_client import (
+    delete_keys_with_prefix,
+    get_key,
+    publish,
+    publish_system_alert,
+    set_key,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -4107,6 +4113,13 @@ class ModelManager:
         self._states.pop(model_id, None)
         self._load_locks.pop(model_id, None)
         self._persisted_model_ids.discard(model_id)
+        # El estado en Redis no se borraba nunca y esas claves no caducan, asi
+        # que cada modelo eliminado o renombrado dejaba una huerfana para
+        # siempre: el 2026-11-07 habia 94 de 154 claves sin modelo detras, casi
+        # todas del renombrado de backend llama_cpp -> llamacpp_mks. Se borran
+        # tambien las de los workers derivados (``<id>::<hash>``).
+        with suppress(Exception):
+            await delete_keys_with_prefix(f"model:state:{model_id}")
 
 
 # ── Capability display resolution ──────────────────────────────────────────
