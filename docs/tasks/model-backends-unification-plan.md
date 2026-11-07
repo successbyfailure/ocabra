@@ -237,8 +237,7 @@ Resultado sobre producción:
 ### Fase 1 — ✅ desplegada 2026-11-07 17:07 (v0.46.0)
 
 Despliegue: `pg_dump -Fc` previo en `/home/makespace/ocabra-backups/2026-11-07_pre-0034.dump`;
-comparación antes/después repetida sobre clones de la BD del momento (incluía un cambio de
-`nemotron-3-nano:30b` a 524288 de otra sesión, que sobrevive intacto): 48/48 despliegues, solo
+comparación antes/después repetida sobre clones de ese dump (48/48 despliegues coinciden salvo lo previsto). Nota: el dump (17:01) recogía `nemotron-3-nano:30b` a 524288, que otra sesión revirtió a 65536 a las 17:04, antes de la migración (17:07); producción conserva 65536. Resultado de la comparación: solo
 las 18 diferencias previstas (nombre interno de 12 llama.cpp, `load_policy` de 3, snake_case de 3
 whisper). Verificado en vivo como usuario real: `/v1/models` (60 entradas), chat `gemma4:26b`,
 `recomendado-ha-chatbots`, `recomendado-embedding` (carga en frío de `qwen3-embedding:4b` vía
