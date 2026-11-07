@@ -424,8 +424,14 @@ class BitnetBackend(BackendInterface):
     def _resolve_model_file(
         self, model_id: str, extra_config: dict[str, Any] | None = None
     ) -> Path:
+        # Section first (``extra_config.bitnet.model_path`` is what both the
+        # local-register endpoint and auto-registration write), root as legacy
+        # fallback. Reading only the root silently dropped the pinned file for
+        # every locally registered BitNet model and fell back to stem heuristics.
         model_path = (
-            (extra_config or {}).get("model_path") if isinstance(extra_config, dict) else None
+            self._get_bitnet_option(extra_config, "model_path", None)
+            if isinstance(extra_config, dict)
+            else None
         )
         if model_path:
             explicit = Path(str(model_path))

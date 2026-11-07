@@ -17,7 +17,12 @@ from starlette.responses import StreamingResponse
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.background_tasks import spawn
-from ocabra.core.model_ref import KNOWN_BACKEND_TYPES, build_model_ref, is_llama_cpp_family
+from ocabra.core.model_ref import (
+    KNOWN_BACKEND_TYPES,
+    LLAMA_CPP_CONFIG_SECTION,
+    build_model_ref,
+    is_llama_cpp_family,
+)
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -82,7 +87,11 @@ class DownloadManager:
         for job in jobs:
             if job.status == "downloading":
                 failed = job.model_copy(
-                    update={"status": "failed", "error": "interrupted (server restart)", "completed_at": datetime.now(UTC)}
+                    update={
+                        "status": "failed",
+                        "error": "interrupted (server restart)",
+                        "completed_at": datetime.now(UTC),
+                    }
                 )
                 await self._save_and_publish(failed)
 
@@ -222,7 +231,7 @@ class DownloadManager:
         except Exception:
             free_bytes = None
         if free_bytes is not None:
-            free_gb = free_bytes / (1024 ** 3)
+            free_gb = free_bytes / (1024**3)
             min_gb = float(settings.download_min_free_gb or 0)
             if free_gb < min_gb:
                 failed = job.model_copy(
@@ -245,6 +254,7 @@ class DownloadManager:
         await self._save_and_publish(downloading)
 
         try:
+
             def _progress(pct: float, speed_mb_s: float | None) -> None:
                 if cancel_flag.is_set():
                     raise asyncio.CancelledError
@@ -282,7 +292,11 @@ class DownloadManager:
                 if not downloading.artifact:
                     raise ValueError("bitnet downloads require a .gguf artifact")
                 stem = Path(downloading.artifact).stem.replace("/", "_")
-                download_dir = target_dir / "huggingface" / f"{downloading.model_ref.replace('/', '--')}--{stem}"
+                download_dir = (
+                    target_dir
+                    / "huggingface"
+                    / f"{downloading.model_ref.replace('/', '--')}--{stem}"
+                )
                 await asyncio.to_thread(download_dir.mkdir, parents=True, exist_ok=True)
 
                 await asyncio.to_thread(
@@ -343,28 +357,7 @@ class DownloadManager:
             mm = self._app.state.model_manager
             backend_model_id = self._job_model_id(job)
             register_config = job.register_config or {}
-            # An explicit choice from the UI wins over inference. The same repo
-            # can legitimately be served by more than one backend (safetensors
-            # + GGUF in one upload, or upstream llama.cpp vs the Makespace
-            # fork), and ``infer_backend_for_repo`` can only ever return one of
-            # them. Validated against KNOWN_BACKEND_TYPES so a typo degrades to
-            # inference instead of registering an unservable model id.
-            requested_backend = _rc_get(register_config, "backend_type")
-            if isinstance(requested_backend, str) and requested_backend in KNOWN_BACKEND_TYPES:
-                backend_type = requested_backend
-            elif job.source == "ollama":
-                backend_type = "ollama"
-            elif job.source == "bitnet":
-                backend_type = "bitnet"
-            else:
-                backend_type = await self._hf_registry.infer_backend_for_repo(job.model_ref, artifact=job.artifact)
-                if isinstance(requested_backend, str) and requested_backend:
-                    logger.warning(
-                        "download_register_unknown_backend_requested",
-                        requested=requested_backend,
-                        fell_back_to=backend_type,
-                    )
-
+            backend_type = await self._resolve_job_backend(job)
             model_id = build_model_ref(backend_type, backend_model_id)
             existing = await mm.get_state(model_id)
             if existing:
@@ -376,7 +369,10 @@ class DownloadManager:
             # model_id (the '::' separator and dots in version names defeat the
             # directory/stem heuristics), so without this the model registers
             # fine but fails to load with "GGUF model not found".
-            if job.artifact and (job.source == "bitnet" or (is_llama_cpp_family(backend_type) or backend_type == "bitnet")):
+            if job.artifact and (
+                job.source == "bitnet"
+                or (is_llama_cpp_family(backend_type) or backend_type == "bitnet")
+            ):
                 stem = Path(job.artifact).stem.replace("/", "_")
                 model_path = (
                     Path(settings.models_dir)
@@ -384,7 +380,17 @@ class DownloadManager:
                     / f"{job.model_ref.replace('/', '--')}--{stem}"
                     / job.artifact
                 )
-                extra_config = {**extra_config, "model_path": str(model_path)}
+                # Into the backend's own section, same as ``/registry/local/register``
+                # does: both llama.cpp backends share ``llama_cpp`` and bitnet reads
+                # ``bitnet``. Writing it at the top level worked for llama.cpp only
+                # because its option lookup falls back to the root.
+                section = (
+                    LLAMA_CPP_CONFIG_SECTION if is_llama_cpp_family(backend_type) else "bitnet"
+                )
+                section_cfg = extra_config.get(section)
+                section_cfg = dict(section_cfg) if isinstance(section_cfg, dict) else {}
+                section_cfg["model_path"] = str(model_path)
+                extra_config = {**extra_config, section: section_cfg}
 
             if job.source == "huggingface" and backend_type == "whisper":
                 nemo_path = self._find_downloaded_nemo_path(job)
@@ -407,7 +413,49 @@ class DownloadManager:
             if profile_registry is not None:
                 await profile_registry.on_model_added(model_id)
         except Exception:
-            pass  # Non-fatal: model can be registered manually
+            # Non-fatal (the model can be registered by hand), but it must be
+            # visible: a silent ``pass`` here meant a finished download that
+            # never showed up in Models, with nothing in the logs explaining why.
+            logger.warning(
+                "download_auto_register_failed",
+                job_id=job.job_id,
+                model_ref=job.model_ref,
+                exc_info=True,
+            )
+
+    async def _resolve_job_backend(self, job: DownloadJob) -> str:
+        """Backend a finished download is registered under.
+
+        Shared by auto-registration and the metadata refresh so both address
+        the same ``model_id``. The metadata refresh used to re-infer the
+        backend on its own and ignore the user's explicit choice, so picking a
+        non-default backend in Explore wrote the metadata to a model id that
+        did not exist.
+
+        An explicit choice from the UI wins over inference. The same repo can
+        legitimately be served by more than one backend (safetensors + GGUF in
+        one upload, or upstream llama.cpp vs the Makespace fork), and
+        ``infer_backend_for_repo`` can only ever return one of them. Validated
+        against KNOWN_BACKEND_TYPES so a typo degrades to inference instead of
+        registering an unservable model id.
+        """
+        requested_backend = _rc_get(job.register_config or {}, "backend_type")
+        if isinstance(requested_backend, str) and requested_backend in KNOWN_BACKEND_TYPES:
+            return requested_backend
+        if job.source == "ollama":
+            return "ollama"
+        if job.source == "bitnet":
+            return "bitnet"
+        backend_type = await self._hf_registry.infer_backend_for_repo(
+            job.model_ref, artifact=job.artifact
+        )
+        if isinstance(requested_backend, str) and requested_backend:
+            logger.warning(
+                "download_register_unknown_backend_requested",
+                requested=requested_backend,
+                fell_back_to=backend_type,
+            )
+        return backend_type
 
     async def _refresh_registry_metadata(self, job: DownloadJob) -> None:
         """Fetch upstream release / last-modified dates and persist them on the model.
@@ -422,14 +470,7 @@ class DownloadManager:
 
             mm = self._app.state.model_manager
             backend_model_id = self._job_model_id(job)
-            if job.source == "ollama":
-                backend_type = "ollama"
-            elif job.source == "bitnet":
-                backend_type = "bitnet"
-            else:
-                backend_type = await self._hf_registry.infer_backend_for_repo(
-                    job.model_ref, artifact=job.artifact
-                )
+            backend_type = await self._resolve_job_backend(job)
 
             model_id = build_model_ref(backend_type, backend_model_id)
             metadata = await fetch_registry_metadata(backend_type, backend_model_id)
@@ -444,7 +485,6 @@ class DownloadManager:
             return job.model_ref
         stem = Path(job.artifact).stem
         return f"{job.model_ref}::{stem}"
-
 
     def _hf_download_dir(self, job: DownloadJob) -> Path:
         base = Path(settings.models_dir) / "huggingface"

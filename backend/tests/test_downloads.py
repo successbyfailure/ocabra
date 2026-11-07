@@ -96,13 +96,77 @@ async def test_auto_register_bitnet_sets_model_path() -> None:
     call = model_manager.add_model.await_args.kwargs
     assert call["backend_type"] == "bitnet"
     assert call["model_id"] == "bitnet/microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s"
-    assert call["extra_config"]["model_path"].endswith(
+    assert call["extra_config"]["bitnet"]["model_path"].endswith(
         "/huggingface/microsoft--BitNet-b1.58-2B-4T-gguf--ggml-model-i2_s/ggml-model-i2_s.gguf"
+    )
+    assert "model_path" not in call["extra_config"]
+
+
+def _gguf_job(register_config: dict) -> DownloadJob:
+    return DownloadJob(
+        job_id="job-gguf-1",
+        source="huggingface",
+        model_ref="unsloth/Qwen3-8B-GGUF",
+        artifact="Qwen3-8B-Q4_K_M.gguf",
+        register_config=register_config,
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-03-14T00:00:00Z",
+        completed_at="2026-03-14T00:01:00Z",
     )
 
 
 @pytest.mark.asyncio
-async def test_auto_register_hf_nemo_sets_base_model_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_auto_register_gguf_pins_path_in_llama_cpp_section_keeping_user_keys() -> None:
+    manager = DownloadManager()
+    model_manager = SimpleNamespace(get_state=AsyncMock(return_value=None), add_model=AsyncMock())
+    manager._app = SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    manager._hf_registry.infer_backend_for_repo = AsyncMock(return_value="llama_cpp")
+
+    job = _gguf_job(
+        {"backend_type": "llamacpp_mks", "extra_config": {"llama_cpp": {"ctx_size": 8192}}}
+    )
+    await manager._auto_register_model(job)
+
+    call = model_manager.add_model.await_args.kwargs
+    assert call["model_id"] == "llamacpp_mks/unsloth/Qwen3-8B-GGUF::Qwen3-8B-Q4_K_M"
+    section = call["extra_config"]["llama_cpp"]
+    assert section["ctx_size"] == 8192
+    assert section["model_path"].endswith(
+        "/unsloth--Qwen3-8B-GGUF--Qwen3-8B-Q4_K_M/Qwen3-8B-Q4_K_M.gguf"
+    )
+    assert "model_path" not in call["extra_config"]
+
+
+@pytest.mark.asyncio
+async def test_registry_metadata_refresh_targets_the_backend_the_user_picked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the refresh re-inferred the backend (``llama_cpp``) and wrote
+    the metadata to a model id that was never registered when the user had
+    picked ``llamacpp_mks`` in Explore."""
+    manager = DownloadManager()
+    model_manager = SimpleNamespace(set_registry_metadata=AsyncMock())
+    manager._app = SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    manager._hf_registry.infer_backend_for_repo = AsyncMock(return_value="llama_cpp")
+    fetch = AsyncMock(return_value={"source": "huggingface"})
+    monkeypatch.setattr("ocabra.registry.metadata.fetch_registry_metadata", fetch)
+
+    await manager._refresh_registry_metadata(_gguf_job({"backend_type": "llamacpp_mks"}))
+
+    model_manager.set_registry_metadata.assert_awaited_once_with(
+        "llamacpp_mks/unsloth/Qwen3-8B-GGUF::Qwen3-8B-Q4_K_M", {"source": "huggingface"}
+    )
+    manager._hf_registry.infer_backend_for_repo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_register_hf_nemo_sets_base_model_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from ocabra.config import settings
 
     manager = DownloadManager()
@@ -172,8 +236,12 @@ async def test_sweep_old_jobs_deletes_past_retention_only(monkeypatch: pytest.Mo
     jobs = [
         _job("old-completed", "completed", "2026-01-01T00:00:00Z"),  # past both cutoffs
         _job("recent-completed", "completed", "2026-11-01T23:59:00Z"),  # within completed retention
-        _job("old-failed", "failed", "2026-10-25T00:00:00Z"),  # past the (longer) failed retention too
-        _job("recent-failed", "failed", "2026-11-01T12:00:00Z"),  # past completed's window, within failed's
+        _job(
+            "old-failed", "failed", "2026-10-25T00:00:00Z"
+        ),  # past the (longer) failed retention too
+        _job(
+            "recent-failed", "failed", "2026-11-01T12:00:00Z"
+        ),  # past completed's window, within failed's
         _job("still-downloading", "downloading", None),  # not terminal — never swept
     ]
     manager.list_jobs = AsyncMock(return_value=jobs)

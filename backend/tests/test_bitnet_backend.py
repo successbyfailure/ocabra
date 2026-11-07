@@ -165,11 +165,14 @@ def test_scheduler_defaults_prismml_to_gpu_and_uses_gguf_size(tmp_path: Path) ->
     )
 
     assert resolve_bitnet_gpu_layers(state, 0) == 99
-    assert estimate_bitnet_vram_from_config(
-        state,
-        default_gpu_layers=0,
-        models_dir=tmp_path,
-    ) >= 648
+    assert (
+        estimate_bitnet_vram_from_config(
+            state,
+            default_gpu_layers=0,
+            models_dir=tmp_path,
+        )
+        >= 648
+    )
 
 
 def test_scheduler_respects_explicit_prismml_cpu_override() -> None:
@@ -224,3 +227,25 @@ async def test_quantised_kv_cache_forces_flash_attn(tmp_path: Path) -> None:
     # The PrismML fork needs the explicit value form `--flash-attn on`.
     assert "--flash-attn" in cmd
     assert cmd[cmd.index("--flash-attn") + 1] == "on"
+
+
+def test_resolve_model_file_reads_path_from_bitnet_section(tmp_path: Path) -> None:
+    """Regression: ``/registry/local/register`` pins the file under
+    ``extra_config.bitnet.model_path`` but the resolver only read the root, so
+    a GGUF with an unrelated filename (e.g. an Ollama sha256 blob) was never found."""
+    weights = tmp_path / "sha256-deadbeef"
+    weights.write_bytes(b"GGUF")
+    backend = BitnetBackend()
+
+    resolved = backend._resolve_model_file(
+        "bitnet/some-model", {"bitnet": {"model_path": str(weights)}}
+    )
+
+    assert resolved == weights
+
+
+def test_resolve_model_file_still_accepts_root_model_path(tmp_path: Path) -> None:
+    weights = tmp_path / "model.gguf"
+    weights.write_bytes(b"GGUF")
+
+    assert BitnetBackend()._resolve_model_file("bitnet/x", {"model_path": str(weights)}) == weights
