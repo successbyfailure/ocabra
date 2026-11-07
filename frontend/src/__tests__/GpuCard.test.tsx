@@ -41,6 +41,11 @@ describe("GpuCard", () => {
     expect(screen.getByText("500k")).toBeTruthy()
     expect(screen.getByText("Procesos (1)")).toBeTruthy()
     expect(screen.getByText("1234 · python")).toBeTruthy()
-    expect(screen.getByText("compute · 1,024 MB")).toBeTruthy()
+    // El numero se formatea con toLocaleString, asi que el separador depende
+    // del locale de la maquina ("1,024" en en-US, "1024" en es-ES). Se compone
+    // la expectativa con la misma API para que el test no dependa del entorno.
+    expect(
+      screen.getByText(`compute · ${(1024).toLocaleString()} MB`),
+    ).toBeTruthy()
   })
 })

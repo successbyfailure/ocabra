@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from ocabra.api.internal import config as config_api
 from ocabra.config import settings
+from tests.conftest import requires_db
 
 
 @pytest.mark.asyncio
@@ -36,6 +37,7 @@ async def test_get_config_includes_settings_fields() -> None:
 
 
 @pytest.mark.asyncio
+@requires_db
 async def test_patch_config_applies_runtime_values() -> None:
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     previous_timeout = settings.idle_timeout_seconds

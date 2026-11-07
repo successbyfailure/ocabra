@@ -14,6 +14,7 @@ from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
 from ocabra.core.worker_pool import WorkerPool
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.stats import ModelLoadStat
+from tests.conftest import requires_db
 
 
 def make_worker_pool_with_mock(vram_mb: int = 4096) -> WorkerPool:
@@ -129,6 +130,7 @@ async def test_manual_unload_waits_for_fresh_vram_sample(worker_pool, monkeypatc
 
 
 @pytest.mark.asyncio
+@requires_db
 async def test_load_records_model_load_stat(model_manager):
     with (
         patch("ocabra.core.model_manager.publish", new=AsyncMock()),

@@ -72,8 +72,14 @@ async def test_refresh_releases_unmaterialized_reservation_for_stopped_container
     gpu_manager = _FakeGPUManager()
     manager.set_gpu_manager(gpu_manager)  # type: ignore[arg-type]
 
+    # La GPU no se fija a fuego: el indice sale de la configuracion del
+    # servicio (el default del codigo y el del .env de produccion no coinciden,
+    # asi que un 0 literal ataba el test a un entorno concreto). Lo que importa
+    # es que la reserva cae en la GPU preferida del servicio.
+    gpu_esperada = manager._require("comfyui").preferred_gpu
+    assert gpu_esperada is not None
     await manager.reserve_gpu_vram("comfyui", 5903)
-    assert gpu_manager.locks == {(0, "service:comfyui"): 5903}
+    assert gpu_manager.locks == {(gpu_esperada, "service:comfyui"): 5903}
 
     state = await manager.refresh("comfyui")
 
@@ -107,12 +113,18 @@ async def test_refresh_keeps_startup_reservation_while_container_runs(monkeypatc
     gpu_manager = _FakeGPUManager()
     manager.set_gpu_manager(gpu_manager)  # type: ignore[arg-type]
 
+    # La GPU no se fija a fuego: el indice sale de la configuracion del
+    # servicio (el default del codigo y el del .env de produccion no coinciden,
+    # asi que un 0 literal ataba el test a un entorno concreto). Lo que importa
+    # es que la reserva cae en la GPU preferida del servicio.
+    gpu_esperada = manager._require("comfyui").preferred_gpu
+    assert gpu_esperada is not None
     await manager.reserve_gpu_vram("comfyui", 5903)
     state = await manager.refresh("comfyui")
 
     assert state.status == "unreachable"
     assert state.vram_reserved_at is not None
-    assert gpu_manager.locks == {(0, "service:comfyui"): 5903}
+    assert gpu_manager.locks == {(gpu_esperada, "service:comfyui"): 5903}
 
 
 @pytest.mark.asyncio

@@ -297,7 +297,6 @@ async def test_schedule_reloads_load_due_pin_models():
         backend_type="vllm",
         status=ModelStatus.UNLOADED,
         load_policy=LoadPolicy.PIN,
-        auto_reload=True,
         preferred_gpu=1,
     )
     model_manager.list_states = AsyncMock(return_value=[state])
@@ -322,7 +321,7 @@ async def test_schedule_reloads_load_due_pin_models():
 
 
 @pytest.mark.asyncio
-async def test_schedule_reloads_skip_models_without_auto_reload():
+async def test_schedule_reloads_skip_on_demand_models():
     from types import SimpleNamespace
 
     from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
@@ -335,8 +334,11 @@ async def test_schedule_reloads_skip_models_without_auto_reload():
         display_name="Pinned Model",
         backend_type="vllm",
         status=ModelStatus.UNLOADED,
-        load_policy=LoadPolicy.PIN,
-        auto_reload=False,
+        # Antes este caso era PIN + auto_reload=False. El checkbox se retiro el
+        # 2026-10-30 y se plego en load_policy, asi que "no ha hecho opt-in"
+        # se expresa ahora siendo ON_DEMAND: _should_reload_state solo recarga
+        # WARM y PIN.
+        load_policy=LoadPolicy.ON_DEMAND,
         preferred_gpu=1,
     )
     model_manager.list_states = AsyncMock(return_value=[state])

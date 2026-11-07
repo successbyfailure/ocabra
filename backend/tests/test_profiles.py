@@ -795,7 +795,6 @@ class TestRuntimePresetRegistry:
             kv_cache_dtype="q8",
             placement_policy="auto",
             execution_policy="auto",
-            load_policy="warm",
             enabled=True,
             is_default=True,
             priority=100,

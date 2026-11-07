@@ -39,7 +39,6 @@ async def _add_model(
     mm: ModelManager,
     model_id: str = "mock/test-model",
     load_policy: str = "on_demand",
-    auto_reload: bool = False,
     preferred_gpu: int | None = None,
     extra_config: dict | None = None,
 ) -> ModelState:
@@ -49,7 +48,6 @@ async def _add_model(
         display_name=model_id,
         backend_type="mock",
         load_policy=LoadPolicy(load_policy),
-        auto_reload=auto_reload,
         preferred_gpu=preferred_gpu,
         extra_config=extra_config or {},
     )
@@ -245,7 +243,14 @@ async def test_pressure_eviction_evicts_on_demand_first():
 
 @pytest.mark.asyncio
 async def test_eviction_order_on_demand_before_warm_before_pin():
-    """Eviction candidates are sorted: on_demand < warm < pin."""
+    """Eviction candidates are sorted: on_demand < warm < pin.
+
+    ``current_gpu`` es obligatorio: desde el 2026-10-31 el filtro
+    ``_on_target_gpu`` descarta a los modelos sin GPU asignada (desalojarlos no
+    libera VRAM en ninguna tarjeta), y sin el la funcion caia al camino de
+    respaldo sobre el worker pool, que no ordena por politica. El test pasaba
+    por ahi y no comprobaba la ordenacion que dice comprobar.
+    """
     mm = _make_manager()
     p1, p2, p3, p4 = _patch_externals()
     with p1, p2, p3, p4:
@@ -258,6 +263,7 @@ async def test_eviction_order_on_demand_before_warm_before_pin():
             await _add_model(mm, model_id=mid, load_policy=policy)
             mm._states[mid].status = ModelStatus.LOADED
             mm._states[mid].vram_used_mb = 1024
+            mm._states[mid].current_gpu = [0]
             wi = WorkerInfo(
                 backend_type="mock", model_id=mid.split("/")[1],
                 gpu_indices=[0], port=9000, pid=1, vram_used_mb=1024,
@@ -323,12 +329,13 @@ async def test_on_demand_does_not_auto_load():
 
 @pytest.mark.asyncio
 async def test_auto_reload_triggers_watch_after_pressure_eviction():
-    """When a model with auto_reload=True is pressure-evicted,
-    _watch_and_reload is kicked off."""
+    """Cuando un modelo PIN es desalojado por presion, se lanza
+    _watch_and_reload. El antiguo checkbox ``auto_reload`` se elimino el
+    2026-10-30: ser PIN es ya el opt-in explicito."""
     mm = _make_manager()
     p1, p2, p3, p4 = _patch_externals()
     with p1, p2, p3, p4:
-        await _add_model(mm, model_id="mock/reloadable", load_policy="pin", auto_reload=True)
+        await _add_model(mm, model_id="mock/reloadable", load_policy="pin")
         state = mm._states["mock/reloadable"]
         state.status = ModelStatus.LOADED
         state.vram_used_mb = 2048
@@ -341,7 +348,6 @@ async def test_auto_reload_triggers_watch_after_pressure_eviction():
 
         # Track whether _watch_and_reload was triggered
         watch_called = False
-        original_watch = mm._watch_and_reload
 
         async def _spy_watch(model_id):
             nonlocal watch_called
@@ -357,11 +363,11 @@ async def test_auto_reload_triggers_watch_after_pressure_eviction():
 
 @pytest.mark.asyncio
 async def test_auto_reload_not_triggered_on_manual_unload():
-    """Manual unloads do NOT trigger _watch_and_reload even with auto_reload=True."""
+    """Las descargas manuales NO lanzan _watch_and_reload ni siendo PIN."""
     mm = _make_manager()
     p1, p2, p3, p4 = _patch_externals()
     with p1, p2, p3, p4:
-        await _add_model(mm, model_id="mock/reloadable", load_policy="pin", auto_reload=True)
+        await _add_model(mm, model_id="mock/reloadable", load_policy="pin")
         state = mm._states["mock/reloadable"]
         state.status = ModelStatus.LOADED
         state.vram_used_mb = 2048
@@ -393,8 +399,6 @@ async def test_state_transitions_during_load():
     """Verify the state passes through LOADING before reaching LOADED."""
     mm = _make_manager()
     observed_statuses = []
-
-    original_publish = AsyncMock()
 
     async def _capture_publish(channel, payload):
         if isinstance(payload, dict) and "new_status" in payload:

@@ -103,7 +103,13 @@ def test_bitnet_post_install_script_ships_in_repo() -> None:
     assert script.stat().st_mode & stat.S_IEXEC
 
 
-def test_bitnet_resolve_server_bin_prefers_metadata(
+# ``_resolve_server_bin`` se partio en dos al integrar Bonsai/PrismML (908d96b):
+# ``_resolve_microsoft_bin`` mantiene la prioridad metadata -> ajuste legacy, y
+# ``_select_server_bin(model_file)`` elige entre el binario de Microsoft y el
+# fork PrismML segun el GGUF.
+
+
+def test_bitnet_resolve_microsoft_bin_prefers_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
@@ -118,16 +124,56 @@ def test_bitnet_resolve_server_bin_prefers_metadata(
     )
     monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
 
-    assert BitnetBackend()._resolve_server_bin() == str(bin_path)
+    assert BitnetBackend()._resolve_microsoft_bin() == str(bin_path)
 
 
-def test_bitnet_resolve_server_bin_falls_back_to_legacy(
+def test_bitnet_resolve_microsoft_bin_falls_back_to_legacy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
     monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
 
-    assert BitnetBackend()._resolve_server_bin() == "/legacy/bitnet-server"
+    assert BitnetBackend()._resolve_microsoft_bin() == "/legacy/bitnet-server"
+
+
+def test_bitnet_select_server_bin_uses_microsoft_for_i2s_gguf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
+
+    modelo = tmp_path / "BitNet-b1.58-2B-4T-i2_s.gguf"
+    assert BitnetBackend()._select_server_bin(modelo) == "/legacy/bitnet-server"
+
+
+def test_bitnet_select_server_bin_uses_prismml_for_bonsai_gguf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
+    # A diferencia del binario de Microsoft, que se devuelve tal cual venga del
+    # ajuste, el de PrismML solo se acepta si existe de verdad: si no, la
+    # resolucion devuelve None para dar un error explicito.
+    bonsai_bin = tmp_path / "bonsai-server"
+    _make_executable(bonsai_bin)
+    monkeypatch.setattr(settings, "bitnet_prismml_server_bin", str(bonsai_bin))
+
+    modelo = tmp_path / "Bonsai-27B-Q1_0_g128.gguf"
+    assert BitnetBackend()._select_server_bin(modelo) == str(bonsai_bin)
+
+
+def test_bitnet_select_server_bin_explains_missing_prismml_fork(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un GGUF de Bonsai sin el fork instalado tiene que decir que falta el
+    fork, no caer al binario de Microsoft (que no sabe leer Q1_0)."""
+    monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
+    monkeypatch.setattr(settings, "bitnet_prismml_server_bin", "")
+
+    modelo = tmp_path / "Bonsai-27B-Q1_0_g128.gguf"
+    with pytest.raises(FileNotFoundError, match="PrismML"):
+        BitnetBackend()._select_server_bin(modelo)
 
 
 # ---------------------------------------------------------------------------

@@ -3718,15 +3718,33 @@ class ModelManager:
         """Return the registered ModelState list.
 
         Derived workers (created by ``_ensure_worker_loaded`` for profiles
-        with non-empty ``load_overrides``) are not persisted and would
-        surface in the model list as phantom ``(override)`` entries.
+        with non-empty ``load_overrides``) would surface in the model list as
+        phantom ``(override)`` entries. Se reconocen por su id
+        ``<canonico>::<hash>`` — ``_canonical_runtime_model_id`` lo resuelve
+        sin confundirse con los ids GGUF ``repo::fichero``, que llevan ``::``
+        y no son derivados.
+
         Callers that render the user-facing model catalog pass the default
         ``include_derived=False``; the scheduler / eviction watchdog / stats
         code paths that need the full picture pass ``True``.
         """
         if include_derived:
             return list(self._states.values())
-        return [s for s in self._states.values() if s.model_id in self._persisted_model_ids]
+        return [
+            state
+            for state in self._states.values()
+            # Tener fila en ``model_configs`` implica ser canonico.
+            if state.model_id in self._persisted_model_ids
+            # Y un estado sin fila tampoco es derivado si su id ya es el
+            # canonico. El filtro usaba solo ``_persisted_model_ids``, que
+            # significa "esta en la base de datos", no "no es derivado": por
+            # eso los modelos que ``sync_ollama_models`` descubre instalados en
+            # Ollama pero sin registrar en oCabra se caian del listado. El
+            # endpoint GET /ocabra/models sincroniza el inventario y acto
+            # seguido llamaba a list_states(), que descartaba justo lo que la
+            # sincronizacion acababa de anadir.
+            or self._canonical_runtime_model_id(state.model_id) == state.model_id
+        ]
 
     async def sync_ollama_models(self, model_ids: list[str]) -> int:
         """Ensure native Ollama models are present in the internal inventory."""

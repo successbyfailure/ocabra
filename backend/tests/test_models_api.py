@@ -9,6 +9,7 @@ import pytest
 from ocabra.api.internal import models as models_api
 from ocabra.backends.base import BackendCapabilities
 from ocabra.core.model_manager import ModelState, ModelStatus
+from tests.conftest import requires_db
 
 
 class _FakeBackend:
@@ -51,6 +52,7 @@ def test_apply_capability_fallbacks_uses_tensorrt_extra_config_context():
     assert payload["context_length"] == 4096
 
 
+@requires_db
 async def test_serialize_model_state_enriches_capabilities_from_backend():
     state = SimpleNamespace(
         model_id="tensorrt_llm/My--Engine",
@@ -261,6 +263,7 @@ async def test_overlay_configured_base_without_derived_reports_runtime_defaults(
     assert overlaid[0].runtime_slots == 1
 
 
+@requires_db
 async def test_serialize_model_state_uses_extra_config_model_path_for_disk_size(
     tmp_path, monkeypatch
 ):
@@ -330,6 +333,11 @@ async def test_get_model_status_exposes_weighted_admission_snapshot():
         "in_flight": 2,
         "queued": 1,
         "slot_saturated": False,
+        # El fair-share gate publica tambien estos dos; con valores distintos
+        # de los que tendrian por defecto (compute_saturated=False y
+        # admission_limit=slots) para comprobar que se propagan de verdad.
+        "compute_saturated": True,
+        "admission_limit": 16,
         "kv_capacity_tokens": 98304,
         "kv_reserved_tokens": 72000,
         "kv_free_tokens": 26304,
@@ -350,6 +358,8 @@ async def test_get_model_status_exposes_weighted_admission_snapshot():
         "activeRequests": 2,
         "queuedRequests": 1,
         "slotSaturated": False,
+        "computeSaturated": True,
+        "admissionLimit": 16,
         "kvCapacityTokens": 98304,
         "kvReservedTokens": 72000,
         "kvFreeTokens": 26304,

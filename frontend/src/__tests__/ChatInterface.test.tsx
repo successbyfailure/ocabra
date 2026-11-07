@@ -234,7 +234,7 @@ describe("ChatInterface", () => {
   })
 })
 
-function sseResponse(events: string[]) {
+function sseResponse(events: string[], headers: Record<string, string> = {}) {
   const encoder = new TextEncoder()
   const body = new ReadableStream({
     start(controller) {
@@ -244,7 +244,17 @@ function sseResponse(events: string[]) {
       controller.close()
     },
   })
-  return { ok: true, body }
+  // ChatInterface lee las cabeceras X-Ocabra-Router / -Router-Target para
+  // mostrar por que objetivo se resolvio un router. Sin un `headers` con
+  // `get`, la llamada reventaba con un TypeError justo antes de empezar a
+  // leer el stream, asi que la burbuja del asistente se quedaba vacia y los
+  // tests fallaban diciendo que no encontraban el texto del razonamiento.
+  return {
+    ok: true,
+    status: 200,
+    body,
+    headers: { get: (name: string) => headers[name] ?? null },
+  }
 }
 
 function jsonChunk(payload: unknown): string {

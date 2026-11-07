@@ -16,6 +16,23 @@ from fastapi.testclient import TestClient
 
 from ocabra.api.openai._deps import fairness_kv_budget, fairness_slots
 
+
+@pytest.fixture(autouse=True)
+def _sin_agentes(monkeypatch):
+    """Aisla el listado de agentes de ``GET /v1/models``.
+
+    El endpoint anexa los agentes leyendo ``AsyncSessionLocal`` directamente,
+    no a traves de ``app.state``, asi que el ModelManager simulado no los
+    sustituye: donde hay base de datos alcanzable (Docker, CI) se colaban los
+    agentes reales y los tests de listado contaban 6 modelos esperando 1.
+    Estos fallos solo aparecian con base de datos, asi que en un portatil sin
+    ella pasaban desapercibidos.
+    """
+    monkeypatch.setattr(
+        "ocabra.api.openai.models._list_agent_model_entries",
+        AsyncMock(return_value=[]),
+    )
+
 # ---------------------------------------------------------------------------
 # Profile helpers
 # ---------------------------------------------------------------------------

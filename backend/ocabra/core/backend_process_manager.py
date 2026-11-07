@@ -19,6 +19,13 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 
+# Fallos de /health consecutivos antes de dar el worker por muerto. Con nombre
+# y a nivel de modulo para que los tests lo importen en vez de duplicar el
+# numero: el test de salud se quedo clavado en 3 cuando esto subio a 5 y llevaba
+# tiempo fallando sin que el cambio de umbral fuese un error.
+HEALTH_FAIL_THRESHOLD = 5
+
+
 class BackendProcessManager:
     """Monitors active workers and restarts those that die."""
 
@@ -116,7 +123,7 @@ class BackendProcessManager:
         except Exception:
             count = self._health_fail_counts.get(model_id, 0) + 1
             self._health_fail_counts[model_id] = count
-            if count >= 5:
+            if count >= HEALTH_FAIL_THRESHOLD:
                 logger.error(
                     "worker_health_failed",
                     model_id=model_id,

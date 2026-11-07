@@ -93,7 +93,14 @@ async def test_commit_stt_path_calls_whisper_and_stores_text() -> None:
     await session._commit_audio_only()
 
     session._transcribe.assert_awaited_once()
-    assert session.conversation == [{"role": "user", "content": "hello there"}]
+    # Cada entrada lleva un ``id`` generado (se usa en los eventos
+    # conversation.item.created), asi que se comprueba la forma sin atar el
+    # valor aleatorio.
+    assert len(session.conversation) == 1
+    entrada = session.conversation[0]
+    assert entrada["role"] == "user"
+    assert entrada["content"] == "hello there"
+    assert entrada["id"]
 
 
 @pytest.mark.asyncio
@@ -215,7 +222,10 @@ async def test_stream_llm_records_realtime_chat_operation() -> None:
         [{"role": "user", "content": "di hola"}]
     )]
 
-    assert chunks == ["hola mundo"]
+    # _stream_llm emite dicts etiquetados por tipo ("content",
+    # "tool_call_delta", "finish") desde que soporta tool calls en streaming;
+    # antes emitia el texto pelado.
+    assert chunks == [{"type": "content", "text": "hola mundo"}]
     recorded = session._request_recorder.await_args.kwargs
     assert recorded["request_kind"] == "realtime_chat"
     assert recorded["status_code"] == 200

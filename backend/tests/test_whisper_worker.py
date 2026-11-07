@@ -2,9 +2,15 @@ import sys
 from itertools import count
 from types import SimpleNamespace
 
-import numpy as np
+import pytest
 
-from workers import whisper_worker
+# numpy no es dependencia de oCabra: la usa el worker de audio, que vive en su
+# propio entorno. Sin este skip el ImportError rompia la recolectada de TODA la
+# suite (no solo de este fichero), asi que habia que lanzar pytest con
+# --ignore=tests/test_whisper_worker.py para que corriese algo.
+np = pytest.importorskip("numpy", reason="numpy solo esta en el entorno del worker de audio")
+
+from workers import whisper_worker  # noqa: E402
 
 
 class _TempFileCtx:

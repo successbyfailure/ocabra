@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from ocabra.config import settings
 from ocabra.core.federation import (
     FederationManager,
     PeerState,
@@ -437,7 +438,7 @@ class TestFederationManagerBasics:
 
 
 @pytest.mark.asyncio
-async def test_try_proxy_json_retries_with_canonical_id_on_404() -> None:
+async def test_try_proxy_json_retries_with_canonical_id_on_404(monkeypatch) -> None:
     """A peer may advertise a profile_id in its heartbeat but then 404 that
     same id when hit directly (observed when the peer inserts a profile row
     without reloading its in-memory profile_registry). The federation helper
@@ -448,6 +449,11 @@ async def test_try_proxy_json_retries_with_canonical_id_on_404() -> None:
     from types import SimpleNamespace
 
     from ocabra.api.openai._federation import try_proxy_json
+
+    # try_proxy_json sale en la primera linea si la federacion esta apagada, y
+    # esta apagada por defecto: sin esto el helper devolvia None sin llegar a
+    # proxyar nada y el test no comprobaba el reintento canonico.
+    monkeypatch.setattr(settings, "federation_enabled", True)
 
     base_id = "ollama/qwen3-embedding:0.6b"
     public_id = "qwen3-embedding:0.6b"
@@ -506,7 +512,10 @@ async def test_try_proxy_json_retries_with_canonical_id_on_404() -> None:
 
     logger = MagicMock()
 
-    with patch("ocabra.core.federation.ModelStatus", _FakeModelStatus):
+    # federation.py importa ModelStatus dentro de la funcion, no a nivel de
+    # modulo, asi que hay que parchearlo en su origen: el modulo federation no
+    # tiene el atributo y el patch antiguo fallaba con AttributeError.
+    with patch("ocabra.core.model_manager.ModelStatus", _FakeModelStatus):
         resp = await try_proxy_json(
             request,
             model_id=public_id,
@@ -525,13 +534,18 @@ async def test_try_proxy_json_retries_with_canonical_id_on_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_try_proxy_json_does_not_retry_when_already_canonical() -> None:
+async def test_try_proxy_json_does_not_retry_when_already_canonical(monkeypatch) -> None:
     """When the first proxy already used the canonical id (peer didn't
     advertise the public profile), a 404 is a real "model missing" — don't
     double-send, just fall back to local."""
     from types import SimpleNamespace
 
     from ocabra.api.openai._federation import try_proxy_json
+
+    # try_proxy_json sale en la primera linea si la federacion esta apagada, y
+    # esta apagada por defecto: sin esto el helper devolvia None sin llegar a
+    # proxyar nada y el test no comprobaba el reintento canonico.
+    monkeypatch.setattr(settings, "federation_enabled", True)
 
     base_id = "ollama/qwen3-embedding:0.6b"
 
@@ -580,7 +594,10 @@ async def test_try_proxy_json_does_not_retry_when_already_canonical() -> None:
     request.url.path = "/v1/embeddings"
     request.headers = {}
 
-    with patch("ocabra.core.federation.ModelStatus", _FakeModelStatus):
+    # federation.py importa ModelStatus dentro de la funcion, no a nivel de
+    # modulo, asi que hay que parchearlo en su origen: el modulo federation no
+    # tiene el atributo y el patch antiguo fallaba con AttributeError.
+    with patch("ocabra.core.model_manager.ModelStatus", _FakeModelStatus):
         resp = await try_proxy_json(
             request,
             model_id=base_id,

@@ -145,7 +145,6 @@ def test_tokenizer_resolution_skips_dirs_without_tokenizer_files(tmp_path: Path)
     """_resolve_tokenizer_path must only return dirs that actually have tokenizer files."""
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
-    engine_parent = tmp_path
     # Neither engine_dir nor its parent has tokenizer files → expect None
 
     backend = TensorRTLLMBackend.__new__(TensorRTLLMBackend)

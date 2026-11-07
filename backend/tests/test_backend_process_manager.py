@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from ocabra.core.backend_process_manager import BackendProcessManager
+from ocabra.core.backend_process_manager import (
+    HEALTH_FAIL_THRESHOLD,
+    BackendProcessManager,
+)
 from ocabra.core.model_manager import ModelStatus
 
 
@@ -94,7 +97,10 @@ async def test_detects_dead_pid():
 
 @pytest.mark.asyncio
 async def test_detects_health_failure():
-    """Mock HTTP timeout 3 times, verify transition to ERROR."""
+    """Falla /health hasta el umbral y comprueba la transicion a ERROR.
+
+    El umbral se importa de produccion en vez de repetirlo aqui: el test
+    esperaba 3 fallos y el codigo exigia 5 desde hace tiempo."""
     bpm, model_manager, worker_pool, _ = make_fixtures()
 
     worker = FakeWorkerInfo(pid=99999)
@@ -109,16 +115,13 @@ async def test_detects_health_failure():
         ),
         patch("ocabra.redis_client.publish_system_alert", new=AsyncMock()),
     ):
-        # First two failures -- no death yet
-        await bpm._check_worker("vllm/test-model", worker)
-        assert bpm._health_fail_counts.get("vllm/test-model") == 1
-        assert state.status == ModelStatus.LOADED
+        # Todos los fallos menos el ultimo: aun no se da por muerto.
+        for intento in range(1, HEALTH_FAIL_THRESHOLD):
+            await bpm._check_worker("vllm/test-model", worker)
+            assert bpm._health_fail_counts.get("vllm/test-model") == intento
+            assert state.status == ModelStatus.LOADED
 
-        await bpm._check_worker("vllm/test-model", worker)
-        assert bpm._health_fail_counts.get("vllm/test-model") == 2
-        assert state.status == ModelStatus.LOADED
-
-        # Third failure triggers death
+        # El fallo que alcanza el umbral lo mata.
         await bpm._check_worker("vllm/test-model", worker)
 
     assert state.status == ModelStatus.ERROR

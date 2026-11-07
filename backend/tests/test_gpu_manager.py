@@ -55,7 +55,6 @@ async def test_start_detects_gpus():
         count = pynvml.nvmlDeviceGetCount()
         for i in range(count):
             gm._locks[i] = {}
-            gm._poll_history[i] = []
             gm._states[i] = gm._read_gpu(i)
 
         states = await gm.get_all_states()

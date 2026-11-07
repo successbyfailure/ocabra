@@ -8,6 +8,7 @@ from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.stats import GpuStat
 from ocabra.stats import aggregator
+from tests.conftest import requires_db
 
 
 def test_percentile_uses_nearest_rank() -> None:
@@ -17,6 +18,7 @@ def test_percentile_uses_nearest_rank() -> None:
 
 
 @pytest.mark.asyncio
+@requires_db
 async def test_gpu_usage_coverage_matches_real_window_at_normal_cadence() -> None:
     """Regression: the gap cap used to be hardcoded at 30s while
     hw-monitor's real persist interval is ~60s, so EVERY normal inter-sample
@@ -65,6 +67,7 @@ async def test_gpu_usage_coverage_matches_real_window_at_normal_cadence() -> Non
 
 
 @pytest.mark.asyncio
+@requires_db
 async def test_gpu_usage_coverage_still_caps_a_genuine_outage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -97,9 +100,15 @@ async def test_gpu_usage_coverage_still_caps_a_genuine_outage(
         )
         totals = {row["gpuIndex"]: row for row in payload["totals"]}
 
-        # Capped at 90s for the first gap; the second sample is the last one
-        # so its own trailing interval is capped against :to_dt the same way.
-        assert totals[gpu_index]["hoursTotal"] == pytest.approx(180 / 3600, abs=1e-3)
+        # El hueco de 3 h del primer sample se capa a 90 s. El segundo sample
+        # es el ultimo y cae exactamente en el final de la ventana, asi que su
+        # intervalo de cola es CERO (`COALESCE(next_at, :to_dt) - recorded_at`),
+        # no 90 s: el total correcto son 90 s, no 180. El test esperaba 180
+        # dando por hecho que el ultimo sample suma un intervalo completo.
+        assert totals[gpu_index]["hoursTotal"] == pytest.approx(90 / 3600, abs=1e-3)
+        # Lo que de verdad protege este test: el apagon no se cuenta como
+        # cubierto. Sin el cap serian las 3 h enteras.
+        assert totals[gpu_index]["hoursTotal"] < 0.1
     finally:
         async with AsyncSessionLocal() as session:
             await session.execute(

@@ -101,7 +101,14 @@ async def test_run_main_loop_idle_timeout(monkeypatch: pytest.MonkeyPatch) -> No
     # Bypass the usual STT background load path.
     session.stt_model_id = None
     # ``receive_text`` never returns — simulate a half-closed TCP peer.
-    session.ws.receive_text = AsyncMock(side_effect=asyncio.sleep(999))
+    # Tiene que ser una funcion, no ``AsyncMock(side_effect=asyncio.sleep(999))``:
+    # eso ejecutaba sleep al construir el mock y pasaba la corrutina como
+    # side_effect, que Mock trata como iterable -> "'coroutine' object is not
+    # an iterator" (ademas de dejar una corrutina sin await).
+    async def _nunca_responde(*args, **kwargs):
+        await asyncio.sleep(999)
+
+    session.ws.receive_text = _nunca_responde
     session.ws.accept = AsyncMock()
     session._send_session_created = AsyncMock()
     session._register_workers = AsyncMock()

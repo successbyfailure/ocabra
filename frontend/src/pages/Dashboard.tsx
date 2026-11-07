@@ -1210,8 +1210,20 @@ export function Dashboard() {
           {activeModels.length === 0 &&
             activeServices.length === 0 &&
             externalRuntimeServices.length > 0 && (
-              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                Hay runtimes externos ocupando GPU en servicios de generación.
+              <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                <p>Hay runtimes externos ocupando GPU en servicios de generación.</p>
+                {/* Nombrarlos: el aviso generico no decia cual era, asi que no
+                    habia forma de saber que servicio liberar. */}
+                <ul className="space-y-0.5 text-xs text-amber-200/90">
+                  {externalRuntimeServices.map((service) => (
+                    <li key={service.serviceId} className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-medium text-amber-100">{service.displayName}</span>
+                      {service.preferredGpu !== null && service.preferredGpu !== undefined && (
+                        <span>· GPU {service.preferredGpu}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
           {activeModels.length === 0 &&

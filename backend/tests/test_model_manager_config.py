@@ -1,6 +1,6 @@
 """Tests for ModelManager.update_config() whitelist enforcement.
 
-Validates that only allowed fields (display_name, load_policy, auto_reload,
+Validates that only allowed fields (display_name, load_policy, pin_permanent,
 preferred_gpu, extra_config) can be updated, and all others are rejected.
 """
 import asyncio
@@ -52,10 +52,10 @@ class TestUpdateConfigWhitelist:
             await mm.update_config("test/model", {"load_policy": "invalid_policy"})
 
     @pytest.mark.asyncio
-    async def test_auto_reload(self, mm):
+    async def test_pin_permanent(self, mm):
         await _add_model(mm)
-        updated = await mm.update_config("test/model", {"auto_reload": True})
-        assert updated.auto_reload is True
+        updated = await mm.update_config("test/model", {"pin_permanent": True})
+        assert updated.pin_permanent is True
 
     @pytest.mark.asyncio
     async def test_preferred_gpu(self, mm):
@@ -84,13 +84,13 @@ class TestUpdateConfigWhitelist:
         updated = await mm.update_config("test/model", {
             "display_name": "Custom Name",
             "load_policy": "pin",
-            "auto_reload": True,
+            "pin_permanent": True,
             "preferred_gpu": 0,
             "extra_config": {"key": "val"},
         })
         assert updated.display_name == "Custom Name"
         assert updated.load_policy == LoadPolicy.PIN
-        assert updated.auto_reload is True
+        assert updated.pin_permanent is True
         assert updated.preferred_gpu == 0
         assert updated.extra_config == {"key": "val"}
 
@@ -125,6 +125,15 @@ class TestUpdateConfigRejection:
         await _add_model(mm)
         with pytest.raises(ValueError, match="Unsupported"):
             await mm.update_config("test/model", {"current_gpu": [0, 1]})
+
+    @pytest.mark.asyncio
+    async def test_rejects_auto_reload(self, mm):
+        """``auto_reload`` se retiro el 2026-10-30 y se plego en ``load_policy``
+        (solo PIN recarga sola). Aceptarlo de nuevo en silencio dejaria creer
+        que se configuro algo."""
+        await _add_model(mm)
+        with pytest.raises(ValueError, match="Unsupported"):
+            await mm.update_config("test/model", {"auto_reload": True})
 
     @pytest.mark.asyncio
     async def test_rejects_mixed_valid_and_invalid(self, mm):

@@ -180,8 +180,6 @@ async def test_phase_progression_convert_then_build():
     manager = _setup_manager()
     observed_phases = []
 
-    original_save = manager._save_to_db
-
     async def _capture_save(state):
         if state.phase:
             observed_phases.append(state.phase)
@@ -642,10 +640,27 @@ async def test_build_docker_cmd_unknown_phase_raises():
 async def test_multiple_jobs_processed_sequentially():
     """Two enqueued jobs are processed one at a time."""
     manager = _setup_manager()
-    completed_order = []
 
-    convert_proc = _make_proc(returncode=0, stdout_lines=[b"ok\n"])
-    build_proc = _make_proc(returncode=0, stdout_lines=[b"ok\n"])
+    # Se envuelve _run_job para medir de verdad el solapamiento y el orden: el
+    # test solo comprobaba que ambos trabajos acabasen en "done", lo que no
+    # prueba que se procesen de uno en uno (declaraba un completed_order que
+    # nunca rellenaba ni comprobaba).
+    orden: list[str] = []
+    en_vuelo = 0
+    max_simultaneos = 0
+    _run_job_real = manager._run_job
+
+    async def _run_job_medido(state):
+        nonlocal en_vuelo, max_simultaneos
+        en_vuelo += 1
+        max_simultaneos = max(max_simultaneos, en_vuelo)
+        try:
+            return await _run_job_real(state)
+        finally:
+            en_vuelo -= 1
+            orden.append(state.engine_name)
+
+    manager._run_job = _run_job_medido
 
     async def _fake_subprocess(*args, **kwargs):
         return _make_proc(returncode=0, stdout_lines=[b"ok\n"])
@@ -667,6 +682,8 @@ async def test_multiple_jobs_processed_sequentially():
 
     assert state1.status == "done"
     assert state2.status == "done"
+    assert max_simultaneos == 1, "los trabajos se solaparon en vez de ir en serie"
+    assert orden == ["job1", "job2"], "no se respeto el orden de la cola"
 
 
 # ── Engine registration ─────────────────────────────────────────

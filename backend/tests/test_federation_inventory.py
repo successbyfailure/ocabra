@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -154,7 +155,11 @@ def _make_openai_app(
     async def _get_state(mid):
         return states_map.get(mid)
 
-    async def _list_states():
+    async def _list_states(*, include_derived: bool = False):
+        # La firma real lleva include_derived desde que existen los workers
+        # derivados por load_overrides; aqui no hay ninguno, asi que el valor
+        # no cambia el resultado, pero el doble tiene que aceptarlo.
+        _ = include_derived
         return list(states_map.values())
 
     mm.get_state = _get_state
@@ -201,7 +206,11 @@ def _make_ollama_app(
     async def _get_state(mid):
         return states_map.get(mid)
 
-    async def _list_states():
+    async def _list_states(*, include_derived: bool = False):
+        # La firma real lleva include_derived desde que existen los workers
+        # derivados por load_overrides; aqui no hay ninguno, asi que el valor
+        # no cambia el resultado, pero el doble tiene que aceptarlo.
+        _ = include_derived
         return list(states_map.values())
 
     mm.get_state = _get_state
@@ -212,6 +221,34 @@ def _make_ollama_app(
     app.state.federation_manager = federation_manager
 
     return app
+
+
+@pytest.fixture(autouse=True)
+def _sin_agentes(monkeypatch):
+    """Aisla el listado de agentes.
+
+    ``GET /ocabra/models`` y ``GET /v1/models`` anexan los agentes leyendo
+    ``AsyncSessionLocal``
+    directamente, no a traves de ``app.state``, asi que el harness no los puede
+    sustituir. Sin base de datos el endpoint se queda sin esa parte, y con la
+    base de datos real se colaban los agentes de produccion y estos tests
+    contaban 6 modelos donde esperaban 1. Devolver una lista vacia los deja
+    midiendo lo que dicen medir: la fusion de inventario federado.
+    """
+    monkeypatch.setattr(
+        "ocabra.api.internal.models._list_agent_entries",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "ocabra.api.openai.models._list_agent_model_entries",
+        AsyncMock(return_value=[]),
+    )
+    # /ocabra/models enriquece cada modelo con sus horarios de desalojo leyendo
+    # la base de datos sin proteccion; aqui no se comprueban horarios.
+    monkeypatch.setattr(
+        "ocabra.api.internal.models.get_all_model_schedule_rows",
+        AsyncMock(return_value=[]),
+    )
 
 
 def _make_internal_app(
@@ -246,7 +283,11 @@ def _make_internal_app(
     async def _get_state(mid):
         return states_map.get(mid)
 
-    async def _list_states():
+    async def _list_states(*, include_derived: bool = False):
+        # La firma real lleva include_derived desde que existen los workers
+        # derivados por load_overrides; aqui no hay ninguno, asi que el valor
+        # no cambia el resultado, pero el doble tiene que aceptarlo.
+        _ = include_derived
         return list(states_map.values())
 
     mm.get_state = _get_state

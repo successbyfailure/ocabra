@@ -162,6 +162,14 @@ describe("Explore flow", () => {
 
     fireEvent.click(screen.getAllByText("Instalar")[0])
 
+    // El detalle del probe vive dentro del colapsable "Detalles avanzados",
+    // que arranca cerrado. El test se escribio cuando todo iba plano en el
+    // modal, asi que esperaba ese texto sin desplegar nada.
+    await waitFor(() => {
+      expect(screen.getByText("Detalles avanzados")).toBeTruthy()
+    }, { timeout: 3000 })
+    fireEvent.click(screen.getByText("Detalles avanzados"))
+
     await waitFor(() => {
       const bodyText = document.body.textContent ?? ""
       expect(bodyText).toContain("Instalar modelo")

@@ -52,7 +52,7 @@ async def test_auto_register_model_uses_register_config() -> None:
         backend_type="vllm",
         display_name="Qwen3 8B",
         load_policy="warm",
-        auto_reload=False,
+        pin_permanent=False,
         preferred_gpu=None,
         extra_config={
             "vllm": {

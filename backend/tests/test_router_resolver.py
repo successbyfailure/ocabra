@@ -185,7 +185,12 @@ class TestSessionVeto:
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
         registry_mock = MagicMock()
-        registry_mock.has_active_session_holding = lambda k: k == "vllm/a"
+        # has_active_session_holding recibe exclude_session_id como keyword-only
+        # desde el arreglo del auto-veto (2026-10-30); el doble tiene que
+        # aceptarlo o la llamada real revienta con TypeError.
+        registry_mock.has_active_session_holding = (
+            lambda k, *, exclude_session_id=None: k == "vllm/a"
+        )
         resolver, _, _ = _make_resolver(
             router, t1, t2,
             states={
@@ -198,6 +203,43 @@ class TestSessionVeto:
         # vllm/a is loaded but reserved — must go to vllm/b instead.
         assert result.target_profile_id == "t2"
         assert result.reason == "primary_loaded"
+
+    @pytest.mark.asyncio
+    async def test_session_does_not_veto_the_target_it_already_holds(self):
+        """Una sesion que vuelve a resolver su propio router no puede vetarse a
+        si misma. Antes del 2026-10-30 su propia reserva sobre el worker que
+        acababa de calentar hacia que el router lo diese por no disponible y
+        cayese a un objetivo genuinamente frio, mostrando ~1s de "cargando" al
+        abrir cada sesion."""
+        router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "vllm/a")
+        t2 = _FakeProfile("t2", "vllm/b")
+
+        registry_mock = MagicMock()
+
+        def _tiene_sesion(k, *, exclude_session_id=None):
+            # vllm/a lo retiene la sesion "s-1" y nadie mas.
+            if k != "vllm/a":
+                return False
+            return exclude_session_id != "s-1"
+
+        registry_mock.has_active_session_holding = _tiene_sesion
+        resolver, _, _ = _make_resolver(
+            router, t1, t2,
+            states={
+                "vllm/a": _FakeState(_Status.LOADED),
+                "vllm/b": _FakeState(_Status.LOADED),
+            },
+            session_registry=registry_mock,
+        )
+
+        # Otra sesion si ve el veto y se va al segundo objetivo.
+        ajena = await resolver.pick(router)
+        assert ajena.target_profile_id == "t2"
+
+        # La propia sesion se queda con el modelo que ya tiene caliente.
+        propia = await resolver.pick(router, exclude_session_id="s-1")
+        assert propia.target_profile_id == "t1"
 
 
 class TestBusyHandling:
