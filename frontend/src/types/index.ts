@@ -446,6 +446,12 @@ export interface DownloadJob {
     pinPermanent?: boolean;
     preferredGpu?: number | null;
     extraConfig?: BackendExtraConfig;
+    /** Public name of the model (`gemma4:e4b`, `qwen3-8b-q4_k_m`). */
+    modelKey?: string;
+    /** Deployment that serves the public name. */
+    defaultBackend?: BackendType;
+    /** Every deployment to create from the same file (default included). */
+    backends?: BackendType[];
   } | null;
   status: "queued" | "downloading" | "completed" | "failed" | "cancelled";
   progressPct: number;
@@ -460,6 +466,64 @@ export interface DownloadJob {
 export type DownloadSource = "huggingface" | "ollama" | "bitnet";
 export type DownloadStatus =
   "queued" | "downloading" | "completed" | "failed" | "cancelled";
+
+/**
+ * One backend able to serve a file, from the server's compatibility engine
+ * (`core/compatibility.py`). `probable` = should work but not verified
+ * (`reason` says why); `installed` = the backend module is on this node.
+ * `deployed` only appears on logical models: a deployment already exists.
+ */
+export type CompatibilityStatus = "compatible" | "probable";
+
+export interface CompatibleBackend {
+  backend: BackendType;
+  status: CompatibilityStatus;
+  installed: boolean;
+  reason: string;
+  deployed?: boolean;
+}
+
+export interface DeploymentArtifact {
+  kind?: string;
+  source?: string;
+  ref?: string;
+  repo?: string;
+  file?: string;
+  mmproj?: boolean;
+  draft?: boolean;
+}
+
+/** One backend of a logical model (`<backend>/<modelKey>`). */
+export interface ModelDeployment {
+  modelId: string;
+  backend: BackendType;
+  isDefault: boolean;
+  installed: boolean;
+  status: ModelStatus | null;
+  loadPolicy: LoadPolicy;
+  pinPermanent: boolean;
+  artifact: DeploymentArtifact | null;
+  profiles: string[];
+}
+
+/** GET /ocabra/logical-models — one entry per public model name. */
+export interface LogicalModel {
+  modelKey: string;
+  displayName: string;
+  category: string | null;
+  defaultBackend: BackendType;
+  deployments: ModelDeployment[];
+  compatibleBackends: CompatibleBackend[];
+  publicProfiles: string[];
+  hiddenProfiles: string[];
+  registryMetadata: Record<string, unknown> | null;
+}
+
+export interface RemoveDeploymentResult {
+  modelKey: string;
+  removed: string;
+  newDefaultBackend: BackendType | null;
+}
 
 export interface HFModelCard {
   repoId: string;
@@ -477,6 +541,7 @@ export interface HFModelCard {
   compatibility?: string;
   compatibilityReason?: string | null;
   vllmSupport?: HFVLLMSupport | null;
+  compatibleBackends?: CompatibleBackend[];
   createdAt?: string | null;
   lastModified?: string | null;
 }
@@ -502,6 +567,7 @@ export interface HFModelVariant {
   compatibility?: string;
   compatibilityReason?: string | null;
   vllmSupport?: HFVLLMSupport | null;
+  compatibleBackends?: CompatibleBackend[];
 }
 
 export interface OllamaModelCard {
@@ -510,6 +576,7 @@ export interface OllamaModelCard {
   tags: string[];
   sizeGb: number | null;
   pulls: number;
+  compatibleBackends?: CompatibleBackend[];
 }
 
 export interface OllamaModelVariant {
@@ -521,6 +588,7 @@ export interface OllamaModelVariant {
   contextWindow: string | null;
   modality: string | null;
   updatedHint: string | null;
+  compatibleBackends?: CompatibleBackend[];
 }
 
 export interface LocalModel {

@@ -58,6 +58,11 @@ import type {
   FederationPeerUpdate,
   FederationTestResult,
   LlamaCppConfig,
+  WhisperConfig,
+  CompatibleBackend,
+  LogicalModel,
+  ModelDeployment,
+  RemoveDeploymentResult,
   RuntimePolicy,
   RuntimePreset,
   RuntimePresetCreate,
@@ -411,6 +416,10 @@ function toBackendExtraConfig(raw: unknown): ModelState["extraConfig"] {
     ])
   ) {
     next.whisper = {
+      // Keep the keys this parser does not know about (same reason as the
+      // llama_cpp section above). Only for a real nested section: in the
+      // legacy flat shape the source is the whole extra_config.
+      ...(isRecord(data.whisper) ? (whisperRaw as WhisperConfig) : {}),
       diarizationEnabled: Boolean(
         whisperSource.diarization_enabled ?? whisperSource.diarizationEnabled,
       ),
@@ -1055,6 +1064,78 @@ function toDownloadJob(raw: unknown): DownloadJob {
   };
 }
 
+function toCompatibleBackends(raw: unknown): CompatibleBackend[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isRecord).map((item) => ({
+    backend: String(item.backend ?? "") as BackendType,
+    status: (item.status === "probable" ? "probable" : "compatible") as
+      CompatibleBackend["status"],
+    installed: item.installed == null ? true : Boolean(item.installed),
+    reason: String(item.reason ?? ""),
+    ...(item.deployed == null ? {} : { deployed: Boolean(item.deployed) }),
+  }));
+}
+
+function toModelDeployment(raw: unknown): ModelDeployment {
+  const data = isRecord(raw) ? raw : {};
+  const artifact = isRecord(data.artifact) ? data.artifact : null;
+  return {
+    modelId: String(data.modelId ?? data.model_id ?? ""),
+    backend: String(data.backend ?? "") as BackendType,
+    isDefault: Boolean(data.isDefault ?? data.is_default),
+    installed: (data.installed ?? true) !== false,
+    status: (data.status ?? null) as ModelDeployment["status"],
+    loadPolicy: String(
+      data.loadPolicy ?? data.load_policy ?? "on_demand",
+    ) as LoadPolicy,
+    pinPermanent: Boolean(data.pinPermanent ?? data.pin_permanent),
+    artifact: artifact as ModelDeployment["artifact"],
+    profiles: Array.isArray(data.profiles) ? data.profiles.map(String) : [],
+  };
+}
+
+export function toLogicalModel(raw: unknown): LogicalModel {
+  const data = isRecord(raw) ? raw : {};
+  const modelKey = String(data.modelKey ?? data.model_key ?? "");
+  const registryMetadata = data.registryMetadata ?? data.registry_metadata;
+  return {
+    modelKey,
+    displayName: String(data.displayName ?? data.display_name ?? modelKey),
+    category: (data.category ?? null) as string | null,
+    defaultBackend: String(
+      data.defaultBackend ?? data.default_backend ?? "",
+    ) as BackendType,
+    deployments: Array.isArray(data.deployments)
+      ? data.deployments.map(toModelDeployment)
+      : [],
+    compatibleBackends: toCompatibleBackends(
+      data.compatibleBackends ?? data.compatible_backends,
+    ),
+    publicProfiles: Array.isArray(data.publicProfiles ?? data.public_profiles)
+      ? ((data.publicProfiles ?? data.public_profiles) as unknown[]).map(String)
+      : [],
+    hiddenProfiles: Array.isArray(data.hiddenProfiles ?? data.hidden_profiles)
+      ? ((data.hiddenProfiles ?? data.hidden_profiles) as unknown[]).map(String)
+      : [],
+    registryMetadata: isRecord(registryMetadata) ? registryMetadata : null,
+  };
+}
+
+function toOllamaModelCard(raw: unknown): OllamaModelCard {
+  const data = isRecord(raw) ? raw : {};
+  const size = data.size_gb ?? data.sizeGb;
+  return {
+    name: String(data.name ?? ""),
+    description: String(data.description ?? ""),
+    tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
+    sizeGb: size == null ? null : Number(size),
+    pulls: Number(data.pulls ?? 0),
+    compatibleBackends: toCompatibleBackends(
+      data.compatible_backends ?? data.compatibleBackends,
+    ),
+  };
+}
+
 function toHFModelCard(raw: unknown): HFModelCard {
   const data = isRecord(raw) ? raw : {};
   return {
@@ -1084,6 +1165,9 @@ function toHFModelCard(raw: unknown): HFModelCard {
       data.compatibilityReason ??
       null) as string | null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
+    compatibleBackends: toCompatibleBackends(
+      data.compatible_backends ?? data.compatibleBackends,
+    ),
   };
 }
 
@@ -1106,6 +1190,9 @@ function toHFModelDetail(raw: unknown): HFModelDetail {
           ? Number(data.estimatedVramGb)
           : null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
+    compatibleBackends: toCompatibleBackends(
+      data.compatible_backends ?? data.compatibleBackends,
+    ),
   };
 }
 
@@ -1133,6 +1220,9 @@ function toHFModelVariant(raw: unknown): HFModelVariant {
       data.compatibilityReason ??
       null) as string | null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
+    compatibleBackends: toCompatibleBackends(
+      data.compatible_backends ?? data.compatibleBackends,
+    ),
   };
 }
 
@@ -1173,6 +1263,9 @@ function toOllamaVariant(raw: unknown): OllamaModelVariant {
     modality: (data.modality ?? null) as string | null,
     updatedHint: (data.updated_hint ?? data.updatedHint ?? null) as
       string | null,
+    compatibleBackends: toCompatibleBackends(
+      data.compatible_backends ?? data.compatibleBackends,
+    ),
   };
 }
 
@@ -2107,6 +2200,76 @@ export const api = {
     },
   },
 
+  /**
+   * Model-centric view (model/backends unification): one entry per public
+   * model name with its per-backend deployments. `/ocabra/models` keeps
+   * listing deployments. Keys may contain ':' and '/'; the server routes take
+   * `{model_key:path}`, so percent-encoding the slash is fine (same as the
+   * `/ocabra/models/{id}` calls above).
+   */
+  logicalModels: {
+    list: async (): Promise<LogicalModel[]> =>
+      (await request<unknown[]>("GET", "/ocabra/logical-models")).map(
+        toLogicalModel,
+      ),
+    get: async (modelKey: string): Promise<LogicalModel> =>
+      toLogicalModel(
+        await request<unknown>(
+          "GET",
+          `/ocabra/logical-models/${encodeURIComponent(modelKey)}`,
+        ),
+      ),
+    patch: async (
+      modelKey: string,
+      body: { defaultBackend?: BackendType; displayName?: string },
+    ): Promise<LogicalModel> =>
+      toLogicalModel(
+        await request<unknown>(
+          "PATCH",
+          `/ocabra/logical-models/${encodeURIComponent(modelKey)}`,
+          body,
+        ),
+      ),
+    addDeployment: async (
+      modelKey: string,
+      body: {
+        backend: BackendType;
+        sourceBackend?: BackendType;
+        extraConfig?: Record<string, unknown>;
+      },
+    ): Promise<LogicalModel> =>
+      toLogicalModel(
+        await request<unknown>(
+          "POST",
+          `/ocabra/logical-models/${encodeURIComponent(modelKey)}/deployments`,
+          body,
+        ),
+      ),
+    removeDeployment: async (
+      modelKey: string,
+      backend: BackendType,
+    ): Promise<RemoveDeploymentResult> => {
+      const data = await request<Record<string, unknown>>(
+        "DELETE",
+        `/ocabra/logical-models/${encodeURIComponent(modelKey)}/deployments/${encodeURIComponent(backend)}`,
+      );
+      return {
+        modelKey: String(data.modelKey ?? data.model_key ?? modelKey),
+        removed: String(data.removed ?? ""),
+        newDefaultBackend: (data.newDefaultBackend ??
+          data.new_default_backend ??
+          null) as BackendType | null,
+      };
+    },
+    compatibility: async (modelKey: string): Promise<CompatibleBackend[]> =>
+      toCompatibleBackends(
+        await request<unknown>(
+          "GET",
+          `/ocabra/logical-models/${encodeURIComponent(modelKey)}/compatibility`,
+        ),
+      ),
+  },
+
   profiles: {
     // Bloque 20 — every profile in the registry. Used by the Routers admin
     // page to filter for profiles whose ``routing_targets`` is non-empty.
@@ -2375,6 +2538,9 @@ export const api = {
               pin_permanent: registerConfig.pinPermanent,
               preferred_gpu: registerConfig.preferredGpu,
               extra_config: registerConfig.extraConfig,
+              model_key: registerConfig.modelKey,
+              default_backend: registerConfig.defaultBackend,
+              backends: registerConfig.backends,
             }
           : null,
       }).then(toDownloadJob),
@@ -2455,11 +2621,13 @@ export const api = {
           `/ocabra/registry/bitnet/${encodeURIComponent(repoId)}/variants`,
         )
       ).map(toHFModelVariant),
-    searchOllama: (q: string) =>
-      request<OllamaModelCard[]>(
-        "GET",
-        `/ocabra/registry/ollama/search?q=${encodeURIComponent(q)}`,
-      ),
+    searchOllama: async (q: string): Promise<OllamaModelCard[]> =>
+      (
+        await request<unknown[]>(
+          "GET",
+          `/ocabra/registry/ollama/search?q=${encodeURIComponent(q)}`,
+        )
+      ).map(toOllamaModelCard),
     getOllamaVariants: async (
       modelName: string,
     ): Promise<OllamaModelVariant[]> =>

@@ -12,7 +12,11 @@ const {
   getBitnetVariants,
   enqueue,
   streamProgress,
+  searchOllama,
+  getOllamaVariants,
 } = vi.hoisted(() => ({
+  searchOllama: vi.fn(),
+  getOllamaVariants: vi.fn(),
   listDownloads: vi.fn(),
   searchHF: vi.fn(),
   searchBitnet: vi.fn(),
@@ -43,8 +47,8 @@ vi.mock("@/api/client", () => ({
       searchBitnet,
       getHFVariants,
       getBitnetVariants,
-      searchOllama: vi.fn(async () => []),
-      getOllamaVariants: vi.fn(async () => []),
+      searchOllama,
+      getOllamaVariants,
     },
   },
 }))
@@ -92,6 +96,8 @@ describe("Explore flow", () => {
       },
     ])
     searchBitnet.mockResolvedValue([])
+    searchOllama.mockResolvedValue([])
+    getOllamaVariants.mockResolvedValue([])
     getBitnetVariants.mockResolvedValue([])
     getHFVariants.mockResolvedValue([
       {
@@ -205,6 +211,118 @@ describe("Explore flow", () => {
             runner: "generate",
           }),
         },
+      }),
+    )
+  }, 10000)
+  it("Ollama: proposes the tag as name, llamacpp_mks as default plus ollama, and sends them", async () => {
+    const compat = [
+      { backend: "llamacpp_mks", status: "compatible", installed: true, reason: "GGUF del tag" },
+      { backend: "llama_cpp", status: "compatible", installed: true, reason: "GGUF del tag" },
+      { backend: "ollama", status: "compatible", installed: true, reason: "tag de Ollama" },
+    ]
+    searchOllama.mockResolvedValue([
+      { name: "gemma4", description: "Gemma 4", tags: [], sizeGb: 9.6, pulls: 10, compatibleBackends: compat },
+    ])
+    getOllamaVariants.mockResolvedValue([
+      {
+        name: "gemma4:e4b",
+        tag: "e4b",
+        sizeGb: 9.6,
+        parameterSize: "8B",
+        quantization: "Q4_K_M",
+        contextWindow: null,
+        modality: null,
+        updatedHint: null,
+        compatibleBackends: compat,
+      },
+    ])
+
+    render(<Explore />)
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Ollama" }))
+    await waitFor(() => expect(screen.getByText("gemma4")).toBeTruthy(), { timeout: 3000 })
+    fireEvent.click(screen.getAllByText("Instalar")[0])
+
+    const nameInput = (await screen.findByLabelText("Nombre del modelo")) as HTMLInputElement
+    await waitFor(() => expect(nameInput.value).toBe("gemma4:e4b"), { timeout: 3000 })
+    expect((screen.getByLabelText("Desplegar con llamacpp_mks") as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByLabelText("Desplegar con ollama") as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByLabelText("Desplegar con llama_cpp") as HTMLInputElement).checked).toBe(false)
+    expect((screen.getByLabelText("Por defecto: llamacpp_mks") as HTMLInputElement).checked).toBe(true)
+
+    fireEvent.click(screen.getByRole("button", { name: "Iniciar descarga" }))
+    await waitFor(() => expect(enqueue).toHaveBeenCalledTimes(1), { timeout: 3000 })
+    expect(enqueue).toHaveBeenCalledWith(
+      "ollama",
+      "gemma4:e4b",
+      null,
+      expect.objectContaining({
+        modelKey: "gemma4:e4b",
+        defaultBackend: "llamacpp_mks",
+        backends: ["llamacpp_mks", "ollama"],
+        backendType: "llamacpp_mks",
+      }),
+    )
+  }, 10000)
+
+  it("HF GGUF: names it <repo>-<quant>, lets the user pick deployments and the default", async () => {
+    const compat = [
+      { backend: "llamacpp_mks", status: "compatible", installed: true, reason: "GGUF" },
+      { backend: "llama_cpp", status: "compatible", installed: true, reason: "GGUF" },
+      { backend: "ollama", status: "probable", installed: true, reason: "importable" },
+      { backend: "bitnet", status: "probable", installed: false, reason: "ternario" },
+    ]
+    searchHF.mockResolvedValue([
+      {
+        repoId: "Qwen/Qwen3-8B-GGUF",
+        modelName: "Qwen3-8B-GGUF",
+        task: "text-generation",
+        downloads: 1,
+        likes: 1,
+        sizeGb: 5,
+        tags: [],
+        gated: false,
+        suggestedBackend: "llamacpp_mks",
+        compatibleBackends: compat,
+      },
+    ])
+    getHFVariants.mockResolvedValue([
+      {
+        variantId: "q4",
+        label: "Q4_K_M",
+        artifact: "Qwen3-8B-Q4_K_M.gguf",
+        sizeGb: 5,
+        format: "gguf",
+        quantization: "Q4_K_M",
+        backendType: "llamacpp_mks",
+        isDefault: true,
+        installable: true,
+        compatibleBackends: compat,
+      },
+    ])
+
+    render(<Explore />)
+    await waitFor(() => expect(screen.getByText("Qwen3-8B-GGUF")).toBeTruthy(), { timeout: 3000 })
+    fireEvent.click(screen.getAllByText("Instalar")[0])
+
+    const nameInput = (await screen.findByLabelText("Nombre del modelo")) as HTMLInputElement
+    await waitFor(() => expect(nameInput.value).toBe("qwen3-8b-q4_k_m"), { timeout: 3000 })
+    // Not-installed backends cannot be selected.
+    expect((screen.getByLabelText("Desplegar con bitnet") as HTMLInputElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByLabelText("Desplegar con llama_cpp"))
+    fireEvent.click(screen.getByLabelText("Por defecto: llama_cpp"))
+    fireEvent.change(nameInput, { target: { value: "qwen3-8b" } })
+    fireEvent.click(screen.getByRole("button", { name: "Iniciar descarga" }))
+
+    await waitFor(() => expect(enqueue).toHaveBeenCalledTimes(1), { timeout: 3000 })
+    expect(enqueue).toHaveBeenCalledWith(
+      "huggingface",
+      "Qwen/Qwen3-8B-GGUF",
+      "Qwen3-8B-Q4_K_M.gguf",
+      expect.objectContaining({
+        modelKey: "qwen3-8b",
+        defaultBackend: "llama_cpp",
+        backends: ["llama_cpp", "llamacpp_mks"],
       }),
     )
   }, 10000)

@@ -1,4 +1,5 @@
 import type { OllamaModelCard } from "@/types"
+import { BackendIcons, compatibleToItems } from "@/components/models/BackendIcons"
 
 interface OllamaModelCardProps {
   model: OllamaModelCard
@@ -29,6 +30,9 @@ export function OllamaModelCard({ model, onInstall }: OllamaModelCardProps) {
           <span key={`${model.name}-${tag}`} className="rounded bg-muted px-2 py-0.5">{tag}</span>
         ))}
       </div>
+      {model.compatibleBackends && model.compatibleBackends.length > 0 && (
+        <BackendIcons className="mt-2" items={compatibleToItems(model.compatibleBackends)} />
+      )}
     </article>
   )
 }

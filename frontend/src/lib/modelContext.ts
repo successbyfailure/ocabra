@@ -1,4 +1,5 @@
 import { isLlamaCppFamily } from "@/types";
+import { toCamelView } from "@/lib/configKeys"
 import type {
   BackendExtraConfig,
   BitNetConfig,
@@ -25,8 +26,11 @@ function getConfigSection<T>(model: ModelState, key: keyof BackendExtraConfig): 
   const extraConfig = model.extraConfig
   if (!isRecord(extraConfig)) return null
   const nested = extraConfig[key]
-  if (isRecord(nested)) return nested as T
-  return extraConfig as T
+  // camelCase view with snake_case winning: the server stores snake_case
+  // since migration 0034, and older rows (or the client mapping) may carry
+  // both spellings — the snake one is what the backend actually applies.
+  if (isRecord(nested)) return toCamelView(nested) as T
+  return toCamelView(extraConfig) as T
 }
 
 function toPositiveNumber(value: unknown): number | null {
@@ -49,50 +53,31 @@ export function getSGLangConfig(model: ModelState): SGLangConfig | null {
 
 export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
   // Upstream llama.cpp and the Makespace fork share the same config
-  // section, so both read the same options here.
+  // section, so both read the same options here. getConfigSection already
+  // folds snake_case (persisted) and camelCase (legacy UI writes) into one
+  // camelCase view, snake first.
   if (!isLlamaCppFamily(model.backendType)) return null
-  const raw = getConfigSection<Record<string, unknown>>(model, "llama_cpp")
-  if (raw == null) return null
-  // Accept both camelCase (frontend write path) and snake_case (backend
-  // schemas / persisted state) for the Sprint 17.3 multi-GPU + MoE knobs.
-  const config: LlamaCppConfig = { ...(raw as LlamaCppConfig) }
-  if (config.mainGpu == null && typeof raw.main_gpu === "number") config.mainGpu = raw.main_gpu
-  if (config.tensorSplit == null && Array.isArray(raw.tensor_split)) {
-    config.tensorSplit = (raw.tensor_split as unknown[]).filter(
+  const config = getConfigSection<LlamaCppConfig>(model, "llama_cpp")
+  if (config == null) return null
+  if (Array.isArray(config.tensorSplit)) {
+    config.tensorSplit = (config.tensorSplit as unknown[]).filter(
       (v): v is number => typeof v === "number" && Number.isFinite(v),
     )
   }
-  if (config.splitMode == null && typeof raw.split_mode === "string") {
-    config.splitMode = raw.split_mode as LlamaCppConfig["splitMode"]
-  }
-  if (config.disabledGpus == null && Array.isArray(raw.disabled_gpus)) {
-    config.disabledGpus = (raw.disabled_gpus as unknown[]).filter(
+  if (Array.isArray(config.disabledGpus)) {
+    config.disabledGpus = (config.disabledGpus as unknown[]).filter(
       (v): v is number => typeof v === "number" && Number.isInteger(v),
     )
   }
-  if (config.splitStrategy == null && typeof raw.split_strategy === "string") {
-    config.splitStrategy = raw.split_strategy as LlamaCppConfig["splitStrategy"]
-  }
-  if (config.nCpuMoe == null && typeof raw.n_cpu_moe === "number") config.nCpuMoe = raw.n_cpu_moe
-  if (config.overrideTensor == null && typeof raw.override_tensor === "string") {
-    config.overrideTensor = raw.override_tensor
-  }
-  if (config.mmprojModelId == null && typeof raw.mmproj_model_id === "string") {
-    config.mmprojModelId = raw.mmproj_model_id
-  }
-  if (config.visionMode == null && typeof raw.vision_mode === "string") {
-    config.visionMode = raw.vision_mode as LlamaCppConfig["visionMode"]
-  }
-  if (config.kvUnified == null && typeof raw.kv_unified === "boolean") {
-    config.kvUnified = raw.kv_unified
-  }
-  if (config.kvUnifiedPerSlot == null && typeof raw.kv_unified_per_slot === "number") {
-    config.kvUnifiedPerSlot = raw.kv_unified_per_slot
-  }
-  if (config.parallelSlots == null && typeof raw.parallel_slots === "number") {
-    config.parallelSlots = raw.parallel_slots
-  }
   return config
+}
+
+/** Default reasoning effort stored at the top level of extra_config. */
+export function getDefaultReasoningEffort(model: ModelState | null | undefined): string {
+  const extra = model?.extraConfig
+  if (!isRecord(extra)) return ""
+  const value = extra.default_reasoning_effort ?? extra.defaultReasoningEffort
+  return typeof value === "string" ? value : ""
 }
 
 export function getBitNetConfig(model: ModelState): BitNetConfig | null {

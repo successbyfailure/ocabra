@@ -324,4 +324,99 @@ describe("api client mappings", () => {
     await expect(api.auth.login("x", "y")).rejects.toThrow("Bad credentials")
     expect(useAuthStore.getState().user).not.toBeNull()
   })
+  it("maps logical models and keeps ':' and '/' of the model key in the path", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          modelKey: "org/gemma4:26b",
+          displayName: "Gemma 4 26B",
+          category: "llm",
+          defaultBackend: "llamacpp_mks",
+          deployments: [
+            {
+              modelId: "llamacpp_mks/org/gemma4:26b",
+              backend: "llamacpp_mks",
+              isDefault: true,
+              installed: true,
+              status: "loaded",
+              loadPolicy: "pin",
+              pinPermanent: false,
+              artifact: { kind: "gguf", source: "ollama", ref: "gemma4:26b", mmproj: true },
+              profiles: ["org/gemma4:26b"],
+            },
+          ],
+          compatibleBackends: [
+            { backend: "llamacpp_mks", status: "compatible", installed: true, reason: "GGUF", deployed: true },
+            { backend: "bitnet", status: "probable", installed: false, reason: "ternario" },
+          ],
+          publicProfiles: ["org/gemma4:26b"],
+          hiddenProfiles: [],
+          registryMetadata: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+
+    const model = await api.logicalModels.patch("org/gemma4:26b", { defaultBackend: "llamacpp_mks" })
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe("/ocabra/logical-models/org%2Fgemma4%3A26b")
+    expect(init.method).toBe("PATCH")
+    expect(JSON.parse(String(init.body))).toEqual({ defaultBackend: "llamacpp_mks" })
+    expect(model.deployments[0]?.artifact?.mmproj).toBe(true)
+    expect(model.compatibleBackends[1]).toEqual({
+      backend: "bitnet",
+      status: "probable",
+      installed: false,
+      reason: "ternario",
+    })
+    expect(model.compatibleBackends[0]?.deployed).toBe(true)
+  })
+
+  it("maps compatible_backends on Ollama search cards", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            name: "gemma4",
+            description: "Gemma",
+            tags: ["vision"],
+            size_gb: 9.6,
+            pulls: 10,
+            compatible_backends: [
+              { backend: "llamacpp_mks", status: "compatible", installed: true, reason: "GGUF del tag" },
+            ],
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+    const cards = await api.registry.searchOllama("gemma4")
+    expect(cards[0]?.sizeGb).toBe(9.6)
+    expect(cards[0]?.compatibleBackends?.[0]?.backend).toBe("llamacpp_mks")
+  })
+
+  it("sends model_key, default_backend and backends in register_config", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ job_id: "j1", source: "ollama", model_ref: "gemma4:e4b", status: "queued" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+    await api.downloads.enqueue("ollama", "gemma4:e4b", null, {
+      displayName: "gemma4",
+      loadPolicy: "on_demand",
+      modelKey: "gemma4:e4b",
+      defaultBackend: "llamacpp_mks",
+      backends: ["llamacpp_mks", "ollama"],
+    })
+    const body = JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body))
+    expect(body.register_config).toEqual(
+      expect.objectContaining({
+        model_key: "gemma4:e4b",
+        default_backend: "llamacpp_mks",
+        backends: ["llamacpp_mks", "ollama"],
+      }),
+    )
+  })
 })

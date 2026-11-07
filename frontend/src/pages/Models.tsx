@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
+import { LogicalModelCard } from "@/components/models/LogicalModelCard"
 import { ModelGridCard } from "@/components/models/ModelGridCard"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { ProfileModal } from "@/components/models/ProfileModal"
@@ -23,7 +24,44 @@ import { ArrowDown, ArrowUp, Loader2, RefreshCw, Search } from "lucide-react"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { SkeletonList } from "@/components/common/Skeleton"
 import { StyledSelect } from "@/components/common/StyledSelect"
-import type { BackendExtraConfig, BackendType, LoadPolicy, ModelProfile, ModelState, ModelStatus, ModelsStorageStats } from "@/types"
+import type {
+  BackendExtraConfig,
+  BackendType,
+  LoadPolicy,
+  LogicalModel,
+  ModelDeployment,
+  ModelProfile,
+  ModelState,
+  ModelStatus,
+  ModelsStorageStats,
+} from "@/types"
+
+type ViewMode = "model" | "deployment"
+
+/** Server profile category → page tab, for models whose default deployment
+ *  is not in the model store yet. */
+const PROFILE_CATEGORY_TO_TAB: Record<string, ModelCategory> = {
+  llm: "chat",
+  embedding: "embeddings",
+  rerank: "embeddings",
+  tts: "tts",
+  stt: "stt",
+  image: "image",
+  music: "music",
+  video_upscaling: "video",
+}
+
+export function categorizeLogicalModel(
+  model: LogicalModel,
+  states: Record<string, ModelState | undefined>,
+): ModelCategory {
+  const preferred =
+    model.deployments.find((dep) => dep.isDefault && states[dep.modelId]) ??
+    model.deployments.find((dep) => states[dep.modelId])
+  const state = preferred ? states[preferred.modelId] : undefined
+  if (state) return categorizeModel(state)
+  return (model.category && PROFILE_CATEGORY_TO_TAB[model.category]) || "other"
+}
 
 export function Models() {
   const [loading, setLoading] = useState(true)
@@ -44,6 +82,10 @@ export function Models() {
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
   const [storage, setStorage] = useState<ModelsStorageStats | null>(null)
+  const [viewMode, setViewMode] = useState<ViewMode>("model")
+  const [logicalModels, setLogicalModels] = useState<LogicalModel[]>([])
+  const [logicalError, setLogicalError] = useState<string | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{ model: LogicalModel; deployment: ModelDeployment } | null>(null)
 
   // Confirm dialog state
   const [confirmAction, setConfirmAction] = useState<{ modelId: string; action: "load" | "unload" } | null>(null)
@@ -76,6 +118,18 @@ export function Models() {
     setGpus(gpuList)
     setModels(modelListResp)
     setStorage(storageStats)
+    await refreshLogical()
+  }
+
+  // Separate from the deployment list so a failure here (older server, role
+  // without access) never takes the per-deployment view down with it.
+  const refreshLogical = async () => {
+    try {
+      setLogicalModels(await api.logicalModels.list())
+      setLogicalError(null)
+    } catch (err) {
+      setLogicalError(err instanceof Error ? err.message : "No se pudieron cargar los modelos lógicos")
+    }
   }
 
   const formatBytes = (bytes: number) => {
@@ -146,13 +200,50 @@ export function Models() {
       })
   }, [backendFilter, gpuFilter, modelList, query, statusFilter])
 
+  const logicalMatchingOtherFilters = useMemo(() => {
+    const q = query.toLowerCase()
+    return logicalModels
+      .map((model) => ({ model, category: categorizeLogicalModel(model, models) }))
+      .filter(({ model }) => {
+        const matchesQuery =
+          !q ||
+          model.modelKey.toLowerCase().includes(q) ||
+          model.displayName.toLowerCase().includes(q) ||
+          model.deployments.some((dep) => dep.modelId.toLowerCase().includes(q))
+        const matchesStatus =
+          statusFilter === "all" ||
+          model.deployments.some((dep) => (models[dep.modelId]?.status ?? dep.status) === statusFilter)
+        const matchesBackend =
+          backendFilter === "all" || model.deployments.some((dep) => dep.backend === backendFilter)
+        const matchesGpu =
+          gpuFilter === "all" ||
+          model.deployments.some((dep) => {
+            const state = models[dep.modelId]
+            return state != null && String(state.currentGpu[0] ?? state.preferredGpu) === gpuFilter
+          })
+        return matchesQuery && matchesStatus && matchesBackend && matchesGpu
+      })
+  }, [backendFilter, gpuFilter, logicalModels, models, query, statusFilter])
+
   const categoryCounts = useMemo(() => {
     const counts = new Map<ModelCategory, number>()
-    for (const { category } of matchingOtherFilters) {
+    const source = viewMode === "model" ? logicalMatchingOtherFilters : matchingOtherFilters
+    for (const { category } of source) {
       counts.set(category, (counts.get(category) ?? 0) + 1)
     }
     return counts
-  }, [matchingOtherFilters])
+  }, [logicalMatchingOtherFilters, matchingOtherFilters, viewMode])
+
+  const logicalFiltered = useMemo(() => {
+    const visible = logicalMatchingOtherFilters.filter(({ category }) => category === categoryTab)
+    visible.sort((left, right) => {
+      const cmp = (left.model.displayName || left.model.modelKey)
+        .toLowerCase()
+        .localeCompare((right.model.displayName || right.model.modelKey).toLowerCase())
+      return sortDir === "asc" ? cmp : -cmp
+    })
+    return visible
+  }, [categoryTab, logicalMatchingOtherFilters, sortDir])
 
   const filtered = useMemo(() => {
     const visible = matchingOtherFilters.filter(({ category }) => category === categoryTab)
@@ -299,6 +390,73 @@ export function Models() {
     }
   }
 
+  const runLogicalAction = async (modelKey: string, action: () => Promise<string>) => {
+    setBusyModelId(modelKey)
+    try {
+      const message = await action()
+      toast.success(message)
+      await refresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error")
+    } finally {
+      setBusyModelId(null)
+    }
+  }
+
+  const handleSetDefaultBackend = (model: LogicalModel, backend: BackendType) =>
+    void runLogicalAction(model.modelKey, async () => {
+      await api.logicalModels.patch(model.modelKey, { defaultBackend: backend })
+      return `${model.modelKey} se sirve ahora con ${backend}`
+    })
+
+  const handleAddDeployment = (model: LogicalModel, backend: BackendType) =>
+    void runLogicalAction(model.modelKey, async () => {
+      await api.logicalModels.addDeployment(model.modelKey, { backend })
+      return `Despliegue ${backend}/${model.modelKey} creado`
+    })
+
+  const handleRemoveDeployment = (model: LogicalModel, deployment: ModelDeployment) =>
+    void runLogicalAction(model.modelKey, async () => {
+      const result = await api.logicalModels.removeDeployment(model.modelKey, deployment.backend)
+      if (model.deployments.length <= 1) return `${model.modelKey} eliminado (los ficheros se conservan)`
+      return result.newDefaultBackend && deployment.isDefault
+        ? `Despliegue quitado · ${model.modelKey} se sirve ahora con ${result.newDefaultBackend}`
+        : "Despliegue quitado"
+    })
+
+  const openDeploymentConfig = async (modelId: string) => {
+    const known = models[modelId]
+    if (known) {
+      setConfigModel(known)
+      return
+    }
+    try {
+      setConfigModel(await api.models.get(modelId))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `No se pudo abrir ${modelId}`)
+    }
+  }
+
+  const removeDescription = (() => {
+    if (!removeTarget) return ""
+    const { model, deployment } = removeTarget
+    const parts = [
+      `Se quitará el despliegue ${deployment.modelId}. Solo se borra la configuración: los ficheros del modelo se conservan.`,
+    ]
+    if (model.deployments.length <= 1) {
+      parts.push(`Es el único despliegue, así que el modelo ${model.modelKey} desaparecerá.`)
+    } else if (deployment.isDefault) {
+      const next = model.deployments.find((dep) => dep.modelId !== deployment.modelId)
+      parts.push(
+        `Es el backend por defecto: el nombre público ${model.modelKey} pasará antes a otro despliegue${
+          next ? ` (probablemente ${next.backend})` : ""
+        }.`,
+      )
+    }
+    return parts.join(" ")
+  })()
+
+  const visibleCount = viewMode === "model" ? logicalFiltered.length : filtered.length
   const deleteModelProfiles = deleteModel?.profiles ?? []
 
   return (
@@ -309,6 +467,26 @@ export function Models() {
           <p className="text-muted-foreground">Gestion de modelos instalados y ciclo de vida.</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <div className="inline-flex rounded-md border border-border p-0.5" role="group" aria-label="Vista">
+            {(
+              [
+                ["model", "Por modelo"],
+                ["deployment", "Por despliegue"],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={viewMode === mode}
+                onClick={() => setViewMode(mode)}
+                className={`rounded px-3 py-1 text-sm transition-colors ${
+                  viewMode === mode ? "bg-primary/15 font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={() => void handleRefreshMetadata()}
@@ -466,12 +644,44 @@ export function Models() {
 
       {!loading && (
         <p className="text-xs text-muted-foreground" aria-live="polite">
-          {filtered.length} modelo{filtered.length !== 1 ? "s" : ""} en {MODEL_CATEGORY_LABELS[categoryTab].toLowerCase()}
+          {visibleCount} {viewMode === "model" ? "modelo" : "despliegue"}
+          {visibleCount !== 1 ? "s" : ""} en {MODEL_CATEGORY_LABELS[categoryTab].toLowerCase()}
         </p>
+      )}
+
+      {viewMode === "model" && logicalError && !loading && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          No se pudo cargar la vista por modelo ({logicalError}). La vista «Por despliegue» sigue disponible.
+        </div>
       )}
 
       {loading ? (
         <SkeletonList count={5} />
+      ) : viewMode === "model" ? (
+        logicalFiltered.length === 0 ? (
+          <EmptyState
+            title="Sin modelos con esos filtros"
+            description="Prueba a ampliar los criterios de búsqueda o elige otra categoría."
+          />
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {logicalFiltered.map(({ model, category }) => (
+              <LogicalModelCard
+                key={model.modelKey}
+                model={model}
+                categoryLabel={MODEL_CATEGORY_LABELS[category]}
+                deploymentStates={models}
+                busy={busyModelId === model.modelKey}
+                onConfigure={(modelId) => void openDeploymentConfig(modelId)}
+                onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
+                onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
+                onSetDefault={handleSetDefaultBackend}
+                onAddDeployment={handleAddDeployment}
+                onRemoveDeployment={(model, deployment) => setRemoveTarget({ model, deployment })}
+              />
+            ))}
+          </div>
+        )
       ) : filtered.length === 0 ? (
         <EmptyState
           title="Sin modelos con esos filtros"
@@ -589,6 +799,20 @@ export function Models() {
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+
+      {/* Remove one deployment (config only) */}
+      <ConfirmDialog
+        open={Boolean(removeTarget)}
+        onOpenChange={(open) => !open && setRemoveTarget(null)}
+        title="Quitar despliegue"
+        description={removeDescription}
+        confirmLabel="Quitar"
+        variant="danger"
+        onConfirm={() => {
+          if (!removeTarget) return
+          handleRemoveDeployment(removeTarget.model, removeTarget.deployment)
+        }}
+      />
 
       {/* Confirm Load/Unload */}
       <ConfirmDialog

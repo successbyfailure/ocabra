@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.48.0 — 2026-11-07
+
+### Sin cambios para tu cliente
+
+- Esta versión solo cambia el panel de administración (gestión de modelos y
+  del explorador de descargas). La API, los nombres de modelo y las respuestas
+  son los mismos que en 0.47.1.
+
+---
+
 ## 0.47.1 — 2026-11-07
 
 ### Documentación

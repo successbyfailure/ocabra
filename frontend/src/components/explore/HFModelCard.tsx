@@ -1,6 +1,7 @@
 import { Calendar } from "lucide-react"
 import type { HFModelCard } from "@/types"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
+import { BackendIcons, compatibleToItems } from "@/components/models/BackendIcons"
 
 function formatRelativeDate(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -64,7 +65,7 @@ export function HFModelCard({ model, onInstall }: HFModelCardProps) {
         {/* If the repo supports more than one backend (e.g. safetensors +
             GGUF in the same upload, or a GGUF-only mirror), surface them
             all so the user knows the choice exists at variant time. */}
-        {model.backendOptions && model.backendOptions.length > 1 ? (
+        {model.compatibleBackends && model.compatibleBackends.length > 0 ? null : model.backendOptions && model.backendOptions.length > 1 ? (
           <span
             className="rounded bg-muted px-2 py-0.5"
             title="Este repositorio se puede servir con varios backends. Eliges cuál en el modal de instalación."
@@ -92,6 +93,9 @@ export function HFModelCard({ model, onInstall }: HFModelCardProps) {
           <span className="rounded bg-amber-500/20 px-2 py-0.5 text-amber-200">{probeOverrideHint}</span>
         )}
       </div>
+      {model.compatibleBackends && model.compatibleBackends.length > 0 && (
+        <BackendIcons className="mt-2" items={compatibleToItems(model.compatibleBackends)} />
+      )}
       {support?.requiredOverrides && support.requiredOverrides.length > 0 && (
         <p className="mt-3 text-xs text-muted-foreground">
           requiere: {support.requiredOverrides.join(", ")}

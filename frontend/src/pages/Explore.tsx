@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Tabs from "@radix-ui/react-tabs"
 import { ChevronDown, ChevronRight, Search, X } from "lucide-react"
@@ -7,10 +7,12 @@ import { api } from "@/api/client"
 import { HFModelCard } from "@/components/explore/HFModelCard"
 import { OllamaModelCard } from "@/components/explore/OllamaModelCard"
 import { SearchFilters } from "@/components/explore/SearchFilters"
+import { BackendIcons, backendLabel, compatibleToItems } from "@/components/models/BackendIcons"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useDownloadStore } from "@/stores/downloadStore"
 import type {
   BackendType,
+  CompatibleBackend,
   DownloadSource,
   HFModelCard as HFCardType,
   HFModelVariant,
@@ -30,6 +32,55 @@ interface InstallTarget {
   // fork). The registration used to always re-infer a single backend and
   // ignore the choice; it now honours `backend_type` in register_config.
   backendOptions?: BackendType[]
+  // Card-level compatibility (fallback when the variant carries none).
+  compatibleBackends?: CompatibleBackend[]
+}
+
+const LLAMACPP_PREFERRED: BackendType = "llamacpp_mks"
+
+function isGgufVariant(variant: HFModelVariant | null | undefined): boolean {
+  if (!variant) return false
+  return variant.format?.toLowerCase() === "gguf" || Boolean(variant.artifact?.toLowerCase().endsWith(".gguf"))
+}
+
+/**
+ * Public name proposed for a download. Ollama: the tag itself
+ * (`gemma4:e4b`). HuggingFace/BitNet: repo name without the org, lowercased,
+ * plus `-<quant>` for a GGUF variant (`qwen3-8b-q4_k_m`); a trailing `-gguf`
+ * in the repo name is dropped in that case so it does not read twice.
+ */
+export function suggestModelKey(
+  source: DownloadSource,
+  ref: string,
+  variant?: HFModelVariant | null,
+): string {
+  if (source === "ollama") return ref.trim()
+  const repoName = (ref.split("/").pop() ?? ref).trim().toLowerCase()
+  const quant = variant?.quantization?.trim().toLowerCase()
+  if (isGgufVariant(variant) && quant) {
+    const base = repoName.replace(/[-_.]gguf$/, "")
+    return base.endsWith(`-${quant}`) ? base : `${base}-${quant}`
+  }
+  return repoName
+}
+
+/**
+ * Default backend preselected in the install dialog: the production
+ * llama.cpp for GGUF/Ollama when installed, else the variant's own backend,
+ * else the first installed compatible one.
+ */
+export function pickDefaultBackend(
+  compatible: CompatibleBackend[],
+  opts: { gguf: boolean; variantBackend?: BackendType | null },
+): BackendType | "" {
+  const installed = compatible.filter((entry) => entry.installed)
+  if (opts.gguf && installed.some((entry) => entry.backend === LLAMACPP_PREFERRED)) {
+    return LLAMACPP_PREFERRED
+  }
+  if (opts.variantBackend && installed.some((entry) => entry.backend === opts.variantBackend)) {
+    return opts.variantBackend
+  }
+  return installed[0]?.backend ?? ""
 }
 
 function AdvancedDetails({ children }: { children: React.ReactNode }) {
@@ -170,6 +221,9 @@ export function Explore() {
   const [variantLoading, setVariantLoading] = useState(false)
   const [targetDir, setTargetDir] = useState("/models")
   const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand")
+  const [modelKey, setModelKey] = useState("")
+  const [deployBackends, setDeployBackends] = useState<BackendType[]>([])
+  const [defaultBackend, setDefaultBackend] = useState<BackendType | "">("")
   const selectedHFVariant = installTarget?.source === "huggingface"
     ? hfVariants.find((v) => v.variantId === selectedHFVariantId) ?? null
     : null
@@ -181,6 +235,55 @@ export function Explore() {
   const probeStatusLabel = getProbeStatusLabel(selectedHFVariant?.vllmSupport?.runtimeProbe?.status)
   const probeOverrideHint = getProbeOverrideHint(selectedHFVariant?.vllmSupport?.runtimeProbe?.status)
   const canInstallBitnet = installTarget?.source !== "bitnet" || Boolean(selectedBitnetVariant?.artifact)
+  const selectedOllamaVariant = installTarget?.source === "ollama"
+    ? ollamaVariants.find((v) => v.name === selectedVariant) ?? null
+    : null
+  const selectedFileVariant = selectedHFVariant ?? selectedBitnetVariant
+  // Backends that can serve the file about to be downloaded: the selected
+  // variant's list when the server sent one, else the card's.
+  const currentCompat: CompatibleBackend[] = useMemo(() => {
+    const fromVariant =
+      installTarget?.source === "ollama"
+        ? selectedOllamaVariant?.compatibleBackends
+        : selectedFileVariant?.compatibleBackends
+    if (fromVariant && fromVariant.length > 0) return fromVariant
+    return installTarget?.compatibleBackends ?? []
+  }, [installTarget, selectedOllamaVariant, selectedFileVariant])
+  const currentIsGguf = installTarget?.source === "ollama" || isGgufVariant(selectedFileVariant)
+  const variantBackend = selectedFileVariant?.backendType ?? null
+
+  // Re-propose name and deployments whenever the file to download changes.
+  useEffect(() => {
+    if (!installTarget) {
+      setModelKey("")
+      setDeployBackends([])
+      setDefaultBackend("")
+      return
+    }
+    const ref = installTarget.source === "ollama" ? selectedVariant || installTarget.modelRef : installTarget.modelRef
+    setModelKey(suggestModelKey(installTarget.source, ref, selectedFileVariant))
+    const preferred = pickDefaultBackend(currentCompat, { gguf: currentIsGguf, variantBackend })
+    setDefaultBackend(preferred)
+    const initial: BackendType[] = preferred ? [preferred] : []
+    // An Ollama pull keeps its Ollama deployment as fallback (server default).
+    if (
+      installTarget.source === "ollama" &&
+      preferred !== "ollama" &&
+      currentCompat.some((entry) => entry.backend === "ollama" && entry.installed)
+    ) {
+      initial.push("ollama")
+    }
+    setDeployBackends(initial)
+  }, [installTarget, selectedVariant, selectedFileVariant, currentCompat, currentIsGguf, variantBackend])
+
+  const toggleDeployBackend = (backend: BackendType, checked: boolean) => {
+    const next = checked
+      ? [...new Set([...deployBackends, backend])]
+      : deployBackends.filter((b) => b !== backend)
+    setDeployBackends(next)
+    // The default must be one of the deployments being created.
+    if (!defaultBackend || !next.includes(defaultBackend)) setDefaultBackend(next[0] ?? "")
+  }
 
   const jobs = useDownloadStore((state) => state.jobs)
   const setJobs = useDownloadStore((state) => state.setJobs)
@@ -373,14 +476,40 @@ export function Explore() {
       return
     }
 
-    // Explicit choice first, then the variant's own backend, then nothing
-    // (the backend infers). Ollama downloads are always served by Ollama.
-    const chosenBackend: BackendType | null =
-      installTarget.source === "ollama"
+    const key = modelKey.trim()
+    if (/\s/.test(key)) {
+      toast.error("El nombre del modelo no puede contener espacios")
+      return
+    }
+    const useDeployments = currentCompat.length > 0
+    if (useDeployments && (deployBackends.length === 0 || !defaultBackend)) {
+      toast.error("Elige al menos un backend y cuál sirve el nombre del modelo")
+      return
+    }
+
+    // With compatibility data the dialog picks the deployments; without it
+    // (older server) fall back to the explicit choice, then the variant's own
+    // backend, then nothing (the server infers).
+    const chosenBackend: BackendType | null = useDeployments
+      ? (defaultBackend as BackendType)
+      : installTarget.source === "ollama"
         ? null
         : ((selectedBackendType || selectedHFVariant?.backendType || null) as BackendType | null)
-    const registerConfig =
-      installTarget.source === "huggingface"
+    const deploymentConfig = {
+      ...(key ? { modelKey: key } : {}),
+      ...(useDeployments
+        ? {
+            defaultBackend: defaultBackend as BackendType,
+            // Default first; the server skips it when creating the extras.
+            backends: [
+              defaultBackend as BackendType,
+              ...deployBackends.filter((b) => b !== defaultBackend),
+            ],
+          }
+        : {}),
+    }
+    const registerConfig = {
+      ...(installTarget.source === "huggingface"
         ? toRecipeRegisterConfig(
             installTarget.title,
             loadPolicy,
@@ -391,7 +520,9 @@ export function Explore() {
             displayName: installTarget.title,
             loadPolicy,
             ...(chosenBackend ? { backendType: chosenBackend } : {}),
-          }
+          }),
+      ...deploymentConfig,
+    }
     try {
       const job = await api.downloads.enqueue(
         installTarget.source,
@@ -496,6 +627,7 @@ export function Explore() {
                       modelRef: item.repoId,
                       title: item.modelName,
                       backendOptions: item.backendOptions,
+                      compatibleBackends: item.compatibleBackends,
                     })
                     // Reset so a previous repo's choice never leaks into the
                     // next install; the selector defaults to options[0].
@@ -534,6 +666,7 @@ export function Explore() {
                       source: "bitnet",
                       modelRef: item.repoId,
                       title: item.modelName,
+                      compatibleBackends: item.compatibleBackends,
                     })
                   }
                 />
@@ -561,6 +694,7 @@ export function Explore() {
                       modelRef: item.name,
                       title: item.name,
                       ollamaBase: item.name,
+                      compatibleBackends: item.compatibleBackends,
                     })
                   }
                 />
@@ -749,6 +883,67 @@ export function Explore() {
                   )}
                 </>
               )}
+              {currentCompat.length > 0 && (
+                <div className="space-y-1 text-sm text-muted-foreground">
+                  <span className="block">Backends compatibles con este fichero</span>
+                  <BackendIcons items={compatibleToItems(currentCompat)} />
+                </div>
+              )}
+              <label className="block text-sm text-muted-foreground">
+                Nombre del modelo
+                <input
+                  aria-label="Nombre del modelo"
+                  value={modelKey}
+                  onChange={(event) => setModelKey(event.target.value)}
+                  placeholder="nombre público, p. ej. gemma4:e4b"
+                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground"
+                />
+                <span className="mt-1 block text-xs">
+                  Nombre con el que se pedirá el modelo en la API. Los demás backends quedan
+                  accesibles como «backend/nombre» sin listarse.
+                </span>
+              </label>
+              {currentCompat.length > 0 && (
+                <fieldset className="space-y-1.5 rounded-md border border-border px-3 py-2 text-sm">
+                  <legend className="px-1 text-muted-foreground">Despliegues a crear</legend>
+                  {currentCompat.map((entry) => {
+                    const checked = deployBackends.includes(entry.backend)
+                    return (
+                      <div key={entry.backend} className="flex items-center justify-between gap-2">
+                        <label
+                          className={`inline-flex items-center gap-2 ${entry.installed ? "" : "text-muted-foreground/60"}`}
+                          title={entry.installed ? entry.reason : "no instalado"}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`Desplegar con ${entry.backend}`}
+                            checked={checked}
+                            disabled={!entry.installed}
+                            onChange={(event) => toggleDeployBackend(entry.backend, event.target.checked)}
+                          />
+                          {backendLabel(entry.backend)}
+                          {entry.status === "probable" && <span className="text-xs">(probable)</span>}
+                          {!entry.installed && <span className="text-xs">(no instalado)</span>}
+                        </label>
+                        <label className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                          <input
+                            type="radio"
+                            name="default-backend"
+                            aria-label={`Por defecto: ${entry.backend}`}
+                            checked={defaultBackend === entry.backend}
+                            disabled={!checked}
+                            onChange={() => setDefaultBackend(entry.backend)}
+                          />
+                          por defecto
+                        </label>
+                      </div>
+                    )
+                  })}
+                  <span className="block text-xs text-muted-foreground">
+                    El backend por defecto sirve el nombre del modelo. Se puede cambiar después en Modelos.
+                  </span>
+                </fieldset>
+              )}
               <label className="block text-sm text-muted-foreground">
                 Carpeta destino
                 <input
@@ -757,7 +952,7 @@ export function Explore() {
                   className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
                 />
               </label>
-              {installTarget?.source !== "ollama" &&
+              {installTarget?.source !== "ollama" && currentCompat.length === 0 &&
                 (() => {
                   // Options the repo actually supports, falling back to the
                   // selected variant's own backend. Only worth a selector when

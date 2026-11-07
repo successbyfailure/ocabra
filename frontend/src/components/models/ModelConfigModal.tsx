@@ -14,8 +14,10 @@ import {
   getTensorRTLLMConfig,
   getVllmConfig,
   getWhisperConfig,
+  getDefaultReasoningEffort,
   getWritableExtraConfig,
 } from "@/lib/modelContext";
+import { toSnakeKeys } from "@/lib/configKeys";
 import { ScheduleEditor } from "@/components/models/ScheduleEditor";
 import { FieldHint, FieldSection, UseCaseManagedNotice } from "@/components/models/fieldPrimitives";
 import { CapacityPlacementPanel } from "@/components/models/CapacityPlacementPanel";
@@ -29,6 +31,7 @@ import type {
   LoadPolicy,
   ModelMemoryEstimate,
   ModelState,
+  LlamaCppConfig,
   LlamaCppVisionMode,
   VLLMConfig,
 } from "@/types";
@@ -232,8 +235,12 @@ function setNestedConfig(
   payload: Record<string, unknown>,
   legacyRootKeys: string[],
 ): BackendExtraConfig {
-  const next = omitKeys(config, legacyRootKeys);
-  const compacted = compactConfig(payload);
+  // Stored keys are snake_case; the editor builds camelCase payloads. Write
+  // snake_case only, so the PATCH never carries both spellings of a key (the
+  // server keeps the camelCase one on a clash, which used to resurrect stale
+  // values the client mapping had camelised).
+  const next = toSnakeKeys(omitKeys(config, legacyRootKeys), 3, "snake");
+  const compacted = compactConfig(toSnakeKeys(payload, 3, "camel"));
   if (Object.keys(compacted).length === 0) {
     delete next[section];
     return next;
@@ -603,10 +610,7 @@ export function ModelConfigModal({
     setWhisperNumWorkers(
       whisper?.numWorkers == null ? "5" : String(whisper.numWorkers),
     );
-    const rawReasoningDefault = model?.extraConfig?.defaultReasoningEffort;
-    setDefaultReasoningEffort(
-      typeof rawReasoningDefault === "string" ? rawReasoningDefault : "",
-    );
+    setDefaultReasoningEffort(getDefaultReasoningEffort(model));
     // Re-hidratar si cambia el modelo o aparece/desaparece una GPU. Depender de
     // la referencia completa `gpus` reiniciaba el formulario cada ~2s con los
     // broadcasts; ignorarla del todo dejaba un split erróneo si llegaba tarde.
@@ -804,10 +808,11 @@ export function ModelConfigModal({
     if (!model) return undefined;
     const current = getWritableExtraConfig(model);
 
+    delete current.defaultReasoningEffort;
     if (defaultReasoningEffort) {
-      current.defaultReasoningEffort = defaultReasoningEffort;
+      current.default_reasoning_effort = defaultReasoningEffort;
     } else {
-      delete current.defaultReasoningEffort;
+      delete current.default_reasoning_effort;
     }
 
     if (model.backendType === "vllm") {
@@ -966,8 +971,8 @@ export function ModelConfigModal({
           ropeFreqScale:
             llamaRopeFreqScale === "" ? null : Number(llamaRopeFreqScale),
           // Sprint 17.2 — KV cache quantization
-          cache_type_k: llamaCacheTypeK === "" ? null : llamaCacheTypeK,
-          cache_type_v: llamaCacheTypeV === "" ? null : llamaCacheTypeV,
+          cacheTypeK: llamaCacheTypeK === "" ? null : (llamaCacheTypeK as LlamaCppConfig["cacheTypeK"]),
+          cacheTypeV: llamaCacheTypeV === "" ? null : (llamaCacheTypeV as LlamaCppConfig["cacheTypeV"]),
           // Sprint 17.3 — Multi-GPU + MoE CPU offload
           mainGpu: mainGpuOut,
           tensorSplit: tensorSplitOut,
@@ -1045,7 +1050,8 @@ export function ModelConfigModal({
       return Object.keys(next).length > 0 ? next : undefined;
     }
 
-    return Object.keys(current).length > 0 ? current : undefined;
+    const snakeCurrent = toSnakeKeys(current, 3, "snake");
+    return Object.keys(snakeCurrent).length > 0 ? snakeCurrent : undefined;
   };
 
   const estimateMemory = async (runProbe = false) => {

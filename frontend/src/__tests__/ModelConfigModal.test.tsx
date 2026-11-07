@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
-import type { LlamaCppConfig } from "@/types"
+import type { LlamaCppConfig, ModelState } from "@/types"
 
 vi.mock("@/api/client", () => ({
   api: {
@@ -276,18 +276,24 @@ describe("ModelConfigModal", () => {
       expect.objectContaining({
         extraConfig: expect.objectContaining({
           model_path: "/models/qwen.gguf",
+          // extra_config is stored in snake_case since migration 0034:
+          // the modal writes snake_case only, never both spellings.
           llama_cpp: expect.objectContaining({
-            gpuLayers: 24,
-            ctxSize: 16384,
-            flashAttn: true,
+            gpu_layers: 24,
+            ctx_size: 16384,
+            flash_attn: true,
             embedding: true,
-            mmprojModelId: "/models/mmproj.gguf",
-            visionMode: "on_demand",
-            kvUnified: true,
+            mmproj_model_id: "/models/mmproj.gguf",
+            vision_mode: "on_demand",
+            kv_unified: true,
+            parallel_slots: 4,
           }),
         }),
       }),
     )
+    const saved = (onSave.mock.calls[0] as unknown as [string, { extraConfig: { llama_cpp: Record<string, unknown> } }])[1]
+    const llamaKeys = Object.keys(saved.extraConfig.llama_cpp)
+    expect(llamaKeys.filter((key) => /[A-Z]/.test(key))).toEqual([])
   })
 
   it("renders memory estimate and lets the user trigger runtime validation", async () => {
@@ -354,5 +360,80 @@ describe("ModelConfigModal", () => {
     })
 
     expect(api.models.estimateMemory).toHaveBeenCalled()
+  })
+  it("reads snake_case whisper config (diarization) and writes it back in snake_case", async () => {
+    const onSave = vi.fn(async () => undefined)
+    render(
+      <ModelConfigModal
+        open
+        onOpenChange={vi.fn()}
+        onSave={onSave}
+        gpus={[]}
+        model={{
+          modelId: "whisper/large-v3",
+          displayName: "Whisper large-v3",
+          backendType: "whisper",
+          status: "configured",
+          loadPolicy: "on_demand",
+          pinPermanent: false,
+          preferredGpu: null,
+          currentGpu: [],
+          vramUsedMb: 0,
+          ramUsedMb: 0,
+          diskSizeBytes: null,
+          capabilities: {
+            chat: false,
+            completion: false,
+            tools: false,
+            vision: false,
+            embeddings: false,
+            pooling: false,
+            rerank: false,
+            classification: false,
+            score: false,
+            reasoning: false,
+            imageGeneration: false,
+            imageEditing: false,
+            audioTranscription: true,
+            musicGeneration: false,
+            tts: false,
+            audioInput: true,
+            audioOutput: false,
+            videoInput: false,
+            streaming: false,
+            contextLength: 0,
+            nativeContextLength: 0,
+          },
+          lastRequestAt: null,
+          loadedAt: null,
+          // Raw server shape (snake_case), plus a stale camelCase twin that
+          // must lose against the persisted snake_case value.
+          extraConfig: {
+            whisper: {
+              diarization_enabled: true,
+              diarizationEnabled: false,
+              diarization_model_id: "pyannote/speaker-diarization-3.1",
+              num_workers: 3,
+            },
+          } as unknown as ModelState["extraConfig"],
+        }}
+      />,
+    )
+
+    const checkbox = screen.getByLabelText(/habilitar diarización/i) as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+    expect(screen.getByDisplayValue("pyannote/speaker-diarization-3.1")).toBeTruthy()
+    expect(screen.getByDisplayValue("3")).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/^Guardar$/i))
+    })
+
+    const saved = (onSave.mock.calls[0] as unknown as [string, { extraConfig: Record<string, unknown> }])[1]
+    expect(saved.extraConfig.whisper).toEqual({
+      diarization_enabled: true,
+      diarization_model_id: "pyannote/speaker-diarization-3.1",
+      num_workers: 3,
+    })
   })
 })

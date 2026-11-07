@@ -1,7 +1,7 @@
 # Plan: un modelo, varios backends · modelo lógico + despliegues
 
 **Fecha de apertura:** 2026-11-07
-**Estado:** 🟢 Fases 0, 1, 2, 3 y backend de la 5 hechas (v0.47.0); pendientes UI (4, 5) y docs (6)
+**Estado:** ✅ Fases 0–6 hechas (v0.48.0); queda deuda menor listada en la Fase 4/5
 **Relacionado:** [`backend-distribution-plan.md`](backend-distribution-plan.md) (backend en el id
 canónico, migración entre backends), [`llama-cpp-elastic-kv-plan.md`](llama-cpp-elastic-kv-plan.md)
 (convención `*-ollama` que este plan elimina), `docs/CONTRACTS.md` §ids canónicos
@@ -318,6 +318,29 @@ Sin migración: reutiliza `model_profiles.backend` y `model_profile_aliases.back
   Ollama se sirve por defecto con `llamacpp_mks` (artefacto = tag) y conserva el despliegue
   `ollama` como respaldo.
 - Pendiente: Fase 4 (UI de modelos) y la parte de UI de la Fase 5.
+
+### Fase 4 + Fase 5 (UI) — implementadas 2026-11-07 (v0.48.0)
+
+- **Modelos**: vista "Por modelo" (por defecto) junto a la de siempre "Por despliegue". Cada modelo
+  muestra sus backends (`BackendIcons`: ★ default, sólido = desplegado, discontinuo = compatible,
+  "?" = probable, tachado = no instalado) y una fila por despliegue; acciones: backend por defecto
+  (PATCH), añadir backend compatible e instalado (POST), quitar despliegue con confirmación (DELETE).
+  Clic en un despliegue abre el `ModelConfigModal` de siempre.
+- **`ModelConfigModal` en snake_case**: lee snake con fallback camel y escribe solo snake. Arregla
+  dos bugs reales: la edición del tipo de caché KV se perdía (se enviaban `cache_type_k` nuevo y
+  `cacheTypeK` viejo, y en un choque el servidor se queda con el camelCase de la edición) y
+  `default_reasoning_effort` se mostraba vacío.
+- **Explore**: iconos de compatibilidad en tarjetas HF/BitNet/Ollama y variantes; el diálogo de
+  descarga pide "Nombre del modelo" (`model_key`), qué backends desplegar y cuál es el default.
+  De paso, la búsqueda de Ollama no se mapeaba y los tamaños salían "?".
+
+Deuda conocida:
+- No hay editor con pestaña por despliegue: cada despliegue abre su propio modal.
+- `/logical-models` no devuelve `preferred_gpu`.
+- Al borrar un campo en el modal la clave se omite del PATCH y el deep-merge del servidor conserva el
+  valor viejo (preexistente).
+- La diarización de whisper.cpp no tiene campo en el modal.
+- El escáner local sigue sugiriendo `llama_cpp` para los blobs de Ollama.
 
 ## Fases
 
