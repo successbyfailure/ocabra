@@ -2,10 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 from ocabra.workers.tensorrt_llm_worker import (
     _dockerize_serve_args,

@@ -7,8 +7,8 @@ All external dependencies (GPU, DB, Redis) are mocked.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -16,7 +16,6 @@ from ocabra.backends._mock import MockBackend
 from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
 from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelState, ModelStatus
 from ocabra.core.worker_pool import WorkerPool
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -484,7 +483,7 @@ async def test_idle_eviction_only_affects_on_demand():
             state = mm._states[mid]
             state.status = ModelStatus.LOADED
             # Set last_request_at to way in the past
-            state.last_request_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+            state.last_request_at = datetime(2020, 1, 1, tzinfo=UTC)
             state.vram_used_mb = 1024
             wi = WorkerInfo(
                 backend_type="mock", model_id=mid.split("/")[1],

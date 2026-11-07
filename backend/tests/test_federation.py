@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ocabra.core.federation import FederationManager, PeerState, _derive_fernet_key
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -66,7 +62,7 @@ def _make_peer_state(
         access_level="inference",
         enabled=True,
         online=online,
-        last_heartbeat=datetime.now(timezone.utc) if online else None,
+        last_heartbeat=datetime.now(UTC) if online else None,
         models=models or [],
         load={
             "active_requests": active_requests,

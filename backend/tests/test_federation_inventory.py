@@ -6,14 +6,12 @@ remote models from federated peers with deduplication.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -34,7 +32,7 @@ def _make_peer(
         access_level="inference",
         enabled=True,
         online=online,
-        last_heartbeat=datetime.now(timezone.utc),
+        last_heartbeat=datetime.now(UTC),
         gpus=[],
         models=models or [],
         load=load or {"active_requests": 0, "gpu_utilization_avg_pct": 0.0},
@@ -176,8 +174,8 @@ def _make_ollama_app(
 ):
     """Create a minimal FastAPI app with Ollama tags router and optional federation."""
     from ocabra.api._deps_auth import UserContext, get_current_user
-    from ocabra.api.ollama.tags import router as tags_router
     from ocabra.api.ollama._shared import get_ollama_user
+    from ocabra.api.ollama.tags import router as tags_router
 
     _admin_ctx = UserContext(
         user_id=None,
@@ -222,7 +220,7 @@ def _make_internal_app(
     federation_manager=None,
 ):
     """Create a minimal FastAPI app with internal models router and optional federation."""
-    from ocabra.api._deps_auth import UserContext, get_current_user, require_role
+    from ocabra.api._deps_auth import UserContext, get_current_user
     from ocabra.api.internal.models import router as models_router
 
     _admin_ctx = UserContext(
@@ -256,7 +254,6 @@ def _make_internal_app(
     mm.sync_ollama_inventory = MagicMock(return_value=None)
 
     # Make sync_ollama_inventory async-safe
-    import asyncio
 
     async def _sync_ollama(*a, **kw):
         return None

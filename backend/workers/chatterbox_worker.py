@@ -561,7 +561,7 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
                 body.reference_audio,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         encoded, content_type = _encode_audio(wav_bytes, fmt)
 
         return StreamingResponse(

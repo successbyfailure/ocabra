@@ -126,7 +126,7 @@ class UpscalerBackend(BackendInterface):
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=open(f"/tmp/upscaler_worker_{model_id.replace('/', '_')}.log", "wb"),
+            stderr=open(f"/tmp/upscaler_worker_{model_id.replace('/', '_')}.log", "wb"),  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
             env=env,
         )
 

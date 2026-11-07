@@ -51,7 +51,6 @@ import structlog
 
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.stats import ModelLoadStat, RequestStat
 
 logger = structlog.get_logger(__name__)
 
@@ -172,7 +171,7 @@ _CHAT_FAMILIES = frozenset(
 # The unit choice is deliberate: the family's regression fits
 # ``duration ≈ k·work_units + c``, so we want the axis where variance in
 # work_units accounts for most of the variance in duration.
-_WORK_UNIT_EXTRACTORS: dict[str, tuple[str, "callable[[dict], float | None]"]] = {
+_WORK_UNIT_EXTRACTORS: dict[str, tuple[str, callable[[dict], float | None]]] = {
     # Whisper/faster-whisper/vibeasr/voxtral/parakeet all scale ~linearly
     # with input audio duration on a single GPU.
     "whisper":    ("audio_seconds",   lambda m: _pos_float(m.get("audio_seconds"))),
@@ -340,9 +339,14 @@ def _fit_chat_regression(
         if d < lo or d > hi:
             continue
         n += 1
-        sx += x; sy += y; sd += d
-        sxx += x * x; syy += y * y; sxy += x * y
-        sxd += x * d; syd += y * d
+        sx += x
+        sy += y
+        sd += d
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+        sxd += x * d
+        syd += y * d
     if n < _MIN_REGRESSION_SAMPLES:
         return None
 
@@ -429,8 +433,10 @@ def _fit_family_regression(
         if y < lo or y > hi:
             continue
         n += 1
-        sx += x; sy += y
-        sxx += x * x; sxy += x * y
+        sx += x
+        sy += y
+        sxx += x * x
+        sxy += x * y
     if n < _MIN_REGRESSION_SAMPLES:
         return None
 

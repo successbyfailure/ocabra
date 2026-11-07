@@ -16,7 +16,6 @@ from ocabra.backends.base import BackendInstallSpec
 from ocabra.backends.tts_backend import TTSBackend
 from ocabra.config import settings
 
-
 # ---------------------------------------------------------------------------
 # install_spec
 # ---------------------------------------------------------------------------

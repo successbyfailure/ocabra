@@ -160,9 +160,10 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
     """
     from datetime import UTC, datetime
 
+    from sqlalchemy.orm import joinedload
+
     from ocabra.core.auth_manager import hash_api_key
     from ocabra.db.auth import ApiKey, User, UserGroup
-    from sqlalchemy.orm import joinedload
 
     key_hash = hash_api_key(raw_key)
     now = datetime.now(UTC)

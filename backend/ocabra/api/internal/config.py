@@ -724,7 +724,7 @@ async def patch_config(
     sm = getattr(request.app.state, "service_manager", None)
     for service_id, prefix in _SERVICE_PREFIXES:
         live: dict[str, int] = {}
-        for short, suffix, kw in (
+        for _short, suffix, kw in (
             ("idle", "idle_unload_seconds", "idle_unload_after_seconds"),
             ("grace", "generation_grace_period_s", "generation_grace_period_s"),
             ("gpu", "preferred_gpu", "preferred_gpu"),

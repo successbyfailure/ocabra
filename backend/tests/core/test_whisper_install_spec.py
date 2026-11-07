@@ -16,7 +16,6 @@ from ocabra.backends.base import BackendInstallSpec
 from ocabra.backends.whisper_backend import WhisperBackend
 from ocabra.config import settings
 
-
 # ---------------------------------------------------------------------------
 # install_spec
 # ---------------------------------------------------------------------------

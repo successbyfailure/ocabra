@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import sqlalchemy as sa
 import structlog
@@ -195,7 +195,7 @@ class GPUScheduler:
             return
 
         schedules = await self._load_enabled_schedules(actions={"evict_warm", "evict_all"})
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         scheduled_models: set[str] = set()
 
         for schedule in schedules:
@@ -225,7 +225,7 @@ class GPUScheduler:
             return
 
         schedules = await self._load_enabled_schedules(actions={"reload"})
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         reloaded_models: set[str] = set()
 
         for schedule in schedules:
@@ -289,7 +289,7 @@ class GPUScheduler:
         return state.status in {ModelStatus.CONFIGURED, ModelStatus.UNLOADED}
 
     def _is_schedule_due(self, schedule: EvictionSchedule, now: datetime) -> bool:
-        current_minute = now.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        current_minute = now.astimezone(UTC).replace(second=0, microsecond=0)
         schedule_id = str(schedule.id)
         if self._last_schedule_run.get(schedule_id) == current_minute:
             return False

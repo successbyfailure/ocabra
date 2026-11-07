@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 import structlog
@@ -50,8 +50,8 @@ async def get_gpu(
     try:
         state = await gpu_manager.get_state(index)
         return asdict(state)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"GPU {index} not found")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"GPU {index} not found") from exc
 
 
 @router.get(
@@ -72,7 +72,7 @@ async def get_gpu_stats(
     from ocabra.database import AsyncSessionLocal
 
     delta = WINDOW_MAP[window]
-    since = datetime.now(timezone.utc) - delta
+    since = datetime.now(UTC) - delta
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -148,7 +148,7 @@ async def get_gpu_power_limits(
             "saved_persistence_mode": saved_persistence_mode,
         }
     except pynvml.NVMLError as exc:
-        raise HTTPException(status_code=500, detail=f"NVML error: {exc}")
+        raise HTTPException(status_code=500, detail=f"NVML error: {exc}") from exc
 
 
 class PowerLimitPatch(BaseModel):
@@ -211,7 +211,7 @@ async def set_gpu_power(
                         status_code=503,
                         detail=f"Cannot set power limit: {nvml_exc}. Ensure hw-monitor is running.",
                         headers={"Retry-After": "10"},
-                    )
+                    ) from nvml_exc
 
             # hw-monitor applies asynchronously over Redis. Poll the live NVML
             # value so we report real success/failure instead of a phantom 200
@@ -301,4 +301,4 @@ async def set_gpu_power(
             "persistence_mode": bool(persistence),
         }
     except pynvml.NVMLError as exc:
-        raise HTTPException(status_code=500, detail=f"NVML error: {exc}")
+        raise HTTPException(status_code=500, detail=f"NVML error: {exc}") from exc

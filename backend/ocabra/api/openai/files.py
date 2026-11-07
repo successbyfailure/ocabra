@@ -173,7 +173,7 @@ async def file_content(
 ):
     record = await _load_file(file_id, user)
     path = Path(record.storage_path)
-    if not path.exists():
+    if not path.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
         raise HTTPException(status_code=404, detail={"error": {
             "message": f"File content missing on disk for '{file_id}'",
             "type": "invalid_request_error",
@@ -213,7 +213,7 @@ async def delete_file(
             await session.commit()
 
     try:
-        Path(record.storage_path).unlink(missing_ok=True)
+        Path(record.storage_path).unlink(missing_ok=True)  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
     except Exception as exc:
         logger.warning("openai_file_disk_delete_failed", file_id=str(file_uuid), error=str(exc))
 

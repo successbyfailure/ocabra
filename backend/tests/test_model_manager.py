@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -215,7 +215,7 @@ async def test_idle_eviction(model_manager):
     ):
         state = await add_test_model(model_manager, load_policy="on_demand")
         state.status = ModelStatus.LOADED
-        state.last_request_at = datetime.now(timezone.utc) - timedelta(seconds=999)
+        state.last_request_at = datetime.now(UTC) - timedelta(seconds=999)
 
         with patch.object(model_manager._worker_pool._backends["mock"], "unload", new=AsyncMock()):
             await model_manager.check_idle_evictions()
@@ -921,7 +921,7 @@ async def test_background_task_failure_is_logged(model_manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_touch_last_request_at_persists_timestamp(model_manager):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     with (
         patch("ocabra.core.model_manager.publish", new=AsyncMock()),
@@ -940,7 +940,7 @@ async def test_touch_last_request_at_persists_timestamp(model_manager):
 
 @pytest.mark.asyncio
 async def test_hydrate_last_request_at_from_redis_restores_timestamp(model_manager):
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = datetime.now(UTC).replace(microsecond=0)
     state = await add_test_model(model_manager)
     state.last_request_at = None
 
@@ -1003,8 +1003,8 @@ async def test_load_evicts_on_demand_model_on_vram_pressure(worker_pool):
         candidate = await add_test_model(mm, model_id="test/candidate", load_policy="on_demand")
         candidate.status = ModelStatus.LOADED
         candidate.current_gpu = [0]
-        candidate.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=10)
-        candidate.last_request_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        candidate.loaded_at = datetime.now(UTC) - timedelta(minutes=10)
+        candidate.last_request_at = datetime.now(UTC) - timedelta(minutes=5)
 
         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -1145,17 +1145,17 @@ async def test_pressure_eviction_skips_wrong_gpu_and_cpu_only_candidates(worker_
         cpu_only = await add_test_model(mm, model_id="test/cpu-only", load_policy="on_demand")
         cpu_only.status = ModelStatus.LOADED
         cpu_only.current_gpu = []
-        cpu_only.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+        cpu_only.loaded_at = datetime.now(UTC) - timedelta(minutes=20)
 
         wrong_gpu = await add_test_model(mm, model_id="test/wrong-gpu", load_policy="on_demand")
         wrong_gpu.status = ModelStatus.LOADED
         wrong_gpu.current_gpu = [0]
-        wrong_gpu.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        wrong_gpu.loaded_at = datetime.now(UTC) - timedelta(minutes=15)
 
         right_gpu = await add_test_model(mm, model_id="test/right-gpu", load_policy="warm")
         right_gpu.status = ModelStatus.LOADED
         right_gpu.current_gpu = [1]
-        right_gpu.loaded_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        right_gpu.loaded_at = datetime.now(UTC) - timedelta(minutes=10)
 
         from ocabra.core.scheduler import InsufficientVRAMError
 
@@ -1201,7 +1201,7 @@ async def test_pressure_eviction_falls_back_to_other_gpu_pool(worker_pool):
     other_gpu_pin.status = ModelStatus.LOADED
     other_gpu_pin.current_gpu = [1]
     other_gpu_pin.vram_used_mb = 22_000
-    other_gpu_pin.loaded_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    other_gpu_pin.loaded_at = datetime.now(UTC) - timedelta(hours=2)
 
     with patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
         gpu_indices = await mm._assign_gpus_for_load(
@@ -1288,7 +1288,7 @@ async def test_update_config_deep_merges_extra_config_preserving_unmentioned_fie
 async def test_pressure_eviction_prefers_on_demand_then_warm_then_pin(worker_pool):
     mm = ModelManager(worker_pool)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     on_demand = await add_test_model(mm, model_id="test/on-demand", load_policy="on_demand")
     warm = await add_test_model(mm, model_id="test/warm", load_policy="warm")
     pin = await add_test_model(mm, model_id="test/pin", load_policy="pin")

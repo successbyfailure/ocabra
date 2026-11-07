@@ -20,7 +20,6 @@ from ocabra.core.auth_manager import (
     verify_password,
 )
 
-
 # ── hash_password / verify_password ──────────────────────────────────────────
 
 
@@ -68,6 +67,7 @@ def test_decode_valid_token():
 def test_decode_expired_token_raises_auth_error():
     """An expired token must raise AuthError."""
     import jwt as pyjwt
+
     from ocabra.config import settings
 
     now = datetime.now(UTC)

@@ -7,11 +7,10 @@ the pure math is in :mod:`ocabra.core.vram_planner`.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from pathlib import Path
-
-import copy
 
 import httpx
 

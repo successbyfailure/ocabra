@@ -1,6 +1,6 @@
 import os
 import struct
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -138,7 +138,7 @@ async def test_overlay_loaded_derived_state_surfaces_runtime_fields_on_base_entr
         status=ModelStatus.LOADED,
         current_gpu=[0, 1],
         vram_used_mb=24751,
-        loaded_at=datetime(2026, 10, 26, 21, 19, 24, tzinfo=timezone.utc),
+        loaded_at=datetime(2026, 10, 26, 21, 19, 24, tzinfo=UTC),
         capabilities=BackendCapabilities(chat=True, completion=True, tools=True, streaming=True),
     )
     mm = _FakeManagerForOverlay([base], [derived])

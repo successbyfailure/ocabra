@@ -100,10 +100,11 @@ async def login(body: LoginRequest, response: Response) -> dict:
     Raises:
         HTTP 401: If credentials are invalid or the account is inactive.
     """
+    from sqlalchemy import func, or_, select
+
     from ocabra.core.auth_manager import create_access_token, verify_password
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import func, or_, select
 
     identifier = (body.username or "").strip()
 
@@ -205,9 +206,10 @@ async def me(
     Raises:
         HTTP 401: If the caller is not authenticated.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.id == user.user_id))
@@ -250,10 +252,11 @@ async def change_password(
         HTTP 400: If *current_password* is incorrect.
         HTTP 401: If the caller is not authenticated.
     """
+    from sqlalchemy import select
+
     from ocabra.core.auth_manager import hash_password, verify_password
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.id == user.user_id))
@@ -289,9 +292,10 @@ async def list_api_keys(
     Raises:
         HTTP 401: If the caller is not authenticated.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -393,9 +397,10 @@ async def purge_own_revoked_api_keys(
     Returns:
         ``{ deleted: int }`` — number of keys removed.
     """
+    from sqlalchemy import delete
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
-    from sqlalchemy import delete
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -433,9 +438,10 @@ async def revoke_api_key(
     """
     import uuid
 
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
-    from sqlalchemy import select
 
     try:
         parsed_key_id = uuid.UUID(key_id)

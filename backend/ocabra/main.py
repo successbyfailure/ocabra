@@ -3,8 +3,7 @@ import logging
 import os
 import sys
 import time
-from contextlib import asynccontextmanager
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 
 import structlog
 from fastapi import FastAPI
@@ -288,10 +287,10 @@ async def _image_outputs_cleanup_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             out_dir = Path(_settings.image_outputs_dir)
-            if out_dir.is_dir():
+            if out_dir.is_dir():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
                 cutoff = time.time() - _settings.image_url_ttl_seconds
                 removed = 0
-                for path in out_dir.iterdir():
+                for path in out_dir.iterdir():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
                     if not path.is_file():
                         continue
                     try:
@@ -357,6 +356,7 @@ def _find_tokenizer_for_engine(engine_name: str, models_root) -> str | None:
 async def _scan_and_register_trtllm_engines(model_manager) -> None:
     """Discover compiled TRT-LLM engines on disk and register any not yet in the model manager."""
     from pathlib import Path
+
     from ocabra.config import settings
 
     # Use the container-side path (TENSORRT_LLM_ENGINES_DIR or models_dir/tensorrt_llm)
@@ -475,27 +475,27 @@ async def lifespan(app: FastAPI):
     )
 
     # Stream 1-B: Worker Pool + Model Manager
-    from ocabra.core.worker_pool import WorkerPool
-    from ocabra.core.model_manager import ModelManager
     from ocabra.backends.acestep_backend import AceStepBackend
     from ocabra.backends.bitnet_backend import BitnetBackend
     from ocabra.backends.chatterbox_backend import ChatterboxBackend
     from ocabra.backends.diffusers_backend import DiffusersBackend
     from ocabra.backends.flashvsr_backend import FlashVSRBackend
-    from ocabra.backends.mageflow_backend import MageFlowBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
     from ocabra.backends.llamacpp_mks_backend import LlamaCppMksBackend
+    from ocabra.backends.mageflow_backend import MageFlowBackend
     from ocabra.backends.ollama_backend import OllamaBackend
     from ocabra.backends.piper_backend import PiperBackend
     from ocabra.backends.sglang_backend import SGLangBackend
     from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
     from ocabra.backends.upscaler_backend import UpscalerBackend
-    from ocabra.backends.vllm_backend import VLLMBackend
     from ocabra.backends.vibeasr_backend import VibeAsrBackend
+    from ocabra.backends.vllm_backend import VLLMBackend
     from ocabra.backends.voxtral_backend import VoxtralBackend
     from ocabra.backends.whisper_backend import WhisperBackend
     from ocabra.backends.whispercpp_backend import WhisperCppBackend
+    from ocabra.core.model_manager import ModelManager
+    from ocabra.core.worker_pool import WorkerPool
 
     worker_pool = WorkerPool()
     worker_pool.register_backend("acestep", AceStepBackend())
@@ -1215,17 +1215,17 @@ from ocabra.api.health import router as health_router  # noqa: E402
 app.include_router(health_router)
 
 # ── Internal routers (hidden from /docs — admin dashboard only) ──
-from ocabra.api.internal.gpus import router as gpus_router
-from ocabra.api.internal.status import router as status_router
-from ocabra.api.internal.video import router as video_router  # noqa: E402
-from ocabra.api.internal.models import router as models_router
-from ocabra.api.internal.ws import router as ws_router
 from ocabra.api.internal.downloads import router as downloads_router  # noqa: E402
+from ocabra.api.internal.gpus import router as gpus_router  # noqa: E402
+from ocabra.api.internal.host import router as host_router  # noqa: E402
+from ocabra.api.internal.models import router as models_router  # noqa: E402
+from ocabra.api.internal.models_update import router as models_update_router  # noqa: E402
+from ocabra.api.internal.ollama_admin import router as ollama_admin_router  # noqa: E402
 from ocabra.api.internal.registry import router as registry_router  # noqa: E402
 from ocabra.api.internal.services import router as services_router  # noqa: E402
-from ocabra.api.internal.host import router as host_router  # noqa: E402
-from ocabra.api.internal.ollama_admin import router as ollama_admin_router  # noqa: E402
-from ocabra.api.internal.models_update import router as models_update_router  # noqa: E402
+from ocabra.api.internal.status import router as status_router  # noqa: E402
+from ocabra.api.internal.video import router as video_router  # noqa: E402
+from ocabra.api.internal.ws import router as ws_router  # noqa: E402
 
 app.include_router(gpus_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(status_router, prefix="/ocabra", include_in_schema=False)
@@ -1258,16 +1258,16 @@ from ocabra.api.ollama import router as ollama_router  # noqa: E402
 app.include_router(ollama_router)
 
 # Stream 5: Metrics (public), Config/Stats/TRT/Auth/Users/Groups/Profiles (internal)
-from ocabra.api.metrics import router as metrics_router  # noqa: E402
-from ocabra.api.internal.config import router as config_router  # noqa: E402
-from ocabra.api.internal.stats import router as stats_router  # noqa: E402
-from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
 from ocabra.api.internal.auth import router as auth_router  # noqa: E402
-from ocabra.api.internal.users import router as users_router  # noqa: E402
+from ocabra.api.internal.config import router as config_router  # noqa: E402
+from ocabra.api.internal.estimate import router as estimate_router  # noqa: E402
 from ocabra.api.internal.groups import router as groups_router  # noqa: E402
 from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
-from ocabra.api.internal.estimate import router as estimate_router  # noqa: E402
 from ocabra.api.internal.sessions import router as sessions_router  # noqa: E402
+from ocabra.api.internal.stats import router as stats_router  # noqa: E402
+from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
+from ocabra.api.internal.users import router as users_router  # noqa: E402
+from ocabra.api.metrics import router as metrics_router  # noqa: E402
 
 app.include_router(metrics_router)
 app.include_router(config_router, prefix="/ocabra", include_in_schema=False)

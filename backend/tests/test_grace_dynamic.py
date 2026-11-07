@@ -51,7 +51,6 @@ class TestDrainGraceCalculation:
         ``min(max_drain_timeout_s, remaining + 15)`` as its drain timeout.
         Verify the estimator returns a usable number given a live in-flight
         entry."""
-        import time
 
         est = DurationEstimator()
         # Inject a calibration so remaining actually computes.

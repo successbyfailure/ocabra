@@ -14,7 +14,6 @@ from sqlalchemy import text
 
 from ocabra.database import AsyncSessionLocal
 
-
 LEGACY_PROFILES = (
     "gemma4:12b-ctx256k",
     "gemma4:26b-ctx160k",

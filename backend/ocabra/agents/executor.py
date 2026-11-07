@@ -25,10 +25,10 @@ import contextvars
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
 import structlog
 from fastapi import HTTPException
@@ -92,7 +92,7 @@ class ToolCallRecord:
     # subagent executed inside its own loop, so the parent can surface the
     # nested trace to the UI without leaking it into ``tool_call_stats`` (those
     # rows are already persisted by the child executor with parent_request_id).
-    child_tool_calls: list["ToolCallRecord"] = field(default_factory=list)
+    child_tool_calls: list[ToolCallRecord] = field(default_factory=list)
 
 
 @dataclass

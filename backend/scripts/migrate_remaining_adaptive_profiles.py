@@ -15,7 +15,6 @@ from sqlalchemy import text
 
 from ocabra.database import AsyncSessionLocal
 
-
 LEGACY_PROFILES = (
     "nemotron-3-nano:30b-ctx256k",
     "qwen3-coder:30b-ctx256k",

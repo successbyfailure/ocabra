@@ -8,6 +8,7 @@ from fastapi import Depends
 
 from ocabra.api._deps_auth import UserContext, get_current_user
 
+
 async def get_ollama_user(
     user: UserContext = Depends(get_current_user),
 ) -> UserContext:

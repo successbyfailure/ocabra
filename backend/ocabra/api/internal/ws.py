@@ -58,7 +58,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         while True:
             try:
                 await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await websocket.send_text(json.dumps({"type": "ping"}))
     except WebSocketDisconnect:
         pass

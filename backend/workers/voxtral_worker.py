@@ -18,11 +18,9 @@ import io
 import os
 import re
 import struct
-import subprocess
 import sys
 import wave
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -154,7 +152,7 @@ async def _start_vllm_omni(model_id: str, port: int, gpu_indices: list[int]) -> 
     # Priority: VOXTRAL_PYTHON_BIN env → vllm-omni CLI → python -m vllm_omni
     python_bin = sys.executable
     venv_python = os.environ.get("VOXTRAL_PYTHON_BIN", "")
-    if venv_python and os.path.isfile(venv_python):
+    if venv_python and os.path.isfile(venv_python):  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
         python_bin = venv_python
 
     env = os.environ.copy()
@@ -189,7 +187,7 @@ async def _start_vllm_omni(model_id: str, port: int, gpu_indices: list[int]) -> 
         cmd = [python_bin, "-m", "vllm_omni.entrypoints.cli.main"] + base_args
 
     log_path = f"/tmp/voxtral-worker-{model_id.replace('/', '__')}.log"
-    log_file = open(log_path, "ab")  # noqa: SIM115
+    log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

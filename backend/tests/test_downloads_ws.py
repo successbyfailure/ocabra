@@ -46,7 +46,7 @@ class _FakePubSub:
             "channel": "download:progress",
             "data": self._payload,
         }
-        while True:
+        while True:  # noqa: ASYNC110 — doble de test: simula un pubsub que no emite mas mensajes
             await asyncio.sleep(3600)
 
     async def unsubscribe(self, *channels: str) -> None:

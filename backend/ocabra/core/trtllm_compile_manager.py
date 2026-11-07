@@ -201,7 +201,7 @@ class TrtllmCompileManager:
     async def list_jobs(self) -> list[CompileJobState]:
         """Return all jobs from the DB, most recent first."""
         async with AsyncSessionLocal() as session:
-            from sqlalchemy import select, desc
+            from sqlalchemy import desc, select
             result = await session.execute(
                 select(TrtllmCompileJob).order_by(desc(TrtllmCompileJob.started_at))
             )

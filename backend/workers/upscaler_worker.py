@@ -23,7 +23,7 @@ import tempfile
 import time
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile
@@ -222,7 +222,7 @@ def translate_legacy_esrgan(state_dict: dict) -> dict:
     return out
 
 
-def build_model(state_dict: dict) -> Tuple[nn.Module, dict]:
+def build_model(state_dict: dict) -> tuple[nn.Module, dict]:
     """Elige la arquitectura por las claves y devuelve (modelo, state_dict listo).
 
     Detectar en vez de configurar evita que cambiar de pesos obligue a tocar la

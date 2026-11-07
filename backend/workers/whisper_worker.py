@@ -7,11 +7,14 @@ from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+if TYPE_CHECKING:  # numpy es una dependencia opcional del backend de audio
+    import numpy as np
 
 # diarization_lib.py is a sibling script, not an installed package. Running
 # this file directly (python .../whisper_worker.py, the production path) puts
@@ -32,6 +35,7 @@ from diarization_lib import (  # noqa: E402
     to_text,
     to_vtt,
 )
+
 # CTranslate2 shares model weights across workers on the same device — extra
 # workers cost ~tens-to-low-hundreds of MB each (measured empirically), not a
 # full model copy. Compute is the real limit, not VRAM: on an RTX 3060 with

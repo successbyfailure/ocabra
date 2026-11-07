@@ -160,7 +160,7 @@ class ChatterboxBackend(BackendInterface):
             raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
 
         python_bin = self._resolve_python_bin()
-        if python_bin == sys.executable and not Path(settings.chatterbox_python_bin).is_file():
+        if python_bin == sys.executable and not Path(settings.chatterbox_python_bin).is_file():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
             logger.warning(
                 "chatterbox_python_bin_missing",
                 configured=settings.chatterbox_python_bin,
@@ -182,7 +182,7 @@ class ChatterboxBackend(BackendInterface):
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: SIM115
+        log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
         process = await asyncio.create_subprocess_exec(
             python_bin,

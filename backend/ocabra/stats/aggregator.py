@@ -6,7 +6,7 @@ and returns summary structures for the REST API.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from math import ceil
 
 import sqlalchemy as sa
@@ -22,7 +22,7 @@ def _normalize_window(
     to_dt: datetime | None,
 ) -> tuple[datetime, datetime]:
     if to_dt is None:
-        to_dt = datetime.now(timezone.utc)
+        to_dt = datetime.now(UTC)
     if from_dt is None:
         from_dt = to_dt - timedelta(hours=24)
     # Callers (including plain `curl` against the public API, not just the
@@ -34,9 +34,9 @@ def _normalize_window(
     # /ocabra/stats/energy. Treat a naive input as UTC rather than rejecting
     # it or crashing downstream.
     if from_dt.tzinfo is None:
-        from_dt = from_dt.replace(tzinfo=timezone.utc)
+        from_dt = from_dt.replace(tzinfo=UTC)
     if to_dt.tzinfo is None:
-        to_dt = to_dt.replace(tzinfo=timezone.utc)
+        to_dt = to_dt.replace(tzinfo=UTC)
     return from_dt, to_dt
 
 
@@ -978,8 +978,9 @@ async def get_my_group_stats(
 ) -> dict:
     """Return overview stats for a user's groups, plus group name."""
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
-    from ocabra.db.auth import Group
     import uuid as _uuid
+
+    from ocabra.db.auth import Group
 
     if not group_ids:
         return {
@@ -1307,6 +1308,7 @@ async def get_user_detail(
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
     import uuid as _uuid
+
     from ocabra.db.auth import User
 
     uid: _uuid.UUID | None = None

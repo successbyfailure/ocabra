@@ -25,9 +25,9 @@ import structlog
 from fastapi import HTTPException, Request
 
 from ocabra.agents.executor import (
+    REQUIRE_APPROVAL_NEVER,
     AgentExecutor,
     AgentExecutorResult,
-    REQUIRE_APPROVAL_NEVER,
     WorkerInvoker,
 )
 from ocabra.agents.resolver import AgentSpec, resolve_agent
@@ -40,10 +40,11 @@ from ocabra.api.openai._deps import (
 )
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from ocabra.api._deps_auth import UserContext
     from ocabra.core.model_manager import ModelManager
     from ocabra.core.profile_registry import ProfileRegistry
-    from uuid import UUID
 
 logger = structlog.get_logger(__name__)
 

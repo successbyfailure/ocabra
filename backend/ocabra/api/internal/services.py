@@ -192,9 +192,10 @@ async def get_service_generations(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[dict]:
     """Return recent generation events for a service, newest first."""
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.stats import ServiceGenerationStat
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(

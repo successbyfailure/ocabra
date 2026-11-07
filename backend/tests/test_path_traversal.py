@@ -3,16 +3,13 @@
 Covers _is_path_within_base(), _delete_model_files(), and TRT-LLM engine
 deletion to ensure paths outside the configured base are always rejected.
 """
-import os
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from ocabra.api.internal.models import _is_path_within_base, _delete_model_files
 from ocabra.api.internal import trtllm
-
+from ocabra.api.internal.models import _delete_model_files, _is_path_within_base
 
 # ── _is_path_within_base unit tests ──────────────────────────────
 
@@ -122,8 +119,9 @@ class TestDeleteModelFiles:
         (the ``ollama`` CLI is NOT installed in the api container, D11).
         Returns ``ollama:<name>`` on success so the caller can log which
         remote resource was cleaned up."""
-        from ocabra.api.internal import models as models_mod
         import httpx
+
+        from ocabra.api.internal import models as models_mod
 
         monkeypatch.setattr(models_mod.settings, "models_dir", str(tmp_path))
 

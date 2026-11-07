@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Annotated
@@ -51,6 +52,36 @@ class CompileJobCreate(BaseModel):
         ...,
         description="Name for the compiled engine (used as directory name)",
     )
+
+
+_PARAMS_B_DEFAULT = 7.0
+
+# Numero de parametros (en miles de millones) escrito en el nombre del modelo:
+# "8B", "0.5b", "Llama-2-13B", "Qwen3-235B-A22B"...
+_PARAMS_B_RE = re.compile(r"(\d+(?:\.\d+)?)\s*b(?![a-z0-9])", re.IGNORECASE)
+
+
+def _params_b_from_name(name: str) -> float | None:
+    """Estima los miles de millones de parametros a partir del nombre.
+
+    Solo se usa como fallback cuando no se pudo leer ``config.json``. Se extrae
+    el numero de verdad en lugar de buscar subcadenas: la version anterior
+    encadenaba ``elif "4b" in name`` / ``elif "14b" in name`` y ganaba la
+    primera, asi que "4b" casaba dentro de "14b" y "7b" dentro de "27b" —
+    un 14B se estimaba como 4B y un 27B como 7B, infravalorando la VRAM
+    hasta 4x y provocando OOM al compilar.
+    """
+    match = _PARAMS_B_RE.search(name)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    # Fuera de rango = el numero no era un tamano de modelo.
+    if not 0.0 < value <= 2000.0:
+        return None
+    return value
 
 
 # ── Endpoints ────────────────────────────────────────────────────
@@ -279,6 +310,7 @@ async def delete_engine(
     # Remove compile job records for this engine from DB
     try:
         import sqlalchemy as sa
+
         from ocabra.database import AsyncSessionLocal
         from ocabra.db.trtllm import TrtllmCompileJob
         async with AsyncSessionLocal() as session:
@@ -368,8 +400,6 @@ def _estimate_vram(
 
     try:
         cfg = _json.loads(cfg_path.read_text())
-        arch = (cfg.get("architectures") or [""])[0]
-
         # Parameter count from config fields
         hidden = cfg.get("hidden_size", 4096)
         intermediate = cfg.get("intermediate_size", hidden * 4)
@@ -392,24 +422,7 @@ def _estimate_vram(
 
     except Exception:
         # Fallback: estimate from model name
-        name_lower = raw.lower()
-        if "0.5b" in name_lower: params_b = 0.5
-        elif "0.6b" in name_lower: params_b = 0.6
-        elif "0.8b" in name_lower: params_b = 0.8
-        elif "1b" in name_lower or "1.1b" in name_lower: params_b = 1.1
-        elif "1.5b" in name_lower: params_b = 1.5
-        elif "3b" in name_lower: params_b = 3.0
-        elif "4b" in name_lower: params_b = 4.0
-        elif "7b" in name_lower: params_b = 7.0
-        elif "8b" in name_lower: params_b = 8.0
-        elif "9b" in name_lower: params_b = 9.0
-        elif "12b" in name_lower: params_b = 12.0
-        elif "14b" in name_lower: params_b = 14.0
-        elif "27b" in name_lower: params_b = 27.0
-        elif "32b" in name_lower: params_b = 32.0
-        elif "70b" in name_lower: params_b = 70.0
-        elif "72b" in name_lower: params_b = 72.0
-        else: params_b = 7.0  # safe default
+        params_b = _params_b_from_name(raw) or _PARAMS_B_DEFAULT
 
         name_lower_full = model_id.lower()
         is_awq = "awq" in name_lower_full

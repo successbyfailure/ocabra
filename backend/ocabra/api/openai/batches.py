@@ -7,6 +7,7 @@ in :mod:`ocabra.core.batch_processor` and runs as a startup task.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -203,6 +204,14 @@ def _line_body_shape_errors(
     return []
 
 
+def _read_jsonl_lines(path: Path) -> list[str]:
+    """Lee un JSONL completo a memoria. Sincrono a proposito: se invoca con
+    ``asyncio.to_thread`` porque el fichero lo sube el usuario y puede tener
+    miles de lineas, y parsearlo en el event loop bloquea todo el servidor."""
+    with path.open("r", encoding="utf-8") as fh:
+        return fh.read().splitlines()
+
+
 def _strip_id(prefixed: str, prefix: str) -> uuid.UUID:
     raw = prefixed[len(prefix):] if prefixed.startswith(prefix) else prefixed
     try:
@@ -264,7 +273,7 @@ async def create_batch(
             }})
 
         path = Path(input_file.storage_path)
-        if not path.exists():
+        if not path.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
             raise HTTPException(status_code=400, detail={"error": {
                 "message": "Input file content missing on disk",
                 "type": "invalid_request_error",
@@ -273,95 +282,95 @@ async def create_batch(
         # Quick line count and basic JSONL validation
         request_total = 0
         validation_errors: list[dict[str, Any]] = []
-        with path.open("r", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, start=1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                request_total += 1
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError as exc:
+        raw_lines = await asyncio.to_thread(_read_jsonl_lines, path)
+        for line_no, line in enumerate(raw_lines, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            request_total += 1
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                validation_errors.append({
+                    "line": line_no,
+                    "code": "invalid_json",
+                    "message": str(exc),
+                })
+                continue
+            if not isinstance(obj, dict):
+                validation_errors.append({
+                    "line": line_no,
+                    "code": "invalid_request",
+                    "message": "Each line must be a JSON object",
+                })
+                continue
+            if obj.get("url") and obj.get("url") != body.endpoint:
+                validation_errors.append({
+                    "line": line_no,
+                    "code": "endpoint_mismatch",
+                    "message": f"Line url '{obj.get('url')}' does not match batch endpoint",
+                })
+                continue
+            if body.endpoint == "/v1/audio/transcriptions":
+                line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
+                for shape_err in _line_body_shape_errors(
+                    TranscriptionBatchLineBody, line_body, skip_fields={"file_id"}
+                ):
+                    validation_errors.append({"line": line_no, **shape_err})
+                audio_file_id = line_body.get("file_id")
+                if not audio_file_id:
                     validation_errors.append({
                         "line": line_no,
-                        "code": "invalid_json",
-                        "message": str(exc),
+                        "code": "missing_file_id",
+                        "message": "body.file_id is required for /v1/audio/transcriptions "
+                        "lines (oCabra extension — upload the audio first via POST "
+                        "/v1/files with purpose='batch_input_audio')",
                     })
                     continue
-                if not isinstance(obj, dict):
+                audio_file = await _resolve_owned_batch_file(
+                    session, audio_file_id,
+                    user_uuid=user_uuid, is_admin=user.is_admin,
+                    purpose=_BATCH_INPUT_AUDIO_PURPOSE,
+                )
+                if audio_file is None:
                     validation_errors.append({
                         "line": line_no,
-                        "code": "invalid_request",
-                        "message": "Each line must be a JSON object",
+                        "code": "invalid_file_id",
+                        "message": f"body.file_id '{audio_file_id}' is not a file you own "
+                        f"with purpose='{_BATCH_INPUT_AUDIO_PURPOSE}'",
                     })
-                    continue
-                if obj.get("url") and obj.get("url") != body.endpoint:
+            elif body.endpoint == "/v1/images/edits":
+                line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
+                for shape_err in _line_body_shape_errors(
+                    ImageEditsBatchLineBody, line_body, skip_fields={"image_file_id"}
+                ):
+                    validation_errors.append({"line": line_no, **shape_err})
+                image_file_id = line_body.get("image_file_id")
+                if not image_file_id:
                     validation_errors.append({
                         "line": line_no,
-                        "code": "endpoint_mismatch",
-                        "message": f"Line url '{obj.get('url')}' does not match batch endpoint",
+                        "code": "missing_file_id",
+                        "message": "body.image_file_id is required for /v1/images/edits "
+                        "lines (oCabra extension — upload the base image first via POST "
+                        "/v1/files with purpose='batch_input_image')",
                     })
                     continue
-                if body.endpoint == "/v1/audio/transcriptions":
-                    line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
-                    for shape_err in _line_body_shape_errors(
-                        TranscriptionBatchLineBody, line_body, skip_fields={"file_id"}
-                    ):
-                        validation_errors.append({"line": line_no, **shape_err})
-                    audio_file_id = line_body.get("file_id")
-                    if not audio_file_id:
-                        validation_errors.append({
-                            "line": line_no,
-                            "code": "missing_file_id",
-                            "message": "body.file_id is required for /v1/audio/transcriptions "
-                            "lines (oCabra extension — upload the audio first via POST "
-                            "/v1/files with purpose='batch_input_audio')",
-                        })
+                for field in _IMAGE_EDIT_FILE_FIELDS:
+                    ref_id = line_body.get(field)
+                    if ref_id is None:
                         continue
-                    audio_file = await _resolve_owned_batch_file(
-                        session, audio_file_id,
+                    ref_file = await _resolve_owned_batch_file(
+                        session, ref_id,
                         user_uuid=user_uuid, is_admin=user.is_admin,
-                        purpose=_BATCH_INPUT_AUDIO_PURPOSE,
+                        purpose=_BATCH_INPUT_IMAGE_PURPOSE,
                     )
-                    if audio_file is None:
+                    if ref_file is None:
                         validation_errors.append({
                             "line": line_no,
                             "code": "invalid_file_id",
-                            "message": f"body.file_id '{audio_file_id}' is not a file you own "
-                            f"with purpose='{_BATCH_INPUT_AUDIO_PURPOSE}'",
+                            "message": f"body.{field} '{ref_id}' is not a file you own "
+                            f"with purpose='{_BATCH_INPUT_IMAGE_PURPOSE}'",
                         })
-                elif body.endpoint == "/v1/images/edits":
-                    line_body = obj.get("body") if isinstance(obj.get("body"), dict) else {}
-                    for shape_err in _line_body_shape_errors(
-                        ImageEditsBatchLineBody, line_body, skip_fields={"image_file_id"}
-                    ):
-                        validation_errors.append({"line": line_no, **shape_err})
-                    image_file_id = line_body.get("image_file_id")
-                    if not image_file_id:
-                        validation_errors.append({
-                            "line": line_no,
-                            "code": "missing_file_id",
-                            "message": "body.image_file_id is required for /v1/images/edits "
-                            "lines (oCabra extension — upload the base image first via POST "
-                            "/v1/files with purpose='batch_input_image')",
-                        })
-                        continue
-                    for field in _IMAGE_EDIT_FILE_FIELDS:
-                        ref_id = line_body.get(field)
-                        if ref_id is None:
-                            continue
-                        ref_file = await _resolve_owned_batch_file(
-                            session, ref_id,
-                            user_uuid=user_uuid, is_admin=user.is_admin,
-                            purpose=_BATCH_INPUT_IMAGE_PURPOSE,
-                        )
-                        if ref_file is None:
-                            validation_errors.append({
-                                "line": line_no,
-                                "code": "invalid_file_id",
-                                "message": f"body.{field} '{ref_id}' is not a file you own "
-                                f"with purpose='{_BATCH_INPUT_IMAGE_PURPOSE}'",
-                            })
 
         if request_total == 0:
             raise HTTPException(status_code=400, detail={"error": {

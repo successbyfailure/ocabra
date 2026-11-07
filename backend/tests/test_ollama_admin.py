@@ -19,7 +19,6 @@ import pytest
 
 from ocabra.api.internal import ollama_admin
 
-
 # ── _service_uses_build_key ─────────────────────────────────
 
 

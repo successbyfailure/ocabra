@@ -231,7 +231,7 @@ class WhisperBackend(BackendInterface):
             args.extend(["--diarize", "--diarization-model-id", diarization_model_id])
 
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: PTH123
+        log_file = open(log_path, "ab")  # noqa: PTH123, ASYNC230
 
         process = await asyncio.create_subprocess_exec(
             *args,

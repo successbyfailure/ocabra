@@ -1,8 +1,7 @@
 """Tests for LRU eviction + VRAM threshold (sub-block 11.1)."""
 
 import asyncio
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -73,13 +72,13 @@ def test_eviction_candidates_excludes_busy():
 
 def test_eviction_order_is_lru():
     mm = _make_mm()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Oldest request first
     _add_loaded_model(
         mm,
         "test/old",
         gpu_indices=[0],
-        last_request_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        last_request_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
     _add_loaded_model(
         mm,
@@ -91,7 +90,7 @@ def test_eviction_order_is_lru():
         mm,
         "test/middle",
         gpu_indices=[0],
-        last_request_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
+        last_request_at=datetime(2025, 6, 1, tzinfo=UTC),
     )
 
     candidates = mm._get_eviction_candidates(0)
@@ -111,7 +110,7 @@ async def test_preload_evicts_when_insufficient_vram():
         "test/existing",
         gpu_indices=[0],
         vram_mb=4000,
-        last_request_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        last_request_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
     with (
@@ -205,7 +204,7 @@ async def test_watchdog_evicts_above_threshold():
         load_policy="warm",
         gpu_indices=[0],
         vram_mb=2000,
-        last_request_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        last_request_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
     with (
@@ -250,7 +249,7 @@ async def test_watchdog_does_nothing_below_threshold():
         load_policy="warm",
         gpu_indices=[0],
         vram_mb=2000,
-        last_request_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        last_request_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
 
     # Check that threshold=0.90 does not trigger eviction at 80%

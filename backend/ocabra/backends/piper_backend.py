@@ -134,7 +134,7 @@ class PiperBackend(BackendInterface):
         # CPU-only — no CUDA_VISIBLE_DEVICES set regardless of gpu_indices.
 
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: SIM115
+        log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
         args = [
             python_bin,

@@ -122,7 +122,7 @@ class VoxtralBackend(BackendInterface):
 
         python_bin = self._resolve_python_bin()
         if python_bin == sys.executable and not (
-            settings.voxtral_python_bin and Path(settings.voxtral_python_bin).is_file()
+            settings.voxtral_python_bin and Path(settings.voxtral_python_bin).is_file()  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
         ):
             logger.warning(
                 "voxtral_python_bin_missing",
@@ -148,7 +148,7 @@ class VoxtralBackend(BackendInterface):
             env["LD_LIBRARY_PATH"] = f"{nvidia_ld}:{existing}" if existing else nvidia_ld
 
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: SIM115
+        log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
         process = await asyncio.create_subprocess_exec(
             sys.executable,  # outer worker always uses the system python

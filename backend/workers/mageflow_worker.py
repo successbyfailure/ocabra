@@ -18,6 +18,7 @@ Qwen3-VL text encoder), so no CUDA extension needs to be compiled.
 """
 
 import argparse
+import asyncio
 import base64
 import os
 import time
@@ -26,8 +27,6 @@ from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-
-import asyncio
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -190,9 +189,9 @@ def edit_sync(state: WorkerState, req: EditRequest) -> GenerateResponse:
             ),
         )
 
-    from PIL import Image
-
     import random
+
+    from PIL import Image
 
     try:
         raw = base64.b64decode(req.image_b64, validate=True)

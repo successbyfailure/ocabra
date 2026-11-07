@@ -28,6 +28,7 @@ from ocabra.core.model_manager_helpers import (
     resolve_worker_slots,
 )
 from ocabra.core.model_ref import (
+    LLAMA_CPP_FAMILY,
     build_model_ref,
     is_llama_cpp_family,
     normalize_model_ref,

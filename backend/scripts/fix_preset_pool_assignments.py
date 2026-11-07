@@ -39,7 +39,6 @@ from sqlalchemy import text
 
 from ocabra.database import AsyncSessionLocal
 
-
 UPDATES = [
     # (profile_id, preset_keys, placement_policy, preferred_gpus_jsonb, parallelism)
     ("nemotron-3-nano:30b", ("32k", "64k", "128k"), "forced", "[0,1]", 1),

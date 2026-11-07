@@ -9,8 +9,6 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
-logger = structlog.get_logger(__name__)
-
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     check_capability,
@@ -25,6 +23,8 @@ from ocabra.api.openai._deps import (
 
 from ._mapper import resolve_model
 from ._shared import get_ollama_user
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 

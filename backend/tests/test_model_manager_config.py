@@ -4,12 +4,11 @@ Validates that only allowed fields (display_name, load_policy, auto_reload,
 preferred_gpu, extra_config) can be updated, and all others are rejected.
 """
 import asyncio
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from ocabra.backends._mock import MockBackend
-from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelState, ModelStatus
+from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelState
 from ocabra.core.worker_pool import WorkerPool
 
 

@@ -69,10 +69,41 @@ include = ["ocabra*"]
 
 [tool.ruff]
 line-length = 100
+# Las migraciones de Alembic son artefactos generados e inmutables (ver
+# CLAUDE.md: no se reescriben ni se borran). Reordenar sus imports no aporta
+# nada y ensucia el historial de cada revision.
+extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-ignore = ["E501"]
+ignore = [
+    "E501",
+    # UP042 propone cambiar `class X(str, Enum)` por `StrEnum`. Es un cambio de
+    # comportamiento, no cosmetico: con (str, Enum) `str(X.A)` da "X.A" y con
+    # StrEnum da "a". Estos enums se persisten (UserRole en BD), cruzan la API
+    # y se emiten en los logs de structlog, asi que migrarlos exige revisar cada
+    # ruta de serializacion a cambio de ninguna mejora funcional. Aplazado a
+    # proposito, no es un falso positivo.
+    "UP042",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI inyecta dependencias llamando a estos helpers en el default del
+# argumento: es el idiom oficial, no un default mutable. Se exentan por nombre
+# en lugar de silenciar B008 entero para seguir cazando defaults mutables de
+# verdad (list(), dict(), datetime.now()...).
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Cookie",
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+    "fastapi.Path",
+    "fastapi.Query",
+    "fastapi.Security",
+    "ocabra.api._deps_auth.require_role",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

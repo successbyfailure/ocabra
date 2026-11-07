@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 import time
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
-
-import json
 
 import httpx
 import structlog

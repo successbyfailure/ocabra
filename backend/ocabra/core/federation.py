@@ -585,7 +585,7 @@ class FederationManager:
         path: str,
         body: dict[str, Any],
         headers: dict[str, str],
-        timeout: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 — el timeout se delega a httpx, que lo gestiona el mismo
     ) -> httpx.Response:
         """Proxy a non-streaming request to a federation peer.
 
@@ -652,7 +652,7 @@ class FederationManager:
         files: dict[str, Any],
         data: dict[str, Any],
         headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 — el timeout se delega a httpx, que lo gestiona el mismo
     ) -> httpx.Response:
         """Proxy a multipart/form-data request to a federation peer.
 

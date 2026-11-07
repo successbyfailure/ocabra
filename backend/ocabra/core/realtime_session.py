@@ -72,7 +72,9 @@ _RECEIVE_IDLE_TIMEOUT_S = 300.0
 def _common_prefix(a: list[str], b: list[str]) -> list[str]:
     """Longest common leading run of two word lists (LocalAgreement-2 stable prefix)."""
     out: list[str] = []
-    for x, y in zip(a, b):
+    # strict=False a proposito: las dos listas tienen longitudes distintas por
+    # definicion y queremos parar en la mas corta.
+    for x, y in zip(a, b, strict=False):
         if x != y:
             break
         out.append(x)
@@ -93,7 +95,13 @@ _REGISTRY_TTL_S = 2 * 3600.0
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    # Dimensiones distintas = vectores incomparables (p.ej. un registro de
+    # hablantes persistido por otro modelo de diarizacion). Antes zip truncaba
+    # al mas corto y devolvia una similitud calculada sobre parte del vector,
+    # que podia superar el umbral y fusionar dos hablantes distintos.
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
@@ -619,7 +627,7 @@ class RealtimeSession:
                             self.ws.receive_text(),
                             timeout=_RECEIVE_IDLE_TIMEOUT_S,
                         )
-                    except asyncio.TimeoutError as exc:
+                    except TimeoutError as exc:
                         logger.info(
                             "realtime_session_idle_timeout",
                             session_id=self._session_id,
@@ -691,7 +699,7 @@ class RealtimeSession:
                         self.ws.receive_text(),
                         timeout=_RECEIVE_IDLE_TIMEOUT_S,
                     )
-                except asyncio.TimeoutError as exc:
+                except TimeoutError as exc:
                     logger.info(
                         "realtime_session_idle_timeout",
                         session_id=self._session_id,
@@ -1924,9 +1932,20 @@ class RealtimeSession:
             if best_id is not None and (best_sim >= _SPEAKER_SIM_THRESHOLD or at_cap):
                 entry = next(e for e in self._speaker_registry if e["id"] == best_id)
                 n = entry["count"]
-                entry["centroid"] = [
-                    (c * n + e2) / (n + 1) for c, e2 in zip(entry["centroid"], emb)
-                ]
+                if len(entry["centroid"]) != len(emb):
+                    # Solo pasa si el registro venia persistido de un modelo de
+                    # diarizacion con otra dimension y at_cap ha forzado el
+                    # emparejamiento. zip truncaba el centroide al mas corto y
+                    # dejaba el registro corrupto para el resto de la sesion;
+                    # adoptamos la geometria nueva y descartamos los ejemplares
+                    # viejos, que ya no son comparables.
+                    entry["centroid"] = list(emb)
+                    entry["exemplars"] = []
+                else:
+                    entry["centroid"] = [
+                        (c * n + e2) / (n + 1)
+                        for c, e2 in zip(entry["centroid"], emb, strict=True)
+                    ]
                 entry["count"] = n + 1
                 entry["exemplars"].append(list(emb))
                 if len(entry["exemplars"]) > _MAX_EXEMPLARS:

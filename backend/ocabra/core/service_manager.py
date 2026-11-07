@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -242,7 +242,7 @@ class ServiceManager:
         if self._gpu_manager is None or state.preferred_gpu is None:
             return
         await self._gpu_manager.lock_vram(state.preferred_gpu, vram_mb, f"service:{service_id}")
-        state.vram_reserved_at = datetime.now(timezone.utc)
+        state.vram_reserved_at = datetime.now(UTC)
 
     async def release_gpu_vram(self, service_id: str) -> None:
         state = self._states.get(service_id)
@@ -286,7 +286,7 @@ class ServiceManager:
         detail: str | None = None,
     ) -> ServiceState:
         state = self._require(service_id)
-        state.last_activity_at = datetime.now(timezone.utc)
+        state.last_activity_at = datetime.now(UTC)
         if not state.enabled:
             state.runtime_loaded = False
             state.active_model_ref = None
@@ -329,7 +329,7 @@ class ServiceManager:
         if detail is not None:
             state.detail = detail
         if runtime_loaded:
-            state.last_activity_at = datetime.now(timezone.utc)
+            state.last_activity_at = datetime.now(UTC)
             state.status = "active" if state.service_alive else "unreachable"
         else:
             state.status = "idle" if state.service_alive else "unreachable"
@@ -343,7 +343,7 @@ class ServiceManager:
         # Don't overwrite transient build/start status — _start_container_bg owns it
         if state.status in ("building", "starting"):
             return state
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if not state.enabled:
             container_running = await self._is_container_running(state)
             service_alive = bool(container_running)
@@ -451,7 +451,7 @@ class ServiceManager:
         if not state.runtime_check_path:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if state.last_unload_at is not None:
             if (now - state.last_unload_at).total_seconds() < 15:
                 state.runtime_loaded = False
@@ -544,7 +544,7 @@ class ServiceManager:
 
         # Detect generation start
         if state.is_generating and not was_generating:
-            state._generation_started_at = datetime.now(timezone.utc)
+            state._generation_started_at = datetime.now(UTC)
             state._generation_vram_peak_mb = state.vram_used_mb
             logger.info("generation_started", service_id=state.service_id)
 
@@ -680,7 +680,7 @@ class ServiceManager:
             if not state.docker_container_name:
                 raise RuntimeError(f"Service '{service_id}' does not expose an unload endpoint")
             async with self._lock:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 if state.idle_action == "restart":
                     await self._restart_container(state)
                 else:
@@ -719,7 +719,7 @@ class ServiceManager:
                 state.runtime_loaded = False
                 state.active_model_ref = None
                 state.is_generating = False
-                state.last_unload_at = datetime.now(timezone.utc)
+                state.last_unload_at = datetime.now(UTC)
                 state.status = "idle" if state.service_alive else "unreachable"
                 state.detail = f"unloaded:{reason}"
                 logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
@@ -743,7 +743,7 @@ class ServiceManager:
     # ── Idle eviction ─────────────────────────────────────────────────────
 
     async def check_idle_unloads(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for state in self._states.values():
             if (
                 state.vram_reserved_at is not None
@@ -854,7 +854,7 @@ class ServiceManager:
         if not state or not state.enabled or not state.service_alive:
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         logger.info(
             "service_pressure_evict",
             service_id=service_id,
@@ -969,7 +969,7 @@ class ServiceManager:
         started_at = state._generation_started_at
         if started_at is None:
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         duration_ms = int((now - started_at).total_seconds() * 1000)
 
         # Reset tracking immediately so the next generation starts fresh

@@ -12,14 +12,12 @@ Tests cover:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from ocabra.core.federation import FederationManager, PeerState
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -39,7 +37,7 @@ def _make_peer(
         access_level=access_level,
         enabled=True,
         online=online,
-        last_heartbeat=datetime.now(timezone.utc) if online else None,
+        last_heartbeat=datetime.now(UTC) if online else None,
         models=[{"model_id": "vllm/test-model", "status": "LOADED"}],
         load={"active_requests": 0, "gpu_utilization_avg_pct": 10.0},
     )
@@ -132,7 +130,7 @@ async def test_remote_load_proxies_to_peer(peer_full):
     app = _mock_app(fm)
     request = _mock_request(app)
 
-    from ocabra.api.internal.federation import _get_full_access_peer, remote_load_model
+    from ocabra.api.internal.federation import remote_load_model
 
     # Directly call the endpoint function
     with patch(
@@ -212,8 +210,8 @@ async def test_remote_download_proxies_to_peer(peer_full):
     app = _mock_app(fm)
     request = _mock_request(app)
 
-    from ocabra.schemas.federation import RemoteDownloadRequest
     from ocabra.api.internal.federation import remote_download
+    from ocabra.schemas.federation import RemoteDownloadRequest
 
     body = RemoteDownloadRequest(
         source="huggingface",

@@ -232,7 +232,7 @@ class SGLangBackend(BackendInterface):
         # chatty-enough worker can fill the kernel pipe buffer and block on
         # its own write(), wedging the server while /health keeps answering.
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: SIM115 — lives for the worker's lifetime, closed in _kill_process
+        log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230 — lives for the worker's lifetime, closed in _kill_process
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,

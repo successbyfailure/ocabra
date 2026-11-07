@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 import wave
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -559,11 +559,11 @@ class SynthesizeRequest(BaseModel):
     speed: float = 1.0
     language: str = "Auto"
     # Voice cloning (Base model)
-    reference_audio: Optional[str] = None   # base64-encoded audio
-    reference_text: Optional[str] = None    # transcript of reference audio
+    reference_audio: str | None = None   # base64-encoded audio
+    reference_text: str | None = None    # transcript of reference audio
     # CustomVoice model
-    speaker: Optional[str] = None           # explicit speaker name (overrides voice mapping)
-    instruct: Optional[str] = None          # style instruction
+    speaker: str | None = None           # explicit speaker name (overrides voice mapping)
+    instruct: str | None = None          # style instruction
 
 
 def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
@@ -702,7 +702,7 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
                 body.instruct,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         encoded, content_type = _encode_audio(wav_bytes, fmt)
 
         return StreamingResponse(

@@ -202,7 +202,7 @@ class BatchPriorityCoordinator:
                 remaining = estimator.in_flight_remaining(worker_key, model_id=worker_key)
             except Exception:  # noqa: BLE001
                 remaining = None
-        for handle, entry in bucket:
+        for _handle, entry in bucket:
             if cancelled >= target_n:
                 break
             if entry.task.done():

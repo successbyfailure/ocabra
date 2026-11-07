@@ -29,7 +29,6 @@ from sqlalchemy import text
 
 from ocabra.database import AsyncSessionLocal
 
-
 LLM_LARGE = (
     "gemma4:26b",
     "qwen3.8:27b",

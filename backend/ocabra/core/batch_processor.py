@@ -39,6 +39,14 @@ logger = structlog.get_logger(__name__)
 _TRANSIENT_BATCH_ERROR_CODES = frozenset({"insufficient_vram"})
 
 
+def _read_input_lines(path: Path) -> list[str]:
+    """Lee el JSONL de entrada de un batch. Sincrono a proposito: se invoca con
+    ``asyncio.to_thread`` porque el fichero lo sube el usuario y leerlo entero
+    en el event loop bloquea al resto de peticiones mientras dura."""
+    with path.open("r", encoding="utf-8") as fh:
+        return [line.rstrip("\n") for line in fh if line.strip()]
+
+
 def _is_transient_batch_error(status_code: int, error_payload: dict[str, Any]) -> bool:
     """Whether a batch line's upstream failure is worth requeuing instead of
     recording as a permanent failure on the first attempt.
@@ -288,11 +296,11 @@ class BatchProcessor:
                 batch.error_file_id = error_uuid
                 await session.commit()
 
-        if not input_path.exists():
+        if not input_path.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
             raise RuntimeError("Input file content missing on disk")
 
         storage_dir = Path(settings.openai_files_dir)
-        storage_dir.mkdir(parents=True, exist_ok=True)
+        storage_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
         output_path = storage_dir / f"{output_uuid}"
         error_path = storage_dir / f"{error_uuid}"
 
@@ -300,9 +308,9 @@ class BatchProcessor:
         sem = asyncio.Semaphore(concurrency)
 
         # Read all lines first (batches are bounded; large batches assumed OK
-        # for current scale). For very large files this could stream instead.
-        with input_path.open("r", encoding="utf-8") as f:
-            lines = [line.rstrip("\n") for line in f if line.strip()]
+        # for current scale). La lectura va en un hilo porque el fichero lo
+        # sube el usuario; para ficheros enormes habria que streamear ademas.
+        lines = await asyncio.to_thread(_read_input_lines, input_path)
 
         def _custom_id_for(idx: int, line: str) -> str:
             try:
@@ -551,7 +559,7 @@ class BatchProcessor:
                     _process_line(idx, lines[idx]) for idx in pending_indices
                 ))
                 pending_indices = [
-                    idx for idx, done in zip(pending_indices, results) if not done
+                    idx for idx, done in zip(pending_indices, results, strict=True) if not done
                 ]
                 if pending_indices and not cancelled:
                     await asyncio.sleep(_REQUEUE_BACKOFF_S)
@@ -741,14 +749,15 @@ class BatchProcessor:
                 }
             else:
                 audio_path = Path(audio_file.storage_path)
-                if not audio_path.exists():
+                if not audio_path.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
                     multipart_error = {
                         "code": "file_not_found",
                         "message": "Referenced audio file content missing on disk",
                     }
                 else:
                     content_type = mimetypes.guess_type(audio_file.filename)[0] or "application/octet-stream"
-                    files_kw = {"file": (audio_file.filename, audio_path.read_bytes(), content_type)}
+                    audio_bytes = await asyncio.to_thread(audio_path.read_bytes)
+                    files_kw = {"file": (audio_file.filename, audio_bytes, content_type)}
                     # dict value = list means "repeat this field" to httpx's
                     # MultipartStream (same idiom as encode_urlencoded_data) —
                     # matches what transcriptions() reads via
@@ -801,14 +810,15 @@ class BatchProcessor:
                     }
                     break
                 ref_path = Path(ref_file.storage_path)
-                if not ref_path.exists():
+                if not ref_path.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
                     multipart_error = {
                         "code": "file_not_found",
                         "message": f"Referenced file for body.{body_key} missing on disk",
                     }
                     break
                 content_type = mimetypes.guess_type(ref_file.filename)[0] or "image/png"
-                resolved_files[form_field] = (ref_file.filename, ref_path.read_bytes(), content_type)
+                ref_bytes = await asyncio.to_thread(ref_path.read_bytes)
+                resolved_files[form_field] = (ref_file.filename, ref_bytes, content_type)
             if multipart_error is None:
                 if "image" not in resolved_files:
                     multipart_error = {
@@ -871,10 +881,10 @@ class BatchProcessor:
         raw_bytes = response.content
         artifact_uuid = uuid.uuid4()
         storage_dir = Path(settings.openai_files_dir)
-        storage_dir.mkdir(parents=True, exist_ok=True)
+        storage_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
         artifact_path = storage_dir / f"{artifact_uuid}"
         try:
-            artifact_path.write_bytes(raw_bytes)
+            await asyncio.to_thread(artifact_path.write_bytes, raw_bytes)
             async with AsyncSessionLocal() as session:
                 session.add(OpenAIFile(
                     id=artifact_uuid,

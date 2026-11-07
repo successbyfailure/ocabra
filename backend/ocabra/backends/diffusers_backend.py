@@ -206,7 +206,7 @@ class DiffusersBackend(BackendInterface):
             # stderr to file so we can diagnose worker crashes (OOM, missing
             # deps, etc.) that would otherwise show up as opaque 500s. Keeping
             # this on disk is fine — file is overwritten on each (re)load.
-            stderr=open(
+            stderr=open(  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
                 f"/tmp/diffusers_worker_{model_id.replace('/', '_')}.log", "wb"
             ),
             env=env,
@@ -313,7 +313,7 @@ class DiffusersBackend(BackendInterface):
                 # (C_report.json) peaks at 18.4 GB, well within this envelope.
                 gguf_bytes = 0
                 try:
-                    gguf_bytes = Path(str(gguf_path)).stat().st_size
+                    gguf_bytes = Path(str(gguf_path)).stat().st_size  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
                 except OSError:
                     pass
                 if gguf_bytes > 0:

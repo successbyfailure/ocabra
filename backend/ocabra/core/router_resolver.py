@@ -99,11 +99,11 @@ class RouterResolver:
     def __init__(
         self,
         *,
-        profile_registry: "ProfileRegistry",
-        model_manager: "ModelManager",
-        duration_estimator: "DurationEstimator | None" = None,
-        session_registry: "SessionRegistry | None" = None,
-        gpu_manager: "GPUManager | None" = None,
+        profile_registry: ProfileRegistry,
+        model_manager: ModelManager,
+        duration_estimator: DurationEstimator | None = None,
+        session_registry: SessionRegistry | None = None,
+        gpu_manager: GPUManager | None = None,
     ) -> None:
         self._profile_registry = profile_registry
         self._model_manager = model_manager
@@ -113,7 +113,7 @@ class RouterResolver:
 
     # ── Public API ────────────────────────────────────────────
 
-    def is_router(self, profile: "ModelProfile") -> bool:
+    def is_router(self, profile: ModelProfile) -> bool:
         """A profile is a router when it declares ``routing_targets``.
 
         The feature flag ``routing_enabled`` short-circuits this — flipping
@@ -128,7 +128,7 @@ class RouterResolver:
 
     async def pick(
         self,
-        router: "ModelProfile",
+        router: ModelProfile,
         *,
         request_body: dict | None = None,
         exclude_session_id: str | None = None,
@@ -171,7 +171,7 @@ class RouterResolver:
         # Pass 1 also resolves each target's registry entry / runtime plan /
         # state once — ``resolved`` carries that over to pass 2 so neither
         # is computed twice regardless of which pass ends up picking it.
-        resolved: list[tuple["ModelProfile", object, object]] = []  # (target, runtime_plan, state)
+        resolved: list[tuple[ModelProfile, object, object]] = []  # (target, runtime_plan, state)
 
         for target_id in target_ids:
             if target_id in visited:

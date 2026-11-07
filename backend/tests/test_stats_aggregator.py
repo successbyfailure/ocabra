@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +27,7 @@ async def test_gpu_usage_coverage_matches_real_window_at_normal_cadence() -> Non
     this doesn't pollute the real dashboard — AsyncSessionLocal here points
     at the same Postgres the live stats pages read from."""
     gpu_index = 999
-    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     # 5 samples, 60s apart — a real 4-minute window at hw-monitor's actual
     # cadence, no genuine gaps.
     samples = [
@@ -73,7 +73,7 @@ async def test_gpu_usage_coverage_still_caps_a_genuine_outage(
     remove this protection entirely."""
     monkeypatch.setattr(settings, "gpu_stats_expected_interval_s", 90)
     gpu_index = 998
-    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     samples = [
         GpuStat(
             recorded_at=t0, gpu_index=gpu_index, utilization_pct=50.0,
@@ -110,7 +110,7 @@ async def test_gpu_usage_coverage_still_caps_a_genuine_outage(
 
 @pytest.mark.asyncio
 async def test_energy_stats_use_sample_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
-    t0 = datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 4, 2, 12, 0, tzinfo=UTC)
     rows = [
         SimpleNamespace(
             gpu_index=0,

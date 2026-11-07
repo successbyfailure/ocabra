@@ -1122,7 +1122,7 @@ async def _delete_model_files(
             if not raw_path:
                 continue
             candidate = Path(raw_path)
-            if not candidate.exists():
+            if not candidate.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
                 continue
             if not _is_path_within_base(candidate, models_dir):
                 raise HTTPException(

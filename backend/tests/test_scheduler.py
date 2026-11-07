@@ -104,6 +104,7 @@ async def test_insufficient_vram_raises():
 async def test_uses_default_gpu_when_no_preferred():
     """No preferred GPU → uses settings.default_gpu_index."""
     from unittest.mock import patch
+
     from ocabra import config
 
     gm = make_gpu_manager({0: 5000, 1: 20000})
@@ -248,7 +249,7 @@ async def test_insufficient_vram_error_reports_per_gpu_headroom():
 async def test_schedule_evictions_unload_due_warm_models():
     from types import SimpleNamespace
 
-    from ocabra.core.model_manager import LoadPolicy, ModelStatus, ModelState
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
     gm = make_gpu_manager({0: 24000})
     model_manager = AsyncMock()
@@ -285,7 +286,7 @@ async def test_schedule_evictions_unload_due_warm_models():
 async def test_schedule_reloads_load_due_pin_models():
     from types import SimpleNamespace
 
-    from ocabra.core.model_manager import LoadPolicy, ModelStatus, ModelState
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
     gm = make_gpu_manager({0: 24000})
     model_manager = AsyncMock()
@@ -324,7 +325,7 @@ async def test_schedule_reloads_load_due_pin_models():
 async def test_schedule_reloads_skip_models_without_auto_reload():
     from types import SimpleNamespace
 
-    from ocabra.core.model_manager import LoadPolicy, ModelStatus, ModelState
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
 
     gm = make_gpu_manager({0: 24000})
     model_manager = AsyncMock()

@@ -70,9 +70,10 @@ async def list_users(
     Returns:
         List of ``{ id, username, email, role, is_active, created_at }``
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).order_by(User.created_at))
@@ -99,11 +100,12 @@ async def create_user(
     Raises:
         HTTP 409: If username already exists.
     """
+    from sqlalchemy import or_, select
+    from sqlalchemy.exc import IntegrityError
+
     from ocabra.core.auth_manager import hash_password
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, User, UserGroup
-    from sqlalchemy import or_, select
-    from sqlalchemy.exc import IntegrityError
 
     async with AsyncSessionLocal() as session:
         # Pre-check both unique columns so the common case returns 409 with a
@@ -199,9 +201,10 @@ async def get_user(
     Raises:
         HTTP 404: If the user does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(user_id)
@@ -239,9 +242,10 @@ async def patch_user(
         HTTP 400: If attempting to deactivate or demote own account.
         HTTP 404: If the user does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(user_id)
@@ -293,9 +297,10 @@ async def delete_user(
         HTTP 400: If attempting to delete own account.
         HTTP 404: If the user does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(user_id)
@@ -337,10 +342,11 @@ async def reset_user_password(
     Raises:
         HTTP 404: If the user does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.core.auth_manager import hash_password
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(user_id)
@@ -379,9 +385,10 @@ async def list_user_api_keys(
     Raises:
         HTTP 404: If the user does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey, User
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(user_id)
@@ -425,9 +432,10 @@ async def list_all_api_keys(
         List of ``{ id, name, key_prefix, expires_at, last_used_at, is_revoked,
         created_at, user_id, username }``
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey, User
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -464,9 +472,10 @@ async def purge_revoked_api_keys(
     Returns:
         ``{ deleted: int }`` — number of keys removed.
     """
+    from sqlalchemy import delete
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
-    from sqlalchemy import delete
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(delete(ApiKey).where(ApiKey.is_revoked.is_(True)))
@@ -492,9 +501,10 @@ async def reassign_api_keys(
     Returns:
         ``{ reassigned: int, skipped: int, failed: [{ id, error }] }``
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey, User
-    from sqlalchemy import select
 
     try:
         target_uuid = uuid.UUID(body.target_user_id)
@@ -561,9 +571,10 @@ async def revoke_user_api_key(
     Raises:
         HTTP 404: If the user or key does not exist or the key does not belong to the user.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey, User
-    from sqlalchemy import select
 
     try:
         parsed_user_id = uuid.UUID(user_id)
@@ -625,10 +636,12 @@ async def create_user_api_key(
         HTTP 404: If the user does not exist.
     """
     import secrets
+
+    from sqlalchemy import select
+
     from ocabra.core.auth_manager import hash_api_key
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey, User
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(user_id)

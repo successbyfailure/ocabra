@@ -80,9 +80,10 @@ async def list_groups(
     Returns:
         List of ``{ id, name, description, is_default, member_count, model_count, created_at }``
     """
+    from sqlalchemy import func, select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, GroupModel, UserGroup
-    from sqlalchemy import func, select
 
     async with AsyncSessionLocal() as session:
         groups_result = await session.execute(select(Group).order_by(Group.created_at))
@@ -123,9 +124,10 @@ async def create_group(
     Raises:
         HTTP 409: If a group with that name already exists.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group
-    from sqlalchemy import select
 
     async with AsyncSessionLocal() as session:
         existing = await session.execute(select(Group).where(Group.name == body.name))
@@ -167,9 +169,10 @@ async def patch_group(
         HTTP 400: If attempting to rename the default group.
         HTTP 404: If the group does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(group_id)
@@ -220,9 +223,10 @@ async def delete_group(
         HTTP 400: If the group is the default group.
         HTTP 404: If the group does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(group_id)
@@ -265,9 +269,10 @@ async def list_group_models(
     Raises:
         HTTP 404: If the group does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, GroupModel
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(group_id)
@@ -306,9 +311,10 @@ async def add_group_model(
         HTTP 404: If the group does not exist.
         HTTP 409: If the model is already assigned to the group.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, GroupModel
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(group_id)
@@ -354,9 +360,10 @@ async def remove_group_model(
     Raises:
         HTTP 404: If the group or the model assignment does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, GroupModel
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(group_id)
@@ -405,9 +412,10 @@ async def list_group_members(
     Raises:
         HTTP 404: If the group does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, User, UserGroup
-    from sqlalchemy import select
 
     try:
         parsed_id = uuid.UUID(group_id)
@@ -452,9 +460,10 @@ async def add_group_member(
         HTTP 404: If the group or user does not exist.
         HTTP 409: If the user is already a member.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, User, UserGroup
-    from sqlalchemy import select
 
     try:
         parsed_group_id = uuid.UUID(group_id)
@@ -517,9 +526,10 @@ async def remove_group_member(
         HTTP 400: If the group is the default group.
         HTTP 404: If the group or the membership does not exist.
     """
+    from sqlalchemy import select
+
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, UserGroup
-    from sqlalchemy import select
 
     try:
         parsed_group_id = uuid.UUID(group_id)

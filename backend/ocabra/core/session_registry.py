@@ -84,7 +84,7 @@ class SessionInfo:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "SessionInfo":
+    def from_dict(cls, payload: dict) -> SessionInfo:
         return cls(
             session_id=payload["session_id"],
             user_id=uuid.UUID(payload["user_id"]) if payload.get("user_id") else None,

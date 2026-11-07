@@ -239,7 +239,7 @@ class AceStepBackend(BackendInterface):
         ]
 
         log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: PTH123
+        log_file = open(log_path, "ab")  # noqa: PTH123, ASYNC230
 
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -410,8 +410,10 @@ class AceStepBackend(BackendInterface):
         # Prefer reading from the local filesystem (subprocess mode).
         # In external/Docker mode the file lives inside the remote container,
         # so we fall back to downloading via the ACE-Step /v1/audio endpoint.
-        if Path(file_path).is_file():
-            audio_bytes = Path(file_path).read_bytes()
+        if Path(file_path).is_file():  # noqa: ASYNC240 — stat(), microsegundos
+            # El audio generado puede pesar varios MB: leerlo en el event loop
+            # bloquearia al resto de peticiones mientras dura la lectura.
+            audio_bytes = await asyncio.to_thread(Path(file_path).read_bytes)
         else:
             from urllib.parse import urlencode
             audio_url = f"{base_url}/v1/audio?{urlencode({'path': file_path})}"
