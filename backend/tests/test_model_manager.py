@@ -1290,6 +1290,22 @@ async def test_update_config_deep_merges_extra_config_preserving_unmentioned_fie
     assert state.extra_config["registry_metadata"] == {"source": "huggingface"}
 
 
+
+@pytest.mark.asyncio
+async def test_update_config_null_clears_a_field_back_to_its_default(model_manager):
+    """Clearing a field in the Models form sends ``null``: the key must go, so
+    the option reader falls back to the backend default instead of keeping the
+    old value (key omitted) or returning ``None`` (key stored as null)."""
+    state = await add_test_model(model_manager)
+    state.extra_config = {"llama_cpp": {"ctx_size": 32768, "gpu_layers": 99}}
+
+    await model_manager.update_config(
+        "test/model", {"extra_config": {"llama_cpp": {"ctx_size": None}}}
+    )
+
+    assert "ctx_size" not in state.extra_config["llama_cpp"]
+    assert state.extra_config["llama_cpp"]["gpu_layers"] == 99
+
 @pytest.mark.asyncio
 async def test_pressure_eviction_prefers_on_demand_then_warm_then_pin(worker_pool):
     mm = ModelManager(worker_pool)

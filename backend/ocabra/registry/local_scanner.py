@@ -282,10 +282,10 @@ class LocalScanner:
                 continue
 
             if path.is_file() and path.suffix.lower() == ".gguf":
-                # GGUF is the native llama.cpp format; default to llama_cpp.
-                # Bitnet quantizations (i2_s, "bitnet" in name) need their
-                # specialised backend.
-                backend_type = "bitnet" if self._is_bitnet_gguf(path) else "llama_cpp"
+                # GGUF is the native llama.cpp format; default to llamacpp_mks,
+                # the Makespace fork that production runs. Bitnet quantizations
+                # (i2_s, "bitnet" in name) need their specialised backend.
+                backend_type = "bitnet" if self._is_bitnet_gguf(path) else "llamacpp_mks"
                 # Tokenizer fingerprint requires reading up to 64 MB from disk
                 # per file. Memoise by (path, mtime_ns, size) so re-scans don't
                 # re-hit the disk for files that haven't changed.
@@ -470,7 +470,7 @@ class LocalScanner:
                     model_ref=model_ref,
                     path=str(blob_path),
                     source="ollama-shared",
-                    backend_type="llama_cpp",
+                    backend_type="llamacpp_mks",
                     size_gb=blob_path.stat().st_size / (1024**3),
                     vocab_size=vocab_size,
                     bos_id=bos_id,

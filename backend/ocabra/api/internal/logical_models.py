@@ -81,6 +81,7 @@ async def _serialize(request: Request, model: LogicalModel, configs: list[ModelC
                 "status": getattr(getattr(state, "status", None), "value", None),
                 "loadPolicy": cfg.load_policy,
                 "pinPermanent": bool(cfg.pin_permanent),
+                "preferredGpu": cfg.preferred_gpu,
                 "artifact": _artifact_summary(cfg.artifact),
                 "profiles": sorted(p.profile_id for p in profiles if p.base_model_id == cfg.model_id),
             }

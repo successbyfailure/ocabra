@@ -1253,7 +1253,7 @@ async def test_local_scanner_discovers_hf_gguf_and_ollama(tmp_path: Path) -> Non
     assert any(model.model_ref == "tiny" for model in models)
     # G2: standalone GGUFs default to llama_cpp instead of vllm.
     assert any(
-        model.model_ref == "tiny" and model.backend_type == "llama_cpp" for model in models
+        model.model_ref == "tiny" and model.backend_type == "llamacpp_mks" for model in models
     )
     assert any(
         model.model_ref == "bitnet-b1.58-i2_s" and model.backend_type == "bitnet"
@@ -1354,7 +1354,7 @@ async def test_local_scanner_exposes_ollama_shared_blobs_as_llama_cpp(tmp_path: 
     shared = [m for m in models if m.source == "ollama-shared"]
     assert len(shared) == 1
     assert shared[0].model_ref == "mistral:7b"
-    assert shared[0].backend_type == "llama_cpp"
+    assert shared[0].backend_type == "llamacpp_mks"
     assert shared[0].path == str(blob_path)
 
 

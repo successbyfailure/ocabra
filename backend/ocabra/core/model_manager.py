@@ -67,9 +67,20 @@ def _deep_merge_dicts(base: dict, patch: dict) -> dict:
     reproduced live 2026-10-29: saving qwen3.8:27b's config from the UI
     silently dropped ``model_path``, breaking context-capacity planning for
     every subsequent request until a worker reload.
+
+    A ``None`` value **removes** the key (JSON Merge Patch, RFC 7386): it is
+    how the UI clears a field. Storing the ``null`` instead left the option
+    "set to None", and every option reader (``_get_option`` & co.) returns a
+    present key as-is — so clearing ``ctx_size`` in the form either kept the
+    old value (when the key was omitted) or handed ``None`` to ``int()``.
+    Every option currently stored as ``null`` defaults to ``None``, so this
+    changes nothing for existing configs.
     """
     merged = dict(base)
     for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+            continue
         existing = merged.get(key)
         if isinstance(existing, dict) and isinstance(value, dict):
             merged[key] = _deep_merge_dicts(existing, value)
