@@ -27,6 +27,17 @@ están en [`/docs/changelog`](/docs/changelog).
 - Las cifras de tok/s salen solo de peticiones **terminadas con éxito**. Los
   fallos están en la sección [Qué falla y por qué](#que-falla-y-por-que).
 
+## Cómo se pide un modelo
+
+Pones su **nombre** en el campo `model` y ya está: `gemma4:26b`,
+`qwen3-embedding:4b`, `whisper-large-v3-turbo`. Los nombres de esta página son
+los que devuelve `GET /v1/models`, y son los únicos que necesitas.
+
+Con qué motor se ejecuta cada modelo —llama.cpp, Ollama, vLLM, Whisper— lo
+decide este servidor, y puede cambiarlo sin que tengas que tocar tu cliente. Lo
+que sí cambia con el motor es el rendimiento, y eso es justo lo que miden las
+tablas de abajo: son del despliegue que está configurado ahora.
+
 ## El hardware
 
 | GPU | Tarjeta | VRAM |

@@ -34,31 +34,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ### Cambios de comportamiento
 
-- **Cada modelo aparece una sola vez en `GET /v1/models` y `GET /api/tags`.**
-  Un modelo puede servirse desde varios backends (por ejemplo `gemma4:26b`
-  desde llama.cpp y desde Ollama); el nombre público lo sirve el backend por
-  defecto, y las variantes fijadas a otro backend ya no se listan:
-  `gemma4:26b-ollama`, `qwen3-coder:30b-ollama`, `qwen3-embedding:4b-ollama` y
-  el resto de `*-ollama`, más `whisper-cpp-large-v3-turbo-cpu` y
-  `whisper.cpp-large-v3-turbo-q8-0-cpu`. **Siguen funcionando igual si las
-  nombras en el campo `model`**: mismo backend, mismos presets, mismos
-  vectores en el caso de los embeddings. **Acción:** solo si tu cliente elige
-  el modelo de la lista y buscaba uno de esos nombres; escríbelo a mano o usa
-  el nombre público.
-- **También puedes pedir un backend concreto con `<backend>/<modelo>`**, por
-  ejemplo `ollama/gemma4:26b` o `llamacpp_mks/gemma4:26b`. No se listan, pero
-  resuelven siempre al despliegue de ese backend.
-- **El acceso se concede por modelo.** Si tu clave tiene acceso a un modelo,
-  tiene acceso a todas sus formas: el nombre público, sus variantes fijadas a
-  otro backend, `<backend>/<modelo>` y los nombres antiguos que lo apuntan.
+- **Llama al modelo por su nombre y se cargará con el backend que tenga
+  configurado.** El motor que sirve cada modelo (llama.cpp, Ollama, vLLM,
+  Whisper…) es una decisión de este servidor, no tuya: se cambia desde la
+  administración y puede cambiar sin avisarte. Tú pides `gemma4:26b` y recibes
+  el despliegue que esté configurado en ese momento.
+- **Cada modelo aparece una sola vez en `GET /v1/models` y `GET /api/tags`**,
+  con el nombre que tienes que usar. **Acción:** si tu cliente tiene guardado
+  un nombre con sufijo de motor —`gemma4:26b-ollama`,
+  `whisper-cpp-large-v3-turbo-cpu` y similares—, cámbialo por el nombre a
+  secas. Es el único que vas a seguir viendo en la lista.
+- **El acceso se concede por modelo**, no por motor: si tu clave puede usar un
+  modelo, lo puede usar sea cual sea el backend que lo sirva.
 
 ### Arreglos
 
 - **En los endpoints de Ollama (`/api/chat`, `/api/generate`,
-  `/api/embeddings`, `/api/show`), un nombre que coincidía con dos backends a
-  la vez se resolvía al primero que apareciese**, que podía no ser el que
-  sirve el nombre público. Ahora gana siempre el backend por defecto del
-  modelo.
+  `/api/embeddings`, `/api/show`), un nombre servido por dos motores a la vez
+  se resolvía al primero que apareciese**, que podía no ser el configurado.
+  Ahora gana siempre el que está configurado para ese modelo.
 
 ---
 
@@ -90,26 +84,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ### Cambios de comportamiento
 
-**Los ids internos de los modelos cambian de forma; los nombres públicos no.**
-oCabra separa ahora el *modelo* (el nombre que usas: `gemma4:26b`,
-`whisper-large-v3-turbo`) de sus *despliegues*, uno por backend que lo sirve.
-Cada despliegue tiene id `<backend>/<modelo>`: `llamacpp_mks/gemma4:26b`,
-`ollama/gemma4:26b`, `whisper/whisper-large-v3-turbo`,
-`whisper_cpp/whisper-large-v3-turbo`, `vllm/bge-reranker-v2-m3`.
+**Por dentro, oCabra separa el modelo del motor que lo ejecuta. Los nombres
+que usas no cambian.** Lo único que necesitas saber es el nombre del modelo
+—`gemma4:26b`, `whisper-large-v3-turbo`—; el servidor decide con qué motor lo
+sirve.
 
-- Los nombres públicos, los perfiles (incluidos los `<modelo>-ollama`), los
-  routers `recomendado-*` y los alias siguen funcionando igual.
-- **Los ids antiguos siguen funcionando** como alias ocultos que llevan al mismo
-  backend: `llamacpp_mks/gemma4-26b`, `whisper/openai/whisper-large-v3-turbo`,
-  `vllm/BAAI/bge-reranker-v2-m3`, `whisper_cpp/large-v3-turbo-q8_0-cpu`, etc.
-- `recomendado-ha-chatbots` usa ahora las versiones por defecto de sus modelos
-  (antes dos de sus destinos iban fijados a Ollama).
+- Los nombres de modelo, los routers `recomendado-*` y los alias siguen
+  funcionando igual.
+- `recomendado-ha-chatbots` usa ahora la configuración por defecto de cada uno
+  de sus modelos.
 - En las estadísticas (`/ocabra/stats/*`), `model_id` es siempre el nombre del
-  modelo y el backend va aparte; lo que pidió el cliente se guarda en
+  modelo y el motor va en un campo aparte; lo que pidió el cliente se guarda en
   `requested_model`.
 
-**Acción**: ninguna si usas nombres públicos. Si guardabas ids internos
-(`backend/...`), siguen resolviendo, pero conviene pasar al nombre público.
+**Acción**: ninguna. Si en algún momento guardaste un id interno con el motor
+delante, deja de depender de esa forma y usa el nombre del modelo: es lo único
+que el servidor garantiza.
 
 ---
 
