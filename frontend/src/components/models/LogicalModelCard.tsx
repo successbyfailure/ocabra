@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Loader2, Plus, Settings2, Trash2 } from "lucide-react"
+import { Loader2, Pencil, Plus, Settings2, Trash2 } from "lucide-react"
 import { BackendIcons, backendLabel, mergeBackendItems } from "@/components/models/BackendIcons"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import type { BackendType, LogicalModel, ModelDeployment, ModelState } from "@/types"
@@ -12,11 +12,18 @@ interface LogicalModelCardProps {
   deploymentStates: Record<string, ModelState | undefined>
   busy?: boolean
   onConfigure: (modelId: string) => void
+  /** Open the model editor (General + one tab per deployment). */
+  onEdit?: (model: LogicalModel) => void
   onLoad: (modelId: string) => void
   onUnload: (modelId: string) => void
   onSetDefault: (model: LogicalModel, backend: BackendType) => void
   onAddDeployment: (model: LogicalModel, backend: BackendType) => void
   onRemoveDeployment: (model: LogicalModel, deployment: ModelDeployment) => void
+}
+
+/** "GPU 1", or "auto" when the scheduler picks. */
+export function formatPreferredGpu(gpu: number | null | undefined): string {
+  return gpu == null ? "GPU auto" : `GPU ${gpu}`
 }
 
 /**
@@ -30,6 +37,7 @@ export function LogicalModelCard({
   deploymentStates,
   busy = false,
   onConfigure,
+  onEdit,
   onLoad,
   onUnload,
   onSetDefault,
@@ -61,6 +69,17 @@ export function LogicalModelCard({
           {busy && <Loader2 size={14} className="animate-spin text-muted-foreground" />}
           {categoryLabel && (
             <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">{categoryLabel}</span>
+          )}
+          {onEdit && (
+            <button
+              type="button"
+              onClick={() => onEdit(model)}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-muted"
+              aria-label={`Editar ${model.modelKey}`}
+            >
+              <Pencil size={12} />
+              Editar
+            </button>
           )}
         </div>
       </div>
@@ -98,6 +117,13 @@ export function LogicalModelCard({
                 </span>
                 {!dep.installed && <span className="text-xs text-muted-foreground">(no instalado)</span>}
               </button>
+              <span
+                className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                title="GPU preferida de este despliegue"
+                data-testid={`preferred-gpu-${dep.backend}`}
+              >
+                {formatPreferredGpu(dep.preferredGpu)}
+              </span>
               <div className="flex shrink-0 items-center gap-1.5">
                 <ModelStatusBadge status={status} />
                 <button

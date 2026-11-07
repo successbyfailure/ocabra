@@ -80,3 +80,45 @@ export function toCamelView<T>(value: T, depth = 3): T {
   }
   return out as T
 }
+
+function isEmptyValue(value: unknown): boolean {
+  if (value == null || value === "") return true
+  if (Array.isArray(value)) return value.length === 0
+  if (isPlainRecord(value)) return Object.keys(value).length === 0
+  return false
+}
+
+/**
+ * Drop unset values (null, "", empty arrays/objects) recursively. Dicts in
+ * {@link FOREIGN_KEYS} are kept verbatim: a `null` inside `hf_overrides` is
+ * a real value for someone else's schema.
+ */
+export function compactDeep<T>(value: T, depth = 3): T {
+  if (!isPlainRecord(value) || depth <= 0) return value
+  const out: AnyRecord = {}
+  for (const [key, entry] of Object.entries(value)) {
+    const next = FOREIGN_KEYS.has(key) ? entry : compactDeep(entry, depth - 1)
+    if (!isEmptyValue(next)) out[key] = next
+  }
+  return out as T
+}
+
+/**
+ * Turn a full section into a JSON Merge Patch against what is stored: every
+ * key that had a value in `original` and is gone from `next` becomes `null`
+ * (the server deletes it); nested dicts are diffed the same way, since the
+ * server merges them key by key. Keys that never existed get no `null`.
+ */
+export function withClearedKeys(original: unknown, next: AnyRecord, depth = 3): AnyRecord {
+  if (!isPlainRecord(original) || depth <= 0) return next
+  const out: AnyRecord = { ...next }
+  for (const [key, before] of Object.entries(original)) {
+    if (isEmptyValue(before)) continue
+    if (!(key in next)) {
+      out[key] = null
+    } else if (isPlainRecord(before) && isPlainRecord(next[key])) {
+      out[key] = withClearedKeys(before, next[key] as AnyRecord, depth - 1)
+    }
+  }
+  return out
+}

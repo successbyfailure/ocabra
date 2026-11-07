@@ -16,6 +16,15 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.50.0 — 2026-11-07
+
+### Sin cambios para tu cliente
+
+- Esta versión solo cambia el panel de administración (editor de modelos).
+  La API, los nombres de modelo y las respuestas son los mismos que en 0.49.0.
+
+---
+
 ## 0.49.0 — 2026-11-07
 
 ### Cambios de comportamiento

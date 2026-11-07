@@ -12,6 +12,7 @@ const deployment = (overrides: Partial<ModelDeployment>): ModelDeployment => ({
   status: "configured",
   loadPolicy: "on_demand",
   pinPermanent: false,
+  preferredGpu: null,
   artifact: null,
   profiles: [],
   ...overrides,

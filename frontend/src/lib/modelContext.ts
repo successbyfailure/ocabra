@@ -72,6 +72,20 @@ export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
   return config
 }
 
+export interface WhisperCppConfig {
+  threads?: number | null
+  diarizationModelId?: string | null
+  [key: string]: unknown
+}
+
+/** whisper.cpp section (`extra_config.whisper_cpp`), camelCase view. */
+export function getWhisperCppConfig(model: ModelState): WhisperCppConfig | null {
+  if (model.backendType !== "whisper_cpp") return null
+  const extra = model.extraConfig
+  if (!isRecord(extra) || !isRecord(extra.whisper_cpp)) return null
+  return toCamelView(extra.whisper_cpp) as WhisperCppConfig
+}
+
 /** Default reasoning effort stored at the top level of extra_config. */
 export function getDefaultReasoningEffort(model: ModelState | null | undefined): string {
   const extra = model?.extraConfig

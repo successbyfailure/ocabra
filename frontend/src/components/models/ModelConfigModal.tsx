@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Link } from "react-router-dom";
 import { Layers3, X } from "lucide-react";
@@ -15,9 +15,10 @@ import {
   getVllmConfig,
   getWhisperConfig,
   getDefaultReasoningEffort,
+  getWhisperCppConfig,
   getWritableExtraConfig,
 } from "@/lib/modelContext";
-import { toSnakeKeys } from "@/lib/configKeys";
+import { compactDeep, toSnakeKeys, withClearedKeys } from "@/lib/configKeys";
 import { ScheduleEditor } from "@/components/models/ScheduleEditor";
 import { FieldHint, FieldSection, UseCaseManagedNotice } from "@/components/models/fieldPrimitives";
 import { CapacityPlacementPanel } from "@/components/models/CapacityPlacementPanel";
@@ -36,21 +37,36 @@ import type {
   VLLMConfig,
 } from "@/types";
 
+export type ModelConfigSaveHandler = (
+  modelId: string,
+  patch: {
+    loadPolicy: LoadPolicy;
+    preferredGpu: number | null;
+    pinPermanent: boolean;
+    schedules: EvictionSchedule[];
+    extraConfig?: BackendExtraConfig;
+  },
+) => Promise<void>;
+
 interface ModelConfigModalProps {
   model: ModelState | null;
   gpus: GPUState[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSave: (
-    modelId: string,
-    patch: {
-      loadPolicy: LoadPolicy;
-      preferredGpu: number | null;
-      pinPermanent: boolean;
-      schedules: EvictionSchedule[];
-      extraConfig?: BackendExtraConfig;
-    },
-  ) => Promise<void>;
+  onSave: ModelConfigSaveHandler;
+}
+
+export interface ModelConfigFormProps {
+  model: ModelState | null;
+  gpus: GPUState[];
+  /** Whether the form is visible: gates the estimate / groups / candidates
+   *  fetches (the modal passes its `open`, a tab passes whether it is active). */
+  active?: boolean;
+  onSave: ModelConfigSaveHandler;
+  /** Called after a successful save (the modal closes itself here). */
+  onSaved?: () => void;
+  /** Rendered at the start of the footer, before "Guardar" (e.g. Cancelar). */
+  footerStart?: ReactNode;
 }
 
 const VLLM_GPU_MEMORY_UTILIZATION_PRESETS = [0.75, 0.8, 0.85, 0.9, 0.92, 0.95];
@@ -228,10 +244,38 @@ function omitKeys(
   return next;
 }
 
+type ConfigSection =
+  | "vllm"
+  | "sglang"
+  | "llama_cpp"
+  | "bitnet"
+  | "tensorrt_llm"
+  | "whisper"
+  | "whisper_cpp";
+
+/** extra_config section this form edits for a backend, if any. */
+function sectionForBackend(backendType: string): ConfigSection | null {
+  if (isLlamaCppFamily(backendType as ModelState["backendType"])) return "llama_cpp";
+  switch (backendType) {
+    case "vllm":
+    case "sglang":
+    case "bitnet":
+    case "tensorrt_llm":
+    case "whisper":
+    case "whisper_cpp":
+      return backendType;
+    default:
+      return null;
+  }
+}
+
+function isConfigRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function setNestedConfig(
   config: BackendExtraConfig,
-  section:
-    "vllm" | "sglang" | "llama_cpp" | "bitnet" | "tensorrt_llm" | "whisper",
+  section: ConfigSection,
   payload: Record<string, unknown>,
   legacyRootKeys: string[],
 ): BackendExtraConfig {
@@ -240,7 +284,9 @@ function setNestedConfig(
   // server keeps the camelCase one on a clash, which used to resurrect stale
   // values the client mapping had camelised).
   const next = toSnakeKeys(omitKeys(config, legacyRootKeys), 3, "snake");
-  const compacted = compactConfig(toSnakeKeys(payload, 3, "camel"));
+  // Deep compaction: unset values inside sub-dicts (speculative) go too;
+  // clearing a stored value is expressed as `null` later, in the patch.
+  const compacted = compactDeep(compactConfig(toSnakeKeys(payload, 3, "camel")));
   if (Object.keys(compacted).length === 0) {
     delete next[section];
     return next;
@@ -249,13 +295,20 @@ function setNestedConfig(
   return next;
 }
 
-export function ModelConfigModal({
+/**
+ * Per-deployment configuration form, without any dialog chrome. Used by
+ * {@link ModelConfigModal} ("Por despliegue" view) and embedded in a tab of the
+ * logical-model editor.
+ */
+export function ModelConfigForm({
   model,
   gpus,
-  open,
-  onOpenChange,
+  active = true,
   onSave,
-}: ModelConfigModalProps) {
+  onSaved,
+  footerStart,
+}: ModelConfigFormProps) {
+  const open = active;
   const isAdmin = useIsAdmin();
 
   const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand");
@@ -375,6 +428,9 @@ export function ModelConfigModal({
   const [whisperDiarizationModelId, setWhisperDiarizationModelId] =
     useState("");
   const [whisperNumWorkers, setWhisperNumWorkers] = useState("5");
+  const [whisperCppThreads, setWhisperCppThreads] = useState("");
+  const [whisperCppDiarizationModelId, setWhisperCppDiarizationModelId] =
+    useState("");
   const [defaultReasoningEffort, setDefaultReasoningEffort] = useState("");
   const [memoryEstimate, setMemoryEstimate] =
     useState<ModelMemoryEstimate | null>(null);
@@ -611,6 +667,15 @@ export function ModelConfigModal({
       whisper?.numWorkers == null ? "5" : String(whisper.numWorkers),
     );
     setDefaultReasoningEffort(getDefaultReasoningEffort(model));
+    const whisperCpp = getWhisperCppConfig(model);
+    setWhisperCppThreads(
+      whisperCpp?.threads == null ? "" : String(whisperCpp.threads),
+    );
+    setWhisperCppDiarizationModelId(
+      whisperCpp?.diarizationModelId == null
+        ? ""
+        : String(whisperCpp.diarizationModelId),
+    );
     // Re-hidratar si cambia el modelo o aparece/desaparece una GPU. Depender de
     // la referencia completa `gpus` reiniciaba el formulario cada ~2s con los
     // broadcasts; ignorarla del todo dejaba un split erróneo si llegaba tarde.
@@ -804,7 +869,31 @@ export function ModelConfigModal({
       Boolean(recipeId) ||
       Boolean(probeStatus));
 
-  const buildExtraConfig = (): BackendExtraConfig | undefined => {
+  /**
+   * `forPatch`: the PATCH is a JSON Merge Patch, so a field the user emptied
+   * must travel as `null` (omitting it keeps the stored value). Only keys that
+   * had a value before get a `null`. The memory estimate wants the plain,
+   * complete config instead (no nulls).
+   */
+  const buildExtraConfig = (forPatch = false): BackendExtraConfig | undefined => {
+    const full = buildFullExtraConfig();
+    if (!forPatch || !model) return full;
+    const original = toSnakeKeys(getWritableExtraConfig(model), 3, "snake");
+    const patch: BackendExtraConfig = { ...(full ?? {}) };
+    const section = sectionForBackend(model.backendType);
+    if (section && isConfigRecord(original[section])) {
+      (patch as Record<string, unknown>)[section] = withClearedKeys(
+        original[section],
+        isConfigRecord(patch[section]) ? (patch[section] as Record<string, unknown>) : {},
+      );
+    }
+    if (getDefaultReasoningEffort(model) && !("default_reasoning_effort" in patch)) {
+      patch.default_reasoning_effort = null;
+    }
+    return Object.keys(patch).length > 0 ? patch : undefined;
+  };
+
+  const buildFullExtraConfig = (): BackendExtraConfig | undefined => {
     if (!model) return undefined;
     const current = getWritableExtraConfig(model);
 
@@ -1050,6 +1139,21 @@ export function ModelConfigModal({
       return Object.keys(next).length > 0 ? next : undefined;
     }
 
+    if (model.backendType === "whisper_cpp") {
+      const next = setNestedConfig(
+        current,
+        "whisper_cpp",
+        {
+          ...(getWhisperCppConfig(model) ?? {}),
+          threads:
+            whisperCppThreads.trim() === "" ? null : Number(whisperCppThreads),
+          diarizationModelId: whisperCppDiarizationModelId.trim() || null,
+        },
+        [],
+      );
+      return Object.keys(next).length > 0 ? next : undefined;
+    }
+
     const snakeCurrent = toSnakeKeys(current, 3, "snake");
     return Object.keys(snakeCurrent).length > 0 ? snakeCurrent : undefined;
   };
@@ -1115,7 +1219,7 @@ export function ModelConfigModal({
         preferredGpu,
         pinPermanent,
         schedules,
-        extraConfig: buildExtraConfig(),
+        extraConfig: buildExtraConfig(true),
       });
 
       // Sync group assignments if admin and groups changed
@@ -1137,63 +1241,14 @@ export function ModelConfigModal({
       }
 
       await Promise.all([savePromise, groupSyncPromise]);
-      onOpenChange(false);
+      onSaved?.();
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[88vh] w-[95vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
-          <div className="mb-4 flex items-start justify-between">
-            <div>
-              <Dialog.Title className="text-lg font-semibold">
-                Configurar modelo
-              </Dialog.Title>
-              <Dialog.Description className="text-sm text-muted-foreground">
-                {model?.displayName ?? ""}
-              </Dialog.Description>
-              {model && (model.releaseDate || model.lastUpdated) && (
-                <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
-                  {model.releaseDate && (
-                    <span title={new Date(model.releaseDate).toLocaleString()}>
-                      Release:{" "}
-                      <span className="text-foreground">
-                        {new Date(model.releaseDate).toLocaleDateString()}
-                      </span>
-                    </span>
-                  )}
-                  {model.lastUpdated && (
-                    <span title={new Date(model.lastUpdated).toLocaleString()}>
-                      Última actualización:{" "}
-                      <span className="text-foreground">
-                        {new Date(model.lastUpdated).toLocaleDateString()}
-                      </span>
-                    </span>
-                  )}
-                  {model.metadataFetchedAt && (
-                    <span
-                      className="opacity-70"
-                      title={new Date(model.metadataFetchedAt).toLocaleString()}
-                    >
-                      (consultado{" "}
-                      {new Date(model.metadataFetchedAt).toLocaleDateString()})
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-            <Dialog.Close
-              className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-              aria-label="Close"
-            >
-              <X size={16} />
-            </Dialog.Close>
-          </div>
-
+    <>
           <div className="space-y-4">
             {model &&
               (model.profiles ?? []).some((profile) =>
@@ -2485,6 +2540,54 @@ export function ModelConfigModal({
               </FieldSection>
             )}
 
+            {model?.backendType === "whisper_cpp" && (
+              <FieldSection
+                title="whisper.cpp Runtime"
+                description="Hilos de CPU y modelo de diarización del sidecar pyannote."
+              >
+                <label className="block text-sm">
+                  <span className="mb-1 block text-muted-foreground">
+                    threads
+                  </span>
+                  <input
+                    aria-label="whisper.cpp threads"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={whisperCppThreads}
+                    onChange={(event) =>
+                      setWhisperCppThreads(event.target.value)
+                    }
+                    placeholder="auto"
+                    className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  />
+                  <FieldHint>
+                    Déjalo vacío para que whisper.cpp elija según los núcleos.
+                  </FieldHint>
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block text-muted-foreground">
+                    Diarization model id
+                  </span>
+                  <input
+                    aria-label="whisper.cpp diarization model id"
+                    value={whisperCppDiarizationModelId}
+                    onChange={(event) =>
+                      setWhisperCppDiarizationModelId(event.target.value)
+                    }
+                    placeholder="pyannote/speaker-diarization-3.1"
+                    className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  />
+                  <FieldHint>
+                    En whisper.cpp la diarización no se activa aquí: se pide en
+                    cada petición con <code>diarize=true</code> (o usando un
+                    perfil -diarized). Este campo solo elige el modelo pyannote;
+                    vacío = el del servidor.
+                  </FieldHint>
+                </label>
+              </FieldSection>
+            )}
+
             {model?.backendType === "whisper" && (
               <FieldSection
                 title="Whisper Runtime"
@@ -2618,9 +2721,7 @@ export function ModelConfigModal({
           </div>
 
           <div className="mt-5 flex justify-end gap-2">
-            <Dialog.Close className="rounded-md border border-border px-3 py-2 text-sm hover:bg-muted">
-              Cancelar
-            </Dialog.Close>
+            {footerStart}
             <button
               type="button"
               onClick={() => void handleSave()}
@@ -2630,6 +2731,80 @@ export function ModelConfigModal({
               {saving ? "Guardando..." : "Guardar"}
             </button>
           </div>
+    </>
+  );
+}
+
+export function ModelConfigModal({
+  model,
+  gpus,
+  open,
+  onOpenChange,
+  onSave,
+}: ModelConfigModalProps) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[88vh] w-[95vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
+          <div className="mb-4 flex items-start justify-between">
+            <div>
+              <Dialog.Title className="text-lg font-semibold">
+                Configurar modelo
+              </Dialog.Title>
+              <Dialog.Description className="text-sm text-muted-foreground">
+                {model?.displayName ?? ""}
+              </Dialog.Description>
+              {model && (model.releaseDate || model.lastUpdated) && (
+                <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
+                  {model.releaseDate && (
+                    <span title={new Date(model.releaseDate).toLocaleString()}>
+                      Release:{" "}
+                      <span className="text-foreground">
+                        {new Date(model.releaseDate).toLocaleDateString()}
+                      </span>
+                    </span>
+                  )}
+                  {model.lastUpdated && (
+                    <span title={new Date(model.lastUpdated).toLocaleString()}>
+                      Última actualización:{" "}
+                      <span className="text-foreground">
+                        {new Date(model.lastUpdated).toLocaleDateString()}
+                      </span>
+                    </span>
+                  )}
+                  {model.metadataFetchedAt && (
+                    <span
+                      className="opacity-70"
+                      title={new Date(model.metadataFetchedAt).toLocaleString()}
+                    >
+                      (consultado{" "}
+                      {new Date(model.metadataFetchedAt).toLocaleDateString()})
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+            <Dialog.Close
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+              aria-label="Close"
+            >
+              <X size={16} />
+            </Dialog.Close>
+          </div>
+
+          <ModelConfigForm
+            model={model}
+            gpus={gpus}
+            active={open}
+            onSave={onSave}
+            onSaved={() => onOpenChange(false)}
+            footerStart={
+              <Dialog.Close className="rounded-md border border-border px-3 py-2 text-sm hover:bg-muted">
+                Cancelar
+              </Dialog.Close>
+            }
+          />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

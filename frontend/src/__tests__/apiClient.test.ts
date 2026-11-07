@@ -341,6 +341,7 @@ describe("api client mappings", () => {
               status: "loaded",
               loadPolicy: "pin",
               pinPermanent: false,
+              preferredGpu: 1,
               artifact: { kind: "gguf", source: "ollama", ref: "gemma4:26b", mmproj: true },
               profiles: ["org/gemma4:26b"],
             },
@@ -364,6 +365,7 @@ describe("api client mappings", () => {
     expect(init.method).toBe("PATCH")
     expect(JSON.parse(String(init.body))).toEqual({ defaultBackend: "llamacpp_mks" })
     expect(model.deployments[0]?.artifact?.mmproj).toBe(true)
+    expect(model.deployments[0]?.preferredGpu).toBe(1)
     expect(model.compatibleBackends[1]).toEqual({
       backend: "bitnet",
       status: "probable",

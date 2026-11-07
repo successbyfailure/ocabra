@@ -1089,6 +1089,10 @@ function toModelDeployment(raw: unknown): ModelDeployment {
       data.loadPolicy ?? data.load_policy ?? "on_demand",
     ) as LoadPolicy,
     pinPermanent: Boolean(data.pinPermanent ?? data.pin_permanent),
+    preferredGpu: (() => {
+      const gpu = data.preferredGpu ?? data.preferred_gpu;
+      return gpu == null || gpu === "" ? null : Number(gpu);
+    })(),
     artifact: artifact as ModelDeployment["artifact"],
     profiles: Array.isArray(data.profiles) ? data.profiles.map(String) : [],
   };

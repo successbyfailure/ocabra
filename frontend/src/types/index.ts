@@ -502,6 +502,8 @@ export interface ModelDeployment {
   status: ModelStatus | null;
   loadPolicy: LoadPolicy;
   pinPermanent: boolean;
+  /** GPU the scheduler should prefer for this deployment; null = auto. */
+  preferredGpu: number | null;
   artifact: DeploymentArtifact | null;
   profiles: string[];
 }

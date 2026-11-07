@@ -30,6 +30,20 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 vi.mock("@/components/models/ModelConfigModal", () => ({
   ModelConfigModal: ({ model, open }: { model: ModelState | null; open: boolean }) =>
     open && model ? <div data-testid="config-modal">{model.modelId}</div> : null,
+  ModelConfigForm: ({
+    model,
+    active,
+    footerStart,
+  }: {
+    model: ModelState | null
+    active?: boolean
+    footerStart?: import("react").ReactNode
+  }) => (
+    <div data-testid="config-form" data-active={String(active)}>
+      {model?.modelId}
+      {footerStart}
+    </div>
+  ),
 }))
 
 function deploymentState(modelId: string, backendType: ModelState["backendType"]): ModelState {
@@ -87,6 +101,7 @@ const gemma: LogicalModel = {
       status: "configured",
       loadPolicy: "pin",
       pinPermanent: false,
+      preferredGpu: 1,
       artifact: { kind: "gguf", source: "ollama", ref: "gemma4:26b" },
       profiles: ["gemma4:26b"],
     },
@@ -98,6 +113,7 @@ const gemma: LogicalModel = {
       status: "configured",
       loadPolicy: "on_demand",
       pinPermanent: false,
+      preferredGpu: null,
       artifact: { kind: "ollama_tag", source: "ollama", ref: "gemma4:26b" },
       profiles: ["gemma4:26b-ollama"],
     },
@@ -196,5 +212,65 @@ describe("Models · vista por modelo", () => {
     fireEvent.click(screen.getByRole("button", { name: "Por despliegue" }))
     await waitFor(() => expect(screen.getByText(/2 despliegues en chat/)).toBeTruthy())
     expect(screen.queryByTestId("logical-model-gemma4:26b")).toBeNull()
+  })
+  it("shows each deployment's preferred GPU (auto when unset)", async () => {
+    const card = await renderModelView()
+    expect(within(card).getByTestId("preferred-gpu-llamacpp_mks").textContent).toBe("GPU 1")
+    expect(within(card).getByTestId("preferred-gpu-ollama").textContent).toBe("GPU auto")
+  })
+
+  describe("editor", () => {
+    async function openEditor() {
+      const card = await renderModelView()
+      fireEvent.click(within(card).getByRole("button", { name: "Editar gemma4:26b" }))
+      return await screen.findByRole("dialog")
+    }
+
+    it("General tab renames, switches the default and adds a backend", async () => {
+      const dialog = await openEditor()
+      expect(within(dialog).getByText("Editar modelo")).toBeTruthy()
+
+      fireEvent.change(within(dialog).getByLabelText("Nombre visible"), { target: { value: "Gemma 4 26B" } })
+      fireEvent.click(within(dialog).getByRole("button", { name: "Guardar nombre" }))
+      await waitFor(() =>
+        expect(api.logicalModels.patch).toHaveBeenCalledWith("gemma4:26b", { displayName: "Gemma 4 26B" }),
+      )
+
+      fireEvent.change(within(dialog).getByLabelText("Backend por defecto"), { target: { value: "ollama" } })
+      await waitFor(() =>
+        expect(api.logicalModels.patch).toHaveBeenCalledWith("gemma4:26b", { defaultBackend: "ollama" }),
+      )
+
+      fireEvent.change(within(dialog).getByLabelText("Añadir backend"), { target: { value: "llama_cpp" } })
+      fireEvent.click(within(dialog).getByRole("button", { name: /Añadir$/ }))
+      await waitFor(() =>
+        expect(api.logicalModels.addDeployment).toHaveBeenCalledWith("gemma4:26b", { backend: "llama_cpp" }),
+      )
+    })
+
+    it("has one tab per deployment (★ on the default) embedding that deployment's form", async () => {
+      const dialog = await openEditor()
+      const tabs = within(dialog).getAllByRole("tab").map((tab) => tab.textContent)
+      expect(tabs).toEqual(["General", "★ llama.cpp mks", "ollama"])
+
+      fireEvent.mouseDown(within(dialog).getByRole("tab", { name: "ollama" }))
+      const form = await within(dialog).findByTestId("config-form")
+      expect(form.textContent).toContain("ollama/gemma4:26b")
+      expect(form.getAttribute("data-active")).toBe("true")
+    })
+
+    it("removes a deployment from its tab through the same confirmation", async () => {
+      const dialog = await openEditor()
+      fireEvent.mouseDown(within(dialog).getByRole("tab", { name: "★ llama.cpp mks" }))
+      const form = await within(dialog).findByTestId("config-form")
+      fireEvent.click(within(form).getByRole("button", { name: /Quitar despliegue/ }))
+
+      const confirm = await screen.findByRole("dialog", { name: "Quitar despliegue" })
+      expect(confirm.textContent).toContain("los ficheros del modelo se conservan")
+      fireEvent.click(within(confirm).getByRole("button", { name: "Quitar" }))
+      await waitFor(() =>
+        expect(api.logicalModels.removeDeployment).toHaveBeenCalledWith("gemma4:26b", "llamacpp_mks"),
+      )
+    })
   })
 })

@@ -1,7 +1,7 @@
 # Plan: un modelo, varios backends · modelo lógico + despliegues
 
 **Fecha de apertura:** 2026-11-07
-**Estado:** ✅ Fases 0–6 hechas (v0.48.0); queda deuda menor listada en la Fase 4/5
+**Estado:** ✅ Fases 0–6 hechas y deuda cerrada (v0.50.0); queda deuda mínima listada en la Fase 4/5
 **Relacionado:** [`backend-distribution-plan.md`](backend-distribution-plan.md) (backend en el id
 canónico, migración entre backends), [`llama-cpp-elastic-kv-plan.md`](llama-cpp-elastic-kv-plan.md)
 (convención `*-ollama` que este plan elimina), `docs/CONTRACTS.md` §ids canónicos
@@ -334,13 +334,18 @@ Sin migración: reutiliza `model_profiles.backend` y `model_profile_aliases.back
   descarga pide "Nombre del modelo" (`model_key`), qué backends desplegar y cuál es el default.
   De paso, la búsqueda de Ollama no se mapeaba y los tamaños salían "?".
 
-Deuda conocida:
-- No hay editor con pestaña por despliegue: cada despliegue abre su propio modal.
-- `/logical-models` no devuelve `preferred_gpu`.
-- Al borrar un campo en el modal la clave se omite del PATCH y el deep-merge del servidor conserva el
-  valor viejo (preexistente).
-- La diarización de whisper.cpp no tiene campo en el modal.
-- El escáner local sigue sugiriendo `llama_cpp` para los blobs de Ollama.
+Deuda de la primera versión, **cerrada en v0.50.0**:
+- Editor de modelo (`LogicalModelEditor`): pestaña "General" (nombre visible, backend por defecto,
+  añadir backend) y una pestaña por despliegue con su formulario embebido (`ModelConfigForm`,
+  extraído de `ModelConfigModal`, que sigue envolviéndolo para la vista "Por despliegue").
+- `/logical-models` devuelve `preferredGpu`; se muestra por despliegue y se edita en su pestaña.
+- Vaciar un campo envía `null` y el servidor borra la clave (`_deep_merge_dicts`, JSON Merge Patch).
+- whisper.cpp: campos `threads` y `diarization_model_id` (la diarización se pide por petición).
+- El escáner local sugiere `llamacpp_mks`.
+
+Queda (menor): claves antiguas en la raíz de `extra_config` que el formulario mueve a su sección
+no se borran al vaciarlas (solo se omiten); dos diálogos Radix apilados al quitar un despliegue desde
+el editor, no probado en navegador real.
 
 ## Fases
 

@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import { ModelConfigModal } from "@/components/models/ModelConfigModal"
-import type { LlamaCppConfig, ModelState } from "@/types"
+import type { GPUState, LlamaCppConfig, ModelState } from "@/types"
 
 vi.mock("@/api/client", () => ({
   api: {
@@ -434,6 +434,129 @@ describe("ModelConfigModal", () => {
       diarization_enabled: true,
       diarization_model_id: "pyannote/speaker-diarization-3.1",
       num_workers: 3,
+    })
+  })
+  function baseModel(overrides: Partial<ModelState>): ModelState {
+    return {
+      modelId: "x",
+      displayName: "x",
+      backendType: "llamacpp_mks",
+      status: "configured",
+      loadPolicy: "on_demand",
+      pinPermanent: false,
+      preferredGpu: null,
+      currentGpu: [],
+      vramUsedMb: 0,
+      ramUsedMb: 0,
+      diskSizeBytes: null,
+      capabilities: {
+        chat: true,
+        completion: true,
+        tools: false,
+        vision: false,
+        embeddings: false,
+        pooling: false,
+        rerank: false,
+        classification: false,
+        score: false,
+        reasoning: false,
+        imageGeneration: false,
+        imageEditing: false,
+        audioTranscription: false,
+        musicGeneration: false,
+        tts: false,
+        audioInput: false,
+        audioOutput: false,
+        videoInput: false,
+        streaming: true,
+        contextLength: 8192,
+        nativeContextLength: 8192,
+      },
+      lastRequestAt: null,
+      loadedAt: null,
+      ...overrides,
+    }
+  }
+
+  it("sends null for a stored field the user emptied, and nothing for untouched unset ones", async () => {
+    const onSave = vi.fn(async () => undefined)
+    render(
+      <ModelConfigModal
+        open
+        onOpenChange={vi.fn()}
+        onSave={onSave}
+        gpus={[]}
+        model={baseModel({
+          modelId: "llamacpp_mks/qwen3:8b",
+          extraConfig: {
+            llama_cpp: {
+              model_path: "/models/q.gguf",
+              ctx_size: 8192,
+              gpu_layers: 99,
+              threads: 8,
+            } as unknown as LlamaCppConfig,
+          },
+        })}
+      />,
+    )
+
+    expect((screen.getByLabelText(/Context size/i) as HTMLInputElement).value).toBe("8192")
+    fireEvent.change(screen.getByLabelText(/Context size/i), { target: { value: "" } })
+    fireEvent.change(screen.getByLabelText(/GPU layers/i), { target: { value: "" } })
+    await act(async () => {
+      fireEvent.click(screen.getByText(/^Guardar$/i))
+    })
+
+    const saved = (onSave.mock.calls[0] as unknown as [string, { extraConfig: { llama_cpp: Record<string, unknown> } }])[1]
+    const llama = saved.extraConfig.llama_cpp
+    expect(llama.ctx_size).toBeNull()
+    expect(llama.gpu_layers).toBeNull()
+    expect(llama.threads).toBe(8)
+    expect(llama.model_path).toBe("/models/q.gguf")
+    // Never stored, never touched: no null for these.
+    expect("batch_size" in llama).toBe(false)
+    expect("tensor_split" in llama).toBe(false)
+    expect("speculative" in llama).toBe(false)
+  })
+
+  it("edits whisper.cpp threads and diarization model, with the per-request diarize note", async () => {
+    const onSave = vi.fn(async () => undefined)
+    render(
+      <ModelConfigModal
+        open
+        onOpenChange={vi.fn()}
+        onSave={onSave}
+        gpus={[{ index: 1, name: "RTX 3060" } as unknown as GPUState]}
+        model={baseModel({
+          modelId: "whisper_cpp/large-v3-turbo",
+          backendType: "whisper_cpp",
+          preferredGpu: 1,
+          extraConfig: { whisper_cpp: { threads: 6, model_path: "/m/ggml.bin" } },
+        })}
+      />,
+    )
+
+    // GPU preferida is part of every deployment form.
+    expect((screen.getByLabelText(/GPU preferida/i) as HTMLSelectElement).value).toBe("1")
+    expect((screen.getByLabelText("whisper.cpp threads") as HTMLInputElement).value).toBe("6")
+    expect(screen.getByPlaceholderText("pyannote/speaker-diarization-3.1")).toBeTruthy()
+    expect(document.body.textContent).toContain("diarize=true")
+    expect(screen.queryByLabelText(/habilitar diarización/i)).toBeNull()
+
+    fireEvent.change(screen.getByLabelText("whisper.cpp threads"), { target: { value: "" } })
+    fireEvent.change(screen.getByLabelText("whisper.cpp diarization model id"), {
+      target: { value: "pyannote/speaker-diarization-community-1" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByText(/^Guardar$/i))
+    })
+
+    const saved = (onSave.mock.calls[0] as unknown as [string, { preferredGpu: number | null; extraConfig: Record<string, unknown> }])[1]
+    expect(saved.preferredGpu).toBe(1)
+    expect(saved.extraConfig.whisper_cpp).toEqual({
+      model_path: "/m/ggml.bin",
+      threads: null,
+      diarization_model_id: "pyannote/speaker-diarization-community-1",
     })
   })
 })
