@@ -519,6 +519,43 @@ describe("ModelConfigModal", () => {
     expect("speculative" in llama).toBe(false)
   })
 
+  it("keeps the speculative type on save (self-MTP without an external draft is not wiped)", async () => {
+    // Regression 2026-11-08: the speculative dict was rebuilt from the form's
+    // draft fields only, so spec_type (no field for it) went out as null and
+    // the server deleted it: gemma4:12b then aborted on every load. With an
+    // empty draft field the whole section went out as null, silently turning
+    // off self-speculative MTP (qwen3.8:27b).
+    const onSave = vi.fn(async () => undefined)
+    render(
+      <ModelConfigModal
+        open
+        onOpenChange={vi.fn()}
+        onSave={onSave}
+        gpus={[]}
+        model={baseModel({
+          modelId: "llamacpp_mks/qwen3.8:27b",
+          extraConfig: {
+            llama_cpp: {
+              ctx_size: 98304,
+              speculative: { spec_type: "draft-mtp", draft_n: 4 },
+            } as unknown as LlamaCppConfig,
+          },
+        })}
+      />,
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/^Guardar$/i))
+    })
+
+    const saved = (onSave.mock.calls[0] as unknown as [string, { extraConfig: { llama_cpp: Record<string, unknown> } }])[1]
+    const speculative = saved.extraConfig.llama_cpp.speculative as Record<string, unknown> | null
+    expect(speculative).not.toBeNull()
+    expect(speculative?.spec_type).toBe("draft-mtp")
+    expect(speculative?.draft_n).toBe(4)
+    expect("specType" in (speculative ?? {})).toBe(false)
+  })
+
   it("edits whisper.cpp threads and diarization model, with the per-request diarize note", async () => {
     const onSave = vi.fn(async () => undefined)
     render(

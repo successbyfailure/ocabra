@@ -1026,16 +1026,42 @@ export function ModelConfigForm({
       const overrideTensorOut: string | null =
         llamaOverrideTensor.trim() === "" ? null : llamaOverrideTensor.trim();
 
-      // Sprint 17.4 — speculative decoding payload
-      const speculative =
-        llamaDraftModelId.trim() === ""
-          ? null
-          : {
-              draftModelId: llamaDraftModelId.trim(),
-              draftN: llamaDraftN === "" ? null : Number(llamaDraftN),
-              draftMin: llamaDraftMin === "" ? null : Number(llamaDraftMin),
-              draftPMin: llamaDraftPMin === "" ? null : Number(llamaDraftPMin),
-            };
+      // Sprint 17.4 — speculative decoding payload.
+      // Start from what is stored and replace only the fields this form owns.
+      // Rebuilding the dict from the form alone dropped ``spec_type`` (no field
+      // for it), and since a missing key is now sent as ``null`` (server
+      // deletes it) every save from this modal stripped the speculative type:
+      // gemma4:12b then launched --model-draft without --spec-type and its
+      // worker aborted on every load (2026-11-08, 503 for hours). An empty
+      // draft field must not null the whole section either: self-speculative
+      // MTP (qwen3.8:27b, gemma4) has a spec type and no external draft.
+      const storedSpeculative: Record<string, unknown> = {
+        ...((llamaCpp?.speculative as Record<string, unknown> | null | undefined) ?? {}),
+      };
+      for (const owned of [
+        "draftModelId",
+        "draft_model_id",
+        "draftN",
+        "draft_n",
+        "draftMin",
+        "draft_min",
+        "draftPMin",
+        "draft_p_min",
+      ]) {
+        delete storedSpeculative[owned];
+      }
+      const speculativeCandidate: Record<string, unknown> = {
+        ...storedSpeculative,
+        draftModelId: llamaDraftModelId.trim() === "" ? null : llamaDraftModelId.trim(),
+        draftN: llamaDraftN === "" ? null : Number(llamaDraftN),
+        draftMin: llamaDraftMin === "" ? null : Number(llamaDraftMin),
+        draftPMin: llamaDraftPMin === "" ? null : Number(llamaDraftPMin),
+      };
+      const speculative = Object.values(speculativeCandidate).some(
+        (value) => value != null && value !== "",
+      )
+        ? speculativeCandidate
+        : null;
       const next = setNestedConfig(
         current,
         "llama_cpp",

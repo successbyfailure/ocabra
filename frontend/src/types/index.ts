@@ -232,10 +232,14 @@ export type LlamaCppRuntime = "cuda" | "rocm" | "vulkan" | "cpu";
 export type LlamaCppVisionMode = "enabled" | "disabled" | "on_demand";
 
 export interface SpeculativeConfig {
-  draftModelId: string;
+  // Optional: self-speculative MTP (qwen3.8, gemma4) has a spec type and no
+  // external draft model.
+  draftModelId?: string | null;
+  specType?: string | null;
   draftN?: number | null;
   draftMin?: number | null;
   draftPMin?: number | null;
+  [key: string]: unknown;
 }
 
 export interface LlamaCppConfig {

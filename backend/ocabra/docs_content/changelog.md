@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.9 — 2026-11-08
+
+### Arreglos
+
+- **Guardar la configuración de un modelo desde el panel ya no le quita la
+  decodificación especulativa.** Era la causa de fondo del `503` de
+  `gemma4:12b` descrito en 0.51.8: una edición desde el panel borró el tipo
+  de borrador. En los modelos con MTP sin borrador externo (`qwen3.8:27b`), la
+  misma edición la habría desactivado entera sin dar ningún error, solo
+  generando más despacio.
+
+---
+
 ## 0.51.8 — 2026-11-08
 
 ### Arreglos
