@@ -22,8 +22,9 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 - **`bonsai-27b-ternario` solo admitía 256 tokens por petición** y rechazaba
   casi cualquier prompt con `request (N tokens) exceeds the available context
-  size (256 tokens)`. Ahora acepta hasta **262.144 tokens** (su ventana
-  nativa), con 4 peticiones simultáneas que comparten ese contexto.
+  size (256 tokens)`. Ahora acepta hasta **98.304 tokens**, con 4 peticiones
+  simultáneas que comparten ese contexto. Su ventana nativa es de 262.144; se
+  queda en 96k para poder convivir en la misma GPU con la transcripción.
 
 ---
 
