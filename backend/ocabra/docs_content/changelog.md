@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.52.1 — 2026-11-08
+
+### Arreglos
+
+- **La autodetección de idioma de 0.52.0 solo llegó a las transcripciones con
+  diarización.** Las normales no pasaban por el sitio donde se aplicó, así que
+  seguían volviendo en inglés. Ahora cubre las dos. Si probaste con 0.52.0 y te
+  salió igual que antes, era esto.
+
+---
+
 ## 0.52.0 — 2026-11-08
 
 ### Arreglos
