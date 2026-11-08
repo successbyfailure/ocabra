@@ -85,6 +85,55 @@ def _is_path_within_base(path: Path, base: Path) -> bool:
         return False
 
 
+async def _unfit_preset_reason(
+    request: Request, profile_id: str, *, exclude: str | None = None
+) -> str | None:
+    """Why ``profile_id`` would be left with no enabled preset that fits, or None.
+
+    A profile whose enabled presets all *resolve* and none *fits* rejects every
+    request ("profile has no enabled runtime preset that fits") — 2026-11-08:
+    ``gemma4:26b`` got a single ``fixed`` preset at its full 262144 and the
+    planner, which reserves for 4 concurrent requests + the MTP draft, only
+    grants ~177k on the 3090, so even a "hola" got a 400. Presets the planner
+    cannot resolve (unknown arch, backend not covered) are not counted as
+    "known not to fit", so this never blocks a model the planner can't judge.
+    ``exclude`` drops a preset as if it were already deleted.
+    """
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None or profile.profile_kind != "execution" or profile.base_model_id is None:
+        return None
+    enabled = {
+        p.preset_key
+        for p in (getattr(profile, "runtime_presets", None) or [])
+        if p.enabled and p.preset_key != exclude
+    }
+    if not enabled:
+        return None
+    model_manager = getattr(request.app.state, "model_manager", None)
+    if model_manager is None:
+        return None
+    state = await model_manager.get_state(profile.base_model_id)
+    if state is None:
+        return None
+    gpu_manager = getattr(model_manager, "gpu_manager", None)
+    gpu_states = await gpu_manager.get_all_states() if gpu_manager is not None else []
+    rows = await runtime_capacity_cache.resolve(profile, state, gpu_states, force=True)
+    by_key = {row.get("preset_key"): row for row in rows}
+    relevant = [by_key[k] for k in enabled if k in by_key]
+    if not relevant or any(row.get("fits") or not row.get("resolved") for row in relevant):
+        return None
+    detail = ", ".join(
+        f"{row['preset_key']}: pide {row.get('requested_context') or 'max'}, "
+        f"caben {row.get('effective_context')}"
+        for row in relevant
+    )
+    return (
+        f"Ningún preset habilitado de '{profile_id}' cabe ({detail}). El perfil rechazaría "
+        "todas las peticiones. Baja el contexto, usa context_mode 'max' o deja un preset que quepa."
+    )
+
+
 # ── Per-model profile endpoints ──────────────────────────────
 
 
@@ -156,9 +205,7 @@ async def create_model_profile(
                 enabled=body.enabled,
                 is_default=body.is_default,
                 routing_targets=body.routing_targets,
-                runtime_policy=(
-                    body.runtime_policy.model_dump() if body.runtime_policy else None
-                ),
+                runtime_policy=(body.runtime_policy.model_dump() if body.runtime_policy else None),
             )
         except ValueError as exc:
             msg = str(exc)
@@ -227,10 +274,7 @@ async def resolve_runtime_presets(
         gpu_states,
         force=True,
     )
-    return [
-        RuntimePresetResolutionOut.model_validate(row).model_dump(mode="json")
-        for row in rows
-    ]
+    return [RuntimePresetResolutionOut.model_validate(row).model_dump(mode="json") for row in rows]
 
 
 @router.post(
@@ -407,8 +451,14 @@ async def create_runtime_preset(
                 body.model_dump(),
             )
         except ValueError as exc:
-            status = 404 if "profile" in str(exc).lower() and "not found" in str(exc).lower() else 400
+            status = (
+                404 if "profile" in str(exc).lower() and "not found" in str(exc).lower() else 400
+            )
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        reason = await _unfit_preset_reason(request, profile_id)
+        if reason:
+            await registry.delete_runtime_preset(session, profile_id, preset.preset_key)
+            raise HTTPException(status_code=400, detail=reason)
     return _preset_to_dict(preset)
 
 
@@ -432,9 +482,22 @@ async def update_runtime_preset(
     patch = body.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(status_code=400, detail="No fields to update")
+    registry = _get_registry(request)
+    current = await registry.get(profile_id)
+    previous_row = next(
+        (
+            p
+            for p in (getattr(current, "runtime_presets", None) or [])
+            if p.preset_key == preset_key
+        ),
+        None,
+    )
+    previous = (
+        {key: getattr(previous_row, key) for key in patch} if previous_row is not None else None
+    )
     async with AsyncSessionLocal() as session:
         try:
-            preset = await _get_registry(request).update_runtime_preset(
+            preset = await registry.update_runtime_preset(
                 session,
                 profile_id,
                 preset_key,
@@ -443,6 +506,11 @@ async def update_runtime_preset(
         except ValueError as exc:
             status = 404 if "not found" in str(exc).lower() else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        reason = await _unfit_preset_reason(request, profile_id)
+        if reason:
+            if previous is not None:
+                await registry.update_runtime_preset(session, profile_id, preset_key, previous)
+            raise HTTPException(status_code=400, detail=reason)
     return _preset_to_dict(preset)
 
 
@@ -465,6 +533,9 @@ async def delete_runtime_preset(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Delete one runtime preset."""
+    reason = await _unfit_preset_reason(request, profile_id, exclude=preset_key)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
     async with AsyncSessionLocal() as session:
         try:
             await _get_registry(request).delete_runtime_preset(

@@ -401,3 +401,14 @@ ese emparejamiento y la federación está desactivada en este nodo (sin impacto 
   `DIFFUSERS_OFFLOAD_MODE=model` en `.env` (sin efecto en los 2 modelos actuales, que fijan `none`).
 - **Hecho (2026-11-07):** Fase 1 desplegada y verificada en vivo.
 - **Pendiente:** Fases 2–6 (incluye pasar los perfiles `-ollama` a alias y la lectura snake_case de la UI).
+
+## Incidente 2026-11-08 · presets que "no caben" tumban el modelo
+
+Un preset `fixed` de 262144 para `gemma4:26b` (verificado a mano con una petición de 230k) dejó el
+perfil sin ningún preset que el planificador diese por bueno (concede ~177k en la 3090: reserva para 4
+peticiones simultáneas + el borrador MTP, deliberadamente conservador desde los OOM del 27/10 y 04/11).
+`plan_profile_runtime` rechazó todas las peticiones 2 minutos. Arreglo: preset borrado (gemma4:26b
+corre sin presets, a 262144 en la 3090) y **guarda en los endpoints de presets** (`_unfit_preset_reason`
+en `api/internal/profiles.py`): crear/modificar/borrar un preset que deje al perfil sin ningún preset
+habilitado que quepa se deshace con 400. **No ponerle preset a `gemma4:26b`** mientras el planificador
+cuente así; un preset `context_mode: max` se adaptaría en vez de rechazar.

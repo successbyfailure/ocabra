@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.4 — 2026-11-08
+
+### Arreglos
+
+- **`gemma4:26b` rechazó todas las peticiones durante unos dos minutos**
+  (2026-11-08, 03:19–03:21 UTC) con `400 context_length_exceeded`, incluso las
+  más cortas. Lo causó un cambio de configuración del servidor que ya se ha
+  deshecho, y el servidor impide ahora que un cambio así vuelva a dejar un
+  modelo sin ninguna configuración de contexto utilizable.
+
+---
+
 ## 0.51.3 — 2026-11-08
 
 ### Arreglos
