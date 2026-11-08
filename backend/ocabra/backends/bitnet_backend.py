@@ -44,6 +44,12 @@ class _BitnetWorker:
     log_file: Any  # open file handle, stdout/stderr target — see load()
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 class BitnetBackend(BackendInterface):
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
@@ -194,6 +200,14 @@ class BitnetBackend(BackendInterface):
         ]
         if options["threads"] is not None:
             cmd.extend(["--threads", str(options["threads"])])
+        # Without a unified KV pool llama.cpp splits --ctx-size evenly across
+        # --parallel slots: Bonsai-27B ran with the global defaults (4096 ctx,
+        # 16 slots) and every request got 256 tokens ("request (3493 tokens)
+        # exceeds the available context size (256 tokens)"). With --kv-unified
+        # any single request can use the whole pool. Only the PrismML fork (a
+        # recent llama.cpp) has the flag; the Microsoft BitNet build predates it.
+        if options["kv_unified"] and is_prismml:
+            cmd.append("--kv-unified")
         # A quantised KV cache (e.g. q8_0) roughly halves KV VRAM — letting Bonsai
         # reach its full 262K context in ~12 GB instead of ~20 GB — but llama.cpp
         # requires flash-attention for a non-f16 KV cache, so force it on.
@@ -401,6 +415,7 @@ class BitnetBackend(BackendInterface):
                 self._get_bitnet_option(extra_config, "flash_attn", settings.bitnet_flash_attn)
             ),
             "mlock": bool(self._get_bitnet_option(extra_config, "mlock", settings.bitnet_mlock)),
+            "kv_unified": _as_bool(self._get_bitnet_option(extra_config, "kv_unified", False)),
             "cache_type_k": self._get_bitnet_option(
                 extra_config, "cache_type_k", settings.bitnet_cache_type_k
             ),

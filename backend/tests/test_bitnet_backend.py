@@ -249,3 +249,53 @@ def test_resolve_model_file_still_accepts_root_model_path(tmp_path: Path) -> Non
     weights.write_bytes(b"GGUF")
 
     assert BitnetBackend()._resolve_model_file("bitnet/x", {"model_path": str(weights)}) == weights
+
+
+async def test_kv_unified_lets_one_request_use_the_whole_context(tmp_path: Path) -> None:
+    """Regression 2026-11-08: Bonsai-27B inherited the BitNet globals (4096 ctx,
+    16 slots) and llama.cpp split the pool → 256 tokens per request. With
+    ``kv_unified`` the PrismML server gets --kv-unified; the Microsoft build
+    (no such flag) never does."""
+    gguf = tmp_path / "Bonsai-27B-Q1_0.gguf"
+    gguf.write_bytes(b"GGUF")
+
+    async def load_cmd(prismml: bool) -> list[str]:
+        proc = _fake_proc(returncode=None)
+        sub = AsyncMock(return_value=proc)
+        backend = BitnetBackend()
+        with (
+            patch("ocabra.backends.bitnet_backend.settings") as mock_settings,
+            patch("asyncio.create_subprocess_exec", new=sub),
+            patch.object(BitnetBackend, "_wait_for_startup", new=AsyncMock()),
+            patch.object(
+                BitnetBackend, "_resolve_prismml_bin", return_value="/bin/prismml/bonsai-server"
+            ),
+            patch.object(BitnetBackend, "_is_prismml_model", return_value=prismml),
+        ):
+            mock_settings.models_dir = str(tmp_path)
+            mock_settings.bitnet_server_bin = "/bin/bitnet-server"
+            mock_settings.bitnet_gpu_layers = 0
+            mock_settings.bitnet_ctx_size = 4096
+            mock_settings.bitnet_threads = None
+            mock_settings.bitnet_batch_size = 512
+            mock_settings.bitnet_ubatch_size = 128
+            mock_settings.bitnet_parallel = 16
+            mock_settings.bitnet_flash_attn = False
+            mock_settings.bitnet_mlock = False
+            mock_settings.bitnet_cache_type_k = None
+            mock_settings.bitnet_cache_type_v = None
+            mock_settings.bitnet_startup_timeout_s = 30
+            mock_settings.cuda_device_order = "PCI_BUS_ID"
+            await backend.load(
+                "Bonsai-27B-Q1_0",
+                [1],
+                port=18022,
+                extra_config={"bitnet": {"ctx_size": 262144, "parallel": 4, "kv_unified": True}},
+            )
+        return list(sub.call_args.args)
+
+    cmd = await load_cmd(prismml=True)
+    assert cmd[cmd.index("--ctx-size") + 1] == "262144"
+    assert cmd[cmd.index("--parallel") + 1] == "4"
+    assert "--kv-unified" in cmd
+    assert "--kv-unified" not in await load_cmd(prismml=False)
