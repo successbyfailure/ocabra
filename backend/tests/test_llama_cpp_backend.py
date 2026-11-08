@@ -569,7 +569,13 @@ def test_compute_evenly_tensor_split_returns_none_without_manager() -> None:
 
 @pytest.mark.asyncio
 async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
-    """Speculative draft + draft_n/min/p_min should reach llama-server cmd."""
+    """Speculative draft + draft_n/min/p_min should reach llama-server cmd.
+
+    ``spec_type`` is part of the fixture on purpose: a draft whose type is
+    neither configured nor readable from the file is dropped instead of being
+    passed on, because llama-server aborts on that combination (see
+    ``tests/core/test_draft_spec_type.py``).
+    """
     target = tmp_path / "target.gguf"
     target.write_bytes(b"GGUF" * 1024)
     draft = tmp_path / "draft.gguf"
@@ -580,6 +586,7 @@ async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
     extra_config = {
         "llama_cpp": {
             "speculative": {
+                "spec_type": "draft-eagle3",
                 "draft_model_id": str(draft),
                 "draft_n": 8,
                 "draft_min": 2,
@@ -600,6 +607,7 @@ async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
     args = list(create_proc.await_args.args)
     assert "--model-draft" in args
     assert str(draft) in args
+    assert "--spec-type" in args and args[args.index("--spec-type") + 1] == "draft-eagle3"
     assert "--spec-draft-n-max" in args and args[args.index("--spec-draft-n-max") + 1] == "8"
     assert "--spec-draft-n-min" in args and args[args.index("--spec-draft-n-min") + 1] == "2"
     assert "--spec-draft-p-min" in args

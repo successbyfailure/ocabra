@@ -23,6 +23,7 @@ from ocabra.config import settings
 from ocabra.core import vram_planner as vp
 from ocabra.core.backend_installer import read_backend_metadata, venv_nvidia_ld_library_path
 from ocabra.core.model_manager_helpers import snake_to_camel
+from ocabra.registry.local_scanner import parse_gguf_speculative_type
 
 logger = structlog.get_logger(__name__)
 
@@ -317,32 +318,7 @@ class LlamaCppBackend(BackendInterface):
             cmd.extend(["--override-tensor", str(options["override_tensor"])])
 
         # --- Sprint 17.4 — speculative decoding + concurrency ---
-        speculative = options.get("speculative")
-        if isinstance(speculative, dict):
-            # "draft-mtp" self-speculates from a nextn block baked into the
-            # main GGUF (e.g. Qwen3.5/3.8) — no separate draft model needed.
-            # Other --spec-type values (draft-simple, draft-eagle3, ...) may
-            # still pair with --model-draft below.
-            spec_type = speculative.get("spec_type")
-            if spec_type:
-                cmd.extend(["--spec-type", str(spec_type)])
-            draft_id = speculative.get("draft_model_id")
-            if draft_id:
-                draft_path = self._resolve_draft_model_path(str(draft_id))
-                cmd.extend(["--model-draft", str(draft_path)])
-            if draft_id or spec_type:
-                draft_n = speculative.get("draft_n")
-                if draft_n is not None:
-                    # --draft-max/--draft-min were removed upstream; the
-                    # draft_n/draft_min config keys are kept for backward
-                    # compatibility with existing extra_config entries.
-                    cmd.extend(["--spec-draft-n-max", str(int(draft_n))])
-                draft_min = speculative.get("draft_min")
-                if draft_min is not None:
-                    cmd.extend(["--spec-draft-n-min", str(int(draft_min))])
-                draft_p_min = speculative.get("draft_p_min")
-                if draft_p_min is not None:
-                    cmd.extend(["--spec-draft-p-min", str(float(draft_p_min))])
+        cmd.extend(await self._speculative_args(model_id, options))
 
         if options["vision_mode"] in {"enabled", "on_demand"}:
             mmproj_path = self._resolve_mmproj_path(str(options["mmproj_model_id"]))
@@ -1176,6 +1152,73 @@ class LlamaCppBackend(BackendInterface):
             f"llama.cpp runtime '{runtime}' is not installed. "
             f"Install it from the /backends page (variant 'llama_cpp:{runtime}')."
         )
+
+    async def _speculative_args(self, model_id: str, options: dict[str, Any]) -> list[str]:
+        """Build the ``--spec-type`` / ``--model-draft`` flags.
+
+        ``spec_type`` and ``draft_model_id`` are independent: "draft-mtp"
+        self-speculates from a nextn block baked into the main GGUF (e.g.
+        Qwen3.5/3.8) with no separate draft model, and other types pair with
+        a draft file.
+
+        What is *not* independent is handing llama-server a draft without
+        telling it the type. That is not "no speculation": the server loads
+        the draft anyway and aborts while probing its context. It happens on
+        its own, with nothing configured, because a draft can arrive as a
+        layer of an Ollama tag — the artifact knows the file but not the mode
+        (see ``ocabra.core.artifacts``). ``gemma4:12b`` spent hours answering
+        503 on 2026-11-08 for exactly that reason, after its tag's draft
+        layer was picked up. So when the type is not configured we read it
+        off the draft GGUF, and when the file does not say we drop the draft
+        rather than launch a worker that dies.
+        """
+
+        speculative = options.get("speculative")
+        if not isinstance(speculative, dict):
+            return []
+
+        spec_type = speculative.get("spec_type")
+        draft_id = speculative.get("draft_model_id")
+        draft_path = self._resolve_draft_model_path(str(draft_id)) if draft_id else None
+
+        if draft_path is not None and not spec_type:
+            spec_type = await asyncio.to_thread(parse_gguf_speculative_type, draft_path)
+            if spec_type:
+                logger.info(
+                    "llama_cpp_draft_spec_type_inferred",
+                    model_id=model_id,
+                    spec_type=spec_type,
+                    draft_path=str(draft_path),
+                )
+            else:
+                logger.warning(
+                    "llama_cpp_draft_ignored_unknown_spec_type",
+                    model_id=model_id,
+                    draft_path=str(draft_path),
+                    hint="set extra_config.llama_cpp.speculative.spec_type to use it",
+                )
+                draft_path = None
+
+        args: list[str] = []
+        if spec_type:
+            args.extend(["--spec-type", str(spec_type)])
+        if draft_path is not None:
+            args.extend(["--model-draft", str(draft_path)])
+        if not args:
+            return args
+        draft_n = speculative.get("draft_n")
+        if draft_n is not None:
+            # --draft-max/--draft-min were removed upstream; the
+            # draft_n/draft_min config keys are kept for backward
+            # compatibility with existing extra_config entries.
+            args.extend(["--spec-draft-n-max", str(int(draft_n))])
+        draft_min = speculative.get("draft_min")
+        if draft_min is not None:
+            args.extend(["--spec-draft-n-min", str(int(draft_min))])
+        draft_p_min = speculative.get("draft_p_min")
+        if draft_p_min is not None:
+            args.extend(["--spec-draft-p-min", str(float(draft_p_min))])
+        return args
 
     def _resolve_draft_model_path(self, draft_model_id: str) -> Path:
         """Resolve a draft model_id into a local GGUF path.

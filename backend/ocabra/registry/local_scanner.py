@@ -172,6 +172,85 @@ def parse_gguf_tokenizer_fingerprint(
         return (None, None, None)
 
 
+# --- Which --spec-type a draft GGUF needs ---------------------------------
+# A draft model is useless to llama-server unless it is also told *how* to
+# drive it, and a draft with no type is not "no speculation": the server loads
+# it anyway and aborts while probing its context. llama.cpp infers the type
+# itself (``common_speculative_types_from_gguf``) but only recognises the
+# exact tensor ``blk.<last>.nextn.eh_proj.weight``, or the ``dflash``
+# architecture. A Gemma 4 assistant head has neither — its MTP block is
+# ``nextn.pre_projection``/``nextn.post_projection`` — so the inference comes
+# up empty and the worker dies on startup (``gemma4:12b``, 2026-11-08: every
+# load since the draft layer appeared in its Ollama tag exited with SIGABRT
+# and the model answered 503 for hours).
+#
+# Matching the ``nextn`` block by name instead of by one exact tensor covers
+# both shapes.
+_NEXTN_TENSOR_MARK = "nextn."
+_DFLASH_ARCH = "dflash"
+_DSPARK_TENSOR = "markov_w1.weight"
+
+
+def parse_gguf_speculative_type(path: Path) -> str | None:
+    """Return the ``--spec-type`` *path* needs as a draft model, or ``None``.
+
+    ``None`` means "cannot tell from the file": callers must then not pass the
+    draft to llama-server at all, since the alternative is a command line that
+    kills the worker on startup.
+    """
+
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(_GGUF_HEADER_MAX_BYTES)
+    except OSError:
+        return None
+
+    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
+        return None
+
+    buf = memoryview(data)
+    try:
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return None
+        (tensor_count,) = struct.unpack_from("<Q", buf, 8)
+        (kv_count,) = struct.unpack_from("<Q", buf, 16)
+        offset = 24
+
+        arch: str | None = None
+        for _ in range(int(kv_count)):
+            key, offset = _read_string(buf, offset)
+            (value_type,) = struct.unpack_from("<I", buf, offset)
+            offset += 4
+            value_type = int(value_type)
+            if key == "general.architecture" and value_type == _GGUF_TYPE_STRING:
+                arch, offset = _read_string(buf, offset)
+                continue
+            offset = _skip_value(buf, offset, value_type)
+
+        # The tensor table follows the metadata: name, n_dims, dims[n_dims],
+        # ggml type, offset.
+        tiene_nextn = False
+        tiene_markov = False
+        for _ in range(int(tensor_count)):
+            name, offset = _read_string(buf, offset)
+            (n_dims,) = struct.unpack_from("<I", buf, offset)
+            offset += 4 + 8 * int(n_dims) + 4 + 8
+            if _NEXTN_TENSOR_MARK in name:
+                tiene_nextn = True
+            elif name == _DSPARK_TENSOR:
+                tiene_markov = True
+    except (struct.error, _GGUFParseError, IndexError, ValueError):
+        return None
+
+    if arch == _DFLASH_ARCH:
+        # The Markov head is what tells DSpark apart from DFlash.
+        return "draft-dspark" if tiene_markov else "draft-dflash"
+    if tiene_nextn:
+        return "draft-mtp"
+    return None
+
+
 class LocalScanner:
     # Walking 200+ dirs and reading 14 × 64 MB of GGUF headers takes 15-25s on
     # this host. The Settings and Models pages both consume the scan and the

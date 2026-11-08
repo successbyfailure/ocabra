@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.8 — 2026-11-08
+
+### Arreglos
+
+- **`gemma4:12b` respondía `503` a todo.** Desde las 02:13 UTC del 08/11, cada
+  petición a `gemma4:12b` fallaba con `Failed to load model`: el proceso del
+  modelo se abortaba al arrancar y ninguna carga llegaba a completarse. La
+  causa estaba en el modelo borrador que acompaña al modelo principal para
+  acelerar la generación. Ese borrador viene dentro del propio paquete del
+  modelo, el servidor empezó a detectarlo, y lo arrancaba sin decirle a
+  llama.cpp de qué tipo era — combinación que mata el proceso en lugar de
+  limitarse a no acelerar nada. Ahora el tipo se deduce del propio fichero del
+  borrador, y si no se puede deducir el borrador se ignora y el modelo carga
+  sin aceleración en vez de no cargar. `gemma4:12b` vuelve a responder, y con
+  el borrador activo: ~116 tok/s.
+
+  Le puede haber pasado a cualquier modelo al que su paquete le añada un
+  borrador. Si viste `503` con `Failed to load model` en un modelo que antes
+  iba, es esto.
+
+---
+
 ## 0.51.7 — 2026-11-08
 
 ### Sin cambios para tu cliente
