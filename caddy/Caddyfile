@@ -19,6 +19,11 @@
     handle /ready {
         reverse_proxy api:8000
     }
+    # Sin esta regla /version se caia al SPA del frontend, que responde con su
+    # propio 404 de nginx: el mismo patron que las subrutas de /docs.
+    handle /version {
+        reverse_proxy api:8000
+    }
     # /docs y todo lo que cuelga: ademas del Swagger estan las paginas en prosa
     # (/docs/changelog, /docs/models, y sus variantes .md) y el
     # /docs/oauth2-redirect de Swagger. Con "handle /docs" a secas solo casaba

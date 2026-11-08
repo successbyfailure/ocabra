@@ -12,6 +12,17 @@ async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "version": settings.app_version})
 
 
+@router.get("/version")
+async def version() -> JSONResponse:
+    """Version of the running server, for clients that probe ``/version``.
+
+    ``/health`` already carried it, but tooling looks for this path and used
+    to get the frontend's 404 instead (it is not an API route, so the proxy
+    fell through to the SPA). Same payload as Ollama's ``/api/version``.
+    """
+    return JSONResponse({"version": settings.app_version})
+
+
 @router.get("/ready")
 async def ready(request: Request) -> JSONResponse:
     """

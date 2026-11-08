@@ -16,6 +16,32 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.52.0 — 2026-11-08
+
+### Arreglos
+
+- **La transcripción en CPU devolvía el texto en inglés.** Si no mandabas
+  `language`, el modelo de respaldo de `recomendado-stt` (`whisper.cpp`, el que
+  entra cuando las tarjetas están ocupadas) asumía inglés y **traducía** en vez
+  de transcribir: un clip en español volvía como "The report on European budget
+  was approved yesterday". El modelo de GPU detecta el idioma solo, así que la
+  misma petición daba un idioma u otro según qué worker la sirviera, sin ningún
+  error de por medio. Ahora, cuando no dices el idioma, también se autodetecta
+  en CPU.
+
+  Se notaba más en audios cortos, donde la traducción además resume: en un clip
+  de 3,8 segundos con 12 palabras volvían 9, en inglés.
+
+### Nuevo
+
+- **`GET /version` y `GET /api/version`.** Devuelven `{"version": "..."}` sin
+  necesidad de clave. `/version` daba un 404 que no venía del servidor sino del
+  panel web, y `/api/version` —que forma parte de la API de Ollama y la usan
+  sus clientes para decidir qué soporta el servidor— no existía. `GET /health`
+  sigue trayendo la versión igual que antes.
+
+---
+
 ## 0.51.9 — 2026-11-08
 
 ### Arreglos

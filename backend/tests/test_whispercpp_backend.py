@@ -11,6 +11,7 @@ import pytest
 from ocabra.backends.base import ModalityType
 from ocabra.backends.whispercpp_backend import (
     WhisperCppBackend,
+    _build_transcription_multipart,
     _extract_audio_file,
     _is_diarize_requested,
 )
@@ -177,9 +178,7 @@ async def test_ensure_diarization_worker_launches_and_caches(tmp_path: Path) -> 
     healthy = httpx.Response(200, request=httpx.Request("GET", "http://x"))
 
     with (
-        patch.object(
-            backend, "_resolve_diarization_python_bin", return_value=str(python_bin)
-        ),
+        patch.object(backend, "_resolve_diarization_python_bin", return_value=str(python_bin)),
         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
         patch("httpx.AsyncClient.get", new=AsyncMock(return_value=healthy)),
         patch("ocabra.backends.whispercpp_backend.open", create=True),
@@ -213,9 +212,7 @@ async def test_ensure_diarization_worker_concurrent_calls_launch_once(tmp_path: 
         return proc
 
     with (
-        patch.object(
-            backend, "_resolve_diarization_python_bin", return_value=str(python_bin)
-        ),
+        patch.object(backend, "_resolve_diarization_python_bin", return_value=str(python_bin)),
         patch(
             "asyncio.create_subprocess_exec", side_effect=_slow_create_subprocess_exec
         ) as create_proc,
@@ -313,3 +310,40 @@ async def test_forward_request_without_diarize_skips_sidecar() -> None:
 
     assert result == {"text": "hola", "segments": []}
     ensure_sidecar.assert_not_awaited()
+
+
+# --- El idioma no puede quedarse en el "en" por defecto de whisper-server ---
+# Con un objetivo "en", Whisper traduce lo que oye en vez de transcribirlo: un
+# clip en español vuelve en inglés y cada palabra cuenta como error. El backend
+# de GPU (faster-whisper) autodetecta, asi que la misma peticion daba un idioma
+# u otro segun que worker la sirviera — y recomendado-stt cae a este cuando las
+# tarjetas estan ocupadas. Reproducido el 2026-11-08 con un clip de 3,8 s:
+# "El informe sobre el presupuesto europeo se aprobo ayer por la tarde" volvia
+# como "The report on European budget was approved yesterday".
+
+
+def test_sin_idioma_pedido_se_autodetecta() -> None:
+    _, form = _build_transcription_multipart({"file": b"RIFF...."})
+    assert form["language"] == "auto"
+
+
+def test_el_idioma_del_cliente_manda() -> None:
+    _, form = _build_transcription_multipart({"file": b"RIFF....", "language": "es"})
+    assert form["language"] == "es"
+
+
+@pytest.mark.parametrize("vacio", ["", None])
+def test_un_idioma_vacio_cuenta_como_no_pedido(vacio) -> None:
+    _, form = _build_transcription_multipart({"file": b"RIFF....", "language": vacio})
+    assert form["language"] == "auto"
+
+
+def test_nunca_se_manda_la_peticion_sin_idioma() -> None:
+    """Invariante: el campo ausente es lo que activaba el "en" del servidor."""
+    for cuerpo in (
+        {"file": b"RIFF...."},
+        {"file": b"RIFF....", "response_format": "verbose_json"},
+        {"file": b"RIFF....", "prompt": "acta de reunion", "temperature": 0},
+    ):
+        _, form = _build_transcription_multipart(cuerpo)
+        assert form.get("language")

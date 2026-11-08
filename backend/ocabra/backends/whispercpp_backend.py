@@ -375,7 +375,9 @@ class WhisperCppBackend(BackendInterface):
             await self._wait_for_startup(
                 model_id,
                 port,
-                timeout_s=int(cfg.get("startup_timeout_s") or settings.whispercpp_startup_timeout_s),
+                timeout_s=int(
+                    cfg.get("startup_timeout_s") or settings.whispercpp_startup_timeout_s
+                ),
             )
         except BaseException:
             await self._kill_process(model_id)
@@ -557,14 +559,20 @@ def _build_transcription_multipart(
     }
 
     form_data: dict[str, str | list[str]] = {}
-    if body.get("language"):
-        form_data["language"] = str(body["language"])
+    # ``whisper-server`` defaults ``--language`` to "en", and with an "en"
+    # target Whisper translates what it hears instead of transcribing it: a
+    # Spanish clip comes back in English, every word counted as an error. The
+    # GPU backend (faster-whisper) auto-detects, so the same request gave two
+    # different languages depending on which worker served it — and
+    # ``recomendado-stt`` falls back to this one when the cards are busy.
+    # Reproduced 2026-11-08 with a 3,8 s clip: "El informe sobre el
+    # presupuesto europeo se aprobó ayer por la tarde" came back as "The
+    # report on European budget was approved yesterday".
+    form_data["language"] = str(body["language"]) if body.get("language") else "auto"
     if body.get("response_format"):
         form_data["response_format"] = str(body["response_format"])
 
-    granularities = body.get("timestamp_granularities") or body.get(
-        "timestamp_granularities[]"
-    )
+    granularities = body.get("timestamp_granularities") or body.get("timestamp_granularities[]")
     if granularities is not None:
         if isinstance(granularities, list):
             form_data["timestamp_granularities"] = [str(value) for value in granularities]
