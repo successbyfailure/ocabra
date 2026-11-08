@@ -16,6 +16,32 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.53.1 — 2026-11-08
+
+### Arreglos
+
+- **La transcripción en CPU decodificaba el audio con otra biblioteca que la de
+  GPU.** `whisper.cpp` intenta primero su decodificador propio y solo recurre a
+  ffmpeg si el primero **no consigue abrir** el fichero, nunca si lo abre y lo
+  lee mal. Con los mismos bytes, los dos modelos de transcripción podían no
+  coincidir en cuánto audio tiene un fichero, sin ningún error de por medio: el
+  `duration` que devuelve el de CPU es literalmente las muestras que decodificó
+  dividido por 16 kHz, así que una lectura corta se ve como un clip corto.
+  Ahora el de CPU decodifica siempre con ffmpeg, el mismo que el de GPU.
+
+### Retirado
+
+- **`nemotron3:33b` ya no está disponible** (devuelve `404` y no aparece en
+  `GET /v1/models`). Era el último modelo que quedaba sobre Ollama, que decide
+  por su cuenta el reparto entre CPU y GPU al cargar, y según cómo cayera daba
+  entre 9 y 100 tokens por segundo para la misma petición. `nemotron-3-nano:30b`
+  no tiene nada que ver y sigue donde estaba.
+
+  **Acción** si lo nombrabas: usa `qwen3.8:27b` o `gemma4:26b` para tareas
+  generales, o `recomendado-sota` si prefieres no elegir.
+
+---
+
 ## 0.53.0 — 2026-11-08
 
 ### Cambios de comportamiento
