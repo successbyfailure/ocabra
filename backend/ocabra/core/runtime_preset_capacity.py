@@ -59,9 +59,7 @@ class RuntimeCapacityCache:
             )
             for preset in profile.runtime_presets
         )
-        gpus = tuple(
-            sorted((int(gpu.index), int(gpu.total_vram_mb)) for gpu in gpu_states)
-        )
+        gpus = tuple(sorted((int(gpu.index), int(gpu.total_vram_mb)) for gpu in gpu_states))
         return repr(
             (
                 profile.profile_id,
@@ -107,10 +105,64 @@ class RuntimeCapacityCache:
 runtime_capacity_cache = RuntimeCapacityCache()
 
 
+# Fallback for the driver/context share when the process list can't attribute
+# usage (e.g. a busy GPU sampled without per-process info): NVML reserves
+# ~330-400 MiB on these cards plus a few MiB of contexts.
+_DEFAULT_UNATTRIBUTED_MB = 512
+_MAX_PLAUSIBLE_UNATTRIBUTED_MB = 1024
+
+
+def _unattributed_vram_mb(gpu: Any) -> int:
+    """VRAM no model can ever get on this card, independent of what is loaded.
+
+    With the NVML v1 API ``used`` already includes the driver reservation, so
+    ``total - free - Σ(process usage)`` is what is neither free nor owned by a
+    process: the reservation plus foreign contexts. It does not change when
+    models come and go, unlike ``free`` itself.
+    """
+    try:
+        total = int(gpu.total_vram_mb)
+        free = int(gpu.free_vram_mb)
+    except (AttributeError, TypeError, ValueError):
+        return _DEFAULT_UNATTRIBUTED_MB
+    processes = getattr(gpu, "processes", None) or []
+    attributed = 0
+    for proc in processes:
+        try:
+            attributed += int(
+                getattr(proc, "used_vram_mb", None)
+                or (proc.get("used_vram_mb") if isinstance(proc, dict) else 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            continue
+    unattributed = total - free - attributed
+    if unattributed < 0 or unattributed > _MAX_PLAUSIBLE_UNATTRIBUTED_MB:
+        return _DEFAULT_UNATTRIBUTED_MB
+    return unattributed
+
+
 def _gpu_dict(gpu: Any) -> dict[str, int]:
+    """Capacity a preset may plan against on this GPU.
+
+    Same FIXED margins the load admission applies (``ModelManager`` →
+    ``GPUManager.get_free_vram`` after evicting everything): the driver's
+    unattributed share and ``vram_buffer_mb``. Planning against the raw total
+    made ``fits=true`` mean "fits on paper": qwen3:32b·32k and
+    nemotron-3-nano:30b on the 3090 resolved as fitting and then failed every
+    load with ``insufficient_vram`` (need 23761/24059 MB, 23647 available).
+
+    Deliberately NOT the current free VRAM: that depends on what happens to be
+    loaded, and would turn presets unfit (→ every request rejected) whenever
+    another model sits on the card. Validated presets keep using their
+    measured capacity (``_apply_validated_context_override``) and the
+    admission still admits those against physical free VRAM without buffer.
+    """
+    total = int(gpu.total_vram_mb)
+    usable = total - _unattributed_vram_mb(gpu) - max(0, int(settings.vram_buffer_mb or 0))
     return {
         "index": int(gpu.index),
-        "total_mb": int(gpu.total_vram_mb),
+        "total_mb": max(0, usable),
     }
 
 
@@ -285,9 +337,9 @@ async def resolve_profile_runtime_capacities(
                 "model_max": None,
                 "hardware_max": None,
                 "requested_parallelism": preset.parallelism,
-                "effective_parallelism": resolve_effective_parallelism(
-                    state, preset.parallelism
-                )[0],
+                "effective_parallelism": resolve_effective_parallelism(state, preset.parallelism)[
+                    0
+                ],
                 "target_gpus": [],
                 "fits": False,
                 "runtime_key": None,
@@ -369,9 +421,7 @@ async def resolve_profile_runtime_capacities(
                         "target_gpus": requested_gpus,
                         "fits": False,
                         "runtime_key": None,
-                        "warnings": [
-                            f"preferred_gpus={requested_gpus} no están todas presentes"
-                        ],
+                        "warnings": [f"preferred_gpus={requested_gpus} no están todas presentes"],
                     }
                 )
                 continue
@@ -417,9 +467,7 @@ async def resolve_profile_runtime_capacities(
                     )
                 effective = policy_max
             if effective <= 0 and not warnings:
-                warnings.append(
-                    "el modelo y su KV cache no caben ni sumando ambas GPUs"
-                )
+                warnings.append("el modelo y su KV cache no caben ni sumando ambas GPUs")
             fits = effective > 0 and not warnings
             if parallelism_warning:
                 warnings.append(parallelism_warning)

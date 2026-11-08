@@ -72,7 +72,8 @@ async def test_resolves_fixed_and_max_on_the_3090(monkeypatch) -> None:
     # vram_planner.max_context_tokens applies that margin since the gemma4:26b
     # incident (262k reported as fitting, Ollama rejected the load with
     # HTTP 500) — 113_408 * 0.90 = 102_067.
-    assert rows[1]["effective_context"] == 102_067
+    # planned against total − unattributed (512 default) − vram_buffer_mb, like the admission
+    assert rows[1]["effective_context"] == 94_694
     assert rows[1]["runtime_key"].startswith("runtime:")
 
 
@@ -107,7 +108,7 @@ async def test_ollama_forced_multi_gpu_resolves_via_shared_pool(monkeypatch) -> 
     assert row["target_gpus"] == [0, 1]
     # (12_288 + 24_576 - 10_000 weights - 400 overhead) * 0.90 safety margin
     # / 0.0625 MB-per-token / 2 slots.
-    assert row["effective_context"] == 190_540
+    assert row["effective_context"] == 175_795
     assert row["fits"] is True
 
 
@@ -138,7 +139,7 @@ async def test_llama_cpp_forced_multi_gpu_resolves_via_layer_split(monkeypatch) 
 
     assert row["resolved"] is True
     assert row["target_gpus"] == [0, 1]
-    assert row["effective_context"] == 190_540
+    assert row["effective_context"] == 175_795
     assert row["fits"] is True
 
 
@@ -321,3 +322,29 @@ async def test_runtime_parallelism_cap_is_used_for_capacity_and_identity(monkeyp
     assert row["effective_parallelism"] == 1
     assert row["fits"] is True
     assert any("p2" in warning and "p1" in warning for warning in row["warnings"])
+
+
+
+def test_capacity_uses_the_admission_fixed_margins_not_current_free_vram() -> None:
+    """2026-11-08: resolved planned against the raw card total and said fits for
+    presets the load admission then refused (need 23761 MB, 23647 available).
+    The budget must subtract the same FIXED margins as the admission — and must
+    NOT depend on what is currently loaded, or a busy card would make every
+    preset unfit and the profile reject all requests."""
+    from ocabra.config import settings
+    from ocabra.core.gpu_manager import GPUProcessInfo
+    from ocabra.core.runtime_preset_capacity import _gpu_dict
+
+    empty = SimpleNamespace(index=1, total_vram_mb=24_576, free_vram_mb=24_158, processes=[])
+    busy = SimpleNamespace(
+        index=1,
+        total_vram_mb=24_576,
+        free_vram_mb=1_776,
+        processes=[GPUProcessInfo(pid=1, process_name="llama-server", process_type="C", used_vram_mb=22_378)],
+    )
+    buffer = int(settings.vram_buffer_mb)
+    assert _gpu_dict(empty)["total_mb"] == 24_576 - 418 - buffer
+    assert _gpu_dict(busy)["total_mb"] == 24_576 - 422 - buffer
+    # a busy sample without per-process info can't attribute usage: fall back, don't collapse
+    unknown = SimpleNamespace(index=1, total_vram_mb=24_576, free_vram_mb=1_776, processes=[])
+    assert _gpu_dict(unknown)["total_mb"] == 24_576 - 512 - buffer

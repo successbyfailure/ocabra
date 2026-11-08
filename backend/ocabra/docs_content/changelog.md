@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.7 — 2026-11-08
+
+### Sin cambios para tu cliente
+
+- Ajuste interno de cómo el servidor calcula qué configuraciones de contexto
+  caben en cada GPU, para que coincida con lo que de verdad puede cargar. Los
+  nombres de modelo, sus contextos y las respuestas son los mismos que en 0.51.6.
+
+---
+
 ## 0.51.6 — 2026-11-08
 
 ### Arreglos
