@@ -659,9 +659,27 @@ class LlamaCppBackend(BackendInterface):
                         await asyncio.sleep(0.1)
                 result = response.json()
             except (httpx.HTTPError, ValueError) as exc:
+                # Este `except` tapaba TODAS las causas con el mismo mensaje,
+                # y solo una de ellas es cierta. El proyector se asigna en
+                # VRAM al activarlo, asi que la causa habitual es que no
+                # quepa: el worker muere con cudaMalloc/GGML_ASSERT y aqui
+                # llega un error de conexion. Contarlo como "hace falta el
+                # runtime custom" manda a quien lo lee al sitio equivocado.
+                # Reproducido 2026-11-08 con qwen3.8:27b-abliterated a 40k en
+                # la 3090 + una imagen: OOM de 888 MB.
+                estado = getattr(getattr(exc, "response", None), "status_code", None)
+                if estado in {404, 405, 501}:
+                    # El runtime no implementa la activacion en caliente: la
+                    # unica causa para la que el mensaje original es correcto.
+                    raise RuntimeError(
+                        "On-demand vision requires the oCabra custom llama.cpp runtime "
+                        "with hot mmproj support"
+                    ) from exc
                 raise RuntimeError(
-                    "On-demand vision requires the oCabra custom llama.cpp runtime "
-                    "with hot mmproj support"
+                    f"Could not activate vision for model '{model_id}': {exc}. "
+                    "The vision projector is allocated in VRAM on activation, so "
+                    "the usual cause is that it does not fit alongside the model's "
+                    "KV cache — try a smaller context preset for this model."
                 ) from exc
             vision_state = result.get("vision") if isinstance(result, dict) else None
             if not isinstance(vision_state, dict) or vision_state.get("active") is not True:

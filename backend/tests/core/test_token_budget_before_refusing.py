@@ -338,3 +338,77 @@ async def test_sin_capacidad_conocida_no_hay_nada_que_afinar(capacidad):
         default_output_reservation=None,
     )
     assert afinado == 99_999
+
+
+# ── Un preset pedido a mano decide el rechazo ─────────────────
+#
+# El afinado comparaba contra la ventana MAYOR, pero cuando el cliente pide un
+# preset concreto el rechazo se compara con ESE preset. Reproducido 2026-11-08
+# contra qwen3:32b con `normal` (30.720): un prompt de ~19.000 tokens reales se
+# estimaba en 34.311, que es menor que la ventana mayor (40.960) y por tanto no
+# se afinaba, pero mayor que el preset pedido -> 400 con el worker cargado y
+# sitio de sobra. Y en el caso sin conteo exacto era peor: el recorte a 40.960
+# FABRICABA un fallo que con el numero real no existia.
+
+
+def _plan_args(presets, body, estados=None):
+    from types import SimpleNamespace
+
+    perfil = SimpleNamespace(
+        profile_id="qwen3:32b",
+        base_model_id="llamacpp_mks/qwen3:32b",
+        runtime_policy={},
+        load_overrides={},
+        runtime_presets=presets,
+    )
+    return perfil, body, estados or []
+
+
+@pytest.mark.asyncio
+async def test_se_afina_contra_el_preset_pedido_no_contra_el_mayor(monkeypatch):
+    from ocabra.core import runtime_coordinator as rc
+
+    medidos = []
+
+    async def _exacto(mm, perfil, body):  # noqa: ARG001
+        medidos.append(True)
+        return 19_000
+
+    monkeypatch.setattr(rc, "exact_prompt_tokens", _exacto)
+    # 34.311 cabe en la ventana mayor (40.960) pero no en el preset pedido
+    # (30.720): antes no se afinaba y el rechazo salia con el estimado.
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": [{"role": "user", "content": "x"}], "max_tokens": 1024},
+        required_tokens=34_311,
+        capacity=30_720,
+        default_output_reservation=None,
+    )
+    assert medidos, "con la capacidad del preset pedido tiene que medir"
+    assert afinado == 20_024  # 19.000 medidos + 1.024 de salida
+    assert afinado < 30_720, "con el numero real cabe en el preset pedido"
+
+
+@pytest.mark.asyncio
+async def test_sin_conteo_exacto_el_recorte_no_pasa_de_la_capacidad_decisiva(monkeypatch):
+    """El recorte devuelve la capacidad que decide, nunca una mayor.
+
+    Si devolviese la ventana mayor (40.960) contra un preset de 30.720, el
+    propio recorte provocaria el 400 que intenta evitar.
+    """
+    from ocabra.core import runtime_coordinator as rc
+
+    async def _sin_medir(mm, perfil, body):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(rc, "exact_prompt_tokens", _sin_medir)
+    afinado = await rc.refine_required_tokens(
+        _MM([]),
+        _Perfil(),
+        {"messages": []},
+        required_tokens=60_021,
+        capacity=30_720,
+        default_output_reservation=None,
+    )
+    assert afinado == 30_720

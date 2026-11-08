@@ -536,17 +536,39 @@ async def plan_profile_runtime(
     #
     # Reportado 2026-11-07: un prompt de ~32k tokens reales se estimaba en
     # ~55k y qwen3:32b (ventana de 40.960) lo rechazaba con 400 aunque cabia.
-    mayor_contexto = max(item.effective_context for item in candidates)
+    explicit_key = _requested_preset_key(body)
+
+    # La capacidad contra la que se afina tiene que ser la MISMA contra la que
+    # se va a decidir el rechazo. Si el cliente pide un preset concreto, el
+    # rechazo se compara con ESE preset, no con el mayor disponible: afinar
+    # contra el mayor dejaba pasar sin medir un presupuesto que luego no cabia
+    # en el preset pedido, y peor, el recorte "no rechaces por estimacion"
+    # podia FABRICAR el fallo —recortaba a la ventana mayor (40.960) y el
+    # preset pedido (30.720) no la cubria—.
+    #
+    # Reproducido 2026-11-08 contra qwen3:32b con el preset `normal` (30.720):
+    #   prompt de ~19.000 tokens reales, estimado en 34.311
+    #   34.311 < 40.960 (mayor)  -> no se afinaba
+    #   34.311 > 30.720 (pedido) -> 400, con el worker cargado y sitio de sobra
+    explicit_candidate = (
+        next((item for item in candidates if item.preset_key == explicit_key), None)
+        if explicit_key
+        else None
+    )
+    capacidad_decisiva = (
+        explicit_candidate.effective_context
+        if explicit_candidate is not None
+        else max(item.effective_context for item in candidates)
+    )
     required_tokens = await refine_required_tokens(
         model_manager,
         profile,
         body,
         required_tokens=required_tokens,
-        capacity=mayor_contexto,
+        capacity=capacidad_decisiva,
         default_output_reservation=default_output_reservation,
     )
 
-    explicit_key = _requested_preset_key(body)
     loaded_keys: set[str] = set()
     for runtime_state in await model_manager.list_states(include_derived=True):
         if runtime_state.status.value != "loaded":
@@ -557,7 +579,7 @@ async def plan_profile_runtime(
             loaded_keys.add(str(metadata["runtime_key"]))
 
     if explicit_key:
-        explicit = next((item for item in candidates if item.preset_key == explicit_key), None)
+        explicit = explicit_candidate
         if explicit is None:
             raise ContextCapacityError(
                 f"runtime preset '{explicit_key}' is disabled, unavailable, or does not fit"

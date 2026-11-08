@@ -113,3 +113,78 @@ def test_registered_in_the_worker_pool() -> None:
     main_py = Path(__file__).resolve().parents[2] / "ocabra" / "main.py"
     source = main_py.read_text(encoding="utf-8")
     assert 'register_backend("llamacpp_mks", LlamaCppMksBackend())' in source
+
+
+# ── El error de activacion de vision dice la causa real ───────
+#
+# El `except` de `_activate_vision` tapaba todas las causas con
+# "requires the oCabra custom llama.cpp runtime with hot mmproj support", y
+# solo una lo es. El proyector se asigna en VRAM al activarlo, asi que lo
+# habitual es que no quepa: el worker muere y aqui llega un error de conexion.
+# Reproducido 2026-11-08 con qwen3.8:27b-abliterated a 40k en la 3090 + imagen.
+
+
+def _mensaje_de_activacion(exc_a_lanzar):
+    """Ejecuta el except de la activacion de vision con una excepcion concreta."""
+    import asyncio
+    from unittest.mock import patch
+
+    import httpx
+
+    from ocabra.backends.llama_cpp_backend import LlamaCppBackend
+
+    backend = LlamaCppBackend()
+    backend._processes["m"] = type("E", (), {"port": 18099})()
+    backend._model_configs["m"] = {
+        "vision_mode": "on_demand",
+        "mmproj_path": "/tmp/mm.gguf",
+    }
+    cuerpo = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}],
+            }
+        ]
+    }
+
+    class _Cliente:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            raise exc_a_lanzar
+
+    with patch.object(httpx, "AsyncClient", _Cliente):
+        try:
+            asyncio.run(backend.prepare_request("m", "/v1/chat/completions", cuerpo))
+        except RuntimeError as exc:
+            return str(exc)
+    return ""
+
+
+def test_un_404_sigue_diciendo_que_falta_el_runtime():
+    import httpx
+
+    peticion = httpx.Request("POST", "http://x/props")
+    respuesta = httpx.Response(404, request=peticion)
+    mensaje = _mensaje_de_activacion(
+        httpx.HTTPStatusError("404", request=peticion, response=respuesta)
+    )
+    assert "hot mmproj support" in mensaje
+
+
+def test_una_caida_del_worker_culpa_a_la_vram_no_al_runtime():
+    import httpx
+
+    mensaje = _mensaje_de_activacion(httpx.ConnectError("All connection attempts failed"))
+    assert mensaje, "tiene que lanzar RuntimeError"
+    assert "hot mmproj support" not in mensaje, "esa no es la causa de una conexion caida"
+    assert "VRAM" in mensaje
+    assert "context preset" in mensaje

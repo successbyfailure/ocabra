@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.6 — 2026-11-08
+
+### Arreglos
+
+- **Si pedías un preset de contexto concreto, el `400` por tamaño volvía a
+  decidirse con una estimación.** El arreglo de 0.51.0 comparaba el tamaño del
+  prompt con la ventana *más grande* del modelo, pero cuando pides un preset
+  con `ocabra.context_preset` el rechazo se compara con **ese** preset. Un
+  prompt de ~19.000 tokens reales contra `qwen3:32b` con el preset `normal`
+  (30.720) se estimaba en 34.311 y se rechazaba, aunque cabía de sobra y el
+  modelo estaba cargado. Peor: cuando no había conteo exacto disponible, el
+  recorte "no rechaces por estimación" usaba la ventana mayor y **fabricaba**
+  un rechazo que con el número real no existía. Ahora se mide y se recorta
+  contra el preset que de verdad decide.
+
+- **El error de activación de visión culpaba al motor en vez de a la VRAM.**
+  Cuando una petición con imagen no cabía, recibías
+  `On-demand vision requires the oCabra custom llama.cpp runtime with hot
+  mmproj support`, que manda a mirar el sitio equivocado: el proyector visual
+  se asigna en VRAM al activarlo, así que la causa habitual es que no quepa
+  junto a la caché del modelo. Ese mensaje queda solo para cuando el motor de
+  verdad no implementa la activación en caliente (`404`/`405`/`501`); el resto
+  de fallos dicen qué pasó y sugieren un preset de contexto más pequeño.
+
 ## 0.51.5 — 2026-11-08
 
 ### Sin cambios para tu cliente
