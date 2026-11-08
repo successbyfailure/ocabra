@@ -355,6 +355,24 @@ class WhisperCppBackend(BackendInterface):
             str(threads),
             "--no-gpu",
             "--convert",
+            # ``whisper-server`` defaults this to "en", and with an "en" target
+            # Whisper *translates* what it hears instead of transcribing it: a
+            # Spanish clip comes back in English, every word counted as an
+            # error. faster-whisper (the GPU backend) auto-detects, so the same
+            # request gave one language or another depending on which worker
+            # served it, with no error anywhere — and ``recomendado-stt`` falls
+            # back to this worker when the cards are busy, so it reached real
+            # users. Reproduced 2026-11-08 with a 3,8 s clip: "El informe sobre
+            # el presupuesto europeo se aprobó ayer por la tarde" came back as
+            # "The report on European budget was approved yesterday".
+            #
+            # It goes on the command line, not in the per-request form, because
+            # plain transcriptions never pass through this backend's
+            # ``forward_request`` — the audio endpoint posts them to the worker
+            # directly and only routes diarized ones through here. A caller's
+            # own ``language`` still overrides this per request.
+            "--language",
+            "auto",
             "--inference-path",
             _INFERENCE_PATH,
         ]
@@ -559,16 +577,12 @@ def _build_transcription_multipart(
     }
 
     form_data: dict[str, str | list[str]] = {}
-    # ``whisper-server`` defaults ``--language`` to "en", and with an "en"
-    # target Whisper translates what it hears instead of transcribing it: a
-    # Spanish clip comes back in English, every word counted as an error. The
-    # GPU backend (faster-whisper) auto-detects, so the same request gave two
-    # different languages depending on which worker served it — and
-    # ``recomendado-stt`` falls back to this one when the cards are busy.
-    # Reproduced 2026-11-08 with a 3,8 s clip: "El informe sobre el
-    # presupuesto europeo se aprobó ayer por la tarde" came back as "The
-    # report on European budget was approved yesterday".
-    form_data["language"] = str(body["language"]) if body.get("language") else "auto"
+    # No default here on purpose: the worker is launched with
+    # ``--language auto`` (see ``load``), which covers every caller — this
+    # function only runs for diarized requests, the plain ones are posted to
+    # the worker straight from the audio endpoint.
+    if body.get("language"):
+        form_data["language"] = str(body["language"])
     if body.get("response_format"):
         form_data["response_format"] = str(body["response_format"])
 

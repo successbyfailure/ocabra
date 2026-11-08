@@ -26,8 +26,9 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   de transcribir: un clip en español volvía como "The report on European budget
   was approved yesterday". El modelo de GPU detecta el idioma solo, así que la
   misma petición daba un idioma u otro según qué worker la sirviera, sin ningún
-  error de por medio. Ahora, cuando no dices el idioma, también se autodetecta
-  en CPU.
+  error de por medio. Ahora el worker de CPU arranca autodetectando el idioma,
+  así que sin `language` transcribe en el idioma que oye. Si lo mandas, manda
+  lo tuyo.
 
   Se notaba más en audios cortos, donde la traducción además resume: en un clip
   de 3,8 segundos con 12 palabras volvían 9, en inglés.

@@ -314,36 +314,71 @@ async def test_forward_request_without_diarize_skips_sidecar() -> None:
 
 # --- El idioma no puede quedarse en el "en" por defecto de whisper-server ---
 # Con un objetivo "en", Whisper traduce lo que oye en vez de transcribirlo: un
-# clip en español vuelve en inglés y cada palabra cuenta como error. El backend
-# de GPU (faster-whisper) autodetecta, asi que la misma peticion daba un idioma
-# u otro segun que worker la sirviera — y recomendado-stt cae a este cuando las
-# tarjetas estan ocupadas. Reproducido el 2026-11-08 con un clip de 3,8 s:
-# "El informe sobre el presupuesto europeo se aprobo ayer por la tarde" volvia
-# como "The report on European budget was approved yesterday".
+# clip en español vuelve en inglés y cada palabra cuenta como error.
+# faster-whisper (el backend de GPU) autodetecta, asi que la misma peticion
+# daba un idioma u otro segun que worker la sirviera, sin error por ningun
+# lado — y recomendado-stt cae a este cuando las tarjetas estan ocupadas, asi
+# que llegaba a usuarios reales. Reproducido el 2026-11-08 con un clip de
+# 3,8 s: "El informe sobre el presupuesto europeo se aprobo ayer por la tarde"
+# volvia como "The report on European budget was approved yesterday".
+#
+# Va en la linea de comandos y no en el formulario de cada peticion: las
+# transcripciones normales no pasan por el forward_request de este backend
+# —el endpoint de audio las postea al worker directamente y solo enruta por
+# aqui las diarizadas—, asi que un defecto puesto en el formulario solo
+# habria arreglado la mitad de los casos. Primer intento de este arreglo,
+# precisamente, puesto en el sitio equivocado: los tests del formulario
+# pasaban y en vivo seguia devolviendo ingles.
 
 
-def test_sin_idioma_pedido_se_autodetecta() -> None:
-    _, form = _build_transcription_multipart({"file": b"RIFF...."})
-    assert form["language"] == "auto"
+async def _args_de_arranque(tmp_path: Path) -> list[str]:
+    modelo = tmp_path / "ggml-m.bin"
+    modelo.write_bytes(b"x")
+    binario = tmp_path / "whisper-server"
+    binario.write_bytes(b"#!/bin/sh\n")
+    backend = WhisperCppBackend()
+    proc = _fake_process()
+    with (
+        patch("ocabra.backends.whispercpp_backend.settings") as mock_settings,
+        patch(
+            "ocabra.backends.whispercpp_backend.read_backend_metadata",
+            return_value={"extra_bins": {"server": str(binario)}},
+        ),
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as spawn,
+        patch.object(WhisperCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        mock_settings.backends_dir = str(tmp_path)
+        mock_settings.whispercpp_threads = 4
+        await backend.load(
+            "m",
+            [],
+            port=18099,
+            extra_config={"whisper_cpp": {"model_path": str(modelo)}},
+        )
+    return list(spawn.await_args.args)
 
 
-def test_el_idioma_del_cliente_manda() -> None:
+@pytest.mark.asyncio
+async def test_el_worker_arranca_autodetectando_el_idioma(tmp_path: Path) -> None:
+    args = await _args_de_arranque(tmp_path)
+    assert "--language" in args
+    assert args[args.index("--language") + 1] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_nunca_se_arranca_sin_decirle_el_idioma(tmp_path: Path) -> None:
+    """Invariante: el campo ausente es lo que activaba el "en" del servidor."""
+    args = await _args_de_arranque(tmp_path)
+    assert "--language" in args, args
+
+
+def test_el_idioma_del_cliente_sigue_mandando_en_las_diarizadas() -> None:
     _, form = _build_transcription_multipart({"file": b"RIFF....", "language": "es"})
     assert form["language"] == "es"
 
 
 @pytest.mark.parametrize("vacio", ["", None])
-def test_un_idioma_vacio_cuenta_como_no_pedido(vacio) -> None:
+def test_sin_idioma_no_se_inventa_ninguno_en_el_formulario(vacio) -> None:
+    """El defecto vive en la linea de comandos; aqui estorbaria."""
     _, form = _build_transcription_multipart({"file": b"RIFF....", "language": vacio})
-    assert form["language"] == "auto"
-
-
-def test_nunca_se_manda_la_peticion_sin_idioma() -> None:
-    """Invariante: el campo ausente es lo que activaba el "en" del servidor."""
-    for cuerpo in (
-        {"file": b"RIFF...."},
-        {"file": b"RIFF....", "response_format": "verbose_json"},
-        {"file": b"RIFF....", "prompt": "acta de reunion", "temperature": 0},
-    ):
-        _, form = _build_transcription_multipart(cuerpo)
-        assert form.get("language")
+    assert "language" not in form
