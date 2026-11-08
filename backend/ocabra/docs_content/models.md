@@ -1,31 +1,17 @@
 # Modelos
 
 Cómo rinde cada modelo **en este despliegue concreto**. No son las cifras del
-autor del modelo ni un benchmark sintético: son percentiles sobre el tráfico
-real que ha pasado por este servidor entre el **23 de septiembre y el 7 de
-noviembre de 2026**, con el número de peticiones de cada muestra a la vista
-para que sepas cuánto fiarte.
+autor del modelo: salen de un benchmark propio con tareas reales —extracción
+de datos de transcripciones de reuniones, resumen de documentos largos,
+transcripción de audio en español, recuperación sobre un corpus real— más los
+percentiles del tráfico que pasa por este servidor.
+
+**Medido**: LLM el 8 de noviembre de 2026; voz y embeddings el 5-6 de
+noviembre. Hardware: RTX 3060 (12 GB) + RTX 3090 (24 GB).
 
 Hay una copia en Markdown sin maquetar en `GET /docs/models.md`, que es la
 misma fuente que genera esta página. Los cambios de comportamiento de la API
 están en [`/docs/changelog`](/docs/changelog).
-
-## Antes de leer las tablas
-
-- **Los tokens/segundo dependen sobre todo del prompt.** Un modelo con prompts
-  de 45.000 tokens de media sale peor que el mismo modelo con prompts de 5.000,
-  aunque el motor sea idéntico. Por eso la tabla incluye el **prompt medio** de
-  cada muestra: compara modelos con prompts parecidos, no la columna de
-  tok/s a secas.
-- **Hay 4 peticiones concurrentes por modelo.** Si las cuatro ranuras están
-  ocupadas, tu petición espera; el tiempo de cola no está en estas cifras pero
-  sí en `GET /ocabra/stats/performance`, que lo separa del tiempo de motor.
-- **El contexto es un fondo común, no una cuota por petición.** Cada modelo
-  reserva su caché KV entera por adelantado y las 4 ranuras la comparten. Una
-  petición sola puede usar casi todo el contexto; cuatro peticiones grandes a la
-  vez, no.
-- Las cifras de tok/s salen solo de peticiones **terminadas con éxito**. Los
-  fallos están en la sección [Qué falla y por qué](#que-falla-y-por-que).
 
 ## Cómo se pide un modelo
 
@@ -40,24 +26,27 @@ tablas de abajo: son del despliegue que está configurado ahora.
 
 Si tienes una razón para fijar el motor —comparar dos, o reproducir un
 resultado— pídelo como `<motor>/<modelo>`: `ollama/gemma4:26b`,
-`ollama/qwen3-embedding:8b`. No salen en la lista, pero resuelven.
+`llamacpp_mks/gemma4:26b`. No salen en la lista, pero resuelven.
 
-## El hardware
+## Antes de leer las tablas
 
-| GPU | Tarjeta | VRAM |
-|-----|---------|------|
-| 0 | RTX 3060 | 12 GB |
-| 1 | RTX 3090 | 24 GB |
-
-Dos tarjetas desiguales, y de ahí vienen casi todas las particularidades: los
-modelos grandes solo caben en la 3090, la 3060 se reserva para los pequeños y
-para Whisper, y un par de modelos se reparten entre las dos. No esperes que dos
-modelos de 30B estén cargados a la vez.
+- **La 3090 es un hueco único.** Los modelos de 27B-33B piden entre 23 y 25 GB
+  cada uno, así que **solo cabe uno a la vez**. Pedir un modelo grande desaloja
+  al que estuviera. No esperes tener dos disponibles en caliente.
+- **Hay 4 peticiones concurrentes por modelo.** Si las cuatro ranuras están
+  ocupadas, tu petición espera. Ese tiempo de cola no está en estas cifras pero
+  sí en `GET /ocabra/stats/performance`.
+- **El contexto es un fondo común, no una cuota por petición.** Cada modelo
+  reserva su caché entera por adelantado y las 4 ranuras la comparten. Una
+  petición sola puede usar casi todo el contexto; cuatro grandes a la vez, no.
+- **Mide dos veces.** Verás el mismo modelo tardando 120 s y luego 1 s con el
+  mismo prompt: la primera pagó el arranque en frío. Si quieres medir el motor
+  y no el planificador, descarta la primera.
 
 ## Si no quieres elegir
 
-Seis perfiles enrutan por ti al mejor modelo disponible en ese momento:
-prefieren uno que ya esté cargado antes que forzar una descarga, así que
+Seis perfiles enrutan por ti al mejor modelo disponible en ese momento.
+Prefieren uno que ya esté cargado antes que forzar una descarga, así que
 también son la opción más rápida en frío.
 
 | Nombre | Para qué | Destinos, en orden de preferencia |
@@ -69,43 +58,140 @@ también son la opción más rápida en frío.
 | `recomendado-stt` | Transcripción | `whisper-large-v3-turbo`, `faster-whisper-large-v3`, el turbo LATAM, y como último recurso la versión CPU |
 | `recomendado-tts` | Voz | `piper-es-mx-claude-high`, `glados-es-fine-tuned`, `piper-es-es-davefx-medium` |
 
-## Modelos de texto
+---
 
-| Modelo | Peticiones | tok/s (p50) | Prefill (tok/s) | Prompt medio | Contexto por defecto | Estado |
-|--------|-----------:|------------:|----------------:|-------------:|---------------------|--------|
-| `gemma4:26b` | 861 | **149** | 845 | 9.600 | 256k | fijado, pero ver abajo |
-| `nemotron-3-nano:30b` | 105 | **150** | 539 | 5.100 | 512k | bajo demanda, 2 GPUs |
-| `ravenx` | 465 | 109 | 730 | 34.600 | 240k | bajo demanda |
-| `gemma4:12b` | 231 | 105 | 656 | 6.700 | 256k | bajo demanda |
-| `qwen3-coder:30b` | 131 | 59 | 711 | 29.400 | 116k (`extended`: 256k) | bajo demanda |
-| `qwen3.8:27b` | 551 | 47 | 412 | 45.500 | 96k (`extended`: 256k) | se mantiene caliente |
-| `qwen3:8b` | 120 | 45 | 584 | 3.800 | 32k | bajo demanda |
-| `mistral:7b` | 75 | 44 | 622 | 4.200 | 32k | bajo demanda |
-| `ravenx-chaos-agent` | 1.417 | 24 | 328 | 33.700 | 128k (`extended`: 256k) | bajo demanda |
-| `qwen3:32b` | 90 | 21 | 333 | 4.500 | 40k | bajo demanda, 2 GPUs |
-| `qwen3.8:27b-abliterated` | 7 | ~47 | 77 | — | 40k (`extended`: 224k) | bajo demanda |
+# Modelos de texto
 
-`gemma4:12b`, `gemma4:26b`, `qwen3.8:27b` y `qwen3.8:27b-abliterated` usan
-decodificación especulativa (MTP) y por eso van más rápido de lo que su tamaño
-sugiere: `gemma4:26b` dobla en tok/s a modelos de 8B. El contraste con
-`qwen3.8:27b` no es del motor, es del prompt — 45.000 tokens de media frente a
-9.600.
+## Velocidad de generación
 
-La muestra de `qwen3.8:27b-abliterated` (7 peticiones) no da para un percentil;
-está en la tabla para que sepas que existe, no para compararlo.
+Media de cuatro tareas reales (extraer afirmaciones, resumir, verificar,
+analizar una sección) sobre transcripciones de 239, 2.033 y 5.076 palabras.
 
-### Razonamiento
+| Modelo | corto | medio | largo | Concurrencia ×4 | Contexto |
+|--------|------:|------:|------:|----------------:|---------:|
+| **`gemma4:26b`** | **158** | **123** | **102** | **206** (2,7×) | 256k |
+| `nemotron-3-nano:30b` | 134 | 102 | 91 | 88 (2,7×) | 512k |
+| `ravenx` | 130 | 97 | 87 | **188** (5,0×) | 240k |
+| `gemma4:12b` | 114 | 92 | 75 | 170 (3,0×) | 256k |
+| `qwen3.8:27b` | 67 | 62 | 47 | 80 (3,0×) | 96k · 256k con `extended` |
+| `mistral:7b` | 55 | 31 | 18 | 16 (2,0×) | 32k |
+| `qwen3:8b` | 51 | 33 | 19 | 40 (2,3×) | 32k |
+| `qwen3:32b` | 25 | 17 | 11 | 34 (3,6×) | 40k |
+| `nemotron3:33b` | — | — | 85 | 109 (1,7×) | 65k |
 
-Solo **tres** modelos distinguen de verdad los niveles de `reasoning_effort`:
-`qwen3.8:27b`, `qwen3.8:27b-abliterated` y `ravenx-chaos-agent`. Su plantilla
-acepta `low`, `medium` y `xhigh`; oCabra traduce el `high` de OpenAI a `xhigh`.
+Cifras en tokens por segundo. "Concurrencia ×4" es el *throughput total* con
+cuatro peticiones simultáneas, y el multiplicador respecto a una sola.
+
+`gemma4:26b` es el más rápido en todos los tamaños y dobla en velocidad a
+modelos de 8B porque usa decodificación especulativa (igual que `gemma4:12b`,
+`qwen3.8:27b` y `qwen3.8:27b-abliterated`). Si vas a mandar volumen, `ravenx`
+es el que mejor escala: ×5 al pasar de una petición a cuatro.
+
+**`nemotron3:33b` no es recomendable.** Es el único modelo que queda sobre
+Ollama y, si las GPUs están ocupadas cuando le toca cargar, Ollama lo reparte
+en CPU y se queda ahí todo su keep-alive: medido a **0,3 tok/s**, con
+peticiones de dos minutos para 32 tokens. Sus cifras buenas de esta tabla son
+de cuando le toca entero en GPU, y no puedes saber en qué caso estás. Usa
+`nemotron-3-nano:30b`, que es el mismo tipo de modelo sobre llama.cpp.
+
+## Calidad de extracción
+
+Extraer afirmaciones de una transcripción de 2.033 palabras y comparar contra
+100 de referencia, por similitud coseno de embeddings.
+
+- **Cobertura**: cuánto de la referencia se captura. Más alto = más completo.
+- **Precisión**: cuán fieles son las afirmaciones extraídas. Más alto = menos
+  invención.
+
+| Modelo | Afirmaciones | Cobertura | Precisión |
+|--------|-------------:|----------:|----------:|
+| `nemotron-3-nano:30b` | 80 | **0,619** | 0,613 |
+| `gemma4:12b` | 35 | 0,559 | **0,685** |
+| `qwen3:8b` | 41 | 0,538 | 0,591 |
+| `qwen3:32b` | 26 | 0,522 | 0,617 |
+| `gemma4:26b` | 33 | 0,521 | 0,574 |
+| `ravenx` (`off`) | 54 | 0,585 | 0,599 |
+| `qwen3.8:27b` (`off`) | 69 | 0,574 | 0,561 |
+| `qwen3.8:27b` (`medium`) | 36 | 0,547 | 0,614 |
+| `mistral:7b` | — | — | — |
+
+`mistral:7b` no produjo JSON válido en ninguna tirada: **no lo uses para
+salida estructurada**.
+
+Lo importante aquí no es el ranking, es que **velocidad y calidad no van
+juntas**: `gemma4:26b` es el más rápido y el que menos extrae; `gemma4:12b` es
+el más fiel de todo el parque; `nemotron-3-nano:30b` es el mejor equilibrio.
+
+## Documentos largos
+
+Resumen de transcripciones de 15.000 y 25.000 palabras.
+
+| Modelo | 15k palabras | 25k palabras |
+|--------|-------------:|-------------:|
+| **`gemma4:26b`** | **41** | **50** |
+| `gemma4:12b` | 35 | 40 |
+| `nemotron3:33b` | 39 | 37 |
+| `ravenx` | 19 | 24 |
+| `qwen3.8:27b` | 21 | 24 |
+| `nemotron-3-nano:30b` | 18 | 20 |
+| `mistral:7b` | 17 | no cabe |
+| `qwen3:8b` | 7 | no cabe |
+| `qwen3:32b` | 5 | no cabe |
+
+**Un documento de 25.000 palabras son unos 43.000 tokens**, así que no entra en
+`qwen3:8b` (32k), `mistral:7b` (32k) ni `qwen3:32b` (40k): recibirás un `400`
+`context_length_exceeded`. Sí entra en los demás. A 15.000 palabras (~29.000
+tokens) entran todos.
+
+Y ojo con el tokenizador: el **mismo** texto de 25.000 palabras son 46.860
+tokens para la familia Qwen y **52.133 para `mistral:7b`**, un 11 % más. Si
+vas al límite de la ventana, cuenta con el modelo concreto, no con una regla
+de palabras.
+
+## Latencia al primer token
+
+Streaming, media de tres tiradas en caliente.
+
+| Modelo | Nivel | TTFT |
+|--------|:-----:|-----:|
+| `ravenx` | `off` | **1,25 s** |
+| `nemotron-3-nano:30b` | — | 1,42 s |
+| `qwen3.8:27b` | `off` | 1,85 s |
+| `ravenx` | `low`/`medium` | 2,15 s |
+| `gemma4:26b` | — | 2,46 s |
+| `mistral:7b` | — | 2,88 s |
+| `qwen3.8:27b` | `low` | 3,11 s |
+| `gemma4:12b` | — | 3,23 s |
+| `qwen3.8:27b` | `medium` | 3,47 s |
+| `qwen3:8b` | — | 8,74 s |
+| `qwen3:32b` | — | **22,73 s** |
+
+Para chat interactivo, `reasoning_effort: "off"` es lo que más baja el TTFT:
+`ravenx` pasa de 2,15 s a 1,25 s y `qwen3.8:27b` de 3,47 s a 1,85 s.
+
+`qwen3:32b` tarda 22 s en empezar incluso cargado, porque se reparte entre las
+dos tarjetas. No lo uses para nada interactivo.
+
+## Razonamiento
+
+Solo **tres** modelos distinguen de verdad los niveles de `reasoning_effort`,
+porque su plantilla los lee: `qwen3.8:27b`, `qwen3.8:27b-abliterated` y
+`ravenx-chaos-agent`. Aceptan `low`, `medium` y `xhigh`; oCabra traduce el
+`high` de OpenAI a `xhigh` por ti.
 
 El resto —`gemma4:26b`, `gemma4:12b`, `qwen3:32b`, `qwen3:8b`,
-`nemotron-3-nano:30b`— solo tiene **interruptor**: piensa o no piensa. Con esos
-modelos `low`, `medium` y `high` producen lo mismo, y `"off"` sí apaga el
-razonamiento. `mistral:7b` y `qwen3-coder:30b` no razonan en absoluto.
+`nemotron-3-nano:30b`, `ravenx`— solo tiene **interruptor**: piensa o no
+piensa. Con ellos `off` apaga el razonamiento, y `low`, `medium` y `high` se
+diferencian únicamente en cuánto pensamiento les deja oCabra antes de cortar.
 
-Cuánto piensan de media, cuando piensan:
+Qué conviene pedir, medido:
+
+| Modelo | Recomendación |
+|--------|---------------|
+| `ravenx` | **`off` siempre.** Con razonamiento extrae menos y peor, y el TTFT casi se dobla. |
+| `qwen3.8:27b` | `off` si quieres exhaustividad (69 afirmaciones), `medium` si quieres precisión (0,614). |
+
+Cuánto piensan de media, cuando piensan, sobre el tráfico real del servidor:
 
 | Modelo | Tokens de razonamiento por respuesta |
 |--------|-------------------------------------:|
@@ -114,177 +200,146 @@ Cuánto piensan de media, cuando piensan:
 | `nemotron-3-nano:30b` | 970 |
 | `gemma4:12b` | 560 |
 | `qwen3.8:27b` | 405 |
-| `qwen3:8b` | 270 |
 | `ravenx-chaos-agent` | 28 |
 
-Si pagas por token de salida o tienes un presupuesto de latencia, cuenta con
-esto: `gemma4:26b` gasta de media 1.700 tokens antes de empezar a responder.
-Todos los modelos tienen un tope de salida que oCabra aplica aunque tú no
-mandes `max_tokens` (ver la entrada 0.41.0 del
-[changelog](/docs/changelog)), así que un razonamiento desbocado se corta en vez
-de consumirte el contexto entero.
+**Acota la salida y el razonamiento se acota con ella.** oCabra reserva siempre
+un cuarto de tu `max_tokens` para la respuesta, así que un `max_tokens` pequeño
+recorta el pensamiento en vez de dejarte sin respuesta (ver la entrada 0.51.2
+del [changelog](/docs/changelog)). Aun así, si pides razonamiento, da holgura:
+con `max_tokens: 4096` y `medium` el modelo piensa como mucho 3.072 tokens.
 
-### Visión
+## Visión
 
 `gemma4:26b` y `gemma4:12b` aceptan imágenes (`image_url` en las content
 parts). El proyector visual se carga **cuando llega la primera imagen**, no al
-arrancar: la primera petición con imagen de una sesión tarda unos segundos más.
-Ningún otro modelo de texto del parque acepta imágenes.
+arrancar: esa primera petición tarda unos segundos más. Ningún otro modelo de
+texto del parque acepta imágenes.
 
-## Embeddings
+## Disponibilidad
 
-| Modelo | Dimensiones | Peticiones | Latencia p50 | p90 | Prompt mediano |
-|--------|------------:|-----------:|-------------:|----:|---------------:|
-| `qwen3-embedding:0.6b` | 1.024 | 2.004 | 97 ms | 3,8 s | 9 tokens |
-| `qwen3-embedding:4b` | 2.560 | 572 | 65 ms | 2,6 s | 12 tokens |
-| `qwen3-embedding:8b` | 4.096 | 3.238 | 416 ms | 4,1 s | 48 tokens |
+| Modelo | Nota |
+|--------|------|
+| `gemma4:26b` | Fijado en la 3090, **pero su pin es evictable**: reserva 23.600 de los 24.576 MB, así que cuando otro modelo grande se queda la tarjeta sale, y no vuelve hasta que quede libre. Entre tanto responde `409`. Si tu carga alterna modelos grandes, usa `recomendado-ha-chatbots`. |
+| `qwen3.8:27b` | Se mantiene caliente. |
+| `qwen3-embedding:8b` | Se mantiene caliente. |
+| `whisper-large-v3-turbo` | Fijado en la 3060, así que transcribir no compite por la 3090. |
+| `nemotron3:33b` | Ver el aviso de la tabla de velocidad. |
+| El resto | Bajo demanda: la primera petición paga la carga. |
 
-Los tres aceptan hasta 32k–40k tokens por entrada y los tres soportan
-`dimensions` para truncar el vector (oCabra lo trunca y **renormaliza a L2**,
-así que el coseno sigue siendo comparable). El salto del p50 al p90 es cola de
-arranque en frío y de cola de espera, no del modelo: si tu carga es a ráfagas,
-cuenta con el p90.
+---
 
-`qwen3-embedding:8b` se mantiene caliente; los otros dos se cargan bajo
-demanda. Para indexar mucho, el 4b es el mejor compromiso y es el que sirve
-`recomendado-embedding`.
+# Transcripción de voz
 
-## Reranking
+Audio real de 85,9 s en español, mono 16 kHz, dos hablantes.
 
-| Modelo | Peticiones | Latencia p50 | p90 | Prompt mediano |
-|--------|-----------:|-------------:|----:|---------------:|
-| `bge-reranker-v2-m3` | 849 | 1,0 s | 20,4 s | 8.131 tokens |
+| Perfil | WER | Velocidad | Con diarización: WER / DER / velocidad |
+|--------|----:|----------:|---------------------------------------:|
+| **`whisper-large-v3-turbo`** | 3,77 % | 36× | **4,18 % / 10,39 % / 17×** |
+| `whisper-large-v3` | **3,77 %** | 19× | 5,86 % / 12,08 % / 15× |
+| `faster-whisper-large-v3` | 3,77 % | 14× | 5,44 % / 12,10 % / 10× |
+| `turbo-latam int8` | 19,25 % | **64×** | 19,67 % / 11,53 % / 27× |
+| `whisper.cpp` (CPU) | 5,02 % | 2,7× | 11,72 % / 30,27 % / 1,1× |
 
-El p90 alto es el coste de los lotes grandes: la latencia crece con el número
-de documentos que mandas. Parte en tandas si necesitas una respuesta acotada.
+**WER** = errores de palabra (más bajo, mejor). **DER** = errores de
+atribución de hablante. **Velocidad** = veces más rápido que el tiempo real.
 
-## Transcripción (STT)
+`whisper-large-v3-turbo` gana en todo: mismo WER que los grandes, el doble de
+rápido, y el mejor DER cuando diarizas. Es lo que sirve `recomendado-stt`.
 
-| Modelo | Peticiones | p50 | p95 |
-|--------|-----------:|----:|----:|
-| `faster-whisper-large-v3` | 2.062 | 2,0 s | 115 s |
-| `faster-whisper-large-v3-turbo-latam-int8-ct2` | 75 | 4,1 s | 128 s |
-| `whisper-large-v3-turbo` | 97 | 7,9 s | 215 s |
-| `whisper-large-v3` | 34 | 23,3 s | 159 s |
+**`turbo-latam int8` tiene un WER de casi el 20 %**, cinco veces peor que el
+resto, y no es la cuantización: es un problema del perfil. Es muy rápido (64×)
+pero no lo uses si te importa lo que dice el texto.
 
-Aquí la latencia es casi toda duración del audio, así que estos números dicen
-más de lo que la gente sube que del modelo. Lo que sí es comparable es el
-**streaming** del endpoint Realtime, donde los trozos son del mismo tamaño:
+La versión **CPU** (`whisper.cpp`) transcribe razonablemente bien (5 % WER) y
+no toca la GPU, pero su diarización no sirve (DER 30 %) y a 1,1× el tiempo
+real tarda casi lo que dura el audio. Está como red de seguridad cuando las
+dos tarjetas están ocupadas.
 
-| Modelo | Trozos | p50 | p95 |
-|--------|-------:|----:|----:|
-| `whisper-large-v3` | 59.433 | **685 ms** | 730 ms |
-| `whisper-large-v3-turbo` | 20 | 667 ms | 4,9 s |
+## Diarización y arranque en frío
 
-`whisper-large-v3-turbo` está fijado en la 3060, así que transcribir no compite
-con el modelo de texto por la 3090. Las variantes `-diarized` añaden separación
-de hablantes y arrancan un proceso aparte la primera vez: cuenta con unos
-segundos extra en la primera petición.
+| Perfil | VRAM | Primera petición | Con diarización |
+|--------|-----:|-----------------:|----------------:|
+| `turbo-latam int8` | 2,6 GB | 1,4 s | 30,4 s |
+| `faster-whisper-large-v3` | 9,3 GB | 6,3 s | 32,3 s |
+| `whisper-large-v3` | 11,7 GB | 4,7 s | 34,9 s |
+| `whisper-large-v3-turbo` | 11,9 GB | 2,5 s | 11,6 s |
+| `whisper.cpp` (CPU) | 0 | 32,5 s | 87,2 s |
 
-Hay además una variante que corre **en CPU**
-(`whisper.cpp-large-v3-turbo-q8-0-cpu`), mucho más lenta, que existe como red
-de seguridad cuando las dos GPUs están ocupadas. `recomendado-stt` solo cae en
-ella como último recurso.
+**La diarización cuesta de 2 a 3 veces más tiempo** y arranca un proceso
+aparte la primera vez. Pídela solo cuando necesites saber quién habla:
+`diarize: true`, o los perfiles `*-diarized`, que son el mismo modelo con la
+opción puesta.
 
-## Voz (TTS)
+Nota de capacidad: `whisper-large-v3-turbo` con diarizador ocupa 11,9 GB de los
+12,2 de la 3060, es decir el 97 %. Deja la tarjeta prácticamente llena.
 
-| Modelo | Peticiones | p50 | p95 |
-|--------|-----------:|----:|----:|
-| `piper-es-es-davefx-medium` | 42 | 295 ms | 4,0 s |
-| `glados-es-fine-tuned` | 160 | 1,3 s | 9,5 s |
+---
 
-En el endpoint Realtime, con frases cortas, los dos bajan de 550 ms de media
-(`glados-es-fine-tuned` 409 ms p50 sobre 90 frases). Son modelos Piper: ligeros,
-sin GPU dedicada y sin arranque en frío apreciable. Hay también
-`piper-es-mx-claude-high` (el que sirve `recomendado-tts` por defecto) y
-`piper-en-us-lessac-high` para inglés.
+# Embeddings y reranking
 
-## Imagen, música y escalado
+Corpus de 200 fragmentos reales de reuniones, 80 consultas, relevancia
+graduada.
 
-| Modelo | Para qué | Peticiones | p50 |
-|--------|----------|-----------:|----:|
-| `qwen-image-2.1` | Generar imagen | 15 | 114 s |
-| `qwen-image-edit-plus` | Editar imagen (`/v1/images/edits`) | — | — |
-| `ace-step-turbo` | Música | — | — |
-| `realesrgan-x4plus`, `remacri-x4`, `ultrasharp-x4`, `ultrasharp-v2-lite`, `real-esrgan-compact-x4` | Escalar imagen ×4 | — | — |
-| `flashvsr-v1-1` | Escalar vídeo | — | — |
+| Modelo | Dimensiones | NDCG@5 | MRR | Latencia | Concurrencia ×4 |
+|--------|------------:|-------:|----:|---------:|----------------:|
+| `qwen3-embedding:8b` | 4.096 | **0,366** | 0,595 | 28 ms | 44 textos/s |
+| `qwen3-embedding:4b` | 2.560 | 0,361 | 0,595 | 18 ms | 62 textos/s |
+| `qwen3-embedding:0.6b` | 1.024 | 0,350 | 0,570 | **8 ms** | **185 textos/s** |
 
-Generar una imagen son **dos minutos**, y el arranque en frío del pipeline son
-otros 90–210 s. Si tu cliente tiene un timeout de 60 s, no vas a ver una sola
-imagen: usa la cola de Batches o sube el timeout. Las muestras de edición,
-música y escalado son demasiado pequeñas para publicar un percentil.
+**La diferencia de calidad es mínima y la de velocidad enorme.** Entre el de
+0,6B y el de 8B hay un 4,6 % de NDCG@5, pero el pequeño es 3,5 veces más
+rápido y escala a 185 textos por segundo. Para indexar volumen, el de 0,6B; el
+de 4B es el término medio y es el que sirve `recomendado-embedding`.
 
-## Arranque en frío
+Los tres aceptan hasta 32k-40k tokens por entrada y los tres soportan
+`dimensions` para truncar el vector: oCabra lo trunca y **renormaliza a L2**,
+así que el coseno sigue siendo comparable.
 
-Casi todos los modelos se cargan **bajo demanda**: si nadie lo ha usado
-últimamente, tu petición paga la carga. Mediana medida sobre las cargas reales
-del periodo:
+| Reranker | MRR | NDCG@5 | Latencia |
+|----------|----:|-------:|---------:|
+| `bge-reranker-v2-m3` | **0,601** | 0,349 | 412 ms/consulta |
 
-| Qué | Cuánto tarda |
-|-----|--------------|
-| GGUF grande (27B–32B) en llama.cpp | 38–51 s |
-| `gemma4:26b` | 41 s (pero está fijado: normalmente no lo pagas) |
-| `nemotron-3-nano:30b` | 62 s |
-| Reranker, Whisper | ~50 s |
-| Pipeline de imagen (Diffusers) | 88–213 s |
+El reranker mejora el MRR por encima de cualquier embedding solo (0,601 frente
+a 0,595), pero cuesta 412 ms por consulta. Tiene sentido como **segunda pasada
+sobre los primeros K resultados**, no como buscador.
 
-Tres excepciones que no pagas casi nunca: `gemma4:26b` está **fijado** en la
-3090, `qwen3.8:27b` y `qwen3-embedding:8b` se mantienen **calientes**, y
-`whisper-large-v3-turbo` y dos voces Piper están fijados también.
+---
 
-**El pin de `gemma4:26b` no es una garantía.** Es evictable: reserva 23.600 MB
-de los 24.576 de la 3090, y `qwen3.8:27b` (24.000), `ravenx` (23.237) y
-`nemotron-3-nano:30b` quieren prácticamente la misma tarjeta. Si uno de ellos
-se la lleva, `gemma4:26b` **no puede volver** hasta que la tarjeta quede libre
-otra vez: ni desalojando todo lo que hay se liberan los 23.600 que pide, así
-que el planificador ni lo intenta y responde `409`. Si tu carga alterna entre
-modelos grandes, cuenta con que `gemma4:26b` puede estar inalcanzable un rato
-largo; `recomendado-ha-chatbots` existe justo para eso y enruta al que esté
-cargado.
+# Qué usar para cada caso
 
-El consejo práctico: si vas a hacer muchas peticiones, mándalas seguidas. Y si
-te da igual el modelo, usa un perfil `recomendado-*`, que prefiere lo que ya
-esté en VRAM.
+| Caso | Modelo | Por qué |
+|------|--------|---------|
+| Chat interactivo | `ravenx` + `reasoning_effort: "off"` | TTFT 1,25 s, 130 tok/s en entradas cortas |
+| Máxima velocidad | `gemma4:26b` | 123 tok/s, 206 con concurrencia — si la 3090 está libre |
+| Documentos largos | `gemma4:26b` o `gemma4:12b` | 50 y 40 tok/s con 25.000 palabras |
+| Extracción exhaustiva | `nemotron-3-nano:30b` | Mejor cobertura (0,619) con precisión alta |
+| Extracción fiel | `gemma4:12b` | La precisión más alta del parque (0,685) |
+| Volumen / lotes | `ravenx` + `off` | 188 tok/s con 4 en paralelo, escala ×5 |
+| Razonamiento visible | `qwen3.8:27b` + `medium` | Es uno de los tres que distinguen niveles de verdad |
+| Salida estructurada | cualquiera **menos** `mistral:7b` | `mistral:7b` no produjo JSON válido |
+| Actas con hablantes | `whisper-large-v3-turbo` + `diarize: true` | WER 4,18 %, DER 10,39 %, 17× tiempo real |
+| Transcripción rápida | `whisper-large-v3-turbo` | WER 3,77 %, 36× tiempo real |
+| Transcribir sin GPU | `whisper.cpp` sin diarizar | WER 5 %, no toca VRAM |
+| Indexar volumen | `qwen3-embedding:0.6b` | 8 ms por texto, 185/s en paralelo |
+| Máxima calidad de búsqueda | `qwen3-embedding:8b` + `bge-reranker-v2-m3` | NDCG@5 0,366 y MRR 0,601 |
 
 ## Qué falla y por qué
 
-Sobre 3.207 peticiones de chat en la última semana del periodo:
+| Código | Qué significa | Qué hacer |
+|--------|---------------|-----------|
+| `400` `context_length_exceeded` | Tu prompt no entra en la ventana del modelo. El número que da el error es el real, contado con el tokenizador del modelo | Parte la petición o usa un modelo con más contexto |
+| `409` `insufficient_vram` | No cabía en la GPU ni desalojando. Es el fallo propio de este despliegue: dos tarjetas desiguales y modelos que no caben juntos | Reintenta en unos segundos, pide un preset de contexto más pequeño, o usa un `recomendado-*` |
+| `429` | Las 4 ranuras del modelo estaban llenas | Respeta el `Retry-After`; la admisión reparte por turnos entre claves, insistir no te adelanta |
+| `504` | El motor no respondió a tiempo | Casi siempre un prompt enorme con el contexto casi lleno |
 
-| Código | Qué significa | Cuántas |
-|--------|---------------|--------:|
-| `409` `insufficient_vram` | No cabía en la GPU, ni descargando otros modelos | 36 |
-| `429` | Las 4 ranuras del modelo estaban llenas | 7 |
-| `504` | El motor no respondió a tiempo | 6 |
-
-El `409` es el fallo propio de este despliegue: dos tarjetas desiguales y
-modelos que no caben juntos. Durante la semana del 26 de octubre hubo **1.242**
-de estos, un 12,5 % del tráfico, por tres carreras de condición en el reparto
-de VRAM entre las dos GPUs que se arreglaron el 4 de noviembre (entradas 0.44.0
-y siguientes del [changelog](/docs/changelog)). Ahora están en el 1,1 %.
-
-Qué hacer con cada uno:
-
-- **`409`** — Reintenta tras unos segundos, o pide un preset de contexto más
-  pequeño (`normal` en vez de `extended`), o cambia a un modelo que quepa en la
-  3060. No viene con `Retry-After` porque no es transitorio por sí solo: algo
-  tiene que liberar VRAM.
-- **`429`** y **`503`** — Vienen con `Retry-After`. Respétalo; la admisión
-  reparte por turnos entre claves, así que insistir no te adelanta.
-- **`504`** — Casi siempre un prompt enorme contra un modelo con el contexto
-  casi lleno. Baja el contexto o parte la petición.
+El `409` llegó a ser el 12,5 % del tráfico la semana del 26 de octubre, por
+tres carreras de condición en el reparto de VRAM que se arreglaron el 4 de
+noviembre. Ahora está en el 1,1 %.
 
 ## Medirlo tú mismo
 
-Nada de esto hay que creérselo: son consultas sobre las métricas que el propio
-servidor publica.
-
-- `GET /v1/models` — qué hay disponible, con las capacidades (`chat`, `tools`,
-  `vision`, `reasoning`, `embeddings`) y el contexto que anuncia cada modelo.
+- `GET /v1/models` — qué hay disponible, con capacidades y contexto.
 - `GET /ocabra/stats/performance` — latencias reales, con la espera en cola, el
-  arranque en frío y el tiempo de motor **separados**. Es la cifra que importa
-  si te preocupa la latencia de punta a punta.
+  arranque en frío y el tiempo de motor **separados**.
 - `GET /ocabra/stats/recent` — las últimas peticiones con su código de estado,
-  para diagnosticar un fallo concreto que acabas de provocar.
-
-Esta página se regenera a mano; si la fecha del encabezado está lejos, pide los
-números en vivo a esos tres endpoints.
+  para diagnosticar un fallo que acabas de provocar.

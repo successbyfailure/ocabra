@@ -18,6 +18,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ## 0.51.2 — 2026-11-08
 
+### Documentación
+
+- **[`/docs/models`](/docs/models) reescrita con un benchmark propio.** Por
+  modelo: velocidad en tres tamaños de tarea y con concurrencia, calidad de
+  extracción (cobertura y precisión sobre 100 afirmaciones de referencia),
+  rendimiento con documentos de 15.000 y 25.000 palabras, latencia al primer
+  token, WER y DER de los cinco perfiles de transcripción, y NDCG/MRR de los
+  embeddings y el reranker. Con avisos concretos: `mistral:7b` no produce JSON
+  válido, `turbo-latam int8` tiene un WER del 20 %, `nemotron3:33b` puede caer
+  a CPU y `qwen3:32b` tarda 22 s en empezar.
+
 ### Arreglos
 
 - **Con `reasoning_effort` y un `max_tokens` ajustado, la respuesta llegaba
