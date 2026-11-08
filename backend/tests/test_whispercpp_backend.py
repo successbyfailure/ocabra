@@ -331,7 +331,7 @@ async def test_forward_request_without_diarize_skips_sidecar() -> None:
 # pasaban y en vivo seguia devolviendo ingles.
 
 
-async def _arranque(tmp_path: Path) -> tuple[list[str], dict[str, str]]:
+async def _args_de_arranque(tmp_path: Path) -> list[str]:
     modelo = tmp_path / "ggml-m.bin"
     modelo.write_bytes(b"x")
     binario = tmp_path / "whisper-server"
@@ -355,12 +355,12 @@ async def _arranque(tmp_path: Path) -> tuple[list[str], dict[str, str]]:
             port=18099,
             extra_config={"whisper_cpp": {"model_path": str(modelo)}},
         )
-    return list(spawn.await_args.args), dict(spawn.await_args.kwargs["env"])
+    return list(spawn.await_args.args)
 
 
 @pytest.mark.asyncio
 async def test_el_worker_arranca_autodetectando_el_idioma(tmp_path: Path) -> None:
-    args, _ = await _arranque(tmp_path)
+    args = await _args_de_arranque(tmp_path)
     assert "--language" in args
     assert args[args.index("--language") + 1] == "auto"
 
@@ -368,33 +368,8 @@ async def test_el_worker_arranca_autodetectando_el_idioma(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_nunca_se_arranca_sin_decirle_el_idioma(tmp_path: Path) -> None:
     """Invariante: el campo ausente es lo que activaba el "en" del servidor."""
-    args, _ = await _arranque(tmp_path)
+    args = await _args_de_arranque(tmp_path)
     assert "--language" in args, args
-
-
-# --- Un solo decodificador para los dos backends de STT -------------------
-# whisper.cpp prueba miniaudio primero y solo cae a ffmpeg si miniaudio *no
-# consigue abrir* el fichero, nunca si lo abre y lo lee mal. Eso deja este
-# backend decodificando los mismos bytes con otra libreria que el de GPU
-# (faster-whisper, que va por ffmpeg), asi que los dos pueden discrepar sobre
-# cuanto audio tiene un fichero sin que salte ningun error — y el ``duration``
-# de la respuesta es literalmente muestras decodificadas / 16 kHz, asi que una
-# lectura corta se ve como un clip corto.
-
-
-@pytest.mark.asyncio
-async def test_el_worker_decodifica_siempre_con_ffmpeg(tmp_path: Path) -> None:
-    _, env = await _arranque(tmp_path)
-    assert env["WHISPER_COMMON_MINIAUDIO_SKIP"] == "1"
-
-
-@pytest.mark.asyncio
-async def test_el_valor_del_salto_no_puede_ser_de_los_que_lo_desactivan(
-    tmp_path: Path,
-) -> None:
-    """Upstream trata "" y "0" como "no te lo saltes"."""
-    _, env = await _arranque(tmp_path)
-    assert env["WHISPER_COMMON_MINIAUDIO_SKIP"] not in ("", "0")
 
 
 def test_el_idioma_del_cliente_sigue_mandando_en_las_diarizadas() -> None:

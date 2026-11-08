@@ -342,19 +342,6 @@ class WhisperCppBackend(BackendInterface):
         lib_dir = str(Path(server_bin).parent)
         prev_ld = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{lib_dir}:{prev_ld}" if prev_ld else lib_dir
-        # Decode every input with ffmpeg instead of whisper.cpp's built-in
-        # miniaudio. Upstream tries miniaudio first and only falls back to
-        # ffmpeg when miniaudio *fails to open* the file — never when it opens
-        # it and reads it wrong. That leaves this backend decoding the same
-        # bytes with a different library than the GPU one (faster-whisper,
-        # which decodes through ffmpeg), so the two can disagree about how
-        # much audio a file contains with no error anywhere; the response's
-        # ``duration`` is literally decoded samples / 16 kHz, so a short read
-        # looks like a short clip. Making ffmpeg the only decoder removes that
-        # class of divergence. ffmpeg ships in the image (/usr/bin/ffmpeg) and
-        # the build has WHISPER_COMMON_FFMPEG, which is what ``--convert``
-        # relies on.
-        env["WHISPER_COMMON_MINIAUDIO_SKIP"] = "1"
 
         args = [
             server_bin,
