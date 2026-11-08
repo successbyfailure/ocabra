@@ -175,3 +175,90 @@ def test_deleting_the_only_fitting_preset_is_refused_but_deleting_the_last_one_i
     # removing every preset returns the profile to the no-preset path: allowed
     assert client2.delete("/ocabra/profiles/gemma4:26b/runtime-presets/normal").status_code == 200
     assert registry2.deleted == ["normal"]
+
+
+# ── Real ProfileRegistry + Postgres (the fake above can't see ORM cache bugs) ──
+
+import sqlalchemy as sa  # noqa: E402
+
+from ocabra.core.profile_registry import ProfileRegistry  # noqa: E402
+from ocabra.database import AsyncSessionLocal  # noqa: E402
+from ocabra.db.model_config import LogicalModel, ModelConfig, ModelProfile  # noqa: E402
+from tests.conftest import requires_db  # noqa: E402
+
+_KEY = "zz-guard:1b"
+
+
+async def _cleanup_db() -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(sa.delete(ModelConfig).where(ModelConfig.model_key == _KEY))
+        await session.execute(sa.delete(LogicalModel).where(LogicalModel.model_key == _KEY))
+        await session.commit()
+
+
+@requires_db
+async def test_rejected_preset_does_not_linger_in_the_registry_cache(monkeypatch):
+    """Live regression 2026-11-08: the guard rolled back inside the creating
+    session; the profile's loaded runtime_presets collection survived the
+    registry reload (identity map), the cache kept the deleted preset and the
+    model rejected every request until the API restarted."""
+    await _cleanup_db()
+    async with AsyncSessionLocal() as session:
+        session.add(LogicalModel(model_key=_KEY, default_backend="llamacpp_mks"))
+        await session.flush()
+        session.add(
+            ModelConfig(
+                model_id=f"llamacpp_mks/{_KEY}", model_key=_KEY, backend_type="llamacpp_mks"
+            )
+        )
+        await session.flush()
+        session.add(
+            ModelProfile(profile_id=_KEY, base_model_id=f"llamacpp_mks/{_KEY}", is_default=True)
+        )
+        await session.commit()
+    try:
+        registry = ProfileRegistry()
+        async with AsyncSessionLocal() as session:
+            await registry.load_all(session)
+
+        async def fake_resolve(profile, _state, _gpus, force=False):
+            return [
+                {
+                    "preset_key": p.preset_key,
+                    "resolved": True,
+                    "requested_context": p.context_tokens,
+                    "effective_context": 176876,
+                    "fits": (p.context_tokens or 0) <= 176876,
+                }
+                for p in profile.runtime_presets
+            ]
+
+        monkeypatch.setattr(profiles_api.runtime_capacity_cache, "resolve", fake_resolve)
+        app = FastAPI()
+        app.include_router(profiles_api.router, prefix="/ocabra")
+        app.state.profile_registry = registry
+        app.state.model_manager = SimpleNamespace(
+            get_state=AsyncMock(return_value=SimpleNamespace()), gpu_manager=None
+        )
+        app.dependency_overrides[get_current_user] = lambda: UserContext(
+            user_id=None,
+            username="__test__",
+            role="system_admin",
+            group_ids=[],
+            accessible_model_ids=set(),
+            is_anonymous=False,
+        )
+        from httpx import ASGITransport, AsyncClient
+
+        # In-loop client: TestClient runs the app on another event loop and the
+        # asyncpg pool is bound to this one.
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ocabra/profiles/{_KEY}/runtime-presets", json=_create_body("normal", 262144)
+            )
+
+        assert resp.status_code == 400
+        cached = await registry.get(_KEY)
+        assert [p.preset_key for p in cached.runtime_presets] == []
+    finally:
+        await _cleanup_db()

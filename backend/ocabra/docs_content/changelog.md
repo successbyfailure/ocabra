@@ -16,6 +16,15 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.5 — 2026-11-08
+
+### Sin cambios para tu cliente
+
+- Corrección interna del panel de administración. La API, los nombres de
+  modelo y las respuestas son los mismos que en 0.51.4.
+
+---
+
 ## 0.51.4 — 2026-11-08
 
 ### Arreglos

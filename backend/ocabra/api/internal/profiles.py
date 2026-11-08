@@ -455,10 +455,15 @@ async def create_runtime_preset(
                 404 if "profile" in str(exc).lower() and "not found" in str(exc).lower() else 400
             )
             raise HTTPException(status_code=status, detail=str(exc)) from exc
-        reason = await _unfit_preset_reason(request, profile_id)
-        if reason:
-            await registry.delete_runtime_preset(session, profile_id, preset.preset_key)
-            raise HTTPException(status_code=400, detail=reason)
+    reason = await _unfit_preset_reason(request, profile_id)
+    if reason:
+        # Roll back in a FRESH session: in the creating one the profile (and its
+        # loaded runtime_presets collection, new preset included) sits in the
+        # identity map, so the registry's reload kept the deleted preset in the
+        # cache and the profile went on rejecting every request.
+        async with AsyncSessionLocal() as rollback_session:
+            await registry.delete_runtime_preset(rollback_session, profile_id, preset.preset_key)
+        raise HTTPException(status_code=400, detail=reason)
     return _preset_to_dict(preset)
 
 
@@ -506,11 +511,14 @@ async def update_runtime_preset(
         except ValueError as exc:
             status = 404 if "not found" in str(exc).lower() else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
-        reason = await _unfit_preset_reason(request, profile_id)
-        if reason:
-            if previous is not None:
-                await registry.update_runtime_preset(session, profile_id, preset_key, previous)
-            raise HTTPException(status_code=400, detail=reason)
+    reason = await _unfit_preset_reason(request, profile_id)
+    if reason:
+        if previous is not None:
+            async with AsyncSessionLocal() as rollback_session:  # fresh: see create_runtime_preset
+                await registry.update_runtime_preset(
+                    rollback_session, profile_id, preset_key, previous
+                )
+        raise HTTPException(status_code=400, detail=reason)
     return _preset_to_dict(preset)
 
 
