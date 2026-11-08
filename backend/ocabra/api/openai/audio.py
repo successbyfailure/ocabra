@@ -50,6 +50,7 @@ _DIARIZATION_CAPABLE_BACKENDS = {"whisper", "whisper_cpp"}
 def _is_diarize_requested(raw: str | None) -> bool:
     return raw is not None and raw.strip().lower() not in {"", "0", "false", "no"}
 
+
 _AUDIO_CONTENT_TYPES = {
     "mp3": "audio/mpeg",
     "opus": "audio/opus",
@@ -60,7 +61,9 @@ _AUDIO_CONTENT_TYPES = {
 }
 
 
-@router.post("/audio/transcriptions", summary="Transcribe audio", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
+@router.post(
+    "/audio/transcriptions", summary="Transcribe audio", responses=NON_STREAMING_LOAD_RESPONSE_DOC
+)
 async def transcriptions(
     request: Request,
     file: UploadFile,
@@ -76,6 +79,23 @@ async def transcriptions(
     form = await request.form(
         max_part_size=max(1, int(settings.openai_audio_max_part_size_mb)) * 1024 * 1024
     )
+    # One audio per request, like OpenAI's own endpoint. Several parts named
+    # "file" used to be accepted with a 200 that transcribed only the last
+    # one: the other audios were dropped with nothing in the response saying
+    # so (reported 2026-11-08 by a harness that sent four WAVs and got one
+    # transcription back). Transcribing batches goes through /v1/batches, one
+    # line per audio — see the Batches section of GET /docs.
+    if len(form.getlist("file")) > 1:
+        raise _openai_error(
+            "This endpoint transcribes one audio per request, and "
+            f"{len(form.getlist('file'))} 'file' parts were sent. Post them one "
+            "at a time, or use /v1/batches with one line per audio (upload each "
+            'via POST /v1/files with purpose="batch_input_audio").',
+            "invalid_request_error",
+            param="file",
+            code="multiple_files",
+        )
+
     model_id: str = form.get("model", "")
     language: str | None = form.get("language")
     response_format: str = form.get("response_format", "json")
@@ -92,8 +112,7 @@ async def transcriptions(
     granularities: list[str] = [
         str(value)
         for value in (
-            form.getlist("timestamp_granularities[]")
-            or form.getlist("timestamp_granularities")
+            form.getlist("timestamp_granularities[]") or form.getlist("timestamp_granularities")
         )
     ]
 
@@ -165,9 +184,7 @@ async def transcriptions(
             # Non-recoverable peer error → propagate (recoverable ones
             # would have made the helper return None for local fallback).
             if normalized_format in {"text", "srt", "vtt"}:
-                return PlainTextResponse(
-                    fed_resp.text, status_code=fed_resp.status_code
-                )
+                return PlainTextResponse(fed_resp.text, status_code=fed_resp.status_code)
             return Response(
                 content=fed_resp.content,
                 status_code=fed_resp.status_code,
@@ -604,9 +621,7 @@ async def generate_music(
         logger=logger,
     )
     if fed_resp is not None:
-        fed_resp.headers["Content-Disposition"] = (
-            f'attachment; filename="music.{response_format}"'
-        )
+        fed_resp.headers["Content-Disposition"] = f'attachment; filename="music.{response_format}"'
         return fed_resp
 
     profile, state = await resolve_profile(
@@ -640,9 +655,7 @@ async def generate_music(
         # ACE-Step backend stores _workers keyed by backend_model_id (the
         # short suffix like "turbo"), not the canonical worker_key
         # ("acestep/turbo"). Use backend_model_id to find the loaded worker.
-        result = await backend.forward_request(
-            state.backend_model_id, "/generate", merged_body
-        )
+        result = await backend.forward_request(state.backend_model_id, "/generate", merged_body)
     except TimeoutError as exc:
         raise _openai_error(
             str(exc),

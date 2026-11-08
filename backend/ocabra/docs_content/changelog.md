@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.53.0 — 2026-11-08
+
+### Cambios de comportamiento
+
+- **`POST /v1/audio/transcriptions` con varios audios ahora responde `400`.**
+  Antes se quedaba con el último y devolvía `200` sin decir nada de los otros:
+  mandabas cuatro WAV, recibías una transcripción y parecía correcta. El
+  endpoint transcribe un audio por petición, igual que el de OpenAI.
+
+  **Acción** si mandabas varios: mándalos de uno en uno, o usa `/v1/batches`
+  con una línea por audio (cada uno subido con `POST /v1/files` y
+  `purpose="batch_input_audio"`). Eso ya funcionaba y procesa todos; lo que no
+  existe es meter varios en un solo `multipart`.
+
+---
+
 ## 0.52.1 — 2026-11-08
 
 ### Arreglos
