@@ -233,3 +233,70 @@ def test_vllm_respeta_los_kwargs_que_ya_trae_el_cliente():
     kwargs = _kwargs_vllm(payload)
     assert kwargs["enable_thinking"] is False  # el del cliente manda
     assert kwargs["otra"] == 1
+
+
+# ── El presupuesto no puede comerse la respuesta ──────────────
+#
+# Detectado por el benchmark del 2026-11-08: `ravenx` con
+# `reasoning_effort=medium` devolvia "JSON inutilizable" porque el nivel
+# concedia 16.384 tokens de pensamiento sobre una salida de 4.096. El
+# pensamiento se comia la respuesta entera y el cliente recibia `content`
+# vacio con finish_reason "length". El informe lo describio como
+# "razonamiento infinito"; no era infinito, era presupuestado por encima de
+# lo que cabia.
+
+
+def _presupuesto(nivel: str, max_tokens: int | None) -> int | None:
+    payload: dict = {"reasoning_effort": nivel}
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    _apply_reasoning_effort(_estado(), payload)
+    return payload.get("reasoning_budget_tokens")
+
+
+@pytest.mark.parametrize(
+    ("nivel", "salida", "esperado"),
+    [
+        # El caso exacto del informe: medium sobre 4.096 de salida.
+        ("medium", 4096, 3072),
+        # Con salida holgada el nivel manda sin recortes.
+        ("medium", 65536, 16384),
+        ("low", 65536, 2048),
+        # Salidas pequeñas: siempre queda sitio para responder.
+        ("low", 512, 256),
+        ("medium", 512, 256),
+        # ``high`` no declara presupuesto, pero con un tope conocido se acota:
+        # sin esto el pensamiento podia agotar la salida entera.
+        ("high", 4096, 3072),
+        ("high", 65536, 49152),
+    ],
+)
+def test_el_presupuesto_deja_sitio_para_la_respuesta(nivel, salida, esperado):
+    assert _presupuesto(nivel, salida) == esperado
+
+
+@pytest.mark.parametrize(("nivel", "salida"), [("low", 512), ("medium", 4096), ("high", 4096)])
+def test_nunca_se_presupuesta_mas_pensamiento_que_salida(nivel, salida):
+    presupuesto = _presupuesto(nivel, salida)
+    assert presupuesto is not None
+    assert presupuesto < salida, "el pensamiento no puede ocupar toda la salida"
+
+
+def test_sin_tope_de_salida_el_nivel_manda_sin_cambios():
+    # Sin max_tokens no hay respuesta que proteger; manda el nivel.
+    assert _presupuesto("low", None) == 2048
+    assert _presupuesto("medium", None) == 16384
+    assert _presupuesto("high", None) is None
+
+
+def test_el_tope_de_ollama_tambien_cuenta():
+    # En la via nativa de Ollama el limite viaja en options.num_predict.
+    payload = {"reasoning_effort": "medium", "options": {"num_predict": 4096}}
+    _apply_reasoning_effort(_estado(), payload)
+    assert payload["reasoning_budget_tokens"] == 3072
+
+
+def test_un_presupuesto_explicito_del_cliente_sigue_mandando():
+    payload = {"reasoning_effort": "medium", "max_tokens": 4096, "reasoning_budget_tokens": 99}
+    _apply_reasoning_effort(_estado(), payload)
+    assert payload["reasoning_budget_tokens"] == 99

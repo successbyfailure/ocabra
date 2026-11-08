@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.51.2 — 2026-11-08
+
+### Arreglos
+
+- **Con `reasoning_effort` y un `max_tokens` ajustado, la respuesta llegaba
+  vacía.** El nivel concedía un presupuesto de pensamiento fijo sin mirar
+  cuánta salida tenías: `medium` daba 16.384 tokens de pensamiento aunque tu
+  `max_tokens` fuese 4.096, así que el pensamiento se comía la respuesta
+  entera y recibías `content: ""` con `finish_reason: "length"`. Pasaba igual
+  con `low` por debajo de 2.048 de salida, y `high` no llevaba tope ninguno.
+  Ahora el presupuesto se recorta para dejar siempre sitio a la respuesta —un
+  cuarto de la salida, mínimo 256 tokens—, y con salida holgada el nivel manda
+  sin cambios (`medium` sobre 65.536 sigue siendo 16.384). **Acción:** si
+  habías bajado el nivel de razonamiento para esquivar esto, puedes volver a
+  subirlo.
+
+---
+
 ## 0.51.1 — 2026-11-08
 
 ### Arreglos

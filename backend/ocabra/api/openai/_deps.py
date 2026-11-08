@@ -1642,6 +1642,61 @@ def _reasoning_budget_for_level(level: str) -> int | None:
     return budget if budget > 0 else None
 
 
+def _output_allowance(payload: dict) -> int | None:
+    """Tokens de salida que tiene esta peticion, si se sabe.
+
+    ``apply_declared_output_limit`` ya ha corrido para cuando se llama a
+    :func:`_apply_reasoning_effort`, asi que el tope esta en el payload: el
+    del cliente si lo mando, y si no el declarado por el modelo.
+    """
+    opciones = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    for valor in (
+        payload.get("max_completion_tokens"),
+        payload.get("max_tokens"),
+        opciones.get("num_predict"),
+    ):
+        if valor is None:
+            continue
+        try:
+            entero = int(valor)
+        except (TypeError, ValueError):
+            continue
+        if entero > 0:
+            return entero
+    return None
+
+
+def _reasoning_budget_capped(level: str, payload: dict) -> int | None:
+    """Tope de pensamiento del nivel, recortado para que quepa la respuesta.
+
+    El presupuesto del nivel no puede pasarse del total de salida: si se
+    permite pensar mas de lo que cabe, el pensamiento se come la respuesta
+    entera y el cliente recibe ``content`` vacio con
+    ``finish_reason: "length"``. Detectado en el benchmark del 2026-11-08
+    (``ravenx`` con ``medium`` daba "JSON inutilizable"): el nivel concedia
+    16.384 tokens de pensamiento sobre una salida de 4.096, asi que el
+    truncado estaba garantizado. Pasaba igual con ``low`` (2.048) por debajo
+    de 2.048 de salida, y ``high`` no llevaba tope ninguno.
+
+    Se reserva para la respuesta un cuarto de la salida (minimo 256 tokens).
+    Con salida holgada el nivel manda sin cambios: ``medium`` sobre 65.536
+    sigue siendo 16.384.
+    """
+    derivado = _reasoning_budget_for_level(level)
+    salida = _output_allowance(payload)
+    if salida is None:
+        # Sin tope conocido no hay nada de lo que proteger a la respuesta.
+        return derivado
+    reserva = max(256, salida // 4)
+    tope = max(1, salida - reserva)
+    if derivado is None:
+        # ``high`` no declara presupuesto a proposito (quien pide esfuerzo
+        # alto quiere que piense sin prisa), pero sin tope el pensamiento
+        # puede agotar la salida igualmente. Con un tope conocido, se acota.
+        return tope
+    return min(derivado, tope)
+
+
 def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
     """Translate the OpenAI-style ``reasoning_effort`` field into whatever the
     target backend understands. The field is already in the ChatCompletionRequest
@@ -1766,7 +1821,7 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
             # la salida (incidente 2026-11-07: 132.263 tokens en 26 minutos).
             # Un presupuesto explicito del cliente manda sobre el derivado.
             if "reasoning_budget_tokens" not in payload and "reasoning_budget" not in payload:
-                derivado = _reasoning_budget_for_level(value)
+                derivado = _reasoning_budget_capped(value, payload)
                 if derivado is not None:
                     payload["reasoning_budget_tokens"] = derivado
 
