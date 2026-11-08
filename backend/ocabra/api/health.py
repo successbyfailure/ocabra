@@ -44,6 +44,7 @@ async def ready(request: Request) -> JSONResponse:
     # Check Postgres (via SQLAlchemy engine ping)
     try:
         from ocabra.database import engine
+
         async with engine.connect() as conn:
             await conn.execute(__import__("sqlalchemy").text("SELECT 1"))
         checks["postgres"] = "ok"
@@ -63,11 +64,10 @@ async def ready(request: Request) -> JSONResponse:
     # Count loaded models
     try:
         from ocabra.core.model_manager import ModelStatus
+
         model_manager = request.app.state.model_manager
         states = await model_manager.list_states()
-        checks["models_loaded"] = sum(
-            1 for s in states if s.status == ModelStatus.LOADED
-        )
+        checks["models_loaded"] = sum(1 for s in states if s.status == ModelStatus.LOADED)
     except Exception:
         checks["models_loaded"] = 0
 
