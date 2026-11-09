@@ -25,6 +25,13 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   modelos servidos por llama.cpp (casi todos). La respuesta era correcta; solo
   faltaban los conteos de tokens. Si tu cliente calcula consumo o velocidad
   con esos campos, ahora recibe los valores reales.
+- Ojo al calcular la velocidad de lectura del prompt con esos campos:
+  `prompt_eval_count` incluye los tokens que se sirvieron de la caché, pero
+  `prompt_eval_duration` solo mide los que se procesaron de verdad (igual que
+  en Ollama). Con una caché caliente, `prompt_eval_count / prompt_eval_duration`
+  sale muy por encima de la velocidad real. Para la tasa real usa
+  `promptTokensPerSecond` de `GET /ocabra/stats/recent`, que la da el propio
+  motor.
 
 ---
 
