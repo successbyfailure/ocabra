@@ -1756,12 +1756,15 @@ async def _overlay_loaded_derived_state(mm, states: list) -> list:
         )
         common = {
             "runtime_phase": phase,
-            "runtime_worker_id": active.model_id if active.status in {
+            "runtime_worker_id": active.model_id
+            if active.status
+            in {
                 ModelStatus.LOADING,
                 ModelStatus.LOADED,
                 ModelStatus.UNLOADING,
                 ModelStatus.ERROR,
-            } else None,
+            }
+            else None,
             "runtime_slots": _runtime_slots(active),
             "can_cancel_load": active.status == ModelStatus.LOADING,
             "can_downsize": can_downsize,
@@ -1897,8 +1900,54 @@ async def _resolve_capabilities_payload(
     return _apply_capability_fallbacks(state, payload)
 
 
+def _llama_cpp_shape_from_config(state) -> dict[str, Any]:
+    """Forma de la cache de un llama.cpp a partir de lo que tiene configurado.
+
+    ``get_capabilities`` lee la configuracion REAL del worker, que solo existe
+    si el modelo se ha cargado alguna vez desde que arranco el proceso. Con el
+    diccionario vacio cae a los ajustes globales, asi que un modelo descargado
+    se publicaba con el contexto por defecto del servidor —4.096— en vez del
+    suyo, y con un solo slot y la cache sin compartir. Para flint:40b, que
+    corre con 262.144 en un pool de 4 slots, eso es ensenar otro modelo.
+    """
+
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    seccion = extra.get("llama_cpp")
+    if not isinstance(seccion, dict):
+        return {}
+    contexto = _resolve_requested_context_length(state, extra) or 0
+    if contexto <= 0:
+        return {}
+    slots = seccion.get("parallel_slots") or seccion.get("parallelSlots") or 1
+    try:
+        slots = max(1, int(slots))
+    except (TypeError, ValueError):
+        slots = 1
+    compartida = bool(seccion.get("kv_unified", seccion.get("kvUnified")))
+    tope = seccion.get("kv_unified_per_slot") or seccion.get("kvUnifiedPerSlot")
+    if compartida:
+        try:
+            por_peticion = min(contexto, int(tope)) if tope else contexto
+        except (TypeError, ValueError):
+            por_peticion = contexto
+    else:
+        por_peticion = contexto // slots
+    return {
+        "context_length": contexto,
+        "parallel_slots": slots,
+        "kv_cache_shared": compartida,
+        "context_per_request": max(0, por_peticion),
+    }
+
+
 def _apply_capability_fallbacks(state, payload: dict) -> dict:
     merged = dict(payload)
+    # Mientras no este cargado, manda lo configurado: el backend no tiene de
+    # donde sacar la forma real y responde con los ajustes globales.
+    if is_llama_cpp_family(getattr(state, "backend_type", "") or "") and (
+        getattr(getattr(state, "status", None), "value", "") != "loaded"
+    ):
+        merged.update(_llama_cpp_shape_from_config(state))
     fallback_context_length = _resolve_context_length_fallback(state)
     current_context_length = int(merged.get("context_length") or 0)
     if fallback_context_length > 0 and (

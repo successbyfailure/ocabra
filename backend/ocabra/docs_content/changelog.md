@@ -16,7 +16,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
-## 0.59.0 — 2026-11-09
+## 0.59.1 — 2026-11-09
 
 ### Arreglos
 
@@ -44,6 +44,11 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   usar la ventana entera, y sin ella cada plaza recibe su parte. Antes había
   que deducirlo de la configuración del backend, y quien lo dedujo pensando en
   llama.cpp de serie mostraba un contexto que no es el que se sirve.
+
+  Y mientras un modelo está descargado, esos campos salían con los valores por
+  defecto del servidor en vez de los suyos: `flint:40b`, que corre con 262.144
+  en un pool de cuatro plazas, aparecía como 4.096 con una sola plaza. Ahora,
+  descargado, manda lo que tiene configurado.
 
 - **Estadísticas de rendimiento también para los endpoints de Ollama.** Las
   velocidades de lectura de prompt y de generación ya se guardan para

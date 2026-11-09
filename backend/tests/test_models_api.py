@@ -1050,3 +1050,78 @@ class TestModelsActivityLoadPhase:
 
         [req_detail] = result["activity"][model_id]["requests"]
         assert req_detail["phase"] == "generating"
+
+
+def test_un_modelo_descargado_publica_su_contexto_y_no_el_global():
+    """get_capabilities lee la config REAL del worker, que solo existe si el
+    modelo se ha cargado desde que arranco el proceso. Sin ella caia a los
+    ajustes globales, asi que flint:40b —262.144 en un pool de 4 slots—
+    aparecia como 4.096, un slot y cache sin compartir: otro modelo."""
+    from types import SimpleNamespace
+
+    from ocabra.api.internal.models import _apply_capability_fallbacks
+
+    estado = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        status=SimpleNamespace(value="unloaded"),
+        extra_config={
+            "llama_cpp": {
+                "ctx_size": 262144,
+                "parallel_slots": 4,
+                "kv_unified": True,
+            }
+        },
+    )
+    # Lo que responde el backend sin worker: los defaults globales.
+    salida = _apply_capability_fallbacks(
+        estado,
+        {
+            "context_length": 4096,
+            "parallel_slots": 1,
+            "kv_cache_shared": False,
+            "context_per_request": 4096,
+        },
+    )
+    assert salida["context_length"] == 262144
+    assert salida["parallel_slots"] == 4
+    assert salida["kv_cache_shared"] is True
+    assert salida["context_per_request"] == 262144
+
+
+def test_cargado_manda_el_backend_que_es_quien_sabe_la_config_real():
+    from types import SimpleNamespace
+
+    from ocabra.api.internal.models import _apply_capability_fallbacks
+
+    estado = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        status=SimpleNamespace(value="loaded"),
+        extra_config={"llama_cpp": {"ctx_size": 262144, "parallel_slots": 4, "kv_unified": True}},
+    )
+    # El worker corre con otro preset: 98.304. Eso es lo que se sirve.
+    salida = _apply_capability_fallbacks(
+        estado,
+        {
+            "context_length": 98304,
+            "parallel_slots": 4,
+            "kv_cache_shared": True,
+            "context_per_request": 98304,
+        },
+    )
+    assert salida["context_length"] == 98304
+    assert salida["context_per_request"] == 98304
+
+
+def test_sin_cache_compartida_cada_plaza_recibe_su_parte():
+    from types import SimpleNamespace
+
+    from ocabra.api.internal.models import _apply_capability_fallbacks
+
+    estado = SimpleNamespace(
+        backend_type="llama_cpp",
+        status=SimpleNamespace(value="unloaded"),
+        extra_config={"llama_cpp": {"ctx_size": 131072, "parallel_slots": 4, "kv_unified": False}},
+    )
+    salida = _apply_capability_fallbacks(estado, {"context_length": 4096})
+    assert salida["context_length"] == 131072
+    assert salida["context_per_request"] == 32768
