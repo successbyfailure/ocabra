@@ -125,6 +125,9 @@ def request_live_detail(
     elif streaming is False:
         # Sin streaming no hay ningun evento hasta el final.
         stage = "processing"
+    elif getattr(req, "prompt_progress_tracked", False) and total is None:
+        # Admitida por oCabra pero el backend aun no ha empezado con ella.
+        stage = "backend_wait"
     else:
         stage = "prefill"
 
@@ -228,7 +231,16 @@ async def attach_estimates(
     """
     estimate = getattr(estimator, "estimate", None)
     for detail in details:
-        rid = detail["requestId"]
+        # Cuando llama.cpp da el total real del prompt se re-estima con el: el
+        # recuento aproximado puede quedarse en una quinta parte (18k frente a
+        # 70k tokens reales en produccion) y dejar el "restante" en 0 con el
+        # prefill al 26 %.
+        prompt = detail.get("prompt") or {}
+        rid = (
+            f"{detail['requestId']}:{prompt.get('totalTokens')}"
+            if prompt.get("source") == "live"
+            else detail["requestId"]
+        )
         if rid not in _estimate_cache:
             expected_ms: int | None = None
             if callable(estimate):
@@ -251,7 +263,21 @@ async def attach_estimates(
             continue
         # Lo esperado cuenta desde la admision, no desde la llegada.
         running_ms = detail["elapsedMs"] - (detail.get("admittedAfterMs") or 0)
-        detail["estimatedRemainingMs"] = max(0, expected_ms - running_ms)
+        remaining = max(0, expected_ms - running_ms)
+        if detail["stage"] == "backend_wait":
+            # Aun no ha empezado: le queda, como poco, toda su duracion.
+            remaining = expected_ms
+        # Con progreso real, nunca menos que el prefill que falta a su ritmo.
+        tps = detail.get("prefillTokensPerSecond")
+        if (
+            detail["stage"] == "prefill"
+            and prompt.get("source") == "live"
+            and tps
+            and prompt.get("totalTokens")
+        ):
+            left = max(0, prompt["totalTokens"] - (prompt.get("processedTokens") or 0))
+            remaining = max(remaining, int(left / tps * 1000))
+        detail["estimatedRemainingMs"] = remaining
 
     queued = sorted(
         (d for d in details if d["stage"] == "queued"),
@@ -321,8 +347,8 @@ async def attach_estimates(
 
 
 def prune_estimates(live_ids: set[str]) -> None:
-    for rid in [rid for rid in _estimate_cache if rid not in live_ids]:
-        _estimate_cache.pop(rid, None)
+    for key in [k for k in _estimate_cache if k.split(":", 1)[0] not in live_ids]:
+        _estimate_cache.pop(key, None)
 
 
 # ── Contexto ────────────────────────────────────────────────────────────────

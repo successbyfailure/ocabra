@@ -46,7 +46,8 @@ export function RequestProgress({
 
   const admitted = req.admittedAfterMs ?? (stage === "queued" ? null : 0)
   const firstToken = req.firstTokenAfterMs ?? null
-  const queueEnd = stage === "queued" ? elapsed : admitted ?? 0
+  // En cola o esperando dentro del backend, todo lo transcurrido es espera.
+  const queueEnd = stage === "queued" || stage === "backend_wait" ? elapsed : admitted ?? 0
   const prefillEnd = firstToken ?? (stage === "prefill" || stage === "processing" ? elapsed : queueEnd)
   const genEnd = firstToken != null ? elapsed : prefillEnd
 
@@ -63,6 +64,7 @@ export function RequestProgress({
       return `#${pos} en cola${wait}`
     }
     if (stage === "waiting_for_gpu" && req.waitingOnModelId) return `esperando a que libere GPU ${req.waitingOnModelId}`
+    if (stage === "backend_wait") return "admitida · esperando a que el backend empiece"
     if (stage === "prefill" && promptLive && prompt?.totalTokens) {
       return `prefill ${req.prefillPct?.toFixed(0) ?? 0}% · ${fmtTokens(prompt.processedTokens)}/${fmtTokens(prompt.totalTokens)}`
     }

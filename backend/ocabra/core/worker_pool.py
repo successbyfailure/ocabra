@@ -1025,6 +1025,14 @@ class WorkerPool:
         is_chat = "/chat/completions" in path
         source: AsyncIterator[bytes] = _raw_stream()
         if track_progress:
+            # Avisa de que se ha pedido progreso: hasta el primer evento la
+            # peticion espera dentro del backend, no esta en prefill.
+            try:
+                self._prompt_progress_sink(
+                    progress_request_id, total=None, cached=None, processed=None, elapsed_ms=None
+                )
+            except Exception:  # noqa: BLE001 — telemetria
+                pass
             source = self._strip_prompt_progress_stream(
                 source,
                 request_id=progress_request_id,

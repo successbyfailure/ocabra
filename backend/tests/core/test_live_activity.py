@@ -25,6 +25,7 @@ def _req(**overrides):
         prompt_tokens_cached=None,
         prompt_tokens_processed=None,
         prompt_progress_ms=None,
+        prompt_progress_tracked=False,
         request_kind="chat",
         profile_id="p",
         api_key_name=None,
@@ -496,3 +497,62 @@ async def test_prefill_rates_prefer_measured_median_and_cache_it(monkeypatch):
     assert await la.prefill_rates({"m"}, estimator) == {"m": (1234.6, "historical")}
     assert await la.prefill_rates({"m"}, estimator) == {"m": (1234.6, "historical")}
     assert calls == [["m"]]
+
+
+# ── Hallazgos de la verificación en producción (2026-11-09) ─────────────────
+
+
+def test_tracked_request_without_progress_waits_in_backend_not_prefill():
+    """llama.cpp procesa los prompts de uno en uno: una petición admitida a la
+    que se pidió progreso y aún no tiene ningún evento está esperando dentro
+    del backend. Antes salía como "prefill 99 %" estimado durante 200 s."""
+    req = _req(prompt_progress_tracked=True)
+    d = _detail(req, lease={"heldMs": 5000, "kvTokens": 29416}, prefill_rate=(721.3, "historical"))
+    assert d["stage"] == "backend_wait"
+    assert d["prefillPct"] is None
+    started = _req(
+        prompt_progress_tracked=True,
+        prompt_tokens_total=49558,
+        prompt_tokens_cached=0,
+        prompt_tokens_processed=0,
+        prompt_progress_ms=0,
+    )
+    assert _detail(started, lease={"heldMs": 1000})["stage"] == "prefill"
+
+
+@pytest.mark.asyncio
+async def test_remaining_reestimated_with_real_prompt_and_never_below_prefill_left():
+    """El recuento aproximado decía 18k tokens y eran 70k: con el total real
+    se re-estima, y el restante no baja nunca de lo que falta de prefill."""
+    la._estimate_cache.clear()
+    asked = []
+
+    class Est:
+        async def estimate(self, model_id, *, backend_type, input_tokens, max_tokens):
+            asked.append(input_tokens)
+            return SimpleNamespace(expected_s=15.0)
+
+    live = {
+        "requestId": "r",
+        "stage": "prefill",
+        "elapsedMs": 20_000,
+        "admittedAfterMs": 0,
+        "prefillTokensPerSecond": 1000.0,
+        "maxOutputTokens": 64,
+        "prompt": {"totalTokens": 70_000, "processedTokens": 20_000, "source": "live"},
+    }
+    await la.attach_estimates([live], estimator=Est(), model_id="m", backend_type="x", slots=4)
+    assert asked == [70_000]
+    # 15 s estimados ya pasados, pero quedan 50k tokens a 1000 t/s.
+    assert live["estimatedRemainingMs"] == 50_000
+
+    waiting = {
+        "requestId": "w",
+        "stage": "backend_wait",
+        "elapsedMs": 90_000,
+        "admittedAfterMs": 0,
+        "maxOutputTokens": None,
+        "prompt": {"totalTokens": 9000, "source": "estimate"},
+    }
+    await la.attach_estimates([waiting], estimator=Est(), model_id="m", backend_type="x", slots=4)
+    assert waiting["estimatedRemainingMs"] == 15_000

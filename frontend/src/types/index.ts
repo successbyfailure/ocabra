@@ -775,6 +775,9 @@ export interface ActiveRequestProgress {
 
 export type RequestStage =
   | "queued"
+  /** Admitida por oCabra, pero el backend aún no ha empezado con ella
+   *  (llama.cpp procesa los prompts de uno en uno). */
+  | "backend_wait"
   | "loading"
   | "waiting_for_gpu"
   | "prefill"

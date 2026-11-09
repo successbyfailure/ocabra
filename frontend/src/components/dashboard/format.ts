@@ -48,6 +48,7 @@ export function loadedMeta(loadedAt: string | null | undefined, nowMs: number): 
 
 export const STAGE_META: Record<RequestStage, { label: string; color: string; text: string }> = {
   queued: { label: "en cola", color: "#d97706", text: "text-amber-300" },
+  backend_wait: { label: "esperando al backend", color: "#d97706", text: "text-amber-200" },
   loading: { label: "cargando modelo", color: "#8b5cf6", text: "text-violet-300" },
   waiting_for_gpu: { label: "esperando GPU", color: "#8b5cf6", text: "text-violet-300" },
   prefill: { label: "prefill", color: "#0ea5e9", text: "text-sky-300" },

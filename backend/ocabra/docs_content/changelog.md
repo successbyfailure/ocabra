@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.61.1 — 2026-11-09
+
+### Arreglos
+
+- **`/ocabra/models/activity` ya no da por "en prefill" una petición que el
+  backend aún no ha empezado.** llama.cpp procesa los prompts de uno en uno:
+  si llegaban varias peticiones largas a la vez, las que esperaban turno
+  dentro del llama-server salían en prefill durante minutos. Ahora tienen su
+  propio `stage`: `backend_wait`.
+- **El tiempo restante estimado ya no llega a cero en mitad de un prefill
+  largo.** Partía del recuento aproximado de tokens del prompt, que puede
+  quedarse en una cuarta parte del real. Con llama.cpp se recalcula con el
+  total real en cuanto se conoce, y nunca es menor que el prefill que falta
+  a su ritmo medido.
+
+---
+
 ## 0.61.0 — 2026-11-09
 
 ### Cambios

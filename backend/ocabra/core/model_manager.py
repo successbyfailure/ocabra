@@ -284,6 +284,13 @@ class ActiveRequest:
     prompt_tokens_cached: int | None = None
     prompt_tokens_processed: int | None = None
     prompt_progress_ms: int | None = None
+    # Se pidio progreso al backend. Si es True y aun no ha llegado ningun
+    # evento, la peticion espera DENTRO del backend: llama.cpp manda un 0 % en
+    # cuanto un slot empieza con el prompt, y procesa los prompts de uno en
+    # uno, asi que las demas admitidas no estan en prefill aunque lo parezca
+    # (visto en produccion 2026-11-09: dos peticiones "en prefill" 100 y 200 s
+    # sin haber empezado).
+    prompt_progress_tracked: bool = False
 
 
 async def _measure_process_ram_mb(pid: int) -> int:
@@ -706,11 +713,15 @@ class ModelManager:
 
         No-op si la peticion ya termino. Cuenta como actividad: durante un
         prefill largo no llega ningun token, y sin esto la peticion pareceria
-        colgada.
+        colgada. Con ``total=None`` solo registra que se ha pedido progreso
+        (lo llama WorkerPool al abrir el stream).
         """
         with self._in_flight_lock:
             req = self._active_requests.get(request_id)
             if req is None:
+                return
+            req.prompt_progress_tracked = True
+            if total is None:
                 return
             req.prompt_tokens_total = total
             req.prompt_tokens_cached = cached

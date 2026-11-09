@@ -145,6 +145,9 @@ async def test_llama_cpp_progress_is_requested_consumed_and_stripped(monkeypatch
     assert bodies[0]["return_progress"] is True
     assert b"prompt_progress" not in out
     assert b"Hola" in out and b" mundo" in out and out.endswith(b"data: [DONE]\n\n")
+    # La primera llamada solo avisa de que se ha pedido progreso.
+    assert calls[0][1]["total"] is None
+    calls = calls[1:]
     assert [kw["processed"] for _rid, kw in calls] == [100, 600, 1000]
     assert all(rid == "req-1" for rid, _kw in calls)
     assert calls[-1][1] == {"total": 1000, "cached": 100, "processed": 1000, "elapsed_ms": 1000}
@@ -167,7 +170,7 @@ async def test_client_that_asked_for_progress_still_gets_it(monkeypatch):
         current_inflight_request_id.reset(token)
 
     assert out == UPSTREAM
-    assert len(calls) == 3
+    assert len(calls) == 4  # aviso inicial + 3 eventos
 
 
 @pytest.mark.asyncio
