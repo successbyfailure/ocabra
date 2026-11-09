@@ -18,6 +18,8 @@ import type {
 import { BackendIcon } from "./BackendIcon"
 import { ContextBar, requestHue } from "./ContextBar"
 import { VISUAL, fmtContext, fmtDuration, fmtTps, loadedMeta, type VisualState } from "./format"
+import { GpuBadge } from "./GpuBadge"
+import { useGpuStore } from "@/stores/gpuStore"
 import { RequestProgress } from "./RequestProgress"
 
 /** Índice de color estable por petición: orden de llegada dentro del modelo. */
@@ -169,8 +171,8 @@ function ModelMemory({
         const reservedPerGpu = reserved > 0 && totalMine > 0 ? (reserved * mine) / totalMine : 0
         const color = over ? "#f59e0b" : visual === "loading" ? VISUAL.loading.color : "#2a78d6"
         return (
-          <div key={idx} className="grid grid-cols-[52px_1fr_auto] items-center gap-2 text-[11px]">
-            <span className="text-muted-foreground">GPU {idx}</span>
+          <div key={idx} className="grid grid-cols-[110px_1fr_auto] items-center gap-2 text-[11px]">
+            <GpuBadge index={idx} gpus={gpus} className="justify-self-start" />
             <div
               className="relative h-2.5 overflow-hidden rounded-full bg-muted"
               title={
@@ -263,6 +265,9 @@ export function ModelLiveCard({
   const running = Math.max(0, inFlight - queued)
   const state = cardState(model, act, phase, stuckThreshold)
   const v = VISUAL[state.visual]
+  // Del store y no de la prop: la burbuja sale aunque la card se pinte sin
+  // la lista de GPUs (p. ej. en tests o antes de que llegue).
+  const storeGpus = useGpuStore((s) => s.gpus)
   const presetKey = ctx?.activePresetKey ?? act?.runtimePreset
 
   let idleLeft: number | null = null
@@ -292,10 +297,14 @@ export function ModelLiveCard({
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
             <LoadPolicyBadge policy={model.loadPolicy} />
-            <Chip>
-              <Cpu size={11} />
-              {gpuIdx.length > 0 ? `GPU ${gpuIdx.join(", ")}` : model.ramUsedMb > 0 ? "CPU" : "—"}
-            </Chip>
+            {gpuIdx.length > 0 ? (
+              gpuIdx.map((i) => <GpuBadge key={i} index={i} gpus={storeGpus} />)
+            ) : (
+              <Chip>
+                <Cpu size={11} />
+                {model.ramUsedMb > 0 ? "CPU" : "—"}
+              </Chip>
+            )}
             {model.ramUsedMb > 0 && <span>{model.ramUsedMb.toLocaleString()} MB RAM</span>}
             {slots != null && (
               <Chip title={presetKey ? `Preset de runtime activo: ${presetKey}` : "Slots concurrentes y contexto cargado"}>

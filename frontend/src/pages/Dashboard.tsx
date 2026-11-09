@@ -10,6 +10,7 @@ import { ModelLiveCard } from "@/components/dashboard/ModelLiveCard"
 import { QueueSection } from "@/components/dashboard/QueueSection"
 import { RecentRequestsTable } from "@/components/dashboard/RecentRequestsTable"
 import { Section } from "@/components/dashboard/Section"
+import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import { useLiveActivity } from "@/components/dashboard/useLiveActivity"
 import { useCurrentUser, useIsAdmin, useIsModelManager } from "@/hooks/useAuth"
 import { useGpuStore } from "@/stores/gpuStore"
@@ -213,10 +214,14 @@ export function Dashboard() {
                         Generando{service.queueDepth > 0 && ` +${service.queueDepth}`}
                       </span>
                     )}
-                    <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
-                      <Cpu size={11} />
-                      GPU {service.preferredGpu ?? "-"}
-                    </span>
+                    {service.preferredGpu != null ? (
+                      <GpuBadge index={service.preferredGpu} gpus={gpus} />
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5">
+                        <Cpu size={11} />
+                        GPU —
+                      </span>
+                    )}
                     <span>
                       {service.vramUsedMb != null
                         ? `${service.vramUsedMb.toLocaleString()} MB`
@@ -246,7 +251,7 @@ export function Dashboard() {
                   {externalRuntimeServices.map((service) => (
                     <li key={service.serviceId} className="flex flex-wrap items-center gap-1.5">
                       <span className="font-medium text-amber-100">{service.displayName}</span>
-                      {service.preferredGpu != null && <span>· GPU {service.preferredGpu}</span>}
+                      {service.preferredGpu != null && <GpuBadge index={service.preferredGpu} gpus={gpus} />}
                     </li>
                   ))}
                 </ul>

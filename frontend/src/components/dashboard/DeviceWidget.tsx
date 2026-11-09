@@ -11,6 +11,8 @@ import type {
   OllamaRuntimeInfo,
   ServerPower,
 } from "@/types"
+import { gpuColor } from "./GpuBadge"
+import { gpuLabel } from "./gpuNames"
 import { StatePill, cardState } from "./ModelLiveCard"
 import { BackendIcon } from "./BackendIcon"
 import { fmtTps } from "./format"
@@ -193,12 +195,25 @@ function TotalsLine({ totals }: { totals: ReturnType<typeof deviceTotals> }) {
   )
 }
 
-function Header({ kicker, title, tempC }: { kicker: string; title: string; tempC?: number | null }) {
+function Header({
+  kicker,
+  title,
+  tempC,
+  color,
+}: {
+  kicker: string
+  title: string
+  tempC?: number | null
+  color?: string
+}) {
   return (
     <div className="mb-3 flex items-start justify-between gap-2">
       <div className="min-w-0">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{kicker}</p>
-        <h3 className="truncate text-[15px] font-semibold tracking-tight">{title}</h3>
+        <h3 className="flex items-center gap-1.5 truncate text-[15px] font-semibold tracking-tight" style={color ? { color } : undefined}>
+          {color && <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: color }} />}
+          {title}
+        </h3>
       </div>
       {tempC != null && (
         <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-[12.5px] font-semibold tabular-nums">
@@ -263,8 +278,12 @@ export function GpuWidget({
   const hot = gpu.temperatureC >= 78 || vramPct >= 90
 
   return (
-    <article className={`rounded-2xl border bg-card p-4 shadow-sm ${hot ? "border-red-500/60" : "border-border"}`} data-gpu={gpu.index}>
-      <Header kicker={`GPU #${gpu.index}`} title={gpu.name} tempC={gpu.temperatureC} />
+    <article
+      className={`rounded-2xl border border-t-4 bg-card p-4 shadow-sm ${hot ? "border-red-500/60" : "border-border"}`}
+      style={{ borderTopColor: gpuColor(gpu.index) }}
+      data-gpu={gpu.index}
+    >
+      <Header kicker="GPU" title={gpuLabel(gpu.index, [gpu])} tempC={gpu.temperatureC} color={gpuColor(gpu.index)} />
       <div className="space-y-1.5">
         <MetricRow icon={Zap} label="Potencia" value={`${Math.round(gpu.powerDrawW)}/${Math.round(gpu.powerLimitW)} W`} barPct={powPct} color={METRIC.power} history={hist.map((p) => p.powerPct)} />
         <MetricRow icon={Gauge} label="Uso" value={`${gpu.utilizationPct.toFixed(0)}%`} barPct={gpu.utilizationPct} color={METRIC.util} history={hist.map((p) => p.util)} />

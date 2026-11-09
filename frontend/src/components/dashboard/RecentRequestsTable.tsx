@@ -4,6 +4,8 @@ import { EmptyState } from "@/components/common/EmptyState"
 import type { RecentRequest } from "@/types"
 import { BackendIcon } from "./BackendIcon"
 import { fmtContext, fmtDuration, fmtTokens, fmtTps } from "./format"
+import { useGpuStore } from "@/stores/gpuStore"
+import { GpuBadge } from "./GpuBadge"
 import { RequestKindBadge } from "./RequestKindBadge"
 
 const TH = "px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
@@ -85,10 +87,11 @@ export function RecentRequestsTable() {
 }
 
 function Row({ r, error }: { r: RecentRequest; error: boolean }) {
+  const gpus = useGpuStore((s) => s.gpus)
   const hora = new Date(r.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
   const queueMs = r.queueMs ?? r.runtimeTelemetry?.queue_ms ?? null
   const ttft = r.runtimeTelemetry?.ttft_ms ?? null
-  const meta = [r.runtimePreset ? `preset ${r.runtimePreset}` : null, r.gpuIndex != null ? `GPU ${r.gpuIndex}` : null, r.effectiveContext ? `ctx ${fmtContext(r.effectiveContext)}` : null]
+  const meta = [r.runtimePreset ? `preset ${r.runtimePreset}` : null, r.effectiveContext ? `ctx ${fmtContext(r.effectiveContext)}` : null]
     .filter(Boolean)
     .join(" · ")
   const status = r.statusCode != null ? String(r.statusCode) : r.error ? "error" : "—"
@@ -101,7 +104,12 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
             {r.backendType && <BackendIcon backendType={r.backendType} showLabel={false} />}
             <span className="truncate font-medium" title={r.modelId}>{r.modelId}</span>
           </div>
-          {meta && <div className="truncate text-[10.5px] text-muted-foreground">{meta}</div>}
+          {(meta || r.gpuIndex != null) && (
+            <div className="flex items-center gap-1.5 truncate text-[10.5px] text-muted-foreground">
+              {r.gpuIndex != null && <GpuBadge index={r.gpuIndex} gpus={gpus} />}
+              {meta}
+            </div>
+          )}
         </td>
         <td className="px-3 py-2">
           <RequestKindBadge kind={r.requestKind ?? r.backendType} />

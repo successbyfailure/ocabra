@@ -1,5 +1,7 @@
 import type { ModelContextInfo } from "@/types"
 import { fmtContext, fmtTokens } from "./format"
+import { gpuColor } from "./GpuBadge"
+import { useGpuLabels } from "./gpuNames"
 
 /** Tono estable por petición, compartido con la lista de peticiones. */
 export const REQUEST_HUES = ["#2a78d6", "#1baf7a", "#b07cf0", "#e0a93b", "#4ec9d6", "#d4679a"] as const
@@ -10,12 +12,6 @@ export function requestHue(index: number): string {
 
 const HATCH =
   "repeating-linear-gradient(135deg, rgba(148,163,184,0.18) 0 4px, transparent 4px 8px)"
-
-function gpuLabel(gpus: number[]): string {
-  if (gpus.length === 0) return "CPU"
-  if (gpus.length === 1) return `GPU ${gpus[0]}`
-  return `${gpus.length} GPU`
-}
 
 /**
  * Barra de contexto de un modelo.
@@ -39,6 +35,7 @@ export function ContextBar({
   /** requestId → índice de color, el mismo que usa la lista de peticiones. */
   requestOrder: Map<string, number>
 }) {
+  const { list: gpuLabel } = useGpuLabels()
   const scale = ctx.scaleMaxTokens ?? ctx.activeMaxTokens ?? 0
   if (scale <= 0) return null
   const pct = (tokens: number) => Math.max(0, Math.min(100, (tokens / scale) * 100))
@@ -124,8 +121,11 @@ export function ContextBar({
         <span className="absolute left-0">0</span>
         {showMark && (
           <span
-            className="absolute -translate-x-1/2 whitespace-nowrap font-medium text-foreground/80"
-            style={{ left: `${pct(mark)}%` }}
+            className="absolute -translate-x-1/2 whitespace-nowrap font-medium"
+            style={{
+              left: `${pct(mark)}%`,
+              color: singleTier?.gpus.length === 1 ? gpuColor(singleTier.gpus[0]) : undefined,
+            }}
           >
             {fmtContext(mark)} · {gpuLabel(singleTier?.gpus ?? [])}
           </span>

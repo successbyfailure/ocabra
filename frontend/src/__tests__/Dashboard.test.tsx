@@ -268,7 +268,7 @@ describe("Dashboard", () => {
     render(<Dashboard />)
 
     await waitFor(() => {
-      expect(screen.getByText("RTX 3090")).toBeTruthy()
+      expect(screen.getAllByText("#0 RTX 3090").length).toBeGreaterThan(0)
       expect(screen.getAllByText("Mistral 7B").length).toBeGreaterThan(0)
       expect(screen.getByText("Qwen 14B")).toBeTruthy()
       expect(screen.getByText("Peticiones · 1 h / 24 h")).toBeTruthy()
@@ -408,12 +408,13 @@ describe("Dashboard", () => {
       // Totales de la card: 2 en curso de 2 slots, 1 en cola.
       expect(screen.getByText("2/2")).toBeTruthy()
       // Cola: puesto, usuario y espera estimada.
-      expect(screen.getByText("#1")).toBeTruthy()
+      expect(screen.getAllByText("#1").length).toBeGreaterThan(0)
       expect(screen.getByText("eva")).toBeTruthy()
       expect(screen.getByText("entra en ~8 s")).toBeTruthy()
       // Barra de contexto: marca del tope de una GPU y escala de dos.
-      expect(screen.getByText("96k · GPU 0")).toBeTruthy()
-      expect(screen.getByText("256k · 2 GPU")).toBeTruthy()
+      expect(screen.getByText("96k · #0 RTX 3090")).toBeTruthy()
+      // La GPU 1 no está en el store del test: sale solo con su índice.
+      expect(screen.getByText("256k · #0 RTX 3090 + #1")).toBeTruthy()
       expect(screen.getByText(/rayado: requiere escalar/)).toBeTruthy()
     })
     // La petición en cola no sale como barra en la card, solo en la cola.
