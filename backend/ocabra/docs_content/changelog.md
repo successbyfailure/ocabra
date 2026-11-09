@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.60.0 — 2026-11-09
+
+### Nuevo
+
+- **Cada petición dice ahora cuánto esperó y a qué velocidad fue.**
+  `GET /ocabra/stats/recent` (y el equivalente de cada usuario) añade por
+  petición `queueMs`, `promptTokensPerSecond` (lectura del prompt),
+  `predictedTokensPerSecond` (generación), `generationMs`, `cachedTokens`,
+  `effectiveContext`, `runtimePreset` y `gpuIndex`.
+
+  Son tres cosas que conviene mirar por separado: una espera larga es
+  contención, un prefill lento es un prompt enorme y una generación lenta es
+  el modelo o la tarjeta. Estaban guardadas, pero solo se publicaban
+  promediadas por modelo en `/ocabra/stats/performance`, que es justo donde
+  esas diferencias se pierden.
+
+---
+
 ## 0.59.1 — 2026-11-09
 
 ### Arreglos

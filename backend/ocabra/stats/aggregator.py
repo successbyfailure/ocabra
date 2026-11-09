@@ -852,9 +852,41 @@ async def get_recent_requests(limit: int = 20) -> dict:
                 "clientAddr": getattr(r, "client_addr", None),
                 "userAgent": getattr(r, "user_agent", None),
                 "runtimeTelemetry": getattr(r, "runtime_telemetry", None),
+                **_rendimiento_de_la_peticion(r),
             }
         )
     return {"requests": requests_out}
+
+
+def _rendimiento_de_la_peticion(r) -> dict:
+    """Lo que hace falta para diagnosticar UNA peticion, no un promedio.
+
+    Estaba todo guardado pero no se publicaba por peticion: habia que ir al
+    agregado por modelo (``/ocabra/stats/performance``) o leer la base de
+    datos a mano. Y son tres cosas distintas que se diagnostican por separado:
+    una cola larga es contencion, un prefill lento es un prompt enorme, y una
+    generacion lenta es el modelo o la tarjeta.
+    """
+
+    telemetria = getattr(r, "runtime_telemetry", None)
+    espera = None
+    if isinstance(telemetria, dict):
+        valor = telemetria.get("queue_ms")
+        if valor is not None:
+            try:
+                espera = int(valor)
+            except (TypeError, ValueError):
+                espera = None
+    return {
+        "queueMs": espera,
+        "promptTokensPerSecond": getattr(r, "prompt_tokens_per_second", None),
+        "predictedTokensPerSecond": getattr(r, "predicted_tokens_per_second", None),
+        "generationMs": getattr(r, "generation_ms", None),
+        "cachedTokens": getattr(r, "cached_tokens", None),
+        "effectiveContext": getattr(r, "effective_context", None),
+        "runtimePreset": getattr(r, "runtime_preset", None),
+        "gpuIndex": getattr(r, "gpu_index", None),
+    }
 
 
 async def get_recent_requests_for_user(user_id: str, limit: int = 20) -> dict:
@@ -890,6 +922,7 @@ async def get_recent_requests_for_user(user_id: str, limit: int = 20) -> dict:
                 "error": r.error,
                 "apiKeyName": getattr(r, "api_key_name", None),
                 "runtimeTelemetry": getattr(r, "runtime_telemetry", None),
+                **_rendimiento_de_la_peticion(r),
             }
         )
     return {"requests": requests_out}
