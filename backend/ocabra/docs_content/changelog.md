@@ -16,6 +16,35 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.62.0 — 2026-11-10
+
+### Cambios
+
+- **`/ocabra/models/activity` distingue las peticiones sin streaming.** En
+  la API de OpenAI, una petición sin `stream` en el cuerpo responde de una
+  vez, y ahora se trata así: antes se tomaba por streaming y se marcaba como
+  parada a los 15 s porque no emite nada hasta el final. En la API nativa de
+  Ollama (`/api/*`), la ausencia sigue significando streaming.
+- **Progreso real también para las peticiones sin streaming a llama.cpp.**
+  Se lee del endpoint `/slots` del llama-server: avance del prompt, tokens
+  generados, ritmos y si espera turno dentro del backend.
+- **Campo nuevo `stalled` en cada petición.** Solo vale `true` cuando hay una
+  señal de vida que vigilar (tokens en streaming o progreso real del prefill)
+  y lleva 15 s parada. Las peticiones sin ninguna señal ya no salen como
+  paradas.
+- **Duraciones estimadas con los ritmos medidos de cada modelo.** Se calculan
+  como prompt ÷ prefill medido + salida esperada ÷ generación medida (medianas
+  de las últimas 6 h), en lugar de con la recta global del estimador, que se
+  quedaba muy corta con prompts largos.
+- **Clave nueva `modelStates`.** Indica si un modelo está cargando (cuánto
+  lleva y cuánto suele tardar), esperando espacio en GPU (y a qué modelo
+  desaloja) o esperando una GPU retenida por un servicio.
+- **`GET /ocabra/host/stats` añade `cpu_model` y `cpu_power_max_w`**, con su
+  fuente en `cpu_power_max_source` (`config`, `rapl` o `tdp`). El máximo se
+  puede fijar con `CPU_POWER_MAX_W`.
+
+---
+
 ## 0.61.2 — 2026-11-09
 
 ### Arreglos

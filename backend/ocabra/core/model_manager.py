@@ -337,6 +337,9 @@ class ModelManager:
         # ``_load_in_progress``: model_id set of loads currently active.
         self._load_queue_waiters: int = 0
         self._load_in_progress: set[str] = set()
+        # Instante (time.time()) en que empezó cada carga en curso: para el
+        # "cargando · 32 s de ~45 s" del dashboard.
+        self._load_started_at: dict[str, float] = {}
         # model_id -> epoch of the last preferred-GPU move (cooldown).
         self._preferred_gpu_move_at: dict[str, float] = {}
         # Exact task owning each load, so an administrator can cancel a cold
@@ -728,6 +731,14 @@ class ModelManager:
             req.prompt_tokens_processed = processed
             req.prompt_progress_ms = elapsed_ms
             req.last_activity_at = time.time()
+
+    def load_started_at(self, model_id: str) -> float | None:
+        """Cuándo empezó la carga en curso de ``model_id`` (o None)."""
+        return self._load_started_at.get(model_id)
+
+    def service_gpu_blocker(self, model_id: str) -> str | None:
+        """Servicio que retiene la GPU que espera ``model_id``, si espera."""
+        return (getattr(self, "_service_gpu_waiters", None) or {}).get(model_id)
 
     def get_load_phase(self, model_id: str) -> tuple[str, str | None]:
         """Current load phase for ``model_id``, for the live-progress UI's
@@ -1904,6 +1915,7 @@ class ModelManager:
                         self._load_queue_waiters -= 1
                         gate_entered = True
                         self._load_in_progress.add(model_id)
+                        self._load_started_at[model_id] = time.time()
                         try:
                             if state.backend_type == "ollama":
                                 await self._prepare_ollama_runtime_switch(state)
@@ -2226,6 +2238,7 @@ class ModelManager:
                             self._worker_pool.set_worker(model_id, worker_info)
                         finally:
                             self._load_in_progress.discard(model_id)
+                            self._load_started_at.pop(model_id, None)
                 except BaseException:
                     # Only decrement the waiter counter when the exception
                     # happened before we even entered the gate; once inside,

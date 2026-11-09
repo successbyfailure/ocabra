@@ -271,7 +271,9 @@ async def get_models_activity(
         bar data for every loaded model (tiers per GPU placement, active
         window, reserved/used per request). Plus ``stuckThresholdSeconds`` and
         ``idleTimeoutSeconds``. ``vramByGpu``: MB measured by NVML for each
-        model on each GPU. Also pushed every second over ``/ocabra/ws``
+        model on each GPU. ``modelStates``: load phase per model (loading,
+        waiting for free VRAM and whom it evicts, waiting for a GPU held by a
+        service) with load elapsed and typical load time. Also pushed every second over ``/ocabra/ws``
         to clients that subscribe to ``models_activity``.
     """
     return await build_models_activity(request)
@@ -305,9 +307,20 @@ async def build_models_activity(request: Any) -> dict:
         if getattr(req, "prompt_tokens_total", None) is None
         and getattr(req, "first_token_at", None) is None
     }
-    prefill_rates = (
-        await live_activity.prefill_rates(rate_keys, estimator) if rate_keys else {}
+    # Ritmos medidos por modelo: prefill (para estimar el avance donde el
+    # backend no lo informa) y prefill + generación + salida típica (para
+    # estimar duraciones). Una consulta cacheada por modelo.
+    all_rate_keys = {
+        req.profile_id or req.model_id for reqs in requests_by_key.values() for req in reqs
+    }
+    measured_rates = (
+        await live_activity.model_rates(all_rate_keys, estimator) if all_rate_keys else {}
     )
+    prefill_rates = {
+        key: value["prefill"]
+        for key, value in measured_rates.items()
+        if key in rate_keys and value.get("prefill")
+    }
     # ``list_states()`` (sin include_derived) devuelve solo los canónicos,
     # pero ``begin_request`` registra con el worker-key derivado del
     # preset activo (``ollama/qwen3.8:27b::<hash>``). Para que el badge
@@ -327,6 +340,7 @@ async def build_models_activity(request: Any) -> dict:
     # Workers derivados cargados por modelo, tengan o no peticiones: hacen
     # falta para leer su puerto (/metrics de vLLM) y sus PID (VRAM por GPU).
     loaded_worker_keys_by_canonical: dict[str, list[str]] = {}
+    loading_worker_keys_by_canonical: dict[str, list[str]] = {}
     for s in all_states:
         base = _canonical_runtime_id(s.model_id, canonical_ids)
         if base is None or base == s.model_id:
@@ -345,9 +359,15 @@ async def build_models_activity(request: Any) -> dict:
         # El preset activo y su contexto efectivo tambien viven solo en el
         # derivado. Sin ellos la barra de KV es un numero sin referencia: no
         # se sabe si 240k de pool vienen del preset de 32k o del de 128k.
-        if getattr(s.status, "value", s.status) == "loaded":
+        derived_status = getattr(s.status, "value", s.status)
+        if derived_status == "loaded":
             runtime_meta_by_canonical[base] = meta
             loaded_worker_keys_by_canonical.setdefault(base, []).append(s.model_id)
+        elif derived_status == "loading":
+            # El preset que se está cargando: la barra de contexto y el
+            # estado de la card ya lo muestran durante la carga.
+            runtime_meta_by_canonical.setdefault(base, meta)
+            loading_worker_keys_by_canonical.setdefault(base, []).append(s.model_id)
         preset_key = meta.get("preset_key")
         effective_context = meta.get("effective_context")
         if preset_key or effective_context:
@@ -489,6 +509,23 @@ async def build_models_activity(request: Any) -> dict:
                 if isinstance(gate_slots, int) and gate_slots > 0:
                     slots = gate_slots
 
+            # Peticiones a llama.cpp sin progreso en el stream (sin streaming):
+            # su avance real sale de /slots del llama-server.
+            if is_llama_cpp_family(state.backend_type) and any(
+                not d.get("progressTracked") and d["stage"] != "queued" for d in requests_detail
+            ):
+                port = None
+                get_worker = getattr(worker_pool, "get_worker", None)
+                for key in keys:
+                    info = get_worker(key) if callable(get_worker) else None
+                    if info is not None and getattr(info, "port", None):
+                        port = info.port
+                        break
+                try:
+                    slots_now = await live_activity.llama_slots(port)
+                    live_activity.apply_slot_progress(requests_detail, slots_now, now=time.time())
+                except Exception:  # noqa: BLE001 — sin slots, se queda con lo estimado
+                    pass
             requests_detail.sort(
                 key=lambda d: (
                     d["stage"] == "queued",
@@ -504,7 +541,9 @@ async def build_models_activity(request: Any) -> dict:
                 slots=slots,
                 kv_capacity=(admission or {}).get("kvCapacityTokens"),
                 kv_reserved=(admission or {}).get("kvReservedTokens"),
+                rates=measured_rates,
             )
+            live_activity.mark_stalls(requests_detail)
             live_activity.strip_internal(requests_detail)
             live_ids.update(d["requestId"] for d in requests_detail)
 
@@ -546,6 +585,7 @@ async def build_models_activity(request: Any) -> dict:
                 entry["effectiveContext"] = preset_info["effectiveContext"]
             activity[state.model_id] = entry
     live_activity.prune_estimates(live_ids)
+    live_activity.prune_slot_track(live_ids)
     contexts: dict[str, dict] = {}
     registry = getattr(request.app.state, "profile_registry", None)
     profiles: list = []
@@ -562,9 +602,25 @@ async def build_models_activity(request: Any) -> dict:
         except Exception:  # noqa: BLE001
             gpu_states = []
     worker_pids: dict[str, list[int]] = {}
+    model_states: dict[str, dict] = {}
+    typical_load = await live_activity.typical_load_ms()
     for state in states:
         derived_meta = runtime_meta_by_canonical.get(state.model_id)
-        loaded = getattr(state.status, "value", state.status) == "loaded"
+        status_value = getattr(state.status, "value", state.status)
+        worker_keys = [
+            *loaded_worker_keys_by_canonical.get(state.model_id, ()),
+            *loading_worker_keys_by_canonical.get(state.model_id, ()),
+            *derived_keys_by_canonical.get(state.model_id, ()),
+        ]
+        try:
+            phase_info = live_activity.model_phase(
+                mm, state, worker_keys, now=now_ts, typical_ms=typical_load
+            )
+        except Exception:  # noqa: BLE001
+            phase_info = None
+        if phase_info and (status_value in ("loaded", "loading") or phase_info["phase"] != "ready"):
+            model_states[state.model_id] = phase_info
+        loaded = status_value in ("loaded", "loading")
         if not loaded and derived_meta is None:
             continue
         worker_port: int | None = None
@@ -615,6 +671,10 @@ async def build_models_activity(request: Any) -> dict:
         "contexts": contexts,
         # MB medidos por NVML de cada modelo en cada GPU ({modelo: {gpu: MB}}).
         "vramByGpu": vram_by_gpu,
+        # Estado de cada modelo activo o esperando: cargando (desde cuándo y
+        # cuánto suele tardar), esperando espacio (a quién desaloja) o
+        # esperando una GPU retenida por un servicio.
+        "modelStates": model_states,
         "stuckThresholdSeconds": int(getattr(settings, "busy_timeout_seconds", 300)),
         # Same delivery as stuckThresholdSeconds: the card needs it to show the
         # idle-unload countdown, and shipping it here avoids threading server

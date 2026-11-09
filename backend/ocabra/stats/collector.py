@@ -512,12 +512,23 @@ def _mark_stream_first_token(
         telemetry.mark_first_token(now_monotonic)
 
 
-def _payload_streaming(payload: object) -> bool | None:
-    """``stream`` del cuerpo; Ollama nativo hace streaming por defecto."""
+def _payload_streaming(payload: object, path: str = "") -> bool | None:
+    """Si la petición va en streaming.
+
+    Sin ``stream`` en el cuerpo, la API de OpenAI responde de una vez y la
+    nativa de Ollama (``/api/*``) hace streaming. Antes la ausencia se tomaba
+    como "desconocido" y la UI trataba como streaming peticiones que no lo
+    eran: les salía "sin actividad del worker" a los 15 s porque no emiten
+    nada hasta el final (2026-11-10, tráfico real de benchmark).
+    """
     if not isinstance(payload, dict):
         return None
     if "stream" in payload:
         return bool(payload.get("stream"))
+    if path.startswith("/api/"):
+        return True
+    if path.startswith("/v1/"):
+        return False
     return None
 
 
@@ -733,7 +744,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 # model happens to be loaded locally.
                 request_kind=request_kind,
                 remote_bound=remote_bound,
-                streaming=_payload_streaming(request_payload),
+                streaming=_payload_streaming(request_payload, path),
                 max_output_tokens=_payload_max_output_tokens(request_payload),
             )
             if inflight_request_id is None:

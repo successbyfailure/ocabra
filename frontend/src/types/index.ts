@@ -768,6 +768,9 @@ export interface ActiveRequestProgress {
   expectedDurationMs?: number | null;
   estimatedRemainingMs?: number | null;
   queueWaitEstimateMs?: number | null;
+  /** El backend ve una señal de vida (tokens o progreso de prefill) y lleva
+   *  15 s parada. Las peticiones sin señal que vigilar nunca se marcan. */
+  stalled?: boolean;
   /** Orden en que se prevé que entre, teniendo en cuenta el KV libre: puede
    *  diferir del turno (una pequeña adelanta a una grande que no cabe). */
   predictedStartOrder?: number | null;
@@ -783,6 +786,17 @@ export type RequestStage =
   | "prefill"
   | "generating"
   | "processing";
+
+/** Fase de carga de un modelo (dashboard). */
+export interface ModelPhaseInfo {
+  /** waiting_for_gpu: desalojando a waitingOn para hacer sitio ·
+   *  waiting_for_service_gpu: GPU retenida por el servicio waitingOn. */
+  phase: "ready" | "loading" | "waiting_for_gpu" | "waiting_for_service_gpu";
+  waitingOn: string | null;
+  loadingForMs: number | null;
+  /** Mediana de lo que tarda en cargar este modelo (30 días). */
+  typicalLoadMs: number | null;
+}
 
 /** Un nivel de contexto: lo que cabe con una colocación de GPUs dada. */
 export interface ContextTier {
@@ -855,6 +869,8 @@ export interface ModelActivityMap {
   contexts?: Record<string, ModelContextInfo>;
   /** MB medidos por NVML de cada modelo en cada GPU: {modelId: {"0": MB}}. */
   vramByGpu?: Record<string, Record<string, number>>;
+  /** Fase de carga de cada modelo activo o esperando. */
+  modelStates?: Record<string, ModelPhaseInfo>;
   stuckThresholdSeconds: number;
   /** Seconds of inactivity after which an on_demand model is unloaded. */
   idleTimeoutSeconds?: number;
@@ -1206,6 +1222,10 @@ export interface ServiceState {
 }
 
 export interface HostStats {
+  cpuModel?: string | null;
+  /** Potencia máxima de la CPU (W): ajuste, límite RAPL o TDP conocido. */
+  cpuPowerMaxW?: number | null;
+  cpuPowerMaxSource?: "config" | "rapl" | "tdp" | null;
   cpuPct: number;
   cpuCount: number;
   cpuCountPhysical: number;

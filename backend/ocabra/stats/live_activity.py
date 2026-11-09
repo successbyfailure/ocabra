@@ -190,9 +190,12 @@ def request_live_detail(
         if lease
         else (_int_or_none(queued.get("kvTokens")) if queued else None),
         "queuePosition": queued.get("position") if queued else None,
-        # Solo para la simulacion de cola (FIFO por usuario); se retira antes
-        # de responder, ver ``strip_internal``.
+        # Solo para calcular; se retiran antes de responder (``strip_internal``):
+        # la clave de usuario del gate (FIFO por usuario en la simulación), la
+        # clave de los ritmos medidos y si el backend informa del progreso.
         "userKey": queued.get("userKey") if queued else None,
+        "rateKey": getattr(req, "profile_id", None) or getattr(req, "model_id", None),
+        "progressTracked": bool(getattr(req, "prompt_progress_tracked", False)),
         "queuedMs": queued.get("waitedMs") if queued else None,
         "prompt": {
             "totalTokens": total if total is not None else req.input_tokens_estimate,
@@ -218,6 +221,7 @@ async def attach_estimates(
     slots: int | None,
     kv_capacity: int | None = None,
     kv_reserved: int | None = None,
+    rates: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Duracion esperada por peticion y cuando entra cada una de la cola.
 
@@ -257,6 +261,11 @@ async def attach_estimates(
                     expected_ms = None
             _estimate_cache[rid] = expected_ms
         expected_ms = _estimate_cache[rid]
+        # Con ritmos medidos del modelo manda la duración física: el
+        # estimador queda solo de respaldo.
+        physical = physical_duration_ms(detail, (rates or {}).get(detail.get("rateKey") or ""))
+        if physical:
+            expected_ms = physical
         detail["expectedDurationMs"] = expected_ms
         if expected_ms is None or detail["stage"] == "queued":
             detail["estimatedRemainingMs"] = None
@@ -619,74 +628,394 @@ async def vram_by_gpu(
 # ── Ritmo de prefill por modelo (para backends sin progreso) ───────────────
 
 _PREFILL_RATE_TTL_S = 60.0
-_prefill_rate_cache: dict[str, tuple[float, tuple[float, str] | None]] = {}
 
 
-async def _measured_prefill_rates(keys: list[str]) -> dict[str, float]:
-    """Mediana de ``prompt_tokens_per_second`` de las ultimas 6 h por modelo."""
+async def _measured_model_rates(keys: list[str]) -> dict[str, dict[str, float]]:
+    """Ritmos medidos por modelo en las últimas 6 h (medianas) y salida típica.
+
+    ``prefill``: tokens/s de prefill · ``generation``: tokens/s de generación ·
+    ``output``: percentil 75 de tokens de salida. Solo cuentan peticiones que
+    los informan (llama.cpp y Ollama al terminar).
+    """
     import sqlalchemy as sa
 
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.stats import RequestStat
 
     since = sa.func.now() - sa.text("interval '6 hours'")
+
+    def median(col):
+        return sa.func.percentile_cont(0.5).within_group(col)
+
     stmt = (
         sa.select(
             RequestStat.model_id,
-            sa.func.percentile_cont(0.5).within_group(RequestStat.prompt_tokens_per_second),
+            median(
+                sa.case(
+                    (RequestStat.prompt_tokens_per_second > 0, RequestStat.prompt_tokens_per_second)
+                )
+            ),
+            median(
+                sa.case(
+                    (
+                        RequestStat.predicted_tokens_per_second > 0,
+                        RequestStat.predicted_tokens_per_second,
+                    )
+                )
+            ),
+            sa.func.percentile_cont(0.75).within_group(
+                sa.case((RequestStat.output_tokens > 0, RequestStat.output_tokens))
+            ),
         )
-        .where(
-            RequestStat.model_id.in_(keys),
-            RequestStat.started_at > since,
-            RequestStat.prompt_tokens_per_second > 0,
-        )
+        .where(RequestStat.model_id.in_(keys), RequestStat.started_at > since)
         .group_by(RequestStat.model_id)
     )
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(stmt)).all()
-    return {model: float(rate) for model, rate in rows if rate}
+    out: dict[str, dict[str, float]] = {}
+    for model, prefill, generation, output in rows:
+        values = {
+            name: float(value)
+            for name, value in (
+                ("prefill", prefill),
+                ("generation", generation),
+                ("output", output),
+            )
+            if value
+        }
+        if values:
+            out[model] = values
+    return out
 
 
-async def prefill_rates(keys: set[str], estimator: Any) -> dict[str, tuple[float, str]]:
-    """(tokens/s, fuente) de prefill para cada modelo pedido.
+_model_rates_cache: dict[str, tuple[float, dict[str, float]]] = {}
 
-    Fuente ``historical``: mediana medida en sus peticiones recientes (llama.cpp
-    y Ollama la informan al terminar). Si no hay, ``regression``: la pendiente
-    por token de entrada que ajusta el ``DurationEstimator``. Cache de 60 s,
-    tambien para los que no tienen dato, para no consultar la BD cada segundo.
+
+async def model_rates(keys: set[str], estimator: Any) -> dict[str, dict[str, Any]]:
+    """Ritmos por modelo con su fuente, cacheados 60 s (también los vacíos).
+
+    Devuelve ``{modelo: {"prefill": (t/s, fuente), "generation": t/s,
+    "output": tokens}}``. El prefill cae a la regresión del estimador si no
+    hay medidas; generación y salida solo existen medidas.
     """
     now = time.monotonic()
     missing = [
         k
         for k in keys
         if k
-        and (k not in _prefill_rate_cache or now - _prefill_rate_cache[k][0] > _PREFILL_RATE_TTL_S)
+        and (k not in _model_rates_cache or now - _model_rates_cache[k][0] > _PREFILL_RATE_TTL_S)
     ]
     if missing:
         try:
-            measured = await asyncio.wait_for(_measured_prefill_rates(missing), timeout=2.0)
-        except Exception:  # noqa: BLE001 — sin BD: se intenta con la regresion
+            measured = await asyncio.wait_for(_measured_model_rates(missing), timeout=2.0)
+        except Exception:  # noqa: BLE001 — sin BD: solo la regresión
             measured = {}
-        calibrations = getattr(estimator, "_calibrations", {}) or {}
         for key in missing:
-            value: tuple[float, str] | None = None
-            if measured.get(key):
-                value = (round(measured[key], 1), "historical")
-            else:
-                cal = calibrations.get(key)
-                regression = getattr(cal, "chat_regression", None)
-                a_in = getattr(regression, "a_in", None)
-                if a_in and a_in > 0:
-                    value = (round(1000.0 / a_in, 1), "regression")
-            _prefill_rate_cache[key] = (now, value)
-    return {
-        k: _prefill_rate_cache[k][1]
-        for k in keys
-        if k in _prefill_rate_cache and _prefill_rate_cache[k][1]
-    }
+            _model_rates_cache[key] = (now, measured.get(key, {}))
+    calibrations = getattr(estimator, "_calibrations", {}) or {}
+    result: dict[str, dict[str, Any]] = {}
+    for key in keys:
+        if key not in _model_rates_cache:
+            continue
+        values = _model_rates_cache[key][1]
+        entry: dict[str, Any] = {}
+        if values.get("prefill"):
+            entry["prefill"] = (round(values["prefill"], 1), "historical")
+        else:
+            regression = getattr(calibrations.get(key), "chat_regression", None)
+            a_in = getattr(regression, "a_in", None)
+            if a_in and a_in > 0:
+                entry["prefill"] = (round(1000.0 / a_in, 1), "regression")
+        if values.get("generation"):
+            entry["generation"] = round(values["generation"], 1)
+        if values.get("output"):
+            entry["output"] = int(values["output"])
+        if entry:
+            result[key] = entry
+    return result
+
+
+async def prefill_rates(keys: set[str], estimator: Any) -> dict[str, tuple[float, str]]:
+    """Solo el ritmo de prefill de ``model_rates`` (compatibilidad)."""
+    rates = await model_rates(keys, estimator)
+    return {k: v["prefill"] for k, v in rates.items() if v.get("prefill")}
+
+
+def physical_duration_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> int | None:
+    """Duración esperada con los ritmos medidos del propio modelo.
+
+    prompt ÷ ritmo de prefill + salida esperada ÷ ritmo de generación. La
+    salida esperada es el ``max_tokens`` pedido acotado por el p75 de salida
+    del modelo (o el p75 si no hay tope). El estimador de duración ajusta una
+    recta global y con prompts largos se quedaba muy corto: 15 s para un
+    prompt de 57k tokens que solo de prefill tardaba más de un minuto.
+    """
+    if not rates:
+        return None
+    prefill = rates.get("prefill")
+    prompt_tokens = (detail.get("prompt") or {}).get("totalTokens")
+    if not prefill or not prompt_tokens:
+        return None
+    ms = prompt_tokens / prefill[0] * 1000
+    generation = rates.get("generation")
+    typical = rates.get("output")
+    asked = detail.get("maxOutputTokens")
+    expected_out = min(asked, typical) if asked and typical else (asked or typical)
+    if generation and expected_out:
+        ms += expected_out / generation * 1000
+    return int(ms)
 
 
 def strip_internal(details: list[dict[str, Any]]) -> None:
     """Quita lo que solo hacia falta para calcular (no sale del servidor)."""
     for detail in details:
-        detail.pop("userKey", None)
+        for key in ("userKey", "rateKey", "progressTracked"):
+            detail.pop(key, None)
+
+
+# ── Peticiones sin streaming en llama.cpp: progreso desde /slots ────────────
+
+STALL_SECONDS = 15.0
+_SLOTS_TTL_S = 1.0
+_slots_cache: dict[int, tuple[float, list[dict[str, Any]] | None]] = {}
+# request_id -> seguimiento entre consultas: primera muestra, último cambio y
+# primer token visto, para sacar ritmos y detectar parones.
+_slot_track: dict[str, dict[str, float]] = {}
+
+
+async def llama_slots(port: int | None) -> list[dict[str, Any]] | None:
+    """``GET /slots`` del llama-server (caché de 1 s, timeout corto)."""
+    if not port:
+        return None
+    now = time.monotonic()
+    cached = _slots_cache.get(port)
+    if cached and now - cached[0] < _SLOTS_TTL_S:
+        return cached[1]
+    value: list[dict[str, Any]] | None = None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(0.8)) as client:
+            resp = await client.get(f"http://127.0.0.1:{port}/slots")
+            if resp.status_code == 200 and isinstance(resp.json(), list):
+                value = resp.json()
+    except (httpx.HTTPError, OSError, ValueError):
+        value = None
+    _slots_cache[port] = (now, value)
+    return value
+
+
+def _slot_counts(slot: dict[str, Any]) -> tuple[int, int, int, int]:
+    total = int(slot.get("n_prompt_tokens") or 0)
+    processed = int(slot.get("n_prompt_tokens_processed") or 0)
+    cached = int(slot.get("n_prompt_tokens_cache") or 0)
+    next_token = slot.get("next_token")
+    if isinstance(next_token, list):
+        next_token = next_token[0] if next_token else {}
+    decoded = int((next_token or {}).get("n_decoded") or 0)
+    return total, processed, cached, decoded
+
+
+def apply_slot_progress(
+    details: list[dict[str, Any]], slots: list[dict[str, Any]] | None, *, now: float
+) -> None:
+    """Progreso real de las peticiones a llama.cpp que no lo traen en el stream.
+
+    Las peticiones sin streaming (la mayoría del tráfico de benchmarks y de
+    muchos clientes) no reciben ``prompt_progress``, pero ``/slots`` las ve. Se
+    emparejan así: los slots cuyo total de prompt coincide con el de una
+    petición que sí trae progreso se descartan; los demás, por orden de tarea
+    (``id_task``), se asignan a las peticiones sin progreso por orden de
+    admisión. Una admitida sin slot procesando espera al backend.
+    """
+    untracked = [
+        d
+        for d in details
+        if d["stage"] in ("prefill", "processing", "backend_wait")
+        and not d.get("progressTracked")
+        and (d.get("prompt") or {}).get("source") != "live"
+        and d.get("admittedAfterMs") is not None
+    ]
+    if not untracked or not slots:
+        return
+    tracked_totals: dict[int, int] = {}
+    for d in details:
+        prompt = d.get("prompt") or {}
+        if prompt.get("source") == "live" and prompt.get("totalTokens"):
+            tracked_totals[prompt["totalTokens"]] = tracked_totals.get(prompt["totalTokens"], 0) + 1
+    free: list[dict[str, Any]] = []
+    for slot in sorted(
+        (s for s in slots if s.get("is_processing")), key=lambda s: s.get("id_task") or 0
+    ):
+        total = _slot_counts(slot)[0]
+        if tracked_totals.get(total):
+            tracked_totals[total] -= 1
+            continue
+        free.append(slot)
+    untracked.sort(key=lambda d: (d.get("startedAt") or 0) + (d.get("admittedAfterMs") or 0) / 1000)
+    for detail, slot in zip(untracked, free, strict=False):
+        total, processed, cached, decoded = _slot_counts(slot)
+        rid = detail["requestId"]
+        track = _slot_track.setdefault(
+            rid, {"t0": now, "p0": processed, "progress": -1.0, "changed": now}
+        )
+        progress = float(processed + decoded)
+        if progress != track["progress"]:
+            track["progress"] = progress
+            track["changed"] = now
+        done_prompt = min(total, cached + processed) if total else 0
+        detail["prompt"] = {
+            "totalTokens": total or detail["prompt"].get("totalTokens"),
+            "cachedTokens": cached,
+            "processedTokens": done_prompt,
+            "source": "live",
+        }
+        detail["prefillPct"] = round(100.0 * done_prompt / total, 1) if total else None
+        detail["prefillSource"] = "live"
+        detail["lastActivitySecondsAgo"] = round(now - track["changed"], 1)
+        if decoded > 0:
+            detail["stage"] = "generating"
+            detail["prefillPct"] = 100.0
+            if "t_first" not in track:
+                track["t_first"] = now
+                track["d0"] = float(decoded)
+            detail["outputTokens"] = decoded
+            elapsed = now - track["t_first"]
+            detail["generationTokensPerSecond"] = (
+                round((decoded - track["d0"]) / elapsed, 1)
+                if elapsed >= 1
+                else detail.get("generationTokensPerSecond")
+            )
+        elif processed > 0 or cached > 0:
+            detail["stage"] = "prefill"
+            elapsed = now - track["t0"]
+            if elapsed >= 1 and processed > track["p0"]:
+                detail["prefillTokensPerSecond"] = round((processed - track["p0"]) / elapsed, 1)
+        else:
+            detail["stage"] = "backend_wait"
+        detail["progressTracked"] = True
+    # Admitidas sin slot que les corresponda: esperan dentro del backend.
+    for detail in untracked[len(free) :]:
+        if detail["stage"] in ("prefill", "processing"):
+            detail["stage"] = "backend_wait"
+            detail["prefillPct"] = None
+            detail["prefillTokensPerSecond"] = None
+            detail["prefillSource"] = None
+
+
+def mark_stalls(details: list[dict[str, Any]]) -> None:
+    """``stalled``: hay una señal de vida que vigilar y lleva 15 s parada.
+
+    Solo cuenta lo que emite eventos: la generación en streaming y el prefill
+    con progreso real (``prompt_progress`` o ``/slots``). Una petición sin
+    streaming o un prefill de Ollama no emiten nada hasta el final, y marcarlas
+    como paradas era el falso "sin actividad del worker" que salía siempre.
+    """
+    for detail in details:
+        stage = detail.get("stage")
+        live_prompt = (detail.get("prompt") or {}).get("source") == "live"
+        watched = (
+            stage == "generating" and (detail.get("streaming") or detail.get("progressTracked"))
+        ) or (stage == "prefill" and live_prompt)
+        detail["stalled"] = bool(
+            watched and (detail.get("lastActivitySecondsAgo") or 0) >= STALL_SECONDS
+        )
+
+
+def prune_slot_track(live_ids: set[str]) -> None:
+    for rid in [rid for rid in _slot_track if rid not in live_ids]:
+        _slot_track.pop(rid, None)
+
+
+# ── Estado de carga del modelo ──────────────────────────────────────────────
+
+_LOAD_TIME_TTL_S = 300.0
+_load_time_cache: tuple[float, dict[str, int]] | None = None
+
+
+async def typical_load_ms() -> dict[str, int]:
+    """Mediana de duración de carga por modelo canónico (últimos 30 días).
+
+    ``model_load_stats`` guarda el worker (``modelo::hash`` si es un preset);
+    se agrupa por el modelo canónico. Caché de 5 min.
+    """
+    global _load_time_cache
+    now = time.monotonic()
+    if _load_time_cache and now - _load_time_cache[0] < _LOAD_TIME_TTL_S:
+        return _load_time_cache[1]
+    result: dict[str, int] = {}
+    try:
+        import sqlalchemy as sa
+
+        from ocabra.database import AsyncSessionLocal
+        from ocabra.db.stats import ModelLoadStat
+
+        canonical = sa.func.split_part(ModelLoadStat.model_id, "::", 1)
+        stmt = (
+            sa.select(
+                canonical, sa.func.percentile_cont(0.5).within_group(ModelLoadStat.duration_ms)
+            )
+            .where(
+                ModelLoadStat.started_at > sa.func.now() - sa.text("interval '30 days'"),
+                ModelLoadStat.duration_ms > 0,
+            )
+            .group_by(canonical)
+        )
+
+        async def run() -> list:
+            async with AsyncSessionLocal() as session:
+                return (await session.execute(stmt)).all()
+
+        rows = await asyncio.wait_for(run(), timeout=2.0)
+        result = {model: int(ms) for model, ms in rows if ms}
+    except Exception:  # noqa: BLE001 — sin BD: sin estimación de carga
+        result = {}
+    _load_time_cache = (now, result)
+    return result
+
+
+def model_phase(
+    mm: Any,
+    state: Any,
+    worker_keys: list[str],
+    *,
+    now: float,
+    typical_ms: dict[str, int],
+) -> dict[str, Any]:
+    """Estado del modelo para la píldora de la card.
+
+    ``phase``: ``waiting_for_gpu`` (desalojando a ``waitingOn`` para hacer
+    sitio), ``waiting_for_service_gpu`` (GPU retenida por el servicio
+    ``waitingOn``), ``loading`` o ``ready``. Con carga en curso, cuánto lleva y
+    cuánto suele tardar.
+    """
+    phase, waiting_on = "ready", None
+    keys = [state.model_id, *worker_keys]
+    for key in keys:
+        try:
+            blocker = mm.service_gpu_blocker(key)
+        except Exception:  # noqa: BLE001
+            blocker = None
+        if blocker:
+            phase, waiting_on = "waiting_for_service_gpu", blocker
+            break
+        try:
+            key_phase, detail = mm.get_load_phase(key)
+        except Exception:  # noqa: BLE001
+            continue
+        if key_phase == "waiting_for_gpu":
+            phase, waiting_on = key_phase, detail
+            break
+        if key_phase == "loading":
+            phase = "loading"
+    if (
+        phase == "ready"
+        and getattr(getattr(state, "status", None), "value", getattr(state, "status", None))
+        == "loading"
+    ):
+        phase = "loading"
+    started = [t for t in (mm.load_started_at(k) for k in keys) if t]
+    return {
+        "phase": phase,
+        "waitingOn": waiting_on,
+        "loadingForMs": int((now - min(started)) * 1000) if started else None,
+        "typicalLoadMs": typical_ms.get(state.model_id),
+    }

@@ -185,6 +185,9 @@ export function Dashboard() {
                 model={model}
                 act={activity[model.modelId]}
                 ctx={contexts[model.modelId]}
+                phase={live.modelStates?.[model.modelId]}
+                gpus={gpus}
+                vramByGpu={live.vramByGpu?.[model.modelId]}
                 nowMs={nowMs}
                 stuckThreshold={stuckThreshold}
                 idleTimeoutSeconds={live.idleTimeoutSeconds}
@@ -263,7 +266,15 @@ export function Dashboard() {
         <Section title="GPUs y CPU">
           <div className="grid gap-4 xl:grid-cols-2">
             {gpus.map((gpu) => (
-              <GpuWidget key={gpu.index} gpu={gpu} models={loadedModels} activity={activity} vramByGpu={live.vramByGpu} />
+              <GpuWidget
+                key={gpu.index}
+                gpu={gpu}
+                models={loadedModels}
+                activity={activity}
+                vramByGpu={live.vramByGpu}
+                modelStates={live.modelStates}
+                stuckThreshold={stuckThreshold}
+              />
             ))}
             {hostStats && (
               <CpuWidget
@@ -273,6 +284,8 @@ export function Dashboard() {
                 models={cpuModels}
                 activity={activity}
                 ollamaRuntime={ollamaRuntime}
+                modelStates={live.modelStates}
+                stuckThreshold={stuckThreshold}
               />
             )}
             {gpus.length === 0 && !hostStats && (

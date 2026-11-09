@@ -2,7 +2,7 @@ import { X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { ActiveRequestProgress } from "@/types"
-import { STALL_SECONDS, STAGE_META, fmtDuration, fmtTokens, fmtTps } from "./format"
+import { STALL_SECONDS, STAGE_META, VISUAL, fmtDuration, fmtTokens, fmtTps } from "./format"
 import { RequestKindBadge } from "./RequestKindBadge"
 
 const STRIPES =
@@ -51,8 +51,16 @@ export function RequestProgress({
   const prefillEnd = firstToken ?? (stage === "prefill" || stage === "processing" ? elapsed : queueEnd)
   const genEnd = firstToken != null ? elapsed : prefillEnd
 
+  // El backend sabe si hay una señal de vida que vigilar (tokens o progreso
+  // real de prefill); sin ella nunca marca "parada". Con versiones antiguas
+  // del backend, sin el campo, se mantiene la regla anterior.
   const stalled =
-    (stage === "prefill" || stage === "generating") && req.lastActivitySecondsAgo >= STALL_SECONDS
+    req.stalled ??
+    ((stage === "prefill" || stage === "generating") && req.lastActivitySecondsAgo >= STALL_SECONDS)
+  const visual = VISUAL[stalled ? "stuck" : meta.visual]
+  // Tramo que está avanzando ahora: rayas en movimiento.
+  const flowing = (color: string) =>
+    `repeating-linear-gradient(90deg, ${color} 0 8px, ${color}99 8px 12px)`
   const stuck = req.elapsedSeconds >= stuckThreshold
   const prompt = req.prompt
   const promptLive = prompt?.source === "live"
@@ -65,6 +73,7 @@ export function RequestProgress({
     }
     if (stage === "waiting_for_gpu" && req.waitingOnModelId) return `esperando a que libere GPU ${req.waitingOnModelId}`
     if (stage === "backend_wait") return "admitida · esperando a que el backend empiece"
+    if (stage === "processing") return "procesando · sin streaming, sin progreso del backend"
     if (stage === "prefill" && promptLive && prompt?.totalTokens) {
       return `prefill ${req.prefillPct?.toFixed(0) ?? 0}% · ${fmtTokens(prompt.processedTokens)}/${fmtTokens(prompt.totalTokens)}`
     }
@@ -111,7 +120,10 @@ export function RequestProgress({
           )}
         </span>
         <span className="flex shrink-0 items-center gap-2 tabular-nums">
-          <span className={meta.text}>{statusText}</span>
+          <span className={`inline-flex items-center gap-1 ${visual.text}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${visual.anim}`} style={{ background: visual.color }} />
+            {statusText}
+          </span>
           {req.prefillTokensPerSecond != null && (
             <span
               className="text-muted-foreground"
@@ -166,14 +178,33 @@ export function RequestProgress({
         {total != null && (
           <span className="absolute inset-y-0" style={{ left: `${at(elapsed)}%`, right: 0, background: STRIPES }} />
         )}
-        <span className="absolute inset-y-0 left-0 bg-amber-500/70" style={{ width: `${at(queueEnd)}%` }} />
         <span
-          className="absolute inset-y-0 bg-sky-500/80"
-          style={{ left: `${at(queueEnd)}%`, width: `${Math.max(0, at(prefillEnd) - at(queueEnd))}%` }}
+          className={`absolute inset-y-0 left-0 ${stage === "queued" || stage === "backend_wait" ? "animate-flow" : ""}`}
+          style={{
+            width: `${at(queueEnd)}%`,
+            background: stage === "queued" || stage === "backend_wait" ? flowing(VISUAL.waiting.color) : `${VISUAL.waiting.color}b3`,
+          }}
         />
         <span
-          className="absolute inset-y-0 bg-emerald-500/85"
-          style={{ left: `${at(prefillEnd)}%`, width: `${Math.max(0, at(genEnd) - at(prefillEnd))}%` }}
+          className={`absolute inset-y-0 ${stage === "prefill" || stage === "processing" ? "animate-flow" : ""}`}
+          style={{
+            left: `${at(queueEnd)}%`,
+            width: `${Math.max(0, at(prefillEnd) - at(queueEnd))}%`,
+            background:
+              stage === "processing"
+                ? flowing(VISUAL.processing.color)
+                : stage === "prefill"
+                  ? flowing(VISUAL.prefill.color)
+                  : `${VISUAL.prefill.color}cc`,
+          }}
+        />
+        <span
+          className={`absolute inset-y-0 ${stage === "generating" ? "animate-flow" : ""}`}
+          style={{
+            left: `${at(prefillEnd)}%`,
+            width: `${Math.max(0, at(genEnd) - at(prefillEnd))}%`,
+            background: stage === "generating" ? flowing(VISUAL.generating.color) : VISUAL.generating.color,
+          }}
         />
         {/* Ahora */}
         <span className="absolute inset-y-0 w-px animate-pulse bg-foreground/80" style={{ left: `${at(elapsed)}%` }} />

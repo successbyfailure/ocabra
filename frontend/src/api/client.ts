@@ -1796,7 +1796,11 @@ function toServiceState(raw: unknown): ServiceState {
 
 function toHostStats(raw: unknown): import("@/types").HostStats {
   const d = isRecord(raw) ? raw : {};
+  const powerMax = d.cpu_power_max_w ?? d.cpuPowerMaxW
   return {
+    cpuModel: (d.cpu_model ?? d.cpuModel ?? null) as string | null,
+    cpuPowerMaxW: powerMax == null ? null : Number(powerMax),
+    cpuPowerMaxSource: (d.cpu_power_max_source ?? d.cpuPowerMaxSource ?? null) as "config" | "rapl" | "tdp" | null,
     cpuPct: Number(d.cpu_pct ?? d.cpuPct ?? 0),
     cpuCount: Number(d.cpu_count ?? d.cpuCount ?? 0),
     cpuCountPhysical: Number(d.cpu_count_physical ?? d.cpuCountPhysical ?? 0),

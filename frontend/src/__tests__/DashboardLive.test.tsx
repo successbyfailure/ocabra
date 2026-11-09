@@ -157,3 +157,108 @@ describe("dashboard en vivo", () => {
     expect(screen.queryByText(/Cola de descargas/)).toBeNull()
   })
 })
+
+describe("estado del modelo, memoria y potencia de CPU", () => {
+  const base = {
+    modelId: "llamacpp_mks/qwen",
+    displayName: "Qwen",
+    backendType: "llamacpp_mks",
+    status: "loaded",
+    loadPolicy: "warm",
+    currentGpu: [1],
+    vramUsedMb: 22800,
+    vramEstimateMb: 21500,
+    ramUsedMb: 0,
+    capabilities: {},
+  } as unknown as ModelState
+
+  it("prioriza esperar espacio, luego cargar, y distingue sin streaming de parada", async () => {
+    const { cardState } = await import("@/components/dashboard/ModelLiveCard")
+    expect(
+      cardState(base, undefined, { phase: "waiting_for_gpu", waitingOn: "gemma4:26b", loadingForMs: null, typicalLoadMs: null }, 300),
+    ).toMatchObject({ visual: "waiting_space", detail: "desalojando gemma4:26b" })
+    expect(
+      cardState({ ...base, status: "loading" } as ModelState, undefined, { phase: "loading", waitingOn: null, loadingForMs: 30_000, typicalLoadMs: 40_000 }, 300),
+    ).toMatchObject({ visual: "loading", detail: "30 s de ~40 s habituales" })
+    const act = (stage: string, stalled = false) => ({
+      inFlight: 1,
+      oldestSeconds: 70,
+      requests: [req({ stage: stage as ActiveRequestProgress["stage"], stalled })],
+    })
+    expect(cardState(base, act("processing"), undefined, 300)).toMatchObject({ visual: "processing" })
+    expect(cardState(base, act("generating", true), undefined, 300)).toMatchObject({ visual: "stuck", label: "Sin actividad" })
+    expect(cardState(base, act("generating"), undefined, 300)).toMatchObject({ visual: "generating" })
+    expect(cardState(base, undefined, undefined, 300)).toMatchObject({ visual: "idle" })
+  })
+
+  it("la card muestra la memoria medida por GPU con la reserva, en ámbar si la supera", async () => {
+    const { ModelLiveCard } = await import("@/components/dashboard/ModelLiveCard")
+    render(
+      <ModelLiveCard
+        model={base}
+        gpus={[gpu(1, 24576)]}
+        vramByGpu={{ "1": 22800 }}
+        nowMs={Date.now()}
+        stuckThreshold={300}
+        onUnload={() => undefined}
+        canCancel={() => false}
+      />,
+    )
+    const memory = screen.getByTestId("model-memory")
+    expect(memory.textContent).toContain("22.3 GB de 21.0 reservados")
+    expect(memory.textContent).toContain("22.3 / 24.0 GB")
+    expect(memory.querySelector(".text-amber-400")).toBeTruthy()
+  })
+
+  it("la barra de potencia de la CPU escala contra el TDP y lo dice", async () => {
+    const { CpuWidget } = await import("@/components/dashboard/DeviceWidget")
+    const stats = {
+      cpuModel: "AMD Ryzen Threadripper 3960X 24-Core Processor",
+      cpuPowerMaxW: 280,
+      cpuPowerMaxSource: "tdp" as const,
+      cpuPct: 20, cpuCount: 48, cpuCountPhysical: 24, loadAvg1m: 1, loadAvg5m: 1, loadAvg15m: 1,
+      memTotalMb: 1000, memUsedMb: 500, memFreeMb: 500, memPct: 50, swapTotalMb: 0, swapUsedMb: 0, swapPct: 0,
+    }
+    render(
+      <CpuWidget
+        stats={stats}
+        serverPower={{ cpuPowerW: 140, cpuTempC: 60, totalGpuPowerW: 0, totalPowerW: 140 }}
+        history={[]}
+        models={[]}
+        activity={{}}
+        ollamaRuntime={{}}
+      />,
+    )
+    expect(screen.getByText("140/280 W")).toBeTruthy()
+    expect(screen.getByText(/potencia sobre TDP 280 W/)).toBeTruthy()
+    expect(screen.getByText("Ryzen Threadripper 3960X · 24C/48T")).toBeTruthy()
+  })
+})
+
+
+describe("memoria repartida entre GPUs", () => {
+  it("no marca OOM por un reparto desigual si el total está dentro de la reserva", async () => {
+    const { ModelLiveCard } = await import("@/components/dashboard/ModelLiveCard")
+    const nemo = {
+      ...nemotron,
+      loadPolicy: "on_demand",
+      vramEstimateMb: 32000,
+      capabilities: {},
+    } as unknown as ModelState
+    render(
+      <ModelLiveCard
+        model={nemo}
+        gpus={[gpu(0, 12288), gpu(1, 24576)]}
+        vramByGpu={{ "0": 9566, "1": 21406 }}
+        nowMs={Date.now()}
+        stuckThreshold={300}
+        onUnload={() => undefined}
+        canCancel={() => false}
+      />,
+    )
+    const memory = screen.getByTestId("model-memory")
+    expect(memory.textContent).toContain("30.2 GB de 31.3 reservados")
+    expect(memory.textContent).not.toContain("riesgo de OOM")
+    expect(memory.querySelector(".text-amber-400")).toBeNull()
+  })
+})

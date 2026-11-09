@@ -1,9 +1,17 @@
 import { Activity, Gauge, MemoryStick, Zap, type LucideIcon } from "lucide-react"
 import { AreaSpark } from "@/components/gpu/AreaSpark"
 import { METRIC, pct, statusColor, tempColor } from "@/components/gpu/metrics"
-import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import { useGpuStore, type GpuHistoryPoint } from "@/stores/gpuStore"
-import type { GPUState, HostStats, ModelActivity, ModelState, OllamaRuntimeInfo, ServerPower } from "@/types"
+import type {
+  GPUState,
+  HostStats,
+  ModelActivity,
+  ModelPhaseInfo,
+  ModelState,
+  OllamaRuntimeInfo,
+  ServerPower,
+} from "@/types"
+import { StatePill, cardState } from "./ModelLiveCard"
 import { BackendIcon } from "./BackendIcon"
 import { fmtTps } from "./format"
 
@@ -86,11 +94,15 @@ function DeviceModels({
   ollamaRuntime = {},
   emptyLabel,
   vramOnDevice,
+  modelStates = {},
+  stuckThreshold = 300,
 }: {
   models: ModelState[]
   activity: Record<string, ModelActivity>
   ollamaRuntime?: Record<string, OllamaRuntimeInfo>
   emptyLabel: string
+  modelStates?: Record<string, ModelPhaseInfo>
+  stuckThreshold?: number
   /** MB del modelo en este dispositivo, si se conoce (si no, el total). */
   vramOnDevice?: (m: ModelState) => number | undefined
 }) {
@@ -109,7 +121,7 @@ function DeviceModels({
                 <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: MODEL_HUES[i % MODEL_HUES.length] }} />
                 <BackendIcon backendType={m.backendType} showLabel={false} />
                 <span className="truncate font-medium">{m.displayName || m.modelId}</span>
-                <ModelStatusBadge status={m.runtimePhase ?? m.status} />
+                <StatePill compact state={cardState(m, act, modelStates[m.modelId], stuckThreshold)} />
               </span>
               <span className="flex shrink-0 items-center gap-2 tabular-nums text-muted-foreground">
                 {running > 0 && <span className="text-emerald-400">{running} en curso</span>}
@@ -203,12 +215,16 @@ export function GpuWidget({
   models,
   activity,
   vramByGpu = {},
+  modelStates,
+  stuckThreshold,
 }: {
   gpu: GPUState
   models: ModelState[]
   activity: Record<string, ModelActivity>
   /** VRAM medida por NVML de cada modelo en cada GPU (backend). */
   vramByGpu?: Record<string, Record<string, number>>
+  modelStates?: Record<string, ModelPhaseInfo>
+  stuckThreshold?: number
 }) {
   const hist = useGpuStore((s) => s.history[gpu.index] ?? EMPTY_HISTORY).slice(-40)
   const vramPct = pct(gpu.usedVramMb, gpu.totalVramMb)
@@ -278,6 +294,8 @@ export function GpuWidget({
           activity={activity}
           emptyLabel="Sin modelos en esta GPU"
           vramOnDevice={(m) => vramByGpu[m.modelId]?.[String(gpu.index)]}
+          modelStates={modelStates}
+          stuckThreshold={stuckThreshold}
         />
       </div>
 
@@ -317,6 +335,8 @@ export function CpuWidget({
   models,
   activity,
   ollamaRuntime,
+  modelStates,
+  stuckThreshold,
 }: {
   stats: HostStats
   serverPower: ServerPower | null
@@ -324,19 +344,36 @@ export function CpuWidget({
   models: ModelState[]
   activity: Record<string, ModelActivity>
   ollamaRuntime: Record<string, OllamaRuntimeInfo>
+  modelStates?: Record<string, ModelPhaseInfo>
+  stuckThreshold?: number
 }) {
   const cpuPower = serverPower?.cpuPowerW ?? null
   const powerHistory = history.map((p) => p.powerW ?? 0)
-  const peak = Math.max(cpuPower ?? 0, ...powerHistory, 1)
+  // Escala real: el máximo de la CPU (ajuste, RAPL o TDP del modelo). Solo si
+  // no se conoce, el pico observado, y entonces se dice.
+  const powerMax = stats.cpuPowerMaxW ?? null
+  const peak = powerMax ?? Math.max(cpuPower ?? 0, ...powerHistory, 1)
+  const powerScaleLabel =
+    powerMax != null
+      ? stats.cpuPowerMaxSource === "tdp"
+        ? `TDP ${Math.round(powerMax)} W`
+        : stats.cpuPowerMaxSource === "rapl"
+          ? `límite ${Math.round(powerMax)} W`
+          : `máx. ${Math.round(powerMax)} W`
+      : "escala: pico observado"
   return (
     <article className="rounded-2xl border border-border bg-card p-4 shadow-sm" data-device="cpu">
-      <Header kicker="CPU" title={`Threadripper · ${stats.cpuCountPhysical}C/${stats.cpuCount}T`} tempC={serverPower?.cpuTempC ?? null} />
+      <Header
+        kicker="CPU"
+        title={`${(stats.cpuModel ?? "CPU").replace(/^AMD |^Intel\(R\) |\s*\d+-Core Processor$/g, "")} · ${stats.cpuCountPhysical}C/${stats.cpuCount}T`}
+        tempC={serverPower?.cpuTempC ?? null}
+      />
       <div className="space-y-1.5">
         <MetricRow
           icon={Zap}
           label="Potencia"
-          value={cpuPower != null ? `${Math.round(cpuPower)} W` : "—"}
-          barPct={cpuPower != null ? (cpuPower / peak) * 100 : 0}
+          value={cpuPower != null ? `${Math.round(cpuPower)}/${powerMax != null ? Math.round(powerMax) : "?"} W` : "—"}
+          barPct={cpuPower != null ? Math.min(100, (cpuPower / peak) * 100) : 0}
           color={METRIC.power}
           history={powerHistory}
         />
@@ -359,6 +396,9 @@ export function CpuWidget({
       </div>
       <p className="mt-1.5 text-[10.5px] tabular-nums text-muted-foreground">
         Load average (1/5/15 min): {stats.loadAvg1m} / {stats.loadAvg5m} / {stats.loadAvg15m}
+        <span className="ml-2" title="Contra qué se mide la barra de potencia">
+          · potencia sobre {powerScaleLabel}
+        </span>
       </p>
       <div className="mt-3 space-y-2 border-t border-border pt-3">
         <TotalsLine totals={deviceTotals(models, activity)} />
@@ -367,6 +407,8 @@ export function CpuWidget({
           activity={activity}
           ollamaRuntime={ollamaRuntime}
           emptyLabel="Ningún modelo corriendo en CPU"
+          modelStates={modelStates}
+          stuckThreshold={stuckThreshold}
         />
       </div>
     </article>

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.61.2"
+    app_version: str = "0.62.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -483,6 +483,10 @@ class Settings(BaseSettings):
             "slowly; empírico sobre gemma4:26b-ctx160k."
         ),
     )
+    # Potencia máxima de la CPU (W) para escalar la barra de consumo del
+    # dashboard. Si no se fija, se usa el límite de RAPL si el kernel lo
+    # publica (en AMD no suele) o el TDP del modelo si es conocido.
+    cpu_power_max_w: float | None = Field(default=None, gt=0)
     busy_timeout_seconds: int = Field(
         default=300,
         ge=30,

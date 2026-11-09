@@ -470,12 +470,12 @@ def test_prefill_without_backend_progress_uses_measured_model_rate():
 
 @pytest.mark.asyncio
 async def test_prefill_rates_fall_back_to_estimator_regression(monkeypatch):
-    la._prefill_rate_cache.clear()
+    la._model_rates_cache.clear()
 
     async def no_db(keys):
         raise RuntimeError("sin base de datos")
 
-    monkeypatch.setattr(la, "_measured_prefill_rates", no_db)
+    monkeypatch.setattr(la, "_measured_model_rates", no_db)
     estimator = SimpleNamespace(
         _calibrations={"m": SimpleNamespace(chat_regression=SimpleNamespace(a_in=0.5))}
     )
@@ -484,19 +484,57 @@ async def test_prefill_rates_fall_back_to_estimator_regression(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_prefill_rates_prefer_measured_median_and_cache_it(monkeypatch):
-    la._prefill_rate_cache.clear()
+async def test_model_rates_prefer_measured_values_and_cache_them(monkeypatch):
+    la._model_rates_cache.clear()
     calls = []
 
     async def measured(keys):
         calls.append(sorted(keys))
-        return {"m": 1234.56}
+        return {"m": {"prefill": 1234.56, "generation": 41.26, "output": 380.0}}
 
-    monkeypatch.setattr(la, "_measured_prefill_rates", measured)
+    monkeypatch.setattr(la, "_measured_model_rates", measured)
     estimator = SimpleNamespace(_calibrations={})
-    assert await la.prefill_rates({"m"}, estimator) == {"m": (1234.6, "historical")}
-    assert await la.prefill_rates({"m"}, estimator) == {"m": (1234.6, "historical")}
+    expected = {"m": {"prefill": (1234.6, "historical"), "generation": 41.3, "output": 380}}
+    assert await la.model_rates({"m"}, estimator) == expected
+    assert await la.model_rates({"m"}, estimator) == expected
     assert calls == [["m"]]
+
+
+def test_physical_duration_uses_model_rates_and_caps_output_by_typical():
+    """57k tokens a 1000 t/s de prefill = 57 s; 128 de salida pedidos (por
+    debajo del p75 de 380) a 40 t/s = 3,2 s. El estimador decía 15 s."""
+    detail = {"prompt": {"totalTokens": 57_000}, "maxOutputTokens": 128}
+    rates = {"prefill": (1000.0, "historical"), "generation": 40.0, "output": 380}
+    assert la.physical_duration_ms(detail, rates) == 60_200
+    # Sin tope: la salida típica del modelo.
+    assert la.physical_duration_ms({"prompt": {"totalTokens": 1000}}, rates) == 10_500
+    assert la.physical_duration_ms(detail, None) is None
+    assert la.physical_duration_ms(detail, {"generation": 40.0}) is None
+
+
+@pytest.mark.asyncio
+async def test_estimate_prefers_physical_duration(monkeypatch):
+    la._estimate_cache.clear()
+
+    class Est:
+        async def estimate(self, model_id, *, backend_type, input_tokens, max_tokens):
+            return SimpleNamespace(expected_s=15.0)
+
+    d = {
+        "requestId": "r",
+        "rateKey": "ravenx",
+        "stage": "processing",
+        "elapsedMs": 30_000,
+        "admittedAfterMs": 0,
+        "maxOutputTokens": 128,
+        "prompt": {"totalTokens": 57_000, "source": "estimate"},
+    }
+    rates = {"ravenx": {"prefill": (1000.0, "historical"), "generation": 40.0, "output": 380}}
+    await la.attach_estimates(
+        [d], estimator=Est(), model_id="m", backend_type="x", slots=4, rates=rates
+    )
+    assert d["expectedDurationMs"] == 60_200
+    assert d["estimatedRemainingMs"] == 30_200
 
 
 # ── Hallazgos de la verificación en producción (2026-11-09) ─────────────────
@@ -577,3 +615,158 @@ async def test_remaining_does_not_count_down_while_the_model_loads():
         }
         await la.attach_estimates([d], estimator=Est(), model_id="m", backend_type="x", slots=4)
         assert d["estimatedRemainingMs"] == 15_000
+
+
+# ── 2026-11-10: peticiones sin streaming, parones y estado de carga ─────────
+
+
+def _slot(id_task, total, processed, cached=0, decoded=0, processing=True):
+    return {
+        "id_task": id_task,
+        "is_processing": processing,
+        "n_prompt_tokens": total,
+        "n_prompt_tokens_processed": processed,
+        "n_prompt_tokens_cache": cached,
+        "next_token": [{"n_decoded": decoded}],
+    }
+
+
+def _untracked(rid, started, stage="processing", streaming=False):
+    return {
+        "requestId": rid,
+        "stage": stage,
+        "streaming": streaming,
+        "startedAt": started,
+        "admittedAfterMs": 0,
+        "progressTracked": False,
+        "prompt": {
+            "totalTokens": 50_000,
+            "cachedTokens": None,
+            "processedTokens": None,
+            "source": "estimate",
+        },
+        "lastActivitySecondsAgo": 60.0,
+    }
+
+
+def test_slots_give_real_progress_to_non_streaming_requests():
+    """Dos sin streaming y una en streaming con progreso propio. La de
+    streaming se reconoce por su total y se descarta; las otras se asignan por
+    orden de llegada. La tercera admitida sin slot espera al backend."""
+    la._slot_track.clear()
+    tracked = {
+        "requestId": "s",
+        "stage": "prefill",
+        "progressTracked": True,
+        "admittedAfterMs": 0,
+        "prompt": {"totalTokens": 70_000, "processedTokens": 1000, "source": "live"},
+    }
+    first = _untracked("a", 100.0)
+    second = _untracked("b", 101.0)
+    third = _untracked("c", 102.0)
+    slots = [
+        _slot(7, 70_000, 1000),  # la de streaming
+        _slot(3, 49_558, 20_000, cached=4096),
+        _slot(5, 30_000, 30_000, decoded=12),
+        _slot(9, 0, 0, processing=False),
+    ]
+    details = [tracked, first, second, third]
+    la.apply_slot_progress(details, slots, now=1000.0)
+    assert first["stage"] == "prefill"
+    assert first["prompt"] == {
+        "totalTokens": 49_558,
+        "cachedTokens": 4096,
+        "processedTokens": 24_096,
+        "source": "live",
+    }
+    assert first["prefillPct"] == pytest.approx(48.6, abs=0.1)
+    assert second["stage"] == "generating" and second["outputTokens"] == 12
+    assert third["stage"] == "backend_wait"
+    # Segunda consulta (el endpoint reconstruye los detalles cada vez): ritmo
+    # medido entre las dos muestras del mismo slot.
+    slots[1] = _slot(3, 49_558, 30_000, cached=4096)
+    again = [dict(tracked), _untracked("a", 100.0), _untracked("b", 101.0), _untracked("c", 102.0)]
+    la.apply_slot_progress(again, slots, now=1005.0)
+    assert again[1]["prefillTokensPerSecond"] == 2000.0
+    assert again[1]["lastActivitySecondsAgo"] == 0.0
+    # Sin cambios en otra consulta: la actividad envejece.
+    third_poll = [
+        dict(tracked),
+        _untracked("a", 100.0),
+        _untracked("b", 101.0),
+        _untracked("c", 102.0),
+    ]
+    la.apply_slot_progress(third_poll, slots, now=1020.0)
+    assert third_poll[1]["lastActivitySecondsAgo"] == 15.0
+
+
+def test_stall_flag_only_when_there_is_a_signal_to_watch():
+    base = {"lastActivitySecondsAgo": 40.0}
+    no_stream = {
+        **base,
+        "stage": "processing",
+        "streaming": False,
+        "prompt": {"source": "estimate"},
+    }
+    ollama_prefill = {
+        **base,
+        "stage": "prefill",
+        "streaming": True,
+        "prompt": {"source": "estimate"},
+    }
+    live_prefill = {**base, "stage": "prefill", "streaming": True, "prompt": {"source": "live"}}
+    gen_stream = {**base, "stage": "generating", "streaming": True, "prompt": {"source": "live"}}
+    fresh = {"lastActivitySecondsAgo": 2.0, "stage": "generating", "streaming": True, "prompt": {}}
+    la.mark_stalls([no_stream, ollama_prefill, live_prefill, gen_stream, fresh])
+    assert [d["stalled"] for d in (no_stream, ollama_prefill, live_prefill, gen_stream, fresh)] == [
+        False,
+        False,
+        True,
+        True,
+        False,
+    ]
+
+
+def test_model_phase_reports_eviction_service_wait_and_load_timing():
+    class MM:
+        def __init__(self, phases, blockers=None, started=None):
+            self.phases, self.blockers, self.started = phases, blockers or {}, started or {}
+
+        def get_load_phase(self, key):
+            return self.phases.get(key, ("ready", None))
+
+        def service_gpu_blocker(self, key):
+            return self.blockers.get(key)
+
+        def load_started_at(self, key):
+            return self.started.get(key)
+
+    state = SimpleNamespace(model_id="m", status=SimpleNamespace(value="loading"))
+    evicting = la.model_phase(
+        MM({"m::h": ("waiting_for_gpu", "gemma4:26b")}),
+        state,
+        ["m::h"],
+        now=100.0,
+        typical_ms={"m": 40_000},
+    )
+    assert evicting["phase"] == "waiting_for_gpu" and evicting["waitingOn"] == "gemma4:26b"
+    service = la.model_phase(MM({}, blockers={"m": "comfyui"}), state, [], now=100.0, typical_ms={})
+    assert service == {
+        "phase": "waiting_for_service_gpu",
+        "waitingOn": "comfyui",
+        "loadingForMs": None,
+        "typicalLoadMs": None,
+    }
+    loading = la.model_phase(
+        MM({"m::h": ("loading", None)}, started={"m::h": 70.0}),
+        state,
+        ["m::h"],
+        now=100.0,
+        typical_ms={"m": 40_000},
+    )
+    assert loading == {
+        "phase": "loading",
+        "waitingOn": None,
+        "loadingForMs": 30_000,
+        "typicalLoadMs": 40_000,
+    }

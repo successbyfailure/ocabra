@@ -46,14 +46,51 @@ export function loadedMeta(loadedAt: string | null | undefined, nowMs: number): 
   return { at, ago: fmtAgo(seconds) }
 }
 
-export const STAGE_META: Record<RequestStage, { label: string; color: string; text: string }> = {
-  queued: { label: "en cola", color: "#d97706", text: "text-amber-300" },
-  backend_wait: { label: "esperando al backend", color: "#d97706", text: "text-amber-200" },
-  loading: { label: "cargando modelo", color: "#8b5cf6", text: "text-violet-300" },
-  waiting_for_gpu: { label: "esperando GPU", color: "#8b5cf6", text: "text-violet-300" },
-  prefill: { label: "prefill", color: "#0ea5e9", text: "text-sky-300" },
-  generating: { label: "generando", color: "#16a34a", text: "text-emerald-300" },
-  processing: { label: "procesando", color: "#64748b", text: "text-slate-300" },
+/**
+ * Lenguaje visual de estados, compartido por la píldora del modelo, el borde
+ * de la card, el punto de cada petición y sus barras. Cada estado tiene un
+ * color propio y una animación que dice si algo avanza (pulso rápido), espera
+ * (parpadeo lento) o está parado (sin animación):
+ *
+ * - verde, pulso: generando · azul cielo, pulso: prefill
+ * - violeta, pulso: cargando el modelo
+ * - naranja, parpadeo: esperando espacio en GPU (desalojo o servicio)
+ * - ámbar, parpadeo: en cola o esperando a que el backend empiece
+ * - pizarra, pulso lento: procesando sin señal (sin streaming)
+ * - rojo, fijo: atascada o sin actividad · gris, fijo: inactivo
+ */
+export type VisualState =
+  | "generating"
+  | "prefill"
+  | "loading"
+  | "waiting_space"
+  | "waiting"
+  | "processing"
+  | "stuck"
+  | "idle"
+
+export const VISUAL: Record<
+  VisualState,
+  { color: string; text: string; bg: string; border: string; anim: string }
+> = {
+  generating: { color: "#22c55e", text: "text-emerald-300", bg: "bg-emerald-500/15", border: "border-emerald-500/50", anim: "animate-pulse" },
+  prefill: { color: "#0ea5e9", text: "text-sky-300", bg: "bg-sky-500/15", border: "border-sky-500/50", anim: "animate-pulse" },
+  loading: { color: "#a78bfa", text: "text-violet-300", bg: "bg-violet-500/15", border: "border-violet-500/50", anim: "animate-pulse" },
+  waiting_space: { color: "#f97316", text: "text-orange-300", bg: "bg-orange-500/15", border: "border-orange-500/60", anim: "animate-blink-slow" },
+  waiting: { color: "#f59e0b", text: "text-amber-300", bg: "bg-amber-500/15", border: "border-amber-500/50", anim: "animate-blink-slow" },
+  processing: { color: "#94a3b8", text: "text-slate-300", bg: "bg-slate-500/15", border: "border-slate-500/40", anim: "animate-pulse-slow" },
+  stuck: { color: "#ef4444", text: "text-red-300", bg: "bg-red-500/15", border: "border-red-500/60", anim: "" },
+  idle: { color: "#64748b", text: "text-slate-400", bg: "bg-muted", border: "border-border", anim: "" },
+}
+
+export const STAGE_META: Record<RequestStage, { label: string; color: string; text: string; visual: VisualState }> = {
+  queued: { label: "en cola", color: VISUAL.waiting.color, text: VISUAL.waiting.text, visual: "waiting" },
+  backend_wait: { label: "esperando al backend", color: VISUAL.waiting.color, text: VISUAL.waiting.text, visual: "waiting" },
+  loading: { label: "cargando modelo", color: VISUAL.loading.color, text: VISUAL.loading.text, visual: "loading" },
+  waiting_for_gpu: { label: "esperando espacio en GPU", color: VISUAL.waiting_space.color, text: VISUAL.waiting_space.text, visual: "waiting_space" },
+  prefill: { label: "prefill", color: VISUAL.prefill.color, text: VISUAL.prefill.text, visual: "prefill" },
+  generating: { label: "generando", color: VISUAL.generating.color, text: VISUAL.generating.text, visual: "generating" },
+  processing: { label: "procesando", color: VISUAL.processing.color, text: VISUAL.processing.text, visual: "processing" },
 }
 
 /** Sin actividad del worker durante este tiempo = probablemente colgada,
