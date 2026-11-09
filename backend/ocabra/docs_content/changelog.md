@@ -16,7 +16,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
-## 0.55.0 — 2026-11-09
+## 0.55.1 — 2026-11-09
 
 ### Arreglos
 
@@ -32,6 +32,13 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
   Lo que configures tú sigue mandando: estos valores solo rellenan lo que no
   venga puesto.
+
+- **Instalar un modelo ternario desde Ollama ya no acaba en nada.** Los
+  modelos de 1 bit (Bonsai, BitNet, `i2_s`, `q1_0`) solo los sirve el backend
+  ternario, pero el alta elegía llama.cpp para cualquier tag de Ollama y el
+  registro se rechazaba por incompatible: la descarga terminaba al 100 % y el
+  modelo no aparecía en ninguna parte. Ahora el alta pregunta a la misma tabla
+  de compatibilidad que valida el registro.
 
 ### Retirado
 

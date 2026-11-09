@@ -416,3 +416,96 @@ async def test_a_un_backend_que_no_es_llama_cpp_no_se_le_tocan_los_defaults() ->
     await manager._auto_register_model(job)
 
     assert model_manager.add_model.await_args.kwargs["extra_config"] is None
+
+
+@pytest.mark.asyncio
+async def test_un_tag_ternario_se_registra_en_bitnet_no_en_llama_cpp() -> None:
+    """Un pull de Ollama ternario solo lo sirve bitnet.
+
+    ``add_model`` valida el artifact contra la tabla de compatibilidad y
+    rechaza la pareja: elegir llamacpp_mks a ciegas acababa con los pesos
+    descargados y ningun modelo registrado — "Backend 'llamacpp_mks' cannot
+    serve this artifact (ollama_tag); compatible: bitnet". Reproducido el
+    2026-11-09 bajando ``bonsai-2:27b``.
+    """
+    manager = DownloadManager()
+    manager._installed_backends = lambda: {"llamacpp_mks", "bitnet", "ollama"}
+    job = DownloadJob(
+        job_id="t",
+        source="ollama",
+        model_ref="bonsai-2:27b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T12:03:00Z",
+        completed_at="2026-11-09T12:04:00Z",
+    )
+    assert await manager._resolve_job_backend(job) == "bitnet"
+
+
+@pytest.mark.asyncio
+async def test_un_tag_normal_sigue_yendo_a_llama_cpp() -> None:
+    manager = DownloadManager()
+    manager._installed_backends = lambda: {"llamacpp_mks", "bitnet", "ollama"}
+    job = DownloadJob(
+        job_id="t2",
+        source="ollama",
+        model_ref="ornith-1.5:35b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T00:04:00Z",
+        completed_at="2026-11-09T00:05:00Z",
+    )
+    assert await manager._resolve_job_backend(job) == "llamacpp_mks"
+
+
+@pytest.mark.asyncio
+async def test_sin_llama_cpp_instalado_un_tag_normal_cae_en_ollama() -> None:
+    manager = DownloadManager()
+    manager._installed_backends = lambda: {"ollama"}
+    job = DownloadJob(
+        job_id="t3",
+        source="ollama",
+        model_ref="gemma4:26b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T00:04:00Z",
+        completed_at="2026-11-09T00:05:00Z",
+    )
+    assert await manager._resolve_job_backend(job) == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_un_backend_pedido_a_mano_sigue_mandando() -> None:
+    """La eleccion explicita de la UI gana sobre la inferencia."""
+    manager = DownloadManager()
+    manager._installed_backends = lambda: {"llamacpp_mks", "bitnet", "ollama"}
+    job = DownloadJob(
+        job_id="t4",
+        source="ollama",
+        model_ref="bonsai-2:27b",
+        artifact=None,
+        register_config={"backend_type": "ollama"},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T12:03:00Z",
+        completed_at="2026-11-09T12:04:00Z",
+    )
+    assert await manager._resolve_job_backend(job) == "ollama"

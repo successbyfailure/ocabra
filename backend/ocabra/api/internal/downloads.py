@@ -17,6 +17,7 @@ from starlette.responses import StreamingResponse
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.background_tasks import spawn
+from ocabra.core.compatibility import backends_for_artifact
 from ocabra.core.model_ref import (
     KNOWN_BACKEND_TYPES,
     LLAMA_CPP_CONFIG_SECTION,
@@ -495,10 +496,32 @@ class DownloadManager:
             return requested_backend
         if job.source == "ollama":
             # Ollama is the distribution channel; serving goes to the
-            # production llama.cpp when it is installed (user, 2026-11-07).
+            # production llama.cpp when it is installed (user, 2026-11-07) —
+            # but only for tags it can actually serve. A ternary/1-bit GGUF
+            # (bonsai, BitNet, i2_s, q1_0, ...) runs on the bitnet backend
+            # and nowhere else, and ``add_model`` refuses the mismatch, so
+            # choosing llamacpp_mks blindly ended with the weights downloaded
+            # and no model registered: "Backend 'llamacpp_mks' cannot serve
+            # this artifact (ollama_tag); compatible: bitnet". Reproduced
+            # 2026-11-09 pulling ``bonsai-2:27b``.
+            #
+            # Asking the same compatibility table ``add_model`` validates
+            # against is what keeps the two from disagreeing.
             installed = self._installed_backends()
-            if installed is None or "llamacpp_mks" in installed:
+            compatibles = backends_for_artifact(
+                {"kind": "ollama_tag", "source": "ollama", "ref": job.model_ref}, installed
+            )
+            instalados = [c["backend"] for c in compatibles if c["installed"]]
+            if "llamacpp_mks" in instalados:
                 return "llamacpp_mks"
+            if instalados:
+                return instalados[0]
+            if compatibles:
+                # Nothing compatible is installed: register on the backend
+                # that could serve it anyway. "Backend not installed" at load
+                # time is a state an operator can act on; a download that
+                # vanishes is not.
+                return compatibles[0]["backend"]
             return "ollama"
         if job.source == "bitnet":
             return "bitnet"
