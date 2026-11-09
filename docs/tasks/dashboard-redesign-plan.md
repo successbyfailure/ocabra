@@ -1,7 +1,7 @@
 # Plan: rediseño del dashboard
 
 **Fecha de apertura:** 2026-11-09
-**Estado:** fases 1 y 2 implementadas y probadas (v0.61.0, sin commit ni despliegue) · fase 3 (verificación en vivo) pendiente de desplegar
+**Estado:** v0.61.1 desplegada y verificada en producción (2026-11-09) · v0.61.2 con commit, pendiente de desplegar
 **Objetivo:** que el dashboard enseñe lo que está pasando *ahora* (peticiones en
 curso, cola, contexto, GPUs) en vez de sobre todo lo que ya pasó. El histórico
 se queda en `/stats`.
@@ -304,9 +304,46 @@ Ollama y cola con dos usuarios.
 - **Chip de contexto distinto de la barra** → la card usa el contexto cargado
   (`activeMaxTokens`) antes que el configurado en el modelo base.
 
+### Fase 3 — verificación en producción · hecha (v0.61.1)
+
+Script: `~/ocabra-dashcheck/live_check.py`. Lanza peticiones reales en
+streaming a qwen3.8:27b y consulta la actividad cada segundo.
+
+- El cliente recibió 0 chunks `prompt_progress` (de 49 por petición) y todas
+  las respuestas fueron correctas.
+- Prefill real: 0 → 49.558 tokens a unos 1.100 t/s. El restante bajó de forma
+  coherente (44 s → 0) y la petición pasó a `generating` con el primer token.
+- `vramByGpu` real: qwen3.8:27b ocupaba 22.802 MB en la GPU 1. Antes de la
+  prueba, gemma4:26b 22.378 MB y whisper 2.184 MB en la GPU 0.
+- La 0.61.0 tenía dos fallos que solo salieron con tráfico real; los dos están
+  arreglados en la 0.61.1:
+  - **Petición en prefill sin haber empezado.** llama.cpp procesa los prompts
+    de uno en uno, así que las peticiones admitidas que esperaban turno
+    dentro del llama-server salían como "prefill 99 %" durante 100–200 s.
+    Ahora tienen su propio stage, `backend_wait`: se detecta porque, al
+    pedir progreso, llama.cpp manda un 0 % en cuanto empieza cada prompt.
+  - **Restante a 0 en mitad de un prefill largo.** Se re-estima con el total
+    real de tokens del prompt y nunca baja del prefill que falta.
+- En la 0.61.2 (con commit, sin desplegar), el restante tampoco cuenta hacia
+  atrás durante `loading` y `waiting_for_gpu`.
+- El WebSocket se probó con tests (suscripción, desuscripción, caché
+  compartida). En producción, las conexiones del navegador se aceptan. No se
+  pudo probar desde fuera sin una sesión real: un token generado en otro
+  proceso no vale, porque el secreto JWT vive en la BD.
+
+### Hallazgo fuera del alcance del dashboard
+
+**La admisión infravalora los prompts largos poco "naturales".** La reserva
+de KV salió de 29.416 tokens para un prompt real de 49.558, y de 47.685 para
+uno de 70.218. Sale del recuento aproximado de tokens, y es la "tokenización
+exacta pendiente" del plan de KV elástica. No se ha tocado porque cambia la
+admisión.
+
 ### Lo que sigue pendiente
 
-- **Fase 3 (verificación en vivo)**: requiere desplegar.
-- **Límite que no se puede cerrar desde oCabra**: Ollama y vLLM no publican el
-  avance del prefill de cada petición. Lo que se muestra para ellos es una
-  estimación con un ritmo medido, nunca un dato del backend.
+- **Desplegar la v0.61.2** cuando termine el A/B de llama.cpp de otra sesión
+  (pidió no reiniciar el api durante unos 90 min desde las 23:30 CET del
+  2026-11-09).
+- **Límite que no se puede cerrar desde oCabra:** Ollama y vLLM no publican el
+  avance del prefill por petición. Para ellos se muestra una estimación con un
+  ritmo medido.
