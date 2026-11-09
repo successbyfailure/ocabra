@@ -311,11 +311,9 @@ async def chat(
         "message": message,
         "done": True,
         "done_reason": _extract_finish_reason(result),
-        "total_duration": total_duration,
-        "load_duration": 0,
         "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
         "eval_count": int(usage.get("completion_tokens") or 0),
-        "eval_duration": total_duration,
+        **_ollama_durations(result, total_duration),
     }
 
 
@@ -415,6 +413,10 @@ async def _stream_chat(
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
     eval_count = 0
+    # El motor manda sus ``timings`` en el ultimo trozo del stream; hay que
+    # guardarlo para poder declarar prefill y generacion por separado en el
+    # chunk final (ver ``_ollama_durations``).
+    ultimo_payload: dict | None = None
     finish_reason: str | None = None
     # OpenAI streams tool_calls incrementally (one delta per `index`, name
     # arriving once then `arguments` trickling in character by character) —
@@ -452,17 +454,18 @@ async def _stream_chat(
                 "message": done_message,
                 "done": True,
                 "done_reason": finish_reason,
-                "total_duration": total_duration,
-                "load_duration": 0,
                 "prompt_eval_count": prompt_eval_count,
                 "eval_count": eval_count,
-                "eval_duration": total_duration,
+                **_ollama_durations(ultimo_payload, total_duration),
             }
             yield (json.dumps(done_payload) + "\n").encode("utf-8")
             return
 
         if not isinstance(payload, dict):
             continue
+
+        if isinstance(payload.get("timings"), dict):
+            ultimo_payload = payload
 
         usage = payload.get("usage") or {}
         if usage:
@@ -740,3 +743,40 @@ async def _dispatch_agent_ollama(
         require_approval_override=require_approval_override,
     )
     return _openai_response_to_ollama(result.openai_response, ollama_model)
+
+
+def _ollama_durations(payload: dict | None, total_duration: int) -> dict[str, int]:
+    """Campos de tiempo de Ollama a partir de las ``timings`` del motor.
+
+    Ollama publica ``prompt_eval_duration`` y ``eval_duration`` en nanosegundos
+    y sus clientes calculan tokens/s dividiendo por ellos. Aqui se ponia
+    ``eval_duration = total_duration`` —el reloj de pared completo, con cola,
+    carga y prefill dentro— y ``prompt_eval_duration`` ni se mandaba: el
+    cliente veia una generacion mas lenta de la real y el prefill, invisible.
+
+    De paso, es lo que deja a este endpoint sin estadisticas: el recolector
+    saca tokens/s del cuerpo de la respuesta, y por esta via no llegaba
+    ninguna cifra util (1.339 peticiones sin un solo dato de rendimiento en
+    los 7 dias previos al 2026-11-09).
+    """
+
+    salida = {"total_duration": total_duration, "load_duration": 0}
+    timings = payload.get("timings") if isinstance(payload, dict) else None
+    if not isinstance(timings, dict):
+        # Sin timings del motor, lo honesto es no inventarse el reparto: se
+        # deja la duracion total y el prefill sin declarar.
+        salida["eval_duration"] = total_duration
+        return salida
+    for destino, origen in (
+        ("prompt_eval_duration", "prompt_ms"),
+        ("eval_duration", "predicted_ms"),
+    ):
+        valor = timings.get(origen)
+        if valor is None:
+            continue
+        try:
+            salida[destino] = int(float(valor) * 1_000_000)
+        except (TypeError, ValueError):
+            continue
+    salida.setdefault("eval_duration", total_duration)
+    return salida

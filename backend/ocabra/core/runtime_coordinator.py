@@ -152,6 +152,19 @@ def output_reservation(body: dict[str, Any], default_reservation: int) -> int:
         return default_reservation
 
 
+def _cuerpo_para_plantilla(body: dict[str, Any]) -> dict[str, Any]:
+    """Lo minimo que ``/apply-template`` necesita para renderizar el prompt."""
+
+    salida: dict[str, Any] = {}
+    if isinstance(body.get("messages"), list):
+        salida["messages"] = body["messages"]
+    if body.get("tools"):
+        salida["tools"] = body["tools"]
+    if body.get("tool_choice") is not None:
+        salida["tool_choice"] = body["tool_choice"]
+    return salida
+
+
 def _prompt_text(body: dict[str, Any]) -> str:
     """Texto plano del prompt, para pedir su conteo exacto al tokenizador."""
     piezas: list[str] = []
@@ -232,19 +245,44 @@ async def exact_prompt_tokens(model_manager: Any, profile: Any, body: dict[str, 
             import httpx
 
             async with httpx.AsyncClient(timeout=settings.tokenize_timeout_s) as cliente:
+                # Primero se le pide al propio worker que aplique su plantilla
+                # de chat. Lo que devuelve es EXACTAMENTE el prompt que vera el
+                # modelo —marcas de rol, formato de las llamadas a herramientas,
+                # esquemas de ``tools`` renderizados—, asi que contarlo da el
+                # numero de verdad y no una aproximacion. Medido el 2026-11-09
+                # contra flint:40b con un turno de agente de codigo: la
+                # plantilla aplicada da 7.833 tokens y el motor cuenta 7.833;
+                # concatenar el texto a mano daba 8.490, un 8,4% de mas.
+                renderizado = None
+                try:
+                    plantilla = await cliente.post(
+                        f"http://127.0.0.1:{int(puerto)}/apply-template",
+                        json=_cuerpo_para_plantilla(body),
+                    )
+                    if plantilla.status_code == 200:
+                        valor = plantilla.json().get("prompt")
+                        if isinstance(valor, str) and valor:
+                            renderizado = valor
+                except Exception:  # noqa: BLE001 — build sin /apply-template
+                    renderizado = None
+
                 respuesta = await cliente.post(
                     f"http://127.0.0.1:{int(puerto)}/tokenize",
-                    json={"content": _prompt_text(body)},
+                    json={
+                        "content": renderizado if renderizado is not None else _prompt_text(body)
+                    },
                 )
             respuesta.raise_for_status()
             tokens = respuesta.json().get("tokens")
             if not isinstance(tokens, list):
                 return None
         except Exception as exc:  # noqa: BLE001
-            logger.debug("exact_tokenize_failed", model_id=model_id, error=str(exc))
+            logger.info("exact_tokenize_failed", model_id=model_id, error=str(exc))
             return None
-        # El prompt no viaja pelado: la plantilla añade marcas de rol por
-        # mensaje. Se suma el mismo margen estructural que usa el heuristico.
+        if renderizado is not None:
+            return len(tokens)
+        # Sin plantilla aplicada, el prompt va pelado: se suma el mismo margen
+        # estructural que usa el heuristico para las marcas de rol.
         estructural = 16 * len(body["messages"]) if isinstance(body.get("messages"), list) else 8
         return len(tokens) + estructural
     return None

@@ -181,7 +181,14 @@ async def test_usa_el_tokenizador_de_un_derivado_del_mismo_modelo(monkeypatch):
     total = await exact_prompt_tokens(_MM(estados), _Perfil(), cuerpo)
     # 1234 del tokenizador + 16 de margen estructural por mensaje.
     assert total == 1234 + 16
-    assert llamadas == ["http://127.0.0.1:18007/tokenize"]
+    # Dos pasos: primero se le pide al worker que aplique su plantilla de chat
+    # y luego se cuenta lo que devuelve. Aqui el doble no implementa
+    # /apply-template (no devuelve "prompt"), asi que se cae al texto
+    # concatenado y se suma el margen estructural.
+    assert llamadas == [
+        "http://127.0.0.1:18007/apply-template",
+        "http://127.0.0.1:18007/tokenize",
+    ]
 
 
 @pytest.mark.asyncio
@@ -455,3 +462,59 @@ def test_la_reserva_nunca_es_negativa():
     from ocabra.core import runtime_coordinator as rc
 
     assert rc._reserva_kv(-5, True, 262_144, parallelism=4) == 0
+
+
+@pytest.mark.asyncio
+async def test_con_la_plantilla_aplicada_el_conteo_es_exacto(monkeypatch):
+    """Contar el prompt renderizado da el numero de verdad, no una aproximacion.
+
+    ``/apply-template`` devuelve exactamente lo que vera el modelo —marcas de
+    rol, formato de las llamadas a herramientas, esquemas de ``tools``—, asi
+    que no hay que sumarle ningun margen estructural. Medido el 2026-11-09
+    contra flint:40b: la plantilla aplicada da 7.833 tokens y el motor cuenta
+    7.833; concatenar el texto a mano daba 8.490.
+    """
+    from ocabra.core.runtime_coordinator import exact_prompt_tokens
+
+    cuerpos = []
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, datos):
+            self._datos = datos
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._datos
+
+    class _Cliente:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            cuerpos.append((url, json))
+            if url.endswith("/apply-template"):
+                return _Resp({"prompt": "<|user|>hola<|assistant|>"})
+            return _Resp({"tokens": list(range(900))})
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Cliente)
+    cuerpo = {"messages": [{"role": "user", "content": "hola"}], "tools": [{"a": 1}]}
+    total = await exact_prompt_tokens(_MM([_Estado("m")]), _Perfil(base_model_id="m"), cuerpo)
+
+    # 900 pelados, sin margen: la plantilla ya trae el andamiaje dentro.
+    assert total == 900
+    # Y a la plantilla se le pasan los mensajes y las tools, que es donde
+    # viven los esquemas grandes.
+    assert cuerpos[0][1] == {"messages": cuerpo["messages"], "tools": cuerpo["tools"]}
+    assert cuerpos[1][1] == {"content": "<|user|>hola<|assistant|>"}

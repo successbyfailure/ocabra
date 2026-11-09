@@ -525,6 +525,19 @@ class LlamaCppBackend(BackendInterface):
             arch = await asyncio.to_thread(vp.arch_from_gguf, model_file)
             if arch is not None and arch.context_length > 0:
                 native_context_length = arch.context_length
+        contexto = int(options.get("ctx_size", settings.llama_cpp_ctx_size))
+        slots = max(1, int(options.get("parallel_slots") or settings.llama_cpp_parallel_slots or 1))
+        # Con ``--kv-unified`` la ventana es un pool y una sola peticion puede
+        # usarla entera; sin el, llama.cpp la reparte y cada slot recibe su
+        # parte. ``--kv-unified-per-slot`` pone un tope por peticion dentro del
+        # pool. Publicarlo evita que cada cliente lo adivine, que es como se
+        # acaba ensenando un contexto que no es el que se sirve.
+        compartida = bool(options.get("kv_unified"))
+        if compartida:
+            tope_por_slot = options.get("kv_unified_per_slot")
+            por_peticion = min(contexto, int(tope_por_slot)) if tope_por_slot else contexto
+        else:
+            por_peticion = contexto // slots
         return BackendCapabilities(
             chat=not embeddings,
             completion=True,
@@ -533,8 +546,11 @@ class LlamaCppBackend(BackendInterface):
             embeddings=embeddings,
             reasoning=reasoning,
             streaming=True,
-            context_length=int(options.get("ctx_size", settings.llama_cpp_ctx_size)),
+            context_length=contexto,
             native_context_length=native_context_length,
+            parallel_slots=slots,
+            kv_cache_shared=compartida,
+            context_per_request=max(0, por_peticion),
         )
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:

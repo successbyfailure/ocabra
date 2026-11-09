@@ -16,6 +16,43 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.59.0 — 2026-11-09
+
+### Arreglos
+
+- **`/api/chat` y `/api/generate` devolvían tiempos falsos.** `eval_duration`
+  traía el reloj de pared completo —cola, carga del modelo y lectura del
+  prompt incluidas— en vez del tiempo de generación, y `prompt_eval_duration`
+  no se enviaba. Si calculabas tokens/s dividiendo por esos campos, te salía
+  bastante menos de lo que el servidor hace en realidad. Ahora los dos llevan
+  lo que mide el motor, y `total_duration` sigue siendo el reloj de pared.
+
+- **El tamaño de una petición se calcula ahora exactamente.** Para decidir
+  ventana y reservar caché, el servidor estimaba el tamaño del prompt juntando
+  su texto. Ahora le pide al propio modelo que aplique su plantilla de chat y
+  cuenta eso, que es literalmente lo que va a leer: medido contra un turno con
+  herramientas, el cálculo da 7.833 tokens y el motor cuenta 7.833 (antes,
+  8.490).
+
+### Nuevo
+
+- **`GET /ocabra/models` dice ahora cuántas peticiones atiende un modelo a la
+  vez y cómo reparte su contexto.** Tres campos nuevos en `capabilities`:
+  `parallel_slots`, `kv_cache_shared` y `context_per_request`. El último es el
+  que querías: cuánto contexto puede gastar **una** petición. No es siempre el
+  mismo que `context_length` — con caché compartida una sola petición puede
+  usar la ventana entera, y sin ella cada plaza recibe su parte. Antes había
+  que deducirlo de la configuración del backend, y quien lo dedujo pensando en
+  llama.cpp de serie mostraba un contexto que no es el que se sirve.
+
+- **Estadísticas de rendimiento también para los endpoints de Ollama.** Las
+  velocidades de lectura de prompt y de generación ya se guardan para
+  `/api/chat` y `/api/generate`; antes solo se registraban por la vía de
+  OpenAI, y un 29 % del tráfico quedaba sin ningún dato con el que comparar
+  modelos.
+
+---
+
 ## 0.58.0 — 2026-11-09
 
 ### Arreglos

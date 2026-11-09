@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.58.0"
+    app_version: str = "0.59.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -262,9 +262,16 @@ class Settings(BaseSettings):
     # window, suggesting borderline timing rather than a genuinely stuck load.
     llama_cpp_startup_timeout_s: int = 60
     # Concurrency: with cont_batching, a llama.cpp worker serves parallel_slots
-    # requests at once (the KV cache / ctx_size is shared across slots, so each
-    # slot gets ctx_size/parallel_slots). Default 1 (full context, no extra VRAM);
-    # raise per-model (extra_config.llama_cpp.parallel_slots) where there's headroom.
+    # requests at once. How the context is divided depends on the build: stock
+    # llama.cpp splits it, so each slot gets ctx_size/parallel_slots, while the
+    # Makespace fork launched with ``kv_unified`` keeps ONE shared pool that a
+    # single request can use whole (``kv_unified_per_slot`` caps it). The
+    # capabilities payload publishes which one applies — see
+    # BackendCapabilities.kv_cache_shared / context_per_request — because every
+    # consumer used to guess, and the guess written for stock llama.cpp shows a
+    # context the server does not serve.
+    # Default 1 (full context, no extra VRAM); raise per-model
+    # (extra_config.llama_cpp.parallel_slots) where there's headroom.
     llama_cpp_parallel_slots: int = 1
     llama_cpp_cont_batching: bool = True
     llama_cpp_adaptive_admission_enabled: bool = Field(

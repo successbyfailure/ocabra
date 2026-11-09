@@ -132,6 +132,20 @@ class BackendCapabilities:
     # enforceable operational cap through runtime_policy.max_output_tokens.
     max_output_tokens: int = 0
 
+    # Concurrencia y forma de la cache, que hasta ahora no se publicaban y
+    # cada panel tenia que adivinar. Con llama.cpp de serie la ventana se
+    # reparte entre los slots (cada uno recibe ctx/parallel); con el fork de
+    # Makespace y ``--kv-unified`` es un pool compartido y UNA sola peticion
+    # puede usarlo entero. Sin esta distincion, un cliente escrito cuando solo
+    # existia llama.cpp de serie divide por los slots y ensena un contexto que
+    # no es el que se sirve.
+    parallel_slots: int = 0  # 0 = desconocido
+    kv_cache_shared: bool = False  # True = pool unico para todos los slots
+    # Lo que de verdad puede gastar una peticion: la ventana entera cuando la
+    # cache es compartida, su parte cuando no. Es el numero que quiere ensenar
+    # una interfaz, y evita que lo calcule mal cada una por su cuenta.
+    context_per_request: int = 0
+
     def to_dict(self) -> dict:
         return asdict(self)
 

@@ -1047,3 +1047,50 @@ def test_contains_image_ignores_non_string_type_values() -> None:
         ],
     }
     assert LlamaCppBackend._contains_image(body) is False
+
+
+@pytest.mark.asyncio
+async def test_capabilities_dicen_si_la_cache_es_compartida() -> None:
+    """Un cliente no puede adivinar si la ventana es por slot o un pool.
+
+    Con llama.cpp de serie la ventana se reparte entre los slots; con el fork
+    de Makespace y ``--kv-unified`` es un pool y una sola peticion puede usarlo
+    entero. Sin publicarlo, un panel escrito cuando solo existia el primero
+    divide por los slots y ensena un contexto que no es el que se sirve.
+    """
+    backend = LlamaCppBackend()
+
+    backend._model_configs["compartida"] = {
+        "ctx_size": 262144,
+        "parallel_slots": 4,
+        "kv_unified": True,
+    }
+    caps = await backend.get_capabilities("compartida")
+    assert caps.parallel_slots == 4
+    assert caps.kv_cache_shared is True
+    assert caps.context_length == 262144
+    assert caps.context_per_request == 262144
+
+    backend._model_configs["repartida"] = {
+        "ctx_size": 262144,
+        "parallel_slots": 4,
+        "kv_unified": False,
+    }
+    caps = await backend.get_capabilities("repartida")
+    assert caps.kv_cache_shared is False
+    assert caps.context_per_request == 65536
+
+
+@pytest.mark.asyncio
+async def test_el_tope_por_slot_acota_lo_que_ve_una_peticion() -> None:
+    """``--kv-unified-per-slot`` limita cada peticion dentro del pool."""
+    backend = LlamaCppBackend()
+    backend._model_configs["m"] = {
+        "ctx_size": 262144,
+        "parallel_slots": 4,
+        "kv_unified": True,
+        "kv_unified_per_slot": 98304,
+    }
+    caps = await backend.get_capabilities("m")
+    assert caps.context_length == 262144
+    assert caps.context_per_request == 98304

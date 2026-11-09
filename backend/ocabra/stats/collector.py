@@ -512,6 +512,23 @@ def _mark_stream_first_token(
         telemetry.mark_first_token(now_monotonic)
 
 
+def _ollama_tps(payload: dict, clave_tokens: str, clave_ns: str) -> float | None:
+    """tokens/s de un par (contador, duracion en ns) de la respuesta de Ollama."""
+
+    tokens = payload.get(clave_tokens)
+    duracion_ns = payload.get(clave_ns)
+    if tokens is None or duracion_ns is None:
+        return None
+    try:
+        tokens = float(tokens)
+        segundos = float(duracion_ns) / 1_000_000_000.0
+    except (TypeError, ValueError):
+        return None
+    if tokens <= 0 or segundos <= 0:
+        return None
+    return tokens / segundos
+
+
 def _extract_speculative_stats(
     payload: dict | None,
 ) -> tuple[int | None, int | None, float | None, float | None]:
@@ -525,7 +542,17 @@ def _extract_speculative_stats(
         return None, None, None, None
     timings = payload.get("timings")
     if not isinstance(timings, dict):
-        return None, None, None, None
+        # Respuesta con forma de Ollama: no trae ``timings``, trae contadores y
+        # duraciones en nanosegundos. Son los mismos numeros con otro nombre, y
+        # sin esto /api/chat y /api/generate no guardaban ni una cifra de
+        # rendimiento: 1.339 peticiones a ciegas en los 7 dias previos al
+        # 2026-11-09, un 29% del trafico generativo.
+        return (
+            None,
+            None,
+            _ollama_tps(payload, "eval_count", "eval_duration"),
+            _ollama_tps(payload, "prompt_eval_count", "prompt_eval_duration"),
+        )
 
     def _int(key: str) -> int | None:
         value = timings.get(key)
