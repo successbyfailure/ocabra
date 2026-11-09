@@ -16,7 +16,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
-## 0.55.3 — 2026-11-09
+## 0.55.4 — 2026-11-09
 
 ### Arreglos
 
@@ -41,12 +41,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   en paralelo. Y el tiempo de arranque de estos modelos ya se puede configurar
   por modelo: los 30 segundos de antes valían para uno de 3 GB y no para uno de
   8, que fallaba con un error que parecía del modelo y era del cronómetro.
-- **Instalar un modelo ternario desde Ollama ya no acaba en nada.** Los
-  modelos de 1 bit (Bonsai, BitNet, `i2_s`, `q1_0`) solo los sirve el backend
-  ternario, pero el alta elegía llama.cpp para cualquier tag de Ollama y el
-  registro se rechazaba por incompatible: la descarga terminaba al 100 % y el
-  modelo no aparecía en ninguna parte. Ahora el alta pregunta a la misma tabla
-  de compatibilidad que valida el registro.
+- **Instalar un modelo desde Ollama ya no puede acabar en nada.** El alta
+  elegía llama.cpp para cualquier tag y el registro se rechazaba cuando el
+  modelo necesitaba otro backend: la descarga terminaba al 100 % y el modelo no
+  aparecía en ninguna parte, con el motivo solo en los registros del servidor.
+  Ahora el alta pregunta a la misma tabla de compatibilidad que valida el
+  registro.
+- **Un nombre de familia ya no manda un modelo al backend equivocado.** Para
+  decidir si un modelo es de 1 bit se miraba el nombre completo, así que
+  cualquier cosa llamada «bonsai» iba al backend ternario aunque no lo fuera.
+  `bonsai-2:27b` es un modelo normal con visión y acababa en un backend que no
+  sabe leerlo. Ahora solo deciden los marcadores de cuantización
+  (`i2_s`, `q1_0`, `1.58bit`, `tq1_0`, `tq2_0`, `bitnet`).
 
 ### Retirado
 

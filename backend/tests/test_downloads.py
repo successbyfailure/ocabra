@@ -426,14 +426,16 @@ async def test_un_tag_ternario_se_registra_en_bitnet_no_en_llama_cpp() -> None:
     rechaza la pareja: elegir llamacpp_mks a ciegas acababa con los pesos
     descargados y ningun modelo registrado — "Backend 'llamacpp_mks' cannot
     serve this artifact (ollama_tag); compatible: bitnet". Reproducido el
-    2026-11-09 bajando ``bonsai-2:27b``.
+    2026-11-09 bajando ``bonsai-2:27b``, que resulto no ser ternario: lo que
+    decide es el marcador de cuantizacion del nombre (``1.58bit``, ``i2_s``,
+    ``q1_0``, ``tq1_0``/``tq2_0``), no la familia.
     """
     manager = DownloadManager()
     manager._installed_backends = lambda: {"llamacpp_mks", "bitnet", "ollama"}
     job = DownloadJob(
         job_id="t",
         source="ollama",
-        model_ref="bonsai-2:27b",
+        model_ref="falcon3:7b-1.58bit",
         artifact=None,
         register_config={},
         status="completed",
@@ -509,3 +511,42 @@ async def test_un_backend_pedido_a_mano_sigue_mandando() -> None:
         completed_at="2026-11-09T12:04:00Z",
     )
     assert await manager._resolve_job_backend(job) == "ollama"
+
+
+def test_la_familia_no_decide_el_backend_solo_la_cuantizacion() -> None:
+    """``bonsai`` en el nombre no implica ternario.
+
+    ``bonsai-2:27b`` es un qwen35 con projector de vision y file_type 41: la
+    build moderna de llama.cpp lo carga, y el bitnet-server se aborta con
+    ``GGML_ASSERT(info->type < GGML_TYPE_COUNT)`` por no conocer el tipo
+    (2026-11-09). El ternario de verdad se reconoce por su quant.
+    """
+    from ocabra.core.compatibility import is_ternary_gguf
+
+    assert is_ternary_gguf("Bonsai-27B-Q1_0.gguf")
+    assert is_ternary_gguf("ggml-model-i2_s.gguf")
+    assert is_ternary_gguf("Falcon3-7B-Instruct-1.58bit-GGUF")
+    assert is_ternary_gguf("model-TQ2_0.gguf")
+    assert not is_ternary_gguf("bonsai-2:27b")
+    assert not is_ternary_gguf("bonsai-2:27b-q4_K_M")
+
+
+@pytest.mark.asyncio
+async def test_bonsai_2_se_registra_en_llama_cpp() -> None:
+    manager = DownloadManager()
+    manager._installed_backends = lambda: {"llamacpp_mks", "bitnet", "ollama"}
+    job = DownloadJob(
+        job_id="t5",
+        source="ollama",
+        model_ref="bonsai-2:27b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T12:03:00Z",
+        completed_at="2026-11-09T12:04:00Z",
+    )
+    assert await manager._resolve_job_backend(job) == "llamacpp_mks"

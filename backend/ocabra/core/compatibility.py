@@ -26,7 +26,14 @@ from typing import Any
 GGUF_BACKENDS = ("llamacpp_mks", "llama_cpp", "ollama")
 HF_LLM_BACKENDS = ("vllm", "sglang")
 
-_TERNARY_RE = re.compile(r"(bitnet|i2_s|q1_0|bonsai|1\.58bit|tq[12]_0)", re.IGNORECASE)
+# Marcadores de *cuantizacion*, no de familia. "bonsai" estaba aqui y mandaba
+# al backend ternario cualquier cosa con ese nombre: bonsai-2:27b es un qwen35
+# con projector de vision y file_type 41 que la build moderna de llama.cpp
+# carga sin problema, mientras el bitnet-server se abortaba con
+# GGML_ASSERT(info->type < GGML_TYPE_COUNT) por no conocer el tipo
+# (2026-11-09). El ternario de verdad se sigue reconociendo por su quant:
+# Bonsai-27B-Q1_0.gguf lleva q1_0.
+_TERNARY_RE = re.compile(r"(bitnet|i2_s|q1_0|1\.58bit|tq[12]_0)", re.IGNORECASE)
 
 
 def is_ternary_gguf(name: str) -> bool:
@@ -143,7 +150,11 @@ def backends_for_files(
         "text-ranking",
         "",
     } and (library_name or "transformers") in {"transformers", "sentence-transformers", ""}
-    if has_safetensors and is_llm_like and suggested in {None, "vllm", "sglang", "llama_cpp", "llamacpp_mks"}:
+    if (
+        has_safetensors
+        and is_llm_like
+        and suggested in {None, "vllm", "sglang", "llama_cpp", "llamacpp_mks"}
+    ):
         add("vllm", "compatible", "safetensors")
         add("sglang", "probable", "safetensors (sin probar en este nodo)")
     if suggested and suggested not in seen and suggested not in {"llama_cpp", "llamacpp_mks"}:
@@ -153,7 +164,9 @@ def backends_for_files(
     return out
 
 
-def backends_for_ollama_tag(installed: set[str] | None = None, name: str = "") -> list[dict[str, Any]]:
+def backends_for_ollama_tag(
+    installed: set[str] | None = None, name: str = ""
+) -> list[dict[str, Any]]:
     """An Ollama tag is a GGUF: Ollama itself plus both llama.cpp builds."""
     if is_ternary_gguf(name):
         return [_entry("bitnet", "probable", "GGUF ternario/1-bit", installed)]
