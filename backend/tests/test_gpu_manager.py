@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -201,3 +202,117 @@ async def test_read_gpu_includes_running_processes() -> None:
     assert state.processes[0].used_vram_mb == 1536
     assert state.processes[1].pid == 9876
     assert state.processes[1].process_type == "graphics"
+
+
+def _process(pid: int, mb: int) -> MagicMock:
+    proc = MagicMock()
+    proc.pid = pid
+    proc.usedGpuMemory = mb * 1024 * 1024
+    return proc
+
+
+def _gm_with_processes(stack: ExitStack, *, free_mb: int, used_mb: int, procs: list) -> GPUManager:
+    patches = _make_mock_nvml(gpu_count=1, free_mb=free_mb, used_mb=used_mb)
+    patches.update(
+        {
+            "pynvml.nvmlDeviceGetComputeRunningProcesses_v3": MagicMock(return_value=procs),
+            "pynvml.nvmlDeviceGetGraphicsRunningProcesses_v3": MagicMock(return_value=[]),
+        }
+    )
+    stack.enter_context(patch("ocabra.core.gpu_manager.publish", new=AsyncMock()))
+    stack.enter_context(patch("ocabra.core.gpu_manager.set_key", new=AsyncMock()))
+    for k, v in patches.items():
+        stack.enter_context(patch(k, v))
+    gm = GPUManager()
+    gm._nvml_available = True
+    gm._locks = {0: {}}
+    stack.enter_context(patch.object(gm, "_read_process_name", return_value="llama-server"))
+    gm._states[0] = gm._read_gpu(0)
+    return gm
+
+
+@pytest.mark.asyncio
+async def test_free_vram_if_released_counts_real_footprint_over_lock() -> None:
+    """2026-11-09: ravenx locked at its 23,237 MB estimate but really held
+    23,594 MB. Releasing it must give back what the process holds."""
+    from ocabra.config import settings
+
+    with ExitStack() as stack:
+        gm = _gm_with_processes(
+            stack, free_mb=53, used_mb=24_523, procs=[_process(4321, 23_594)]
+        )
+        await gm.lock_vram(0, 23_237, "llamacpp_mks/ravenx")
+
+        projected = await gm.get_free_vram_if_released(0, {"llamacpp_mks/ravenx": 4321})
+
+    assert projected == 53 + 23_594 - settings.vram_buffer_mb
+
+
+@pytest.mark.asyncio
+async def test_free_vram_if_released_uses_lock_when_pid_holds_less() -> None:
+    """vLLM allocates in a child process: a small reading for the recorded PID
+    must not shrink the bound below the model's lock."""
+    from ocabra.config import settings
+
+    with ExitStack() as stack:
+        gm = _gm_with_processes(stack, free_mb=1_000, used_mb=11_000, procs=[_process(77, 400)])
+        await gm.lock_vram(0, 10_000, "vllm/model")
+
+        projected = await gm.get_free_vram_if_released(0, {"vllm/model": 77})
+
+    assert projected == 1_000 + 10_000 - settings.vram_buffer_mb
+
+
+@pytest.mark.asyncio
+async def test_free_vram_if_released_keeps_other_models_and_services() -> None:
+    from ocabra.config import settings
+
+    with ExitStack() as stack:
+        gm = _gm_with_processes(
+            stack,
+            free_mb=2_000,
+            used_mb=10_000,
+            procs=[_process(1, 4_000), _process(2, 6_000)],
+        )
+        await gm.lock_vram(0, 4_000, "a")
+        await gm.lock_vram(0, 6_000, "b")
+        await gm.lock_vram(0, 1_500, "service:trellis2")
+
+        projected = await gm.get_free_vram_if_released(0, {"a": 1})
+
+    assert projected == 2_000 + 4_000 - 1_500 - settings.vram_buffer_mb
+
+
+@pytest.mark.asyncio
+async def test_poll_replaces_hw_monitor_processes_with_local_reading() -> None:
+    """hw-monitor's container sees no processes (NVML filters by PID
+    namespace); the API's own reading lists its workers under their PIDs."""
+    from ocabra.core.gpu_manager import GPUState
+
+    with ExitStack() as stack:
+        gm = _gm_with_processes(stack, free_mb=5_000, used_mb=7_000, procs=[_process(19647, 6_800)])
+        redis_state = GPUState(
+            index=0,
+            name="RTX 3090",
+            total_vram_mb=12_000,
+            free_vram_mb=5_000,
+            used_vram_mb=7_000,
+            utilization_pct=0.0,
+            temperature_c=40.0,
+            power_draw_w=100.0,
+            power_limit_w=300.0,
+            locked_vram_mb=0,
+            processes=[],
+        )
+        stack.enter_context(
+            patch.object(gm, "_read_gpu_from_redis", new=AsyncMock(return_value=redis_state))
+        )
+        stack.enter_context(patch.object(gm, "_check_thermal_throttle", new=AsyncMock()))
+        sleep = AsyncMock(side_effect=asyncio.CancelledError)
+        stack.enter_context(patch("ocabra.core.gpu_manager.asyncio.sleep", sleep))
+
+        with pytest.raises(asyncio.CancelledError):
+            await gm._poll_loop()
+
+        assert [(p.pid, p.used_vram_mb) for p in gm._states[0].processes] == [(19647, 6_800)]
+        assert gm.get_process_vram_mb(0) == {19647: 6_800}

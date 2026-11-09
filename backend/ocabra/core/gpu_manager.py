@@ -152,6 +152,72 @@ class GPUManager:
         processes.sort(key=lambda item: (-item.used_vram_mb, item.pid))
         return processes
 
+    def _read_local_processes(self, index: int) -> list[GPUProcessInfo] | None:
+        """Processes on this GPU as seen from this process's PID namespace.
+
+        ``None`` when NVML is not usable here, so callers can tell "no reading"
+        apart from "no processes".
+        """
+        if not self._nvml_available:
+            return None
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            return self._read_gpu_processes(handle)
+        except pynvml.NVMLError:
+            return None
+
+    def get_process_vram_mb(self, gpu_index: int) -> dict[int, int]:
+        """VRAM per PID on one GPU, read now rather than from the last poll.
+
+        PIDs are those of this process's namespace, i.e. the ones in
+        ``WorkerInfo.pid``. Falls back to the polled snapshot without NVML.
+        """
+        processes = self._read_local_processes(gpu_index)
+        if processes is None:
+            state = self._states.get(gpu_index)
+            processes = state.processes if state is not None else []
+        usage: dict[int, int] = {}
+        for process in processes:
+            if process.pid > 0:
+                usage[process.pid] = usage.get(process.pid, 0) + process.used_vram_mb
+        return usage
+
+    async def get_free_vram_if_released(
+        self, gpu_index: int, released: dict[str, int | None]
+    ) -> int:
+        """What ``get_free_vram`` would return once these models are unloaded.
+
+        ``released`` maps model_id to its worker PID. Each model gives back the
+        larger of its lock and what its process really holds on this GPU. Using
+        only the lock under-counted it whenever the estimate fell short of the
+        real footprint, which is how a 3090 holding a single evictable model
+        was declared impossible to free. The result is an optimistic bound,
+        meant for rejecting plans that cannot work, not for admitting loads.
+        """
+        state = self._states[gpu_index]
+        locks = self._locks.get(gpu_index, {})
+        per_pid = self.get_process_vram_mb(gpu_index)
+        physical_gain = 0
+        released_lock_mb = 0
+        for model_id, pid in released.items():
+            lock_mb = locks.get(model_id, 0)
+            released_lock_mb += lock_mb
+            # max, not "measured if known": this is an upper bound, and the
+            # recorded PID can hold only part of a worker's memory (vLLM
+            # allocates in an EngineCore child process).
+            measured = per_pid.get(pid, 0) if pid else 0
+            physical_gain += max(measured, lock_mb)
+        model_locked = sum(mb for key, mb in locks.items() if not key.startswith("service:"))
+        service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+        free = (
+            min(
+                state.free_vram_mb + physical_gain,
+                state.total_vram_mb - (model_locked - released_lock_mb),
+            )
+            - service_locked
+        )
+        return max(0, free - settings.vram_buffer_mb)
+
     def _query_nvml_processes(
         self,
         handle,
@@ -227,13 +293,23 @@ class GPUManager:
                 redis_used = False
                 for i in self._states:
                     state = await self._read_gpu_from_redis(i)
-                    if state is not None:
+                    from_redis = state is not None
+                    if from_redis:
                         redis_used = True
                     else:
                         # Fallback: read directly via pynvml
                         state = self._read_gpu(i)
                         # Publish to Redis so other consumers still get data
                         await set_key(f"gpu:state:{i}", asdict(state), ttl=5)
+                    # hw-monitor runs in its own container, and NVML only lists
+                    # the processes of the caller's PID namespace, so the list
+                    # it publishes is always empty. Ours lists the workers we
+                    # spawned, under the same PIDs WorkerInfo records.
+                    processes = state.processes
+                    if from_redis:
+                        local = self._read_local_processes(i)
+                        if local is not None:
+                            processes = local
                     # Preserve locked_vram_mb from local lock state
                     locked = sum(self._locks.get(i, {}).values())
                     state = GPUState(
@@ -247,7 +323,7 @@ class GPUManager:
                         power_draw_w=state.power_draw_w,
                         power_limit_w=state.power_limit_w,
                         locked_vram_mb=locked,
-                        processes=state.processes,
+                        processes=processes,
                     )
                     self._states[i] = state
                     states.append(asdict(state))
@@ -408,6 +484,10 @@ class GPUManager:
     async def unlock_vram(self, gpu_index: int, model_id: str) -> None:
         self._locks.get(gpu_index, {}).pop(model_id, None)
         logger.debug("vram_unlocked", gpu=gpu_index, model=model_id)
+
+    def locks_snapshot(self, gpu_index: int) -> dict[str, int]:
+        """Copy of the VRAM reservations on one GPU, keyed by model or service."""
+        return dict(self._locks.get(gpu_index, {}))
 
     def locked_gpu_indices(self, model_id: str) -> list[int]:
         """Return every GPU carrying a reservation for ``model_id``.

@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.60.2 — 2026-11-09
+
+### Arreglos
+
+- **Un modelo grande podía rechazarse con 409 aunque hubiese sitio si se
+  descargaba otro.** Antes de descargar modelos para hacer hueco, el servidor
+  calcula si la operación puede funcionar. Ese cálculo usaba lo que se
+  estimaba que ocupaba cada modelo cargado, no lo que ocupaba de verdad.
+  Cuando la estimación se quedaba corta, daba la descarga por inútil y
+  rechazaba la carga con `409 insufficient_vram`, aunque descargar ese modelo
+  habría dejado sitio de sobra.
+
+  Lo sufría sobre todo `gemma4:26b`: unas 10 de cada 180 peticiones en los
+  tres días previos, siempre que otro modelo grande ocupaba la RTX 3090. Ahora
+  el cálculo usa la memoria real de cada proceso y la carga sigue adelante.
+
+  Si reintentabas esos 409 con espera, ya no te harán falta en este caso. Un
+  409 sigue significando que no cabe ni descargando todo lo que se puede
+  descargar.
+
+---
+
 ## 0.60.1 — 2026-11-09
 
 ### Arreglos

@@ -2110,21 +2110,29 @@ class ModelManager:
                                 # clamped to 0) while it actually had ~3.6 GB
                                 # physically free — starving an unrelated
                                 # whisper load that would have fit there.
+                                #
+                                # Read live from this container's NVML: the
+                                # polled snapshot came from hw-monitor, whose
+                                # PID namespace sees no processes at all, so
+                                # until 2026-11-09 this always fell back to the
+                                # even split. Limited to llama.cpp, whose worker
+                                # execs llama-server so the recorded PID is the
+                                # one holding the memory; vLLM's is not (its
+                                # EngineCore child allocates), and a small
+                                # reading there would under-lock every GPU.
                                 real_per_gpu_mb: dict[int, int] = {}
-                                if len(actual_gpu_indices) > 1 and worker_info.pid:
+                                if (
+                                    len(actual_gpu_indices) > 1
+                                    and worker_info.pid
+                                    and is_llama_cpp_family(state.backend_type)
+                                ):
                                     try:
                                         for gpu_idx in actual_gpu_indices:
-                                            gpu_state = await self._gpu_manager.get_state(gpu_idx)
-                                            match = next(
-                                                (
-                                                    p
-                                                    for p in gpu_state.processes
-                                                    if p.pid == worker_info.pid
-                                                ),
-                                                None,
-                                            )
-                                            if match is not None:
-                                                real_per_gpu_mb[gpu_idx] = match.used_vram_mb
+                                            measured = self._gpu_manager.get_process_vram_mb(
+                                                gpu_idx
+                                            ).get(worker_info.pid)
+                                            if measured:
+                                                real_per_gpu_mb[gpu_idx] = int(measured)
                                     except Exception:  # noqa: BLE001
                                         real_per_gpu_mb = {}
                                 use_real = len(real_per_gpu_mb) == len(actual_gpu_indices)
@@ -2203,6 +2211,8 @@ class ModelManager:
                 # so the log always names *something*.
                 _err_text = str(e) or f"{type(e).__name__}"
                 logger.error("model_load_failed", model_id=model_id, error=_err_text)
+                if "cudaMalloc failed" in _err_text or "CUDA error: out of memory" in _err_text:
+                    await self._log_cuda_oom_snapshot(model_id)
                 from ocabra.core.scheduler import InsufficientVRAMError
 
                 if isinstance(e, InsufficientVRAMError):
@@ -2221,6 +2231,46 @@ class ModelManager:
                     self._load_tasks.pop(model_id, None)
 
         return state
+
+    async def _log_cuda_oom_snapshot(self, model_id: str) -> None:
+        """Record what every GPU held when admission said a load fit but CUDA
+        refused the allocation.
+
+        Added 2026-11-09 after two such failures on the 3060 during a benchmark
+        whose cause could not be reconstructed: the API had been restarted and
+        its logs were gone. Comparing locks with real per-process usage is what
+        tells an estimate that fell short from a load that raced another one.
+        """
+        if self._gpu_manager is None:
+            return
+        try:
+            snapshot = []
+            pid_owner = {
+                st.worker_info.pid: mid
+                for mid, st in self._states.items()
+                if st.worker_info is not None and st.worker_info.pid
+            }
+            for gpu_state in await self._gpu_manager.get_all_states():
+                index = int(gpu_state.index)
+                snapshot.append(
+                    {
+                        "gpu": index,
+                        "nvml_free_mb": gpu_state.free_vram_mb,
+                        "locks_mb": self._gpu_manager.locks_snapshot(index),
+                        "processes_mb": {
+                            pid_owner.get(pid, f"pid:{pid}"): mb
+                            for pid, mb in self._gpu_manager.get_process_vram_mb(index).items()
+                        },
+                    }
+                )
+            logger.error(
+                "model_load_cuda_oom_snapshot",
+                model_id=model_id,
+                loading=sorted(self._load_in_progress),
+                gpus=snapshot,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("model_load_cuda_oom_snapshot_failed", model_id=model_id, error=str(exc))
 
     @staticmethod
     def _apply_capability_fallbacks(
@@ -2815,22 +2865,54 @@ class ModelManager:
                 # scoped to it alone (not summed across every GPU), since
                 # candidates here are already scoped to gpu_pool and freeing
                 # one GPU never adds free VRAM on another.
+                #
+                # The bound is projected per GPU from what each candidate's
+                # process really holds there. Summing ``vram_used_mb`` was not
+                # an upper bound: that is the estimate, and when it falls short
+                # of the real footprint the plan looks impossible. Seen live
+                # 2026-11-09: ravenx estimated at 23,237 MB but holding ~23,594
+                # left gemma4:26b (23,600, the PIN model) refused with a 409 on
+                # a 3090 that evicting ravenx would have freed to 23,647.
                 if self._gpu_manager is not None:
                     try:
                         if gpu_pool is not None:
-                            free_now_mb = await self._gpu_manager.get_free_vram(gpu_pool)
+                            pool_indices = [gpu_pool]
                         else:
-                            gpu_states = await self._gpu_manager.get_all_states()
-                            free_now_mb = 0
-                            for gpu_state in gpu_states:
-                                free_now_mb += await self._gpu_manager.get_free_vram(
-                                    int(gpu_state.index)
-                                )
-                        reclaimable_mb = sum(
-                            max(0, int(self._states[candidate_id].vram_used_mb))
+                            pool_indices = [
+                                int(gpu_state.index)
+                                for gpu_state in await self._gpu_manager.get_all_states()
+                            ]
+                        released = {
+                            candidate_id: (
+                                self._states[candidate_id].worker_info.pid
+                                if self._states[candidate_id].worker_info is not None
+                                else None
+                            )
                             for candidate_id in candidates
                             if candidate_id in self._states
-                        )
+                        }
+                        free_now_mb = 0
+                        maximum_available_mb = 0
+                        for gpu_index in pool_indices:
+                            free_now_mb += int(await self._gpu_manager.get_free_vram(gpu_index))
+                            maximum_available_mb += int(
+                                await self._gpu_manager.get_free_vram_if_released(
+                                    gpu_index, released
+                                )
+                            )
+                        # Models with no VRAM lock anywhere (Ollama runners
+                        # live in another container, so neither lock nor PID
+                        # is ours) keep counting by their estimate, as before.
+                        for candidate_id in released:
+                            candidate_state = self._states[candidate_id]
+                            if self._gpu_manager.locked_gpu_indices(candidate_id):
+                                continue
+                            if gpu_pool is not None and gpu_pool not in (
+                                candidate_state.current_gpu or []
+                            ):
+                                continue
+                            maximum_available_mb += max(0, int(candidate_state.vram_used_mb))
+                        reclaimable_mb = max(0, maximum_available_mb - free_now_mb)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "pressure_eviction_preflight_failed",
@@ -2839,7 +2921,6 @@ class ModelManager:
                             error=str(exc),
                         )
                     else:
-                        maximum_available_mb = free_now_mb + reclaimable_mb
                         if maximum_available_mb < vram_needed:
                             logger.info(
                                 "pressure_eviction_impossible_skip",

@@ -1035,6 +1035,8 @@ async def test_pressure_eviction_skips_impossible_aggregate_plan(worker_pool):
         SimpleNamespace(index=1),
     ]
     gpu_manager.get_free_vram.side_effect = [2800, 1800]
+    gpu_manager.get_free_vram_if_released.return_value = 1800 + 23_632
+    gpu_manager.locked_gpu_indices = MagicMock(return_value=[1])
     scheduler = AsyncMock()
     scheduler.find_gpu_for_model.side_effect = InsufficientVRAMError("full")
     mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
@@ -1058,6 +1060,84 @@ async def test_pressure_eviction_skips_impossible_aggregate_plan(worker_pool):
         )
 
     unload_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pressure_eviction_counts_real_footprint_not_estimate(worker_pool):
+    """2026-11-09 live incident: gemma4:26b (PIN, 23,600 MB) got a 409 on a 3090
+    holding only ravenx. ravenx was estimated at 23,237 MB but really held
+    ~23,594, so "53 free + 23,237 reclaimable" looked short and eviction was
+    skipped, although an empty 3090 offers 23,647. The plan must be judged on
+    the projected free VRAM after release, which counts the real footprint."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states.return_value = [
+        SimpleNamespace(index=0),
+        SimpleNamespace(index=1),
+    ]
+    gpu_manager.get_free_vram.return_value = 53
+    gpu_manager.get_free_vram_if_released.return_value = 23_647
+    gpu_manager.locked_gpu_indices = MagicMock(return_value=[1])
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = [InsufficientVRAMError("full"), [1]]
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+
+    await add_test_model(mm, model_id="test/gemma")
+    candidate = await add_test_model(mm, model_id="test/ravenx")
+    candidate.status = ModelStatus.LOADED
+    candidate.current_gpu = [1]
+    candidate.vram_used_mb = 23_237
+    candidate.worker_info = WorkerInfo(
+        backend_type="mock",
+        model_id="test/ravenx",
+        gpu_indices=[1],
+        port=18001,
+        pid=4321,
+        vram_used_mb=23_237,
+    )
+
+    with patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
+        await mm._assign_gpus_for_load(
+            "test/gemma",
+            vram_needed=23_600,
+            preferred_gpu=1,
+            enforce_vllm_headroom=False,
+        )
+
+    unload_mock.assert_awaited_once_with("test/ravenx", reason="pressure")
+    gpu_manager.get_free_vram_if_released.assert_any_await(1, {"test/ravenx": 4321})
+
+
+@pytest.mark.asyncio
+async def test_pressure_eviction_counts_unlocked_candidate_by_estimate(worker_pool):
+    """Ollama runners hold no lock and no PID of ours: keep their estimate."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram.return_value = 1_000
+    gpu_manager.get_free_vram_if_released.return_value = 1_000
+    gpu_manager.get_all_states.return_value = [SimpleNamespace(index=0)]
+    gpu_manager.locked_gpu_indices = MagicMock(return_value=[])
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = [InsufficientVRAMError("full"), [0]]
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+
+    await add_test_model(mm, model_id="test/requested")
+    candidate = await add_test_model(mm, model_id="ollama/runner")
+    candidate.status = ModelStatus.LOADED
+    candidate.current_gpu = [0]
+    candidate.vram_used_mb = 6_000
+
+    with patch.object(mm, "unload", new=AsyncMock()) as unload_mock:
+        await mm._assign_gpus_for_load(
+            "test/requested",
+            vram_needed=5_000,
+            preferred_gpu=0,
+            enforce_vllm_headroom=False,
+        )
+
+    unload_mock.assert_awaited_once_with("ollama/runner", reason="pressure")
 
 
 @pytest.mark.asyncio
@@ -1192,6 +1272,8 @@ async def test_pressure_eviction_falls_back_to_other_gpu_pool(worker_pool):
         SimpleNamespace(index=1),
     ]
     gpu_manager.get_free_vram = AsyncMock(return_value=400)
+    gpu_manager.get_free_vram_if_released = AsyncMock(return_value=400 + 22_000)
+    gpu_manager.locked_gpu_indices = MagicMock(return_value=[1])
     scheduler = AsyncMock()
     scheduler.find_gpu_for_model = AsyncMock(side_effect=[InsufficientVRAMError("full"), [1]])
     mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
@@ -1644,40 +1726,29 @@ async def test_multi_gpu_admission_evicts_for_each_tensor_shard() -> None:
     last_resort.assert_awaited_once_with("llama_cpp/dual", 0, 4_000)
 
 
-@pytest.mark.asyncio
-async def test_multi_gpu_load_locks_real_per_gpu_vram_not_even_split(worker_pool) -> None:
-    """2026-11-04 live incident: a tensor-split worker (qwen3.8:27b) landed
-    unevenly across two GPUs (8.3 GB / 23.2 GB in production) but got
-    locked for an even split of the total on EACH GPU — making the lighter
-    GPU register as fully reserved (free computed negative, clamped to 0)
-    even though it had several GB physically free, starving an unrelated
-    load that would have fit there. lock_vram must use the real per-process
-    reading NVML already has for this worker's PID when it's available for
-    every GPU the worker touched."""
-    from ocabra.core.gpu_manager import GPUProcessInfo
+def _llama_cpp_pool() -> WorkerPool:
+    """A worker pool whose mock backend is registered as llama.cpp."""
+    wp = WorkerPool()
+    wp.register_backend("llamacpp_mks", MockBackend(vram_mb=4096))
+    return wp
+
+
+async def _load_multi_gpu(backend_type: str, real_usage_mb: dict[int, int]):
     from ocabra.core.model_manager import ModelState
 
-    real_usage_mb = {0: 8_292, 1: 23_214}
     gpu_manager = AsyncMock()
-    gpu_manager.get_state = AsyncMock(
-        side_effect=lambda idx: SimpleNamespace(
-            processes=[
-                GPUProcessInfo(
-                    pid=12345,
-                    process_name="mock",
-                    process_type="C",
-                    used_vram_mb=real_usage_mb[idx],
-                )
-            ]
-        )
+    gpu_manager.get_process_vram_mb = MagicMock(
+        side_effect=lambda idx: {12345: real_usage_mb[idx]} if idx in real_usage_mb else {}
     )
-    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
-    model_id = "test/multi-gpu"
+    wp = _llama_cpp_pool() if backend_type == "llamacpp_mks" else make_worker_pool_with_mock()
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = f"{backend_type}/multi-gpu"
     mm._states[model_id] = ModelState(
         model_id=model_id,
         display_name=model_id,
-        backend_type="mock",
+        backend_type=backend_type,
         load_policy=LoadPolicy.ON_DEMAND,
+        extra_config={"llama_cpp": {"gpu_layers": 99}},
     )
     mm._load_locks[model_id] = asyncio.Lock()
 
@@ -1687,9 +1758,47 @@ async def test_multi_gpu_load_locks_real_per_gpu_vram_not_even_split(worker_pool
         patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[0, 1])),
     ):
         await mm.load(model_id)
+    return gpu_manager, model_id
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_load_locks_real_per_gpu_vram_not_even_split() -> None:
+    """2026-11-04 live incident: a tensor-split worker (qwen3.8:27b) landed
+    unevenly across two GPUs (8.3 GB / 23.2 GB in production) but got
+    locked for an even split of the total on EACH GPU — making the lighter
+    GPU register as fully reserved (free computed negative, clamped to 0)
+    even though it had several GB physically free, starving an unrelated
+    load that would have fit there. lock_vram must use the real per-process
+    reading for this worker's PID on every GPU the worker touched.
+
+    2026-11-09: that reading must be taken live from the API's own NVML. The
+    polled snapshot comes from hw-monitor, whose PID namespace lists no
+    processes, so the original fix never applied in production."""
+    gpu_manager, model_id = await _load_multi_gpu("llamacpp_mks", {0: 8_292, 1: 23_214})
 
     gpu_manager.lock_vram.assert_any_call(0, 8_292, model_id)
     gpu_manager.lock_vram.assert_any_call(1, 23_214, model_id)
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_lock_falls_back_to_even_split_on_partial_reading() -> None:
+    """A GPU without a reading for the PID must not be locked at 0."""
+    gpu_manager, model_id = await _load_multi_gpu("llamacpp_mks", {1: 23_214})
+
+    locked = {c.args[0]: c.args[1] for c in gpu_manager.lock_vram.await_args_list}
+    assert locked[0] == locked[1]
+    assert locked[0] > 0
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_lock_ignores_pid_reading_outside_llama_cpp() -> None:
+    """vLLM allocates in a child process, so its recorded PID can show a
+    small CUDA context on every GPU; locking that would under-reserve both."""
+    gpu_manager, model_id = await _load_multi_gpu("mock", {0: 400, 1: 400})
+
+    locked = {c.args[0]: c.args[1] for c in gpu_manager.lock_vram.await_args_list}
+    assert locked[0] == locked[1]
+    assert locked[0] > 400
 
 
 @pytest.mark.asyncio
@@ -2545,3 +2654,44 @@ def test_build_diarized_extra_config_wins_over_a_snake_case_base() -> None:
 
     assert _get_whisper_option(merged, "diarization_enabled") is True
     assert "diarizationEnabled" not in merged["whisper"]
+
+
+@pytest.mark.asyncio
+async def test_cuda_oom_load_failure_logs_vram_snapshot(worker_pool) -> None:
+    """A CUDA OOM after admission said "fits" must leave a per-GPU record."""
+    from ocabra.core.gpu_manager import GPUProcessInfo
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states.return_value = [
+        SimpleNamespace(
+            index=0,
+            free_vram_mb=900,
+            processes=[GPUProcessInfo(pid=55, process_name="x", process_type="compute", used_vram_mb=0)],
+        )
+    ]
+    gpu_manager.locks_snapshot = MagicMock(return_value={"test/resident": 2_800})
+    gpu_manager.get_process_vram_mb = MagicMock(return_value={55: 3_100, 99: 400})
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+    resident = await add_test_model(mm, model_id="test/resident")
+    resident.worker_info = WorkerInfo(
+        backend_type="mock",
+        model_id="test/resident",
+        gpu_indices=[0],
+        port=18001,
+        pid=55,
+        vram_used_mb=2_800,
+    )
+
+    with patch("ocabra.core.model_manager.logger") as log:
+        await mm._log_cuda_oom_snapshot("test/new")
+
+    event, kwargs = log.error.call_args.args[0], log.error.call_args.kwargs
+    assert event == "model_load_cuda_oom_snapshot"
+    assert kwargs["gpus"] == [
+        {
+            "gpu": 0,
+            "nvml_free_mb": 900,
+            "locks_mb": {"test/resident": 2_800},
+            "processes_mb": {"test/resident": 3_100, "pid:99": 400},
+        }
+    ]
