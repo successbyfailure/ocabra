@@ -676,7 +676,9 @@ router = APIRouter(tags=["downloads"], lifespan=_lifespan)
     description="Return all download jobs (active, queued, completed, failed) ordered by most recent first.",
 )
 async def list_downloads(
-    _user: UserContext = Depends(require_role("model_manager")),
+    # Lectura abierta para el indicador de descargas de la cabecera
+    # (2026-11-09). Lanzar o cancelar sigue pidiendo model_manager.
+    _user: UserContext = Depends(require_role("user")),
 ) -> list[DownloadJob]:
     return await download_manager.list_jobs()
 

@@ -3,7 +3,21 @@
 from __future__ import annotations
 
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
+
+# Id de la peticion en vuelo (``ModelManager.try_begin_request``) de la
+# request HTTP actual. Lo fija el middleware de stats ANTES de ``call_next``:
+# BaseHTTPMiddleware copia el contexto al lanzar la app interna, asi que llega
+# hasta ``WorkerPool`` y ``FairSlotGate`` (incluido el cuerpo de un
+# ``StreamingResponse``). La propagacion inversa (de la app al middleware) no
+# funciona, por eso nada debe ESCRIBIRLO fuera del middleware.
+# Sirve para atribuir a una peticion concreta lo que solo ve la capa de
+# transporte: su lease o su puesto en la cola del gate y el progreso de
+# prefill que emite llama.cpp con ``return_progress``.
+current_inflight_request_id: ContextVar[str | None] = ContextVar(
+    "ocabra_current_inflight_request_id", default=None
+)
 
 
 @dataclass

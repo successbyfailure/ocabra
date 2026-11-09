@@ -22,6 +22,7 @@ from ocabra.db.model_config import (
     replace_model_schedules,
 )
 from ocabra.registry.ollama_registry import OllamaRegistry
+from ocabra.stats import live_activity
 
 router = APIRouter(tags=["models"])
 _ollama_registry = OllamaRegistry()
@@ -36,6 +37,26 @@ def _canonical_runtime_id(model_id: str, canonical_ids: set[str]) -> str | None:
         if model_id == candidate or model_id.startswith(f"{candidate}::")
     ]
     return max(matches, key=len) if matches else None
+
+
+def _live_totals(details: list[dict]) -> dict:
+    """Totales del dashboard nuevo: por fase y t/s medidos en su propia fase."""
+    stages: dict[str, int] = {}
+    prefill = 0.0
+    generation = 0.0
+    for detail in details:
+        stage = detail.get("stage") or "unknown"
+        stages[stage] = stages.get(stage, 0) + 1
+        if stage == "prefill" and detail.get("prefillTokensPerSecond"):
+            prefill += float(detail["prefillTokensPerSecond"])
+        if stage == "generating" and detail.get("generationTokensPerSecond"):
+            generation += float(detail["generationTokensPerSecond"])
+    return {
+        "stages": stages,
+        "queuedCount": stages.get("queued", 0),
+        "prefillTokensPerSecondTotal": round(prefill, 1) if prefill else None,
+        "generationTokensPerSecondTotal": round(generation, 1) if generation else None,
+    }
 
 
 class ModelPatch(BaseModel):
@@ -241,7 +262,24 @@ async def get_models_activity(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Live in-flight counts + oldest age keyed by model_id."""
+    """Live in-flight activity per model, for the dashboard.
+
+    Returns:
+        ``activity``: per model with requests in flight — counts, slots, gate
+        state, aggregate t/s and one row per request (stage, prefill progress,
+        t/s per phase, queue position and estimates). ``contexts``: context
+        bar data for every loaded model (tiers per GPU placement, active
+        window, reserved/used per request). Plus ``stuckThresholdSeconds`` and
+        ``idleTimeoutSeconds``. ``vramByGpu``: MB measured by NVML for each
+        model on each GPU. Also pushed every second over ``/ocabra/ws``
+        to clients that subscribe to ``models_activity``.
+    """
+    return await build_models_activity(request)
+
+
+async def build_models_activity(request: Any) -> dict:
+    """Body of ``get_models_activity``; ``request`` only needs ``.app.state``
+    (the WebSocket passes itself)."""
     mm = request.app.state.model_manager
     # Read-only: the fair-share gate is the only place that knows the real KV
     # pool occupancy and the queue depth behind a busy worker. Both were
@@ -249,6 +287,8 @@ async def get_models_activity(
     # them on the dashboard, where "N en curso" could not distinguish a busy
     # worker from one that is about to queue or reject.
     worker_pool = getattr(request.app.state, "worker_pool", None)
+    estimator = getattr(request.app.state, "duration_estimator", None)
+    live_ids: set[str] = set()
     snapshot = mm.inflight_snapshot()
     ages = mm.active_request_ages()
     sources = mm.activity_sources()
@@ -256,6 +296,18 @@ async def get_models_activity(
     requests_by_key: dict[str, list] = {}
     for req in mm.active_requests_snapshot():
         requests_by_key.setdefault(req.model_id, []).append(req)
+    # Ritmo de prefill para las peticiones cuyo backend no informa del avance
+    # (todo lo que no es llama.cpp): una consulta cacheada por modelo.
+    rate_keys = {
+        req.profile_id or req.model_id
+        for reqs in requests_by_key.values()
+        for req in reqs
+        if getattr(req, "prompt_tokens_total", None) is None
+        and getattr(req, "first_token_at", None) is None
+    }
+    prefill_rates = (
+        await live_activity.prefill_rates(rate_keys, estimator) if rate_keys else {}
+    )
     # ``list_states()`` (sin include_derived) devuelve solo los canónicos,
     # pero ``begin_request`` registra con el worker-key derivado del
     # preset activo (``ollama/qwen3.8:27b::<hash>``). Para que el badge
@@ -271,6 +323,10 @@ async def get_models_activity(
     canonical_ids = {state.model_id for state in states}
     runtime_by_canonical: dict[str, int] = {}
     preset_by_canonical: dict[str, dict] = {}
+    runtime_meta_by_canonical: dict[str, dict] = {}
+    # Workers derivados cargados por modelo, tengan o no peticiones: hacen
+    # falta para leer su puerto (/metrics de vLLM) y sus PID (VRAM por GPU).
+    loaded_worker_keys_by_canonical: dict[str, list[str]] = {}
     for s in all_states:
         base = _canonical_runtime_id(s.model_id, canonical_ids)
         if base is None or base == s.model_id:
@@ -289,6 +345,9 @@ async def get_models_activity(
         # El preset activo y su contexto efectivo tambien viven solo en el
         # derivado. Sin ellos la barra de KV es un numero sin referencia: no
         # se sabe si 240k de pool vienen del preset de 32k o del de 128k.
+        if getattr(s.status, "value", s.status) == "loaded":
+            runtime_meta_by_canonical[base] = meta
+            loaded_worker_keys_by_canonical.setdefault(base, []).append(s.model_id)
         preset_key = meta.get("preset_key")
         effective_context = meta.get("effective_context")
         if preset_key or effective_context:
@@ -353,6 +412,8 @@ async def get_models_activity(
             # is None until at least one output token has streamed — division
             # by elapsed time before that is meaningless, not just zero.
             requests_detail: list[dict] = []
+            gate_leases, gate_queued, _ = live_activity.gate_requests_by_id(worker_pool, keys)
+            has_gate = bool(gate_leases or gate_queued)
             for key in keys:
                 if not requests_by_key.get(key):
                     continue
@@ -385,6 +446,15 @@ async def get_models_activity(
                             ),
                             "phase": phase,
                             "waitingOnModelId": waiting_on,
+                            **live_activity.request_live_detail(
+                                req,
+                                now=now_ts,
+                                lease=gate_leases.get(req.request_id),
+                                queued=gate_queued.get(req.request_id),
+                                load_phase=load_phase,
+                                has_gate=has_gate,
+                                prefill_rate=prefill_rates.get(req.profile_id or req.model_id),
+                            ),
                         }
                     )
             # Fair-share gate snapshot. Keyed by whichever id actually runs
@@ -419,6 +489,25 @@ async def get_models_activity(
                 if isinstance(gate_slots, int) and gate_slots > 0:
                     slots = gate_slots
 
+            requests_detail.sort(
+                key=lambda d: (
+                    d["stage"] == "queued",
+                    d.get("queuePosition") or 0,
+                    -d["elapsedMs"],
+                )
+            )
+            await live_activity.attach_estimates(
+                requests_detail,
+                estimator=estimator,
+                model_id=state.model_id,
+                backend_type=state.backend_type,
+                slots=slots,
+                kv_capacity=(admission or {}).get("kvCapacityTokens"),
+                kv_reserved=(admission or {}).get("kvReservedTokens"),
+            )
+            live_activity.strip_internal(requests_detail)
+            live_ids.update(d["requestId"] for d in requests_detail)
+
             # Aggregate phase mix. Per-request phases were already exposed but
             # only readable one line at a time; the mix is what tells you at a
             # glance whether a model is generating or stuck in prompt eval.
@@ -447,6 +536,7 @@ async def get_models_activity(
                 # being at full load.
                 "tokensPerSecondTotal": round(tps_total, 1) if generating_count else None,
                 "generatingCount": generating_count,
+                **_live_totals(requests_detail),
             }
             if admission is not None:
                 entry["admission"] = admission
@@ -455,8 +545,76 @@ async def get_models_activity(
                 entry["runtimePreset"] = preset_info["presetKey"]
                 entry["effectiveContext"] = preset_info["effectiveContext"]
             activity[state.model_id] = entry
+    live_activity.prune_estimates(live_ids)
+    contexts: dict[str, dict] = {}
+    registry = getattr(request.app.state, "profile_registry", None)
+    profiles: list = []
+    if registry is not None:
+        try:
+            profiles = await registry.list_all()
+        except Exception:  # noqa: BLE001
+            profiles = []
+    gpu_manager = getattr(mm, "gpu_manager", None)
+    gpu_states: list = []
+    if gpu_manager is not None:
+        try:
+            gpu_states = await gpu_manager.get_all_states()
+        except Exception:  # noqa: BLE001
+            gpu_states = []
+    worker_pids: dict[str, list[int]] = {}
+    for state in states:
+        derived_meta = runtime_meta_by_canonical.get(state.model_id)
+        loaded = getattr(state.status, "value", state.status) == "loaded"
+        if not loaded and derived_meta is None:
+            continue
+        worker_port: int | None = None
+        get_worker = getattr(worker_pool, "get_worker", None)
+        if callable(get_worker):
+            for key in (state.model_id, *loaded_worker_keys_by_canonical.get(state.model_id, ())):
+                try:
+                    info = get_worker(key)
+                except Exception:  # noqa: BLE001
+                    info = None
+                if info is None:
+                    continue
+                worker_port = worker_port or getattr(info, "port", None)
+                pid = getattr(info, "pid", 0)
+                # Ollama comparte un proceso entre modelos: NVML no sabe cual.
+                if pid and state.backend_type != "ollama":
+                    worker_pids.setdefault(state.model_id, []).append(int(pid))
+        gate_raw = None
+        if worker_pool is not None and hasattr(worker_pool, "peek_queue_state"):
+            for key in (state.model_id, *derived_keys_by_canonical.get(state.model_id, ())):
+                try:
+                    gate_raw = worker_pool.peek_queue_state(key)
+                except Exception:  # noqa: BLE001
+                    gate_raw = None
+                if gate_raw is not None:
+                    break
+        try:
+            ctx = await live_activity.model_context(
+                state,
+                runtime_meta=derived_meta,
+                gate=gate_raw,
+                request_details=(activity.get(state.model_id) or {}).get("requests", []),
+                profiles=profiles,
+                gpu_states=gpu_states,
+                worker_port=worker_port,
+            )
+        except Exception:  # noqa: BLE001 — una barra menos, no un 500
+            live_activity.logger.debug("live_context_failed", model_id=state.model_id, exc_info=True)
+            ctx = None
+        if ctx is not None:
+            contexts[state.model_id] = ctx
+    try:
+        vram_by_gpu = await live_activity.vram_by_gpu(worker_pids, gpu_states)
+    except Exception:  # noqa: BLE001 — sin desglose, la UI reparte a partes iguales
+        vram_by_gpu = {}
     return {
         "activity": activity,
+        "contexts": contexts,
+        # MB medidos por NVML de cada modelo en cada GPU ({modelo: {gpu: MB}}).
+        "vramByGpu": vram_by_gpu,
         "stuckThresholdSeconds": int(getattr(settings, "busy_timeout_seconds", 300)),
         # Same delivery as stuckThresholdSeconds: the card needs it to show the
         # idle-unload countdown, and shipping it here avoids threading server

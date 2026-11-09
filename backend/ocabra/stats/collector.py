@@ -22,7 +22,7 @@ from starlette.types import ASGIApp
 from ocabra.config import settings
 from ocabra.core.background_tasks import spawn
 from ocabra.core.model_manager_helpers import compute_worker_key
-from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_inflight_request_id
 from ocabra.core.runtime_coordinator import _text_size
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
@@ -512,6 +512,39 @@ def _mark_stream_first_token(
         telemetry.mark_first_token(now_monotonic)
 
 
+def _payload_streaming(payload: object) -> bool | None:
+    """``stream`` del cuerpo; Ollama nativo hace streaming por defecto."""
+    if not isinstance(payload, dict):
+        return None
+    if "stream" in payload:
+        return bool(payload.get("stream"))
+    return None
+
+
+def _payload_max_output_tokens(payload: object) -> int | None:
+    """Tope de salida pedido, en cualquiera de sus nombres (OpenAI y Ollama)."""
+    if not isinstance(payload, dict):
+        return None
+    candidates = [
+        payload.get("max_completion_tokens"),
+        payload.get("max_tokens"),
+        payload.get("max_output_tokens"),
+    ]
+    options = payload.get("options")
+    if isinstance(options, dict):
+        candidates.append(options.get("num_predict"))
+    for value in candidates:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return int(value)
+    return None
+
+
+def _stream_ttft_known(request: Request) -> bool:
+    """Si ``_mark_stream_first_token`` ya vio el primer token de este stream."""
+    telemetry = getattr(request.state, "runtime_telemetry", None)
+    return isinstance(telemetry, RequestRuntimeTelemetry) and telemetry.ttft_ms is not None
+
+
 def _ollama_tps(payload: dict, clave_tokens: str, clave_ns: str) -> float | None:
     """tokens/s de un par (contador, duracion en ns) de la respuesta de Ollama."""
 
@@ -700,6 +733,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 # model happens to be loaded locally.
                 request_kind=request_kind,
                 remote_bound=remote_bound,
+                streaming=_payload_streaming(request_payload),
+                max_output_tokens=_payload_max_output_tokens(request_payload),
             )
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
@@ -746,6 +781,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             request.state.inflight_model_id = inflight_model_id
             request.state.inflight_request_id = inflight_request_id
+            # Antes de ``call_next``: la app interna hereda el contexto y asi
+            # WorkerPool/FairSlotGate saben a que peticion pertenece su lease
+            # o el progreso de prefill que ven pasar.
+            current_inflight_request_id.set(inflight_request_id)
 
         try:
             response = await call_next(request)
@@ -928,12 +967,21 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 error_msg: str | None = None
                 stream_cancelled = False
                 last_progress_at = 0.0
+                first_token_reported = False
                 try:
                     async for chunk in original_iterator:
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8")
                         chunks.append(chunk)
                         _mark_stream_first_token(request, chunks, content_type)
+                        if (
+                            not first_token_reported
+                            and mm
+                            and inflight_request_id
+                            and _stream_ttft_known(request)
+                        ):
+                            first_token_reported = True
+                            mm.mark_request_first_token(inflight_request_id)
                         yield chunk
                         # Live progress for the model/GPU card "is this hung
                         # or still working" indicator (2026-10-29). Throttled

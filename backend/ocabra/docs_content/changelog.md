@@ -16,6 +16,48 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.61.0 — 2026-11-09
+
+### Cambios
+
+- **Streaming con llama.cpp: el servidor pide al backend el progreso del
+  prefill.** Para enseñar en el dashboard cuánto lleva procesado cada prompt,
+  oCabra añade `return_progress` a las peticiones en streaming que van a un
+  modelo `llama_cpp` o `llamacpp_mks`. Tu cliente no recibe nada nuevo: esos
+  chunks de progreso se consumen dentro del servidor y el stream que te llega
+  es el de siempre. Si tú mandabas `return_progress: true`, los sigues
+  recibiendo igual que antes.
+- **`GET /ocabra/models/activity` trae el estado real de cada petición en
+  curso.** Cada petición incluye ahora `stage` (`queued`, `loading`,
+  `waiting_for_gpu`, `prefill`, `generating` o `processing` si no hay
+  streaming), su puesto en la cola de admisión, el progreso del prefill
+  (`prompt`, `prefillPct`), los t/s de prefill y de generación medidos en su
+  propia fase, y la duración y espera estimadas. Hay una clave nueva,
+  `contexts`, con los niveles de contexto de cada modelo cargado por
+  colocación de GPU (en modelos vLLM, `usagePct` con la ocupación real del
+  pool KV), y otra, `vramByGpu`, con los MB que cada modelo ocupa en cada GPU
+  según NVML. En la cola, `predictedStartOrder` y `queueWaitEstimateMs`
+  tienen en cuenta el KV libre, no solo los slots: una petición pequeña puede
+  entrar antes que una grande que todavía no cabe. En backends que no
+  informan del prefill (Ollama, vLLM), `prefillPct` se estima con el ritmo de
+  prefill medido del modelo y `prefillSource` lo indica. Los campos
+  anteriores no cambian. `tokensPerSecond`
+  sigue dividiendo la salida entre todo el tiempo transcurrido; para el
+  ritmo real de generación usa `generationTokensPerSecond`.
+- **El mismo snapshot llega por WebSocket.** Si en `/ocabra/ws` mandas
+  `{"subscribe": "models_activity"}`, recibes un mensaje `models_activity`
+  cada segundo hasta que mandas `{"unsubscribe": "models_activity"}`.
+- **Más endpoints de lectura abiertos a cualquier usuario autenticado.**
+  `GET /ocabra/stats/recent`, `GET /ocabra/stats/requests`,
+  `GET /ocabra/stats/tokens`, `GET /ocabra/services` y
+  `GET /ocabra/downloads` ya no exigen rol `model_manager`; antes devolvían
+  403 a un usuario normal. Crear, modificar o cancelar sigue igual.
+- **`GET /ocabra/stats/recent` solo da la IP y el user agent a los admin.**
+  Para el resto de roles, `clientAddr` y `userAgent` llegan siempre a
+  `null`.
+
+---
+
 ## 0.60.3 — 2026-11-09
 
 ### Arreglos

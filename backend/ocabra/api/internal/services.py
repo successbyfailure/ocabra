@@ -33,7 +33,9 @@ class EnsureVramRequest(BaseModel):
 )
 async def list_services(
     request: Request,
-    _user: UserContext = Depends(require_role("model_manager")),
+    # Lectura abierta: el dashboard lo ve cualquier usuario (2026-11-09).
+    # Arrancar, parar o descargar un servicio sigue pidiendo model_manager.
+    _user: UserContext = Depends(require_role("user")),
 ) -> list[dict]:
     sm = request.app.state.service_manager
     states = await sm.list_states()

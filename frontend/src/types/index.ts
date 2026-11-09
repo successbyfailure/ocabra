@@ -731,6 +731,80 @@ export interface ActiveRequestProgress {
   lastActivitySecondsAgo: number;
   phase: RequestLoadPhase;
   waitingOnModelId: string | null;
+  // ── Dashboard en vivo (v0.61.0) ──
+  /** Fase real: en cola del gate, cargando, prefill, generando, o
+   *  "processing" para peticiones sin streaming (no hay eventos que ver). */
+  stage?: RequestStage;
+  streaming?: boolean | null;
+  requestKind?: string | null;
+  profileId?: string | null;
+  apiKeyName?: string | null;
+  source?: string | null;
+  /** Epoch en segundos. */
+  startedAt?: number;
+  elapsedMs?: number;
+  /** ms desde la llegada hasta obtener slot / hasta el primer token. */
+  admittedAfterMs?: number | null;
+  firstTokenAfterMs?: number | null;
+  kvReservedTokens?: number | null;
+  /** Puesto en el turno real del gate (0 = la siguiente en entrar). */
+  queuePosition?: number | null;
+  queuedMs?: number | null;
+  prompt?: {
+    totalTokens: number | null;
+    cachedTokens: number | null;
+    processedTokens: number | null;
+    /** "live": lo informa llama.cpp; "estimate": recuento aproximado. */
+    source: "live" | "estimate";
+  };
+  prefillPct?: number | null;
+  prefillTokensPerSecond?: number | null;
+  /** live: lo informa llama.cpp · historical: ritmo medido del modelo ·
+   *  regression: pendiente del estimador · estimate: inferido del primer token. */
+  prefillSource?: "live" | "historical" | "regression" | "estimate" | null;
+  outputTokens?: number | null;
+  maxOutputTokens?: number | null;
+  generationTokensPerSecond?: number | null;
+  expectedDurationMs?: number | null;
+  estimatedRemainingMs?: number | null;
+  queueWaitEstimateMs?: number | null;
+  /** Orden en que se prevé que entre, teniendo en cuenta el KV libre: puede
+   *  diferir del turno (una pequeña adelanta a una grande que no cabe). */
+  predictedStartOrder?: number | null;
+}
+
+export type RequestStage =
+  | "queued"
+  | "loading"
+  | "waiting_for_gpu"
+  | "prefill"
+  | "generating"
+  | "processing";
+
+/** Un nivel de contexto: lo que cabe con una colocación de GPUs dada. */
+export interface ContextTier {
+  presetKey: string | null;
+  gpus: number[];
+  maxTokens: number;
+  slots: number | null;
+}
+
+/** Datos de la barra de contexto de un modelo cargado. */
+export interface ModelContextInfo {
+  /** pool = KV unificada (llama.cpp mks); slots = parcelas fijas (Ollama,
+   *  llama.cpp sin pool); paged = vLLM. */
+  mode: "pool" | "slots" | "paged";
+  scaleMaxTokens: number | null;
+  activeMaxTokens: number | null;
+  activePresetKey: string | null;
+  activeGpus: number[];
+  /** Tope del mayor nivel de una sola GPU: la marca de la barra. */
+  singleGpuMaxTokens: number | null;
+  tiers: ContextTier[];
+  reservedTokens: number | null;
+  segments: { requestId: string; reservedTokens: number | null; usedTokens: number | null }[];
+  usagePct: number | null;
+  source: "live" | "estimate";
 }
 
 /** Fair-share gate snapshot: queue depth and KV pool occupancy. Only present
@@ -765,10 +839,19 @@ export interface ModelActivity {
    *  worker state. Without these the KV bar is a number with no reference. */
   runtimePreset?: string | null;
   effectiveContext?: number | null;
+  stages?: Partial<Record<RequestStage, number>>;
+  queuedCount?: number;
+  /** t/s medidos en su propia fase (no divididos por el tiempo total). */
+  prefillTokensPerSecondTotal?: number | null;
+  generationTokensPerSecondTotal?: number | null;
 }
 
 export interface ModelActivityMap {
   activity: Record<string, ModelActivity>;
+  /** Barra de contexto de cada modelo cargado, aunque no tenga peticiones. */
+  contexts?: Record<string, ModelContextInfo>;
+  /** MB medidos por NVML de cada modelo en cada GPU: {modelId: {"0": MB}}. */
+  vramByGpu?: Record<string, Record<string, number>>;
   stuckThresholdSeconds: number;
   /** Seconds of inactivity after which an on_demand model is unloaded. */
   idleTimeoutSeconds?: number;
@@ -913,6 +996,15 @@ export interface RecentRequest {
   queuePosition?: number;
   slots?: number;
   queueWaitEstimateMs?: number | null;
+  // v0.60.0: rendimiento de peticiones terminadas.
+  queueMs?: number | null;
+  promptTokensPerSecond?: number | null;
+  predictedTokensPerSecond?: number | null;
+  generationMs?: number | null;
+  cachedTokens?: number | null;
+  effectiveContext?: number | null;
+  runtimePreset?: string | null;
+  gpuIndex?: number | null;
   runtimeTelemetry?: {
     prompt_tokens_estimate?: number;
     kv_tokens_reserved?: number;

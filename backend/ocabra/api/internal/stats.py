@@ -27,7 +27,8 @@ async def request_stats(
     to_dt: datetime | None = Query(None, alias="to"),
     model_id: str | None = Query(None, alias="model_id"),
     model_id_camel: str | None = Query(None, alias="modelId"),
-    _user: UserContext = Depends(require_role("model_manager")),
+    # Agregado global, sin datos por usuario: lo ve el dashboard de todos.
+    _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """Return aggregated request statistics for the given time window."""
     from ocabra.stats.aggregator import get_request_stats
@@ -104,7 +105,8 @@ async def token_stats(
     all_time_camel: Annotated[bool | None, Query(alias="allTime")] = None,
     include_series: Annotated[bool | None, Query(alias="include_series")] = None,
     include_series_camel: Annotated[bool | None, Query(alias="includeSeries")] = None,
-    _user: UserContext = Depends(require_role("model_manager")),
+    # Agregado global, sin datos por usuario: lo ve el dashboard de todos.
+    _user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """Return token usage totals and timeline."""
     from ocabra.stats.aggregator import get_token_stats
@@ -151,10 +153,14 @@ async def overview_stats(
 async def recent_requests(
     request: Request,
     limit: int = Query(20, ge=1, le=200),
-    user: UserContext = Depends(require_role("model_manager")),
+    user: UserContext = Depends(require_role("user")),
 ) -> dict:
     """Return the most recent N inference requests with user and group info,
     with any currently in-flight requests prepended.
+
+    Any authenticated user can read it (the dashboard shows everything to
+    everyone, 2026-11-09), but ``clientAddr`` and ``userAgent`` are only
+    filled in for admins: for everyone else they are always ``null``.
 
     Args:
         limit: Max number of records to return (default 20, max 200).
@@ -298,6 +304,10 @@ async def recent_requests(
     for row in result.get("requests", []):
         row["inFlight"] = False
     result["requests"] = in_flight_rows + result.get("requests", [])
+    if not user.is_admin:
+        for row in result["requests"]:
+            row["clientAddr"] = None
+            row["userAgent"] = None
     return result
 
 

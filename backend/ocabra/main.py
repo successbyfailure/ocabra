@@ -742,6 +742,8 @@ async def lifespan(app: FastAPI):
     batch_priority = BatchPriorityCoordinator()
     app.state.batch_priority = batch_priority
     worker_pool.set_batch_priority(batch_priority, duration_estimator)
+    # Progreso de prefill de llama.cpp -> peticion en vuelo (dashboard).
+    worker_pool.set_prompt_progress_sink(model_manager.update_prompt_progress)
     model_manager.set_batch_priority(batch_priority)
     logger.info("batch_priority_coordinator_ready")
 

@@ -263,6 +263,27 @@ class ActiveRequest:
     input_tokens_estimate: int | None = None
     output_tokens_estimate: int | None = None
     last_activity_at: float = 0.0
+    # Dashboard en vivo (2026-11-09). ``request_kind`` lo da el middleware
+    # (chat, embeddings, transcripcion...); antes la fila en vuelo salia con
+    # ``requestKind: null`` aunque se supiera desde la admision.
+    request_kind: str | None = None
+    # Del cuerpo de la peticion. Sin streaming no hay primer token ni progreso
+    # que observar: la UI debe decir "procesando (estimado)" en vez de dejarla
+    # eternamente en prefill. ``max_output_tokens`` alimenta la estimacion.
+    streaming: bool | None = None
+    max_output_tokens: int | None = None
+    # Primer token visible (contenido o razonamiento) del stream: separa la
+    # fase de prefill de la de generacion y es la base del t/s de generacion
+    # en vivo. ``None`` mientras no haya llegado o si no hay streaming.
+    first_token_at: float | None = None
+    # Progreso real de prefill, solo para llama.cpp (``return_progress``):
+    # tokens del prompt, cuantos venian de cache y cuantos lleva procesados,
+    # y el tiempo que lleva el servidor con ellos. Ver
+    # ``WorkerPool._strip_prompt_progress_stream``.
+    prompt_tokens_total: int | None = None
+    prompt_tokens_cached: int | None = None
+    prompt_tokens_processed: int | None = None
+    prompt_progress_ms: int | None = None
 
 
 async def _measure_process_ram_mb(pid: int) -> int:
@@ -581,6 +602,8 @@ class ModelManager:
         input_tokens_estimate: int | None = None,
         request_kind: str | None = None,
         remote_bound: bool = False,
+        streaming: bool | None = None,
+        max_output_tokens: int | None = None,
     ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
@@ -622,6 +645,9 @@ class ModelManager:
                 task=owning_task,
                 input_tokens_estimate=input_tokens_estimate,
                 last_activity_at=now,
+                request_kind=request_kind,
+                streaming=streaming,
+                max_output_tokens=max_output_tokens,
             )
         # Bloque 20 — track start on the estimator so
         # ``in_flight_remaining`` returns useful numbers for the dynamic
@@ -648,7 +674,48 @@ class ModelManager:
             req = self._active_requests.get(request_id)
             if req is None:
                 return
+            now = time.time()
             req.output_tokens_estimate = output_tokens_estimate
+            req.last_activity_at = now
+            if req.first_token_at is None and output_tokens_estimate:
+                req.first_token_at = now
+
+    def mark_request_first_token(self, request_id: str) -> None:
+        """Fija el instante del primer token si aun no lo estaba.
+
+        Lo llama el tee de streaming en cuanto ve el primer token, sin esperar
+        al muestreo de ~2 Hz de ``update_request_progress``: con un prompt
+        corto la fase de prefill puede durar menos que ese intervalo.
+        """
+        with self._in_flight_lock:
+            req = self._active_requests.get(request_id)
+            if req is not None and req.first_token_at is None:
+                req.first_token_at = time.time()
+                req.last_activity_at = req.first_token_at
+
+    def update_prompt_progress(
+        self,
+        request_id: str,
+        *,
+        total: int | None,
+        cached: int | None,
+        processed: int | None,
+        elapsed_ms: int | None,
+    ) -> None:
+        """Progreso de prefill emitido por el backend (llama.cpp).
+
+        No-op si la peticion ya termino. Cuenta como actividad: durante un
+        prefill largo no llega ningun token, y sin esto la peticion pareceria
+        colgada.
+        """
+        with self._in_flight_lock:
+            req = self._active_requests.get(request_id)
+            if req is None:
+                return
+            req.prompt_tokens_total = total
+            req.prompt_tokens_cached = cached
+            req.prompt_tokens_processed = processed
+            req.prompt_progress_ms = elapsed_ms
             req.last_activity_at = time.time()
 
     def get_load_phase(self, model_id: str) -> tuple[str, str | None]:

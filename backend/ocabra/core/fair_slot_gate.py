@@ -35,6 +35,9 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
+
+from ocabra.core.request_telemetry import current_inflight_request_id
 
 
 class KVCapacityError(ValueError):
@@ -61,6 +64,9 @@ class _Waiter:
     track_prefill: bool = False
     granted: bool = False
     lease_id: int | None = None
+    # Peticion en vuelo de oCabra a la que pertenece (contextvar del
+    # middleware). Solo para el dashboard; la admision no lo usa.
+    request_id: str | None = None
 
 
 @dataclass
@@ -73,6 +79,7 @@ class _ActiveLease:
     prefill_pending: bool
     acquired_at: float
     owner_task: asyncio.Task | None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +281,63 @@ class FairSlotGate:
             "kv_free_tokens": free,
         }
 
+    def requests_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        """Detalle por peticion para el dashboard: quien tiene slot y la cola.
+
+        ``queued`` sale en el orden en que el gate los iria atendiendo si se
+        liberasen slots de uno en uno: se simula ``_dispatch_locked`` —el
+        usuario con la clave de prioridad mas baja cede su cabeza y su clave
+        pasa a "recien servido"— sin tocar el estado real. No modela que una
+        cabeza que no cabe (KV, computo, prefill) deje pasar a otra: es el
+        orden de turno, no una promesa de cuando entra cada una.
+        """
+        now = time.monotonic()
+        leases = [
+            {
+                "requestId": lease.request_id,
+                "kvTokens": lease.kv_tokens,
+                "promptTokens": lease.prompt_tokens,
+                "prefillPending": lease.prefill_pending,
+                "isBatch": lease.is_batch,
+                "heldMs": max(0, int((now - lease.acquired_at) * 1000)),
+            }
+            for lease in self._active_leases.values()
+        ]
+        queues = {
+            user_key: [w for w in queue if not w.future.done() and not w.granted]
+            for user_key, queue in self._queues.items()
+        }
+        queues = {user_key: list(q) for user_key, q in queues.items() if q}
+        last_served = dict(self._last_served)
+        seq = self._seq
+
+        def priority(user_key: str) -> tuple[int, int, int]:
+            batch_tier = 1 if queues[user_key][0].is_batch else 0
+            if user_key in last_served:
+                return (batch_tier, 1, last_served[user_key])
+            return (batch_tier, 0, self._first_seen.get(user_key, 0))
+
+        queued: list[dict[str, Any]] = []
+        while queues:
+            user_key = min(queues, key=priority)
+            waiter = queues[user_key].pop(0)
+            if not queues[user_key]:
+                queues.pop(user_key)
+            last_served[user_key] = seq
+            seq += 1
+            queued.append(
+                {
+                    "requestId": waiter.request_id,
+                    "userKey": user_key,
+                    "kvTokens": waiter.kv_tokens,
+                    "promptTokens": waiter.prompt_tokens,
+                    "isBatch": waiter.is_batch,
+                    "waitedMs": max(0, int((now - waiter.queued_at) * 1000)),
+                    "position": len(queued),
+                }
+            )
+        return {"leases": leases, "queued": queued}
+
     def is_idle(self) -> bool:
         """Return whether replacing this gate cannot orphan a lease/waiter."""
         return self._in_flight == 0 and not any(self._queues.values())
@@ -309,6 +373,7 @@ class FairSlotGate:
             queued_at=time.monotonic(),
             owner_task=asyncio.current_task() if _track_owner else None,
             track_prefill=_track_prefill,
+            request_id=current_inflight_request_id.get(),
         )
         async with self._lock:
             self._reap_finished_leases_locked()
@@ -403,6 +468,7 @@ class FairSlotGate:
                 prefill_pending=waiter.track_prefill,
                 acquired_at=time.monotonic(),
                 owner_task=waiter.owner_task,
+                request_id=waiter.request_id,
             )
             if waiter.is_batch:
                 self._in_flight_batch += 1

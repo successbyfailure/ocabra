@@ -20,6 +20,8 @@ const {
   getServerPower,
   getActivity,
   getOllamaRuntime,
+  getRecent,
+  getPeers,
 } = vi.hoisted(() => ({
   listGpus: vi.fn(),
   listModels: vi.fn(),
@@ -32,6 +34,8 @@ const {
   getServerPower: vi.fn(),
   getActivity: vi.fn(),
   getOllamaRuntime: vi.fn(),
+  getRecent: vi.fn(),
+  getPeers: vi.fn(),
 }))
 
 vi.mock("@/hooks/useWebSocket", () => ({
@@ -50,12 +54,26 @@ vi.mock("@/api/client", () => ({
       requests: getRequestStats,
       energy: getEnergyStats,
       serverPower: getServerPower,
+      recent: getRecent,
+      cancelRequest: vi.fn(),
     },
+    federation: { getPeers },
   },
 }))
 
+// jsdom intentaría conectar de verdad: un socket que nunca abre deja al hook
+// en su respaldo REST, que es lo que se prueba aquí.
+class FakeWebSocket {
+  onopen: (() => void) | null = null
+  onmessage: ((e: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  send() {}
+  close() {}
+}
+
 describe("Dashboard", () => {
   beforeEach(() => {
+    vi.stubGlobal("WebSocket", FakeWebSocket)
     vi.stubGlobal(
       "ResizeObserver",
       class ResizeObserver {
@@ -242,6 +260,8 @@ describe("Dashboard", () => {
     })
     getActivity.mockResolvedValue({ activity: {}, stuckThresholdSeconds: 300 })
     getOllamaRuntime.mockResolvedValue({})
+    getRecent.mockResolvedValue({ requests: [] })
+    getPeers.mockResolvedValue([])
   })
 
   it("loads and renders dashboard sections with API data", async () => {
@@ -251,16 +271,154 @@ describe("Dashboard", () => {
       expect(screen.getByText("RTX 3090")).toBeTruthy()
       expect(screen.getAllByText("Mistral 7B").length).toBeGreaterThan(0)
       expect(screen.getByText("Qwen 14B")).toBeTruthy()
-      expect(screen.getByText("Tokens · historico")).toBeTruthy()
-      expect(screen.getAllByText("2.0M").length).toBeGreaterThan(0)
-      expect(screen.getAllByText("1.5M").length).toBeGreaterThan(0)
+      expect(screen.getByText("Peticiones · 1 h / 24 h")).toBeTruthy()
+      expect(screen.getByText("310 W")).toBeTruthy()
+      expect(screen.getByText(/Sin peticiones en cola/)).toBeTruthy()
     })
 
     expect(listGpus).toHaveBeenCalledTimes(1)
     expect(listModels).toHaveBeenCalledTimes(1)
-    expect(listDownloads).toHaveBeenCalledTimes(1)
     expect(listServices).toHaveBeenCalledTimes(1)
-    expect(getTokens).toHaveBeenCalledWith({ allTime: true, includeSeries: false })
+    // Retiradas del dashboard: agentes activos y la sección de descargas
+    // (ahora es un indicador de la cabecera).
+    expect(screen.queryByText(/Active agents/i)).toBeNull()
+    expect(screen.queryByText("Descargas activas")).toBeNull()
+  })
+
+  it("renders live requests, the queue and the context bar with its one-GPU mark", async () => {
+    const now = Date.now() / 1000
+    const base = {
+      username: "ana",
+      inputTokensEstimate: 9000,
+      outputTokensEstimate: null,
+      tokensPerSecond: null,
+      lastActivitySecondsAgo: 0.2,
+      phase: "generating",
+      waitingOnModelId: null,
+      streaming: true,
+      requestKind: "chat",
+      profileId: "mistral",
+      apiKeyName: null,
+      source: "api",
+      kvReservedTokens: 20000,
+      queuePosition: null,
+      queuedMs: null,
+      maxOutputTokens: null,
+      expectedDurationMs: 20000,
+    }
+    getActivity.mockResolvedValue({
+      stuckThresholdSeconds: 300,
+      idleTimeoutSeconds: 300,
+      activity: {
+        "mistral-7b": {
+          inFlight: 3,
+          oldestSeconds: 12,
+          slots: 2,
+          queuedCount: 1,
+          prefillTokensPerSecondTotal: 1800,
+          generationTokensPerSecondTotal: 42.5,
+          requests: [
+            {
+              ...base,
+              requestId: "gen",
+              stage: "generating",
+              startedAt: now - 12,
+              elapsedSeconds: 12,
+              elapsedMs: 12000,
+              admittedAfterMs: 0,
+              firstTokenAfterMs: 4000,
+              prompt: { totalTokens: 9000, cachedTokens: 3000, processedTokens: 9000, source: "live" },
+              prefillPct: 100,
+              prefillTokensPerSecond: 1500,
+              prefillSource: "live",
+              outputTokens: 340,
+              generationTokensPerSecond: 42.5,
+              estimatedRemainingMs: 8000,
+            },
+            {
+              ...base,
+              requestId: "pre",
+              username: "luis",
+              stage: "prefill",
+              startedAt: now - 3,
+              elapsedSeconds: 3,
+              elapsedMs: 3000,
+              admittedAfterMs: 0,
+              firstTokenAfterMs: null,
+              prompt: { totalTokens: 50000, cachedTokens: 0, processedTokens: 30000, source: "live" },
+              prefillPct: 60,
+              prefillTokensPerSecond: 1800,
+              prefillSource: "live",
+              outputTokens: null,
+              generationTokensPerSecond: null,
+              estimatedRemainingMs: 30000,
+            },
+            {
+              ...base,
+              requestId: "q",
+              username: "eva",
+              stage: "queued",
+              startedAt: now - 1,
+              elapsedSeconds: 1,
+              elapsedMs: 1000,
+              admittedAfterMs: null,
+              firstTokenAfterMs: null,
+              queuePosition: 0,
+              queuedMs: 1000,
+              prompt: { totalTokens: 400, cachedTokens: null, processedTokens: null, source: "estimate" },
+              prefillPct: null,
+              prefillTokensPerSecond: null,
+              prefillSource: null,
+              outputTokens: null,
+              generationTokensPerSecond: null,
+              estimatedRemainingMs: null,
+              queueWaitEstimateMs: 8000,
+            },
+          ],
+        },
+      },
+      contexts: {
+        "mistral-7b": {
+          mode: "pool",
+          scaleMaxTokens: 262144,
+          activeMaxTokens: 98304,
+          activePresetKey: "normal",
+          activeGpus: [0],
+          singleGpuMaxTokens: 98304,
+          tiers: [
+            { presetKey: "normal", gpus: [0], maxTokens: 98304, slots: 4 },
+            { presetKey: "extended", gpus: [0, 1], maxTokens: 262144, slots: 4 },
+          ],
+          reservedTokens: 40000,
+          segments: [
+            { requestId: "gen", reservedTokens: 20000, usedTokens: 9340 },
+            { requestId: "pre", reservedTokens: 20000, usedTokens: 30000 },
+          ],
+          usagePct: null,
+          source: "live",
+        },
+      },
+    })
+
+    render(<Dashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByText("prefill 60% · 30.0k/50.0k")).toBeTruthy()
+      expect(screen.getByText("340 tok")).toBeTruthy()
+      // Totales de la card: 2 en curso de 2 slots, 1 en cola.
+      expect(screen.getByText("2/2")).toBeTruthy()
+      // Cola: puesto, usuario y espera estimada.
+      expect(screen.getByText("#1")).toBeTruthy()
+      expect(screen.getByText("eva")).toBeTruthy()
+      expect(screen.getByText("entra en ~8 s")).toBeTruthy()
+      // Barra de contexto: marca del tope de una GPU y escala de dos.
+      expect(screen.getByText("96k · GPU 0")).toBeTruthy()
+      expect(screen.getByText("256k · 2 GPU")).toBeTruthy()
+      expect(screen.getByText(/rayado: requiere escalar/)).toBeTruthy()
+    })
+    // La petición en cola no sale como barra en la card, solo en la cola.
+    expect(document.querySelectorAll('[data-stage="queued"]').length).toBe(0)
+    expect(document.querySelectorAll('[data-stage="prefill"]').length).toBe(1)
   })
 
   it("explains that external runtimes do not count as active models", async () => {

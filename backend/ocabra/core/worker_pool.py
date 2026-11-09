@@ -13,7 +13,7 @@ from ocabra.config import settings
 from ocabra.core.background_tasks import spawn
 from ocabra.core.fair_slot_gate import WorkerPoolFairGates
 from ocabra.core.model_ref import is_llama_cpp_family
-from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_inflight_request_id
 from ocabra.core.runtime_coordinator import estimate_prompt_tokens
 
 logger = structlog.get_logger(__name__)
@@ -439,6 +439,62 @@ def _log_upstream_http_error(
     )
 
 
+def _consume_progress_event(event: bytes, *, request_id: str, sink: Any, strip: bool) -> bytes:
+    """Procesa un evento SSE con ``prompt_progress``; devuelve lo que reenviar."""
+    text = event.decode("utf-8", errors="ignore")
+    data_lines = [line[5:].lstrip() for line in text.splitlines() if line.startswith("data:")]
+    if len(data_lines) != 1:
+        return event
+    try:
+        payload = _json.loads(data_lines[0])
+    except ValueError:
+        return event
+    if not isinstance(payload, dict):
+        return event
+    progress = payload.get("prompt_progress")
+    if isinstance(progress, dict):
+
+        def _int(key: str) -> int | None:
+            value = progress.get(key)
+            return int(value) if isinstance(value, (int, float)) else None
+
+        try:
+            sink(
+                request_id,
+                total=_int("total"),
+                cached=_int("cache"),
+                processed=_int("processed"),
+                elapsed_ms=_int("time_ms"),
+            )
+        except Exception:  # noqa: BLE001 — telemetria, nunca rompe el stream
+            logger.debug("prompt_progress_sink_failed", request_id=request_id)
+    if not strip:
+        return event
+    payload.pop("prompt_progress", None)
+    if not _sse_payload_has_output(payload):
+        return b""
+    return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+
+def _sse_payload_has_output(payload: dict) -> bool:
+    """Si un chunk OpenAI aporta algo al cliente mas alla del progreso."""
+    if payload.get("timings") or payload.get("usage"):
+        return True
+    for choice in payload.get("choices") or []:
+        if not isinstance(choice, dict):
+            return True
+        if choice.get("finish_reason") is not None:
+            return True
+        if choice.get("text"):
+            return True
+        delta = choice.get("delta")
+        if isinstance(delta, dict) and any(
+            delta.get(key) for key in ("content", "reasoning_content", "reasoning", "tool_calls")
+        ):
+            return True
+    return False
+
+
 def _looks_like_dead_backend(exc: httpx.HTTPStatusError) -> bool:
     if exc.response.status_code < 500:
         return False
@@ -472,6 +528,13 @@ class WorkerPool:
         # nothing ever preempts an already-running batch request.
         self._batch_priority: Any | None = None
         self._duration_estimator: Any | None = None
+        # Destino del progreso de prefill de llama.cpp (``return_progress``):
+        # ``ModelManager.update_prompt_progress``, conectado en main.py. None =
+        # no se pide progreso al backend y el stream queda como siempre.
+        self._prompt_progress_sink: Any | None = None
+
+    def set_prompt_progress_sink(self, sink: Any | None) -> None:
+        self._prompt_progress_sink = sink
 
     def set_batch_priority(self, coordinator: Any, duration_estimator: Any | None = None) -> None:
         self._batch_priority = coordinator
@@ -529,6 +592,20 @@ class WorkerPool:
         if gate is None:
             return None
         return gate.peek_priority(user_key, is_batch=is_batch)
+
+    def peek_gate_requests(self, model_id: str) -> dict[str, list[dict[str, Any]]] | None:
+        """Leases y cola por peticion del gate de ``model_id`` (solo lectura).
+
+        ``None`` si ese worker no tiene gate: no se crea uno para contestar.
+        """
+        gate = self._fair_gates.peek(model_id)
+        if gate is None:
+            return None
+        return gate.requests_snapshot()
+
+    def gate_keys(self) -> list[str]:
+        """Workers con gate de admision vivo."""
+        return list(self._fair_gates._gates)  # noqa: SLF001 — mismo modulo logico
 
     def _fair_gate(
         self,
@@ -874,6 +951,26 @@ class WorkerPool:
             requested_model = worker.model_id
             url = f"http://127.0.0.1:{worker.port}{path}"
 
+        # Progreso real de prefill para el dashboard (2026-11-09). llama.cpp
+        # lo emite en el propio stream si se pide ``return_progress``: asi se
+        # sabe de que peticion es sin emparejar slots de ``/slots``. Esos
+        # chunks se consumen aqui y no llegan al cliente (salvo que los
+        # pidiera el), de modo que el resto de la cadena —incluido el "primer
+        # chunk = fin del prefill" del gate— ve exactamente el stream de antes:
+        # sin ``return_progress`` llama-server no manda ningun dato hasta el
+        # primer token.
+        progress_request_id = current_inflight_request_id.get()
+        track_progress = (
+            self._prompt_progress_sink is not None
+            and progress_request_id is not None
+            and is_llama_cpp_family(worker.backend_type)
+            and path.endswith("/completions")
+            and bool(body.get("stream"))
+        )
+        client_wants_progress = bool(body.get("return_progress"))
+        if track_progress and not client_wants_progress:
+            body = {**body, "return_progress": True}
+
         async def _raw_stream() -> AsyncIterator[bytes]:
             # Cancellation contract: when the client disconnects, Starlette cancels
             # the streaming task; the CancelledError unwinds through this generator
@@ -927,6 +1024,13 @@ class WorkerPool:
         # Normalize reasoning → reasoning_content for chat completions
         is_chat = "/chat/completions" in path
         source: AsyncIterator[bytes] = _raw_stream()
+        if track_progress:
+            source = self._strip_prompt_progress_stream(
+                source,
+                request_id=progress_request_id,
+                sink=self._prompt_progress_sink,
+                strip=not client_wants_progress,
+            )
         if ollama_adapter is not None:
             source = self._ollama_native_stream(
                 source,
@@ -954,6 +1058,44 @@ class WorkerPool:
     # ------------------------------------------------------------------
     # SSE normalisation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _strip_prompt_progress_stream(
+        raw: AsyncIterator[bytes],
+        *,
+        request_id: str,
+        sink: Any,
+        strip: bool,
+    ) -> AsyncIterator[bytes]:
+        """Lee ``prompt_progress`` del SSE de llama.cpp y, si ``strip``, lo quita.
+
+        Reensambla eventos SSE completos (separados por linea en blanco),
+        porque un chunk de bytes puede partir un evento. Solo se parsean los
+        eventos que mencionan ``prompt_progress``; el resto pasa intacto. Un
+        evento que solo traia progreso (delta vacio, sin ``finish_reason``)
+        se descarta entero; si llevara contenido, se reenvia sin el campo.
+        Un fallo del sink nunca corta el stream.
+        """
+        buf = b""
+        marker = b'"prompt_progress"'
+        async for chunk in raw:
+            buf += chunk
+            out: list[bytes] = []
+            while True:
+                idx = buf.find(b"\n\n")
+                if idx < 0:
+                    break
+                event, buf = buf[: idx + 2], buf[idx + 2 :]
+                if marker not in event:
+                    out.append(event)
+                    continue
+                kept = _consume_progress_event(event, request_id=request_id, sink=sink, strip=strip)
+                if kept:
+                    out.append(kept)
+            if out:
+                yield b"".join(out)
+        if buf:
+            yield buf
 
     @staticmethod
     async def _ollama_native_stream(

@@ -471,6 +471,8 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
         input_tokens_estimate=None,
         request_kind="chat",
         remote_bound=False,
+        streaming=None,
+        max_output_tokens=None,
     )
     model_manager.end_request.assert_called_once_with(
         "ollama/gemma:12b",

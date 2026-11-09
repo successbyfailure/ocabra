@@ -3,7 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog"
 import { Download, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import { useDownloadStore } from "@/stores/downloadStore"
+import { useDownloadStore, visibleDownloadJobs } from "@/stores/downloadStore"
 import type { DownloadJob } from "@/types"
 
 interface DownloadQueueProps {
@@ -15,7 +15,18 @@ export function DownloadQueue({ jobs: jobsProp, onCancel: onCancelProp }: Downlo
   const storeJobs = useDownloadStore((state) => state.jobs)
   const setJobs = useDownloadStore((state) => state.setJobs)
   const updateJob = useDownloadStore((state) => state.updateJob)
-  const [open, setOpen] = useState(false)
+  // Montado globalmente, lo abre la píldora de descargas de la cabecera
+  // (el estado vive en el store). Con jobs por props se controla solo.
+  const storeOpen = useDownloadStore((state) => state.queueOpen)
+  const setStoreOpen = useDownloadStore((state) => state.setQueueOpen)
+  const [localOpen, setLocalOpen] = useState(false)
+  const global = jobsProp === undefined
+  const open = global ? storeOpen : localOpen
+  const setOpen = (next: boolean | ((curr: boolean) => boolean)) => {
+    const value = typeof next === "function" ? next(open) : next
+    if (global) setStoreOpen(value)
+    else setLocalOpen(value)
+  }
   const [targetJob, setTargetJob] = useState<DownloadJob | null>(null)
 
   const jobs = jobsProp ?? storeJobs
@@ -92,17 +103,7 @@ export function DownloadQueue({ jobs: jobsProp, onCancel: onCancelProp }: Downlo
     }
   }
 
-  // Hide cancelled and stale finished jobs (older than 1h) so the widget
-  // doesn't accumulate forever when mounted globally.
-  const cutoff = Date.now() - 60 * 60 * 1000
-  const visibleJobs = jobs.filter((job) => {
-    if (job.status === "cancelled") return false
-    if (job.status === "completed" || job.status === "failed") {
-      const finished = job.completedAt ? Date.parse(job.completedAt) : NaN
-      if (Number.isFinite(finished) && finished < cutoff) return false
-    }
-    return true
-  })
+  const visibleJobs = visibleDownloadJobs(jobs)
   const activeCount = visibleJobs.filter(
     (job) => job.status === "queued" || job.status === "downloading",
   ).length
@@ -110,6 +111,8 @@ export function DownloadQueue({ jobs: jobsProp, onCancel: onCancelProp }: Downlo
     (job) => job.kind === "update" && (job.status === "queued" || job.status === "downloading"),
   )
   if (visibleJobs.length === 0) return null
+  // Global y cerrado: no hay barra plegada flotando; se abre desde la cabecera.
+  if (global && !open) return null
 
   return (
     <div className="fixed bottom-4 right-4 z-30 w-[90vw] max-w-sm rounded-lg border border-border bg-card/95 p-3 shadow-xl backdrop-blur">
@@ -123,7 +126,7 @@ export function DownloadQueue({ jobs: jobsProp, onCancel: onCancelProp }: Downlo
           {updatesActive ? "Descargas y actualizaciones" : "Cola de descargas"} ({activeCount}
           {activeCount !== visibleJobs.length ? `/${visibleJobs.length}` : ""})
         </span>
-        <span className="text-xs text-muted-foreground">{open ? "Ocultar" : "Mostrar"}</span>
+        <span className="text-xs text-muted-foreground">{open ? (global ? "Cerrar" : "Ocultar") : "Mostrar"}</span>
       </button>
 
       {open && (
