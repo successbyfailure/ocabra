@@ -264,8 +264,11 @@ async def attach_estimates(
         # Lo esperado cuenta desde la admision, no desde la llegada.
         running_ms = detail["elapsedMs"] - (detail.get("admittedAfterMs") or 0)
         remaining = max(0, expected_ms - running_ms)
-        if detail["stage"] == "backend_wait":
-            # Aun no ha empezado: le queda, como poco, toda su duracion.
+        if detail["stage"] in ("backend_wait", "loading", "waiting_for_gpu"):
+            # Aun no ha empezado (espera al backend, a la carga del modelo o a
+            # que se libere la GPU): le queda, como poco, toda su duracion. Antes
+            # el restante contaba hacia atras durante una carga de un minuto y
+            # llegaba a 0 sin haber procesado nada.
             remaining = expected_ms
         # Con progreso real, nunca menos que el prefill que falta a su ritmo.
         tps = detail.get("prefillTokensPerSecond")

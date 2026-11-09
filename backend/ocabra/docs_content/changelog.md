@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.61.2 — 2026-11-09
+
+### Arreglos
+
+- **`estimatedRemainingMs` ya no cuenta hacia atrás mientras el modelo se
+  carga o espera GPU.** Una petición en `loading` o `waiting_for_gpu` aún no
+  ha empezado, pero su tiempo restante bajaba con el reloj y podía llegar a 0
+  antes de procesar nada. Ahora conserva su duración estimada completa hasta
+  que empieza, igual que `backend_wait`.
+
+---
+
 ## 0.61.1 — 2026-11-09
 
 ### Arreglos

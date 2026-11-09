@@ -556,3 +556,24 @@ async def test_remaining_reestimated_with_real_prompt_and_never_below_prefill_le
     }
     await la.attach_estimates([waiting], estimator=Est(), model_id="m", backend_type="x", slots=4)
     assert waiting["estimatedRemainingMs"] == 15_000
+
+
+@pytest.mark.asyncio
+async def test_remaining_does_not_count_down_while_the_model_loads():
+    la._estimate_cache.clear()
+
+    class Est:
+        async def estimate(self, model_id, *, backend_type, input_tokens, max_tokens):
+            return SimpleNamespace(expected_s=15.0)
+
+    for stage in ("loading", "waiting_for_gpu"):
+        d = {
+            "requestId": stage,
+            "stage": stage,
+            "elapsedMs": 60_000,
+            "admittedAfterMs": 0,
+            "maxOutputTokens": None,
+            "prompt": {"totalTokens": 9000, "source": "estimate"},
+        }
+        await la.attach_estimates([d], estimator=Est(), model_id="m", backend_type="x", slots=4)
+        assert d["estimatedRemainingMs"] == 15_000
