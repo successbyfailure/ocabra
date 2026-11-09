@@ -279,17 +279,12 @@ async def attach_estimates(
             # el restante contaba hacia atras durante una carga de un minuto y
             # llegaba a 0 sin haber procesado nada.
             remaining = expected_ms
-        # Con progreso real, nunca menos que el prefill que falta a su ritmo.
-        tps = detail.get("prefillTokensPerSecond")
-        if (
-            detail["stage"] == "prefill"
-            and prompt.get("source") == "live"
-            and prompt.get("totalKnown", True)
-            and tps
-            and prompt.get("totalTokens")
-        ):
-            left = max(0, prompt["totalTokens"] - (prompt.get("processedTokens") or 0))
-            remaining = max(remaining, int(left / tps * 1000))
+        live_left = _live_remaining_ms(detail, (rates or {}).get(detail.get("rateKey") or ""))
+        if live_left is not None:
+            # Con ritmos medidos EN ESTA petición mandan ellos: el histórico
+            # del modelo puede ser 3 veces más lento (gemma4: 726 t/s de
+            # mediana frente a 2.300 t/s en vivo) y el restante salía inflado.
+            remaining = live_left
         detail["estimatedRemainingMs"] = remaining
 
     queued = sorted(
@@ -357,6 +352,38 @@ async def attach_estimates(
             _, kv = heapq.heappop(busy)
             if use_kv:
                 free_kv += kv
+
+
+def _live_remaining_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> int | None:
+    """Restante con los ritmos medidos en vivo en esta petición, si los hay.
+
+    En prefill con progreso real: lo que falta del prompt a su ritmo en vivo
+    más la salida esperada al ritmo de generación del modelo. Generando con
+    ritmo en vivo: los tokens que faltan hasta la salida esperada.
+    """
+    prompt = detail.get("prompt") or {}
+    typical = (rates or {}).get("output")
+    asked = detail.get("maxOutputTokens")
+    expected_out = min(asked, typical) if asked and typical else (asked or typical)
+    stage = detail.get("stage")
+    if (
+        stage == "prefill"
+        and prompt.get("source") == "live"
+        and detail.get("prefillSource") == "live"
+    ):
+        tps = detail.get("prefillTokensPerSecond")
+        if not tps:
+            return None
+        left = max(0, (prompt.get("totalTokens") or 0) - (prompt.get("processedTokens") or 0))
+        gen_rate = (rates or {}).get("generation")
+        gen_ms = expected_out / gen_rate * 1000 if expected_out and gen_rate else 0
+        return int(left / tps * 1000 + gen_ms)
+    if stage == "generating":
+        tps = detail.get("generationTokensPerSecond")
+        out = detail.get("outputTokens") or 0
+        if tps and expected_out:
+            return int(max(0, expected_out - out) / tps * 1000)
+    return None
 
 
 def prune_estimates(live_ids: set[str]) -> None:

@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.62.2 — 2026-11-10
+
+### Arreglos
+
+- **El tiempo restante usa el ritmo medido en la propia petición.** Si hay
+  ritmo en vivo de prefill o de generación, se calcula con él y no con la
+  mediana histórica del modelo, que puede ser varias veces más lenta. En
+  gemma4:26b, el histórico era de 726 t/s y la petición iba a 2.300 t/s:
+  marcaba 41 s restantes en una petición que terminó a los 20.
+
+---
+
 ## 0.62.1 — 2026-11-10
 
 ### Arreglos

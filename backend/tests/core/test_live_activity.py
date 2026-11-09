@@ -576,6 +576,7 @@ async def test_remaining_reestimated_with_real_prompt_and_never_below_prefill_le
         "elapsedMs": 20_000,
         "admittedAfterMs": 0,
         "prefillTokensPerSecond": 1000.0,
+        "prefillSource": "live",
         "maxOutputTokens": 64,
         "prompt": {"totalTokens": 70_000, "processedTokens": 20_000, "source": "live"},
     }
@@ -784,3 +785,40 @@ def test_slot_total_never_below_processed():
     assert d["prompt"]["processedTokens"] == 43_016
     assert d["prompt"]["totalTokens"] == 43_016
     assert d["prefillPct"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_rates_beat_slow_historical_rates():
+    """gemma4 en producción: mediana histórica de prefill 726 t/s, en vivo
+    2.300 t/s. El restante salía en 41 s y la petición acababa en 20."""
+    la._estimate_cache.clear()
+    rates = {"gemma4:26b": {"prefill": (726.0, "historical"), "generation": 140.0, "output": 528}}
+    prefill = {
+        "requestId": "p",
+        "rateKey": "gemma4:26b",
+        "stage": "prefill",
+        "elapsedMs": 10_000,
+        "admittedAfterMs": 0,
+        "maxOutputTokens": 200,
+        "prefillTokensPerSecond": 2300.0,
+        "prefillSource": "live",
+        "prompt": {"totalTokens": 43_912, "processedTokens": 20_912, "source": "live"},
+    }
+    generating = {
+        "requestId": "g",
+        "rateKey": "gemma4:26b",
+        "stage": "generating",
+        "elapsedMs": 20_000,
+        "admittedAfterMs": 0,
+        "maxOutputTokens": 200,
+        "outputTokens": 60,
+        "generationTokensPerSecond": 140.0,
+        "prompt": {"totalTokens": 1000, "source": "live"},
+    }
+    await la.attach_estimates(
+        [prefill, generating], estimator=None, model_id="m", backend_type="x", slots=4, rates=rates
+    )
+    # 23.000 tokens a 2.300 t/s = 10 s + 200 de salida a 140 t/s = 1,43 s.
+    assert prefill["estimatedRemainingMs"] == 11_428
+    # Faltan 140 tokens a 140 t/s.
+    assert generating["estimatedRemainingMs"] == 1_000
