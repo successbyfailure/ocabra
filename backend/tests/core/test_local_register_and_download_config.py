@@ -111,7 +111,12 @@ class TestRegisterLocalModel:
         assert kwargs["model_id"] == "llamacpp_mks/gemma4:26b"
         assert kwargs["backend_type"] == "llamacpp_mks"
         # Shared section name: the same config works on either llama.cpp backend.
-        assert kwargs["extra_config"] == {"llama_cpp": {"model_path": str(blob)}}
+        seccion = kwargs["extra_config"]["llama_cpp"]
+        assert seccion["model_path"] == str(blob)
+        # Y con los defaults de arranque: la seccion con solo model_path dejaba
+        # el modelo en CPU con 4096 de contexto (ver registration_defaults).
+        assert seccion["gpu_layers"] == 99
+        assert seccion["ctx_size"] > 4096
 
     @pytest.mark.asyncio
     async def test_conflict_when_already_registered(self, tmp_path, monkeypatch) -> None:

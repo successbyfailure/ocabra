@@ -172,6 +172,58 @@ def parse_gguf_tokenizer_fingerprint(
         return (None, None, None)
 
 
+def parse_gguf_context_length(path: Path) -> int | None:
+    """Native context length declared by a GGUF, or ``None``.
+
+    The key is namespaced by architecture (``qwen35moe.context_length``,
+    ``flint.context_length``, ...), so ``general.architecture`` has to be read
+    first. Used when registering a model to pick a context the model actually
+    supports instead of llama.cpp's 4096 fallback.
+    """
+
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(_GGUF_HEADER_MAX_BYTES)
+    except OSError:
+        return None
+
+    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
+        return None
+
+    buf = memoryview(data)
+    try:
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return None
+        (kv_count,) = struct.unpack_from("<Q", buf, 16)
+        offset = 24
+
+        arch: str | None = None
+        contextos: dict[str, int] = {}
+        for _ in range(int(kv_count)):
+            key, offset = _read_string(buf, offset)
+            (value_type,) = struct.unpack_from("<I", buf, offset)
+            offset += 4
+            value_type = int(value_type)
+            if key == "general.architecture" and value_type == _GGUF_TYPE_STRING:
+                arch, offset = _read_string(buf, offset)
+                continue
+            if key.endswith(".context_length") and value_type in _GGUF_SCALAR_FORMATS:
+                valor, offset = _read_scalar(buf, offset, value_type)
+                contextos[key] = int(valor)  # type: ignore[arg-type]
+                continue
+            offset = _skip_value(buf, offset, value_type)
+    except (struct.error, _GGUFParseError, IndexError, ValueError):
+        return None
+
+    if arch and f"{arch}.context_length" in contextos:
+        return contextos[f"{arch}.context_length"]
+    # Un solo candidato es inequivoco aunque no se haya leido la arquitectura.
+    if len(contextos) == 1:
+        return next(iter(contextos.values()))
+    return None
+
+
 # --- Which --spec-type a draft GGUF needs ---------------------------------
 # A draft model is useless to llama-server unless it is also told *how* to
 # drive it, and a draft with no type is not "no speculation": the server loads

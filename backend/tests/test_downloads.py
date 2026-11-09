@@ -347,3 +347,72 @@ async def test_ollama_pull_is_served_by_llamacpp_mks_and_keeps_ollama_as_fallbac
     assert call["artifact"]["source"] == "ollama" and call["artifact"]["ref"] == "gemma4:e4b"
     add_deployment.assert_awaited_once()
     assert add_deployment.await_args.args == ("gemma4:e4b", "ollama")
+
+
+@pytest.mark.asyncio
+async def test_un_pull_de_ollama_servido_por_llama_cpp_se_registra_usable() -> None:
+    """Sin esto el alta deja extra_config vacio y llama.cpp arranca en CPU.
+
+    Instalar desde Explore no manda ``extra_config``, y desde 0.47.0 un pull
+    de Ollama registra tambien un despliegue ``llamacpp_mks``. Con la seccion
+    vacia, ``_build_options`` cae a ``LLAMA_CPP_GPU_LAYERS=0`` y
+    ``LLAMA_CPP_CTX_SIZE=4096``: un modelo de 20 GiB intenta correr en CPU y
+    no carga. Este test mira lo que llega a ``add_model``, no la funcion de
+    defaults por separado.
+    """
+    manager = DownloadManager()
+    model_manager = SimpleNamespace(get_state=AsyncMock(return_value=None), add_model=AsyncMock())
+    manager._app = SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    manager._resolve_job_backend = AsyncMock(return_value="llamacpp_mks")
+
+    job = DownloadJob(
+        job_id="job-ollama",
+        source="ollama",
+        model_ref="ornith-1.5:35b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T00:04:00Z",
+        completed_at="2026-11-09T00:05:00Z",
+    )
+
+    await manager._auto_register_model(job)
+
+    enviado = model_manager.add_model.await_args.kwargs["extra_config"]
+    seccion = enviado["llama_cpp"]
+    assert seccion["gpu_layers"] == 99
+    assert seccion["ctx_size"] > 4096
+    assert seccion["flash_attn"] is True
+    assert seccion["cache_type_k"] == "q8_0"
+    assert seccion["parallel_slots"] == 4
+
+
+@pytest.mark.asyncio
+async def test_a_un_backend_que_no_es_llama_cpp_no_se_le_tocan_los_defaults() -> None:
+    manager = DownloadManager()
+    model_manager = SimpleNamespace(get_state=AsyncMock(return_value=None), add_model=AsyncMock())
+    manager._app = SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    manager._resolve_job_backend = AsyncMock(return_value="ollama")
+
+    job = DownloadJob(
+        job_id="job-ollama-2",
+        source="ollama",
+        model_ref="ornith-1.5:35b",
+        artifact=None,
+        register_config={},
+        status="completed",
+        progress_pct=100.0,
+        speed_mb_s=None,
+        eta_seconds=0,
+        error=None,
+        started_at="2026-11-09T00:04:00Z",
+        completed_at="2026-11-09T00:05:00Z",
+    )
+
+    await manager._auto_register_model(job)
+
+    assert model_manager.add_model.await_args.kwargs["extra_config"] is None

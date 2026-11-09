@@ -16,6 +16,42 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.55.0 — 2026-11-09
+
+### Arreglos
+
+- **Un modelo recién instalado ya se puede usar sin configurarlo a mano.** Al
+  darlo de alta sin parámetros —lo que hace la pantalla de instalación— el
+  despliegue de llama.cpp se quedaba sin ninguno, y llama.cpp solo hace lo que
+  se le dice: cargaba **en CPU** y con **4.096 tokens** de contexto. Un modelo
+  de 20 GB así no llega a cargar. Ahora el alta deja capas en GPU, el contexto
+  nativo que declare el fichero del modelo (hasta 262.144), atención rápida,
+  caché de contexto cuantizada y cuatro peticiones en paralelo. Si el tag trae
+  visión, el proyector se carga con la primera imagen en vez de ocupar memoria
+  en todas las peticiones de texto.
+
+  Lo que configures tú sigue mandando: estos valores solo rellenan lo que no
+  venga puesto.
+
+### Retirado
+
+- **`nemotron3:33b` y `vibevoice-asr-bitnet` ya no están.** El primero era el
+  último modelo sobre Ollama y su rendimiento variaba diez veces entre
+  peticiones según cómo repartiera Ollama entre CPU y GPU; el segundo no tenía
+  su backend instalado, así que nunca pudo responder.
+
+### Nuevo
+
+- **Tres modelos más:** `ornith-1.5:35b` (35B con visión, 158 tok/s),
+  `flint:40b` (40B, 107 tok/s) y `nemotron-3.5-lightning:30b` (30B, 148 tok/s,
+  reparte entre las dos tarjetas). Los tres con contexto largo: 262.144 tokens
+  los dos primeros, 131.072 el tercero.
+
+  `qwen3.8:27b-abliterated` sigue igual; solo cambió de dónde se leen sus
+  pesos, que ahora es su repositorio original de HuggingFace.
+
+---
+
 ## 0.54.1 — 2026-11-09
 
 ### Arreglos
