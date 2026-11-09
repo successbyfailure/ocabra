@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.57.0 — 2026-11-09
+
+### Retirado
+
+- **`bonsai-27b-ternario` ya no está disponible,** y con él el motor ternario
+  que solo servía a ese modelo. Lo sustituye **`bonsai-2:27b`**, el mismo
+  modelo en una cuantización más nueva que además trae visión y la escalera de
+  contexto completa (262.144 tokens).
+
+  **Acción** si lo nombrabas: cambia a `bonsai-2:27b`. Medido en la misma
+  tarjeta, `bonsai-2:27b` da 65,6 tokens/s en la 3090 y 32,9 en la 3060.
+
+---
+
 ## 0.56.0 — 2026-11-09
 
 ### Mejoras
