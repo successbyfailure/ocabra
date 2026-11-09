@@ -59,6 +59,7 @@ logs/
 *.log
 tmp/
 temp/
+benchmark/results/
 
 # === IDE ===
 .vscode/

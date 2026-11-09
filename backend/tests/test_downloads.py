@@ -68,6 +68,36 @@ async def test_auto_register_model_uses_register_config() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_job_does_not_auto_register_new_deployments() -> None:
+    manager = DownloadManager()
+    manager._ollama_registry.pull = AsyncMock()
+    manager._save_and_publish = AsyncMock()
+    manager._auto_register_model = AsyncMock()
+    manager._refresh_registry_metadata = AsyncMock()
+    job = DownloadJob(
+        job_id="job-update-1",
+        source="ollama",
+        model_ref="gemma4:26b",
+        artifact=None,
+        register_config=None,
+        status="queued",
+        progress_pct=0.0,
+        speed_mb_s=None,
+        eta_seconds=None,
+        error=None,
+        started_at="2026-11-09T00:00:00Z",
+        completed_at=None,
+        kind="update",
+    )
+
+    await manager._execute_job(job)
+
+    manager._ollama_registry.pull.assert_awaited_once()
+    manager._auto_register_model.assert_not_awaited()
+    manager._refresh_registry_metadata.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_auto_register_bitnet_sets_model_path() -> None:
     manager = DownloadManager()
     model_manager = SimpleNamespace(

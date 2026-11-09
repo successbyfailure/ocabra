@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "app": "escriba",
+  "description": "Casos reales de transcripción, reuniones y búsqueda de Escriba.",
+  "repository": "https://github.com/makespacemadrid/escriba.git",
+  "default_revision": "main",
+  "dataset_root": "eval/datasets",
+  "suites": {
+    "llm": {
+      "description": "Extracción de claims y velocidad sobre transcripciones de reuniones.",
+      "script": "llm/benchmark_llm.py",
+      "result_glob": "llm/results_*/results.json",
+      "models_flag": "--models"
+    },
+    "stt": {
+      "description": "WER y velocidad sobre audio español de VoxPopuli.",
+      "script": "stt/benchmark_stt.py",
+      "prepare_script": "stt/download_dataset.py",
+      "result_glob": "stt/results_*/results.json",
+      "models_flag": "--models"
+    },
+    "stt_diarization": {
+      "description": "DER, JER y velocidad sobre reuniones multihablante AMI SDM.",
+      "script": "stt_diarization/benchmark_diarization.py",
+      "prepare_script": "stt_diarization/download_dataset.py",
+      "result_glob": "stt_diarization/results_*/results.json",
+      "models_flag": "--models"
+    },
+    "embeddings": {
+      "description": "Recuperación, clustering y reranking sobre evidencia de reuniones.",
+      "script": "embeddings/benchmark_embeddings.py",
+      "result_glob": "embeddings/results_*/results.json",
+      "models_flag": "--models"
+    }
+  }
+}

@@ -9,12 +9,26 @@ failure.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from ocabra.api.internal.models_update import _build_update_request
+import pytest
+
+from ocabra.api.internal.models_update import _build_update_request, update_all_models
+from ocabra.schemas.registry import DownloadJob
 
 
-def _state(model_id: str, backend_type: str, extra_config: dict | None = None) -> SimpleNamespace:
-    return SimpleNamespace(model_id=model_id, backend_type=backend_type, extra_config=extra_config)
+def _state(
+    model_id: str,
+    backend_type: str,
+    extra_config: dict | None = None,
+    artifact: dict | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_id=model_id,
+        backend_type=backend_type,
+        extra_config=extra_config,
+        artifact=artifact,
+    )
 
 
 def test_standard_piper_voice_is_skipped_not_misresolved_as_an_hf_repo() -> None:
@@ -60,6 +74,24 @@ def test_vibeasr_un_flattens_the_repo_id_before_using_it() -> None:
     assert req.source == "huggingface"
 
 
+def test_vibeasr_uses_artifact_ref_when_the_public_name_is_friendly() -> None:
+    state = _state(
+        "vibeasr/vibevoice-asr-bitnet",
+        "vibeasr",
+        artifact={
+            "kind": "gguf_pair",
+            "source": "local",
+            "ref": "microsoft--VibeVoice-ASR-BitNet",
+        },
+    )
+
+    req, reason = _build_update_request(state)
+
+    assert reason is None
+    assert req is not None
+    assert req.model_ref == "microsoft/VibeVoice-ASR-BitNet"
+
+
 def test_custom_assembled_diffusers_pipeline_is_skipped() -> None:
     """Reproduced live: qwen-image-2.1's model_id is a local alias, not a
     real HF repo — the actual weights come from gguf_transformer_path
@@ -87,7 +119,9 @@ def test_custom_assembled_diffusers_pipeline_is_skipped() -> None:
 def test_regular_diffusers_model_without_gguf_assembly_still_resolves() -> None:
     """A normal diffusers model (model_id IS a real HF repo) must still go
     through the generic huggingface branch unaffected by the new check."""
-    state = _state("diffusers/stabilityai/stable-diffusion-xl-base-1.0", "diffusers", extra_config=None)
+    state = _state(
+        "diffusers/stabilityai/stable-diffusion-xl-base-1.0", "diffusers", extra_config=None
+    )
 
     req, reason = _build_update_request(state)
 
@@ -109,3 +143,145 @@ def test_bitnet_and_llama_cpp_are_unaffected_by_the_new_branches() -> None:
     assert req is not None
     assert req.source == "huggingface"
     assert req.artifact == "model.Q4_K_M.gguf"
+
+
+def test_hf_repo_descriptor_preserves_the_original_namespace() -> None:
+    state = _state(
+        "vllm/bge-reranker-v2-m3",
+        "vllm",
+        artifact={"kind": "hf_repo", "source": "local", "ref": "BAAI/bge-reranker-v2-m3"},
+    )
+
+    req, reason = _build_update_request(state)
+
+    assert reason is None
+    assert req is not None
+    assert req.source == "huggingface"
+    assert req.model_ref == "BAAI/bge-reranker-v2-m3"
+
+
+def test_llama_cpp_ollama_artifact_updates_the_tag_not_a_fake_hf_repo() -> None:
+    state = _state(
+        "llamacpp_mks/gemma4:26b",
+        "llamacpp_mks",
+        artifact={"kind": "gguf", "source": "ollama", "ref": "gemma4:26b"},
+    )
+
+    req, reason = _build_update_request(state)
+
+    assert reason is None
+    assert req is not None
+    assert req.source == "ollama"
+    assert req.model_ref == "gemma4:26b"
+
+
+def test_structured_hf_gguf_descriptor_uses_repo_and_file() -> None:
+    state = _state(
+        "bitnet/bonsai-27b-ternario",
+        "bitnet",
+        artifact={
+            "kind": "gguf",
+            "source": "hf",
+            "ref": "Bonsai-27B-Q1_0",
+            "repo": "prism-ml/Bonsai-27B-gguf",
+            "file": "Bonsai-27B-Q1_0.gguf",
+        },
+    )
+
+    req, reason = _build_update_request(state)
+
+    assert reason is None
+    assert req is not None
+    assert req.source == "bitnet"
+    assert req.model_ref == "prism-ml/Bonsai-27B-gguf"
+    assert req.artifact == "Bonsai-27B-Q1_0.gguf"
+
+
+def test_explicit_update_source_handles_a_local_alias() -> None:
+    state = _state(
+        "ollama/friendly-name",
+        "ollama",
+        extra_config={
+            "update_source": {
+                "source": "ollama",
+                "model_ref": "hf.co/org/repo:Q5_K_M",
+            }
+        },
+        artifact={"kind": "ollama_tag", "source": "ollama", "ref": "friendly-name"},
+    )
+
+    req, reason = _build_update_request(state)
+
+    assert reason is None
+    assert req is not None
+    assert req.model_ref == "hf.co/org/repo:Q5_K_M"
+
+
+@pytest.mark.asyncio
+async def test_update_all_deduplicates_deployments_that_share_weights(monkeypatch) -> None:
+    states = [
+        _state(
+            "llamacpp_mks/gemma4:26b",
+            "llamacpp_mks",
+            artifact={"kind": "gguf", "source": "ollama", "ref": "gemma4:26b"},
+        ),
+        _state(
+            "ollama/gemma4:26b",
+            "ollama",
+            artifact={"kind": "ollama_tag", "source": "ollama", "ref": "gemma4:26b"},
+        ),
+    ]
+    model_manager = SimpleNamespace(list_states=AsyncMock(return_value=states))
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    )
+    job = DownloadJob.model_construct()
+    enqueue = AsyncMock(return_value=job)
+    monkeypatch.setattr("ocabra.api.internal.models_update._enqueue_update", enqueue)
+
+    response = await update_all_models(request, None)
+
+    assert response.enqueued == [job]
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args.args[0].model_ref == "gemma4:26b"
+    assert enqueue.await_args.args[1].model_id == "ollama/gemma4:26b"
+    assert response.skipped == [
+        {
+            "model_id": "llamacpp_mks/gemma4:26b",
+            "reason": "shares update source with 'ollama/gemma4:26b'",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_all_prefers_configured_alias_over_discovered_inventory(monkeypatch) -> None:
+    ref = "hf.co/org/repo:Q5_K_M"
+    inventory = _state(
+        f"ollama/{ref}",
+        "ollama",
+        artifact={"kind": "ollama_tag", "source": "ollama", "ref": ref},
+    )
+    inventory.model_key = None
+    alias = _state(
+        "ollama/zzz-friendly-name",
+        "ollama",
+        artifact={"kind": "ollama_tag", "source": "ollama", "ref": ref},
+    )
+    alias.model_key = "zzz-friendly-name"
+    model_manager = SimpleNamespace(list_states=AsyncMock(return_value=[inventory, alias]))
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(model_manager=model_manager))
+    )
+    job = DownloadJob.model_construct()
+    enqueue = AsyncMock(return_value=job)
+    monkeypatch.setattr("ocabra.api.internal.models_update._enqueue_update", enqueue)
+
+    response = await update_all_models(request, None)
+
+    assert enqueue.await_args.args[1].model_id == "ollama/zzz-friendly-name"
+    assert response.skipped == [
+        {
+            "model_id": f"ollama/{ref}",
+            "reason": "shares update source with 'ollama/zzz-friendly-name'",
+        }
+    ]

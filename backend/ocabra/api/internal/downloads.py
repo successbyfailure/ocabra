@@ -330,7 +330,11 @@ class DownloadManager:
                 }
             )
             await self._save_and_publish(completed)
-            await self._auto_register_model(downloading)
+            # Updates refresh bytes and metadata for existing deployments.
+            # Auto-registration belongs only to first-time installs; running it
+            # here created duplicate logical models/backends on update-all.
+            if downloading.kind == "install":
+                await self._auto_register_model(downloading)
             await self._refresh_registry_metadata(downloading)
         except asyncio.CancelledError:
             cancelled = downloading.model_copy(

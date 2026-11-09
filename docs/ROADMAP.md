@@ -1,6 +1,6 @@
 # oCabra — Roadmap
 
-Última actualización: 2026-10-30
+Última actualización: 2026-11-08
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
 fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
@@ -214,7 +214,11 @@ Implementado:
 - Nuevos paneles frontend: `ApiKeyPanel`, `CostSavingsCard`, `FederationPanel`, `UserDetailPanel`, `EnergyPanel` rediseñado. Layout (Header/Sidebar/Layout) y página Stats rehechos.
 - Componentes comunes reutilizables: `ConfirmDialog`, `Skeleton`, `StyledSelect`.
 - Gateway con portal de servicios y páginas mejoradas.
-- Benchmark harness en `benchmark/run_benchmark.py`.
+- Benchmark harness de motores en `benchmark/run_benchmark.py` y runner manual
+  de datasets externos por aplicación en `benchmark/app_benchmarks.py`. El
+  primer adaptador ejecuta las suites LLM, STT, diarización y embeddings mantenidas por
+  Escriba y archiva revisión, versión del servidor y resultado bruto sin
+  guardar credenciales. Uso y contrato en `docs/BENCHMARKS.md`.
 
 ---
 
@@ -776,6 +780,22 @@ nombres ocultos. Sustituye a la convención manual `*-ollama` (que sigue resolvi
 oculta). Hecho: migración 0034, cambio de backend por defecto, añadir/quitar despliegues,
 compatibilidad formato→backends en la búsqueda, permisos por modelo, descarga multi-backend.
 
+## ⏳ Bloque 24 — Retirada del soporte LiteLLM (PENDIENTE)
+
+LiteLLM y la ruta externa `iapi` ya se han retirado de la infraestructura. oCabra usa su
+autenticación interna y el gateway de servicios, por lo que queda eliminar el soporte residual
+para que configuración, UI y documentación reflejen la arquitectura desplegada.
+
+- Eliminar `backend/ocabra/integrations/litellm_sync.py`, su listener de arranque y los tests
+  específicos de sincronización.
+- Retirar los settings `litellm_*`, su persistencia en `server_config` y el endpoint
+  `POST /ocabra/config/litellm/sync`; decidir y documentar la limpieza de claves heredadas en BD.
+- Eliminar la pestaña y componente LiteLLM de Settings, junto con tipos y métodos del cliente.
+- Retirar `LITELLM_*` de `.env.example` y la generación de credenciales en `scripts/setup.sh`.
+- Actualizar `docs/PLAN.md`, documentación de streams, changelog y tests de contrato/configuración.
+- Verificar que API OpenAI/Ollama, API keys, gateway y benchmarks funcionan directamente contra
+  oCabra sin dependencias ni referencias operativas a LiteLLM o `iapi`.
+
 ## Orden de ejecución
 
 ```
@@ -800,6 +820,7 @@ compatibilidad formato→backends en la búsqueda, permisos por modelo, descarga
 [🚧 En curso] Bloque 20 — Router profiles, duration estimator y session registry
 [✅ Hecho]    Bloque 21 — Presets de contexto y runtimes adaptativos
 [🚧 En curso] Bloque 22 — KV elástica y paralelismo dinámico en llama.cpp (pool fijo, admission, UI y canary completados; soak y context reinit pendientes)
+[Pendiente]   Bloque 24 — Retirada completa del soporte LiteLLM
 [Pendiente]   Revalidar paralelismo Qwen 3.8 cuando Ollama soporte qwen35 con más de un slot
 [Pendiente]   Investigación e integración de vLLM sleep mode
 [Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido

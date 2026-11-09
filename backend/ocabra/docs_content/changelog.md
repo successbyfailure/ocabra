@@ -16,6 +16,32 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.54.1 — 2026-11-09
+
+### Arreglos
+
+- **`POST /ocabra/models/update-all` usa ahora la procedencia del artefacto.**
+  Conserva el namespace real de HuggingFace, actualiza por Ollama los modelos
+  que llama.cpp sirve desde un tag de Ollama y soporta GGUF con repositorio y
+  fichero explícitos. Ya no intenta descargar nombres locales inventados.
+- **Una fuente compartida se descarga una sola vez.** Si los despliegues de
+  Ollama y llama.cpp sirven los mismos pesos, el segundo figura en `skipped`
+  indicando qué despliegue cubre su actualización.
+- **Actualizar ya no crea despliegues nuevos.** El auto-registro queda limitado
+  a instalaciones iniciales; un repull solo refresca los pesos y metadatos del
+  modelo existente.
+
+---
+
+## 0.54.0 — 2026-11-08
+
+Esta versión no cambia el contrato HTTP. Añade una herramienta operativa para
+ejecutar manualmente datasets mantenidos por las aplicaciones, empezando por
+Escriba, y conservar resultados con la revisión del dataset y la versión del
+servidor medidas.
+
+---
+
 ## 0.53.1 — 2026-11-08
 
 ### Retirado
