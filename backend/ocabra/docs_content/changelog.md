@@ -16,7 +16,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
-## 0.55.1 — 2026-11-09
+## 0.55.2 — 2026-11-09
 
 ### Arreglos
 
@@ -33,6 +33,12 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   Lo que configures tú sigue mandando: estos valores solo rellenan lo que no
   venga puesto.
 
+- **Un modelo ternario recién instalado tampoco se queda en 256 tokens.** El
+  backend ternario reparte la ventana entre las peticiones en paralelo, y con
+  sus valores por defecto (4.096 de contexto entre 16 peticiones) cada petición
+  se quedaba con 256 tokens. Es lo que le pasaba a `bonsai-27b-ternario` hasta
+  0.51.3; ahora el alta pone el contexto del propio fichero y cuatro peticiones
+  en paralelo.
 - **Instalar un modelo ternario desde Ollama ya no acaba en nada.** Los
   modelos de 1 bit (Bonsai, BitNet, `i2_s`, `q1_0`) solo los sirve el backend
   ternario, pero el alta elegía llama.cpp para cualquier tag de Ollama y el

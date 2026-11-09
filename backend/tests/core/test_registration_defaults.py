@@ -179,3 +179,39 @@ def test_no_se_pierde_nada_de_otras_secciones(tmp_path):
     )
     assert cfg["registry_metadata"] == {"a": 1}
     assert cfg["llama_cpp"]["model_path"] == "/x.gguf"
+
+
+# --- El backend ternario tiene el mismo agujero, peor ---------------------
+# Sus defaults son BITNET_CTX_SIZE=4096 con BITNET_PARALLEL=16, y la ventana
+# se reparte entre slots: 256 tokens por peticion. Es con lo que vivio
+# bonsai-27b-ternario hasta 0.51.3.
+
+
+def test_un_alta_ternaria_no_queda_en_256_tokens(tmp_path):
+    from ocabra.core.registration_defaults import launch_defaults
+
+    artifact = _tienda_ollama(tmp_path, "bonsai-2:27b", 131072)
+    cfg = launch_defaults("bitnet", None, artifact=artifact, ollama_root=tmp_path)["bitnet"]
+    assert cfg["ctx_size"] >= 32768
+    assert cfg["parallel"] == 4
+    assert cfg["ctx_size"] // cfg["parallel"] > 4096
+    assert cfg["kv_unified"] is True
+    assert cfg["cache_type_k"] == "q8_0"
+
+
+def test_al_ternario_no_se_le_fuerzan_capas_de_gpu(tmp_path):
+    """El backend ya elige 99 para PrismML, y la build llana puede ser de CPU."""
+    from ocabra.core.registration_defaults import launch_defaults
+
+    artifact = _tienda_ollama(tmp_path, "bonsai-2:27b", 131072)
+    cfg = launch_defaults("bitnet", None, artifact=artifact, ollama_root=tmp_path)["bitnet"]
+    assert "gpu_layers" not in cfg
+
+
+def test_un_backend_ajeno_pasa_de_largo():
+    from ocabra.core.registration_defaults import launch_defaults
+
+    assert launch_defaults("vllm", {"vllm": {"runner": "generate"}}) == {
+        "vllm": {"runner": "generate"}
+    }
+    assert launch_defaults("whisper", None) is None

@@ -24,7 +24,7 @@ from ocabra.core.model_ref import (
     build_model_ref,
     is_llama_cpp_family,
 )
-from ocabra.core.registration_defaults import llama_cpp_launch_defaults
+from ocabra.core.registration_defaults import launch_defaults
 from ocabra.redis_client import get_key, lpush, publish, rpop, set_key, subscribe
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -418,8 +418,7 @@ class DownloadManager:
             # Nothing else fills these in: installing from Explore sends no
             # extra_config at all, and llama.cpp without one runs on the CPU
             # with a 4096-token window (see registration_defaults).
-            if is_llama_cpp_family(backend_type):
-                extra_config = llama_cpp_launch_defaults(extra_config, artifact=artifact)
+            extra_config = launch_defaults(backend_type, extra_config, artifact=artifact)
 
             await mm.add_model(
                 model_id=model_id,

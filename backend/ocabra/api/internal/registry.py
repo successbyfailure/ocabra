@@ -12,7 +12,7 @@ from ocabra.core.model_ref import (
     build_model_ref,
     is_llama_cpp_family,
 )
-from ocabra.core.registration_defaults import llama_cpp_launch_defaults
+from ocabra.core.registration_defaults import launch_defaults
 from ocabra.registry.bitnet_registry import BitnetRegistry
 from ocabra.registry.huggingface import HuggingFaceRegistry
 from ocabra.registry.local_scanner import LocalScanner
@@ -329,8 +329,7 @@ async def register_local_model(
 
     # Same reason as in the download flow: llama.cpp with only a model_path
     # loads on the CPU with a 4096-token window (see registration_defaults).
-    if is_llama_cpp_family(body.backend_type):
-        extra_config = llama_cpp_launch_defaults(extra_config)
+    extra_config = launch_defaults(body.backend_type, extra_config)
 
     try:
         state = await mm.add_model(
