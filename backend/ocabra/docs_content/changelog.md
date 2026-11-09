@@ -16,7 +16,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
-## 0.55.2 — 2026-11-09
+## 0.55.3 — 2026-11-09
 
 ### Arreglos
 
@@ -38,7 +38,9 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   sus valores por defecto (4.096 de contexto entre 16 peticiones) cada petición
   se quedaba con 256 tokens. Es lo que le pasaba a `bonsai-27b-ternario` hasta
   0.51.3; ahora el alta pone el contexto del propio fichero y cuatro peticiones
-  en paralelo.
+  en paralelo. Y el tiempo de arranque de estos modelos ya se puede configurar
+  por modelo: los 30 segundos de antes valían para uno de 3 GB y no para uno de
+  8, que fallaba con un error que parecía del modelo y era del cronómetro.
 - **Instalar un modelo ternario desde Ollama ya no acaba en nada.** Los
   modelos de 1 bit (Bonsai, BitNet, `i2_s`, `q1_0`) solo los sirve el backend
   ternario, pero el alta elegía llama.cpp para cualquier tag de Ollama y el

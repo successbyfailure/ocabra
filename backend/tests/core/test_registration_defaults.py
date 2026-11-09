@@ -215,3 +215,12 @@ def test_un_backend_ajeno_pasa_de_largo():
         "vllm": {"runner": "generate"}
     }
     assert launch_defaults("whisper", None) is None
+
+
+def test_el_ternario_se_le_da_tiempo_a_arrancar(tmp_path):
+    """30 s valen para 3 GiB y no para 8: bonsai-2:27b moria en el arranque."""
+    from ocabra.core.registration_defaults import launch_defaults
+
+    artifact = _tienda_ollama(tmp_path, "bonsai-2:27b", 131072)
+    cfg = launch_defaults("bitnet", None, artifact=artifact, ollama_root=tmp_path)["bitnet"]
+    assert cfg["startup_timeout_s"] >= 300

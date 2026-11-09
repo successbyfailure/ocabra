@@ -276,7 +276,11 @@ class BitnetBackend(BackendInterface):
 
         try:
             await self._wait_for_startup(
-                model_id, port, timeout_s=settings.bitnet_startup_timeout_s
+                model_id,
+                port,
+                timeout_s=int(
+                    options.get("startup_timeout_s") or settings.bitnet_startup_timeout_s
+                ),
             )
         except Exception:
             await self._kill_process(model_id)
@@ -415,6 +419,14 @@ class BitnetBackend(BackendInterface):
                 self._get_bitnet_option(extra_config, "flash_attn", settings.bitnet_flash_attn)
             ),
             "mlock": bool(self._get_bitnet_option(extra_config, "mlock", settings.bitnet_mlock)),
+            # Per-model, like the llama.cpp backends: the global default (30 s)
+            # is fine for a 3 GiB ternary model and not for an 8 GiB one, and
+            # a load that times out looks like a broken model.
+            "startup_timeout_s": int(
+                self._get_bitnet_option(
+                    extra_config, "startup_timeout_s", settings.bitnet_startup_timeout_s
+                )
+            ),
             "kv_unified": _as_bool(self._get_bitnet_option(extra_config, "kv_unified", False)),
             "cache_type_k": self._get_bitnet_option(
                 extra_config, "cache_type_k", settings.bitnet_cache_type_k

@@ -64,6 +64,10 @@ _BITNET_DEFAULTS: dict[str, Any] = {
     "kv_unified": True,
     "cache_type_k": "q8_0",
     "cache_type_v": "q8_0",
+    # 30 s (the global default) is enough for a 3 GiB ternary model and not
+    # for an 8 GiB one: ``bonsai-2:27b`` died with "did not become healthy
+    # within 30s", which reads like a broken model rather than a short timer.
+    "startup_timeout_s": 300,
 }
 
 # Ternary models run on the smaller card in this park; this is the window the
