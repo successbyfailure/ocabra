@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.58.0 — 2026-11-09
+
+### Arreglos
+
+- **Una petición con herramientas ya no se cuenta a la mitad.** Lo que el
+  asistente pide a una herramienta viaja fuera del campo de texto del mensaje,
+  y ninguno de los dos contadores lo miraba. En un cliente de programación eso
+  es la mitad del prompt: una petición que el motor contó en 196.549 tokens
+  aparecía como 35.383 en el panel y se medía internamente como 102.200. Ahora
+  se cuentan también los argumentos de las llamadas a herramientas.
+
+- **Una petición grande ya no reserva toda la caché compartida.** Cuando el
+  tamaño real del prompt no se puede medir —el modelo aún está cargando, o su
+  tokenizador no contesta a tiempo— el servidor asume el máximo para no
+  rechazar la petición por una estimación. Pero ese máximo se estaba apuntando
+  también como caché ocupada, así que **una sola petición bloqueaba las cuatro
+  plazas del modelo** hasta terminar, y el panel mostraba la caché al 100 %.
+  Ahora, cuando no hay medida, se reserva lo que le corresponde a una plaza;
+  elegir la ventana grande y reservar la caché entera son decisiones distintas.
+
+---
+
 ## 0.57.0 — 2026-11-09
 
 ### Retirado

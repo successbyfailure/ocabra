@@ -244,7 +244,7 @@ async def test_sin_presets_tambien_se_afina_con_el_conteo_exacto(monkeypatch):
         return 230_011
 
     monkeypatch.setattr(rc, "exact_prompt_tokens", _exacto)
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": [{"role": "user", "content": "x"}], "max_tokens": 8},
@@ -265,7 +265,7 @@ async def test_sin_conteo_exacto_se_intenta_en_vez_de_rechazar(monkeypatch):
         return None
 
     monkeypatch.setattr(rc, "exact_prompt_tokens", _sin_medir)
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": []},
@@ -288,7 +288,7 @@ async def test_un_rechazo_medido_sigue_siendo_un_rechazo(monkeypatch):
         return 42_764
 
     monkeypatch.setattr(rc, "exact_prompt_tokens", _exacto)
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": []},
@@ -312,7 +312,7 @@ async def test_lo_que_ya_cabe_no_se_toca(monkeypatch):
         return 1
 
     monkeypatch.setattr(rc, "exact_prompt_tokens", _contador)
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": []},
@@ -329,7 +329,7 @@ async def test_lo_que_ya_cabe_no_se_toca(monkeypatch):
 async def test_sin_capacidad_conocida_no_hay_nada_que_afinar(capacidad):
     from ocabra.core import runtime_coordinator as rc
 
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": []},
@@ -377,7 +377,7 @@ async def test_se_afina_contra_el_preset_pedido_no_contra_el_mayor(monkeypatch):
     monkeypatch.setattr(rc, "exact_prompt_tokens", _exacto)
     # 34.311 cabe en la ventana mayor (40.960) pero no en el preset pedido
     # (30.720): antes no se afinaba y el rechazo salia con el estimado.
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": [{"role": "user", "content": "x"}], "max_tokens": 1024},
@@ -403,7 +403,7 @@ async def test_sin_conteo_exacto_el_recorte_no_pasa_de_la_capacidad_decisiva(mon
         return None
 
     monkeypatch.setattr(rc, "exact_prompt_tokens", _sin_medir)
-    afinado = await rc.refine_required_tokens(
+    afinado, _medido = await rc.refine_required_tokens(
         _MM([]),
         _Perfil(),
         {"messages": []},
@@ -412,3 +412,46 @@ async def test_sin_conteo_exacto_el_recorte_no_pasa_de_la_capacidad_decisiva(mon
         default_output_reservation=None,
     )
     assert afinado == 30_720
+
+
+# --- La reserva de KV no es el presupuesto de ventana ---------------------
+# Sin conteo exacto, el presupuesto se infla a proposito hasta la capacidad
+# entera: asi se elige la ventana mayor y no se rechaza por una estimacion.
+# Reservar ESO del pool compartido deja a los demas slots sin sitio hasta que
+# la peticion termine. Visto el 2026-11-09 en flint:40b: la tarjeta marcaba
+# 256k/256k de KV con una sola peticion dentro y sus cuatro slots servian de
+# uno en uno.
+
+
+def test_medido_se_reserva_lo_medido():
+    from ocabra.core import runtime_coordinator as rc
+
+    assert rc._reserva_kv(102_200, True, 262_144, parallelism=4) == 102_200
+
+
+def test_sin_medir_no_se_reserva_el_pool_entero():
+    from ocabra.core import runtime_coordinator as rc
+
+    reserva = rc._reserva_kv(262_144, False, 262_144, parallelism=4)
+    assert reserva < 262_144
+    assert reserva == 65_536
+
+
+def test_sin_medir_y_sin_paralelismo_se_reserva_la_ventana():
+    from ocabra.core import runtime_coordinator as rc
+
+    """Un worker de un solo slot no tiene con quien repartir."""
+    assert rc._reserva_kv(262_144, False, 262_144, parallelism=1) == 262_144
+    assert rc._reserva_kv(262_144, False, 262_144, parallelism=None) == 262_144
+
+
+def test_sin_capacidad_conocida_se_deja_lo_que_haya():
+    from ocabra.core import runtime_coordinator as rc
+
+    assert rc._reserva_kv(1234, False, 0, parallelism=4) == 1234
+
+
+def test_la_reserva_nunca_es_negativa():
+    from ocabra.core import runtime_coordinator as rc
+
+    assert rc._reserva_kv(-5, True, 262_144, parallelism=4) == 0

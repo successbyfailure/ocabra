@@ -237,6 +237,21 @@ def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int 
                 for part in content:
                     if isinstance(part, dict) and isinstance(part.get("text"), str):
                         total += len(part["text"].split())
+            # Mismo agujero que tenian las ``tools`` antes de 2026-10-29, en el
+            # otro lado de la conversacion: lo que el asistente pide a una
+            # herramienta viaja en ``tool_calls``, no en ``content``. Con un
+            # cliente de codigo eso es la mitad del prompt, y la tarjeta
+            # mostraba "~35.383 tok entrada" para una peticion que el motor
+            # conto en 196.549 (flint:40b, 2026-11-09).
+            for call in m.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function")
+                if isinstance(fn, dict):
+                    _chars, words = _text_size(fn.get("arguments"))
+                    total += words
+                    if isinstance(fn.get("name"), str):
+                        total += 1
         _tools_chars, tools_words = _text_size(request_payload.get("tools"))
         total += tools_words
         return total or None

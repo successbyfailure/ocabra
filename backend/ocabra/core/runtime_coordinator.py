@@ -37,6 +37,12 @@ class RuntimePlan:
     effective_context: int | None
     required_tokens: int | None
     selection_reason: str | None
+    # Lo que se reserva del pool KV, que NO es lo mismo que el presupuesto con
+    # el que se elige ventana: cuando el tamaño real no se ha podido medir, el
+    # presupuesto se deja en la capacidad entera para quedarse con la ventana
+    # mayor y no rechazar, pero reservar el pool entero deja los demas slots
+    # fuera hasta que esa peticion termine. Ver ``refine_required_tokens``.
+    kv_reservation_tokens: int | None = None
 
 
 class OutputTokenLimitError(ContextCapacityError):
@@ -160,6 +166,23 @@ def _prompt_text(body: dict[str, Any]) -> str:
                 for parte in contenido:
                     if isinstance(parte, dict) and isinstance(parte.get("text"), str):
                         piezas.append(parte["text"])
+            # Las llamadas a herramientas viajan fuera de ``content``, y en un
+            # cliente de codigo son la mitad del prompt: sus argumentos llevan
+            # ficheros enteros. Sin esto el conteo "exacto" salia a la mitad
+            # (medido 102.200 contra 196.549 reales en flint:40b el
+            # 2026-11-09), y la reserva de KV se quedaba corta justo con las
+            # peticiones mas grandes.
+            for llamada in mensaje.get("tool_calls") or []:
+                if not isinstance(llamada, dict):
+                    continue
+                funcion = llamada.get("function")
+                if isinstance(funcion, dict):
+                    for clave in ("name", "arguments"):
+                        valor = funcion.get(clave)
+                        if isinstance(valor, str):
+                            piezas.append(valor)
+                        elif valor is not None:
+                            piezas.append(json.dumps(valor, ensure_ascii=False))
     else:
         origen = body.get("prompt", body.get("input", ""))
         if isinstance(origen, str):
@@ -255,6 +278,30 @@ def estimate_request_token_budget(
     return max(estimated, requested_context)
 
 
+def _reserva_kv(
+    required_tokens: int, medido: bool, capacity: int, *, parallelism: int | None
+) -> int:
+    """Lo que esta peticion reserva del pool KV compartido.
+
+    Con el tamaño medido se reserva eso y ya esta. Sin medir, ``required_tokens``
+    viene inflado a proposito —la capacidad entera— para quedarse con la ventana
+    mayor y no rechazar por una estimacion; reservarlo tal cual deja el pool a
+    cero y los otros slots fuera hasta que termine. Visto el 2026-11-09 en
+    ``flint:40b``: la tarjeta marcaba 256k/256k de KV ocupado con una sola
+    peticion dentro, y sus cuatro slots quedaban servidos de uno en uno.
+
+    Sin medida se reserva la parte que le tocaria a un slot, que es justo para
+    lo que el preset se dimensiono. Si de verdad necesita mas, el pool unificado
+    se lo da: para eso es unificado.
+    """
+
+    if medido:
+        return max(0, int(required_tokens))
+    if capacity <= 0:
+        return max(0, int(required_tokens))
+    return max(1, int(capacity) // max(1, int(parallelism or 1)))
+
+
 async def refine_required_tokens(
     model_manager: Any,
     profile: Any,
@@ -263,7 +310,7 @@ async def refine_required_tokens(
     required_tokens: int,
     capacity: int,
     default_output_reservation: int | None,
-) -> int:
+) -> tuple[int, bool]:
     """Afina el presupuesto de tokens antes de que pueda provocar un rechazo.
 
     Un rechazo por tamaño no puede decidirse con el heuristico: medido contra
@@ -280,9 +327,14 @@ async def refine_required_tokens(
     ``capacity`` es con lo que se va a comparar aguas abajo: la ventana del
     preset mayor cuando el perfil tiene presets, o el pool KV del propio
     worker cuando no los tiene. Con ``capacity <= 0`` no hay nada que afinar.
+
+    Devuelve ``(presupuesto, medido)``. El segundo valor importa porque el
+    presupuesto sirve para dos cosas distintas y solo una admite "no lo se":
+    elegir ventana (ahi conviene pasarse) y reservar KV (ahi pasarse deja al
+    resto de slots sin sitio).
     """
     if capacity <= 0 or required_tokens <= capacity:
-        return required_tokens
+        return required_tokens, True
     exacto = await exact_prompt_tokens(model_manager, profile, body)
     if exacto is not None:
         # Misma resolucion que estimate_request_token_budget: el valor del
@@ -301,14 +353,14 @@ async def refine_required_tokens(
             measured=medido,
             largest_context=capacity,
         )
-        return medido
+        return medido, True
     logger.info(
         "token_budget_unverified_attempt",
         profile_id=getattr(profile, "profile_id", None),
         estimated=required_tokens,
         largest_context=capacity,
     )
-    return capacity
+    return capacity, False
 
 
 def _requested_preset_key(body: dict[str, Any]) -> str | None:
@@ -462,7 +514,7 @@ async def plan_profile_runtime(
                     pool_kv = int(resolve_llama_cpp_option(sin_presets, "ctx_size", 0) or 0)
             except (TypeError, ValueError, AttributeError):
                 pool_kv = 0
-        required_tokens = await refine_required_tokens(
+        required_tokens, medido = await refine_required_tokens(
             model_manager,
             profile,
             body,
@@ -470,6 +522,7 @@ async def plan_profile_runtime(
             capacity=pool_kv,
             default_output_reservation=default_output_reservation,
         )
+        reserva_kv = _reserva_kv(required_tokens, medido, pool_kv, parallelism=None)
         return RuntimePlan(
             worker_key=worker_key,
             load_overrides=profile.load_overrides,
@@ -480,6 +533,7 @@ async def plan_profile_runtime(
             effective_context=None,
             required_tokens=required_tokens,
             selection_reason=None,
+            kv_reservation_tokens=reserva_kv,
         )
 
     state = await model_manager.get_state(profile.base_model_id)
@@ -560,7 +614,7 @@ async def plan_profile_runtime(
         if explicit_candidate is not None
         else max(item.effective_context for item in candidates)
     )
-    required_tokens = await refine_required_tokens(
+    required_tokens, medido = await refine_required_tokens(
         model_manager,
         profile,
         body,
@@ -737,4 +791,10 @@ async def plan_profile_runtime(
         effective_context=chosen.effective_context,
         required_tokens=required_tokens,
         selection_reason=reason,
+        kv_reservation_tokens=_reserva_kv(
+            required_tokens,
+            medido,
+            chosen.effective_context,
+            parallelism=chosen.parallelism,
+        ),
     )

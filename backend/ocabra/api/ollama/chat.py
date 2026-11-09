@@ -247,6 +247,7 @@ async def chat(
         state,
         required_tokens=getattr(request.state, "runtime_required_tokens", None),
         effective_context=getattr(request.state, "runtime_effective_context", None),
+        reservation_tokens=getattr(request.state, "runtime_kv_reservation_tokens", None),
     )
     kv_admission = (
         {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}

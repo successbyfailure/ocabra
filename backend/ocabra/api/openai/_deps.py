@@ -371,6 +371,7 @@ async def resolve_profile_runtime_plan(
             request_state.runtime_key = plan.runtime_key
             request_state.runtime_effective_context = plan.effective_context
             request_state.runtime_required_tokens = plan.required_tokens
+            request_state.runtime_kv_reservation_tokens = plan.kv_reservation_tokens
             request_state.runtime_selection_reason = plan.selection_reason
             request_id = getattr(request_state, "inflight_request_id", None)
             old_worker = getattr(request_state, "inflight_model_id", None)
@@ -1473,6 +1474,7 @@ def fairness_kv_budget(
     *,
     required_tokens: int | None,
     effective_context: int | None = None,
+    reservation_tokens: int | None = None,
 ) -> tuple[int | None, int]:
     """Return ``(pool_capacity, request_reservation)`` for fair admission.
 
@@ -1512,7 +1514,12 @@ def fairness_kv_budget(
             and not runtime.get("context_is_pool")
         ):
             capacity *= max(1, int(runtime.get("parallelism") or 1))
-        reservation = max(0, int(required_tokens))
+        # El planificador puede separar las dos cifras: ``required_tokens``
+        # elige ventana y se infla a proposito cuando no se ha podido medir el
+        # prompt; reservar eso bloquearia el pool entero (ver ``_reserva_kv``).
+        reservation = max(
+            0, int(reservation_tokens if reservation_tokens is not None else required_tokens)
+        )
     except (TypeError, ValueError):
         return None, 0
     if capacity <= 0:

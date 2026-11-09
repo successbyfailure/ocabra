@@ -134,9 +134,7 @@ async def completions(
 
     worker_pool = request.app.state.worker_pool
     runtime_telemetry = getattr(request.state, "runtime_telemetry", None)
-    telemetry_admission = (
-        {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
-    )
+    telemetry_admission = {"telemetry": runtime_telemetry} if runtime_telemetry is not None else {}
 
     # Streaming: pre-flush headers (incl. X-Ocabra-Expected-Wait-Seconds)
     # before triggering the load.
@@ -199,6 +197,7 @@ async def completions(
                     preferred_gpu=runtime_plan.preferred_gpu,
                     load_policy=runtime_plan.load_policy,
                     required_tokens=runtime_plan.required_tokens,
+                    kv_reservation_tokens=runtime_plan.kv_reservation_tokens,
                     effective_context=runtime_plan.effective_context,
                     body=body,
                     user_key=fairness_user_key(user),
@@ -237,6 +236,7 @@ async def completions(
         state,
         required_tokens=getattr(request.state, "runtime_required_tokens", None),
         effective_context=getattr(request.state, "runtime_effective_context", None),
+        reservation_tokens=getattr(request.state, "runtime_kv_reservation_tokens", None),
     )
     kv_admission = (
         {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
@@ -321,13 +321,16 @@ async def completions(
         # El cliente ya no esta: se cancelo la generacion y se solto el slot.
         # 499 es el codigo canonico de "client closed request" que ya usa el
         # colector para las cancelaciones de streaming.
-        raise HTTPException(status_code=499, detail={
-            "error": {
-                "message": "Client disconnected before the response was ready",
-                "type": "server_error",
-                "code": "client_disconnected",
-            }
-        }) from None
+        raise HTTPException(
+            status_code=499,
+            detail={
+                "error": {
+                    "message": "Client disconnected before the response was ready",
+                    "type": "server_error",
+                    "code": "client_disconnected",
+                }
+            },
+        ) from None
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
     except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:
@@ -456,6 +459,7 @@ async def _stream_completions_with_load(
     preferred_gpu: int | None,
     load_policy: str | None,
     required_tokens: int | None,
+    kv_reservation_tokens: int | None,
     effective_context: int | None = None,
     body: dict,
     user_key: str | None = None,
@@ -539,14 +543,15 @@ async def _stream_completions_with_load(
     apply_declared_output_limit(
         profile,
         merged_body,
-context_length=effective_context or 0,
-fallback_limit=settings.default_max_output_tokens,
+        context_length=effective_context or 0,
+        fallback_limit=settings.default_max_output_tokens,
     )
     backend_body = to_backend_body(state, merged_body)
     slots = fairness_slots(state)
     kv_capacity, kv_tokens = fairness_kv_budget(
         state,
         required_tokens=required_tokens,
+        reservation_tokens=kv_reservation_tokens,
     )
     kv_admission = (
         {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}

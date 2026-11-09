@@ -2243,6 +2243,7 @@ class TestFairnessGateWiring:
                     preferred_gpu=None,
                     load_policy=None,
                     required_tokens=None,
+                    kv_reservation_tokens=None,
                     body={"messages": [{"role": "user", "content": "Hi"}]},
                     content_kinds=set(),
                     user_key="luis",
