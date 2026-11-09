@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.62.1 — 2026-11-10
+
+### Arreglos
+
+- **El prefill de las peticiones sin streaming ya no marca un porcentaje
+  falso.** El servidor de llama.cpp no publica el total de tokens del prompt
+  mientras lo procesa: el dato que se tomaba por total era solo lo cargado
+  hasta ese momento, y el progreso salía siempre cerca del 98 %. Ahora
+  `prompt.processedTokens` es el dato real, `prompt.totalKnown` vale `false`
+  y `prefillPct` es `null`. En streaming el total sí es real y el porcentaje
+  no cambia.
+
+---
+
 ## 0.62.0 — 2026-11-10
 
 ### Cambios

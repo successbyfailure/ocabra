@@ -756,6 +756,8 @@ export interface ActiveRequestProgress {
     processedTokens: number | null;
     /** "live": lo informa llama.cpp; "estimate": recuento aproximado. */
     source: "live" | "estimate";
+    /** false: lo procesado es real (de /slots) pero el total es estimado. */
+    totalKnown?: boolean;
   };
   prefillPct?: number | null;
   prefillTokensPerSecond?: number | null;

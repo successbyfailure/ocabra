@@ -74,6 +74,10 @@ export function RequestProgress({
     if (stage === "waiting_for_gpu" && req.waitingOnModelId) return `esperando a que libere GPU ${req.waitingOnModelId}`
     if (stage === "backend_wait") return "admitida · esperando a que el backend empiece"
     if (stage === "processing") return "procesando · sin streaming, sin progreso del backend"
+    if (stage === "prefill" && promptLive && prompt?.totalKnown === false) {
+      // Sin streaming: /slots da lo procesado pero no el total del prompt.
+      return `prefill · ${fmtTokens(prompt.processedTokens)} tok procesados`
+    }
     if (stage === "prefill" && promptLive && prompt?.totalTokens) {
       return `prefill ${req.prefillPct?.toFixed(0) ?? 0}% · ${fmtTokens(prompt.processedTokens)}/${fmtTokens(prompt.totalTokens)}`
     }

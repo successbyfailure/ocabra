@@ -242,7 +242,7 @@ async def attach_estimates(
         prompt = detail.get("prompt") or {}
         rid = (
             f"{detail['requestId']}:{prompt.get('totalTokens')}"
-            if prompt.get("source") == "live"
+            if prompt.get("source") == "live" and prompt.get("totalKnown", True)
             else detail["requestId"]
         )
         if rid not in _estimate_cache:
@@ -284,6 +284,7 @@ async def attach_estimates(
         if (
             detail["stage"] == "prefill"
             and prompt.get("source") == "live"
+            and prompt.get("totalKnown", True)
             and tps
             and prompt.get("totalTokens")
         ):
@@ -861,14 +862,23 @@ def apply_slot_progress(
         if progress != track["progress"]:
             track["progress"] = progress
             track["changed"] = now
-        done_prompt = min(total, cached + processed) if total else 0
+        # OJO: en /slots, ``n_prompt_tokens`` es lo cargado en el slot hasta
+        # ahora (va 512 por delante de lo procesado), NO el total del prompt:
+        # visto en producción con un prompt de 43.912 tokens que /slots
+        # mostraba como 5.128, 11.272, ... El total real solo lo da
+        # ``prompt_progress`` en streaming. Aquí lo procesado es real y el
+        # total, la estimación (nunca menos de lo ya procesado); sin total
+        # fiable no se da porcentaje.
+        done_prompt = cached + processed
+        estimated_total = (detail.get("prompt") or {}).get("totalTokens") or 0
         detail["prompt"] = {
-            "totalTokens": total or detail["prompt"].get("totalTokens"),
+            "totalTokens": max(estimated_total, done_prompt) or None,
             "cachedTokens": cached,
             "processedTokens": done_prompt,
             "source": "live",
+            "totalKnown": False,
         }
-        detail["prefillPct"] = round(100.0 * done_prompt / total, 1) if total else None
+        detail["prefillPct"] = None
         detail["prefillSource"] = "live"
         detail["lastActivitySecondsAgo"] = round(now - track["changed"], 1)
         if decoded > 0:

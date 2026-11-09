@@ -673,13 +673,16 @@ def test_slots_give_real_progress_to_non_streaming_requests():
     details = [tracked, first, second, third]
     la.apply_slot_progress(details, slots, now=1000.0)
     assert first["stage"] == "prefill"
+    # /slots no da el total del prompt (n_prompt_tokens es lo cargado hasta
+    # ahora): procesado real, total = la estimación (50k) y sin porcentaje.
     assert first["prompt"] == {
-        "totalTokens": 49_558,
+        "totalTokens": 50_000,
         "cachedTokens": 4096,
         "processedTokens": 24_096,
         "source": "live",
+        "totalKnown": False,
     }
-    assert first["prefillPct"] == pytest.approx(48.6, abs=0.1)
+    assert first["prefillPct"] is None
     assert second["stage"] == "generating" and second["outputTokens"] == 12
     assert third["stage"] == "backend_wait"
     # Segunda consulta (el endpoint reconstruye los detalles cada vez): ritmo
@@ -770,3 +773,14 @@ def test_model_phase_reports_eviction_service_wait_and_load_timing():
         "loadingForMs": 30_000,
         "typicalLoadMs": 40_000,
     }
+
+
+def test_slot_total_never_below_processed():
+    """Visto en producción: estimación de 10k para un prompt real de 43,9k."""
+    la._slot_track.clear()
+    d = _untracked("x", 1.0)
+    d["prompt"]["totalTokens"] = 10_004
+    la.apply_slot_progress([d], [_slot(1, 43_528, 43_016)], now=10.0)
+    assert d["prompt"]["processedTokens"] == 43_016
+    assert d["prompt"]["totalTokens"] == 43_016
+    assert d["prefillPct"] is None
