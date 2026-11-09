@@ -690,3 +690,69 @@ def test_chat_stream_surfaces_done_reason_in_final_chunk() -> None:
 
     payloads = [json.loads(line) for line in lines]
     assert payloads[-1]["done_reason"] == "length"
+
+
+def _llama_state():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id="llamacpp_mks/gemma4:26b",
+        display_name="Gemma 4 26B",
+        backend_type="llamacpp_mks",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, completion=True, streaming=True),
+    )
+
+
+def _stream_chat(app, chunks: list[bytes]) -> tuple[list[dict], dict]:
+    app.state.worker_pool.forward_stream = MagicMock(return_value=_async_gen(chunks))
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"model": "gemma4:26b", "messages": [{"role": "user", "content": "hola"}], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [json.loads(line) for line in resp.iter_lines() if line]
+    sent_body = app.state.worker_pool.forward_stream.call_args.args[2]
+    return lines, sent_body
+
+
+def test_chat_stream_asks_the_engine_for_usage_and_reports_it() -> None:
+    """Regression 2026-11-09: the Ollama translation built its own upstream
+    body without stream_options.include_usage, llama-server sent no usage
+    chunk, and every streamed /api/chat answered prompt_eval_count=0 /
+    eval_count=0 to the client (and to request_stats)."""
+    app = _make_app(model_state=_llama_state())
+    lines, sent = _stream_chat(
+        app,
+        [
+            b'data: {"choices":[{"delta":{"content":"Hola"}}]}\n\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":7}}\n\n',
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert sent["stream_options"] == {"include_usage": True}
+    assert lines[-1]["done"] is True
+    assert lines[-1]["prompt_eval_count"] == 21
+    assert lines[-1]["eval_count"] == 7
+
+
+def test_chat_stream_falls_back_to_llama_timings_when_no_usage_chunk() -> None:
+    app = _make_app(model_state=_llama_state())
+    lines, _sent = _stream_chat(
+        app,
+        [
+            b'data: {"choices":[{"delta":{"content":"Hola"}}]}\n\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+            b'"timings":{"prompt_n":5,"cache_n":16,"predicted_n":7,"prompt_ms":10,"predicted_ms":40}}\n\n',
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert lines[-1]["prompt_eval_count"] == 21  # prompt_n + cache_n
+    assert lines[-1]["eval_count"] == 7

@@ -49,6 +49,8 @@ from ._shared import (
     get_ollama_user,
     iter_sse_payloads,
     now_iso_z,
+    request_stream_usage,
+    usage_from_stream_payload,
 )
 
 router = APIRouter()
@@ -396,6 +398,7 @@ def _build_vllm_chat_body(payload: dict, model_id: str, stream: bool) -> dict:
     options = payload.get("options") or {}
     apply_option_map(body, options)
 
+    request_stream_usage(body)
     return body
 
 
@@ -467,10 +470,9 @@ async def _stream_chat(
         if isinstance(payload.get("timings"), dict):
             ultimo_payload = payload
 
-        usage = payload.get("usage") or {}
-        if usage:
-            prompt_eval_count = int(usage.get("prompt_tokens") or prompt_eval_count)
-            eval_count = int(usage.get("completion_tokens") or eval_count)
+        prompt_eval_count, eval_count = usage_from_stream_payload(
+            payload, prompt_eval_count, eval_count
+        )
 
         choices = payload.get("choices") or []
         if not choices:

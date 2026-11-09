@@ -119,3 +119,46 @@ async def iter_sse_payloads(source: AsyncIterator[bytes]) -> AsyncIterator[dict 
                 yield json.loads(data)
             except json.JSONDecodeError:
                 continue
+
+
+def request_stream_usage(body: dict) -> dict:
+    """Ask an OpenAI-compatible upstream to report token usage on a stream.
+
+    llama-server (and vLLM) only send the final ``usage`` chunk when the
+    request carries ``stream_options.include_usage``. The /v1 routes get it
+    from ``to_backend_body``; the Ollama translation built its own body
+    without it, so every streamed /api/chat answered ``prompt_eval_count: 0``
+    and ``eval_count: 0`` — to the client and to request_stats (2026-11-09:
+    34 of 35 /api/chat requests on llamacpp_mks since 2026-11-06 recorded 0
+    tokens).
+    """
+    if body.get("stream") is True:
+        options = body.get("stream_options")
+        body["stream_options"] = (
+            {**options, "include_usage": True}
+            if isinstance(options, dict)
+            else {"include_usage": True}
+        )
+    return body
+
+
+def usage_from_stream_payload(
+    payload: dict, prompt_tokens: int, completion_tokens: int
+) -> tuple[int, int]:
+    """Token counts carried by one upstream stream chunk (``usage`` first,
+    llama.cpp's ``timings.prompt_n``/``predicted_n`` as a fallback)."""
+    usage = payload.get("usage") or {}
+    if isinstance(usage, dict) and usage:
+        prompt_tokens = int(usage.get("prompt_tokens") or prompt_tokens)
+        completion_tokens = int(usage.get("completion_tokens") or completion_tokens)
+        return prompt_tokens, completion_tokens
+    timings = payload.get("timings")
+    if isinstance(timings, dict):
+        try:
+            if timings.get("prompt_n") is not None and not prompt_tokens:
+                prompt_tokens = int(timings["prompt_n"]) + int(timings.get("cache_n") or 0)
+            if timings.get("predicted_n") is not None and not completion_tokens:
+                completion_tokens = int(timings["predicted_n"])
+        except (TypeError, ValueError):
+            pass
+    return prompt_tokens, completion_tokens

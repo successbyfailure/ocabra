@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.60.1 — 2026-11-09
+
+### Arreglos
+
+- **`/api/chat` y `/api/generate` en streaming devolvían
+  `prompt_eval_count: 0` y `eval_count: 0`** en el último trozo, en todos los
+  modelos servidos por llama.cpp (casi todos). La respuesta era correcta; solo
+  faltaban los conteos de tokens. Si tu cliente calcula consumo o velocidad
+  con esos campos, ahora recibe los valores reales.
+
+---
+
 ## 0.60.0 — 2026-11-09
 
 ### Nuevo
