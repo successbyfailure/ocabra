@@ -3044,6 +3044,8 @@ class ModelManager:
                         )
                     await self.unload(candidate_id, reason="pressure")
                     await self._wait_for_vram_released(evicted_vram_mb)
+                    if gpu_pool is not None:
+                        await self._wait_for_free_vram(gpu_pool, vram_needed)
                     try:
                         return await self._gpu_scheduler.find_gpu_for_model(
                             vram_needed,
@@ -3145,6 +3147,50 @@ class ModelManager:
             sum(int(getattr(state, "free_vram_mb", 0)) for state in selected),
             sum(int(getattr(state, "total_vram_mb", 0)) for state in selected),
         )
+
+    async def _wait_for_free_vram(
+        self,
+        gpu_index: int,
+        needed_mb: int,
+        *,
+        timeout_s: float = 15.0,
+        poll_s: float = 0.5,
+        settle_s: float = 3.0,
+    ) -> None:
+        """After an eviction, wait until one GPU offers ``needed_mb`` or stops
+        freeing memory, so the scheduler does not judge a half-released card.
+
+        ``_wait_for_vram_released`` returns once free VRAM rises by 1 GiB, which
+        only proves that a sample after the exit was published. A 21 GB worker
+        is still releasing then, and hw-monitor refreshes every ~2 s. Seen live
+        2026-11-09: gemma4:26b (23,600) evicted ravenx-chaos-agent, saw 23,307
+        free 0.7 s later, failed, and freed the gate for ravenx to come back.
+
+        Stops early once the figure has not moved for ``settle_s``: when one
+        eviction is not enough, the caller moves on to the next candidate.
+        """
+        if self._gpu_manager is None or needed_mb <= 0:
+            return
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_s
+        last_free: int | None = None
+        last_change = loop.time()
+        while True:
+            try:
+                free = int(await self._gpu_manager.get_free_vram(gpu_index))
+            except Exception:  # noqa: BLE001
+                return
+            if free >= needed_mb:
+                return
+            now = loop.time()
+            if last_free is None or free != last_free:
+                last_free = free
+                last_change = now
+            elif now - last_change >= settle_s:
+                return
+            if now >= deadline:
+                return
+            await asyncio.sleep(poll_s)
 
     async def _wait_for_vram_released(
         self,

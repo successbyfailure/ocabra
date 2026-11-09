@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.60.3 — 2026-11-09
+
+### Arreglos
+
+- **Otro caso del mismo 409: el servidor descargaba un modelo para hacer
+  sitio y comprobaba la GPU antes de que terminara de liberarse.** Daba por
+  liberada la memoria en cuanto subía 1 GB, aunque el modelo descargado
+  ocupase más de 20. Medio segundo después veía la tarjeta a medio vaciar,
+  concluía que no cabía y devolvía `409 insufficient_vram`. Ese hueco lo
+  aprovechaba además el modelo recién descargado para volver a cargarse.
+  Ahora espera a que la GPU tenga la memoria necesaria, o a que deje de
+  liberar más, antes de decidir.
+
+  Los 409 de `gemma4:26b` con la RTX 3090 a unos 23.300 MB libres eran este
+  caso: la tarjeta estaba prácticamente vacía, solo que todavía no se había
+  terminado de leer así.
+
+---
+
 ## 0.60.2 — 2026-11-09
 
 ### Arreglos

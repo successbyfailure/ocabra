@@ -28,6 +28,14 @@ def worker_pool():
     return make_worker_pool_with_mock()
 
 
+@pytest.fixture(autouse=True)
+def _no_post_eviction_wait(request, monkeypatch):
+    """Skip the post-eviction release wait except in the tests that cover it."""
+    if "wait_for_free_vram" in request.node.name:
+        return
+    monkeypatch.setattr(ModelManager, "_wait_for_free_vram", AsyncMock())
+
+
 @pytest.fixture
 def model_manager(worker_pool):
     return ModelManager(worker_pool)
@@ -2695,3 +2703,58 @@ async def test_cuda_oom_load_failure_logs_vram_snapshot(worker_pool) -> None:
             "processes_mb": {"test/resident": 3_100, "pid:99": 400},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_free_vram_waits_until_the_card_offers_enough(worker_pool) -> None:
+    """2026-11-09: 0.7 s after evicting a 21 GB worker the 3090 read 23,307
+    free and gemma4:26b (23,600) gave up. The wait must cover the release."""
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram.side_effect = [12_000, 20_000, 23_307, 23_647]
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+
+    await mm._wait_for_free_vram(1, 23_600, poll_s=0)
+
+    assert gpu_manager.get_free_vram.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_wait_for_free_vram_stops_once_release_settles(worker_pool) -> None:
+    """When one eviction is not enough, stop waiting so the next candidate goes."""
+    gpu_manager = AsyncMock()
+    gpu_manager.get_free_vram.return_value = 9_000
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager)
+
+    await mm._wait_for_free_vram(1, 23_600, poll_s=0.01, settle_s=0.05, timeout_s=5)
+
+    assert gpu_manager.get_free_vram.await_count < 50
+
+
+@pytest.mark.asyncio
+async def test_pressure_eviction_waits_for_release_before_rechecking(worker_pool) -> None:
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states.return_value = [SimpleNamespace(index=1)]
+    gpu_manager.get_free_vram.return_value = 53
+    gpu_manager.get_free_vram_if_released.return_value = 23_647
+    gpu_manager.locked_gpu_indices = MagicMock(return_value=[1])
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = [InsufficientVRAMError("full"), [1]]
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+    await add_test_model(mm, model_id="test/gemma")
+    candidate = await add_test_model(mm, model_id="test/ravenx")
+    candidate.status = ModelStatus.LOADED
+    candidate.current_gpu = [1]
+    candidate.vram_used_mb = 20_990
+
+    with (
+        patch.object(mm, "unload", new=AsyncMock()),
+        patch.object(mm, "_wait_for_vram_released", new=AsyncMock()),
+        patch.object(mm, "_wait_for_free_vram", new=AsyncMock()) as wait_free,
+    ):
+        await mm._assign_gpus_for_load(
+            "test/gemma", vram_needed=23_600, preferred_gpu=1, enforce_vllm_headroom=False
+        )
+
+    wait_free.assert_awaited_once_with(1, 23_600)
