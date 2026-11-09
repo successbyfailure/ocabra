@@ -11,6 +11,12 @@
 #   BITNET_KERNEL_FLAVOR   default tl2
 #   BITNET_BUILD_JOBS      default nproc/2 capped at 8
 #   BITNET_ENABLE_CUDA     default false   (BitNet's pretuned kernels are CPU-first)
+#                          NOTE: this flag also decides whether the PrismML
+#                          fork gets CUDA. Leaving it false silently produces a
+#                          CPU-only bonsai-server, which is a big downgrade for
+#                          the ternary models that actually run here — this node
+#                          sets it to true in .env.
+#   BITNET_CUDA_ARCHS      default 86      (sm_86: the Ampere cards here)
 #
 # Output: ${BIN_DIR}/bitnet-server (renamed from llama-server) + lib*.so deps.
 #
@@ -100,8 +106,14 @@ if [[ "${BITNET_BUILD_PRISMML}" == "true" ]]; then
     fi
     cd "${PRISMML_SRC}"
     echo "[install_bitnet] cmake build PrismML fork (CUDA=${GGML_CUDA_FLAG}, jobs=${BITNET_BUILD_JOBS})"
+    # CMAKE_CUDA_ARCHITECTURES has to be explicit: the fork's default is
+    # "native", and the build runs in a container that cannot see a GPU, so
+    # cmake dies with "CUDA_ARCHITECTURES is set to native, but no GPU was
+    # detected" (2026-11-09). 86 covers the Ampere cards in this node; override
+    # with BITNET_CUDA_ARCHS elsewhere.
     cmake -B build \
         -DGGML_CUDA="${GGML_CUDA_FLAG}" \
+        -DCMAKE_CUDA_ARCHITECTURES="${BITNET_CUDA_ARCHS:-86}" \
         -DGGML_AVX2=ON \
         -DGGML_F16C=ON \
         -DGGML_FMA=ON \
@@ -128,7 +140,7 @@ if [[ "${BITNET_BUILD_PRISMML}" == "true" ]]; then
     # runtime, not cuBLAS/cudart/NCCL, which ggml-cuda links against.
     if [[ "${GGML_CUDA_FLAG}" == "ON" ]]; then
         for pat in "libcublas.so.*" "libcublasLt.so.*" "libcudart.so.*"; do
-            find /usr/local/cuda/lib64 -maxdepth 1 -name "${pat}" -exec cp -a {} "${PRISMML_BIN_DIR}/" \; 2>/dev/null || true
+            find -L /usr/local/cuda/lib64 -maxdepth 1 -name "${pat}" -exec cp -a {} "${PRISMML_BIN_DIR}/" \; 2>/dev/null || true
         done
         nccl="$(find / -name 'libnccl.so.2*' 2>/dev/null | head -1)"
         [[ -n "${nccl}" ]] && cp -a "${nccl}" "${PRISMML_BIN_DIR}/" || true

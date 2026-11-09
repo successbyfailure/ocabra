@@ -111,7 +111,7 @@ if [[ "${BITNET_BUILD_PRISMML}" == "true" ]]; then
   # target container provides only libcuda.so.1 (driver) via the NVIDIA runtime.
   if [[ "${GGML_CUDA_FLAG}" == "ON" ]]; then
     for pat in "libcublas.so.*" "libcublasLt.so.*" "libcudart.so.*"; do
-      find /usr/local/cuda/lib64 -maxdepth 1 -name "${pat}" -exec cp -a {} "${PRISMML_OUTDIR}/" \; 2>/dev/null || true
+      find -L /usr/local/cuda/lib64 -maxdepth 1 -name "${pat}" -exec cp -a {} "${PRISMML_OUTDIR}/" \; 2>/dev/null || true
     done
     nccl="$(find / -name 'libnccl.so.2*' 2>/dev/null | head -1)"
     [[ -n "${nccl}" ]] && cp -a "${nccl}" "${PRISMML_OUTDIR}/" || true

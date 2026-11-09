@@ -130,20 +130,39 @@ def test_bitnet_resolve_microsoft_bin_prefers_metadata(
 def test_bitnet_resolve_microsoft_bin_falls_back_to_legacy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """El ajuste heredado vale, pero solo si el binario esta en disco."""
+    legacy = tmp_path / "legacy-bitnet-server"
+    legacy.write_bytes(b"#!/bin/sh\n")
     monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
-    monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
+    monkeypatch.setattr(settings, "bitnet_server_bin", str(legacy))
 
-    assert BitnetBackend()._resolve_microsoft_bin() == "/legacy/bitnet-server"
+    assert BitnetBackend()._resolve_microsoft_bin() == str(legacy)
+
+
+def test_bitnet_resolve_microsoft_bin_no_inventa_una_ruta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Devolvia la ruta configurada existiera o no, y se ejecutaba nada.
+
+    Este nodo retiro ese binario el 2026-11-09 (su llama.cpp era de enero y
+    no lo usaba ningun modelo), asi que la ausencia tiene que notarse.
+    """
+    monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/no-existe")
+
+    assert BitnetBackend()._resolve_microsoft_bin() is None
 
 
 def test_bitnet_select_server_bin_uses_microsoft_for_i2s_gguf(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    legacy = tmp_path / "legacy-bitnet-server"
+    legacy.write_bytes(b"#!/bin/sh\n")
     monkeypatch.setattr(settings, "backends_dir", str(tmp_path))
-    monkeypatch.setattr(settings, "bitnet_server_bin", "/legacy/bitnet-server")
+    monkeypatch.setattr(settings, "bitnet_server_bin", str(legacy))
 
     modelo = tmp_path / "BitNet-b1.58-2B-4T-i2_s.gguf"
-    assert BitnetBackend()._select_server_bin(modelo) == "/legacy/bitnet-server"
+    assert BitnetBackend()._select_server_bin(modelo) == str(legacy)
 
 
 def test_bitnet_select_server_bin_uses_prismml_for_bonsai_gguf(
@@ -214,9 +233,7 @@ def test_acestep_resolve_project_paths_prefers_metadata(
     venv_python.parent.mkdir(parents=True)
     _make_executable(venv_python)
     (backend_dir / "metadata.json").write_text(
-        json.dumps(
-            {"src_dir": str(src_dir), "python_bin": str(venv_python)}
-        ),
+        json.dumps({"src_dir": str(src_dir), "python_bin": str(venv_python)}),
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "acestep_project_dir", "/legacy/acestep")

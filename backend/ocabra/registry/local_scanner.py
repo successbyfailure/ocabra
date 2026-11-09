@@ -172,6 +172,45 @@ def parse_gguf_tokenizer_fingerprint(
         return (None, None, None)
 
 
+def parse_gguf_file_type(path: Path) -> int | None:
+    """``general.file_type`` of a GGUF, or ``None`` if unreadable.
+
+    This is the quantization the file was produced with, and it is what tells
+    apart builds that can load it: ``Q1_0`` (40) and ``Q2_0`` (41) only exist
+    in the PrismML fork, for instance. The name cannot be trusted for this —
+    an Ollama blob is called after its sha256.
+    """
+
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(_GGUF_HEADER_MAX_BYTES)
+    except OSError:
+        return None
+
+    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
+        return None
+
+    buf = memoryview(data)
+    try:
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return None
+        (kv_count,) = struct.unpack_from("<Q", buf, 16)
+        offset = 24
+        for _ in range(int(kv_count)):
+            key, offset = _read_string(buf, offset)
+            (value_type,) = struct.unpack_from("<I", buf, offset)
+            offset += 4
+            value_type = int(value_type)
+            if key == "general.file_type" and value_type in _GGUF_SCALAR_FORMATS:
+                valor, offset = _read_scalar(buf, offset, value_type)
+                return int(valor)  # type: ignore[arg-type]
+            offset = _skip_value(buf, offset, value_type)
+    except (struct.error, _GGUFParseError, IndexError, ValueError):
+        return None
+    return None
+
+
 def parse_gguf_context_length(path: Path) -> int | None:
     """Native context length declared by a GGUF, or ``None``.
 

@@ -16,6 +16,33 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.56.0 — 2026-11-09
+
+### Mejoras
+
+- **El modelo ternario (`bonsai-27b-ternario`) va un 62 % más rápido:** de 35 a
+  **57 tokens/s** en la misma tarjeta. Su motor estaba compilado en julio y se
+  ha actualizado a la versión del 6 de noviembre, que son tres meses de mejoras
+  de llama.cpp además de las propias de ese formato.
+
+### Retirado
+
+- **El motor `bitnet-server` de Microsoft ya no está instalado.** Llevaba
+  dentro un llama.cpp de enero y no lo usaba ningún modelo del servidor. Si
+  instalas un modelo en formato `i2_s` (el de Microsoft BitNet), ahora el error
+  lo dice y explica cómo recuperarlo; antes se intentaba arrancar un binario
+  inexistente. Los modelos en formato PrismML (`Q1_0`, `Q2_0`) no se ven
+  afectados.
+
+### Arreglos
+
+- **Un modelo ternario instalado desde Ollama ya elige bien su motor.** Se
+  decidía por el nombre del fichero, y el de un modelo instalado como tag es su
+  sha256, así que arrancaba el motor equivocado y el servidor se abortaba. Ahora
+  se decide por la cuantización que declara el propio fichero.
+
+---
+
 ## 0.55.4 — 2026-11-09
 
 ### Arreglos

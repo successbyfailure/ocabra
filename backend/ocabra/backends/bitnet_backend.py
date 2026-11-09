@@ -21,8 +21,14 @@ from ocabra.backends.base import (
 from ocabra.config import settings
 from ocabra.core.backend_installer import read_backend_metadata
 from ocabra.core.model_manager_helpers import PRISMML_DEFAULT_GPU_LAYERS
+from ocabra.registry.local_scanner import parse_gguf_file_type
 
 logger = structlog.get_logger(__name__)
+
+# LLAMA_FTYPE_MOSTLY_Q1_0 / Q2_0 in the PrismML fork's own include/llama.h.
+# Upstream's ternary types (TQ1_0=36, TQ2_0=37) are not here: those the plain
+# builds read fine.
+_PRISMML_FTYPES = frozenset({40, 41})
 
 _SHUTDOWN_TIMEOUT_S = 20
 _DEFAULT_MODEL_MB = 400
@@ -96,14 +102,25 @@ class BitnetBackend(BackendInterface):
 
     @staticmethod
     def _is_prismml_model(model_file: Path) -> bool:
-        """True for Bonsai/PrismML GGUFs (need the PrismML llama.cpp fork).
+        """True for PrismML GGUFs (need the PrismML llama.cpp fork).
 
-        Microsoft's BitNet GGUFs use ``i2_s`` (TL1/TL2 kernels); Bonsai ships
-        the ``Q1_0_g128`` hybrid-attention kernels only available in the
-        ``PrismML-Eng/llama.cpp`` fork.
+        Microsoft's BitNet GGUFs use ``i2_s`` (TL1/TL2 kernels); PrismML ships
+        ``Q1_0``/``Q2_0`` hybrid-attention kernels that only exist in the
+        ``PrismML-Eng/llama.cpp`` fork — file types 40 and 41 in its own
+        ``llama.h``.
+
+        Decided by what the file says, not by its name: a model installed as
+        an Ollama tag lives in a blob named after its sha256, so every name
+        hint misses and the plain binary gets launched. That is how
+        ``bonsai-2:27b`` ended up aborting the server with
+        ``GGML_ASSERT(info->type < GGML_TYPE_COUNT)`` on 2026-11-09. The name
+        is still consulted when the file cannot be parsed.
         """
+        ftype = parse_gguf_file_type(model_file)
+        if ftype is not None:
+            return ftype in _PRISMML_FTYPES
         name = model_file.name.lower()
-        return "bonsai" in name or "q1_0" in name or "prismml" in name
+        return "bonsai" in name or "q1_0" in name or "q2_0" in name or "prismml" in name
 
     def _metadata_extra_bins(self) -> dict[str, Any]:
         meta = read_backend_metadata(settings.backends_dir, "bitnet")
@@ -113,15 +130,22 @@ class BitnetBackend(BackendInterface):
                 return extra
         return {}
 
-    def _resolve_microsoft_bin(self) -> str:
-        """Pick the Microsoft ``bitnet-server`` binary path.
+    def _resolve_microsoft_bin(self) -> str | None:
+        """Pick the Microsoft ``bitnet-server`` binary path, or ``None``.
 
         Priority: modular install metadata → ``settings.bitnet_server_bin``.
+        It used to return the configured path whether or not the file was
+        there, which meant exec'ing something that does not exist; this node
+        dropped that binary on 2026-11-09 (its embedded llama.cpp was from
+        January and no model used it), so the caller now has to say so.
         """
         bin_path = self._metadata_extra_bins().get("server")
         if bin_path and Path(bin_path).is_file():
             return str(bin_path)
-        return settings.bitnet_server_bin
+        configured = settings.bitnet_server_bin
+        if configured and Path(configured).is_file():
+            return str(configured)
+        return None
 
     def _resolve_prismml_bin(self) -> str | None:
         """Pick the PrismML ``bonsai-server`` binary, or ``None`` if absent.
@@ -133,9 +157,11 @@ class BitnetBackend(BackendInterface):
         bin_path = self._metadata_extra_bins().get("prismml_server")
         if bin_path and Path(bin_path).is_file():
             return str(bin_path)
-        sibling = Path(self._resolve_microsoft_bin()).parent / "prismml" / "bonsai-server"
-        if sibling.is_file():
-            return str(sibling)
+        microsoft = self._resolve_microsoft_bin()
+        if microsoft:
+            sibling = Path(microsoft).parent / "prismml" / "bonsai-server"
+            if sibling.is_file():
+                return str(sibling)
         configured = settings.bitnet_prismml_server_bin
         if configured and Path(configured).is_file():
             return str(configured)
@@ -153,7 +179,16 @@ class BitnetBackend(BackendInterface):
                     "settings.bitnet_prismml_server_bin to a bonsai-server binary."
                 )
             return prismml
-        return self._resolve_microsoft_bin()
+        microsoft = self._resolve_microsoft_bin()
+        if microsoft is None:
+            raise FileNotFoundError(
+                f"'{model_file.name}' is not a PrismML quantization (Q1_0/Q2_0) and "
+                "the Microsoft bitnet-server is not installed on this node. Reinstall "
+                "the bitnet backend (POST /ocabra/backends/bitnet/install) to get it "
+                "back, or serve the model from llamacpp_mks if its quantization is one "
+                "that build understands."
+            )
+        return microsoft
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
@@ -227,7 +262,15 @@ class BitnetBackend(BackendInterface):
         if cache_v:
             cmd.extend(["--cache-type-v", str(cache_v)])
         if options["mlock"]:
-            cmd.append("--mlock")
+            # Same split as --flash-attn above: the PrismML fork tracks a
+            # recent llama.cpp, where --mlock became a value of --load-mode and
+            # passing the old flag aborts the server outright ("error: invalid
+            # argument: --mlock", seen when the fork was updated to commit
+            # 6447906 on 2026-11-09). The Microsoft build only knows --mlock.
+            if is_prismml:
+                cmd.extend(["--load-mode", "mlock"])
+            else:
+                cmd.append("--mlock")
 
         if options["gpu_layers"] > 0:
             visible = ",".join(str(i) for i in gpu_indices)
