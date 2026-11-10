@@ -344,7 +344,10 @@ class WhisperBackend(BackendInterface):
         endpoint = path if path.startswith("/") else f"/{path}"
         files, form_data = _build_transcription_multipart(body)
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # Same read timeout as the direct worker path in api/openai/audio.py
+        # (server-wide inference timeout, not a fixed 300 s).
+        timeout_s = float(max(60, int(settings.inference_request_timeout_seconds)))
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
             response = await client.post(
                 f"http://127.0.0.1:{worker.info.port}{endpoint}",
                 files=files,

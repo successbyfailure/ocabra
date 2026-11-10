@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.67.4 — 2026-11-10
+
+### Arreglos
+
+- **Las transcripciones que tardaban más de 5 minutos fallaban siempre**, con
+  `503 worker_unavailable` y tras unos 10 minutos de espera. Afectaba sobre
+  todo a grabaciones largas con diarización (`whisper-large-v3-diarized`),
+  también dentro de `/v1/batches`. Ahora pueden tardar tanto como el límite
+  general de inferencia del servidor (25 minutos). Si aun así no terminan,
+  la respuesta es `504` con `code: "transcription_timeout"` y llega en cuanto
+  se cumple el plazo, sin reintentos que dupliquen la espera. **Acción:** si
+  tu cliente reintentaba los `503` de transcripción, trata el `504
+  transcription_timeout` como definitivo para ese audio (prueba sin
+  diarización, con un modelo más rápido o troceando la grabación).
+
+---
+
 ## 0.67.3 — 2026-11-10
 
 ### Arreglos

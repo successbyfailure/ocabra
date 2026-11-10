@@ -35,6 +35,19 @@ from ._federation import try_proxy_json, try_proxy_multipart
 router = APIRouter()
 logger = structlog.get_logger(__name__)
 
+
+def _worker_timeout() -> float:
+    """Read timeout for a transcription forwarded to a Whisper worker.
+
+    Follows the server-wide inference timeout instead of a hard-coded 300 s:
+    long recordings with diarization (pyannote on top of large-v3) routinely
+    take longer than five minutes, and the old cap failed them every time.
+    """
+    try:
+        return float(max(60, int(settings.inference_request_timeout_seconds)))
+    except (TypeError, ValueError):
+        return 1500.0
+
 # faster-whisper wires diarize=true to pyannote in-process
 # (workers/whisper_worker.py); whisper_cpp forwards it to a dedicated pyannote
 # sidecar instead (workers/diarization_worker.py, launched lazily by
@@ -288,7 +301,7 @@ async def transcriptions(
                     )
                 else:
                     url = f"http://127.0.0.1:{worker.port}/transcribe"
-                    async with httpx.AsyncClient(timeout=300.0) as client:
+                    async with httpx.AsyncClient(timeout=_worker_timeout()) as client:
                         form_data: dict[str, Any] = {
                             "response_format": response_format,
                             "temperature": str(temperature),
@@ -319,6 +332,27 @@ async def transcriptions(
                         )
                         resp.raise_for_status()
                 break
+            except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+                # The worker is alive and busy: it accepted the request and is
+                # still transcribing. Killing and reloading it (the transport
+                # error path below) threw away that work, evicted whatever it
+                # had to reload next to, and re-ran the same audio only to hit
+                # the same wall again (2026-11-10: a diarized large-v3 batch
+                # item failed twice at exactly 300 s each).
+                logger.warning(
+                    "whisper_worker_timeout",
+                    model_id=worker_key,
+                    worker_port=worker.port,
+                    timeout_s=_worker_timeout(),
+                )
+                raise _openai_error(
+                    f"Transcription with '{worker_key}' did not finish within "
+                    f"{_worker_timeout():.0f} s. Try a shorter recording, no diarization "
+                    "or a faster model.",
+                    "server_error",
+                    code="transcription_timeout",
+                    status_code=504,
+                ) from exc
             except httpx.TransportError as exc:
                 last_error = exc
                 logger.warning(

@@ -108,3 +108,120 @@ def test_sin_fichero_no_lo_corta_esta_guarda(cliente):
     """Cero ficheros es cosa de la validacion de FastAPI, no de la guarda."""
     respuesta = cliente.post("/v1/audio/transcriptions", data={"model": "whisper-large-v3-turbo"})
     assert respuesta.status_code == 422
+
+
+# ── Timeout del worker (2026-11-10) ──────────────────────────────────────────
+
+
+def _cliente_con_worker(monkeypatch, post_error: Exception):
+    """Handler real con un perfil y un worker de whisper simulados; el POST al
+    worker lanza ``post_error``."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    from ocabra.api.openai import audio as audio_mod
+    from ocabra.backends.base import BackendCapabilities
+
+    admin = UserContext(
+        user_id=None,
+        username=None,
+        role="system_admin",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=False,
+    )
+
+    async def _usuario():
+        return admin
+
+    profile = SimpleNamespace(
+        profile_id="whisper-large-v3-diarized",
+        base_model_id="whisper/whisper-large-v3",
+        load_overrides={"whisper": {"diarization_enabled": True}},
+        request_defaults={"diarize": True},
+    )
+    state = SimpleNamespace(
+        model_id="whisper/whisper-large-v3",
+        backend_model_id="openai/whisper-large-v3",
+        backend_type="whisper",
+        capabilities=BackendCapabilities(audio_transcription=True),
+    )
+    monkeypatch.setattr(audio_mod, "resolve_profile", AsyncMock(return_value=(profile, state)))
+
+    class _Cliente:
+        def __init__(self, *a, **k):
+            self.timeout = k.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *a, **k):
+            raise post_error
+
+    monkeypatch.setattr(audio_mod.httpx, "AsyncClient", _Cliente)
+
+    app = FastAPI()
+    app.include_router(openai_router, prefix="/v1")
+    for dep in (get_current_user, get_openai_user):
+        app.dependency_overrides[dep] = _usuario
+    mm = MagicMock()
+    mm.begin_request = MagicMock(return_value="req-1")
+    mm.end_request = MagicMock()
+    mm.unload = AsyncMock()
+    mm.load = AsyncMock()
+    mm.touch_last_request_at = AsyncMock()
+    mm.get_state = AsyncMock(return_value=state)
+    app.state.model_manager = mm
+    backend = SimpleNamespace(health_check=AsyncMock(return_value=True))
+    app.state.worker_pool = SimpleNamespace(
+        get_worker=MagicMock(return_value=SimpleNamespace(port=18004)),
+        get_backend=AsyncMock(return_value=backend),
+    )
+    app.state.profile_registry = ProfileRegistry()
+    _ = httpx
+    return TestClient(app), mm
+
+
+def test_un_worker_lento_da_504_y_no_se_recarga(monkeypatch):
+    """Un ReadTimeout es un worker vivo y ocupado. Antes se trataba como caido:
+    se mataba, se recargaba desalojando a otro modelo y se repetia el mismo
+    audio para volver a cortarse a los 300 s (lote de escriba, 2026-11-10)."""
+    import httpx
+
+    cliente, mm = _cliente_con_worker(monkeypatch, httpx.ReadTimeout("slow"))
+    respuesta = cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("largo.wav", _WAV, "audio/wav"))],
+        data={"model": "whisper-large-v3-diarized"},
+    )
+
+    assert respuesta.status_code == 504
+    assert respuesta.json()["detail"]["error"]["code"] == "transcription_timeout"
+    mm.unload.assert_not_awaited()
+    mm.load.assert_not_awaited()
+
+
+def test_un_worker_caido_se_sigue_recargando_una_vez(monkeypatch):
+    import httpx
+
+    cliente, mm = _cliente_con_worker(monkeypatch, httpx.ConnectError("refused"))
+    respuesta = cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("a.wav", _WAV, "audio/wav"))],
+        data={"model": "whisper-large-v3-diarized"},
+    )
+
+    assert respuesta.status_code == 503
+    mm.unload.assert_awaited_once()
+    mm.load.assert_awaited_once()
+
+
+def test_el_timeout_del_worker_sigue_al_de_inferencia(monkeypatch):
+    from ocabra.api.openai import audio as audio_mod
+
+    monkeypatch.setattr(audio_mod.settings, "inference_request_timeout_seconds", 1500)
+    assert audio_mod._worker_timeout() == 1500.0
