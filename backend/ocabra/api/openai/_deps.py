@@ -365,7 +365,8 @@ async def resolve_profile_runtime_plan(
             status_code=400,
         ) from exc
     # The chosen worker had its context shrunk in place: grow it back before a
-    # request that needs more than it holds now (resize_context, ~0.15 s).
+    # request that needs more than it holds now (~0.15-0.5 s), evicting what
+    # took the room it gave up if the GPUs no longer have it.
     live_effective_context = plan.live_effective_context
     if (
         live_effective_context is not None
@@ -373,7 +374,7 @@ async def resolve_profile_runtime_plan(
         and plan.required_tokens > live_effective_context
     ):
         try:
-            await model_manager.resize_context(plan.worker_key, restore=True)
+            await model_manager.grow_context_back(plan.worker_key)
         except Exception as exc:  # noqa: BLE001 - any failure leaves it small
             logger.warning(
                 "live_context_regrow_failed",

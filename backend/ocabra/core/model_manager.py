@@ -49,6 +49,9 @@ from ocabra.redis_client import (
 
 logger = structlog.get_logger(__name__)
 
+# Slack over the measured loaded footprint when growing a context back.
+_GROW_MARGIN_MB = 256
+
 
 def _to_camel_key(value: str) -> str:
     return "".join(
@@ -400,6 +403,8 @@ class ModelManager:
         # window is a short-lived operational state, not configuration worth
         # persisting across a restart.
         self._maintenance_models: set[str] = set()
+        # Shrunk llama.cpp workers with an idle regrow check in flight.
+        self._regrow_pending: set[str] = set()
 
     @asynccontextmanager
     async def _acquire_load_gate(self):
@@ -1215,6 +1220,10 @@ class ModelManager:
             state = self._states.get(model_id)
             if not state:
                 continue
+            shrunk = await self._try_shrink_for_space(model_id, gpu_index, needed_mb - freed)
+            if shrunk:
+                freed += shrunk
+                continue
             vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
             logger.info(
                 "vram_eviction",
@@ -1296,6 +1305,10 @@ class ModelManager:
                     continue
             state = self._states.get(candidate_id)
             if not state:
+                continue
+            shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb - freed)
+            if shrunk:
+                freed += shrunk
                 continue
             vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
             logger.info(
@@ -3222,6 +3235,17 @@ class ModelManager:
                                 )
                                 continue  # skip — still busy, try next candidate
 
+                    if await self._shrink_candidate_for_load(candidate_id, gpu_pool, vram_needed):
+                        try:
+                            return await self._gpu_scheduler.find_gpu_for_model(
+                                vram_needed,
+                                preferred_gpu,
+                                enforce_vllm_headroom=enforce_vllm_headroom,
+                                vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                            )
+                        except InsufficientVRAMError:
+                            pass  # not enough after all: evict it as before
+
                     logger.info(
                         "pressure_eviction_attempt",
                         requested_model_id=model_id,
@@ -3533,6 +3557,188 @@ class ModelManager:
             for candidate in self._states.values()
         )
 
+    def _worker_vram_by_gpu(self, state: ModelState) -> dict[int, int]:
+        """VRAM the worker process holds on each of its GPUs, read from NVML now."""
+        if self._gpu_manager is None or state.worker_info is None or not state.worker_info.pid:
+            return {}
+        usage: dict[int, int] = {}
+        for gpu_idx in state.current_gpu or []:
+            used = self._gpu_manager.get_process_vram_mb(gpu_idx).get(state.worker_info.pid)
+            if used:
+                usage[int(gpu_idx)] = int(used)
+        return usage
+
+    def _can_change_context_live(self, model_id: str) -> bool:
+        state = self._states.get(model_id)
+        if (
+            not settings.llama_cpp_live_context_enabled
+            or state is None
+            or state.status != ModelStatus.LOADED
+            or not is_llama_cpp_family(state.backend_type)
+        ):
+            return False
+        backend = self._registered_backend(state.backend_type)
+        return bool(getattr(backend, "SUPPORTS_LIVE_CONTEXT", False))
+
+    def _registered_backend(self, backend_type: str):
+        backends = getattr(self._worker_pool, "_backends", None)
+        return backends.get(backend_type) if isinstance(backends, dict) else None
+
+    async def _try_shrink_for_space(self, model_id: str, gpu_index: int, needed_mb: int) -> int:
+        """Shrink an idle llama.cpp worker's context to free ``needed_mb`` on a GPU.
+
+        Halves the KV pool step by step, down to ``llama_cpp_shrink_min_context``,
+        measuring what each step really frees on ``gpu_index``: how much a GPU
+        gives back depends on how the model is split (qwen3.8 in tensor mode
+        freed 1.8 GB on the 3060 and 4.2 GB on the 3090 going 262k -> 128k).
+        Returns the MB freed when that was enough, so the caller keeps the model
+        loaded instead of evicting it. Otherwise puts the context back where it
+        was and returns 0, and the caller evicts as before.
+        """
+        if not settings.llama_cpp_shrink_before_evict or needed_mb <= 0:
+            return 0
+        if not self._can_change_context_live(model_id) or self.is_busy(model_id):
+            return 0
+        state = self._states[model_id]
+        if gpu_index not in (state.current_gpu or []):
+            return 0
+        start = self._worker_vram_by_gpu(state).get(gpu_index)
+        if not start:
+            return 0
+
+        backend = self._registered_backend(state.backend_type)
+        nominal = (state.live_context or {}).get("nominal") or backend.context_options(
+            state.backend_model_id
+        )
+        original_ctx = int((state.live_context or {}).get("n_ctx") or nominal.get("n_ctx") or 0)
+        minimum = max(1, int(settings.llama_cpp_shrink_min_context))
+        ctx = original_ctx
+        freed = 0
+        while freed < needed_mb:
+            target = max(minimum, ctx // 2)
+            if target >= ctx:
+                break
+            try:
+                await self.resize_context(model_id, context=target)
+            except Exception as exc:  # noqa: BLE001 - shrinking is best effort
+                logger.info("shrink_for_space_step_failed", model_id=model_id, error=str(exc))
+                break
+            ctx = target
+            now = self._worker_vram_by_gpu(state).get(gpu_index, start)
+            freed = max(0, start - now)
+
+        if freed >= needed_mb:
+            logger.info(
+                "shrink_instead_of_evict",
+                model_id=model_id,
+                gpu_index=gpu_index,
+                needed_mb=needed_mb,
+                freed_mb=freed,
+                context=ctx,
+                original_context=original_ctx,
+            )
+            return freed
+
+        if ctx != original_ctx:
+            try:
+                if original_ctx == nominal.get("n_ctx"):
+                    await self.resize_context(model_id, restore=True)
+                else:
+                    await self.resize_context(model_id, context=original_ctx)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("shrink_for_space_undo_failed", model_id=model_id, error=str(exc))
+        logger.info(
+            "shrink_for_space_insufficient",
+            model_id=model_id,
+            gpu_index=gpu_index,
+            needed_mb=needed_mb,
+            freed_mb=freed,
+        )
+        return 0
+
+    async def _shrink_candidate_for_load(
+        self, candidate_id: str, gpu_pool: int | None, vram_needed: int
+    ) -> bool:
+        """Pressure-loop variant of ``_try_shrink_for_space``: try the GPU being
+        freed (or, with no pool, the candidate's GPU closest to fitting)."""
+        if self._gpu_manager is None or not self._can_change_context_live(candidate_id):
+            return False
+        state = self._states[candidate_id]
+        gpus = [gpu_pool] if gpu_pool is not None else list(state.current_gpu or [])
+        deficits: list[tuple[int, int]] = []
+        for gpu_idx in gpus:
+            if gpu_idx not in (state.current_gpu or []):
+                continue
+            try:
+                free = int(await self._gpu_manager.get_free_vram(gpu_idx))
+            except Exception:  # noqa: BLE001
+                continue
+            deficits.append((max(1, int(vram_needed) - free), int(gpu_idx)))
+        for deficit, gpu_idx in sorted(deficits):
+            if await self._try_shrink_for_space(candidate_id, gpu_idx, deficit):
+                return True
+        return False
+
+    async def _missing_vram_to_grow(self, state: ModelState) -> dict[int, int]:
+        """MB each GPU lacks for the worker to take its loaded context back."""
+        missing: dict[int, int] = {}
+        if self._gpu_manager is None or state.live_context is None:
+            return missing
+        current = self._worker_vram_by_gpu(state)
+        for gpu_key, nominal_mb in (state.live_context.get("nominal_vram_mb") or {}).items():
+            gpu_idx = int(gpu_key)
+            needed = int(nominal_mb) - int(current.get(gpu_idx, 0)) + _GROW_MARGIN_MB
+            free = int(await self._gpu_manager.get_free_vram(gpu_idx))
+            if needed > free:
+                missing[gpu_idx] = needed - free
+        return missing
+
+    async def _regrow_if_room(self, model_id: str) -> None:
+        """Idle check: grow a shrunk worker back when its GPUs have room again,
+        without evicting anything for it."""
+        try:
+            state = self._states.get(model_id)
+            if state is None or state.live_context is None or self.is_busy(model_id):
+                return
+            async with self._acquire_load_gate():
+                if state.live_context is None or self.is_busy(model_id):
+                    return
+                missing = await self._missing_vram_to_grow(state)
+                if missing:
+                    return
+                logger.info("live_context_regrow_idle", model_id=model_id)
+                await self.resize_context(model_id, restore=True)
+        except Exception as exc:  # noqa: BLE001 - retried on the next idle tick
+            logger.info("live_context_regrow_idle_failed", model_id=model_id, error=str(exc))
+        finally:
+            self._regrow_pending.discard(model_id)
+
+    async def grow_context_back(self, model_id: str) -> ModelState:
+        """Give a shrunk worker its loaded context back, making room if needed.
+
+        Called when a request needs more than the reduced context. If the GPUs
+        no longer have the room it gave up, the usual last-resort eviction frees
+        it (the models that moved in meanwhile go, as they would for a load),
+        all under the load gate so it does not race other loads.
+        """
+        state = self._states.get(model_id)
+        if state is None:
+            raise KeyError(f"Model '{model_id}' not configured")
+        if state.live_context is None:
+            return state
+        async with self._acquire_load_gate():
+            if state.live_context is None:
+                return state
+            for gpu_idx, missing_mb in (await self._missing_vram_to_grow(state)).items():
+                logger.info(
+                    "live_context_grow_back_evicting",
+                    model_id=model_id,
+                    gpu_index=gpu_idx,
+                    missing_mb=missing_mb,
+                )
+                await self._evict_last_resort_for_space(model_id, gpu_idx, missing_mb)
+            return await self.resize_context(model_id, restore=True)
+
     async def resize_context(
         self,
         model_id: str,
@@ -3596,6 +3802,12 @@ class ModelManager:
                     )
                 await asyncio.sleep(0.1)
 
+            # What each GPU held at the loaded size, measured before the first
+            # change: growing back needs that much room again (grow_context_back).
+            nominal_vram = (state.live_context or {}).get("nominal_vram_mb")
+            if nominal_vram is None:
+                nominal_vram = self._worker_vram_by_gpu(state)
+
             result = await backend.reconfigure_context(
                 state.backend_model_id,
                 n_ctx=context,
@@ -3611,7 +3823,11 @@ class ModelManager:
             back_to_nominal = all(
                 live.get(key) == nominal.get(key) for key in ("n_ctx", "n_parallel", "n_ubatch")
             )
-            state.live_context = None if back_to_nominal else {**live, "nominal": nominal}
+            state.live_context = (
+                None
+                if back_to_nominal
+                else {**live, "nominal": nominal, "nominal_vram_mb": nominal_vram}
+            )
             state.capabilities = self._apply_capability_fallbacks(
                 state, await backend.get_capabilities(state.backend_model_id)
             )
@@ -4100,6 +4316,18 @@ class ModelManager:
         for model_id, state in list(self._states.items()):
             if state.status != ModelStatus.LOADED:
                 continue
+            if (
+                state.live_context is not None
+                and settings.llama_cpp_regrow_when_idle
+                and model_id not in self._regrow_pending
+                and not self.is_busy(model_id)
+            ):
+                self._regrow_pending.add(model_id)
+                self._create_background_task(
+                    self._regrow_if_room(model_id),
+                    task_name=f"live-context-regrow:{model_id}",
+                    model_id=model_id,
+                )
             runtime = (
                 state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
             )

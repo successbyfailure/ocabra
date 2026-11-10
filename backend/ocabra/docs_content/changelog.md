@@ -16,6 +16,31 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.67.0 — 2026-11-10
+
+### Cambios de comportamiento
+
+- **Menos recargas largas en los modelos de llama.cpp.** Si hace falta VRAM
+  para otro modelo y un modelo de llama.cpp está ocioso, oCabra primero le
+  reduce el contexto en caliente, a la mitad cada vez y con un mínimo de
+  32.768 tokens. Solo lo descarga si con eso no basta. Antes lo descargaba
+  siempre, y la siguiente petición pagaba una carga de 30 s a varios minutos.
+  Cambiar el contexto tarda menos de medio segundo.
+- **Una petición que no cabe en el contexto reducido lo recupera.** El modelo
+  vuelve a su contexto completo antes de atenderla. Si la VRAM que soltó ya la
+  ocupa otro modelo, se descarga ese. Antes respondía 503
+  `context_temporarily_reduced` en cuanto la VRAM no estaba libre. Ese 503
+  sigue existiendo, pero ya solo sale si ni descargando cabe; trae
+  `Retry-After`.
+- Cuando el modelo reducido se queda ocioso y hay sitio, recupera solo su
+  contexto completo.
+
+**Acción:** ninguna. Si lees `max_context` o el contexto del modelo en
+`/ocabra/models`, ahora puede bajar un rato y volver a subir. El valor actual
+está en `live_context`, y el de carga en `live_context.nominal`.
+
+---
+
 ## 0.66.0 — 2026-11-10
 
 ### Nuevo

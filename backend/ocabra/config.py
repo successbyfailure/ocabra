@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.66.0"
+    app_version: str = "0.67.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -290,6 +290,14 @@ class Settings(BaseSettings):
     llama_cpp_live_context_enabled: bool = False
     # How long resize_context waits for the worker's requests to finish.
     llama_cpp_live_context_drain_timeout_s: float = 30.0
+    # Before evicting an idle llama.cpp fork worker to free VRAM, shrink its
+    # context (halving it, measuring what each step frees on that GPU) and keep
+    # it loaded when that is enough. Needs llama_cpp_live_context_enabled.
+    llama_cpp_shrink_before_evict: bool = True
+    # Never shrink a context below this many tokens (KV pool).
+    llama_cpp_shrink_min_context: int = 32768
+    # Grow shrunk workers back once they are idle and their GPUs have room.
+    llama_cpp_regrow_when_idle: bool = True
     llama_cpp_cont_batching: bool = True
     llama_cpp_adaptive_admission_enabled: bool = Field(
         default=True,

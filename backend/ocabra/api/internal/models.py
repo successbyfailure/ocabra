@@ -2098,6 +2098,8 @@ async def _overlay_loaded_derived_state(mm, states: list) -> list:
                 # from before it was ever loaded.
                 capabilities=derived.capabilities,
                 error_message=derived.error_message,
+                # A context shrunk in place lives on the worker, not the entry.
+                live_context=derived.live_context,
                 **common,
             )
         )

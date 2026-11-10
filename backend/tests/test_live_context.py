@@ -268,6 +268,141 @@ async def test_failed_resize_leaves_state_untouched(monkeypatch) -> None:
     gpu.lock_vram.assert_not_awaited()
 
 
+# -- shrink before evict / grow back (phase 2) ---------------------------------
+
+
+def _elastic_manager(monkeypatch, *, free=None, kv_mb_per_64k=(500, 1000)):
+    """Manager whose worker's VRAM follows its context, like the real fork:
+    every 64k tokens of KV cost ``kv_mb_per_64k[gpu]`` on each GPU."""
+    mm, state, backend, gpu = _manager(monkeypatch)
+    monkeypatch.setattr("ocabra.core.model_manager.settings.llama_cpp_shrink_before_evict", True)
+    monkeypatch.setattr("ocabra.core.model_manager.settings.llama_cpp_shrink_min_context", 32768)
+    mm._worker_pool._backends["llamacpp_mks"] = backend
+    ctx = {"n": 262144}
+    weights = {0: 6000, 1: 16000}
+
+    def vram(idx):
+        return {4242: weights[idx] + kv_mb_per_64k[idx] * ctx["n"] // 65536}
+
+    async def reconfigure(_model, *, n_ctx, n_parallel, n_ubatch, n_batch):
+        ctx["n"] = n_ctx
+        return {
+            "n_ctx": n_ctx,
+            "n_ctx_slot": n_ctx,
+            "n_parallel": n_parallel,
+            "n_ubatch": n_ubatch,
+            "n_batch": n_batch,
+            "t_ms": 150.0,
+        }
+
+    gpu.get_process_vram_mb = MagicMock(side_effect=vram)
+    free_mb = dict(free or {0: 0, 1: 0})
+    gpu.get_free_vram = AsyncMock(side_effect=lambda idx: free_mb[idx])
+    backend.reconfigure_context = AsyncMock(side_effect=reconfigure)
+    return mm, state, backend, ctx, free_mb
+
+
+@pytest.mark.asyncio
+async def test_shrink_halves_until_the_gpu_frees_enough(monkeypatch) -> None:
+    mm, state, _, ctx, _ = _elastic_manager(monkeypatch)
+
+    # GPU 1 frees 1000 MB per 64k: 262k -> 131k frees 2000, -> 65k frees 3000.
+    freed = await mm._try_shrink_for_space(state.model_id, 1, 2500)
+
+    assert freed == 3000
+    assert ctx["n"] == 65536
+    assert state.live_context["n_ctx"] == 65536
+    assert state.live_context["nominal_vram_mb"] == {0: 8000, 1: 20000}
+
+
+@pytest.mark.asyncio
+async def test_shrink_that_cannot_free_enough_puts_the_context_back(monkeypatch) -> None:
+    mm, state, backend, ctx, _ = _elastic_manager(monkeypatch)
+
+    # The 3060 holds little KV: even at the 32k floor it frees 1750 MB.
+    freed = await mm._try_shrink_for_space(state.model_id, 0, 6000)
+
+    assert freed == 0
+    assert ctx["n"] == 262144
+    assert state.live_context is None
+
+
+@pytest.mark.asyncio
+async def test_shrink_skips_busy_or_foreign_gpu_or_disabled(monkeypatch) -> None:
+    mm, state, backend, ctx, _ = _elastic_manager(monkeypatch)
+    assert await mm._try_shrink_for_space(state.model_id, 3, 100) == 0
+    mm._in_flight[state.model_id] = 1
+    assert await mm._try_shrink_for_space(state.model_id, 1, 100) == 0
+    mm._in_flight.pop(state.model_id)
+    monkeypatch.setattr("ocabra.core.model_manager.settings.llama_cpp_shrink_before_evict", False)
+    assert await mm._try_shrink_for_space(state.model_id, 1, 100) == 0
+    backend.reconfigure_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evict_for_space_shrinks_instead_of_unloading(monkeypatch) -> None:
+    mm, state, _, ctx, _ = _elastic_manager(monkeypatch)
+    mm.unload = AsyncMock()
+    mm._get_eviction_candidates = MagicMock(return_value=[state.model_id])
+
+    freed = await mm._evict_for_space(1, 1500)
+
+    assert freed == 2000
+    mm.unload.assert_not_awaited()
+    assert ctx["n"] == 131072
+
+
+@pytest.mark.asyncio
+async def test_evict_for_space_still_unloads_when_shrinking_is_not_enough(monkeypatch) -> None:
+    mm, state, _, ctx, _ = _elastic_manager(monkeypatch)
+    mm.unload = AsyncMock()
+    mm._get_eviction_candidates = MagicMock(return_value=[state.model_id])
+
+    await mm._evict_for_space(0, 20000)
+
+    mm.unload.assert_awaited_once_with(state.model_id, reason="vram_pressure")
+    assert ctx["n"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_grow_back_evicts_what_took_the_room(monkeypatch) -> None:
+    mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch)
+    await mm._try_shrink_for_space(state.model_id, 1, 2500)  # now 65k
+    evicted = []
+
+    async def evict(requesting, gpu_idx, needed):
+        evicted.append((requesting, gpu_idx, needed))
+        free_mb[gpu_idx] += needed
+        return needed
+
+    mm._evict_last_resort_for_space = AsyncMock(side_effect=evict)
+    free_mb.update({0: 5000, 1: 1000})
+
+    await mm.grow_context_back(state.model_id)
+
+    # GPU 1 needs 3000 back (+256 margin) and has 1000 free; GPU 0 has room.
+    assert evicted == [(state.model_id, 1, 2256)]
+    assert ctx["n"] == 262144
+    assert state.live_context is None
+
+
+@pytest.mark.asyncio
+async def test_idle_regrow_only_when_there_is_room(monkeypatch) -> None:
+    mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch)
+    await mm._try_shrink_for_space(state.model_id, 1, 2500)
+    mm._evict_last_resort_for_space = AsyncMock()
+
+    await mm._regrow_if_room(state.model_id)
+    assert ctx["n"] == 65536  # no room: stays small, nothing evicted
+    mm._evict_last_resort_for_space.assert_not_awaited()
+
+    free_mb.update({0: 5000, 1: 5000})
+    await mm._regrow_if_room(state.model_id)
+    assert ctx["n"] == 262144
+    assert state.live_context is None
+    assert state.model_id not in mm._regrow_pending
+
+
 # -- planner / request path ------------------------------------------------------
 
 
@@ -292,19 +427,19 @@ def _plan(**kw) -> RuntimePlan:
 @pytest.mark.asyncio
 async def test_request_larger_than_live_context_grows_worker_back() -> None:
     mm = MagicMock()
-    mm.resize_context = AsyncMock()
+    mm.grow_context_back = AsyncMock()
     request_state = SimpleNamespace()
     with patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())):
         await resolve_profile_runtime_plan(MagicMock(), mm, {}, request_state=request_state)
 
-    mm.resize_context.assert_awaited_once_with("llamacpp_mks/qwen3.8:27b::abc", restore=True)
+    mm.grow_context_back.assert_awaited_once_with("llamacpp_mks/qwen3.8:27b::abc")
     assert request_state.runtime_effective_context == 262144
 
 
 @pytest.mark.asyncio
 async def test_request_that_fits_live_context_uses_it_without_regrowing() -> None:
     mm = MagicMock()
-    mm.resize_context = AsyncMock()
+    mm.grow_context_back = AsyncMock()
     request_state = SimpleNamespace()
     with patch(
         "ocabra.api.openai._deps.plan_profile_runtime",
@@ -312,14 +447,14 @@ async def test_request_that_fits_live_context_uses_it_without_regrowing() -> Non
     ):
         await resolve_profile_runtime_plan(MagicMock(), mm, {}, request_state=request_state)
 
-    mm.resize_context.assert_not_awaited()
+    mm.grow_context_back.assert_not_awaited()
     assert request_state.runtime_effective_context == 65536
 
 
 @pytest.mark.asyncio
 async def test_failed_regrow_is_a_retryable_503() -> None:
     mm = MagicMock()
-    mm.resize_context = AsyncMock(side_effect=RuntimeError("no VRAM"))
+    mm.grow_context_back = AsyncMock(side_effect=RuntimeError("no VRAM"))
     with (
         patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())),
         pytest.raises(HTTPException) as caught,

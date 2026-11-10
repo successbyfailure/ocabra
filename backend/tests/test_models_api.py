@@ -142,12 +142,14 @@ async def test_overlay_loaded_derived_state_surfaces_runtime_fields_on_base_entr
         vram_used_mb=24751,
         loaded_at=datetime(2026, 10, 26, 21, 19, 24, tzinfo=UTC),
         capabilities=BackendCapabilities(chat=True, completion=True, tools=True, streaming=True),
+        live_context={"n_ctx": 131072, "nominal": {"n_ctx": 262144}},
     )
     mm = _FakeManagerForOverlay([base], [derived])
 
     overlaid = await models_api._overlay_loaded_derived_state(mm, [base])
 
     assert len(overlaid) == 1
+    assert overlaid[0].live_context["n_ctx"] == 131072
     result = overlaid[0]
     assert result.model_id == "llama_cpp/qwen3.8-27b"
     assert result.display_name == "qwen3.8:27b"
