@@ -19,6 +19,7 @@ import ocabra.database as database
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
 from ocabra.config import settings
 from ocabra.core import artifacts as model_artifacts
+from ocabra.core import observed_vram
 from ocabra.core.config_keys import normalize_case
 from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
@@ -1830,6 +1831,7 @@ class ModelManager:
                 vram_needed = await backend.get_vram_estimate_mb(
                     state.backend_model_id, extra_config=state.extra_config
                 )
+                manually_validated_vram = False
                 if state.backend_type == "bitnet":
                     vram_needed = self._estimate_bitnet_vram_from_config(state)
                 elif is_llama_cpp_family(state.backend_type):
@@ -1866,6 +1868,7 @@ class ModelManager:
                             calibrated_vram_mb=calibrated_vram_mb,
                         )
                         vram_needed = calibrated_vram_mb
+                        manually_validated_vram = True
                 elif state.backend_type == "vllm":
                     # vLLM's own get_vram_estimate_mb is weights-only. Long-context
                     # loads then pass the eviction filter (weights fit) but crash
@@ -1973,6 +1976,42 @@ class ModelManager:
                                             }
                                     except (TypeError, ValueError):
                                         required_gpu_vram_mb = None
+                            # Raise the estimate to what this exact configuration
+                            # was measured to hold last time (see observed_vram).
+                            # Fingerprinted here, before use-case resolution
+                            # rewrites extra_config, and recorded with the same
+                            # fingerprint once the worker is up.
+                            observed_fingerprint: str | None = None
+                            # A preset validated by hand keeps its measured figure:
+                            # those sit at the edge of the card on purpose (qwen3.8
+                            # "normal": 24,000 of 24,159), and margin on top would
+                            # make them unloadable. Learning still records them.
+                            if is_llama_cpp_family(state.backend_type) and gpu_managed:
+                                observed_fingerprint = observed_vram.footprint_fingerprint(
+                                    state.extra_config
+                                )
+                                observed = await observed_vram.lookup(
+                                    model_id, fingerprint=observed_fingerprint
+                                )
+                                if observed and not manually_validated_vram:
+                                    raised_total, raised_per_gpu = observed_vram.raise_to_observed(
+                                        vram_needed, required_gpu_vram_mb, observed
+                                    )
+                                    if raised_total != vram_needed or (
+                                        raised_per_gpu != required_gpu_vram_mb
+                                    ):
+                                        logger.info(
+                                            "llama_cpp_observed_vram_applied",
+                                            model_id=model_id,
+                                            estimated_vram_mb=vram_needed,
+                                            observed_per_gpu_mb=observed,
+                                            vram_needed_mb=raised_total,
+                                            required_gpu_vram_mb=raised_per_gpu,
+                                        )
+                                    vram_needed, required_gpu_vram_mb = (
+                                        raised_total,
+                                        raised_per_gpu,
+                                    )
                             gpu_indices = await self._admit_gpu_load(
                                 model_id=model_id,
                                 vram_needed=vram_needed,
@@ -2211,11 +2250,7 @@ class ModelManager:
                                 # EngineCore child allocates), and a small
                                 # reading there would under-lock every GPU.
                                 real_per_gpu_mb: dict[int, int] = {}
-                                if (
-                                    len(actual_gpu_indices) > 1
-                                    and worker_info.pid
-                                    and is_llama_cpp_family(state.backend_type)
-                                ):
+                                if worker_info.pid and is_llama_cpp_family(state.backend_type):
                                     try:
                                         for gpu_idx in actual_gpu_indices:
                                             measured = self._gpu_manager.get_process_vram_mb(
@@ -2225,7 +2260,18 @@ class ModelManager:
                                                 real_per_gpu_mb[gpu_idx] = int(measured)
                                     except Exception:  # noqa: BLE001
                                         real_per_gpu_mb = {}
-                                use_real = len(real_per_gpu_mb) == len(actual_gpu_indices)
+                                measured_everywhere = bool(actual_gpu_indices) and len(
+                                    real_per_gpu_mb
+                                ) == len(actual_gpu_indices)
+                                if measured_everywhere and observed_fingerprint is not None:
+                                    await observed_vram.record(
+                                        model_id,
+                                        fingerprint=observed_fingerprint,
+                                        per_gpu_mb=real_per_gpu_mb,
+                                    )
+                                # The single-GPU lock keeps the estimate, as before;
+                                # the reading reaches it through the next admission.
+                                use_real = len(actual_gpu_indices) > 1 and measured_everywhere
                                 for gpu_idx in actual_gpu_indices:
                                     await self._gpu_manager.lock_vram(
                                         gpu_idx,

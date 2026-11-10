@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.63.0 — 2026-11-10
+
+### Cambios
+
+- **Los modelos de llama.cpp ya no fallan al cargar por estimar mal su
+  memoria.** Antes de cargar un modelo, el servidor calcula cuánta VRAM
+  necesitará para decidir dónde cabe y a quién descargar. Para llama.cpp ese
+  cálculo dejaba fuera una parte que depende de cada modelo, y en los
+  repartidos entre las dos GPUs se quedaba corto en más de 3 GB. El servidor
+  creía que cabía, empezaba a cargar y la GPU se quedaba sin memoria: la
+  petición fallaba con `503` aunque hubiera bastado con descargar otro modelo
+  primero.
+
+  Ahora apunta la memoria real que ocupa cada modelo al cargarse y la usa la
+  siguiente vez que se cargue con la misma configuración. La cifra solo sirve
+  para reservar más, nunca menos, y se descarta si cambia la configuración del
+  modelo. La primera carga de cada configuración sigue usando la estimación.
+
+---
+
 ## 0.62.5 — 2026-11-10
 
 ### Arreglos
