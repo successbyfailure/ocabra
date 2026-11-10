@@ -367,6 +367,30 @@ class TestGetVramEstimate:
         # Very small models still reserve a minimum baseline for vLLM runtime overhead.
         assert estimate >= 2048
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "extra_config",
+        [{"vram_estimate_mb": 1843}, {"vllm": {"vram_estimate_mb": 1843}}],
+    )
+    async def test_override_from_passed_extra_config(self, tmp_model_dir: Path, extra_config):
+        """Since 0034 the deployment id (``vllm/<model_key>``) no longer
+        matches ``vllm/<repo>``: the override must come from the extra_config
+        the caller passes, not only from a DB lookup by the old id."""
+        model_path = tmp_model_dir / "BAAI" / "bge-reranker-v2-m3"
+        model_path.mkdir(parents=True)
+        (model_path / "model.safetensors").write_bytes(b"x" * (3 * 1024 * 1024))
+
+        from ocabra.backends.vllm_backend import VLLMBackend
+
+        with patch("ocabra.backends.vllm_backend.settings") as mock_settings:
+            mock_settings.models_dir = str(tmp_model_dir)
+            backend = VLLMBackend()
+            estimate = await backend.get_vram_estimate_mb(
+                "BAAI/bge-reranker-v2-m3", extra_config=extra_config
+            )
+
+        assert estimate == 1843
+
 
 class TestWorkerKeySuffixStripping:
     """Profile worker_keys carry a ``::<hash>`` suffix (see

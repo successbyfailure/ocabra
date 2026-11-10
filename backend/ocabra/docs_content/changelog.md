@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.62.5 — 2026-11-10
+
+### Arreglos
+
+- **Los modelos vLLM con `vram_estimate_mb` vuelven a cargar.** Tras la
+  unificación de modelos (0.46.0) el servidor dejaba de ver ese ajuste
+  y estimaba la VRAM solo por el tamaño de los pesos. Con ese cálculo
+  podía rechazar una carga que sí cabía, con el error `Need N MB VRAM`.
+  Le pasaba, por ejemplo, a `bge-reranker-v2-m3` en `/v1/rerank`.
+
+---
+
 ## 0.62.4 — 2026-11-10
 
 ### Arreglos

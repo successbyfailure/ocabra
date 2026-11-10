@@ -823,9 +823,19 @@ class VLLMBackend(BackendInterface):
         e.g. quantised weights with auxiliary tensors like MTP that don't
         all live on GPU).
         """
-        # Allow per-model override via DB-stored extra_config. Caller passes
-        # the backend-stripped id (e.g. "palmfuture/Qwen3.6-..."); the DB row
-        # is stored with the "vllm/" prefix.
+        # The caller usually hands us the deployment's extra_config: that is
+        # the authoritative source and needs no DB round-trip.
+        if extra_config:
+            override = self._get_vllm_option(extra_config, "vram_estimate_mb", None)
+            if override:
+                return int(override)
+
+        # Otherwise look the override up in the DB. Caller passes the
+        # backend-stripped id (e.g. "palmfuture/Qwen3.6-..."). Since migration
+        # 0034 the deployment id is ``vllm/<model_key>`` and the repo lives in
+        # ``artifact.ref``, so ``vllm/<repo>`` only matches pre-0034 rows —
+        # match either, or the override is silently ignored and the
+        # weights × 1.2 heuristic can refuse a load that fits.
         try:
             import sqlalchemy as sa
 
@@ -834,7 +844,17 @@ class VLLMBackend(BackendInterface):
 
             async with AsyncSessionLocal() as session:
                 row = await session.execute(
-                    sa.select(ModelConfig).where(ModelConfig.model_id == f"vllm/{model_id}")
+                    sa.select(ModelConfig)
+                    .where(
+                        sa.or_(
+                            ModelConfig.model_id == f"vllm/{model_id}",
+                            sa.and_(
+                                ModelConfig.backend_type == "vllm",
+                                ModelConfig.artifact["ref"].astext == model_id,
+                            ),
+                        )
+                    )
+                    .limit(1)
                 )
                 cfg = row.scalar_one_or_none()
                 if cfg is not None:
