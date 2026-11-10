@@ -483,9 +483,17 @@ def _apply_llama_cpp_preset_placement(
                 key=lambda pos: totals.get(selected[pos], 0),
             )
         )
+        # Multi-GPU presets used to force "layer". A profile that asks for
+        # "row" or "tensor" keeps it; anything else still becomes "layer".
+        configured_split_mode = (
+            str(section.get("split_mode", section.get("splitMode")) or "").strip().lower()
+        )
+        split_mode = (
+            configured_split_mode if configured_split_mode in {"row", "tensor"} else "layer"
+        )
         section.update(
             {
-                "split_mode": "layer",
+                "split_mode": split_mode,
                 "split_strategy": "evenly",
                 "tensor_split": ratios,
                 # llama.cpp interprets --main-gpu relative to CUDA_VISIBLE_DEVICES.

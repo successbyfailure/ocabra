@@ -333,6 +333,74 @@ async def test_llama_cpp_dual_preset_replaces_single_gpu_base_placement(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("tensor", "tensor"), ("row", "row"), ("layer", "layer"), (None, "layer")],
+)
+async def test_llama_cpp_dual_preset_keeps_tensor_or_row_split(
+    monkeypatch, configured, expected
+) -> None:
+    """A dual preset used to force "layer"; a profile asking for "tensor"
+    (both GPUs compute every layer together) must get it."""
+    preset = _preset("extended", 262_144, default=False)
+    preset.preferred_gpus = [0, 1]
+    profile = SimpleNamespace(
+        profile_id="qwen3.8:27b",
+        base_model_id="llamacpp_mks/qwen3.8:27b",
+        load_overrides=None,
+        runtime_policy={"selection": "prefer_loaded"},
+        runtime_presets=[preset],
+    )
+    llama_cfg = {"tensor_split": [1, 3], "main_gpu": 1}
+    if configured is not None:
+        llama_cfg["split_mode"] = configured
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="llamacpp_mks",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={"llama_cpp": llama_cfg},
+    )
+    gpu_states = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=gpu_states)),
+        list_states=AsyncMock(return_value=[state]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(
+            return_value=[
+                {
+                    "preset_key": "extended",
+                    "resolved": True,
+                    "fits": True,
+                    "effective_context": 262_144,
+                    "effective_parallelism": 4,
+                    "target_gpus": [0, 1],
+                    "runtime_key": "runtime:extended",
+                }
+            ]
+        ),
+    )
+
+    plan = await plan_profile_runtime(
+        profile,
+        manager,
+        {
+            "messages": [{"role": "user", "content": "hola"}],
+            "max_tokens": 1,
+            "ocabra": {"context_preset": "extended"},
+        },
+    )
+
+    assert plan.load_overrides["llama_cpp"]["split_mode"] == expected
+
+
+@pytest.mark.asyncio
 async def test_llama_cpp_dual_preset_keeps_calibrated_matching_split(monkeypatch) -> None:
     preset = _preset("extended", 229_376, default=False)
     preset.preferred_gpus = [0, 1]

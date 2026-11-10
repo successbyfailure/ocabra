@@ -126,3 +126,9 @@ def test_elastic_kv_flags_are_forwarded():
     assert cmd[cmd.index("--kv-unified-per-slot") + 1] == "32768"
     assert cmd[cmd.index("--cache-ram") + 1] == "0"
     assert "--no-cache-idle-slots" in cmd
+
+
+def test_split_mode_tensor_is_passed_through():
+    cmd = build_command(_args("--split-mode", "tensor"))
+    idx = cmd.index("--split-mode")
+    assert cmd[idx + 1] == "tensor"

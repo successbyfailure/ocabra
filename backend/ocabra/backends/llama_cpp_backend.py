@@ -53,7 +53,11 @@ _DEFAULT_STARTUP_TIMEOUT_S = 30
 _SHUTDOWN_TIMEOUT_S = 20
 _VISION_ACTIVATION_TIMEOUT_S = 60.0
 _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_worker.py"
-_VALID_SPLIT_MODES = {"layer", "row", "none"}
+#: "tensor" splits every layer across the GPUs so they compute together, where
+#: "layer" gives each GPU a range of layers and they take turns. llama.cpp
+#: supports it per architecture (not flint, nemotron_h); see
+#: llm_arch_supports_sm_tensor.
+_VALID_SPLIT_MODES = {"layer", "row", "tensor", "none"}
 _VALID_SPLIT_STRATEGIES = {"evenly", "favor_main"}
 _VALID_VISION_MODES = {"enabled", "disabled", "on_demand"}
 

@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-split", default=None)
     parser.add_argument(
         "--split-mode",
-        choices=("layer", "row", "none"),
+        choices=("layer", "row", "tensor", "none"),
         default=None,
     )
     parser.add_argument("--n-cpu-moe", type=int, default=None)
