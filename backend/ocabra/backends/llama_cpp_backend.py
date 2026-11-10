@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes.util
+import functools
 import os
 import signal
 import sys
@@ -28,18 +30,40 @@ from ocabra.registry.local_scanner import parse_gguf_speculative_type
 logger = structlog.get_logger(__name__)
 
 
-def _cuda_ld_library_path() -> str:
-    """CUDA runtime lib dirs for the natively-built llama-server binary.
+#: Libraries a CUDA build of llama-server needs from the CUDA runtime.
+_CUDA_RUNTIME_LIBS = ("cudart", "cublas", "cublasLt")
 
-    Unlike the python backends, llama.cpp is compiled from source and has no
-    venv of its own, so it ships no CUDA runtime: on the slim image the binary
-    dies at startup with ``libcublas.so.12: cannot open shared object file``
-    (exit 127). The NVIDIA container runtime only injects the *driver* libs, so
-    reuse the CUDA runtime that pip already dropped into another backend's venv.
+
+@functools.cache
+def _system_cuda_runtime_available() -> bool:
+    """Whether the dynamic linker already resolves the CUDA runtime by itself.
+
+    The api image ships the CUDA toolkit llama-server is compiled with, and
+    registers it in the linker cache, so nothing has to be added for the binary
+    to start. Cached: the image does not change while the process runs.
+    """
+    return all(ctypes.util.find_library(name) for name in _CUDA_RUNTIME_LIBS)
+
+
+def _cuda_ld_library_path() -> str:
+    """Extra CUDA runtime lib dirs for the natively-built llama-server binary.
+
+    llama.cpp is compiled from source and has no venv of its own. When the image
+    lacks a CUDA runtime, the binary dies at startup with ``libcublas.so.N:
+    cannot open shared object file`` (exit 127): the NVIDIA container runtime
+    only injects the *driver* libs. Only then reuse the runtime pip dropped into
+    another backend's venv.
+
+    With the system runtime present this returns "" on purpose. Borrowing was
+    unconditional before 2026-11-10, so every llama.cpp worker silently ran on
+    vLLM's cuBLAS/cudart instead of the toolkit it was built with: updating or
+    removing vLLM would change or break llama.cpp without anyone noticing.
     """
     own = venv_nvidia_ld_library_path(settings.backends_dir, "llama_cpp")
     if own:
         return own
+    if _system_cuda_runtime_available():
+        return ""
     for donor in ("vllm", "sglang", "acestep", "diffusers"):
         donated = venv_nvidia_ld_library_path(settings.backends_dir, donor)
         if donated:
@@ -672,7 +696,9 @@ class LlamaCppBackend(BackendInterface):
         if entry is None:
             raise LiveContextError(f"llama.cpp worker for '{model_id}' is not running")
         if not self.SUPPORTS_LIVE_CONTEXT:
-            raise LiveContextUnsupported(f"backend '{self.BACKEND_TYPE}' cannot change context live")
+            raise LiveContextUnsupported(
+                f"backend '{self.BACKEND_TYPE}' cannot change context live"
+            )
 
         wanted = {
             "n_ctx": n_ctx,
@@ -700,7 +726,9 @@ class LlamaCppBackend(BackendInterface):
         try:
             result = dict(response.json()["context"])
         except (ValueError, KeyError, TypeError) as exc:
-            raise LiveContextError(f"unexpected live context response: {response.text[:300]}") from exc
+            raise LiveContextError(
+                f"unexpected live context response: {response.text[:300]}"
+            ) from exc
 
         options = self._model_configs.get(model_id)
         if isinstance(options, dict):
