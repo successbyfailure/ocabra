@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.64.0"
+    app_version: str = "0.64.1"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -253,7 +253,12 @@ class Settings(BaseSettings):
     llama_cpp_batch_size: int = 512
     llama_cpp_ubatch_size: int = 128
     llama_cpp_flash_attn: bool = False
-    llama_cpp_mlock: bool = True
+    # Off by default (2026-11-10). With every layer on the GPU, locking the
+    # mmap'd file only pins a host copy of weights the GPU already holds:
+    # flint:40b would pin ~22 GB of RAM on a 94 GB host that already swaps. It
+    # never worked here anyway: the container's RLIMIT_MEMLOCK is 8 MB, so every
+    # load logged "failed to mlock" and carried on unlocked.
+    llama_cpp_mlock: bool = False
     llama_cpp_embeddings: bool = False
     # 2026-10-29: raised 30->60 — under host CPU/memory contention (several
     # heavy workers competing, observed swap usage up to ~41GB that session)
