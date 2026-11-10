@@ -1,6 +1,6 @@
 # Plan de evaluación e integración de Strata
 
-**Estado:** spike preparado; pendiente ejecutar la descarga y benchmark en hardware libre
+**Estado:** ejecutado el 2026-11-10; no promover a backend de producto con Qwen3.6
 **Backend propuesto:** `strata` (experimental y opt-in)
 **Upstream fijado para el spike:** Strata `v0.2.13`, Terminal/Control `0.1.59.1`
 **Hardware objetivo:** RTX 3060 12 GB (GPU 0) + RTX 3090 24 GB (GPU 1), 94 GiB RAM
@@ -29,8 +29,10 @@ La instalación reproducible del Terminal está en
 `benchmark/install_strata_spike.sh`. Descarga el instalador de la release
 fijada y verifica el SHA-256 antes de ejecutarlo. Todo queda aislado en
 `/docker/ai-models/ocabra/models/huggingface/strata-spike`; no modifica el PATH
-global ni instala paquetes del sistema. Se usa esta subcarpeta porque el dataset
-ZFS `/docker/ai-models` tiene espacio suficiente y concede escritura ahi; la
+global ni instala paquetes del sistema. El runner fija también `XDG_DATA_HOME`
+y `XDG_STATE_HOME` bajo ese prefijo para aislar componentes y journals del
+runtime. Se usa esta subcarpeta porque el dataset
+ZFS `/docker/ai-models` tiene espacio suficiente y concede escritura ahí; la
 raiz `/docker/ai-models/ocabra` no concede escritura al usuario operativo.
 
 El runner prueba dos perfiles con iguales modelo, contexto, visión y
@@ -43,7 +45,9 @@ concurrencia:
 
 Se fuerza contexto 32K, visión desactivada, un slot y layer split normal. Así se
 evita mezclar el resultado con el coste del encoder visual, batching o el split
-engine experimental.
+engine experimental. Las peticiones usan `reasoning_effort=none`: con el default
+`high`, una salida corta puede agotarse enteramente en `reasoning_content` antes
+de producir respuesta o abrir una tool call forzada.
 
 ## Procedimiento de prueba
 
@@ -57,7 +61,7 @@ benchmark/install_strata_spike.sh
 El instalador solo ocupa aproximadamente 100 MB. El motor y el modelo no se
 descargan en este paso.
 
-En este host el paso ya esta ejecutado y deja `strata 0.2.13.1` (Control
+En este host el paso ya está ejecutado y deja `strata 0.2.13.1` (Control
 `0.1.59.1`) instalado en el prefijo aislado.
 
 ### 2. Preflight y plan sin cambios
@@ -76,7 +80,7 @@ Resultado del preflight del 2026-11-09: hardware, driver, RAM, disco y puerto so
 compatibles; quedan como bloqueantes tres procesos GPU de oCabra (Whisper y un
 llama-server repartido entre ambas tarjetas). Los dos planes upstream validan
 Qwen3.6 UD-Q4_K_XL, contexto 32K y los roles pedidos. Ambos dicen que el engine
-falta. Tambien dicen `0 GB` y "model already on this computer" aunque el directorio
+falta. También dicen `0 GB` y "model already on this computer" aunque el directorio
 aislado no contiene ningun run config; se considera una estimacion no fiable del
 plan y la ejecucion debe asumir que puede descargar los ~23 GB completos.
 
@@ -175,3 +179,30 @@ Si pasa, el cambio de producto se divide en unidades revisables:
 
 Estos límites permiten decidir con datos antes de ampliar contratos compartidos
 o introducir otro gestor de procesos en producción.
+
+## Resultado y decisión
+
+El spike completó en la RTX 3090 la carga, dos generaciones streaming, una tool
+call forzada y el apagado limpio. Qwen3.6 UD-Q4_K_XL alcanzó 75,09 tok/s en la
+salida de 256 tokens, 187,22 ms de TTFT y 83,56 s de carga. Consumió 23.548 MiB
+en la 3090 y volvió a 18 MiB después del stop.
+
+No se cumple el umbral de aceptación frente al backend desplegado: el benchmark
+histórico de vLLM con Qwen3.6 GPTQ Int4 alcanza 120,55 tok/s. Son cuantizadores
+y protocolos distintos, por lo que no es una comparación bit a bit, pero Strata
+no aporta aquí una ventaja de rendimiento, capacidad o memoria que justifique
+integrarlo todavía en ModelManager.
+
+El brazo `split` es un diagnóstico fallido, no un resultado multi-GPU válido.
+Terminal añadió `--layer-split auto`, pero el engine Qwen3.6 0.1.59 registró
+`ignoring --layer-split auto (not an option of this engine)`. El proceso terminó
+en la primera GPU visible, la RTX 3060, con 11.421 MiB allí y solo 614 MiB en la
+3090; por eso cayó a 26,75 tok/s. No se debe anunciar split para esta combinación
+de familia y engine.
+
+La conclusión completa, métricas y límites de comparación están en
+`docs/benchmarks/strata-qwen36-spike-2026-11-10.md`. Una evaluación posterior
+de Qwen3.8 sigue siendo razonable si se quiere medir el caso diferencial de
+Strata —MoE que no cabe en una sola GPU—, pero debe abrirse como spike separado,
+confirmar primero que su engine soporta realmente layer split y presupuestar
+66–76 GB adicionales de descarga.

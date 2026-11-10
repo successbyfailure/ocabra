@@ -104,6 +104,22 @@ def _run(command: list[str], *, timeout: int = 30, env: dict[str, str] | None = 
     return completed.stdout.strip()
 
 
+def _strata_environment(root: Path, api_key: str) -> dict[str, str]:
+    """Keep components, lifecycle journals and credentials inside the spike root."""
+    runtime = root / "runtime"
+    xdg_data = runtime / "xdg-data"
+    xdg_state = runtime / "xdg-state"
+    xdg_data.mkdir(parents=True, exist_ok=True)
+    xdg_state.mkdir(parents=True, exist_ok=True)
+    return {
+        **os.environ,
+        "STRATA_SPIKE_API_KEY": api_key,
+        "STRATA_DATA_DIR": str(root / "models"),
+        "XDG_DATA_HOME": str(xdg_data),
+        "XDG_STATE_HOME": str(xdg_state),
+    }
+
+
 def _strata_bin(root: Path, override: str | None = None) -> Path:
     if override:
         path = Path(override).expanduser().resolve()
@@ -364,6 +380,7 @@ def generate(
         "messages": prompt["messages"],
         "max_tokens": prompt["max_tokens"],
         "temperature": 0,
+        "reasoning_effort": "none",
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -420,6 +437,7 @@ def check_tool_call(base_url: str, api_key: str, model: str) -> ToolResult:
         "tool_choice": {"type": "function", "function": {"name": "sumar"}},
         "max_tokens": 128,
         "temperature": 0,
+        "reasoning_effort": "none",
         "stream": False,
     }
     request = urllib.request.Request(
@@ -486,11 +504,7 @@ def execute_profile(
         )
 
     api_key = secrets.token_urlsafe(32)
-    environment = {
-        **os.environ,
-        "STRATA_SPIKE_API_KEY": api_key,
-        "STRATA_DATA_DIR": str(root / "models"),
-    }
+    environment = _strata_environment(root, api_key)
     command = build_launch_command(strata_bin, root, profile=profile, port=port, plan=False)
     started = time.monotonic()
     launch_output = ""
@@ -591,11 +605,7 @@ def main(argv: list[str] | None = None) -> int:
         command = build_launch_command(
             strata_bin, root, profile=args.profile, port=args.port, plan=True
         )
-        environment = {
-            **os.environ,
-            "STRATA_SPIKE_API_KEY": "plan-only-not-a-secret",
-            "STRATA_DATA_DIR": str(root / "models"),
-        }
+        environment = _strata_environment(root, "plan-only-not-a-secret")
         print(_run(command, timeout=300, env=environment))
         return 0
     if not args.execute:

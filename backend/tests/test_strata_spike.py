@@ -45,6 +45,15 @@ def test_perfil_desconocido_se_rechaza(tmp_path: Path) -> None:
         )
 
 
+def test_entorno_strata_aisla_componentes_estado_y_credencial(tmp_path: Path) -> None:
+    environment = strata_spike._strata_environment(tmp_path, "secreta")
+
+    assert environment["STRATA_SPIKE_API_KEY"] == "secreta"
+    assert environment["STRATA_DATA_DIR"] == str(tmp_path / "models")
+    assert environment["XDG_DATA_HOME"] == str(tmp_path / "runtime" / "xdg-data")
+    assert environment["XDG_STATE_HOME"] == str(tmp_path / "runtime" / "xdg-state")
+
+
 def test_stream_openai_extrae_ttft_texto_y_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     ticks = iter((10.1,))
     monkeypatch.setattr(strata_spike.time, "monotonic", lambda: next(ticks))
