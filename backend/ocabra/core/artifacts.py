@@ -55,6 +55,7 @@ KIND_BY_BACKEND = {
     "mage": "diffusers_tree",
     "vllm": "hf_repo",
     "sglang": "hf_repo",
+    "strata": "strata_config",
     "tensorrt_llm": "trt_engine",
     "tts": "hf_repo",
     "chatterbox": "hf_repo",
@@ -228,7 +229,7 @@ def materialize(
     section_key = config_section_for(backend_type)
     section = dict(extra.get(section_key) or {}) if isinstance(extra.get(section_key), dict) else {}
     if "model" in paths:
-        section["model_path"] = paths["model"]
+        section["config_path" if backend_type == "strata" else "model_path"] = paths["model"]
     if "mmproj" in paths:
         section["mmproj_model_id"] = paths["mmproj"]
     if "draft" in paths:
@@ -260,6 +261,8 @@ def strip_derived(backend_type: str, extra_config: dict | None) -> dict | None:
         section = dict(section)
         for key in ARTIFACT_KEYS:
             section.pop(key, None)
+        if backend_type == "strata":
+            section.pop("config_path", None)
         spec = section.get("speculative")
         if isinstance(spec, dict) and "draft_model_id" in spec:
             spec = {k: v for k, v in spec.items() if k != "draft_model_id"}
@@ -297,8 +300,9 @@ def artifact_from_legacy_extra(
         "source": "local",
         "ref": backend_model_id,
     }
-    if opt("model_path"):
-        art["path"] = str(opt("model_path"))
+    model_path = opt("config_path") if backend_type == "strata" else opt("model_path")
+    if model_path:
+        art["path"] = str(model_path)
     mmproj = opt("mmproj_model_id") or opt("mmproj_path")
     if mmproj:
         art["mmproj"] = {"source": "local", "path": str(mmproj)}

@@ -62,6 +62,19 @@ también son la opción más rápida en frío.
 
 # Modelos de texto
 
+## Qwen3.8 Flash-Next Coder en Strata
+
+`qwen3.8-coder:iq1-m` es el perfil grande de programación y agentes. Usa
+cuantización IQ1_M, contexto de 65.536 tokens, dos peticiones paralelas y
+`reasoning_effort: medium` por defecto. Ocupa las dos GPU de forma asimétrica
+(aprox. 11,3 GiB en la RTX 3060 y 23,7 GiB en la RTX 3090) y cerca de 90 GiB
+de RAM total del host, por lo que se carga bajo demanda y desaloja los modelos
+que estuvieran en cualquiera de las tarjetas.
+
+En la prueba concurrente sostuvo aproximadamente 36–40 tok/s por petición.
+Está pensado para tareas de código difíciles que justifican el arranque y la
+presión de memoria, no para respuestas cortas de baja latencia.
+
 ## Velocidad de generación
 
 Media de cuatro tareas reales (extraer afirmaciones, resumir, verificar,

@@ -25,6 +25,7 @@ const SHORT_LABELS: Record<string, string> = {
   llama_cpp: "llama.cpp",
   whisper_cpp: "whisper.cpp",
   tensorrt_llm: "TensorRT",
+  strata: "Strata",
 }
 
 export function backendLabel(backend: string): string {

@@ -1953,10 +1953,27 @@ class ModelManager:
                                         required_gpu_indices = [int(i) for i in raw_indices]
                                     except (TypeError, ValueError):
                                         required_gpu_indices = None
+                                raw_per_gpu = _runtime_meta.get("capacity_vram_by_gpu_mb")
+                                if isinstance(raw_per_gpu, dict) and required_gpu_indices:
+                                    try:
+                                        candidate = {
+                                            int(index): max(0, int(value))
+                                            for index, value in raw_per_gpu.items()
+                                        }
+                                        if all(
+                                            index in candidate for index in required_gpu_indices
+                                        ):
+                                            required_gpu_vram_mb = {
+                                                index: candidate[index]
+                                                for index in required_gpu_indices
+                                            }
+                                    except (TypeError, ValueError):
+                                        required_gpu_vram_mb = None
                             if (
                                 is_llama_cpp_family(state.backend_type)
                                 and required_gpu_indices
                                 and len(required_gpu_indices) > 1
+                                and required_gpu_vram_mb is None
                             ):
                                 llama_config = state.extra_config.get("llama_cpp")
                                 tensor_split = (
@@ -2299,9 +2316,16 @@ class ModelManager:
                                 # the reading reaches it through the next admission.
                                 use_real = len(actual_gpu_indices) > 1 and measured_everywhere
                                 for gpu_idx in actual_gpu_indices:
+                                    configured = (required_gpu_vram_mb or {}).get(gpu_idx)
                                     await self._gpu_manager.lock_vram(
                                         gpu_idx,
-                                        real_per_gpu_mb[gpu_idx] if use_real else fallback_per_gpu,
+                                        (
+                                            real_per_gpu_mb[gpu_idx]
+                                            if use_real
+                                            else configured
+                                            if configured is not None
+                                            else fallback_per_gpu
+                                        ),
                                         model_id,
                                     )
 
@@ -2462,7 +2486,15 @@ class ModelManager:
             if isinstance(value, int) and value > 0:
                 return value
 
-        for section_name in ("vllm", "sglang", "llama_cpp", "bitnet", "tensorrt_llm", "whisper"):
+        for section_name in (
+            "vllm",
+            "sglang",
+            "strata",
+            "llama_cpp",
+            "bitnet",
+            "tensorrt_llm",
+            "whisper",
+        ):
             section = extra_config.get(section_name)
             if not isinstance(section, dict):
                 continue
@@ -3559,7 +3591,9 @@ class ModelManager:
             deadline = loop.time() + float(settings.llama_cpp_live_context_drain_timeout_s)
             while self.is_busy(model_id):
                 if loop.time() >= deadline:
-                    raise RuntimeError(f"'{model_id}' stayed busy; live context change not attempted")
+                    raise RuntimeError(
+                        f"'{model_id}' stayed busy; live context change not attempted"
+                    )
                 await asyncio.sleep(0.1)
 
             result = await backend.reconfigure_context(
@@ -3570,7 +3604,10 @@ class ModelManager:
                 n_batch=batch,
             )
 
-            live = {key: result.get(key) for key in ("n_ctx", "n_ctx_slot", "n_parallel", "n_ubatch", "n_batch")}
+            live = {
+                key: result.get(key)
+                for key in ("n_ctx", "n_ctx_slot", "n_parallel", "n_ubatch", "n_batch")
+            }
             back_to_nominal = all(
                 live.get(key) == nominal.get(key) for key in ("n_ctx", "n_parallel", "n_ubatch")
             )
@@ -3580,7 +3617,11 @@ class ModelManager:
             )
 
             # The footprint changed: lock what the worker really holds now.
-            if self._gpu_manager is not None and state.worker_info is not None and state.worker_info.pid:
+            if (
+                self._gpu_manager is not None
+                and state.worker_info is not None
+                and state.worker_info.pid
+            ):
                 measured: dict[int, int] = {}
                 for gpu_idx in state.current_gpu or []:
                     used = self._gpu_manager.get_process_vram_mb(gpu_idx).get(state.worker_info.pid)
@@ -4770,6 +4811,7 @@ class ModelManager:
 _TEXT_LLM_BACKENDS = {
     "vllm",
     "sglang",
+    "strata",
     "llama_cpp",
     "llamacpp_mks",
     "bitnet",

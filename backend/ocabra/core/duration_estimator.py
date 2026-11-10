@@ -70,6 +70,7 @@ FAMILY_DEFAULT_S: dict[str, dict[str, float]] = {
     "llama_cpp":    {"p50": 15.0, "p95": 250.0},
     # Same engine as upstream, so the same priors apply.
     "llamacpp_mks": {"p50": 15.0, "p95": 250.0},
+    "strata": {"p50": 18.0, "p95": 300.0},
     "bitnet":       {"p50": 10.0, "p95": 120.0},
     "ollama":       {"p50": 14.0, "p95": 250.0},
     "whisper":      {"p50":  5.0, "p95":  60.0},
@@ -158,7 +159,7 @@ class _ChatRegression:
 # a·input_tokens + b·output_tokens + c. Everything else stays on the
 # percentile path in Etapa 1 / gets its own family estimator in Etapa 5.
 _CHAT_FAMILIES = frozenset(
-    {"vllm", "sglang", "tensorrt_llm", "llama_cpp", "llamacpp_mks", "bitnet", "ollama"}
+    {"vllm", "sglang", "strata", "tensorrt_llm", "llama_cpp", "llamacpp_mks", "bitnet", "ollama"}
 )
 
 

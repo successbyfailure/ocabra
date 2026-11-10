@@ -8,7 +8,7 @@ Si necesitas cambiar un contrato, documenta el cambio aquí antes de implementar
 
 ## 1. BackendInterface — Contrato de backends de inferencia
 
-Todo backend de inferencia (vLLM, Diffusers, Whisper, whisper.cpp, VibeASR, TTS, Ollama, llama.cpp, SGLang, TensorRT-LLM, BitNet, ACE-Step) debe implementar esta interfaz abstracta.
+Todo backend de inferencia (vLLM, Diffusers, Whisper, whisper.cpp, VibeASR, TTS, Ollama, llama.cpp, SGLang, Strata, TensorRT-LLM, BitNet, ACE-Step) debe implementar esta interfaz abstracta.
 
 No todo backend necesita un worker Python propio: cuando el proceso nativo
 ya expone HTTP (`whisper-server`, `llama-server`), `load()` lo lanza
@@ -47,7 +47,7 @@ class BackendCapabilities:
 
 @dataclass
 class WorkerInfo:
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "mage" | "whisper" | "whisper_cpp" | "vibeasr" | "tts" | "chatterbox" | "piper" | "voxtral" | "upscaler" | "flashvsr" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
+    backend_type: str           # Backend prefix in model_id; includes "strata" for Strata Terminal deployments.
     model_id: str
     gpu_indices: list[int]
     port: int
@@ -85,9 +85,23 @@ class BackendInterface(ABC):
         """Reenvía una petición streaming al worker."""
 ```
 
+### 1.1 Backend Strata
+
+Un despliegue `strata` sirve un run config creado por Strata Terminal. Su
+artefacto es `{"kind":"strata_config","source":"local","path":"/ruta/strata-*.json","ref":"modelo"}`;
+`materialize()` deriva `extra_config.strata.config_path` solo en memoria.
+
+El backend lanza `serve/server.py` en localhost como grupo de procesos,
+inyecta una clave interna aleatoria en una copia temporal y exige que
+`/health` responda con `loaded=true`. Al descargar termina el grupo completo,
+incluido el hijo nativo que posee la VRAM.
+
+`_runtime.capacity_vram_by_gpu_mb` declara reservas asimétricas validadas.
+ModelManager usa ese mapa para admisión y locks, sin dividir el total al 50 %.
+
 ---
 
-### 1.1 Escalado de vídeo (VIDEO_UPSCALING)
+### 1.2 Escalado de vídeo (VIDEO_UPSCALING)
 
 Los backends de escalado (`upscaler`, `flashvsr`) implementan además:
 

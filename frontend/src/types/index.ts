@@ -78,7 +78,8 @@ export type BackendType =
   | "tensorrt_llm"
   | "llama_cpp"
   | "llamacpp_mks"
-  | "sglang";
+  | "sglang"
+  | "strata";
 
 /**
  * Backends that run a llama.cpp server: upstream and the Makespace fork.

@@ -6,6 +6,7 @@ KNOWN_BACKEND_TYPES = {
     "llama_cpp",
     "llamacpp_mks",
     "sglang",
+    "strata",
     "tensorrt_llm",
     "bitnet",
     "diffusers",

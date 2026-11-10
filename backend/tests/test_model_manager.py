@@ -107,9 +107,7 @@ async def test_manual_unload_waits_for_fresh_vram_sample(worker_pool, monkeypatc
         locked_vram_mb=0,
     )
     gpu_manager = AsyncMock()
-    gpu_manager.get_all_states = AsyncMock(
-        side_effect=[[occupied], [occupied], [released]]
-    )
+    gpu_manager.get_all_states = AsyncMock(side_effect=[[occupied], [occupied], [released]])
     gpu_manager.unlock_vram = AsyncMock()
 
     manager = ModelManager(worker_pool, gpu_manager=gpu_manager)
@@ -468,9 +466,7 @@ async def test_in_flight_counters_are_thread_safe(model_manager):
 
 
 @pytest.mark.asyncio
-async def test_try_begin_request_scales_cap_down_for_single_slot_worker(
-    model_manager, monkeypatch
-):
+async def test_try_begin_request_scales_cap_down_for_single_slot_worker(model_manager, monkeypatch):
     """A model with no declared ``_runtime.parallelism`` (the common case for
     Ollama models) defaults to 1 slot. The flat 32-request ceiling must not
     apply as-is — a burst against a single-slot worker should get rejected
@@ -479,9 +475,7 @@ async def test_try_begin_request_scales_cap_down_for_single_slot_worker(
     model_id = "test/model"
     await add_test_model(model_manager, model_id=model_id)
 
-    accepted = [
-        model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(6)
-    ]
+    accepted = [model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(6)]
     assert accepted.count(None) == 2  # 4 admitted (1 slot * cap 4), 2 rejected
     assert accepted[:4] != [None, None, None, None]
 
@@ -525,9 +519,7 @@ class TestLiveRequestProgress:
         assert after.last_activity_at > first_activity
 
     @pytest.mark.asyncio
-    async def test_update_request_progress_is_a_noop_for_unknown_request_id(
-        self, model_manager
-    ):
+    async def test_update_request_progress_is_a_noop_for_unknown_request_id(self, model_manager):
         """The request may have already finished (cancelled/evicted) between
         the tee's throttle check and the update call — must not raise."""
         model_manager.update_request_progress("does-not-exist", output_tokens_estimate=10)
@@ -612,9 +604,7 @@ class TestMonitorLoadVramProgress:
         monkeypatch.setattr(model_manager_module.asyncio, "sleep", _fast_sleep)
 
     async def _run_briefly(self, model_manager, model_id, gpu_indices):
-        task = asyncio.create_task(
-            model_manager._monitor_load_vram_progress(model_id, gpu_indices)
-        )
+        task = asyncio.create_task(model_manager._monitor_load_vram_progress(model_id, gpu_indices))
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(task, timeout=0.2)
         if not task.done():
@@ -623,9 +613,7 @@ class TestMonitorLoadVramProgress:
                 await task
 
     @pytest.mark.asyncio
-    async def test_warns_when_vram_and_utilization_stay_flat(
-        self, model_manager, monkeypatch
-    ):
+    async def test_warns_when_vram_and_utilization_stay_flat(self, model_manager, monkeypatch):
         import ocabra.core.model_manager as model_manager_module
         from ocabra.core.gpu_manager import GPUState
 
@@ -657,9 +645,7 @@ class TestMonitorLoadVramProgress:
         assert warnings[0].kwargs["model_id"] == "test/stalled-model"
 
     @pytest.mark.asyncio
-    async def test_does_not_warn_when_vram_keeps_growing(
-        self, model_manager, monkeypatch
-    ):
+    async def test_does_not_warn_when_vram_keeps_growing(self, model_manager, monkeypatch):
         import ocabra.core.model_manager as model_manager_module
         from ocabra.core.gpu_manager import GPUState
 
@@ -695,9 +681,7 @@ class TestMonitorLoadVramProgress:
         assert not warnings
 
     @pytest.mark.asyncio
-    async def test_per_sample_logging_follows_debug_flag(
-        self, model_manager, monkeypatch
-    ):
+    async def test_per_sample_logging_follows_debug_flag(self, model_manager, monkeypatch):
         import ocabra.core.model_manager as model_manager_module
         from ocabra.config import settings
         from ocabra.core.gpu_manager import GPUState
@@ -731,9 +715,7 @@ class TestMonitorLoadVramProgress:
 
 
 @pytest.mark.asyncio
-async def test_try_begin_request_scales_cap_up_for_multi_slot_worker(
-    model_manager, monkeypatch
-):
+async def test_try_begin_request_scales_cap_up_for_multi_slot_worker(model_manager, monkeypatch):
     """A model that declares real concurrency via ``_runtime.parallelism``
     (e.g. a vLLM worker with max_num_seqs > 1) should get a proportionally
     larger cap instead of being clamped to the single-slot default."""
@@ -742,9 +724,7 @@ async def test_try_begin_request_scales_cap_up_for_multi_slot_worker(
     state = await add_test_model(model_manager, model_id=model_id)
     state.extra_config = {"_runtime": {"parallelism": 8}}
 
-    results = [
-        model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(32)
-    ]
+    results = [model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(32)]
     assert results.count(None) == 0  # 8 slots * cap 4 = 32, none rejected
 
     assert model_manager.try_begin_request(model_id, max_inflight=32) is None
@@ -774,9 +754,7 @@ async def test_effective_inflight_cap_skips_slot_scaling_for_embedding_models(
 
     assert model_manager.effective_inflight_cap(model_id, 32) == 32
 
-    results = [
-        model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(32)
-    ]
+    results = [model_manager.try_begin_request(model_id, max_inflight=32) for _ in range(32)]
     assert results.count(None) == 0
 
     assert model_manager.try_begin_request(model_id, max_inflight=32) is None
@@ -831,9 +809,7 @@ async def test_effective_inflight_cap_skips_slot_scaling_when_bound_for_a_peer(
     assert model_manager.effective_inflight_cap(model_id, 32, request_kind="chat") == 4
     # Same model, same kind, but headed for a peer.
     assert (
-        model_manager.effective_inflight_cap(
-            model_id, 32, request_kind="chat", remote_bound=True
-        )
+        model_manager.effective_inflight_cap(model_id, 32, request_kind="chat", remote_bound=True)
         == 32
     )
 
@@ -1380,7 +1356,6 @@ async def test_update_config_deep_merges_extra_config_preserving_unmentioned_fie
     assert state.extra_config["registry_metadata"] == {"source": "huggingface"}
 
 
-
 @pytest.mark.asyncio
 async def test_update_config_null_clears_a_field_back_to_its_default(model_manager):
     """Clearing a field in the Models form sends ``null``: the key must go, so
@@ -1395,6 +1370,7 @@ async def test_update_config_null_clears_a_field_back_to_its_default(model_manag
 
     assert "ctx_size" not in state.extra_config["llama_cpp"]
     assert state.extra_config["llama_cpp"]["gpu_layers"] == 99
+
 
 @pytest.mark.asyncio
 async def test_pressure_eviction_prefers_on_demand_then_warm_then_pin(worker_pool):
@@ -1609,14 +1585,28 @@ async def test_use_case_resolution_sums_capacity_across_forced_multi_gpu():
     gpu_manager.get_all_states = AsyncMock(
         return_value=[
             GPUState(
-                index=0, name="RTX 3060", total_vram_mb=12_288, free_vram_mb=12_000,
-                used_vram_mb=288, utilization_pct=0, temperature_c=40,
-                power_draw_w=50, power_limit_w=170, locked_vram_mb=0,
+                index=0,
+                name="RTX 3060",
+                total_vram_mb=12_288,
+                free_vram_mb=12_000,
+                used_vram_mb=288,
+                utilization_pct=0,
+                temperature_c=40,
+                power_draw_w=50,
+                power_limit_w=170,
+                locked_vram_mb=0,
             ),
             GPUState(
-                index=1, name="RTX 3090", total_vram_mb=24_576, free_vram_mb=24_000,
-                used_vram_mb=576, utilization_pct=0, temperature_c=40,
-                power_draw_w=50, power_limit_w=350, locked_vram_mb=0,
+                index=1,
+                name="RTX 3090",
+                total_vram_mb=24_576,
+                free_vram_mb=24_000,
+                used_vram_mb=576,
+                utilization_pct=0,
+                temperature_c=40,
+                power_draw_w=50,
+                power_limit_w=350,
+                locked_vram_mb=0,
             ),
         ]
     )
@@ -1698,6 +1688,55 @@ async def test_runtime_single_gpu_placement_bypasses_scheduler_spill():
 
     assert state.current_gpu == [1]
     assert admit.await_args.kwargs["required_gpu_indices"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_strata_uses_validated_asymmetric_per_gpu_reservations() -> None:
+    """Strata's 14/34 layer split must never become a 50/50 lock."""
+    from ocabra.core.model_manager import ModelState
+
+    wp = WorkerPool()
+    backend = _PortRequiredBackend()
+    backend.get_vram_estimate_mb = AsyncMock(return_value=34_993)
+    wp.register_backend("strata", backend)
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states = AsyncMock(
+        return_value=[
+            SimpleNamespace(index=0, total_vram_mb=12_288),
+            SimpleNamespace(index=1, total_vram_mb=24_576),
+        ]
+    )
+    gpu_manager.lock_vram = AsyncMock()
+    mm = ModelManager(wp, gpu_manager=gpu_manager)
+    model_id = "strata/qwen3.8-coder:iq1_m"
+    per_gpu = {0: 11_297, 1: 23_696}
+    with (
+        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
+        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
+        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
+        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[0, 1])) as admit,
+    ):
+        mm._states[model_id] = ModelState(
+            model_id=model_id,
+            display_name="Strata coder",
+            backend_type="strata",
+            load_policy=LoadPolicy.ON_DEMAND,
+            extra_config={
+                "strata": {"context_length": 65_536},
+                "_runtime": {
+                    "gpu_indices": [0, 1],
+                    "capacity_validated": True,
+                    "capacity_vram_by_gpu_mb": {"0": 11_297, "1": 23_696},
+                    "parallelism": 2,
+                },
+            },
+        )
+        mm._load_locks[model_id] = asyncio.Lock()
+        state = await mm.load(model_id)
+    assert state.status == ModelStatus.LOADED
+    assert admit.await_args.kwargs["required_gpu_vram_mb"] == per_gpu
+    gpu_manager.lock_vram.assert_any_await(0, 11_297, model_id)
+    gpu_manager.lock_vram.assert_any_await(1, 23_696, model_id)
 
 
 @pytest.mark.asyncio
@@ -1815,9 +1854,7 @@ async def test_validated_preset_uses_physical_capacity_at_measured_edge() -> Non
 
     gpu_manager = AsyncMock()
     gpu_manager.get_free_vram = AsyncMock(return_value=23_343)
-    gpu_manager.get_state = AsyncMock(
-        return_value=SimpleNamespace(free_vram_mb=24_159)
-    )
+    gpu_manager.get_state = AsyncMock(return_value=SimpleNamespace(free_vram_mb=24_159))
     mm = ModelManager(WorkerPool(), gpu_manager=gpu_manager)
     model_id = "llama_cpp/measured-edge"
     mm._states[model_id] = ModelState(
@@ -2042,9 +2079,7 @@ class _FakeOllamaBackend(BackendInterface):
     for testing the preferred-GPU-busy fallback without the real
     OllamaBackend's pool/HTTP machinery."""
 
-    def __init__(
-        self, fallback_gpus: list[int], resident: list[dict] | None = None
-    ) -> None:
+    def __init__(self, fallback_gpus: list[int], resident: list[dict] | None = None) -> None:
         self._fallback_gpus = fallback_gpus
         self.load_calls: list[list[int]] = []
         self._resident = resident or []
@@ -2052,8 +2087,12 @@ class _FakeOllamaBackend(BackendInterface):
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
         self.load_calls.append(list(gpu_indices))
         return WorkerInfo(
-            backend_type="ollama", model_id=model_id, gpu_indices=gpu_indices,
-            port=0, pid=1, vram_used_mb=1024,
+            backend_type="ollama",
+            model_id=model_id,
+            gpu_indices=gpu_indices,
+            port=0,
+            pid=1,
+            vram_used_mb=1024,
         )
 
     def single_gpu_pool_candidates(self, *, exclude_gpu, required_parallelism=1):
@@ -2101,14 +2140,28 @@ async def test_ollama_falls_back_to_alternate_gpu_when_preferred_is_busy():
     gpu_manager.get_all_states = AsyncMock(
         return_value=[
             GPUState(
-                index=0, name="RTX 3060", total_vram_mb=12_288, free_vram_mb=12_000,
-                used_vram_mb=288, utilization_pct=0, temperature_c=40,
-                power_draw_w=50, power_limit_w=170, locked_vram_mb=0,
+                index=0,
+                name="RTX 3060",
+                total_vram_mb=12_288,
+                free_vram_mb=12_000,
+                used_vram_mb=288,
+                utilization_pct=0,
+                temperature_c=40,
+                power_draw_w=50,
+                power_limit_w=170,
+                locked_vram_mb=0,
             ),
             GPUState(
-                index=1, name="RTX 3090", total_vram_mb=24_576, free_vram_mb=500,
-                used_vram_mb=24_076, utilization_pct=0, temperature_c=40,
-                power_draw_w=50, power_limit_w=350, locked_vram_mb=0,
+                index=1,
+                name="RTX 3090",
+                total_vram_mb=24_576,
+                free_vram_mb=500,
+                used_vram_mb=24_076,
+                utilization_pct=0,
+                temperature_c=40,
+                power_draw_w=50,
+                power_limit_w=350,
+                locked_vram_mb=0,
             ),
         ]
     )
@@ -2154,9 +2207,16 @@ async def test_ollama_keeps_preferred_gpu_when_it_has_room():
     gpu_manager.get_all_states = AsyncMock(
         return_value=[
             GPUState(
-                index=1, name="RTX 3090", total_vram_mb=24_576, free_vram_mb=20_000,
-                used_vram_mb=4_576, utilization_pct=0, temperature_c=40,
-                power_draw_w=50, power_limit_w=350, locked_vram_mb=0,
+                index=1,
+                name="RTX 3090",
+                total_vram_mb=24_576,
+                free_vram_mb=20_000,
+                used_vram_mb=4_576,
+                utilization_pct=0,
+                temperature_c=40,
+                power_draw_w=50,
+                power_limit_w=350,
+                locked_vram_mb=0,
             ),
         ]
     )
@@ -2658,7 +2718,9 @@ def test_build_diarized_extra_config_wins_over_a_snake_case_base() -> None:
     from ocabra.backends.whisper_backend import _get_whisper_option
     from ocabra.core.model_manager_helpers import build_diarized_extra_config
 
-    merged = build_diarized_extra_config({"whisper": {"diarization_enabled": False, "diarizationEnabled": False}})
+    merged = build_diarized_extra_config(
+        {"whisper": {"diarization_enabled": False, "diarizationEnabled": False}}
+    )
 
     assert _get_whisper_option(merged, "diarization_enabled") is True
     assert "diarizationEnabled" not in merged["whisper"]
@@ -2674,7 +2736,9 @@ async def test_cuda_oom_load_failure_logs_vram_snapshot(worker_pool) -> None:
         SimpleNamespace(
             index=0,
             free_vram_mb=900,
-            processes=[GPUProcessInfo(pid=55, process_name="x", process_type="compute", used_vram_mb=0)],
+            processes=[
+                GPUProcessInfo(pid=55, process_name="x", process_type="compute", used_vram_mb=0)
+            ],
         )
     ]
     gpu_manager.locks_snapshot = MagicMock(return_value={"test/resident": 2_800})

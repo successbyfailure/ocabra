@@ -2184,12 +2184,13 @@ async def _resolve_capabilities_payload(
         or int(current_payload.get("context_length") or 0) > 0
     )
 
-    if has_meaningful_caps and not (
+    needs_configured_shape = state.backend_type == "strata" or (
         state.backend_type == "tensorrt_llm"
         and int(current_payload.get("context_length") or 0) <= 0
         and isinstance(state.extra_config, dict)
         and state.extra_config.get("context_length")
-    ):
+    )
+    if has_meaningful_caps and not needs_configured_shape:
         return current_payload
 
     worker_pool = getattr(request.app.state, "worker_pool", None)
@@ -2246,6 +2247,25 @@ def _llama_cpp_shape_from_config(state) -> dict[str, Any]:
     }
 
 
+def _strata_shape_from_config(state) -> dict[str, Any]:
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    section = extra.get("strata") if isinstance(extra.get("strata"), dict) else {}
+    runtime = extra.get("_runtime") if isinstance(extra.get("_runtime"), dict) else {}
+    try:
+        context = max(0, int(section.get("context_length") or 0))
+        native = max(0, int(section.get("native_context_length") or 0))
+        slots = max(1, int(runtime.get("parallelism") or section.get("parallel_slots") or 1))
+    except (TypeError, ValueError):
+        return {}
+    return {
+        "context_length": context,
+        "native_context_length": native,
+        "parallel_slots": slots,
+        "kv_cache_shared": False,
+        "context_per_request": context,
+    }
+
+
 def _apply_capability_fallbacks(state, payload: dict) -> dict:
     merged = dict(payload)
     # Mientras no este cargado, manda lo configurado: el backend no tiene de
@@ -2254,6 +2274,8 @@ def _apply_capability_fallbacks(state, payload: dict) -> dict:
         getattr(getattr(state, "status", None), "value", "") != "loaded"
     ):
         merged.update(_llama_cpp_shape_from_config(state))
+    elif getattr(state, "backend_type", "") == "strata":
+        merged.update(_strata_shape_from_config(state))
     fallback_context_length = _resolve_context_length_fallback(state)
     current_context_length = int(merged.get("context_length") or 0)
     if fallback_context_length > 0 and (
@@ -2287,7 +2309,7 @@ def _resolve_requested_context_length(state, extra_config: dict[str, Any]) -> in
             value = extra_config.get(candidate)
             if isinstance(value, int) and value > 0:
                 return value
-    for section in ("vllm", "sglang", "llama_cpp", "bitnet", "tensorrt_llm"):
+    for section in ("vllm", "sglang", "strata", "llama_cpp", "bitnet", "tensorrt_llm"):
         nested = extra_config.get(section)
         if isinstance(nested, dict):
             for key in ("context_length", "max_model_len", "ctx_size"):
@@ -2337,12 +2359,13 @@ def _resolve_context_length_fallback(state) -> int:
         if isinstance(value, int) and value > 0:
             return value
 
-    vllm_config = extra_config.get("vllm")
-    if isinstance(vllm_config, dict):
-        for key in ("max_model_len", "context_length"):
-            value = vllm_config.get(key)
-            if isinstance(value, int) and value > 0:
-                return value
+    for section_name in ("vllm", "strata"):
+        section = extra_config.get(section_name)
+        if isinstance(section, dict):
+            for key in ("max_model_len", "context_length"):
+                value = section.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
 
     backend_model_id = getattr(state, "backend_model_id", "")
     model_path = _resolve_extra_config_path(

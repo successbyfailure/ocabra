@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.66.0 — 2026-11-10
+
+### Nuevo
+
+- **Backend Strata y perfil `qwen3.8-coder:iq1-m`.** Sirve chat, streaming,
+  razonamiento y herramientas con 65.536 tokens de contexto y dos peticiones
+  paralelas. Se carga bajo demanda en las dos tarjetas y puede tardar varios
+  minutos en arrancar.
+- **Reserva multi-GPU asimétrica.** Los backends pueden declarar el consumo
+  validado por tarjeta. El perfil Strata reserva aproximadamente 11,3 GiB en
+  la RTX 3060 y 23,7 GiB en la RTX 3090, en vez de repartir el total al 50 %.
+
+**Acción:** ninguna para clientes OpenAI u Ollama; usa el nombre público del
+modelo como cualquier otro.
+
+---
+
 ## 0.65.1 — 2026-11-10
 
 ### Arreglos

@@ -755,6 +755,7 @@ class ProfileRegistry:
         "llama_cpp": "llm",
         "llamacpp_mks": "llm",
         "sglang": "llm",
+        "strata": "llm",
         "tensorrt_llm": "llm",
         "bitnet": "llm",
         "ollama": "llm",

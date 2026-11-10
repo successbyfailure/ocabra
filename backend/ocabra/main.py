@@ -486,6 +486,7 @@ async def lifespan(app: FastAPI):
     from ocabra.backends.ollama_backend import OllamaBackend
     from ocabra.backends.piper_backend import PiperBackend
     from ocabra.backends.sglang_backend import SGLangBackend
+    from ocabra.backends.strata_backend import StrataBackend
     from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
     from ocabra.backends.tts_backend import TTSBackend
     from ocabra.backends.upscaler_backend import UpscalerBackend
@@ -506,6 +507,7 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("llamacpp_mks", LlamaCppMksBackend())
     worker_pool.register_backend("ollama", OllamaBackend())
     worker_pool.register_backend("sglang", SGLangBackend())
+    worker_pool.register_backend("strata", StrataBackend())
     worker_pool.register_backend("whisper", WhisperBackend())
     worker_pool.register_backend("whisper_cpp", WhisperCppBackend())
     worker_pool.register_backend("vibeasr", VibeAsrBackend())

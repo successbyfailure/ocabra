@@ -18,6 +18,7 @@ const FAMILY: Record<string, LucideIcon> = {
   llamacpp_mks: Layers,
   bitnet: Layers,
   sglang: Cpu,
+  strata: Layers,
   whisper: AudioLines,
   whisper_cpp: AudioLines,
   whispercpp: AudioLines,

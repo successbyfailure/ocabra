@@ -211,8 +211,12 @@ con esta combinación de RTX 3060 + RTX 3090 y Q2_0, y cayó explícitamente al
 layer split normal. Métricas y motivos exactos en
 `docs/benchmarks/strata-qwen38-split-spike-2026-11-10.md`.
 
-Por tanto, Strata solo interesa como backend experimental `on_demand` para
-habilitar el Qwen3.8 completo que los backends actuales no sirven. El perfil
-inicial debe ser exclusivamente la RTX 3090, un slot, 32K, visión desactivada y
-DFlash2. Debe reservar casi toda la RAM del nodo y desalojar previamente otros
-LLM; no debe usar `pin`, `warm`, layer split ni all-cards split en este hardware.
+Esa conclusión se limita al checkpoint Q2_0 general. La prueba posterior del
+checkpoint Coder IQ1_M validó un layer split real K=14, contexto 65.536 y
+paralelismo 2. Reserva 11.297 MiB en GPU0 y 23.696 MiB en GPU1, usa
+`reasoning_effort=medium` y conserva la política `on_demand`. No se generaliza
+ese reparto a otros checkpoints: cada run config se valida por separado.
+
+Con esa evidencia se aprueba el perfil `qwen3.8-coder:iq1-m` (despliegue
+`strata/qwen3.8-coder:iq1_m`). oCabra posee lifecycle, clave interna, admisión
+asimétrica y forwarding OpenAI; Strata prepara los pesos y el run config.
