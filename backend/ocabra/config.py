@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.63.0"
+    app_version: str = "0.63.1"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -273,6 +273,14 @@ class Settings(BaseSettings):
     # Default 1 (full context, no extra VRAM); raise per-model
     # (extra_config.llama_cpp.parallel_slots) where there's headroom.
     llama_cpp_parallel_slots: int = 1
+    # Use the VRAM a llama.cpp worker was measured to hold (core/observed_vram)
+    # to raise the next admission of the same configuration. Off: readings are
+    # still recorded, not applied. Applying them as shipped in 0.63.0 made
+    # models that fill a card unloadable on their second load (qwen3-coder:30b
+    # holds 24,024 MiB of a 24,576 MiB 3090; reading + margin exceeded what the
+    # card ever reports free), so it stays off until the raise is capped by
+    # what the target GPU can offer.
+    llama_cpp_observed_vram_apply: bool = False
     llama_cpp_cont_batching: bool = True
     llama_cpp_adaptive_admission_enabled: bool = Field(
         default=True,

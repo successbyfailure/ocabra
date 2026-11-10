@@ -1993,7 +1993,11 @@ class ModelManager:
                                 observed = await observed_vram.lookup(
                                     model_id, fingerprint=observed_fingerprint
                                 )
-                                if observed and not manually_validated_vram:
+                                if (
+                                    observed
+                                    and not manually_validated_vram
+                                    and settings.llama_cpp_observed_vram_apply
+                                ):
                                     raised_total, raised_per_gpu = observed_vram.raise_to_observed(
                                         vram_needed, required_gpu_vram_mb, observed
                                     )

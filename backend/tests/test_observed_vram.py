@@ -95,9 +95,10 @@ def _llama_manager(*, pid_usage: dict[int, dict[int, int]]):
     return mm, model_id
 
 
-async def _load(mm, model_id, *, observed, admitted_gpus):
+async def _load(mm, model_id, *, observed, admitted_gpus, apply=True):
     admit = AsyncMock(return_value=admitted_gpus)
     with (
+        patch("ocabra.core.model_manager.settings.llama_cpp_observed_vram_apply", apply),
         patch("ocabra.core.model_manager.publish", new=AsyncMock()),
         patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
         patch("ocabra.core.observed_vram.lookup", new=AsyncMock(return_value=observed)),
@@ -151,3 +152,14 @@ async def test_manually_validated_preset_keeps_its_figure() -> None:
     kwargs, _ = await _load(mm, model_id, observed={1: 23_900}, admitted_gpus=[1])
 
     assert kwargs["vram_needed"] == 24_000
+
+
+@pytest.mark.asyncio
+async def test_readings_are_not_applied_while_the_setting_is_off() -> None:
+    """0.63.1: applying them made a 24,024 MiB worker unloadable on a 3090."""
+    mm, model_id = _llama_manager(pid_usage={1: {12345: 24_024}})
+
+    kwargs, record = await _load(mm, model_id, observed={1: 24_024}, admitted_gpus=[1], apply=False)
+
+    assert kwargs["vram_needed"] == 4_096
+    record.assert_awaited_once()

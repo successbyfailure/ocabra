@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.63.1 — 2026-11-10
+
+### Arreglos
+
+- **Se retira el cambio de la 0.63.0, que impedía recargar algunos modelos.**
+  Un modelo que ocupa casi toda una tarjeta (`qwen3-coder:30b` en la RTX 3090)
+  cargaba bien la primera vez, pero en la siguiente carga el servidor le
+  reservaba más memoria de la que la tarjeta ofrece y respondía
+  `409 insufficient_vram`. Duró unos minutos. El servidor vuelve a calcular la
+  memoria como antes de la 0.63.0, y la medición real se sigue guardando sin
+  aplicarla todavía.
+
+---
+
 ## 0.63.0 — 2026-11-10
 
 ### Cambios
