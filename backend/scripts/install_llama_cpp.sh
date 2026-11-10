@@ -62,13 +62,26 @@ cmake -S . -B build \
 cmake --build build --target llama-server -j"${BUILD_JOBS}"
 
 mkdir -p "${BIN_DIR}"
-cp build/bin/llama-server "${BIN_DIR}/llama-server"
+
+# Install each file by copying it beside its destination and renaming it over.
+# Reinstalling runs while workers are serving: copying straight over a running
+# executable fails with "Text file busy", and overwriting a loaded .so in place
+# corrupts the processes that mapped it. A rename swaps the directory entry and
+# leaves running processes on the old inode.
+install_atomic() {
+    local src="$1" dest="$2"
+    cp -a "${src}" "${dest}.new.$$"
+    mv -f "${dest}.new.$$" "${dest}"
+}
+
+install_atomic build/bin/llama-server "${BIN_DIR}/llama-server"
 chmod +x "${BIN_DIR}/llama-server"
 
 # Copy libggml/libllama shared libs next to the binary so it loads them
 # without LD_LIBRARY_PATH gymnastics at runtime.
-find build -type f \( -name "libllama*.so*" -o -name "libggml*.so*" -o -name "libmtmd*.so*" \) \
-    -exec cp -a {} "${BIN_DIR}/" \;
+while IFS= read -r -d '' lib; do
+    install_atomic "${lib}" "${BIN_DIR}/$(basename "${lib}")"
+done < <(find build -type f \( -name "libllama*.so*" -o -name "libggml*.so*" -o -name "libmtmd*.so*" \) -print0)
 
 echo "[install_llama_cpp] done. Produced:"
 ls -la "${BIN_DIR}"
