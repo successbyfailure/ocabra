@@ -266,7 +266,7 @@ function STTDefaults({ defaults, onChange }: { defaults: Defaults; onChange: (d:
   )
 }
 
-function LLMDefaults({ defaults, onChange }: { defaults: Defaults; onChange: (d: Defaults) => void }) {
+export function LLMDefaults({ defaults, onChange }: { defaults: Defaults; onChange: (d: Defaults) => void }) {
   return (
     <div className="grid grid-cols-2 gap-3">
       <Field label="Temperatura" hint="0.0 – 2.0, mayor = mas creativo">
@@ -298,6 +298,45 @@ function LLMDefaults({ defaults, onChange }: { defaults: Defaults; onChange: (d:
           value={extractField(defaults, "system_prompt")}
           onChange={(v) => onChange(mergeField(defaults, "system_prompt", v))}
           placeholder=""
+        />
+      </Field>
+      <div className="col-span-2 mt-1 border-t border-border/50 pt-2">
+        <p className="text-xs font-medium text-foreground">Anti-repetición (DRY)</p>
+        <p className="text-[10px] text-muted-foreground">
+          Penaliza continuar una secuencia que ya apareció. Corta bucles en la respuesta sin
+          castigar repeticiones legítimas como claves de JSON o código. Solo llama.cpp.
+        </p>
+      </div>
+      <Field label="DRY multiplicador" hint="0 = desactivado; 0.8 es el valor típico">
+        <SmallInput
+          value={extractField(defaults, "dry_multiplier")}
+          onChange={(v) => onChange(mergeField(defaults, "dry_multiplier", v))}
+          placeholder="0"
+          type="number"
+        />
+      </Field>
+      <Field label="DRY longitud permitida" hint="Tokens que puede repetirse sin penalizar; 3">
+        <SmallInput
+          value={extractField(defaults, "dry_allowed_length")}
+          onChange={(v) => onChange(mergeField(defaults, "dry_allowed_length", v))}
+          placeholder="2"
+          type="number"
+        />
+      </Field>
+      <Field label="DRY ventana (tokens)" hint="Cuánto mira hacia atrás; 4096. No uses -1: lo desactiva">
+        <SmallInput
+          value={extractField(defaults, "dry_penalty_last_n")}
+          onChange={(v) => onChange(mergeField(defaults, "dry_penalty_last_n", v))}
+          placeholder="64"
+          type="number"
+        />
+      </Field>
+      <Field label="DRY base" hint="Crecimiento de la penalización; 1.75">
+        <SmallInput
+          value={extractField(defaults, "dry_base")}
+          onChange={(v) => onChange(mergeField(defaults, "dry_base", v))}
+          placeholder="1.75"
+          type="number"
         />
       </Field>
     </div>
