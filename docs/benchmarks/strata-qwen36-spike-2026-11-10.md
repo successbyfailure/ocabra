@@ -119,6 +119,11 @@ diferencial de Strata, abrir un spike separado con Qwen3.8 y estas condiciones:
 4. Repetir cada prompt después de warm-up y reportar mediana, no una sola muestra.
 5. Exigir cleanup, cancelación y tool calling además del throughput.
 
+Este follow-up se completó el mismo día con Qwen3.8 Q2_0. Véase
+`docs/benchmarks/strata-qwen38-split-spike-2026-11-10.md`: la 3090 sola es
+viable, el layer split empeora el rendimiento y el all-cards split no admite
+esta pareja heterogénea ni este pack.
+
 ## Reproducción
 
 ```bash

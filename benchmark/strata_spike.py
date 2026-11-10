@@ -33,16 +33,28 @@ from typing import BinaryIO
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = Path("/docker/ai-models/ocabra/models/huggingface/strata-spike")
 DEFAULT_RESULTS = PROJECT_ROOT / "benchmark" / "results" / "strata-spike"
-DEFAULT_MODEL_FAMILY = "qwen36"
-DEFAULT_MODEL = "UD-Q4_K_XL"
 DEFAULT_CONTEXT = "32k"
 DEFAULT_PORT = 18095
 MIN_FREE_DISK_GIB = 45.0
 MIN_TOTAL_RAM_GIB = 48.0
 
+TARGETS = {
+    "qwen36": {
+        "family": "qwen36",
+        "model": "UD-Q4_K_XL",
+    },
+    "qwen38": {
+        "family": "qwen",
+        "model": "Q2_0",
+    },
+}
+
+REPETITIONS = {"qwen36": 1, "qwen38": 3}
+
 PROFILES = {
-    "3090": "1=main,0=off",
-    "split": "1=main,0=helper",
+    "3090": {"gpu_roles": "1=main,0=off", "split_engine": "off"},
+    "split": {"gpu_roles": "1=main,0=helper", "split_engine": "off"},
+    "split-engine": {"gpu_roles": "1=main,0=helper", "split_engine": "on"},
 }
 
 PROMPTS = (
@@ -219,12 +231,25 @@ def _git_revision() -> dict[str, object]:
     return {"commit": commit, "dirty": dirty}
 
 
+def _latest_engine_log(root: Path, lines: int = 120) -> dict[str, object] | None:
+    """Return bounded evidence of the effective engine mode without request bodies."""
+    log_root = root / "runtime" / "xdg-state" / "strata" / "launch"
+    candidates = list(log_root.glob("*.engine.log"))
+    if not candidates:
+        return None
+    path = max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
+    content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return {"path": str(path), "tail": content[-lines:]}
+
+
 def _port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
-def collect_preflight(root: Path, strata_bin: Path, port: int) -> dict[str, object]:
+def collect_preflight(
+    root: Path, strata_bin: Path, port: int, min_free_disk_gib: float = MIN_FREE_DISK_GIB
+) -> dict[str, object]:
     disk = shutil.disk_usage(root)
     gib = 1024**3
     report: dict[str, object] = {
@@ -253,8 +278,8 @@ def collect_preflight(root: Path, strata_bin: Path, port: int) -> dict[str, obje
         errors.append("GPU 1 no es la RTX 3090 esperada")
     if float(report["memory"]["total_gib"]) < MIN_TOTAL_RAM_GIB:  # type: ignore[index]
         errors.append(f"RAM total inferior a {MIN_TOTAL_RAM_GIB:.0f} GiB")
-    if float(report["disk"]["free_gib"]) < MIN_FREE_DISK_GIB:  # type: ignore[index]
-        errors.append(f"espacio libre inferior a {MIN_FREE_DISK_GIB:.0f} GiB")
+    if float(report["disk"]["free_gib"]) < min_free_disk_gib:  # type: ignore[index]
+        errors.append(f"espacio libre inferior a {min_free_disk_gib:.0f} GiB")
     if not report["port"]["free"]:  # type: ignore[index]
         errors.append(f"el puerto {port} esta ocupado")
     report["errors"] = errors
@@ -272,19 +297,24 @@ def build_launch_command(
     strata_bin: Path,
     root: Path,
     *,
+    target: str = "qwen36",
     profile: str,
     port: int,
     plan: bool,
 ) -> list[str]:
+    if target not in TARGETS:
+        raise SpikeError(f"Target desconocido: {target}")
     if profile not in PROFILES:
         raise SpikeError(f"Perfil desconocido: {profile}")
+    target_config = TARGETS[target]
+    profile_config = PROFILES[profile]
     command = [
         str(strata_bin),
         "launch",
         "--family",
-        DEFAULT_MODEL_FAMILY,
+        str(target_config["family"]),
         "--model",
-        DEFAULT_MODEL,
+        str(target_config["model"]),
         "--data-dir",
         str(root / "models"),
         "--context",
@@ -294,9 +324,9 @@ def build_launch_command(
         "--parallel",
         "1",
         "--gpu-roles",
-        PROFILES[profile],
+        str(profile_config["gpu_roles"]),
         "--split-engine",
-        "off",
+        str(profile_config["split_engine"]),
         "--tune",
         "skip",
         "--access",
@@ -309,11 +339,42 @@ def build_launch_command(
         "--output",
         "json",
     ]
+    if target == "qwen38":
+        drafting = "mtp" if profile == "split-engine" else "auto"
+        command[command.index("--gpu-roles"):command.index("--gpu-roles")] = [
+            "--drafting",
+            drafting,
+        ]
     if plan:
         command.append("--plan")
     else:
         command.extend(["--yes", "--restart"])
     return command
+
+
+def collect_plan(
+    strata_bin: Path,
+    root: Path,
+    *,
+    target: str,
+    profile: str,
+    port: int,
+    environment: dict[str, str],
+) -> dict[str, object]:
+    command = build_launch_command(
+        strata_bin, root, target=target, profile=profile, port=port, plan=True
+    )
+    try:
+        return json.loads(_run(command, timeout=300, env=environment))
+    except ValueError as exc:
+        raise SpikeError("El plan de Strata no devolvio JSON valido") from exc
+
+
+def _required_free_disk_gib(plan: dict[str, object]) -> float:
+    details = plan.get("plan")
+    download = details.get("download") if isinstance(details, dict) else None
+    pending_gb = float(download.get("gb") or 0) if isinstance(download, dict) else 0.0
+    return max(MIN_FREE_DISK_GIB, pending_gb + 10.0)
 
 
 def _json_request(url: str, api_key: str) -> dict[str, object]:
@@ -476,9 +537,11 @@ def check_tool_call(base_url: str, api_key: str, model: str) -> ToolResult:
     return result
 
 
-def _write_result(results_root: Path, profile: str, payload: dict[str, object]) -> Path:
+def _write_result(
+    results_root: Path, target: str, profile: str, payload: dict[str, object]
+) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    destination = results_root / f"{stamp}_{profile}"
+    destination = results_root / f"{stamp}_{target}_{profile}"
     destination.mkdir(parents=True, exist_ok=False)
     path = destination / "run.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -490,11 +553,22 @@ def execute_profile(
     root: Path,
     results_root: Path,
     *,
+    target: str,
     profile: str,
     port: int,
     allow_busy_gpus: bool,
 ) -> Path:
-    preflight = collect_preflight(root, strata_bin, port)
+    target_config = TARGETS[target]
+    environment = _strata_environment(root, "preflight-plan-not-a-secret")
+    plan = collect_plan(
+        strata_bin,
+        root,
+        target=target,
+        profile=profile,
+        port=port,
+        environment=environment,
+    )
+    preflight = collect_preflight(root, strata_bin, port, _required_free_disk_gib(plan))
     if preflight["errors"]:
         raise SpikeError("Preflight fallido: " + "; ".join(preflight["errors"]))
     if preflight["gpu_processes"] and not allow_busy_gpus:
@@ -505,7 +579,9 @@ def execute_profile(
 
     api_key = secrets.token_urlsafe(32)
     environment = _strata_environment(root, api_key)
-    command = build_launch_command(strata_bin, root, profile=profile, port=port, plan=False)
+    command = build_launch_command(
+        strata_bin, root, target=target, profile=profile, port=port, plan=False
+    )
     started = time.monotonic()
     launch_output = ""
     error: str | None = None
@@ -514,6 +590,7 @@ def execute_profile(
     generations: list[GenerationResult] = []
     tool_result: ToolResult | None = None
     gpu_loaded: list[dict[str, object]] = []
+    resource_checkpoints: list[dict[str, object]] = []
     load_time_s = 0.0
     try:
         launch_output = _run(command, timeout=1800, env=environment)
@@ -521,10 +598,24 @@ def execute_profile(
         health = _wait_for_health(base_url, api_key)
         load_time_s = time.monotonic() - started
         gpu_loaded = _gpu_usage()
+        resource_checkpoints.append(
+            {"phase": "loaded", "memory": _memory(), "gpus": gpu_loaded}
+        )
         model = str(health.get("model") or "strata")
-        for prompt in PROMPTS:
-            generations.append(generate(base_url, api_key, model, prompt))
+        for repetition in range(1, REPETITIONS[target] + 1):
+            for prompt in PROMPTS:
+                generations.append(generate(base_url, api_key, model, prompt))
+                resource_checkpoints.append(
+                    {
+                        "phase": f"after_{prompt['name']}_{repetition}",
+                        "memory": _memory(),
+                        "gpus": _gpu_usage(),
+                    }
+                )
         tool_result = check_tool_call(base_url, api_key, model)
+        resource_checkpoints.append(
+            {"phase": "after_tool", "memory": _memory(), "gpus": _gpu_usage()}
+        )
         status = _json_request(f"{base_url}/v1/status", api_key)
     except Exception as exc:
         error = str(exc)
@@ -553,10 +644,16 @@ def execute_profile(
             "error": error,
             "stop_error": stop_error,
             "profile": profile,
-            "gpu_roles": PROFILES[profile],
-            "model": {"family": DEFAULT_MODEL_FAMILY, "name": DEFAULT_MODEL},
+            "target": target,
+            "gpu_roles": PROFILES[profile]["gpu_roles"],
+            "split_engine": PROFILES[profile]["split_engine"],
+            "model": {
+                "family": target_config["family"],
+                "name": target_config["model"],
+            },
             "context": DEFAULT_CONTEXT,
             "parallel": 1,
+            "repetitions": REPETITIONS[target],
             "load_time_s": round(load_time_s, 2),
             "elapsed_s": round(time.monotonic() - started, 2),
             "command": [part for part in command if part != api_key],
@@ -565,12 +662,16 @@ def execute_profile(
             "strata_status": status,
             "gpu_loaded": gpu_loaded,
             "gpu_after_stop": _gpu_usage(),
+            "memory_after_stop": _memory(),
+            "resource_checkpoints": resource_checkpoints,
+            "engine_log": _latest_engine_log(root),
             "generations": [asdict(result) for result in generations],
             "tool_call": asdict(tool_result) if tool_result else None,
             "preflight": preflight,
+            "plan": plan,
             "ocabra": _git_revision(),
         }
-        result_path = _write_result(results_root, profile, payload)
+        result_path = _write_result(results_root, target, profile, payload)
         print(result_path)
     return result_path
 
@@ -582,10 +683,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("preflight")
+    preflight = subparsers.add_parser("preflight")
+    preflight.add_argument("--target", choices=sorted(TARGETS), default="qwen36")
     plan = subparsers.add_parser("plan")
+    plan.add_argument("--target", choices=sorted(TARGETS), default="qwen36")
     plan.add_argument("--profile", choices=sorted(PROFILES), default="3090")
     run = subparsers.add_parser("run")
+    run.add_argument("--target", choices=sorted(TARGETS), default="qwen36")
     run.add_argument("--profile", choices=sorted(PROFILES), default="3090")
     run.add_argument("--execute", action="store_true")
     run.add_argument("--allow-busy-gpus", action="store_true")
@@ -598,15 +702,30 @@ def main(argv: list[str] | None = None) -> int:
     root.mkdir(parents=True, exist_ok=True)
     strata_bin = _strata_bin(root, args.strata_bin)
     if args.command == "preflight":
-        report = collect_preflight(root, strata_bin, args.port)
+        environment = _strata_environment(root, "preflight-plan-not-a-secret")
+        plan = collect_plan(
+            strata_bin,
+            root,
+            target=args.target,
+            profile="3090",
+            port=args.port,
+            environment=environment,
+        )
+        report = collect_preflight(root, strata_bin, args.port, _required_free_disk_gib(plan))
+        report["plan"] = plan
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if report["ready"] else 2
     if args.command == "plan":
-        command = build_launch_command(
-            strata_bin, root, profile=args.profile, port=args.port, plan=True
-        )
         environment = _strata_environment(root, "plan-only-not-a-secret")
-        print(_run(command, timeout=300, env=environment))
+        plan = collect_plan(
+            strata_bin,
+            root,
+            target=args.target,
+            profile=args.profile,
+            port=args.port,
+            environment=environment,
+        )
+        print(json.dumps(plan, ensure_ascii=False))
         return 0
     if not args.execute:
         raise SpikeError(
@@ -616,6 +735,7 @@ def main(argv: list[str] | None = None) -> int:
         strata_bin,
         root,
         args.results_root.expanduser().resolve(),
+        target=args.target,
         profile=args.profile,
         port=args.port,
         allow_busy_gpus=args.allow_busy_gpus,

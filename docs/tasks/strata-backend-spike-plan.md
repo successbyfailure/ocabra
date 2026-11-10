@@ -1,6 +1,6 @@
 # Plan de evaluación e integración de Strata
 
-**Estado:** ejecutado el 2026-11-10; no promover a backend de producto con Qwen3.6
+**Estado:** ejecutado el 2026-11-10 con Qwen3.6 y Qwen3.8; integración solo experimental
 **Backend propuesto:** `strata` (experimental y opt-in)
 **Upstream fijado para el spike:** Strata `v0.2.13`, Terminal/Control `0.1.59.1`
 **Hardware objetivo:** RTX 3060 12 GB (GPU 0) + RTX 3090 24 GB (GPU 1), 94 GiB RAM
@@ -201,8 +201,18 @@ en la primera GPU visible, la RTX 3060, con 11.421 MiB allí y solo 614 MiB en l
 de familia y engine.
 
 La conclusión completa, métricas y límites de comparación están en
-`docs/benchmarks/strata-qwen36-spike-2026-11-10.md`. Una evaluación posterior
-de Qwen3.8 sigue siendo razonable si se quiere medir el caso diferencial de
-Strata —MoE que no cabe en una sola GPU—, pero debe abrirse como spike separado,
-confirmar primero que su engine soporta realmente layer split y presupuestar
-66–76 GB adicionales de descarga.
+`docs/benchmarks/strata-qwen36-spike-2026-11-10.md`.
+
+El follow-up con Qwen3.8 Flash-Next Q2_0 también se ejecutó. La 3090 sola sirvió
+el modelo completo a una mediana de 69,65 tok/s, con streaming y tools correctos,
+pero utilizó 23,5 GiB de VRAM y unos 90 de los 94,2 GiB de RAM del host. El layer
+split real fue un 13,8 % más lento. El all-cards split engine no es compatible
+con esta combinación de RTX 3060 + RTX 3090 y Q2_0, y cayó explícitamente al
+layer split normal. Métricas y motivos exactos en
+`docs/benchmarks/strata-qwen38-split-spike-2026-11-10.md`.
+
+Por tanto, Strata solo interesa como backend experimental `on_demand` para
+habilitar el Qwen3.8 completo que los backends actuales no sirven. El perfil
+inicial debe ser exclusivamente la RTX 3090, un slot, 32K, visión desactivada y
+DFlash2. Debe reservar casi toda la RAM del nodo y desalojar previamente otros
+LLM; no debe usar `pin`, `warm`, layer split ni all-cards split en este hardware.
