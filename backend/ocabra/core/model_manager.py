@@ -17,6 +17,7 @@ import structlog
 
 import ocabra.database as database
 from ocabra.backends.base import BackendCapabilities, WorkerInfo
+from ocabra.backends.llama_cpp_backend import LiveContextUnsupported
 from ocabra.config import settings
 from ocabra.core import artifacts as model_artifacts
 from ocabra.core import observed_vram
@@ -405,6 +406,9 @@ class ModelManager:
         self._maintenance_models: set[str] = set()
         # Shrunk llama.cpp workers with an idle regrow check in flight.
         self._regrow_pending: set[str] = set()
+        # Loaded workers that answered "not supported" (started without
+        # --props, e.g. embeddings); forgotten when they unload.
+        self._live_context_unsupported: set[str] = set()
 
     @asynccontextmanager
     async def _acquire_load_gate(self):
@@ -2266,6 +2270,7 @@ class ModelManager:
                             state.capabilities = capabilities
                             state.status = ModelStatus.LOADED
                             state.live_context = None
+                            self._live_context_unsupported.discard(state.model_id)
                             state.loaded_at = datetime.now(UTC)
                             state.error_message = None
 
@@ -2386,6 +2391,7 @@ class ModelManager:
                     self._worker_pool.release_port(assigned_port)
                 state.status = ModelStatus.UNLOADED
                 state.live_context = None
+                self._live_context_unsupported.discard(state.model_id)
                 state.error_message = None
                 await self._publish_event(model_id, "load_cancelled")
                 logger.info("model_load_cancelled", model_id=model_id)
@@ -3051,6 +3057,33 @@ class ModelManager:
             static_drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
             max_drain_timeout_s = max(static_drain_timeout_s, int(settings.max_drain_timeout_s))
 
+            # Shrinking an idle llama.cpp context costs ~0.5 s and is undone
+            # later; evicting costs the next request a full reload. So try
+            # shrinking on EVERY GPU before evicting on any. Seen live
+            # 2026-11-10: qwen3-embedding:4b preferring the 3060 evicted
+            # qwen3.8 there (its 3060 share of KV frees ~3 GB at most) while
+            # shrinking qwen3.8 on the 3090 would have freed ~7 GB.
+            for gpu_pool in gpu_pool_order:
+                for candidate_id in self._get_pressure_eviction_candidates(
+                    model_id,
+                    gpu_indices=[gpu_pool] if gpu_pool is not None else None,
+                ):
+                    if self.is_busy(candidate_id):
+                        continue
+                    if not await self._shrink_candidate_for_load(
+                        candidate_id, gpu_pool, vram_needed
+                    ):
+                        continue
+                    try:
+                        return await self._gpu_scheduler.find_gpu_for_model(
+                            vram_needed,
+                            preferred_gpu,
+                            enforce_vllm_headroom=enforce_vllm_headroom,
+                            vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                        )
+                    except InsufficientVRAMError:
+                        continue
+
             for gpu_pool in gpu_pool_order:
                 candidates = self._get_pressure_eviction_candidates(
                     model_id,
@@ -3234,17 +3267,6 @@ class ModelManager:
                                     evicting_model_id=candidate_id,
                                 )
                                 continue  # skip — still busy, try next candidate
-
-                    if await self._shrink_candidate_for_load(candidate_id, gpu_pool, vram_needed):
-                        try:
-                            return await self._gpu_scheduler.find_gpu_for_model(
-                                vram_needed,
-                                preferred_gpu,
-                                enforce_vllm_headroom=enforce_vllm_headroom,
-                                vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
-                            )
-                        except InsufficientVRAMError:
-                            pass  # not enough after all: evict it as before
 
                     logger.info(
                         "pressure_eviction_attempt",
@@ -3577,6 +3599,8 @@ class ModelManager:
             or not is_llama_cpp_family(state.backend_type)
         ):
             return False
+        if model_id in self._live_context_unsupported:
+            return False
         backend = self._registered_backend(state.backend_type)
         return bool(getattr(backend, "SUPPORTS_LIVE_CONTEXT", False))
 
@@ -3620,12 +3644,22 @@ class ModelManager:
                 break
             try:
                 await self.resize_context(model_id, context=target)
+            except LiveContextUnsupported:
+                self._live_context_unsupported.add(model_id)
+                break
             except Exception as exc:  # noqa: BLE001 - shrinking is best effort
                 logger.info("shrink_for_space_step_failed", model_id=model_id, error=str(exc))
                 break
             ctx = target
             now = self._worker_vram_by_gpu(state).get(gpu_index, start)
             freed = max(0, start - now)
+            # KV memory is linear in context: project the floor from what
+            # this step freed and stop now if even that cannot be enough
+            # (gemma4:26b was shrunk three times to free 21 GB it never had).
+            if freed < needed_mb and original_ctx > ctx:
+                projected = freed * (original_ctx - minimum) / (original_ctx - ctx)
+                if projected < needed_mb:
+                    break
 
         if freed >= needed_mb:
             logger.info(
@@ -3979,6 +4013,7 @@ class ModelManager:
             self._worker_pool.remove_worker(model_id)
             state.status = ModelStatus.UNLOADED
             state.live_context = None
+            self._live_context_unsupported.discard(state.model_id)
             state.current_gpu = []
             state.vram_used_mb = 0
             state.vram_estimate_mb = 0
@@ -4701,6 +4736,7 @@ class ModelManager:
                         continue
                 state.status = ModelStatus.UNLOADED
                 state.live_context = None
+                self._live_context_unsupported.discard(state.model_id)
                 state.current_gpu = []
                 state.vram_used_mb = 0
                 state.vram_estimate_mb = 0

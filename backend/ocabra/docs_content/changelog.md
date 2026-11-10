@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.67.1 — 2026-11-10
+
+### Arreglos
+
+- **El ajuste de contexto de 0.67.0 ahora prueba todas las tarjetas.** Antes
+  solo reducía el contexto en la tarjeta preferida del modelo que se iba a
+  cargar. Si esa tarjeta no daba bastante, descargaba otro modelo aunque
+  reducir en la otra tarjeta habría bastado. Pasaba, por ejemplo, con
+  `qwen3-embedding:4b` y `qwen3.8:27b`: se echaban mutuamente y cada
+  petición al otro pagaba una recarga. Ahora oCabra reduce el contexto
+  donde haga falta antes de descargar nada. Además, si una reducción no
+  va a llegar, lo ve al primer paso y no pierde segundos en intentarlo.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.67.0 — 2026-11-10
 
 ### Cambios de comportamiento

@@ -403,6 +403,57 @@ async def test_idle_regrow_only_when_there_is_room(monkeypatch) -> None:
     assert state.model_id not in mm._regrow_pending
 
 
+@pytest.mark.asyncio
+async def test_shrink_stops_early_when_the_projection_cannot_reach_it(monkeypatch) -> None:
+    mm, state, backend, ctx, _ = _elastic_manager(monkeypatch)
+
+    # One halving frees 2000 on GPU 1, so the 32k floor frees 3500 at most.
+    assert await mm._try_shrink_for_space(state.model_id, 1, 21000) == 0
+
+    sizes = [call.kwargs["n_ctx"] for call in backend.reconfigure_context.await_args_list]
+    assert sizes == [131072, 262144]  # one step and back, not three
+    assert ctx["n"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_worker_without_live_context_is_not_retried(monkeypatch) -> None:
+    mm, state, backend, _, _ = _elastic_manager(monkeypatch)
+    backend.reconfigure_context.side_effect = LiveContextUnsupported("start it with --props")
+
+    assert await mm._try_shrink_for_space(state.model_id, 1, 100) == 0
+    assert await mm._try_shrink_for_space(state.model_id, 1, 100) == 0
+
+    assert backend.reconfigure_context.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pressure_load_shrinks_on_another_gpu_before_evicting(monkeypatch) -> None:
+    """2026-11-10 live: qwen3-embedding:4b preferring the 3060 evicted qwen3.8
+    there, though shrinking qwen3.8 on the 3090 had room to spare."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 1000, 1: 3000})
+    mm._gpu_manager.get_all_states = AsyncMock(
+        return_value=[SimpleNamespace(index=0), SimpleNamespace(index=1)]
+    )
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = [InsufficientVRAMError("full"), [1]]
+    mm._gpu_scheduler = scheduler
+    mm._get_pressure_eviction_candidates = MagicMock(return_value=[state.model_id])
+    mm.unload = AsyncMock()
+
+    gpus = await mm._assign_gpus_for_load(
+        "llamacpp_mks/qwen3-embedding:4b",
+        vram_needed=6000,
+        preferred_gpu=0,
+        enforce_vllm_headroom=False,
+    )
+
+    assert gpus == [1]
+    mm.unload.assert_not_awaited()
+    assert ctx["n"] == 65536  # 3060 could not give 5000; the 3090 gave 3000
+
+
 # -- planner / request path ------------------------------------------------------
 
 
