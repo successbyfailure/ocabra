@@ -262,3 +262,30 @@ describe("memoria repartida entre GPUs", () => {
     expect(memory.querySelector(".text-amber-400")).toBeNull()
   })
 })
+
+describe("contexto cambiado en vivo", () => {
+  it("la barra dice el tamaño de carga cuando se cambió sin recargar", async () => {
+    const { ContextBar } = await import("@/components/dashboard/ContextBar")
+    render(
+      <ContextBar
+        requestOrder={new Map()}
+        ctx={{
+          mode: "pool",
+          scaleMaxTokens: 262144,
+          activeMaxTokens: 131072,
+          liveResized: true,
+          nominalMaxTokens: 262144,
+          activePresetKey: null,
+          activeGpus: [1],
+          singleGpuMaxTokens: 262144,
+          tiers: [{ presetKey: null, gpus: [1], maxTokens: 262144, slots: 4 }],
+          reservedTokens: 0,
+          segments: [],
+          usagePct: null,
+          source: "estimate",
+        }}
+      />,
+    )
+    expect(screen.getByText(/cambiado en vivo \(cargado con 256k\)/)).toBeTruthy()
+  })
+})

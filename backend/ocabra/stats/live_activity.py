@@ -470,8 +470,14 @@ async def model_context(
     profiles: list[Any],
     gpu_states: list[Any],
     worker_port: int | None = None,
+    live_context: dict | None = None,
 ) -> dict[str, Any] | None:
-    """Objeto ``context`` normalizado de un modelo cargado."""
+    """Objeto ``context`` normalizado de un modelo cargado.
+
+    ``live_context``: ``ModelState.live_context`` del worker si su contexto se
+    cambió en vivo (v0.65.0, sin recargar pesos). Manda sobre el tamaño del
+    preset, que sigue siendo el de carga.
+    """
     mode = context_mode(state)
     if mode is None:
         return None
@@ -517,13 +523,29 @@ async def model_context(
             active_tokens = int(ctx or 0) or None
         except Exception:  # noqa: BLE001
             active_tokens = None
+    nominal_tokens = active_tokens
+    live = live_context if isinstance(live_context, dict) else None
+    if live:
+        try:
+            live_pool = int(live.get("n_ctx") or 0)
+            live_slot = int(live.get("n_ctx_slot") or 0)
+            live_parallel = int(live.get("n_parallel") or 0)
+        except (TypeError, ValueError):
+            live_pool = live_slot = live_parallel = 0
+        # Pool unificado: una petición puede usar todo el pool. Por slots: su
+        # parcela.
+        if mode == "pool" and live_pool:
+            active_tokens = live_pool
+        elif live_slot or (live_pool and live_parallel):
+            active_tokens = live_slot or live_pool // live_parallel
     active_gpus = list(meta.get("gpu_indices") or getattr(state, "current_gpu", []) or [])
-    if not tiers and active_tokens:
+    if not tiers and (nominal_tokens or active_tokens):
+        # Sin presets, el único nivel es el tamaño con el que se cargó.
         tiers = [
             {
                 "presetKey": meta.get("preset_key"),
                 "gpus": active_gpus,
-                "maxTokens": active_tokens,
+                "maxTokens": nominal_tokens or active_tokens,
                 "slots": meta.get("parallelism"),
             }
         ]
@@ -553,6 +575,9 @@ async def model_context(
         "mode": mode,
         "scaleMaxTokens": scale,
         "activeMaxTokens": active_tokens,
+        # Cambiado en vivo: el tamaño con el que se cargó, para que la UI lo diga.
+        "liveResized": bool(live) and nominal_tokens != active_tokens,
+        "nominalMaxTokens": nominal_tokens if live else None,
         "activePresetKey": meta.get("preset_key"),
         "activeGpus": active_gpus,
         "singleGpuMaxTokens": max(single) if single else None,

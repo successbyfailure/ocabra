@@ -887,3 +887,48 @@ async def test_first_generation_instant_uses_historical_generation_rate():
     )
     assert d["estimatedRemainingMs"] == int(170 / 140 * 1000)
     assert d["expectedDurationMs"] == 21_000 + d["estimatedRemainingMs"]
+
+
+@pytest.mark.asyncio
+async def test_context_bar_follows_a_live_context_change():
+    """v0.65.0 cambia el contexto de un worker cargado sin recargarlo
+    (ModelState.live_context). La barra debe mostrar el tamaño real y avisar
+    del nominal, no seguir con el del preset."""
+    state = _state(gpus=(1,))
+    live = {"n_ctx": 131072, "n_ctx_slot": 131072, "n_parallel": 4, "nominal": {"n_ctx": 262144}}
+    ctx = await la.model_context(
+        state,
+        runtime_meta=None,
+        gate=None,
+        request_details=[],
+        profiles=[],
+        gpu_states=[],
+        live_context=live,
+    )
+    assert ctx["activeMaxTokens"] == 131072
+    assert ctx["liveResized"] is True
+    assert ctx["nominalMaxTokens"] == 262144
+    # El nivel (sin presets) sigue siendo el tamaño de carga, y es la escala.
+    assert ctx["tiers"][0]["maxTokens"] == 262144
+    assert ctx["scaleMaxTokens"] == 262144
+    unchanged = await la.model_context(
+        state, runtime_meta=None, gate=None, request_details=[], profiles=[], gpu_states=[]
+    )
+    assert unchanged["liveResized"] is False and unchanged["nominalMaxTokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_context_in_slot_mode_uses_the_per_slot_size():
+    state = _state(extra={"llama_cpp": {"kv_unified": False, "ctx_size": 65536}})
+    live = {"n_ctx": 131072, "n_ctx_slot": 32768, "n_parallel": 4}
+    ctx = await la.model_context(
+        state,
+        runtime_meta=None,
+        gate=None,
+        request_details=[],
+        profiles=[],
+        gpu_states=[],
+        live_context=live,
+    )
+    assert ctx["mode"] == "slots"
+    assert ctx["activeMaxTokens"] == 32768

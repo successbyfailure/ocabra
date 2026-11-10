@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.65.1 — 2026-11-10
+
+### Arreglos
+
+- **`/ocabra/models/activity` refleja el contexto cambiado en vivo.** Antes,
+  si se cambiaba el contexto de un worker de llama.cpp sin recargarlo, la
+  clave `contexts` seguía mostrando el tamaño con el que se cargó. Ahora
+  `activeMaxTokens` es el tamaño real; `liveResized` indica que se cambió y
+  `nominalMaxTokens` da el tamaño de carga.
+
+---
+
 ## 0.65.0 — 2026-11-10
 
 ### Nuevo

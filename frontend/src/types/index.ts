@@ -815,6 +815,9 @@ export interface ModelContextInfo {
   mode: "pool" | "slots" | "paged";
   scaleMaxTokens: number | null;
   activeMaxTokens: number | null;
+  /** El contexto se cambió en vivo sin recargar (v0.65.0); nominal = el de carga. */
+  liveResized?: boolean;
+  nominalMaxTokens?: number | null;
   activePresetKey: string | null;
   activeGpus: number[];
   /** Tope del mayor nivel de una sola GPU: la marca de la barra. */

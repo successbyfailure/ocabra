@@ -152,6 +152,11 @@ export function ContextBar({
         {ctx.mode === "paged" &&
           (ctx.usagePct != null ? `Pool KV al ${ctx.usagePct.toFixed(0)}%` : "vLLM no publica aún la ocupación del pool")}
         {activePct < 100 && <span className="text-muted-foreground/70"> · rayado: requiere escalar</span>}
+        {ctx.liveResized && ctx.nominalMaxTokens != null && (
+          <span className="text-sky-300" title="El contexto se cambió en vivo, sin recargar el modelo">
+            {" "}· cambiado en vivo (cargado con {fmtContext(ctx.nominalMaxTokens)})
+          </span>
+        )}
       </p>
     </div>
   )

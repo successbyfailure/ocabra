@@ -342,6 +342,9 @@ async def build_models_activity(request: Any) -> dict:
     # falta para leer su puerto (/metrics de vLLM) y sus PID (VRAM por GPU).
     loaded_worker_keys_by_canonical: dict[str, list[str]] = {}
     loading_worker_keys_by_canonical: dict[str, list[str]] = {}
+    # Contexto cambiado en vivo (v0.65.0) del worker cargado: manda sobre el
+    # tamaño del preset en la barra de contexto.
+    live_context_by_canonical: dict[str, dict] = {}
     for s in all_states:
         base = _canonical_runtime_id(s.model_id, canonical_ids)
         if base is None or base == s.model_id:
@@ -364,6 +367,8 @@ async def build_models_activity(request: Any) -> dict:
         if derived_status == "loaded":
             runtime_meta_by_canonical[base] = meta
             loaded_worker_keys_by_canonical.setdefault(base, []).append(s.model_id)
+            if isinstance(getattr(s, "live_context", None), dict):
+                live_context_by_canonical[base] = s.live_context
         elif derived_status == "loading":
             # El preset que se está cargando: la barra de contexto y el
             # estado de la card ya lo muestran durante la carga.
@@ -657,9 +662,17 @@ async def build_models_activity(request: Any) -> dict:
                 profiles=profiles,
                 gpu_states=gpu_states,
                 worker_port=worker_port,
+                live_context=live_context_by_canonical.get(state.model_id)
+                or (
+                    state.live_context
+                    if isinstance(getattr(state, "live_context", None), dict)
+                    else None
+                ),
             )
         except Exception:  # noqa: BLE001 — una barra menos, no un 500
-            live_activity.logger.debug("live_context_failed", model_id=state.model_id, exc_info=True)
+            live_activity.logger.debug(
+                "live_context_failed", model_id=state.model_id, exc_info=True
+            )
             ctx = None
         if ctx is not None:
             contexts[state.model_id] = ctx
