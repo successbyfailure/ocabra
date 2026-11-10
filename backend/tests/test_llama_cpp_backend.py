@@ -1094,3 +1094,28 @@ async def test_el_tope_por_slot_acota_lo_que_ve_una_peticion() -> None:
     caps = await backend.get_capabilities("m")
     assert caps.context_length == 262144
     assert caps.context_per_request == 98304
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_borrow_another_backends_cuda_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until v0.67.5 every llama.cpp worker ran on vLLM's cuBLAS/cudart,
+    prepended to LD_LIBRARY_PATH, instead of the CUDA toolkit it is built with."""
+    (tmp_path / "vllm/venv/lib/python3.11/site-packages/nvidia/cu13/lib").mkdir(parents=True)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/local/lib/llama_cpp")
+    gguf = tmp_path / "demo.gguf"
+    gguf.write_bytes(b"GGUF" * 1024)
+
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _stub_settings(mock_settings, str(tmp_path))
+        mock_settings.backends_dir = str(tmp_path)
+        await backend.load("demo", [1], port=18032, extra_config={})
+
+    assert create_proc.await_args.kwargs["env"]["LD_LIBRARY_PATH"] == "/usr/local/lib/llama_cpp"

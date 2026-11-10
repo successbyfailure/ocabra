@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import ctypes.util
-import functools
 import os
 import signal
 import sys
@@ -23,53 +21,11 @@ from ocabra.backends.base import (
 )
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
-from ocabra.core.backend_installer import read_backend_metadata, venv_nvidia_ld_library_path
+from ocabra.core.backend_installer import read_backend_metadata
 from ocabra.core.model_manager_helpers import snake_to_camel
 from ocabra.registry.local_scanner import parse_gguf_speculative_type
 
 logger = structlog.get_logger(__name__)
-
-
-#: Libraries a CUDA build of llama-server needs from the CUDA runtime.
-_CUDA_RUNTIME_LIBS = ("cudart", "cublas", "cublasLt")
-
-
-@functools.cache
-def _system_cuda_runtime_available() -> bool:
-    """Whether the dynamic linker already resolves the CUDA runtime by itself.
-
-    The api image ships the CUDA toolkit llama-server is compiled with, and
-    registers it in the linker cache, so nothing has to be added for the binary
-    to start. Cached: the image does not change while the process runs.
-    """
-    return all(ctypes.util.find_library(name) for name in _CUDA_RUNTIME_LIBS)
-
-
-def _cuda_ld_library_path() -> str:
-    """Extra CUDA runtime lib dirs for the natively-built llama-server binary.
-
-    llama.cpp is compiled from source and has no venv of its own. When the image
-    lacks a CUDA runtime, the binary dies at startup with ``libcublas.so.N:
-    cannot open shared object file`` (exit 127): the NVIDIA container runtime
-    only injects the *driver* libs. Only then reuse the runtime pip dropped into
-    another backend's venv.
-
-    With the system runtime present this returns "" on purpose. Borrowing was
-    unconditional before 2026-11-10, so every llama.cpp worker silently ran on
-    vLLM's cuBLAS/cudart instead of the toolkit it was built with: updating or
-    removing vLLM would change or break llama.cpp without anyone noticing.
-    """
-    own = venv_nvidia_ld_library_path(settings.backends_dir, "llama_cpp")
-    if own:
-        return own
-    if _system_cuda_runtime_available():
-        return ""
-    for donor in ("vllm", "sglang", "acestep", "diffusers"):
-        donated = venv_nvidia_ld_library_path(settings.backends_dir, donor)
-        if donated:
-            logger.info("llama_cpp_cuda_libs_borrowed", donor=donor)
-            return donated
-    return ""
 
 
 _DEFAULT_TOTAL_LAYERS = 32
@@ -401,10 +357,10 @@ class LlamaCppBackend(BackendInterface):
             if options["gpu_layers"] > 0
             else "",
         }
-        cuda_ld = _cuda_ld_library_path()
-        if cuda_ld:
-            existing = os.environ.get("LD_LIBRARY_PATH", "")
-            env["LD_LIBRARY_PATH"] = f"{cuda_ld}:{existing}".rstrip(":")
+        # No LD_LIBRARY_PATH of our own: llama-server is compiled in this image,
+        # against the CUDA toolkit whose runtime the image registers with the
+        # linker. Until v0.67.5 the workers borrowed cuBLAS/cudart from vLLM's
+        # venv, so updating or removing vLLM silently changed llama.cpp.
 
         logger.info(
             "llama_cpp_starting",
