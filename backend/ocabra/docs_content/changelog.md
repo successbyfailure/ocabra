@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.67.2 — 2026-11-10
+
+### Arreglos
+
+- **La reducción de contexto de 0.67.1 ya evita la descarga.** El contexto se
+  reducía bien en la otra tarjeta, pero oCabra decidía con la cifra de memoria
+  libre anterior a la reducción, porque esa cifra se refresca cada ~2 s. Así
+  que descargaba el modelo de todos modos. Ahora espera a que la cifra refleje
+  lo liberado antes de decidir.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.67.1 — 2026-11-10
 
 ### Arreglos

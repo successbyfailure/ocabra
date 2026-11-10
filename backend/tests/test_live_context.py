@@ -297,7 +297,13 @@ def _elastic_manager(monkeypatch, *, free=None, kv_mb_per_64k=(500, 1000)):
 
     gpu.get_process_vram_mb = MagicMock(side_effect=vram)
     free_mb = dict(free or {0: 0, 1: 0})
-    gpu.get_free_vram = AsyncMock(side_effect=lambda idx: free_mb[idx])
+    full = {idx: vram(idx)[4242] for idx in weights}
+
+    # What the GPU reports free: the base figure plus whatever the worker
+    # released relative to its loaded size (as NVML would show it).
+    gpu.get_free_vram = AsyncMock(
+        side_effect=lambda idx: free_mb[idx] + full[idx] - vram(idx)[4242]
+    )
     backend.reconfigure_context = AsyncMock(side_effect=reconfigure)
     return mm, state, backend, ctx, free_mb
 
@@ -376,7 +382,8 @@ async def test_grow_back_evicts_what_took_the_room(monkeypatch) -> None:
         return needed
 
     mm._evict_last_resort_for_space = AsyncMock(side_effect=evict)
-    free_mb.update({0: 5000, 1: 1000})
+    # Others took the room: GPU 1 only shows 1000 free beyond what it held.
+    free_mb.update({0: 5000, 1: 1000 - 3000})
 
     await mm.grow_context_back(state.model_id)
 
@@ -452,6 +459,25 @@ async def test_pressure_load_shrinks_on_another_gpu_before_evicting(monkeypatch)
     assert gpus == [1]
     mm.unload.assert_not_awaited()
     assert ctx["n"] == 65536  # 3060 could not give 5000; the 3090 gave 3000
+
+
+@pytest.mark.asyncio
+async def test_shrink_waits_until_the_gpu_shows_the_release(monkeypatch) -> None:
+    """hw-monitor publishes free VRAM every ~2 s: the scheduler must not judge
+    the GPU on the figure from before the shrink (seen live 2026-11-10)."""
+    mm, state, _, _, _ = _elastic_manager(monkeypatch)
+    stale = {"reads": 0}
+    real = mm._gpu_manager.get_free_vram.side_effect
+
+    async def lagging(idx):
+        stale["reads"] += 1
+        return 0 if stale["reads"] <= 3 else real(idx)
+
+    mm._gpu_manager.get_free_vram = AsyncMock(side_effect=lagging)
+    monkeypatch.setattr("ocabra.core.model_manager.asyncio.sleep", AsyncMock())
+
+    assert await mm._try_shrink_for_space(state.model_id, 1, 1500) == 2000
+    assert stale["reads"] >= 4  # kept polling until the release showed up
 
 
 # -- planner / request path ------------------------------------------------------

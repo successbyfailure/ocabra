@@ -3635,6 +3635,10 @@ class ModelManager:
             state.backend_model_id
         )
         original_ctx = int((state.live_context or {}).get("n_ctx") or nominal.get("n_ctx") or 0)
+        try:
+            baseline_free = int(await self._gpu_manager.get_free_vram(gpu_index))
+        except Exception:  # noqa: BLE001
+            baseline_free = None
         minimum = max(1, int(settings.llama_cpp_shrink_min_context))
         ctx = original_ctx
         freed = 0
@@ -3662,6 +3666,7 @@ class ModelManager:
                     break
 
         if freed >= needed_mb:
+            await self._wait_for_shrink_published(gpu_index, baseline_free, freed)
             logger.info(
                 "shrink_instead_of_evict",
                 model_id=model_id,
@@ -3689,6 +3694,28 @@ class ModelManager:
             freed_mb=freed,
         )
         return 0
+
+    async def _wait_for_shrink_published(
+        self, gpu_index: int, baseline_free: int | None, freed_mb: int, timeout_s: float = 6.0
+    ) -> None:
+        """The freed memory is measured on the worker's own process, but the
+        scheduler reads the GPU's free figure, which hw-monitor refreshes every
+        ~2 s. Seen live 2026-11-10: qwen3.8 freed 6.3 GB on the 3090, the
+        scheduler still saw the old figure and evicted it anyway. Wait until
+        the free figure shows the release."""
+        if self._gpu_manager is None or baseline_free is None:
+            return
+        target = baseline_free + freed_mb - _GROW_MARGIN_MB
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_s
+        while loop.time() < deadline:
+            try:
+                if int(await self._gpu_manager.get_free_vram(gpu_index)) >= target:
+                    return
+            except Exception:  # noqa: BLE001
+                return
+            await asyncio.sleep(0.25)
+        logger.info("shrink_release_not_published", gpu_index=gpu_index, freed_mb=freed_mb)
 
     async def _shrink_candidate_for_load(
         self, candidate_id: str, gpu_pool: int | None, vram_needed: int
