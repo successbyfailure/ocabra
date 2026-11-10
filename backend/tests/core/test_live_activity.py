@@ -822,3 +822,68 @@ async def test_live_rates_beat_slow_historical_rates():
     assert prefill["estimatedRemainingMs"] == 11_428
     # Faltan 140 tokens a 140 t/s.
     assert generating["estimatedRemainingMs"] == 1_000
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_prompt_longer_than_estimated_has_no_remaining():
+    """Producción: estimación de 10k, prompt real de 43,9k sin streaming. Al
+    superar la estimación no se sabe cuánto falta; antes salía "1,4 s"
+    clavado durante 15 s."""
+    la._estimate_cache.clear()
+    rates = {"gemma4:26b": {"prefill": (726.0, "historical"), "generation": 140.0, "output": 528}}
+
+    def prefill(processed):
+        return {
+            "requestId": "p",
+            "rateKey": "gemma4:26b",
+            "stage": "prefill",
+            "elapsedMs": 5_000,
+            "admittedAfterMs": 0,
+            "maxOutputTokens": 200,
+            "prefillTokensPerSecond": 2300.0,
+            "prefillSource": "live",
+            "estimatedPromptTokens": 10_004,
+            "prompt": {
+                "totalTokens": max(10_004, processed),
+                "processedTokens": processed,
+                "source": "live",
+                "totalKnown": False,
+            },
+        }
+
+    early = prefill(4_616)
+    late = prefill(20_000)
+    await la.attach_estimates(
+        [early, late], estimator=None, model_id="m", backend_type="x", slots=4, rates=rates
+    )
+    # Dentro de la estimación: lo que falta de ella a su ritmo + la salida.
+    assert early["estimatedRemainingMs"] == int(5_388 / 2300 * 1000 + 200 / 140 * 1000)
+    assert early["expectedDurationMs"] == 5_000 + early["estimatedRemainingMs"]
+    # Superada: sin restante ni duración esperada.
+    assert late["estimatedRemainingMs"] is None
+    assert late["expectedDurationMs"] is None
+
+
+@pytest.mark.asyncio
+async def test_first_generation_instant_uses_historical_generation_rate():
+    """Al empezar a generar aún no hay ritmo en vivo: antes el restante
+    saltaba a 43 s (duración física completa); ahora, lo que falta de salida
+    al ritmo histórico de generación."""
+    la._estimate_cache.clear()
+    rates = {"gemma4:26b": {"prefill": (726.0, "historical"), "generation": 140.0, "output": 528}}
+    d = {
+        "requestId": "g",
+        "rateKey": "gemma4:26b",
+        "stage": "generating",
+        "elapsedMs": 21_000,
+        "admittedAfterMs": 0,
+        "maxOutputTokens": 200,
+        "outputTokens": 30,
+        "generationTokensPerSecond": None,
+        "prompt": {"totalTokens": 43_912, "source": "live"},
+    }
+    await la.attach_estimates(
+        [d], estimator=None, model_id="m", backend_type="x", slots=4, rates=rates
+    )
+    assert d["estimatedRemainingMs"] == int(170 / 140 * 1000)
+    assert d["expectedDurationMs"] == 21_000 + d["estimatedRemainingMs"]

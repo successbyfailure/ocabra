@@ -280,11 +280,18 @@ async def attach_estimates(
             # llegaba a 0 sin haber procesado nada.
             remaining = expected_ms
         live_left = _live_remaining_ms(detail, (rates or {}).get(detail.get("rateKey") or ""))
-        if live_left is not None:
+        if live_left == _UNKNOWN:
+            # El prompt es más largo de lo estimado y el backend no da su
+            # total: mejor sin restante que uno inventado.
+            detail["expectedDurationMs"] = None
+            remaining = None
+        elif live_left is not None:
             # Con ritmos medidos EN ESTA petición mandan ellos: el histórico
             # del modelo puede ser 3 veces más lento (gemma4: 726 t/s de
             # mediana frente a 2.300 t/s en vivo) y el restante salía inflado.
+            # La duración esperada cuadra con él: transcurrido + restante.
             remaining = live_left
+            detail["expectedDurationMs"] = running_ms + live_left
         detail["estimatedRemainingMs"] = remaining
 
     queued = sorted(
@@ -354,17 +361,23 @@ async def attach_estimates(
                 free_kv += kv
 
 
-def _live_remaining_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> int | None:
-    """Restante con los ritmos medidos en vivo en esta petición, si los hay.
+_UNKNOWN = -1
 
-    En prefill con progreso real: lo que falta del prompt a su ritmo en vivo
-    más la salida esperada al ritmo de generación del modelo. Generando con
-    ritmo en vivo: los tokens que faltan hasta la salida esperada.
+
+def _live_remaining_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> int | None:
+    """Restante con los ritmos medidos en esta petición, si los hay.
+
+    Devuelve ms, ``None`` si no hay ritmos en vivo (se usa la estimación
+    general) o ``_UNKNOWN`` si se sabe que no se puede estimar: sin streaming,
+    cuando lo procesado ya supera la estimación del prompt, no hay forma de
+    saber cuánto falta (verificado en producción: el restante se quedaba
+    clavado en 1,4 s durante 15 s de prefill).
     """
     prompt = detail.get("prompt") or {}
     typical = (rates or {}).get("output")
     asked = detail.get("maxOutputTokens")
     expected_out = min(asked, typical) if asked and typical else (asked or typical)
+    hist_gen = (rates or {}).get("generation")
     stage = detail.get("stage")
     if (
         stage == "prefill"
@@ -374,12 +387,21 @@ def _live_remaining_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> 
         tps = detail.get("prefillTokensPerSecond")
         if not tps:
             return None
-        left = max(0, (prompt.get("totalTokens") or 0) - (prompt.get("processedTokens") or 0))
-        gen_rate = (rates or {}).get("generation")
-        gen_ms = expected_out / gen_rate * 1000 if expected_out and gen_rate else 0
+        processed = prompt.get("processedTokens") or 0
+        if prompt.get("totalKnown") is False:
+            estimated = detail.get("estimatedPromptTokens") or 0
+            if processed >= estimated:
+                return _UNKNOWN
+            left = estimated - processed
+        else:
+            left = max(0, (prompt.get("totalTokens") or 0) - processed)
+        gen_ms = expected_out / hist_gen * 1000 if expected_out and hist_gen else 0
         return int(left / tps * 1000 + gen_ms)
     if stage == "generating":
-        tps = detail.get("generationTokensPerSecond")
+        # Ritmo en vivo si ya lo hay; si no (primer instante), el histórico de
+        # GENERACIÓN del modelo. Antes caía a la duración física completa y el
+        # restante saltaba de 1 s a 43 s al empezar a generar.
+        tps = detail.get("generationTokensPerSecond") or hist_gen
         out = detail.get("outputTokens") or 0
         if tps and expected_out:
             return int(max(0, expected_out - out) / tps * 1000)
@@ -797,7 +819,7 @@ def physical_duration_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -
 def strip_internal(details: list[dict[str, Any]]) -> None:
     """Quita lo que solo hacia falta para calcular (no sale del servidor)."""
     for detail in details:
-        for key in ("userKey", "rateKey", "progressTracked"):
+        for key in ("userKey", "rateKey", "progressTracked", "estimatedPromptTokens"):
             detail.pop(key, None)
 
 
@@ -905,6 +927,8 @@ def apply_slot_progress(
             "source": "live",
             "totalKnown": False,
         }
+        # Interno: la estimación original, para saber cuándo se ha superado.
+        detail["estimatedPromptTokens"] = estimated_total
         detail["prefillPct"] = None
         detail["prefillSource"] = "live"
         detail["lastActivitySecondsAgo"] = round(now - track["changed"], 1)

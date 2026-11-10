@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.62.4 — 2026-11-10
+
+### Arreglos
+
+- **`estimatedRemainingMs` ya no inventa un valor cuando no se puede
+  saber.** En una petición sin streaming cuyo prompt resulta más largo de lo
+  estimado, el servidor no conoce el total de tokens. Ahora `estimatedRemainingMs`
+  y `expectedDurationMs` llegan a `null` en lugar de quedarse fijos en un
+  valor falso.
+- **El tiempo restante ya no salta al empezar a generar.** En el primer
+  instante de la generación, antes de tener ritmo en vivo, se usa el ritmo
+  de generación habitual del modelo. Y `expectedDurationMs` cuadra con el
+  restante: es lo transcurrido más lo que falta.
+
+---
+
 ## 0.62.2 — 2026-11-10
 
 ### Arreglos
