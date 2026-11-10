@@ -34,6 +34,9 @@ class LlamaCppMksBackend(LlamaCppBackend):
     # serving it would make this backend indistinguishable from llama_cpp while
     # reporting fork capabilities it does not have.
     LEGACY_SERVER_BIN_SETTING = None
+    # POST /props {"context"} recreates the context keeping the weights
+    # (fork commit "server: recreate the context at runtime ...").
+    SUPPORTS_LIVE_CONTEXT = True
 
     @property
     def install_spec(self) -> BackendInstallSpec:

@@ -733,3 +733,65 @@ async def test_request_size_does_not_change_runtime_worker_key(monkeypatch) -> N
 
     assert short.preset_key == longer.preset_key == "64k"
     assert short.worker_key == longer.worker_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_slot", "expected"), [(65_536, 65_536), (262_144, None), (None, None)]
+)
+async def test_plan_reports_live_context_of_loaded_worker(monkeypatch, live_slot, expected) -> None:
+    """A worker whose context was shrunk in place (ModelState.live_context)
+    keeps its key, so the plan reuses it but must report its real size."""
+    preset = _preset("extended", 262_144, default=False)
+    preset.preferred_gpus = [0, 1]
+    profile = SimpleNamespace(
+        profile_id="qwen3.8:27b",
+        base_model_id="llamacpp_mks/qwen3.8:27b",
+        load_overrides=None,
+        runtime_policy={"selection": "prefer_loaded"},
+        runtime_presets=[preset],
+    )
+    state = SimpleNamespace(
+        model_id=profile.base_model_id,
+        backend_type="llamacpp_mks",
+        status=SimpleNamespace(value="configured"),
+        load_policy=SimpleNamespace(value="warm"),
+        extra_config={"llama_cpp": {"tensor_split": [1, 3], "main_gpu": 1}},
+    )
+    loaded = SimpleNamespace(
+        model_id=f"{profile.base_model_id}::abc",
+        status=SimpleNamespace(value="loaded"),
+        extra_config={"_runtime": {"runtime_key": "runtime:extended"}},
+        live_context=None if live_slot is None else {"n_ctx": live_slot, "n_ctx_slot": live_slot},
+    )
+    gpu_states = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    manager = SimpleNamespace(
+        get_state=AsyncMock(return_value=state),
+        gpu_manager=SimpleNamespace(get_all_states=AsyncMock(return_value=gpu_states)),
+        list_states=AsyncMock(return_value=[state, loaded]),
+    )
+    monkeypatch.setattr(
+        "ocabra.core.runtime_coordinator.runtime_capacity_cache.resolve",
+        AsyncMock(
+            return_value=[
+                {
+                    "preset_key": "extended",
+                    "resolved": True,
+                    "fits": True,
+                    "effective_context": 262_144,
+                    "effective_parallelism": 4,
+                    "target_gpus": [0, 1],
+                    "runtime_key": "runtime:extended",
+                }
+            ]
+        ),
+    )
+
+    plan = await plan_profile_runtime(
+        profile, manager, {"messages": [{"role": "user", "content": "hola"}], "max_tokens": 1}
+    )
+
+    assert plan.live_effective_context == expected

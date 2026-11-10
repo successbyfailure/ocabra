@@ -43,6 +43,10 @@ class RuntimePlan:
     # mayor y no rechazar, pero reservar el pool entero deja los demas slots
     # fuera hasta que esa peticion termine. Ver ``refine_required_tokens``.
     kv_reservation_tokens: int | None = None
+    # Per-request context the chosen worker really has, when it was changed in
+    # place (ModelState.live_context) and is smaller than the preset's. The
+    # caller grows it back before serving a request that needs more.
+    live_effective_context: int | None = None
 
 
 class OutputTokenLimitError(ContextCapacityError):
@@ -670,6 +674,7 @@ async def plan_profile_runtime(
     )
 
     loaded_keys: set[str] = set()
+    live_context_by_key: dict[str, int] = {}
     for runtime_state in await model_manager.list_states(include_derived=True):
         if runtime_state.status.value != "loaded":
             continue
@@ -677,6 +682,9 @@ async def plan_profile_runtime(
         metadata = extra.get("_runtime")
         if isinstance(metadata, dict) and metadata.get("runtime_key"):
             loaded_keys.add(str(metadata["runtime_key"]))
+            live = getattr(runtime_state, "live_context", None)
+            if isinstance(live, dict) and live.get("n_ctx_slot"):
+                live_context_by_key[str(metadata["runtime_key"])] = int(live["n_ctx_slot"])
 
     if explicit_key:
         explicit = explicit_candidate
@@ -842,5 +850,12 @@ async def plan_profile_runtime(
             medido,
             chosen.effective_context,
             parallelism=chosen.parallelism,
+        ),
+        live_effective_context=(
+            live_context_by_key.get(chosen.runtime_key)
+            if chosen.runtime_key is not None
+            and live_context_by_key.get(chosen.runtime_key, chosen.effective_context)
+            < chosen.effective_context
+            else None
         ),
     )

@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.65.0 — 2026-11-10
+
+### Nuevo
+
+- **Los administradores pueden cambiar en vivo el contexto de un modelo de
+  llama.cpp ya cargado**, sin recargarlo, con
+  `POST /ocabra/models/{model_id}/context`. El cuerpo admite `context`
+  (tamaño de la caché KV en tokens), `parallel` (slots), `ubatch` y `batch`, o
+  `restore` para volver al tamaño con el que se cargó. El cambio tarda unos
+  0,15 s en lugar de las decenas de segundos de una recarga.
+
+  Está **desactivado por defecto** (`llama_cpp_live_context_enabled`) y solo
+  funciona con el backend `llamacpp_mks` cuando ejecuta una versión del fork
+  que lo admite. Mientras se aplica, las peticiones a ese modelo esperan a que
+  termine. Si un modelo está funcionando con un contexto reducido y llega una
+  petición que no cabe, vuelve a crecer solo antes de atenderla. Si no puede,
+  la petición recibe `503` con `Retry-After`.
+
+---
+
 ## 0.64.0 — 2026-11-10
 
 ### Cambios

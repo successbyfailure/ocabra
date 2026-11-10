@@ -34,13 +34,31 @@ transición drenada mientras implique redistribuir pesos.
 | 2 | Admission control ponderado por tokens | Implementado y validado en canary | Gemma 26B 128k/4 real, cancelación, remanente y oversized; tokenizer exacto pendiente |
 | 3 | Validación de rendimiento y corrección | En curso | Smokes, grounding, cancelación y soak acelerado de 1.000 peticiones completados; matriz diversa y 12 h pendientes |
 | 4 | Observabilidad KV candidata a upstream | Pendiente | Patch aislado y tests llama.cpp |
-| 5 | Recreación de contexto conservando pesos | Pendiente | Benchmark frente a recarga completa |
+| 5 | Recreación de contexto conservando pesos | Endpoint y fontanería implementados (2026-11-10); orquestación automática pendiente | Ver "Evidencia de recreación de contexto" |
 | 6 | Escalado drenado de una a dos GPU | Implementado y validado | Abliterated 64k/1 → 224k/4 con visión → 64k/1; reconciliación, drenado e histéresis probados |
 | 7 | Despliegue gradual y propuestas upstream | Pendiente | Feature flag, rollback y PRs |
 
 No se avanzará una fase por haber terminado el código. Deben cumplirse sus
 pruebas y registrar la evidencia en este documento o en un fichero enlazado de
 `docs/benchmarks/`.
+
+### Evidencia de recreación de contexto (2026-11-10)
+
+- **Fork** (rama `ocabra/live-context`, commit `96fff6cab`): `POST /props {"context": {n_ctx, n_parallel, n_ubatch, n_batch}}`.
+  - Libera el contexto y monta otro conservando los pesos. Libera primero porque con el viejo vivo no cabía el nuevo: de 32k a 64k en la 3060 falló.
+  - Reconstruye los slots, el estado especulativo, el batch y la caché de prompts.
+  - Si no cabe, restaura el anterior. Si tampoco puede, el proceso sale para que lo reinicien.
+  - Espera a las peticiones en curso, porque toma el cerrojo de los handlers en exclusiva.
+- **Medido** con gemma4:12b en la 3060, 4 slots, KV unificada q8_0:
+  - 123–150 ms por transición sin borrador y 230–320 ms con el borrador MTP aparte (conservando su modelo).
+  - Una carga real a través de oCabra tarda 40–60 s.
+  - Probado al crecer, al encoger (también de slots), con una petición imposible (vuelve atrás), con peticiones en curso, con la visión activa y con embeddings.
+- **Prueba previa de la API** (`~/gpu-bench/ctxreinit`): `llama_context_default_params()` trae `swa_full=true`; `llama-server` usa `false`.
+- **oCabra 0.65.0**, desactivado por defecto (`llama_cpp_live_context_enabled`):
+  - `LlamaCppBackend.reconfigure_context` y `ModelManager.resize_context`: drena, llama al endpoint, guarda `ModelState.live_context` (no en `extra_config`, para no persistirlo), recalcula capacidades y fija las reservas de VRAM con lo medido.
+  - La admisión y el planificador usan el contexto real. Si una petición no cabe en el contexto reducido, el worker vuelve a crecer o se devuelve 503 con `Retry-After`.
+  - Endpoint de administración: `POST /ocabra/models/{id}/context`.
+- **Pendiente:** la Fase 2 (encoger en vez de evictar y crecer cuando sobra), mostrarlo en el dashboard, la interacción con el tope de imagen de la visión y desplegar el binario del fork con el endpoint.
 
 ### Evidencia de visión bajo demanda (2026-10-31)
 

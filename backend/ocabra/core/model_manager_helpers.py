@@ -208,6 +208,17 @@ def resolve_worker_slots(state) -> int | None:
     from ocabra.config import settings
     from ocabra.core.model_ref import is_llama_cpp_family
 
+    # A context changed in place reports its real slots; extra_config keeps
+    # the ones it was loaded with (see ModelManager.resize_context).
+    live = getattr(state, "live_context", None)
+    if isinstance(live, dict):
+        try:
+            live_parallel = int(live.get("n_parallel") or 0)
+        except (TypeError, ValueError):
+            live_parallel = 0
+        if live_parallel > 0:
+            return live_parallel
+
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
     runtime_meta = extra.get("_runtime")
     if isinstance(runtime_meta, dict):

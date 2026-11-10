@@ -52,6 +52,9 @@ _DEFAULT_TOTAL_LAYERS = 32
 _DEFAULT_STARTUP_TIMEOUT_S = 30
 _SHUTDOWN_TIMEOUT_S = 20
 _VISION_ACTIVATION_TIMEOUT_S = 60.0
+#: llama-server waits for requests in flight before replacing the context, so
+#: the call can take as long as the longest of them, plus ~0.1-0.3 s of work.
+_LIVE_CONTEXT_TIMEOUT_S = 120.0
 _WORKER_PATH = Path(__file__).resolve().parents[1] / "workers" / "llama_cpp_worker.py"
 #: "tensor" splits every layer across the GPUs so they compute together, where
 #: "layer" gives each GPU a range of layers and they take turns. llama.cpp
@@ -106,7 +109,27 @@ def _compose_visible_devices(
     return [idx for idx in preferred_gpu if idx not in blocked]
 
 
+class LiveContextError(RuntimeError):
+    """Changing a loaded worker's context in place did not happen."""
+
+
+class LiveContextUnsupported(LiveContextError):
+    """The worker's llama-server has no live context endpoint (upstream build)."""
+
+
+class LiveContextBusy(LiveContextError):
+    """Slots were still processing when the change was attempted."""
+
+
+class LiveContextFailed(LiveContextError):
+    """The new context could not be created; the worker restored the previous one."""
+
+
 class LlamaCppBackend(BackendInterface):
+    #: llama-server can recreate its context without reloading the weights
+    #: (POST /props {"context"}). Only the Makespace fork implements it.
+    SUPPORTS_LIVE_CONTEXT = False
+
     # ── Identity, overridden by LlamaCppMksBackend ───────────────────────
     # Reported in WorkerInfo and used to resolve this backend's own install
     # directory. Kept as class attributes rather than literals so the fork
@@ -605,6 +628,92 @@ class LlamaCppBackend(BackendInterface):
             response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
             response.raise_for_status()
             return response.json()
+
+    def context_options(self, model_id: str) -> dict[str, int | None]:
+        """The context sizes a loaded worker runs, as llama-server names them."""
+        options = self._model_configs.get(model_id) or {}
+
+        def as_int(value: Any) -> int | None:
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "n_ctx": as_int(options.get("ctx_size")),
+            "n_parallel": as_int(options.get("parallel_slots")) or 1,
+            "n_ubatch": as_int(options.get("ubatch_size")),
+            "n_batch": as_int(options.get("batch_size")),
+        }
+
+    async def reconfigure_context(
+        self,
+        model_id: str,
+        *,
+        n_ctx: int | None = None,
+        n_parallel: int | None = None,
+        n_ubatch: int | None = None,
+        n_batch: int | None = None,
+    ) -> dict[str, Any]:
+        """Recreate a loaded worker's context with new sizes, keeping its weights.
+
+        Values left as ``None`` keep the current ones. Returns what llama-server
+        reports afterwards (``n_ctx``, ``n_ctx_slot``, ``n_parallel``,
+        ``n_ubatch``, ``n_batch``, ``t_ms``) and updates the cached options, so
+        :meth:`get_capabilities` describes the new context.
+
+        Raises:
+            LiveContextUnsupported: the binary has no live context endpoint.
+            LiveContextBusy: slots were processing; retry once drained.
+            LiveContextFailed: the new context did not fit and llama-server
+                restored the previous one.
+        """
+        entry = self._processes.get(model_id)
+        if entry is None:
+            raise LiveContextError(f"llama.cpp worker for '{model_id}' is not running")
+        if not self.SUPPORTS_LIVE_CONTEXT:
+            raise LiveContextUnsupported(f"backend '{self.BACKEND_TYPE}' cannot change context live")
+
+        wanted = {
+            "n_ctx": n_ctx,
+            "n_parallel": n_parallel,
+            "n_ubatch": n_ubatch,
+            "n_batch": n_batch,
+        }
+        payload = {key: int(value) for key, value in wanted.items() if value is not None}
+        if not payload:
+            raise ValueError("nothing to change")
+
+        url = f"http://127.0.0.1:{entry.port}/props"
+        try:
+            async with httpx.AsyncClient(timeout=_LIVE_CONTEXT_TIMEOUT_S) as client:
+                response = await client.post(url, json={"context": payload})
+        except httpx.HTTPError as exc:
+            raise LiveContextError(f"live context request failed: {exc}") from exc
+
+        if response.status_code in {404, 405, 501}:
+            raise LiveContextUnsupported(response.text[:300])
+        if response.status_code == 503:
+            raise LiveContextBusy(response.text[:300])
+        if response.status_code >= 400:
+            raise LiveContextFailed(response.text[:300])
+        try:
+            result = dict(response.json()["context"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise LiveContextError(f"unexpected live context response: {response.text[:300]}") from exc
+
+        options = self._model_configs.get(model_id)
+        if isinstance(options, dict):
+            for option, field in (
+                ("ctx_size", "n_ctx"),
+                ("parallel_slots", "n_parallel"),
+                ("ubatch_size", "n_ubatch"),
+                ("batch_size", "n_batch"),
+            ):
+                if result.get(field):
+                    options[option] = int(result[field])
+        logger.info("llama_cpp_context_reconfigured", model_id=model_id, **result)
+        return result
 
     async def prepare_request(self, model_id: str, path: str, body: dict) -> None:
         """Activate optional vision before forwarding an image request."""

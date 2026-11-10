@@ -37,7 +37,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from ocabra.core.request_telemetry import current_inflight_request_id
+
+logger = structlog.get_logger(__name__)
 
 
 class KVCapacityError(ValueError):
@@ -672,10 +676,21 @@ class WorkerPoolFairGates:
             != min(normalized_slots, max(1, int(large_prefill_max_concurrency or normalized_slots)))
         ):
             if gate is not None and not gate.is_idle():
-                raise RuntimeError(
-                    f"cannot resize active admission gate '{worker_key}'; "
-                    "runtime configuration must use a distinct worker key"
+                # Keep serving with the current gate until it drains: replacing
+                # it would orphan the reservations of the requests inside, and
+                # refusing used to fail the request instead. The new sizes take
+                # effect on the first lookup after it goes idle. Happens when a
+                # worker's context changes in place (ModelManager.resize_context)
+                # while a request that arrived during the change is still running.
+                logger.info(
+                    "fair_gate_resize_deferred",
+                    worker_key=worker_key,
+                    slots=gate.slots,
+                    wanted_slots=normalized_slots,
+                    kv_capacity_tokens=gate.kv_capacity_tokens,
+                    wanted_kv_capacity_tokens=normalized_capacity,
                 )
+                return gate
             gate = FairSlotGate(
                 normalized_slots,
                 normalized_capacity,

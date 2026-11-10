@@ -364,12 +364,43 @@ async def resolve_profile_runtime_plan(
             code="context_length_exceeded",
             status_code=400,
         ) from exc
+    # The chosen worker had its context shrunk in place: grow it back before a
+    # request that needs more than it holds now (resize_context, ~0.15 s).
+    live_effective_context = plan.live_effective_context
+    if (
+        live_effective_context is not None
+        and plan.required_tokens is not None
+        and plan.required_tokens > live_effective_context
+    ):
+        try:
+            await model_manager.resize_context(plan.worker_key, restore=True)
+        except Exception as exc:  # noqa: BLE001 - any failure leaves it small
+            logger.warning(
+                "live_context_regrow_failed",
+                worker_key=plan.worker_key,
+                required_tokens=plan.required_tokens,
+                live_effective_context=live_effective_context,
+                error=str(exc),
+            )
+            raise _openai_error(
+                "The model is running with a reduced context and could not grow back "
+                f"to fit {plan.required_tokens} tokens right now; retry shortly.",
+                "server_error",
+                code="context_temporarily_reduced",
+                status_code=503,
+                headers={"Retry-After": "5"},
+            ) from exc
+        live_effective_context = None
+    effective_context = plan.effective_context
+    if live_effective_context is not None and effective_context is not None:
+        effective_context = min(effective_context, live_effective_context)
+
     if request_state is not None:
         try:
             request_state.runtime_worker_key = plan.worker_key
             request_state.runtime_preset_key = plan.preset_key
             request_state.runtime_key = plan.runtime_key
-            request_state.runtime_effective_context = plan.effective_context
+            request_state.runtime_effective_context = effective_context
             request_state.runtime_required_tokens = plan.required_tokens
             request_state.runtime_kv_reservation_tokens = plan.kv_reservation_tokens
             request_state.runtime_selection_reason = plan.selection_reason
@@ -1522,6 +1553,16 @@ def fairness_kv_budget(
         )
     except (TypeError, ValueError):
         return None, 0
+    # A context changed in place holds the pool llama-server really has now;
+    # the preset and extra_config still describe the one it was loaded with.
+    live = getattr(state, "live_context", None)
+    if isinstance(live, dict):
+        try:
+            live_pool = int(live.get("n_ctx") or 0)
+        except (TypeError, ValueError):
+            live_pool = 0
+        if live_pool > 0:
+            capacity = min(capacity, live_pool) if capacity > 0 else live_pool
     if capacity <= 0:
         return None, 0
     return capacity, reservation

@@ -294,17 +294,20 @@ def test_worker_pool_fair_gates_resizes_on_kv_capacity_change():
 
 
 @pytest.mark.asyncio
-async def test_worker_pool_fair_gates_refuses_to_orphan_active_reservation():
+async def test_worker_pool_fair_gates_defers_resize_while_active():
+    """An active gate is never replaced (that would orphan its reservations);
+    the lookup keeps it and the new sizes apply once it drains."""
     registry = WorkerPoolFairGates()
     gate = registry.get("worker-1", slots=4, kv_capacity_tokens=96_000)
     await gate.acquire("alice", kv_tokens=32_000)
 
-    with pytest.raises(RuntimeError, match="cannot resize active admission gate"):
-        registry.get("worker-1", slots=4, kv_capacity_tokens=128_000)
-
-    assert registry.peek("worker-1") is gate
+    assert registry.get("worker-1", slots=2, kv_capacity_tokens=64_000) is gate
     assert gate.snapshot()["kv_reserved_tokens"] == 32_000
+
     await gate.release(kv_tokens=32_000)
+    resized = registry.get("worker-1", slots=2, kv_capacity_tokens=64_000)
+    assert resized is not gate
+    assert (resized.slots, resized.kv_capacity_tokens) == (2, 64_000)
 
 
 @pytest.mark.asyncio

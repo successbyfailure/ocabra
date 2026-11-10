@@ -172,6 +172,12 @@ class ModelState:
     runtime_slots: int = 1
     can_cancel_load: bool = False
     can_downsize: bool = False
+    # Context changed in place (llama.cpp fork, resize_context). ``None`` when
+    # the worker runs the context it was loaded with. Holds what llama-server
+    # reports now (n_ctx, n_ctx_slot, n_parallel, n_ubatch, n_batch) and the
+    # loaded values under "nominal". Kept out of extra_config on purpose: that
+    # one can be written back to the database, and a live change is temporary.
+    live_context: dict | None = None
 
     def __post_init__(self) -> None:
         if self.backend_model_id:
@@ -223,6 +229,7 @@ class ModelState:
             "runtime_slots": max(1, int(self.runtime_slots or 1)),
             "can_cancel_load": self.can_cancel_load,
             "can_downsize": self.can_downsize,
+            "live_context": self.live_context,
         }
 
 
@@ -2228,6 +2235,7 @@ class ModelManager:
                             )
                             state.capabilities = capabilities
                             state.status = ModelStatus.LOADED
+                            state.live_context = None
                             state.loaded_at = datetime.now(UTC)
                             state.error_message = None
 
@@ -2340,6 +2348,7 @@ class ModelManager:
                 if "assigned_port" in locals() and assigned_port:
                     self._worker_pool.release_port(assigned_port)
                 state.status = ModelStatus.UNLOADED
+                state.live_context = None
                 state.error_message = None
                 await self._publish_event(model_id, "load_cancelled")
                 logger.info("model_load_cancelled", model_id=model_id)
@@ -3492,6 +3501,108 @@ class ModelManager:
             for candidate in self._states.values()
         )
 
+    async def resize_context(
+        self,
+        model_id: str,
+        *,
+        context: int | None = None,
+        parallel: int | None = None,
+        ubatch: int | None = None,
+        batch: int | None = None,
+        restore: bool = False,
+    ) -> ModelState:
+        """Change a loaded llama.cpp worker's context in place, keeping its weights.
+
+        ``context`` is the KV pool llama-server holds (``--ctx-size``), ``parallel``
+        its slots. With ``restore=True`` the worker goes back to the sizes it was
+        loaded with. The worker is drained first: its requests in flight must
+        finish within ``llama_cpp_live_context_drain_timeout_s``.
+
+        Only the state this changes is updated: ``live_context`` (read by the
+        admission and the planner), capabilities, VRAM locks and usage.
+        ``extra_config`` keeps the loaded configuration, so the worker key and
+        anything written back to the database stay nominal; the learned VRAM
+        reading is left alone for the same reason.
+
+        Raises:
+            KeyError: unknown model.
+            RuntimeError: disabled, not loaded, backend without support, or the
+                worker stayed busy.
+            LiveContextError: from the backend (the worker kept or restored
+                its previous context).
+        """
+        if not settings.llama_cpp_live_context_enabled:
+            raise RuntimeError("live context changes are disabled (llama_cpp_live_context_enabled)")
+        state = self._states.get(model_id)
+        if state is None:
+            raise KeyError(f"Model '{model_id}' not configured")
+        if not is_llama_cpp_family(state.backend_type):
+            raise RuntimeError(f"'{model_id}' is not a llama.cpp model")
+        backend = await self._worker_pool.get_backend(state.backend_type)
+        if not getattr(backend, "SUPPORTS_LIVE_CONTEXT", False):
+            raise RuntimeError(f"backend '{state.backend_type}' cannot change context live")
+
+        async with self._acquire_model_load_lock(model_id):
+            if state.status != ModelStatus.LOADED:
+                raise RuntimeError(f"'{model_id}' is not loaded")
+
+            nominal = (state.live_context or {}).get("nominal") or backend.context_options(
+                state.backend_model_id
+            )
+            if restore:
+                context = nominal.get("n_ctx")
+                parallel = nominal.get("n_parallel")
+                ubatch = nominal.get("n_ubatch")
+                batch = nominal.get("n_batch")
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + float(settings.llama_cpp_live_context_drain_timeout_s)
+            while self.is_busy(model_id):
+                if loop.time() >= deadline:
+                    raise RuntimeError(f"'{model_id}' stayed busy; live context change not attempted")
+                await asyncio.sleep(0.1)
+
+            result = await backend.reconfigure_context(
+                state.backend_model_id,
+                n_ctx=context,
+                n_parallel=parallel,
+                n_ubatch=ubatch,
+                n_batch=batch,
+            )
+
+            live = {key: result.get(key) for key in ("n_ctx", "n_ctx_slot", "n_parallel", "n_ubatch", "n_batch")}
+            back_to_nominal = all(
+                live.get(key) == nominal.get(key) for key in ("n_ctx", "n_parallel", "n_ubatch")
+            )
+            state.live_context = None if back_to_nominal else {**live, "nominal": nominal}
+            state.capabilities = self._apply_capability_fallbacks(
+                state, await backend.get_capabilities(state.backend_model_id)
+            )
+
+            # The footprint changed: lock what the worker really holds now.
+            if self._gpu_manager is not None and state.worker_info is not None and state.worker_info.pid:
+                measured: dict[int, int] = {}
+                for gpu_idx in state.current_gpu or []:
+                    used = self._gpu_manager.get_process_vram_mb(gpu_idx).get(state.worker_info.pid)
+                    if used:
+                        measured[gpu_idx] = int(used)
+                if measured and len(measured) == len(state.current_gpu or []):
+                    for gpu_idx, used in measured.items():
+                        await self._gpu_manager.lock_vram(gpu_idx, used, model_id)
+                    state.vram_used_mb = sum(measured.values())
+                    state.worker_info.vram_used_mb = state.vram_used_mb
+
+            logger.info(
+                "llama_cpp_live_context_changed",
+                model_id=model_id,
+                restore=restore,
+                live_context=state.live_context,
+                vram_used_mb=state.vram_used_mb,
+                t_ms=result.get("t_ms"),
+            )
+            await self._publish_event(model_id, "status_changed")
+            return state
+
     async def downsize_runtime(self, model_id: str) -> str:
         """Restore an idle multi-GPU derived runtime to its default preset."""
 
@@ -3610,6 +3721,7 @@ class ModelManager:
 
             self._worker_pool.remove_worker(model_id)
             state.status = ModelStatus.UNLOADED
+            state.live_context = None
             state.current_gpu = []
             state.vram_used_mb = 0
             state.vram_estimate_mb = 0
@@ -4319,6 +4431,7 @@ class ModelManager:
                     if age_s < grace_s:
                         continue
                 state.status = ModelStatus.UNLOADED
+                state.live_context = None
                 state.current_gpu = []
                 state.vram_used_mb = 0
                 state.vram_estimate_mb = 0

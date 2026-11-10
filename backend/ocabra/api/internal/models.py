@@ -22,6 +22,7 @@ from ocabra.db.model_config import (
     replace_model_schedules,
 )
 from ocabra.registry.ollama_registry import OllamaRegistry
+from ocabra.schemas.live_context import LiveContextRequest
 from ocabra.stats import live_activity
 
 router = APIRouter(tags=["models"])
@@ -1060,6 +1061,80 @@ async def downsize_model_runtime(
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"model_id": model_id, "downsized_worker": worker_id}
+
+
+@router.post(
+    "/models/{model_id:path}/context",
+    summary="Change a loaded llama.cpp worker's context in place",
+    description=(
+        "Recreates the context of the loaded llama.cpp worker for this model with new "
+        "sizes, keeping its weights in VRAM (~0.15 s instead of a reload of tens of "
+        "seconds). Only the Makespace fork backend supports it, and only when "
+        "``llama_cpp_live_context_enabled`` is on. The worker is drained first. "
+        "``model_id`` may be the canonical id or a derived ``::<hash>`` worker key; with "
+        "more than one worker loaded for the model, pass the worker key. If the new "
+        "context does not fit, the worker keeps or restores its previous one. A worker "
+        "running a reduced context grows back on its own when a request needs more."
+    ),
+    responses={
+        404: {"description": "Model not found or no worker loaded"},
+        409: {"description": "Disabled, unsupported, busy, ambiguous, or did not fit"},
+    },
+)
+async def change_model_context(
+    model_id: str,
+    body: LiveContextRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Resize the worker's KV pool, slots or batch sizes without reloading.
+
+    Args:
+        model_id: canonical model id or derived worker key.
+        body: sizes to change (``context``, ``parallel``, ``ubatch``, ``batch``) or
+            ``restore``.
+
+    Returns:
+        ``{model_id, worker_id, live_context, vram_used_mb}``; ``live_context`` is
+        ``null`` once the worker runs its loaded sizes again.
+    """
+    from ocabra.backends.llama_cpp_backend import LiveContextError
+
+    mm = request.app.state.model_manager
+    if not await mm.get_state(model_id):
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    loaded = [
+        state
+        for state in await mm.list_states(include_derived=True)
+        if state.status.value == "loaded"
+        and (state.model_id == model_id or state.model_id.startswith(f"{model_id}::"))
+    ]
+    if not loaded:
+        raise HTTPException(status_code=404, detail=f"No worker loaded for '{model_id}'")
+    if len(loaded) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="several workers loaded: "
+            + ", ".join(sorted(state.model_id for state in loaded)),
+        )
+    worker_id = loaded[0].model_id
+    try:
+        state = await mm.resize_context(
+            worker_id,
+            context=body.context,
+            parallel=body.parallel,
+            ubatch=body.ubatch,
+            batch=body.batch,
+            restore=body.restore,
+        )
+    except (RuntimeError, LiveContextError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "model_id": model_id,
+        "worker_id": worker_id,
+        "live_context": state.live_context,
+        "vram_used_mb": state.vram_used_mb,
+    }
 
 
 @router.post(

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.64.3"
+    app_version: str = "0.65.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -284,6 +284,12 @@ class Settings(BaseSettings):
     # model that fills a card (qwen3-coder:30b, 24,024 of 24,576 MiB) became
     # unloadable on its second load. Set to false to only record readings.
     llama_cpp_observed_vram_apply: bool = True
+    # Allow changing a loaded llama.cpp worker's context in place (fork only,
+    # POST /props {"context"}), keeping its weights: ~0.15 s against a reload of
+    # tens of seconds. Off until it has run in production for a while.
+    llama_cpp_live_context_enabled: bool = False
+    # How long resize_context waits for the worker's requests to finish.
+    llama_cpp_live_context_drain_timeout_s: float = 30.0
     llama_cpp_cont_batching: bool = True
     llama_cpp_adaptive_admission_enabled: bool = Field(
         default=True,
