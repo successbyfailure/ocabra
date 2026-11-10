@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.67.3 — 2026-11-10
+
+### Arreglos
+
+- **Recuperar el contexto ya no descarga modelos sin necesidad.** Cuando un
+  modelo con el contexto reducido lo recuperaba, oCabra contaba la memoria de
+  los demás modelos por su reserva, no por lo que usan de verdad. Por eso podía
+  descargar, por ejemplo, el modelo de transcripción, que reserva 3,5 GB y usa
+  unos 0,4 GB, para un hueco que en realidad ya había. Ahora mira la memoria
+  libre real de la tarjeta.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.67.2 — 2026-11-10
 
 ### Arreglos

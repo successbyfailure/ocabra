@@ -304,6 +304,7 @@ def _elastic_manager(monkeypatch, *, free=None, kv_mb_per_64k=(500, 1000)):
     gpu.get_free_vram = AsyncMock(
         side_effect=lambda idx: free_mb[idx] + full[idx] - vram(idx)[4242]
     )
+    gpu.get_physical_free_vram = gpu.get_free_vram
     backend.reconfigure_context = AsyncMock(side_effect=reconfigure)
     return mm, state, backend, ctx, free_mb
 
@@ -387,8 +388,8 @@ async def test_grow_back_evicts_what_took_the_room(monkeypatch) -> None:
 
     await mm.grow_context_back(state.model_id)
 
-    # GPU 1 needs 3000 back (+256 margin) and has 1000 free; GPU 0 has room.
-    assert evicted == [(state.model_id, 1, 2256)]
+    # GPU 1 needs 3000 back and has 1000 free; GPU 0 has room.
+    assert evicted == [(state.model_id, 1, 2000)]
     assert ctx["n"] == 262144
     assert state.live_context is None
 
@@ -398,6 +399,7 @@ async def test_idle_regrow_only_when_there_is_room(monkeypatch) -> None:
     mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch)
     await mm._try_shrink_for_space(state.model_id, 1, 2500)
     mm._evict_last_resort_for_space = AsyncMock()
+    free_mb.update({0: -1500, 1: -3000})  # another model moved into what it freed
 
     await mm._regrow_if_room(state.model_id)
     assert ctx["n"] == 65536  # no room: stays small, nothing evicted

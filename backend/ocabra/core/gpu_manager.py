@@ -565,6 +565,18 @@ class GPUManager:
         free = min(state.free_vram_mb, state.total_vram_mb - model_locked) - service_locked
         return max(0, free - settings.vram_buffer_mb)
 
+    async def get_physical_free_vram(self, gpu_index: int) -> int:
+        """Free VRAM as NVML sees it, minus service reservations and the buffer.
+
+        Unlike ``get_free_vram`` it ignores model locks, which can be well above
+        what a worker really uses (whisper locks 3500 MB and holds ~390). Only
+        right when no model load is in flight, i.e. under the load gate.
+        """
+        state = self._states[gpu_index]
+        locks = self._locks.get(gpu_index, {})
+        service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+        return max(0, state.free_vram_mb - service_locked - settings.vram_buffer_mb)
+
     def has_service_lock(self, gpu_index: int) -> bool:
         """Whether an external service (Hunyuan, TRELLIS.2, ...) currently holds a
         VRAM reservation on this GPU via ServiceManager.reserve_gpu_vram. Cheap,

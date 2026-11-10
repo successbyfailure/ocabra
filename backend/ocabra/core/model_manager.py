@@ -50,7 +50,7 @@ from ocabra.redis_client import (
 
 logger = structlog.get_logger(__name__)
 
-# Slack over the measured loaded footprint when growing a context back.
+# Slack when checking that the GPU's free figure shows what a shrink released.
 _GROW_MARGIN_MB = 256
 
 
@@ -3748,8 +3748,9 @@ class ModelManager:
         current = self._worker_vram_by_gpu(state)
         for gpu_key, nominal_mb in (state.live_context.get("nominal_vram_mb") or {}).items():
             gpu_idx = int(gpu_key)
-            needed = int(nominal_mb) - int(current.get(gpu_idx, 0)) + _GROW_MARGIN_MB
-            free = int(await self._gpu_manager.get_free_vram(gpu_idx))
+            # get_physical_free_vram already keeps the scheduler's buffer.
+            needed = int(nominal_mb) - int(current.get(gpu_idx, 0))
+            free = int(await self._gpu_manager.get_physical_free_vram(gpu_idx))
             if needed > free:
                 missing[gpu_idx] = needed - free
         return missing

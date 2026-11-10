@@ -316,3 +316,21 @@ async def test_poll_replaces_hw_monitor_processes_with_local_reading() -> None:
 
         assert [(p.pid, p.used_vram_mb) for p in gm._states[0].processes] == [(19647, 6_800)]
         assert gm.get_process_vram_mb(0) == {19647: 6_800}
+
+
+@pytest.mark.asyncio
+async def test_physical_free_vram_ignores_inflated_model_locks() -> None:
+    """2026-11-10: growing qwen3.8 back evicted whisper for 446 MB because
+    whisper locks 3,500 MB while holding ~390. Model locks must not count."""
+    from ocabra.config import settings
+
+    with ExitStack() as stack:
+        gm = _gm_with_processes(stack, free_mb=9_000, used_mb=3_000, procs=[_process(5, 390)])
+        await gm.lock_vram(0, 3_500, "whisper/large")
+        await gm.lock_vram(0, 1_000, "service:trellis2")
+
+        physical = await gm.get_physical_free_vram(0)
+        scheduled = await gm.get_free_vram(0)
+
+    assert physical == 9_000 - 1_000 - settings.vram_buffer_mb
+    assert scheduled < physical
