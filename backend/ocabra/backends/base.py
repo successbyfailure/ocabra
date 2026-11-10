@@ -225,6 +225,15 @@ class BackendInterface(ABC):
         """
         return None
 
+    def request_headers(self, model_id: str) -> dict[str, str]:
+        """Return private headers used by WorkerPool for worker requests.
+
+        The default is intentionally empty. Backends whose localhost worker
+        requires internal authentication can override this without exposing
+        its credential through the public request body.
+        """
+        return {}
+
     # ------------------------------------------------------------------
     # Multi-modal interface (optional — subclasses override as needed)
     # ------------------------------------------------------------------

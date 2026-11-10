@@ -222,6 +222,10 @@ class StrataBackend(BackendInterface):
             int(runtime.get("capacity_vram_mb") or self._options(extra).get("vram_total_mb") or 0),
         )
 
+    def request_headers(self, model_id: str) -> dict[str, str]:
+        worker = self._worker(model_id)
+        return {"Authorization": f"Bearer {worker.api_key}"}
+
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         worker = self._worker(model_id)
         payload = {**body, "model": worker.served_model}

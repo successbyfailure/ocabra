@@ -10,7 +10,7 @@ import pytest
 from ocabra.api.internal.models import _apply_capability_fallbacks
 from ocabra.backends.strata_backend import StrataBackend
 from ocabra.core import artifacts
-from ocabra.core.model_manager import ModelStatus
+from ocabra.core.model_manager import ModelState, ModelStatus, declared_capabilities
 
 
 class _Process:
@@ -77,6 +77,7 @@ async def test_load_private_config_capabilities_and_cleanup(tmp_path, monkeypatc
         2,
         65_536,
     )
+    assert backend.request_headers("coder") == {"Authorization": f"Bearer {private['api_key']}"}
     monkeypatch.setattr("os.killpg", lambda *_args: None)
     await backend.unload("coder")
     assert not worker.temp_config_path.exists()
@@ -123,3 +124,26 @@ def test_cold_capabilities_use_strata_shape() -> None:
         2,
         65_536,
     )
+
+
+def test_declared_capabilities_use_strata_shape() -> None:
+    state = ModelState(
+        model_id="strata/coder",
+        display_name="Strata Coder",
+        backend_type="strata",
+        backend_model_id="coder",
+        status=ModelStatus.CONFIGURED,
+        extra_config={
+            "strata": {
+                "context_length": 65_536,
+                "native_context_length": 262_144,
+                "parallel_slots": 2,
+            },
+            "_runtime": {"parallelism": 2},
+        },
+    )
+    caps = declared_capabilities(state)
+    assert caps.chat and caps.tools and caps.reasoning and caps.streaming
+    assert not caps.completion
+    assert (caps.context_length, caps.native_context_length) == (65_536, 262_144)
+    assert (caps.parallel_slots, caps.context_per_request) == (2, 65_536)

@@ -4860,6 +4860,7 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
     caps = BackendCapabilities()
     backend_type = (state.backend_type or "").strip().lower()
     name = f"{state.backend_model_id or ''} {state.model_id or ''}".lower()
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
 
     context_length = ModelManager._resolve_context_length_fallback(state)
     if context_length > 0:
@@ -4921,6 +4922,23 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
         caps.image_generation = True
     elif backend_type == "acestep":
         caps.music_generation = True
+
+    if backend_type == "strata":
+        section = extra.get("strata")
+        section = section if isinstance(section, dict) else {}
+        runtime = extra.get("_runtime")
+        runtime = runtime if isinstance(runtime, dict) else {}
+        caps.completion = False
+        caps.chat = caps.tools = caps.reasoning = caps.streaming = True
+        try:
+            caps.native_context_length = max(0, int(section.get("native_context_length") or 0))
+            caps.parallel_slots = max(
+                1,
+                int(runtime.get("parallelism") or section.get("parallel_slots") or 1),
+            )
+        except (TypeError, ValueError):
+            caps.parallel_slots = 1
+        caps.context_per_request = caps.context_length
 
     return caps
 

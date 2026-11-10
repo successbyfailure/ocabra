@@ -83,6 +83,9 @@ class BackendInterface(ABC):
     @abstractmethod
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         """Reenvía una petición streaming al worker."""
+
+    def request_headers(self, model_id: str) -> dict[str, str]:
+        """Cabeceras privadas para WorkerPool; por defecto no añade ninguna."""
 ```
 
 ### 1.1 Backend Strata
@@ -95,6 +98,10 @@ El backend lanza `serve/server.py` en localhost como grupo de procesos,
 inyecta una clave interna aleatoria en una copia temporal y exige que
 `/health` responda con `loaded=true`. Al descargar termina el grupo completo,
 incluido el hijo nativo que posee la VRAM.
+
+La clave no se expone al cliente: `request_headers()` entrega el Bearer
+efímero a `WorkerPool`, que lo aplica tanto a JSON como a SSE al conectar con
+el worker localhost.
 
 `_runtime.capacity_vram_by_gpu_mb` declara reservas asimétricas validadas.
 ModelManager usa ese mapa para admisión y locks, sin dividir el total al 50 %.

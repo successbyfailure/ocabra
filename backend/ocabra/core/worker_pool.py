@@ -817,8 +817,10 @@ class WorkerPool:
             raise KeyError(f"No worker found for model '{model_id}'")
         self._check_circuit_breaker(model_id)
         backend = self._backends.get(worker.backend_type)
+        request_headers: dict[str, str] = {}
         if backend is not None:
             await backend.prepare_request(worker.model_id, path, body)
+            request_headers = backend.request_headers(worker.model_id)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -835,7 +837,10 @@ class WorkerPool:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(float(timeout_s), connect=30.0)
             ) as client:
-                resp = await client.post(url, json=body)
+                post_kwargs: dict[str, Any] = {"json": body}
+                if request_headers:
+                    post_kwargs["headers"] = request_headers
+                resp = await client.post(url, **post_kwargs)
                 resp.raise_for_status()
                 result = resp.json()
         except httpx.TimeoutException as exc:
@@ -938,8 +943,10 @@ class WorkerPool:
             raise KeyError(f"No worker found for model '{model_id}'")
         self._check_circuit_breaker(model_id)
         backend = self._backends.get(worker.backend_type)
+        request_headers: dict[str, str] = {}
         if backend is not None:
             await backend.prepare_request(worker.model_id, path, body)
+            request_headers = backend.request_headers(worker.model_id)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -984,7 +991,10 @@ class WorkerPool:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(float(timeout_s), connect=30.0)
                 ) as client:
-                    async with client.stream("POST", url, json=body) as resp:
+                    stream_kwargs: dict[str, Any] = {"json": body}
+                    if request_headers:
+                        stream_kwargs["headers"] = request_headers
+                    async with client.stream("POST", url, **stream_kwargs) as resp:
                         # httpx does not buffer streaming responses. Read an
                         # error body while the response is still open so the
                         # API layer can preserve its validation detail.

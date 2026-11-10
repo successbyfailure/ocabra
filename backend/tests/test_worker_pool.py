@@ -393,6 +393,43 @@ async def test_forward_request_prepares_backend_before_dispatch(pool, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_forward_request_applies_private_backend_headers(pool, monkeypatch):
+    seen: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url: str, **kwargs):
+            seen.update(kwargs)
+            return _Response()
+
+    backend = pool.registered_backends()["mock"]
+    backend.request_headers = lambda _model_id: {"Authorization": "Bearer private"}
+    monkeypatch.setattr("ocabra.core.worker_pool.httpx.AsyncClient", _Client)
+    _register_worker(pool)
+
+    await pool.forward_request("test/model", "/v1/chat/completions", {})
+
+    assert seen["headers"] == {"Authorization": "Bearer private"}
+
+
+@pytest.mark.asyncio
 async def test_forward_request_does_not_trip_breaker_on_unrelated_errors(pool, monkeypatch):
     """An ordinary request-specific 5xx (bad prompt, transient OOM on one
     call) must not be treated as evidence the worker process died — only
