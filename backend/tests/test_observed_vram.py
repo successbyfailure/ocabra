@@ -40,7 +40,7 @@ def test_fingerprint_changes_with_ubatch_and_ignores_runtime_bookkeeping() -> No
 def test_raise_to_observed_lifts_an_estimate_that_falls_short() -> None:
     """flint:40b 262k on two GPUs: estimated 25,787, measured 9,972 + 18,926."""
     total, per_gpu = observed_vram.raise_to_observed(
-        25_787, {0: 8_596, 1: 17_191}, {0: 9_972, 1: 18_926}
+        25_787, {0: 8_596, 1: 17_191}, {0: 9_972, 1: 18_926}, {0: 11_894, 1: 24_113}
     )
 
     assert total == 9_972 + 18_926 + MARGIN
@@ -48,14 +48,32 @@ def test_raise_to_observed_lifts_an_estimate_that_falls_short() -> None:
 
 
 def test_raise_to_observed_never_lowers() -> None:
-    total, per_gpu = observed_vram.raise_to_observed(23_600, {1: 23_600}, {1: 21_000})
+    total, per_gpu = observed_vram.raise_to_observed(23_600, {1: 23_600}, {1: 21_000}, {1: 24_113})
 
     assert total == 23_600
     assert per_gpu == {1: 23_600}
 
 
+def test_raise_stops_at_what_the_card_can_offer() -> None:
+    """0.63.0 regression: qwen3-coder:30b holds 24,024 MiB of a 3090 whose
+    empty-card ceiling is 24,113; asking 24,280 made its second load a 409."""
+    total, per_gpu = observed_vram.raise_to_observed(23_665, {1: 23_665}, {1: 24_024}, {1: 24_113})
+
+    assert total == 24_113
+    assert per_gpu == {1: 24_113}
+
+
+def test_raise_skips_gpus_with_unknown_ceiling() -> None:
+    total, per_gpu = observed_vram.raise_to_observed(
+        20_000, {0: 8_000, 1: 12_000}, {0: 9_000, 1: 14_000}, {0: None, 1: 24_113}
+    )
+
+    assert total == 20_000
+    assert per_gpu == {0: 8_000, 1: 14_000 + MARGIN // 2}
+
+
 def test_raise_to_observed_without_split_only_touches_total() -> None:
-    total, per_gpu = observed_vram.raise_to_observed(20_000, None, {1: 22_856})
+    total, per_gpu = observed_vram.raise_to_observed(20_000, None, {1: 22_856}, {1: 24_113})
 
     assert total == 22_856 + MARGIN
     assert per_gpu is None
@@ -82,6 +100,7 @@ def _llama_manager(*, pid_usage: dict[int, dict[int, int]]):
     wp.register_backend("llamacpp_mks", MockBackend(vram_mb=4096))
     gpu_manager = AsyncMock()
     gpu_manager.get_process_vram_mb = MagicMock(side_effect=lambda idx: pid_usage.get(idx, {}))
+    gpu_manager.admission_ceiling_mb = MagicMock(return_value=24_113)
     mm = ModelManager(wp, gpu_manager=gpu_manager)
     model_id = "llamacpp_mks/flint:40b::abc"
     mm._states[model_id] = ModelState(
@@ -116,6 +135,15 @@ async def test_load_raises_estimate_to_what_was_observed() -> None:
     kwargs, record = await _load(mm, model_id, observed={1: 22_880}, admitted_gpus=[1])
 
     assert kwargs["vram_needed"] == 22_880 + MARGIN
+
+
+@pytest.mark.asyncio
+async def test_load_caps_the_raise_at_the_card() -> None:
+    mm, model_id = _llama_manager(pid_usage={1: {12345: 24_024}})
+
+    kwargs, _ = await _load(mm, model_id, observed={1: 24_024}, admitted_gpus=[1])
+
+    assert kwargs["vram_needed"] == 24_113
 
 
 @pytest.mark.asyncio
@@ -163,3 +191,39 @@ async def test_readings_are_not_applied_while_the_setting_is_off() -> None:
 
     assert kwargs["vram_needed"] == 4_096
     record.assert_awaited_once()
+
+
+def _gm_with_reserved(reserved_mb: int | None):
+    from ocabra.core.gpu_manager import GPUManager, GPUState
+
+    gm = GPUManager()
+    gm._nvml_available = True
+    gm._states[1] = GPUState(
+        index=1,
+        name="RTX 3090",
+        total_vram_mb=24_576,
+        free_vram_mb=24_159,
+        used_vram_mb=417,
+        utilization_pct=0,
+        temperature_c=40,
+        power_draw_w=100,
+        power_limit_w=305,
+    )
+    gm._locks = {1: {"service:trellis2": 1_000, "llamacpp_mks/x": 5_000}}
+    gm._read_reserved_mb = MagicMock(return_value=reserved_mb)  # type: ignore[method-assign]
+    return gm
+
+
+def test_admission_ceiling_is_the_empty_card() -> None:
+    from ocabra.config import settings
+
+    gm = _gm_with_reserved(399)
+
+    assert gm.admission_ceiling_mb(1, physical=True) == 24_576 - 399 - 64
+    assert gm.admission_ceiling_mb(1, physical=False) == (
+        24_576 - 399 - 64 - 1_000 - settings.vram_buffer_mb
+    )
+
+
+def test_admission_ceiling_unknown_without_reservation() -> None:
+    assert _gm_with_reserved(None).admission_ceiling_mb(1, physical=True) is None

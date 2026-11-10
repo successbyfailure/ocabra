@@ -113,19 +113,36 @@ def raise_to_observed(
     vram_needed: int,
     required_gpu_vram_mb: dict[int, int] | None,
     observed: dict[int, int],
+    ceilings: dict[int, int | None],
 ) -> tuple[int, dict[int, int] | None]:
     """Apply a reading to the admission figures; never lowers either of them.
 
-    The total grows to the observed sum plus the margin. A per-GPU split, when
-    the admission has one, grows GPU by GPU, sharing the margin evenly.
+    The total grows to the observed sum plus the margin, and a per-GPU split,
+    when the admission has one, GPU by GPU with the margin shared evenly. Every
+    raise stops at ``ceilings``: the most the admission can find free on that
+    GPU. Asking for more makes a model unloadable even on an empty card, which
+    is what 0.63.0 did to qwen3-coder:30b (24,024 MiB held, 24,280 asked, 24,159
+    possible). A GPU whose ceiling is unknown is not raised at all.
     """
     margin = OBSERVED_VRAM_MARGIN_MB
-    total = max(int(vram_needed), sum(observed.values()) + margin)
+
+    total = int(vram_needed)
+    total_cap = (
+        sum(ceilings[gpu] for gpu in observed)  # type: ignore[misc]
+        if observed and all(ceilings.get(gpu) is not None for gpu in observed)
+        else None
+    )
+    if total_cap is not None:
+        total = max(total, min(sum(observed.values()) + margin, total_cap))
+
     if not required_gpu_vram_mb:
         return total, required_gpu_vram_mb
     share = margin // max(1, len(required_gpu_vram_mb))
-    per_gpu = {
-        gpu: max(int(mb), observed[gpu] + share) if gpu in observed else int(mb)
-        for gpu, mb in required_gpu_vram_mb.items()
-    }
+    per_gpu: dict[int, int] = {}
+    for gpu, mb in required_gpu_vram_mb.items():
+        cap = ceilings.get(gpu)
+        if gpu in observed and cap is not None:
+            per_gpu[gpu] = max(int(mb), min(observed[gpu] + share, cap))
+        else:
+            per_gpu[gpu] = int(mb)
     return total, per_gpu

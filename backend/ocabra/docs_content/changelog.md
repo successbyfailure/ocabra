@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.64.0 — 2026-11-10
+
+### Cambios
+
+- **Vuelve el cálculo de memoria con la medición real de la 0.63.0, ahora
+  acotado a lo que cabe en cada tarjeta.** El servidor apunta la memoria real
+  que ocupa cada modelo de llama.cpp al cargarse y, la siguiente vez que se
+  carga con la misma configuración, reserva esa cantidad en lugar de su
+  estimación si esta se quedaba corta. Así evita los fallos `503` al cargar un
+  modelo junto a otros: antes reservaba de menos, empezaba a cargar y la GPU
+  se quedaba sin memoria.
+
+  La diferencia con la 0.63.0 es que la reserva ya no puede pasar de lo que
+  la tarjeta ofrece vacía. En la 0.63.0 un modelo que llena casi una tarjeta
+  entera recibía `409 insufficient_vram` en su segunda carga. Ahora carga
+  igual que antes, aunque para hacerle sitio se descarguen todos los demás.
+
+---
+
 ## 0.63.1 — 2026-11-10
 
 ### Arreglos

@@ -35,6 +35,11 @@ class GPUState:
     processes: list[GPUProcessInfo] = field(default_factory=list)
 
 
+#: Kept below the computed ceiling of a GPU: CUDA contexts and allocator
+#: rounding mean an empty card reads a little less free than total - reserved.
+_CEILING_SLACK_MB = 64
+
+
 class GPUManager:
     def __init__(self) -> None:
         self._states: dict[int, GPUState] = {}
@@ -151,6 +156,49 @@ class GPUManager:
         processes = list(process_map.values())
         processes.sort(key=lambda item: (-item.used_vram_mb, item.pid))
         return processes
+
+    def _read_reserved_mb(self, index: int) -> int | None:
+        """Memory the driver keeps on a GPU, which no process can be given.
+
+        Only NVML's v2 memory query reports it; hw-monitor's v1 reading folds it
+        into "used". Measured 2026-11-10: 330 MiB on the RTX 3060 and 399 MiB
+        on the RTX 3090. ``None`` when it cannot be read here.
+        """
+        if not self._nvml_available:
+            return None
+        version = getattr(pynvml, "nvmlMemory_v2", None)
+        if version is None:
+            return None
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle, version=version)
+        except (pynvml.NVMLError, TypeError):
+            return None
+        reserved = getattr(info, "reserved", None)
+        if reserved is None:
+            return None
+        return int(reserved) // (1024 * 1024)
+
+    def admission_ceiling_mb(self, gpu_index: int, *, physical: bool) -> int | None:
+        """The most an admission can ever find free on this GPU.
+
+        That is the card with every process gone: its total minus the driver's
+        reservation and a small slack for CUDA contexts (an empty RTX 3090 reads
+        24,159 MiB free against 24,177 by this figure). With ``physical=False``
+        it matches ``get_free_vram``, which also keeps the scheduler buffer and
+        service reservations aside. ``None`` when the reservation is unknown, so
+        a caller can avoid asking for memory it cannot prove exists.
+        """
+        state = self._states.get(gpu_index)
+        reserved = self._read_reserved_mb(gpu_index)
+        if state is None or reserved is None:
+            return None
+        ceiling = state.total_vram_mb - reserved - _CEILING_SLACK_MB
+        if not physical:
+            locks = self._locks.get(gpu_index, {})
+            service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+            ceiling -= service_locked + settings.vram_buffer_mb
+        return max(0, ceiling)
 
     def _read_local_processes(self, index: int) -> list[GPUProcessInfo] | None:
         """Processes on this GPU as seen from this process's PID namespace.

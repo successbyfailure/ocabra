@@ -1997,9 +1997,22 @@ class ModelManager:
                                     observed
                                     and not manually_validated_vram
                                     and settings.llama_cpp_observed_vram_apply
+                                    and self._gpu_manager is not None
                                 ):
+                                    # Same free-VRAM reading the admission will use:
+                                    # physical for validated presets, buffered else.
+                                    physical = bool(
+                                        isinstance(_runtime_meta, dict)
+                                        and _runtime_meta.get("capacity_validated")
+                                    )
+                                    ceilings = {
+                                        gpu: self._gpu_manager.admission_ceiling_mb(
+                                            gpu, physical=physical
+                                        )
+                                        for gpu in set(observed) | set(required_gpu_vram_mb or {})
+                                    }
                                     raised_total, raised_per_gpu = observed_vram.raise_to_observed(
-                                        vram_needed, required_gpu_vram_mb, observed
+                                        vram_needed, required_gpu_vram_mb, observed, ceilings
                                     )
                                     if raised_total != vram_needed or (
                                         raised_per_gpu != required_gpu_vram_mb
@@ -2011,6 +2024,7 @@ class ModelManager:
                                             observed_per_gpu_mb=observed,
                                             vram_needed_mb=raised_total,
                                             required_gpu_vram_mb=raised_per_gpu,
+                                            ceilings_mb=ceilings,
                                         )
                                     vram_needed, required_gpu_vram_mb = (
                                         raised_total,
