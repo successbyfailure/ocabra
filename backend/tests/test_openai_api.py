@@ -535,7 +535,8 @@ class TestLlamaCppReasoningControls:
         payload = to_backend_body(_llama_cpp_state(), {"model": "gemma4:26b", "messages": []})
 
         assert payload["reasoning_effort"] == "medium"
-        assert payload["reasoning_budget_tokens"] == settings.reasoning_budget_medium_tokens
+        # Sin nivel pedido: el tope por defecto, no el de "medium" (2026-11-11).
+        assert payload["reasoning_budget_tokens"] == settings.reasoning_budget_default_tokens
         # La extension de oCabra se consume, no se reenvia.
         assert "reasoning_budget" not in payload
         assert "reasoning" not in payload

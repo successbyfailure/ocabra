@@ -263,6 +263,59 @@ def parse_gguf_context_length(path: Path) -> int | None:
     return None
 
 
+def parse_gguf_chat_template(path: Path) -> str | None:
+    """The Jinja chat template a GGUF ships (``tokenizer.chat_template``), or ``None``.
+
+    Lets the model list show the tool and reasoning support a llama.cpp model
+    really has while it is not loaded. Without it the list fell back to a name
+    heuristic: flint:40b showed ``tools: false, reasoning: false`` although its
+    template has ``<tool_call>`` and ``<think>`` (2026-11-11).
+    """
+
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(_GGUF_HEADER_MAX_BYTES)
+    except OSError:
+        return None
+
+    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
+        return None
+
+    buf = memoryview(data)
+    try:
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return None
+        (kv_count,) = struct.unpack_from("<Q", buf, 16)
+        offset = 24
+        for _ in range(int(kv_count)):
+            key, offset = _read_string(buf, offset)
+            (value_type,) = struct.unpack_from("<I", buf, offset)
+            offset += 4
+            value_type = int(value_type)
+            if key == "tokenizer.chat_template" and value_type == _GGUF_TYPE_STRING:
+                template, offset = _read_string(buf, offset)
+                return template
+            offset = _skip_value(buf, offset, value_type)
+    except (struct.error, _GGUFParseError, IndexError, ValueError):
+        return None
+    return None
+
+
+def gguf_template_capabilities(path: Path) -> dict[str, bool] | None:
+    """``{"tools", "reasoning"}`` support declared by a GGUF's chat template.
+
+    Same markers ``LlamaCppBackend._template_caps`` reads from a running worker.
+    """
+    template = (parse_gguf_chat_template(path) or "").lower()
+    if not template:
+        return None
+    return {
+        "tools": any(m in template for m in ("tool_call", "tool_calls", "tools")),
+        "reasoning": any(m in template for m in ("<think>", "</think>", "reasoning_content")),
+    }
+
+
 # --- Which --spec-type a draft GGUF needs ---------------------------------
 # A draft model is useless to llama-server unless it is also told *how* to
 # drive it, and a draft with no type is not "no speculation": the server loads

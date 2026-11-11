@@ -1515,11 +1515,37 @@ class ModelManager:
                 for gpu_idx in item["pool_gpus"]:
                     await self._gpu_manager.lock_vram(gpu_idx, vram_per_gpu, state.model_id)
 
+    async def warm_template_capabilities(self) -> None:
+        """Read each llama.cpp model's chat template from its GGUF, off the loop.
+
+        ``resolve_display_capabilities`` uses it for models that are not
+        loaded, so the list shows what the model really supports.
+        """
+        from pathlib import Path
+
+        from ocabra.registry.local_scanner import gguf_template_capabilities
+
+        for state in list(self._states.values()):
+            caps = None
+            if is_llama_cpp_family(state.backend_type or ""):
+                section = (state.extra_config or {}).get("llama_cpp")
+                path = section.get("model_path") if isinstance(section, dict) else None
+                if path and str(path) not in _TEMPLATE_CAPS_BY_FILE:
+                    try:
+                        caps = await asyncio.to_thread(gguf_template_capabilities, Path(str(path)))
+                    except Exception as exc:  # noqa: BLE001 - display hint only
+                        logger.debug("template_caps_read_failed", path=path, error=str(exc))
+                    if caps:
+                        _TEMPLATE_CAPS_BY_FILE[str(path)] = caps
+
     async def start(self) -> None:
         await self._load_configs_from_db()
         await self._hydrate_last_request_at_from_redis()
         await self._purge_orphan_redis_states()
         await self._reconcile_ollama_state()
+        self._create_background_task(
+            self.warm_template_capabilities(), task_name="warm-template-capabilities"
+        )
         for model_id, state in self._states.items():
             # PIN: always preload, never evictable.
             # WARM: load on first request and then keep resident until VRAM
@@ -5430,6 +5456,24 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
     return caps
 
 
+#: GGUF path -> tool/reasoning support from its chat template, filled in the
+#: background at startup (``ModelManager.warm_template_capabilities``) so the
+#: model list never reads a 20 GB file on the request path.
+_TEMPLATE_CAPS_BY_FILE: dict[str, dict[str, bool]] = {}
+
+
+def _template_caps_for(state: "ModelState") -> dict[str, bool] | None:
+    if not is_llama_cpp_family(state.backend_type or ""):
+        return None
+    section = (
+        (state.extra_config or {}).get("llama_cpp")
+        if isinstance(state.extra_config, dict)
+        else None
+    )
+    path = section.get("model_path") if isinstance(section, dict) else None
+    return _TEMPLATE_CAPS_BY_FILE.get(str(path)) if path else None
+
+
 def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:
     """Return ``(capabilities_dict, source)`` for display purposes.
 
@@ -5443,6 +5487,14 @@ def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:
         caps, source = state.capabilities.to_dict(), "cached"
     else:
         caps, source = declared_capabilities(state).to_dict(), "declared"
+    if source != "live":
+        # A cold llama.cpp model: its own chat template beats both the name
+        # heuristic and a cache from an older load. flint:40b showed tools and
+        # reasoning off (no hint in its name) although its template has
+        # <tool_call> and <think>; once loaded the worker reported them on.
+        template_caps = _template_caps_for(state)
+        if template_caps and caps.get("chat"):
+            caps = {**caps, **template_caps}
     # A total context window is not an independent generation cap. The public
     # profile-aware API adds runtime_policy.max_output_tokens when configured;
     # profile-unaware callers keep zero to mean "unknown".

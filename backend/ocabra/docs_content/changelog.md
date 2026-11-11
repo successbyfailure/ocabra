@@ -16,6 +16,36 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.69.0 — 2026-11-11
+
+### Cambios de comportamiento
+
+- **`reasoning_effort: "low"` y `"medium"` ahora piensan menos en los modelos de
+  llama.cpp.** El tope de tokens de pensamiento pasa a 1.000 con `low` y a
+  4.096 con `medium`; antes eran 2.048 y 16.384. Muchas plantillas ignoran el
+  nivel (`gemma4`, `ornith`, `nemotron`, `ravenx`) y `flint:40b` ni siquiera
+  deja apagar el pensamiento, así que el tope es lo único que distingue un
+  nivel de otro. Hasta ahora `flint:40b` pensaba lo mismo (unos 750 tokens) con
+  cualquier nivel, también en tareas de clasificación rápida. La tabla por
+  modelo está en [`/docs/models`](/docs/models#razonamiento).
+- **Si no mandas `reasoning_effort` nada cambia.** Se aplica un tope de 16.384
+  tokens, el mismo que tenías antes con el nivel por defecto. Si un modelo
+  tiene configurado su propio nivel por defecto, se usa el tope de ese nivel.
+
+### Arreglos
+
+- **`/v1/models` y `/ocabra/models` muestran bien las herramientas y el
+  razonamiento de los modelos de llama.cpp que no están cargados.** Se leen
+  de la plantilla del propio fichero del modelo. Antes salía la capacidad
+  guardada de una carga antigua o deducida del nombre: `flint:40b` aparecía
+  sin herramientas ni razonamiento aunque los tiene. Al cargarse siempre se
+  usaban los correctos.
+
+**Acción:** si pides `low` o `medium` y necesitas más pensamiento, pide `high`,
+o fija tú el tope con `reasoning_budget_tokens`.
+
+---
+
 ## 0.68.5 — 2026-11-11
 
 ### Cambios de comportamiento

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.68.5"
+    app_version: str = "0.69.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -711,9 +711,18 @@ class Settings(BaseSettings):
     # (ravenx): cortarlo en 4096 habria truncado su operacion normal. Aun asi
     # atrapa la fuga que motivo esto, de 62.072 tokens de razonamiento.
     # "low" si corta de verdad, que es lo que significa pedir esfuerzo bajo.
-    reasoning_budget_low_tokens: int = 2048
-    reasoning_budget_medium_tokens: int = 16384
+    #
+    # 2026-11-11 (decision del usuario): "low" 1.000 y "medium" 4.096 cuando el
+    # cliente los PIDE. Muchas plantillas ignoran el nivel (flint, gemma4,
+    # ravenx, nemotron) y el tope es lo unico que lo hace real: flint pensaba
+    # ~750 tokens en triaje con cualquier nivel. Una peticion SIN nivel no usa
+    # el de "medium" sino ``reasoning_budget_default_tokens`` (16.384, el valor
+    # de antes), para no truncar a quien razona mucho en uso normal: ravenx
+    # tiene un p90 de 13.455 tokens.
+    reasoning_budget_low_tokens: int = 1000
+    reasoning_budget_medium_tokens: int = 4096
     reasoning_budget_high_tokens: int = 0
+    reasoning_budget_default_tokens: int = 16384
 
     # Traduccion del nivel de OpenAI (low/medium/high) al vocabulario que
     # esperan las plantillas de chat. Las de Qwen 3.5 (qwen3.8:27b, su

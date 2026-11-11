@@ -223,21 +223,38 @@ a la mitad.
 
 ## Razonamiento
 
-Solo **tres** modelos distinguen de verdad los niveles de `reasoning_effort`,
-porque su plantilla los lee: `qwen3.8:27b`, `qwen3.8:27b-abliterated` y
-`ravenx-chaos-agent`. Aceptan `low`, `medium` y `xhigh`; oCabra traduce el
-`high` de OpenAI a `xhigh` por ti.
+Cómo responde cada plantilla al nivel:
 
-El resto —`gemma4:26b`, `gemma4:12b`, `qwen3:32b`, `qwen3:8b`,
-`nemotron-3-nano:30b`, `ravenx`— solo tiene **interruptor**: piensa o no
-piensa. Con ellos `off` apaga el razonamiento, y `low`, `medium` y `high` se
-diferencian únicamente en cuánto pensamiento les deja oCabra antes de cortar.
+| Plantilla | Modelos | Qué hace `reasoning_effort` |
+|-----------|---------|-----------------------------|
+| Lee el nivel | `qwen3.8:27b`, `qwen3.8:27b-abliterated`, `bonsai-2:27b`, `ravenx-chaos-agent` | Gradúa el razonamiento. Aceptan `low`, `medium` y `xhigh`; oCabra traduce el `high` de OpenAI a `xhigh` por ti |
+| Solo interruptor | `gemma4:26b`, `gemma4:12b`, `ornith-1.5:35b`, `nemotron-3.5-lightning:30b`, `nemotron-3-nano:30b`, `qwen3:8b`, `qwen3:32b`, `ravenx` | `off` apaga el pensamiento; `low`, `medium` y `high` la plantilla los trata igual |
+| Ni nivel ni interruptor | `flint:40b` | Piensa siempre, también con `off` |
+| No razona | `qwen3-coder:30b` | Nada |
+
+**Para que el nivel signifique algo en todos, oCabra lo convierte en un tope
+duro de tokens de pensamiento.** Cuando se agota, llama.cpp corta el
+pensamiento y obliga a responder:
+
+| Nivel | Tope de pensamiento |
+|-------|--------------------:|
+| `low` | 1.000 tokens |
+| `medium` | 4.096 tokens |
+| `high` | Sin tope propio |
+| Sin `reasoning_effort` | 16.384 tokens |
+
+En los modelos de solo interruptor y en `flint:40b`, **ese tope es la única
+diferencia entre `low`, `medium` y `high`**. En los que leen el nivel se suma a
+lo que ya hace la plantilla. Si no mandas nivel se aplica un tope holgado, para
+no recortar el uso normal: `ravenx` piensa unos 13.000 tokens en el 10 % de sus
+respuestas más largas. Si mandas tu propio `reasoning_budget_tokens`, manda el
+tuyo.
 
 Qué conviene pedir, medido:
 
 | Modelo | Recomendación |
 |--------|---------------|
-| `ravenx` | Razonando si quieres exhaustividad (72 afirmaciones, cobertura 0,617); `off` si quieres precisión (0,620). Solo tiene interruptor: `low` y `medium` dan lo mismo. |
+| `ravenx` | Razonando si quieres exhaustividad (72 afirmaciones, cobertura 0,617); `off` si quieres precisión (0,620). Medido antes de los topes de la 0.69.0, cuando `low` y `medium` daban lo mismo. |
 | `qwen3.8:27b` | `off` si quieres exhaustividad (74 afirmaciones), `medium` si quieres precisión (0,608). |
 
 Cuánto piensan de media, cuando piensan, sobre el tráfico real del servidor:
@@ -255,7 +272,8 @@ Cuánto piensan de media, cuando piensan, sobre el tráfico real del servidor:
 un cuarto de tu `max_tokens` para la respuesta, así que un `max_tokens` pequeño
 recorta el pensamiento en vez de dejarte sin respuesta (ver la entrada 0.51.2
 del [changelog](/docs/changelog)). Aun así, si pides razonamiento, da holgura:
-con `max_tokens: 4096` y `medium` el modelo piensa como mucho 3.072 tokens.
+con `max_tokens: 4096` el modelo piensa como mucho 3.072 tokens, aunque el
+nivel permitiera más.
 
 ## Visión
 

@@ -260,8 +260,8 @@ def _presupuesto(nivel: str, max_tokens: int | None) -> int | None:
         # El caso exacto del informe: medium sobre 4.096 de salida.
         ("medium", 4096, 3072),
         # Con salida holgada el nivel manda sin recortes.
-        ("medium", 65536, 16384),
-        ("low", 65536, 2048),
+        ("medium", 65536, 4096),
+        ("low", 65536, 1000),
         # Salidas pequeñas: siempre queda sitio para responder.
         ("low", 512, 256),
         ("medium", 512, 256),
@@ -284,8 +284,8 @@ def test_nunca_se_presupuesta_mas_pensamiento_que_salida(nivel, salida):
 
 def test_sin_tope_de_salida_el_nivel_manda_sin_cambios():
     # Sin max_tokens no hay respuesta que proteger; manda el nivel.
-    assert _presupuesto("low", None) == 2048
-    assert _presupuesto("medium", None) == 16384
+    assert _presupuesto("low", None) == 1000
+    assert _presupuesto("medium", None) == 4096
     assert _presupuesto("high", None) is None
 
 
@@ -300,3 +300,36 @@ def test_un_presupuesto_explicito_del_cliente_sigue_mandando():
     payload = {"reasoning_effort": "medium", "max_tokens": 4096, "reasoning_budget_tokens": 99}
     _apply_reasoning_effort(_estado(), payload)
     assert payload["reasoning_budget_tokens"] == 99
+
+
+# ── 2026-11-11: low 1.000, medium 4.096, y sin nivel 16.384 ─────────────────
+
+
+def test_un_nivel_pedido_lleva_su_tope_y_sin_nivel_el_de_por_defecto():
+    """flint:40b pensaba ~750 tokens en triaje con cualquier nivel, porque su
+    plantilla no lee ``reasoning_effort``: el tope es lo unico que lo hace real.
+    Sin nivel se conserva el de antes, para no truncar a ravenx (p90 13.455)."""
+    pedido_low: dict = {"reasoning_effort": "low"}
+    pedido_medium: dict = {"reasoning_effort": "medium"}
+    sin_nivel: dict = {}
+    for payload in (pedido_low, pedido_medium, sin_nivel):
+        _apply_reasoning_effort(_estado(), payload)
+
+    assert pedido_low["reasoning_budget_tokens"] == 1000
+    assert pedido_medium["reasoning_budget_tokens"] == 4096
+    assert sin_nivel["reasoning_budget_tokens"] == settings.reasoning_budget_default_tokens == 16384
+
+
+def test_un_nivel_por_defecto_del_modelo_lleva_el_tope_de_ese_nivel():
+    """Un nivel que el admin fija para el modelo es una decision, no 'nada'."""
+    estado = _estado()
+    estado.extra_config = {"default_reasoning_effort": "low"}
+    payload: dict = {}
+    _apply_reasoning_effort(estado, payload)
+    assert payload["reasoning_budget_tokens"] == 1000
+
+
+def test_la_salida_tambien_acota_el_tope_por_defecto():
+    payload: dict = {"max_tokens": 4096}
+    _apply_reasoning_effort(_estado(), payload)
+    assert payload["reasoning_budget_tokens"] == 3072

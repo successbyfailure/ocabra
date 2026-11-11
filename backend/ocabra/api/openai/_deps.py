@@ -1671,13 +1671,22 @@ def _resolve_default_reasoning_effort(state: ModelState) -> str:
     return DEFAULT_REASONING_EFFORT
 
 
-def _reasoning_budget_for_level(level: str) -> int | None:
+def _reasoning_budget_for_level(level: str, *, implicit: bool = False) -> int | None:
     """Tope duro de tokens de pensamiento para un nivel de ``reasoning_effort``.
 
     ``None`` = ese nivel no lleva tope (``high`` por defecto: quien pide
-    esfuerzo alto quiere justamente que piense sin prisa).
+    esfuerzo alto quiere justamente que piense sin prisa). ``implicit`` es
+    una peticion que no mando nivel: lleva ``reasoning_budget_default_tokens``
+    en vez del tope del nivel por defecto.
     """
     from ocabra.config import settings
+
+    if implicit:
+        try:
+            budget = int(settings.reasoning_budget_default_tokens or 0)
+        except (TypeError, ValueError):
+            return None
+        return budget if budget > 0 else None
 
     por_nivel = {
         "low": settings.reasoning_budget_low_tokens,
@@ -1715,7 +1724,7 @@ def _output_allowance(payload: dict) -> int | None:
     return None
 
 
-def _reasoning_budget_capped(level: str, payload: dict) -> int | None:
+def _reasoning_budget_capped(level: str, payload: dict, *, implicit: bool = False) -> int | None:
     """Tope de pensamiento del nivel, recortado para que quepa la respuesta.
 
     El presupuesto del nivel no puede pasarse del total de salida: si se
@@ -1731,7 +1740,7 @@ def _reasoning_budget_capped(level: str, payload: dict) -> int | None:
     Con salida holgada el nivel manda sin cambios: ``medium`` sobre 65.536
     sigue siendo 16.384.
     """
-    derivado = _reasoning_budget_for_level(level)
+    derivado = _reasoning_budget_for_level(level, implicit=implicit)
     salida = _output_allowance(payload)
     if salida is None:
         # Sin tope conocido no hay nada de lo que proteger a la respuesta.
@@ -1778,10 +1787,18 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
 
     raw = payload.pop("reasoning_effort", None)
     value = "" if raw is None else str(raw).strip().lower()
+    implicit = False
     if value in _REASONING_EFFORT_DEFAULT:
         if not getattr(state.capabilities, "reasoning", False):
             return
         value = _resolve_default_reasoning_effort(state)
+        # Only the global default is "the client asked for nothing": a level
+        # an admin set for this model is a deliberate choice and gets that
+        # level's budget.
+        extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+        implicit = not (
+            extra.get("default_reasoning_effort") or extra.get("defaultReasoningEffort")
+        )
     if value in _REASONING_EFFORT_OFF:
         enabled = False
     elif value in _REASONING_EFFORT_LEVELS:
@@ -1870,7 +1887,7 @@ def _apply_reasoning_effort(state: ModelState, payload: dict) -> None:
             # la salida (incidente 2026-11-07: 132.263 tokens en 26 minutos).
             # Un presupuesto explicito del cliente manda sobre el derivado.
             if "reasoning_budget_tokens" not in payload and "reasoning_budget" not in payload:
-                derivado = _reasoning_budget_capped(value, payload)
+                derivado = _reasoning_budget_capped(value, payload, implicit=implicit)
                 if derivado is not None:
                     payload["reasoning_budget_tokens"] = derivado
 
