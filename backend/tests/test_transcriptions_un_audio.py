@@ -54,6 +54,7 @@ def cliente() -> TestClient:
     mm.list_states = AsyncMock(return_value=[])
     mm.touch_last_request_at = AsyncMock()
     mm.make_room_for_whisper = AsyncMock()
+    mm.get_expected_load_seconds = AsyncMock(return_value=None)
     app.state.model_manager = mm
     app.state.worker_pool = MagicMock()
     # Un registro de verdad, vacio: con un MagicMock la resolucion revienta
@@ -180,6 +181,7 @@ def _cliente_con_worker(monkeypatch, post_error: Exception):
     mm.touch_last_request_at = AsyncMock()
     mm.get_state = AsyncMock(return_value=state)
     mm.make_room_for_whisper = AsyncMock()
+    mm.get_expected_load_seconds = AsyncMock(return_value=None)
     app.state.model_manager = mm
     backend = SimpleNamespace(health_check=AsyncMock(return_value=True))
     app.state.worker_pool = SimpleNamespace(
@@ -361,3 +363,180 @@ def test_un_anonimo_sigue_sin_usuario():
     )
     rid = real.begin_request("whisper/x", user=anon)
     assert real._active_requests[rid].username is None
+
+
+# ── Una peticion sin diarizar usa el worker diarizado ya cargado (2026-11-11) ─
+#
+# faster-whisper-large-v3 y su -diarized son dos workers con los mismos pesos.
+# En la 3060, junto al turbo fijado, no caben a la vez, y un cliente que
+# alternaba peticiones normales y diarizadas hacia que cada una desalojase a la
+# otra (8 veces en 45 min).
+
+from ocabra.api.openai._deps import compute_worker_key  # noqa: E402
+from ocabra.core.model_manager import ModelStatus  # noqa: E402
+
+_BASE = "whisper/faster-whisper-large-v3"
+_DIAR = {"whisper": {"diarization_enabled": True}, "diarization_enabled": True}
+_KEY_DIAR = compute_worker_key(_BASE, _DIAR)
+
+
+def _gemelos(monkeypatch, *, cargado_normal: bool, cargado_diar: bool, acceso=None):
+    from types import SimpleNamespace
+
+    from ocabra.api.openai import audio as audio_mod
+    from ocabra.backends.base import BackendCapabilities
+
+    usuario = UserContext(
+        user_id="u-1",
+        username="rogelio",
+        role="user",
+        group_ids=[],
+        accessible_model_ids=set(acceso or ()),
+        is_anonymous=False,
+    )
+    if acceso is None:
+        usuario.role = "system_admin"
+
+    async def _usuario():
+        return usuario
+
+    normal = SimpleNamespace(
+        profile_id="faster-whisper-large-v3",
+        base_model_id=_BASE,
+        load_overrides=None,
+        request_defaults=None,
+        enabled=True,
+    )
+    diarizado = SimpleNamespace(
+        profile_id="faster-whisper-large-v3-diarized",
+        base_model_id=_BASE,
+        load_overrides=_DIAR,
+        request_defaults={"diarize": True},
+        enabled=True,
+    )
+
+    class _Registry:
+        async def get(self, pid):
+            return {p.profile_id: p for p in (normal, diarizado)}.get(pid)
+
+        async def list_by_model(self, base):
+            return [normal, diarizado] if base == _BASE else []
+
+    def _st(model_id, loaded):
+        return SimpleNamespace(
+            model_id=model_id,
+            backend_model_id="Systran/faster-whisper-large-v3",
+            backend_type="whisper",
+            status=ModelStatus.LOADED if loaded else ModelStatus.UNLOADED,
+            capabilities=BackendCapabilities(audio_transcription=True),
+        )
+
+    estados = {
+        _BASE: _st(_BASE, cargado_normal),
+        _KEY_DIAR: _st(_KEY_DIAR, cargado_diar),
+    }
+    resueltos: list[str] = []
+
+    async def fake_resolve(pid, *a, **k):
+        resueltos.append(pid)
+        prof = normal if pid == normal.profile_id else diarizado
+        # resolve_profile deja el worker cargado
+        return prof, _st(_BASE, True)
+
+    monkeypatch.setattr(audio_mod, "resolve_profile", fake_resolve)
+    enviados: list[dict] = []
+
+    class _Cliente:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, *a, **k):
+            enviados.append(dict(k.get("data") or {}))
+            import httpx
+
+            return httpx.Response(200, json={"text": "hola"}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(audio_mod.httpx, "AsyncClient", _Cliente)
+
+    app = FastAPI()
+    app.include_router(openai_router, prefix="/v1")
+    for dep in (get_current_user, get_openai_user):
+        app.dependency_overrides[dep] = _usuario
+    mm = MagicMock()
+    mm.begin_request = MagicMock(return_value="req-1")
+    mm.end_request = MagicMock()
+    mm.unload = AsyncMock()
+    mm.load = AsyncMock()
+    mm.touch_last_request_at = AsyncMock()
+    mm.make_room_for_whisper = AsyncMock()
+    mm.get_expected_load_seconds = AsyncMock(return_value=None)
+    mm.get_state = AsyncMock(side_effect=lambda mid: estados.get(mid))
+    app.state.model_manager = mm
+    backend = SimpleNamespace(health_check=AsyncMock(return_value=True))
+    app.state.worker_pool = SimpleNamespace(
+        get_worker=MagicMock(return_value=SimpleNamespace(port=18000)),
+        get_backend=AsyncMock(return_value=backend),
+    )
+    app.state.profile_registry = _Registry()
+    return TestClient(app), mm, resueltos, enviados
+
+
+def _transcribe(cliente, model="faster-whisper-large-v3", **data):
+    return cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("a.wav", _WAV, "audio/wav"))],
+        data={"model": model, **data},
+    )
+
+
+def test_sin_diarizar_va_al_diarizado_cargado_y_le_pide_no_diarizar(monkeypatch):
+    cliente, mm, resueltos, enviados = _gemelos(
+        monkeypatch, cargado_normal=False, cargado_diar=True
+    )
+    respuesta = _transcribe(cliente)
+
+    assert respuesta.status_code == 200
+    assert resueltos == ["faster-whisper-large-v3-diarized"]
+    assert enviados[0]["diarize"] == "false"
+    assert mm.begin_request.call_args.args[0] == _KEY_DIAR
+    assert mm.make_room_for_whisper.await_args.args[0] == _KEY_DIAR
+    assert mm.make_room_for_whisper.await_args.kwargs["diarize"] is False
+    assert mm.end_request.call_args.args[0] == _KEY_DIAR
+
+
+def test_con_su_worker_cargado_no_se_desvia(monkeypatch):
+    cliente, _mm, resueltos, enviados = _gemelos(
+        monkeypatch, cargado_normal=True, cargado_diar=True
+    )
+    _transcribe(cliente)
+    assert resueltos == ["faster-whisper-large-v3"]
+    assert "diarize" not in enviados[0]
+
+
+def test_sin_el_diarizado_cargado_carga_el_suyo(monkeypatch):
+    cliente, _mm, resueltos, _ = _gemelos(monkeypatch, cargado_normal=False, cargado_diar=False)
+    _transcribe(cliente)
+    assert resueltos == ["faster-whisper-large-v3"]
+
+
+def test_pedir_diarizacion_no_se_desvia(monkeypatch):
+    cliente, _mm, resueltos, _ = _gemelos(monkeypatch, cargado_normal=False, cargado_diar=True)
+    _transcribe(cliente, diarize="true")
+    assert resueltos == ["faster-whisper-large-v3"]
+
+
+def test_sin_acceso_al_diarizado_no_se_desvia(monkeypatch):
+    cliente, _mm, resueltos, _ = _gemelos(
+        monkeypatch,
+        cargado_normal=False,
+        cargado_diar=True,
+        acceso={"faster-whisper-large-v3"},
+    )
+    _transcribe(cliente)
+    assert resueltos == ["faster-whisper-large-v3"]

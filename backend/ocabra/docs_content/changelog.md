@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.72.3 — 2026-11-11
+
+### Correcciones
+
+- **Alternar transcripciones normales y diarizadas del mismo modelo ya no
+  recarga el modelo cada vez.** `faster-whisper-large-v3` y
+  `faster-whisper-large-v3-diarized` corrían en dos procesos con los mismos
+  pesos, que no cabían juntos en su tarjeta: cada cambio de tipo de petición
+  desalojaba al otro y la petición esperaba de 13 a 20 s a que cargase. Ahora,
+  si el diarizado está cargado y el normal no, la petición sin diarizar se
+  transcribe en el diarizado (sin diarizar). La respuesta es la misma.
+
+---
+
 ## 0.72.2 — 2026-11-11
 
 ### Correcciones
