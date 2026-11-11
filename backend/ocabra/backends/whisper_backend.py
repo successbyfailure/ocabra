@@ -28,13 +28,16 @@ KNOWN_VRAM_MB = {
     "small": 1200,
     "medium": 3000,
     "large-v3": 6000,
-    "large-v3-turbo": 3500,
+    # Measured 2026-11-11 with 2 concurrent transcriptions, no diarization
+    # (2,682 MiB); more load or diarization makes room on demand
+    # (ModelManager.make_room_for_whisper).
+    "large-v3-turbo": 2700,
     "whisper-tiny": 300,
     "whisper-base": 500,
     "whisper-small": 1200,
     "whisper-medium": 3000,
     "whisper-large-v3": 6000,
-    "whisper-large-v3-turbo": 3500,
+    "whisper-large-v3-turbo": 2700,
     "faster-whisper-large-v3-turbo-latam-int8-ct2": 3600,
     "parakeet-tdt-0.6b-v3": 4500,
     "canary-1b-v2": 9000,
@@ -229,6 +232,9 @@ class WhisperBackend(BackendInterface):
         ]
         if diarization_enabled:
             args.extend(["--diarize", "--diarization-model-id", diarization_model_id])
+        args.extend(
+            ["--diarizer-idle-unload-s", str(float(settings.whisper_diarizer_idle_unload_s))]
+        )
 
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: PTH123, ASYNC230

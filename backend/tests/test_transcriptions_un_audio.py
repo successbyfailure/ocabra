@@ -53,6 +53,7 @@ def cliente() -> TestClient:
     mm.get_state = AsyncMock(return_value=None)
     mm.list_states = AsyncMock(return_value=[])
     mm.touch_last_request_at = AsyncMock()
+    mm.make_room_for_whisper = AsyncMock()
     app.state.model_manager = mm
     app.state.worker_pool = MagicMock()
     # Un registro de verdad, vacio: con un MagicMock la resolucion revienta
@@ -175,6 +176,7 @@ def _cliente_con_worker(monkeypatch, post_error: Exception):
     mm.load = AsyncMock()
     mm.touch_last_request_at = AsyncMock()
     mm.get_state = AsyncMock(return_value=state)
+    mm.make_room_for_whisper = AsyncMock()
     app.state.model_manager = mm
     backend = SimpleNamespace(health_check=AsyncMock(return_value=True))
     app.state.worker_pool = SimpleNamespace(

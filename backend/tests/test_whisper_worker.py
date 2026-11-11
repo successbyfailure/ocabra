@@ -170,3 +170,60 @@ def test_run_transcription_segment_granularity_omits_words():
 
 # Speaker-splitting logic moved to workers/diarization_lib.py (shared with the
 # whisper.cpp diarization sidecar) — see tests/test_diarization_lib.py.
+
+
+# -- the on-demand diarizer is dropped when idle (2026-11-11) --------------------
+
+
+@pytest.mark.asyncio
+async def test_an_idle_diarizer_is_unloaded_but_never_mid_diarization(monkeypatch):
+    import asyncio
+    import time
+
+    rt = whisper_worker.runtime
+    monkeypatch.setattr(rt, "diarize_default", False)
+    monkeypatch.setattr(rt, "diarizer_idle_unload_s", 300.0)
+    monkeypatch.setattr(rt, "diarization_pipeline", object())
+    monkeypatch.setattr(rt, "embedding_inference", object())
+    dropped = []
+    monkeypatch.setattr(
+        whisper_worker,
+        "_drop_diarizer",
+        lambda: dropped.append(True) or setattr(rt, "diarization_pipeline", None),
+    )
+
+    async def tick():
+        task = asyncio.create_task(whisper_worker._reap_idle_diarizer(interval_s=0.01))
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+    # Used 10 s ago: kept.
+    monkeypatch.setattr(rt, "last_diarization_at", time.monotonic() - 10)
+    await tick()
+    assert not dropped
+    # Idle long enough but a diarization is running: kept.
+    monkeypatch.setattr(rt, "last_diarization_at", time.monotonic() - 400)
+    monkeypatch.setattr(rt, "diarizations_in_flight", 1)
+    await tick()
+    assert not dropped
+    # Idle and nothing running: dropped.
+    monkeypatch.setattr(rt, "diarizations_in_flight", 0)
+    await tick()
+    assert dropped
+
+
+@pytest.mark.asyncio
+async def test_a_profile_that_always_diarizes_keeps_its_diarizer(monkeypatch):
+    import asyncio
+    import time
+
+    rt = whisper_worker.runtime
+    monkeypatch.setattr(rt, "diarize_default", True)
+    monkeypatch.setattr(rt, "diarizer_idle_unload_s", 1.0)
+    monkeypatch.setattr(rt, "diarization_pipeline", object())
+    monkeypatch.setattr(rt, "diarizations_in_flight", 0)
+    monkeypatch.setattr(rt, "last_diarization_at", time.monotonic() - 999)
+    task = asyncio.create_task(whisper_worker._reap_idle_diarizer(interval_s=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert rt.diarization_pipeline is not None

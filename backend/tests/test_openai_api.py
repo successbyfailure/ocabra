@@ -218,6 +218,7 @@ def _make_app(model_state=None, worker_result=None):
     mm.list_states = AsyncMock(return_value=[model_state])
     mm.load = AsyncMock(return_value=model_state)
     mm.touch_last_request_at = AsyncMock()
+    mm.make_room_for_whisper = AsyncMock()
 
     # Mock worker pool
     wp = MagicMock()

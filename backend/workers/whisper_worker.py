@@ -1,8 +1,10 @@
 import argparse
 import asyncio
+import gc
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -59,6 +61,13 @@ class WhisperRuntime:
         self.diarization_error: str | None = None
         self.embedding_inference: Any = None  # pyannote speaker-embedding model (lazy)
         self.num_workers: int = DEFAULT_NUM_WORKERS
+        # The diarizer loads on demand and holds ~2.6 GB more of VRAM (4
+        # concurrent diarized transcriptions peaked at 6.1 GB against 3.4 GB
+        # without, and PyTorch kept 5.3 GB reserved afterwards, 2026-11-11).
+        # Drop it once nobody has diarized for this long; 0 keeps it.
+        self.diarizer_idle_unload_s: float = 300.0
+        self.diarizations_in_flight: int = 0
+        self.last_diarization_at: float = 0.0
 
 
 runtime = WhisperRuntime()
@@ -70,7 +79,9 @@ def create_app(
     diarize_default: bool = False,
     diarization_model_id: str = DEFAULT_DIARIZATION_MODEL_ID,
     num_workers: int = DEFAULT_NUM_WORKERS,
+    diarizer_idle_unload_s: float = 300.0,
 ) -> FastAPI:
+    runtime.diarizer_idle_unload_s = float(diarizer_idle_unload_s)
     runtime.model_id = model_id
     runtime.gpu_indices = gpu_indices
     runtime.diarize_default = diarize_default
@@ -107,7 +118,9 @@ def create_app(
             runtime.model = None
             runtime.error = str(exc)
 
+        reaper = asyncio.create_task(_reap_idle_diarizer())
         yield
+        reaper.cancel()
 
         runtime.model = None
         runtime.diarization_pipeline = None
@@ -188,6 +201,8 @@ def create_app(
         audio_bytes = await file.read()
         if not audio_bytes:
             raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
+        if use_diarization:
+            runtime.diarizations_in_flight += 1
 
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -235,6 +250,9 @@ def create_app(
                 else:
                     raise
         finally:
+            if use_diarization:
+                runtime.diarizations_in_flight -= 1
+                runtime.last_diarization_at = time.monotonic()
             with suppress(FileNotFoundError):
                 os.unlink(tmp_path)
 
@@ -666,6 +684,39 @@ def _run_transcription(
 
 
 
+def _drop_diarizer() -> None:
+    """Release the diarization models and give their VRAM back to the card."""
+    runtime.diarization_pipeline = None
+    runtime.embedding_inference = None
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 - CPU-only or no torch: nothing to give back
+        pass
+
+
+async def _reap_idle_diarizer(interval_s: float = 30.0) -> None:
+    """Unload the on-demand diarizer once it has been idle long enough.
+
+    Never while a diarization is running, and never for a profile that
+    diarizes every request (``diarize_default``): that one needs it loaded.
+    """
+    while True:
+        await asyncio.sleep(interval_s)
+        idle_limit = runtime.diarizer_idle_unload_s
+        if (
+            idle_limit > 0
+            and runtime.diarization_pipeline is not None
+            and not runtime.diarize_default
+            and runtime.diarizations_in_flight == 0
+            and time.monotonic() - runtime.last_diarization_at >= idle_limit
+        ):
+            await asyncio.to_thread(_drop_diarizer)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="oCabra Whisper worker")
     parser.add_argument("--model-id", required=True)
@@ -675,6 +726,7 @@ def main() -> None:
     parser.add_argument("--diarize", action="store_true")
     parser.add_argument("--diarization-model-id", default=DEFAULT_DIARIZATION_MODEL_ID)
     parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS)
+    parser.add_argument("--diarizer-idle-unload-s", type=float, default=300.0)
     args = parser.parse_args()
 
     gpu_indices = [int(item) for item in args.gpu_indices.split(",") if item.strip()]
@@ -684,6 +736,7 @@ def main() -> None:
         diarize_default=bool(args.diarize),
         diarization_model_id=args.diarization_model_id,
         num_workers=args.num_workers,
+        diarizer_idle_unload_s=args.diarizer_idle_unload_s,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

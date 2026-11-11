@@ -253,6 +253,11 @@ async def transcriptions(
     last_error: Exception | None = None
 
     inflight_request_id = model_manager.begin_request(worker_key)
+    if state.backend_type == "whisper":
+        # Diarizing or many transcriptions at once grow whisper's footprint past
+        # what it is sized for: ask a llama.cpp model on its card to shrink its
+        # context first, instead of whisper running out of memory.
+        await model_manager.make_room_for_whisper(worker_key, diarize=diarize_requested)
     try:
         for attempt in range(2):
             worker = worker_pool.get_worker(worker_key)

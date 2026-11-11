@@ -3981,6 +3981,53 @@ class ModelManager:
                 return True
         return await self._evict_cheap_then_shrink(model_id, gpu_idx, needed_mb)
 
+    async def make_room_for_whisper(self, model_id: str, *, diarize: bool) -> None:
+        """Before a transcription that will grow whisper past its estimate, shrink
+        a llama.cpp model's context on its GPU if the card lacks the room.
+
+        whisper is sized for two plain transcriptions at once. Diarizing loads
+        pyannote in the same process (+~3.4 GB) and each extra concurrent
+        request adds ~350 MB; that memory is allocated inside the request, where
+        nothing can make room for it, so it is made here, before. Best effort:
+        if no context can give way, the request goes ahead as before.
+        """
+        state = self._states.get(model_id)
+        if state is None or self._gpu_manager is None or not state.current_gpu:
+            return
+        concurrent = self._in_flight_count(model_id)  # this request included
+        extra = max(0, concurrent - 2) * int(settings.whisper_extra_per_request_mb)
+        if diarize:
+            extra += int(settings.whisper_diarization_extra_mb)
+        if extra <= 0:
+            return
+        gpu = int(state.current_gpu[0])
+        free = int(await self._gpu_manager.get_physical_free_vram(gpu))
+        if free >= extra:
+            return
+        for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
+            if candidate == model_id or not self._can_change_context_live(candidate):
+                continue
+            freed = await self._try_shrink_for_space(candidate, gpu, extra - free)
+            if freed:
+                logger.info(
+                    "whisper_room_made",
+                    whisper=model_id,
+                    shrunk=candidate,
+                    gpu_index=gpu,
+                    needed_mb=extra - free,
+                    freed_mb=freed,
+                    diarize=diarize,
+                    concurrent=concurrent,
+                )
+                return
+        logger.info(
+            "whisper_room_unavailable",
+            whisper=model_id,
+            gpu_index=gpu,
+            needed_mb=extra - free,
+            diarize=diarize,
+        )
+
     def _vision_cost_estimate(self, state: ModelState, path: str) -> dict[int, int]:
         """MB the projector will take per GPU: the probe's measurement for this
         preset when there is one, else its file size plus compute headroom."""

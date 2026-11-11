@@ -307,6 +307,14 @@ class Settings(BaseSettings):
     # After growing above that starting context, go back to it once the worker
     # has been idle this long, so the reserve is free again.
     llama_cpp_return_to_initial_seconds: int = 120
+    # Seconds without a diarized request before a whisper worker drops its
+    # on-demand diarizer and returns that VRAM (~2.6 GB) to the card. 0 = keep.
+    whisper_diarizer_idle_unload_s: float = 300.0
+    # What whisper grows by beyond its estimate, measured 2026-11-11 on
+    # whisper-large-v3-turbo: diarizing (6,108 MiB peak with 4 at once against
+    # 2,682 with 2 plain) and each concurrent transcription past the second.
+    whisper_diarization_extra_mb: int = 3400
+    whisper_extra_per_request_mb: int = 350
     llama_cpp_cont_batching: bool = True
     llama_cpp_adaptive_admission_enabled: bool = Field(
         default=True,

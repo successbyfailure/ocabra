@@ -138,3 +138,56 @@ async def test_a_large_request_grows_it_and_idle_brings_it_back(monkeypatch):
     for _ in range(5):
         await asyncio.sleep(0)
     assert ctx["n"] == 131072
+
+
+# -- whisper asks for room before it grows ----------------------------------------
+
+
+def _whisper_next_to_qwen(monkeypatch, free_gpu0):
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+    from tests.test_live_context import _elastic_manager
+
+    mm, state, backend, ctx, free_mb = _elastic_manager(
+        monkeypatch, free={0: free_gpu0, 1: 0}, kv_mb_per_64k=(2000, 1000)
+    )
+    whisper = ModelState(
+        model_id="whisper/whisper-large-v3-turbo",
+        display_name="w",
+        backend_type="whisper",
+        load_policy=LoadPolicy.PIN,
+        status=ModelStatus.LOADED,
+        current_gpu=[0],
+    )
+    mm._states[whisper.model_id] = whisper
+    mm._get_pressure_eviction_candidates = MagicMock(return_value=[state.model_id])
+    return mm, state, whisper, ctx
+
+
+@pytest.mark.asyncio
+async def test_a_diarization_on_a_full_3060_shrinks_the_big_model_first(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._in_flight[whisper.model_id] = 1
+
+    await mm.make_room_for_whisper(whisper.model_id, diarize=True)
+
+    assert ctx["n"] < 262144  # qwen3.8 gave ~3.4 GB of KV on GPU 0
+
+
+@pytest.mark.asyncio
+async def test_two_plain_transcriptions_fit_in_whisper_s_own_estimate(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._in_flight[whisper.model_id] = 2
+
+    await mm.make_room_for_whisper(whisper.model_id, diarize=False)
+
+    assert ctx["n"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_a_third_concurrent_one_asks_only_for_its_share(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=500)
+    mm._in_flight[whisper.model_id] = 3
+
+    await mm.make_room_for_whisper(whisper.model_id, diarize=False)
+
+    assert ctx["n"] == 262144  # 350 MB needed, 500 free: nothing to do
