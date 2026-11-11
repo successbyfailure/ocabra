@@ -508,6 +508,19 @@ def _apply_llama_cpp_preset_placement(
     overrides["llama_cpp"] = section
 
 
+def _probe_vision_mb(policy: dict, preset_key: str) -> dict[str, int] | None:
+    probes = policy.get("context_probe") if isinstance(policy, dict) else None
+    probe = probes.get(preset_key) if isinstance(probes, dict) else None
+    vision = probe.get("vision") if isinstance(probe, dict) else None
+    cost = vision.get("cost_mb") if isinstance(vision, dict) else None
+    if not isinstance(cost, dict) or not cost:
+        return None
+    try:
+        return {str(gpu): int(mb) for gpu, mb in cost.items()}
+    except (TypeError, ValueError):
+        return None
+
+
 async def plan_profile_runtime(
     profile: Any,
     model_manager: Any,
@@ -801,6 +814,10 @@ async def plan_profile_runtime(
             # ``_select_pool`` del backend usa esta lista para elegir un pool que
             # exponga todas estas GPUs juntas (``multi_gpu=true`` + ``gpus`` ⊇).
             "gpu_indices": list(candidate.gpu_indices),
+            # What the vision projector took on each GPU when this preset was
+            # probed (runtime_policy.context_probe): lets the worker make just
+            # enough room before the first image instead of guessing.
+            "context_probe_vision_mb": _probe_vision_mb(policy, candidate_preset.preset_key),
             "tracking_worker_key": compute_worker_key(
                 profile.base_model_id,
                 profile.load_overrides,

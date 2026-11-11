@@ -719,3 +719,110 @@ async def test_endpoint_errors() -> None:
     with pytest.raises(HTTPException) as caught:
         await change_model_context("llamacpp_mks/q", LiveContextRequest(context=1), request, None)
     assert caught.value.status_code == 409
+
+
+# -- vision on a full card (phase B, 2026-11-11) --------------------------------
+
+
+def _with_vision(mm, state, backend, free_mb, tmp_path, *, projector_mb=1, measured=None):
+    """Give the fake worker an on-demand projector that takes ``load_mb`` on GPU 0
+    when activated, visible both in its process VRAM and in the free figure."""
+    extra = {0: 0, 1: 0}
+    gm = mm._gpu_manager
+    base_vram = gm.get_process_vram_mb.side_effect
+    base_free = gm.get_physical_free_vram.side_effect
+    gm.get_process_vram_mb = MagicMock(
+        side_effect=lambda idx: {4242: base_vram(idx)[4242] + extra[idx]}
+    )
+
+    async def free(idx):
+        return base_free(idx) - extra[idx]
+
+    gm.get_physical_free_vram = AsyncMock(side_effect=free)
+    gm.get_free_vram = gm.get_physical_free_vram
+    projector = tmp_path / "mmproj.gguf"
+    projector.write_bytes(b"\0" * (projector_mb * 1024 * 1024))
+    active = {"on": False}
+
+    async def activate(_model):
+        active["on"] = True
+        extra[0] += 900
+
+    backend._contains_image = lambda body: "image" in str(body)
+    backend.vision_is_active = lambda _m: active["on"]
+    backend.vision_projector_path = lambda _m: str(projector)
+    backend.activate_vision = AsyncMock(side_effect=activate)
+    if measured:
+        state.extra_config["_runtime"]["context_probe_vision_mb"] = measured
+    return active, extra
+
+
+IMAGE = {"messages": [{"content": [{"type": "image_url", "image_url": {"url": "data:"}}]}]}
+
+
+@pytest.mark.asyncio
+async def test_vision_with_room_loads_without_touching_the_context(monkeypatch, tmp_path):
+    mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 4000, 1: 0})
+    active, _ = _with_vision(mm, state, backend, free_mb, tmp_path)
+
+    await mm.make_room_for_vision(state.model_id, IMAGE)
+
+    assert active["on"] is True
+    assert ctx["n"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_vision_on_a_full_card_shrinks_first_with_its_own_request_in_flight(
+    monkeypatch, tmp_path
+):
+    """gemma4:26b 2026-11-10: the first image on a full 3090 killed the worker
+    (cudaMalloc). Now the context gives way first; the image request itself is
+    already counted in flight and must not block the change."""
+    mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    active, extra = _with_vision(mm, state, backend, free_mb, tmp_path)
+    mm._in_flight[state.model_id] = 1  # the image request
+
+    await mm.make_room_for_vision(state.model_id, IMAGE)
+
+    assert ctx["n"] < 262144
+    assert active["on"] is True
+    assert state.live_context["vision_mb"] == {"0": 900}
+
+
+@pytest.mark.asyncio
+async def test_vision_that_cannot_fit_is_a_clear_error_not_a_crash(monkeypatch, tmp_path):
+    mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    # The probe measured 5 GB for this projector; GPU 0 frees 1.75 GB at most.
+    active, _ = _with_vision(mm, state, backend, free_mb, tmp_path, measured={"0": 5000})
+
+    with pytest.raises(RuntimeError, match="vision projector needs"):
+        await mm.make_room_for_vision(state.model_id, IMAGE)
+
+    backend.activate_vision.assert_not_awaited()
+    assert ctx["n"] == 262144  # put back
+
+
+@pytest.mark.asyncio
+async def test_requests_without_images_never_touch_vision(monkeypatch, tmp_path):
+    mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    _with_vision(mm, state, backend, free_mb, tmp_path)
+
+    await mm.make_room_for_vision(state.model_id, {"messages": [{"content": "hola"}]})
+
+    backend.activate_vision.assert_not_awaited()
+    assert ctx["n"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_growing_back_counts_the_projector_that_stays_loaded(monkeypatch, tmp_path):
+    mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    _with_vision(mm, state, backend, free_mb, tmp_path)
+    mm._in_flight[state.model_id] = 1
+    await mm.make_room_for_vision(state.model_id, IMAGE)
+    mm._in_flight.pop(state.model_id)
+
+    missing = await mm._missing_vram_to_grow(state)
+
+    # GPU 0 gave up KV for the projector; growing back needs those MB again
+    # although the worker's total footprint now includes the projector.
+    assert missing.get(0, 0) >= 900 - 256

@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -939,6 +940,10 @@ class ModelManager:
         # (the estimator can't tell them apart yet).
         if went_idle:
             self.mark_request_end(model_id)
+
+    def _in_flight_count(self, model_id: str) -> int:
+        with self._in_flight_lock:
+            return int(self._in_flight.get(model_id, 0))
 
     def is_busy(self, model_id: str) -> bool:
         """Return True if there are in-flight requests for this model."""
@@ -3687,7 +3692,9 @@ class ModelManager:
         backends = getattr(self._worker_pool, "_backends", None)
         return backends.get(backend_type) if isinstance(backends, dict) else None
 
-    async def _try_shrink_for_space(self, model_id: str, gpu_index: int, needed_mb: int) -> int:
+    async def _try_shrink_for_space(
+        self, model_id: str, gpu_index: int, needed_mb: int, *, tolerate_in_flight: int = 0
+    ) -> int:
         """Shrink an idle llama.cpp worker's context to free ``needed_mb`` on a GPU.
 
         Halves the KV pool step by step, down to ``llama_cpp_shrink_min_context``,
@@ -3700,7 +3707,10 @@ class ModelManager:
         """
         if not settings.llama_cpp_shrink_before_evict or needed_mb <= 0:
             return 0
-        if not self._can_change_context_live(model_id) or self.is_busy(model_id):
+        if (
+            not self._can_change_context_live(model_id)
+            or self._in_flight_count(model_id) > tolerate_in_flight
+        ):
             return 0
         state = self._states[model_id]
         if gpu_index not in (state.current_gpu or []):
@@ -3727,7 +3737,9 @@ class ModelManager:
             if target >= ctx:
                 break
             try:
-                await self.resize_context(model_id, context=target)
+                await self.resize_context(
+                    model_id, context=target, tolerate_in_flight=tolerate_in_flight
+                )
             except LiveContextUnsupported:
                 self._live_context_unsupported.add(model_id)
                 break
@@ -3762,9 +3774,13 @@ class ModelManager:
         if ctx != original_ctx:
             try:
                 if original_ctx == nominal.get("n_ctx"):
-                    await self.resize_context(model_id, restore=True)
+                    await self.resize_context(
+                        model_id, restore=True, tolerate_in_flight=tolerate_in_flight
+                    )
                 else:
-                    await self.resize_context(model_id, context=original_ctx)
+                    await self.resize_context(
+                        model_id, context=original_ctx, tolerate_in_flight=tolerate_in_flight
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("shrink_for_space_undo_failed", model_id=model_id, error=str(exc))
         # What shrinking to the floor could free here: _evict_cheap_then_shrink
@@ -3938,6 +3954,89 @@ class ModelManager:
                 return True
         return await self._evict_cheap_then_shrink(model_id, gpu_idx, needed_mb)
 
+    def _vision_cost_estimate(self, state: ModelState, path: str) -> dict[int, int]:
+        """MB the projector will take per GPU: the probe's measurement for this
+        preset when there is one, else its file size plus compute headroom."""
+        runtime = (
+            (state.extra_config or {}).get("_runtime")
+            if isinstance(state.extra_config, dict)
+            else None
+        )
+        if isinstance(runtime, dict):
+            measured = (runtime.get("context_probe_vision_mb") or {}) if runtime else {}
+            if measured:
+                return {int(g): int(mb) for g, mb in measured.items()}
+        gpus = [int(g) for g in state.current_gpu or []]
+        if not gpus:
+            return {}
+        section = (state.extra_config or {}).get("llama_cpp") or {}
+        main = section.get("main_gpu") if isinstance(section, dict) else None
+        main = int(main) if main is not None and int(main) in gpus else gpus[0]
+        try:
+            size_mb = os.path.getsize(path) / 1024 / 1024
+        except OSError:
+            size_mb = 1024
+        return {main: int(size_mb * 1.1) + 256}
+
+    async def make_room_for_vision(self, model_id: str, body: dict) -> None:
+        """Before the first image reaches a llama.cpp worker whose card is full,
+        shrink its context so the vision projector fits.
+
+        The projector is loaded on demand and cannot be unloaded, and when it
+        does not fit llama-server dies with ``cudaMalloc failed`` (gemma4:26b,
+        2026-11-10, every image request crashed the worker). The maximum
+        context is sized without the projector on purpose, so this is the moment
+        to give some of it back. Shrinking is in place (~0.5 s) and measured;
+        if even the smallest context leaves no room, the request fails with a
+        clear error instead of the worker crashing.
+        """
+        state = self._states.get(model_id)
+        if state is None or state.status != ModelStatus.LOADED:
+            return
+        backend = self._registered_backend(state.backend_type)
+        contains_image = getattr(backend, "_contains_image", None)
+        if backend is None or not callable(contains_image) or not contains_image(body):
+            return
+        if backend.vision_is_active(state.backend_model_id):
+            return
+        path = backend.vision_projector_path(state.backend_model_id)
+        if not path or self._gpu_manager is None:
+            return
+        cost = await asyncio.to_thread(self._vision_cost_estimate, state, path)
+        for gpu, needed in cost.items():
+            free = int(await self._gpu_manager.get_physical_free_vram(gpu))
+            if free >= needed:
+                continue
+            if not self._can_change_context_live(model_id):
+                raise RuntimeError(
+                    f"The vision projector needs ~{needed} MB on GPU {gpu} and only "
+                    f"{free} MB are free; this model cannot shrink its context to make room."
+                )
+            before = self._worker_vram_by_gpu(state)
+            freed = await self._try_shrink_for_space(
+                model_id, gpu, needed - free, tolerate_in_flight=1
+            )
+            if not freed:
+                raise RuntimeError(
+                    f"The vision projector needs ~{needed} MB on GPU {gpu} and shrinking the "
+                    f"context of '{model_id}' cannot free them; try again with the card freer."
+                )
+            logger.info(
+                "vision_room_made",
+                model_id=model_id,
+                gpu_index=gpu,
+                needed_mb=needed,
+                freed_mb=freed,
+                vram_before_mb=before.get(gpu),
+                context=(state.live_context or {}).get("n_ctx"),
+            )
+        before = self._worker_vram_by_gpu(state)
+        await backend.activate_vision(state.backend_model_id)
+        after = self._worker_vram_by_gpu(state)
+        loaded = {g: max(0, after.get(g, 0) - before.get(g, 0)) for g in after}
+        if state.live_context is not None:
+            state.live_context["vision_mb"] = {str(g): mb for g, mb in loaded.items() if mb}
+
     async def _shrink_candidate_for_load(
         self, candidate_id: str, gpu_pool: int | None, vram_needed: int
     ) -> bool:
@@ -3967,8 +4066,14 @@ class ModelManager:
         if self._gpu_manager is None or state.live_context is None:
             return missing
         current = self._worker_vram_by_gpu(state)
+        # A projector loaded since the first shrink is in ``current`` but was
+        # not in the nominal footprint: it stays, so growing needs it on top.
+        vision_mb = {
+            int(gpu): int(mb) for gpu, mb in (state.live_context.get("vision_mb") or {}).items()
+        }
         for gpu_key, nominal_mb in (state.live_context.get("nominal_vram_mb") or {}).items():
             gpu_idx = int(gpu_key)
+            current[gpu_idx] = int(current.get(gpu_idx, 0)) - vision_mb.get(gpu_idx, 0)
             # get_physical_free_vram already keeps the scheduler's buffer.
             needed = int(nominal_mb) - int(current.get(gpu_idx, 0))
             free = int(await self._gpu_manager.get_physical_free_vram(gpu_idx))
@@ -4031,8 +4136,13 @@ class ModelManager:
         ubatch: int | None = None,
         batch: int | None = None,
         restore: bool = False,
+        tolerate_in_flight: int = 0,
     ) -> ModelState:
         """Change a loaded llama.cpp worker's context in place, keeping its weights.
+
+        ``tolerate_in_flight`` lets the caller's own request stay counted as in
+        flight (the image request that needs room for the vision projector has
+        not reached llama-server yet, so it does not block the change there).
 
         ``context`` is the KV pool llama-server holds (``--ctx-size``), ``parallel``
         its slots. With ``restore=True`` the worker goes back to the sizes it was
@@ -4078,7 +4188,7 @@ class ModelManager:
 
             loop = asyncio.get_running_loop()
             deadline = loop.time() + float(settings.llama_cpp_live_context_drain_timeout_s)
-            while self.is_busy(model_id):
+            while self._in_flight_count(model_id) > tolerate_in_flight:
                 if loop.time() >= deadline:
                     raise RuntimeError(
                         f"'{model_id}' stayed busy; live context change not attempted"
@@ -4106,10 +4216,16 @@ class ModelManager:
             back_to_nominal = all(
                 live.get(key) == nominal.get(key) for key in ("n_ctx", "n_parallel", "n_ubatch")
             )
+            vision_mb = (state.live_context or {}).get("vision_mb")
             state.live_context = (
                 None
                 if back_to_nominal
-                else {**live, "nominal": nominal, "nominal_vram_mb": nominal_vram}
+                else {
+                    **live,
+                    "nominal": nominal,
+                    "nominal_vram_mb": nominal_vram,
+                    **({"vision_mb": vision_mb} if vision_mb else {}),
+                }
             )
             state.capabilities = self._apply_capability_fallbacks(
                 state, await backend.get_capabilities(state.backend_model_id)

@@ -650,6 +650,9 @@ async def lifespan(app: FastAPI):
     from ocabra.core.context_probe_service import ContextProbeService
 
     app.state.context_probe = ContextProbeService(model_manager, profile_registry, worker_pool)
+    # A full card makes room for an on-demand vision projector before the first
+    # image, instead of the worker dying with cudaMalloc (gemma4:26b, 2026-11-10).
+    worker_pool.set_before_prepare(model_manager.make_room_for_vision)
     # Late-bind profile_registry into the compile manager (created earlier so
     # it can start recovering stale jobs) so completed engines get a default
     # profile alongside their model_config registration.

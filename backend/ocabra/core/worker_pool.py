@@ -2,7 +2,7 @@ import json as _json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -508,6 +508,7 @@ def _looks_like_dead_backend(exc: httpx.HTTPStatusError) -> bool:
 class WorkerPool:
     def __init__(self) -> None:
         self._backends: dict[str, BackendInterface] = {}
+        self._before_prepare: Callable[[str, dict], Awaitable[None]] | None = None
         self._disabled_backends: dict[str, str] = {}
         self._workers: dict[str, WorkerInfo] = {}
         self._used_ports: set[int] = set()
@@ -706,6 +707,10 @@ class WorkerPool:
         self._disabled_backends[backend_type] = reason
         logger.info("backend_disabled", backend_type=backend_type, reason=reason)
 
+    def set_before_prepare(self, hook: Callable[[str, dict], Awaitable[None]] | None) -> None:
+        """Hook awaited before a backend prepares a request (vision room)."""
+        self._before_prepare = hook
+
     def registered_backends(self) -> dict[str, BackendInterface]:
         """Snapshot of currently registered (enabled) backends, keyed by backend_type."""
         return dict(self._backends)
@@ -819,6 +824,11 @@ class WorkerPool:
         backend = self._backends.get(worker.backend_type)
         request_headers: dict[str, str] = {}
         if backend is not None:
+            if self._before_prepare is not None:
+                # Room for an on-demand vision projector on a full card: the
+                # model manager shrinks the context first (see
+                # ModelManager.make_room_for_vision).
+                await self._before_prepare(model_id, body)
             await backend.prepare_request(worker.model_id, path, body)
             request_headers = backend.request_headers(worker.model_id)
         if worker.backend_type == "ollama":
@@ -945,6 +955,11 @@ class WorkerPool:
         backend = self._backends.get(worker.backend_type)
         request_headers: dict[str, str] = {}
         if backend is not None:
+            if self._before_prepare is not None:
+                # Room for an on-demand vision projector on a full card: the
+                # model manager shrinks the context first (see
+                # ModelManager.make_room_for_vision).
+                await self._before_prepare(model_id, body)
             await backend.prepare_request(worker.model_id, path, body)
             request_headers = backend.request_headers(worker.model_id)
         if worker.backend_type == "ollama":
