@@ -770,6 +770,9 @@ export interface ActiveRequestProgress {
   generationTokensPerSecond?: number | null;
   expectedDurationMs?: number | null;
   estimatedRemainingMs?: number | null;
+  /** El restante es "como mucho": la petición ya superó la salida típica del
+   *  modelo y se cuenta hasta su max_tokens. */
+  remainingIsUpperBound?: boolean;
   queueWaitEstimateMs?: number | null;
   /** El backend ve una señal de vida (tokens o progreso de prefill) y lleva
    *  15 s parada. Las peticiones sin señal que vigilar nunca se marcan. */

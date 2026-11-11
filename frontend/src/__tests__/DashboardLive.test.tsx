@@ -289,3 +289,51 @@ describe("contexto cambiado en vivo", () => {
     expect(screen.getByText(/cambiado en vivo \(cargado con 256k\)/)).toBeTruthy()
   })
 })
+
+describe("modo pool del fork mks (captura del 2026-11-11)", () => {
+  it("no habla de slots: pool compartido y máximo a la vez", async () => {
+    const { ModelLiveCard } = await import("@/components/dashboard/ModelLiveCard")
+    const model = {
+      modelId: "llamacpp_mks/gemma4:12b",
+      displayName: "Gemma 4 12B",
+      backendType: "llamacpp_mks",
+      status: "loaded",
+      loadPolicy: "on_demand",
+      currentGpu: [1],
+      vramUsedMb: 11980,
+      vramEstimateMb: 16280,
+      ramUsedMb: 0,
+      capabilities: {},
+    } as unknown as ModelState
+    render(
+      <ModelLiveCard
+        model={model}
+        act={{
+          inFlight: 4,
+          oldestSeconds: 78,
+          slots: 4,
+          admission: { slots: 4, queuedRequests: 0, slotSaturated: true, computeSaturated: false, admissionLimit: 4, kvCapacityTokens: 262144, kvReservedTokens: 113000, kvFreeTokens: 149144 },
+          requests: [req({ stage: "generating", outputTokens: 4000, maxOutputTokens: 16384, firstTokenAfterMs: null, elapsedMs: 78_000 })],
+        }}
+        ctx={{
+          mode: "pool", scaleMaxTokens: 262144, activeMaxTokens: 262144, activePresetKey: null, activeGpus: [1],
+          singleGpuMaxTokens: 262144, tiers: [{ presetKey: null, gpus: [1], maxTokens: 262144, slots: 4 }],
+          reservedTokens: 113000, segments: [], usagePct: null, source: "estimate",
+        }}
+        gpus={[gpu(1, 24576)]}
+        nowMs={Date.now()}
+        stuckThreshold={300}
+        onUnload={() => undefined}
+        canCancel={() => false}
+      />,
+    )
+    expect(screen.getByText(/pool 256k compartido · máx\. 4 a la vez/)).toBeTruthy()
+    expect(screen.getByText("máx. 4 a la vez")).toBeTruthy()
+    expect(screen.queryByText("slots llenos")).toBeNull()
+    expect(screen.getByText(/Pool compartido/)).toBeTruthy()
+    // Generando sin instante de primer token: la barra de generación no queda vacía.
+    const bar = document.querySelector('[data-stage="generating"] .relative.mt-1') as HTMLElement
+    const widths = Array.from(bar.querySelectorAll("span")).map((el) => (el as HTMLElement).style.width)
+    expect(widths.some((w) => w && w !== "0%" && parseFloat(w) > 50)).toBe(true)
+  })
+})

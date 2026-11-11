@@ -139,6 +139,9 @@ export function ContextBar({
       <p className="text-[10.5px] text-muted-foreground">
         {ctx.mode === "pool" && (
           <>
+            <span title="Cada tramo es lo que reserva una petición (su prompt + su max_tokens), no un slot fijo: el pool es compartido">
+              Pool compartido ·{" "}
+            </span>
             Reservado {fmtTokens(ctx.reservedTokens ?? reserved)}
             {anyUsed ? ` · usado ${fmtTokens(used)}` : ""} de {fmtContext(active)} cargados
           </>

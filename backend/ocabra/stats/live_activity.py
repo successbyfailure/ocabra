@@ -267,8 +267,19 @@ async def attach_estimates(
         if physical:
             expected_ms = physical
         detail["expectedDurationMs"] = expected_ms
-        if expected_ms is None or detail["stage"] == "queued":
+        if detail["stage"] == "queued":
             detail["estimatedRemainingMs"] = None
+            continue
+        if expected_ms is None:
+            # Sin estimación general puede haber ritmos en vivo de la propia
+            # petición: con ellos sí hay restante.
+            running_ms = detail["elapsedMs"] - (detail.get("admittedAfterMs") or 0)
+            live_left = _live_remaining_ms(detail, (rates or {}).get(detail.get("rateKey") or ""))
+            if live_left is not None and live_left != _UNKNOWN:
+                detail["estimatedRemainingMs"] = live_left
+                detail["expectedDurationMs"] = running_ms + live_left
+            else:
+                detail["estimatedRemainingMs"] = None
             continue
         # Lo esperado cuenta desde la admision, no desde la llegada.
         running_ms = detail["elapsedMs"] - (detail.get("admittedAfterMs") or 0)
@@ -377,6 +388,17 @@ def _live_remaining_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> 
     typical = (rates or {}).get("output")
     asked = detail.get("maxOutputTokens")
     expected_out = min(asked, typical) if asked and typical else (asked or typical)
+    out_so_far = detail.get("outputTokens") or 0
+    detail["remainingIsUpperBound"] = False
+    if expected_out and out_so_far >= expected_out:
+        # Ya va por encima de la salida típica del modelo: el único límite
+        # conocido es su tope. Restante "como mucho" hasta él; sin tope, no
+        # se sabe. Antes daba 0 con la petición a medias (9k de 16,4k tokens).
+        if asked and asked > out_so_far:
+            expected_out = asked
+            detail["remainingIsUpperBound"] = True
+        else:
+            expected_out = None
     hist_gen = (rates or {}).get("generation")
     stage = detail.get("stage")
     if (
@@ -965,11 +987,18 @@ def apply_slot_progress(
                 track["d0"] = float(decoded)
             detail["outputTokens"] = decoded
             elapsed = now - track["t_first"]
-            detail["generationTokensPerSecond"] = (
-                round((decoded - track["d0"]) / elapsed, 1)
-                if elapsed >= 1
-                else detail.get("generationTokensPerSecond")
-            )
+            rate = round((decoded - track["d0"]) / elapsed, 1) if elapsed >= 1 else None
+            detail["generationTokensPerSecond"] = rate or detail.get("generationTokensPerSecond")
+            # Instante del primer token: /slots no lo da. Si la primera vez que
+            # la vemos ya llevaba tokens, se retrocede al ritmo medido (sin
+            # ritmo aún, el momento en que se vio). Sin esto la barra de la
+            # petición salía vacía: no sabía dónde empezaba la generación.
+            first_token = track["t_first"]
+            if rate and track["d0"] > 0:
+                first_token = track["t_first"] - track["d0"] / rate
+            started = detail.get("startedAt") or now
+            admitted_ms = detail.get("admittedAfterMs") or 0
+            detail["firstTokenAfterMs"] = max(admitted_ms, int((first_token - started) * 1000))
         elif processed > 0 or cached > 0:
             detail["stage"] = "prefill"
             elapsed = now - track["t0"]

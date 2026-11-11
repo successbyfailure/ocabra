@@ -269,6 +269,7 @@ export function ModelLiveCard({
   // la lista de GPUs (p. ej. en tests o antes de que llegue).
   const storeGpus = useGpuStore((s) => s.gpus)
   const presetKey = ctx?.activePresetKey ?? act?.runtimePreset
+  const pool = ctx?.mode === "pool"
 
   let idleLeft: number | null = null
   if (idleTimeoutSeconds && model.loadPolicy === "on_demand" && model.status === "loaded" && inFlight === 0 && model.lastRequestAt) {
@@ -306,12 +307,28 @@ export function ModelLiveCard({
               </Chip>
             )}
             {model.ramUsedMb > 0 && <span>{model.ramUsedMb.toLocaleString()} MB RAM</span>}
-            {slots != null && (
-              <Chip title={presetKey ? `Preset de runtime activo: ${presetKey}` : "Slots concurrentes y contexto cargado"}>
-                {slots} slot{slots === 1 ? "" : "s"} · {fmtContext(configuredCtx)} ctx
-                {presetKey ? ` · ${presetKey}` : ""}
-              </Chip>
-            )}
+            {slots != null &&
+              (pool ? (
+                // Fork mks con KV unificada: no hay parcelas por slot. El
+                // contexto es un pool que cada petición reserva según lo que
+                // pide (prompt + max_tokens); el número es cuántas pueden ir a
+                // la vez (secuencias físicas).
+                <Chip
+                  title={
+                    `Pool de contexto compartido de ${fmtContext(configuredCtx)}: cada petición reserva su prompt + max_tokens. ` +
+                    `Hasta ${slots} peticiones a la vez.` +
+                    (presetKey ? ` Preset activo: ${presetKey}.` : "")
+                  }
+                >
+                  pool {fmtContext(configuredCtx)} compartido · máx. {slots} a la vez
+                  {presetKey ? ` · ${presetKey}` : ""}
+                </Chip>
+              ) : (
+                <Chip title={presetKey ? `Preset de runtime activo: ${presetKey}` : "Slots concurrentes y contexto por slot"}>
+                  {slots} slot{slots === 1 ? "" : "s"} · {fmtContext(configuredCtx)} ctx
+                  {presetKey ? ` · ${presetKey}` : ""}
+                </Chip>
+              ))}
             {whisperWorkers != null && (
               <Chip title="num_workers de CTranslate2">
                 {whisperWorkers} worker{whisperWorkers === 1 ? "" : "s"}
@@ -326,7 +343,11 @@ export function ModelLiveCard({
                     : "Todos los slots ocupados: las siguientes peticiones esperarán en cola"
                 }
               >
-                {adm?.computeSaturated && !adm?.slotSaturated ? "límite de cómputo" : "slots llenos"}
+                {adm?.computeSaturated && !adm?.slotSaturated
+                  ? "límite de cómputo"
+                  : pool
+                    ? `máx. ${adm?.slots ?? slots} a la vez`
+                    : "slots llenos"}
               </Chip>
             )}
             {idleLeft != null && (
@@ -369,7 +390,13 @@ export function ModelLiveCard({
           <Total
             label="En curso"
             value={slots != null ? `${running}/${slots}` : running}
-            title={slots != null ? `${running} admitidas de ${slots} slots` : "Backend sin pool de slots gestionado"}
+            title={
+              slots != null
+                ? pool
+                  ? `${running} de un máximo de ${slots} peticiones a la vez`
+                  : `${running} admitidas de ${slots} slots`
+                : "Backend sin pool de slots gestionado"
+            }
           />
           <Total label="En cola" value={queued} />
           <Total label="Prefill" value={fmtTps(act?.prefillTokensPerSecondTotal)} title="Suma de las peticiones en prefill, medida en su propia fase" />

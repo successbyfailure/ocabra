@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.67.6 — 2026-11-11
+
+### Arreglos
+
+- **`/ocabra/models/activity` da el primer token y un restante útil en las
+  peticiones a llama.cpp sin streaming.** `firstTokenAfterMs` llegaba a
+  `null`, porque `/slots` no lo da; ahora se reconstruye con el ritmo
+  medido. Además, el tiempo restante daba 0 cuando la petición ya había
+  superado la salida típica del modelo. Ahora se calcula hasta su
+  `max_tokens`, y el campo nuevo `remainingIsUpperBound` indica que es un
+  máximo.
+
+---
+
 ## 0.67.4 — 2026-11-10
 
 ### Arreglos

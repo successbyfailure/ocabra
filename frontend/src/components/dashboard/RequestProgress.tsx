@@ -49,7 +49,9 @@ export function RequestProgress({
   // En cola o esperando dentro del backend, todo lo transcurrido es espera.
   const queueEnd = stage === "queued" || stage === "backend_wait" ? elapsed : admitted ?? 0
   const prefillEnd = firstToken ?? (stage === "prefill" || stage === "processing" ? elapsed : queueEnd)
-  const genEnd = firstToken != null ? elapsed : prefillEnd
+  // Generando sin instante de primer token (backend antiguo o sin dato): la
+  // generación ocupa igualmente hasta ahora, en vez de dejar la barra vacía.
+  const genEnd = firstToken != null || stage === "generating" ? elapsed : prefillEnd
 
   // El backend sabe si hay una señal de vida que vigilar (tokens o progreso
   // real de prefill); sin ella nunca marca "parada". Con versiones antiguas
@@ -150,9 +152,14 @@ export function RequestProgress({
               ✎ {fmtTps(req.generationTokensPerSecond)}
             </span>
           )}
-          <span className={stuck ? "font-medium text-red-400" : "text-muted-foreground"} title="Transcurrido · restante estimado">
+          <span
+            className={stuck ? "font-medium text-red-400" : "text-muted-foreground"}
+            title={req.remainingIsUpperBound ? "Transcurrido · restante como mucho (hasta su max_tokens)" : "Transcurrido · restante estimado"}
+          >
             {fmtDuration(elapsed)}
-            {stage !== "queued" && remaining != null && remaining > 0 ? ` · ~${fmtDuration(remaining)}` : ""}
+            {stage !== "queued" && remaining != null && remaining > 0
+              ? ` · ${req.remainingIsUpperBound ? "≤" : "~"}${fmtDuration(remaining)}`
+              : ""}
             {stage !== "queued" && overrun > 0 ? (
               <span className="text-amber-300"> · +{fmtDuration(overrun)} sobre lo estimado</span>
             ) : null}

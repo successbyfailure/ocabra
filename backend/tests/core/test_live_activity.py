@@ -932,3 +932,59 @@ async def test_live_context_in_slot_mode_uses_the_per_slot_size():
     )
     assert ctx["mode"] == "slots"
     assert ctx["activeMaxTokens"] == 32768
+
+
+# ── 2026-11-11: captura del usuario, gemma4:12b con 4 peticiones sin streaming ──
+
+
+def test_slot_generating_request_gets_a_first_token_time():
+    """/slots no da el primer token. Sin él la barra de la petición salía
+    vacía. Si la primera vez que se ve ya llevaba tokens, se retrocede al
+    ritmo medido."""
+    la._slot_track.clear()
+
+    def detail():
+        d = _untracked("g", 1000.0)
+        d["admittedAfterMs"] = 39
+        return d
+
+    first = detail()
+    la.apply_slot_progress([first], [_slot(1, 11_000, 11_000, decoded=4000)], now=1078.0)
+    assert first["stage"] == "generating"
+    # Sin ritmo aún: el momento en que se vio (78 s tras la llegada).
+    assert first["firstTokenAfterMs"] == 78_000
+    second = detail()
+    la.apply_slot_progress([second], [_slot(1, 11_000, 11_000, decoded=4600)], now=1088.0)
+    # 600 tokens en 10 s = 60 t/s → los 4000 primeros empezaron 66,7 s antes.
+    assert second["generationTokensPerSecond"] == 60.0
+    assert second["firstTokenAfterMs"] == pytest.approx(11_333, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_remaining_is_an_upper_bound_once_past_the_typical_output():
+    """9k de 16,4k tokens generados, salida típica del modelo de 128: antes el
+    restante daba 0 con la petición a medias."""
+    la._estimate_cache.clear()
+    rates = {"gemma4:12b": {"generation": 70.0, "output": 128}}
+    d = {
+        "requestId": "r",
+        "rateKey": "gemma4:12b",
+        "stage": "generating",
+        "elapsedMs": 143_854,
+        "admittedAfterMs": 39,
+        "maxOutputTokens": 16_384,
+        "outputTokens": 9014,
+        "generationTokensPerSecond": 71.8,
+        "prompt": {"totalTokens": 11_000, "source": "live"},
+    }
+    await la.attach_estimates(
+        [d], estimator=None, model_id="m", backend_type="x", slots=4, rates=rates
+    )
+    assert d["estimatedRemainingMs"] == int((16_384 - 9014) / 71.8 * 1000)
+    assert d["remainingIsUpperBound"] is True
+    # Sin max_tokens y ya por encima de lo típico: no se sabe.
+    no_cap = {**d, "requestId": "s", "maxOutputTokens": None}
+    await la.attach_estimates(
+        [no_cap], estimator=None, model_id="m", backend_type="x", slots=4, rates=rates
+    )
+    assert no_cap["estimatedRemainingMs"] is None
