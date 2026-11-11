@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.68.4 — 2026-11-11
+
+### Arreglos
+
+- **Un router (`recomendado-*`) devolvía `409` mientras había una sesión de
+  voz (`/v1/realtime`) abierta con su modelo.** El router aparta a propósito
+  el modelo que está usando una sesión de voz, para que la voz no se frene, y
+  probaba a cargar otro; si el otro no cabía en la GPU, la petición fallaba con
+  `409 Need … MB VRAM`. Ahora, si no hay ningún otro modelo que se pueda
+  servir, la petición comparte el modelo de la sesión de voz: tarda algo más,
+  pero responde.
+
+---
+
 ## 0.68.3 — 2026-11-11
 
 ### Arreglos

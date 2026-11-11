@@ -96,7 +96,9 @@ class _FakeModelManager:
         return any(m not in excluded for m in self.busy)
 
 
-def _make_resolver(*profiles, **kwargs) -> tuple[RouterResolver, _FakeProfileRegistry, _FakeModelManager]:
+def _make_resolver(
+    *profiles, **kwargs
+) -> tuple[RouterResolver, _FakeProfileRegistry, _FakeModelManager]:
     registry = _FakeProfileRegistry(profiles={p.profile_id: p for p in profiles})
     mm = _FakeModelManager(states=kwargs.get("states", {}))
     if "busy" in kwargs:
@@ -119,7 +121,9 @@ class TestBasicResolution:
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={"vllm/a": _FakeState(_Status.LOADED)},
         )
         result = await resolver.pick(router)
@@ -135,7 +139,9 @@ class TestBasicResolution:
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={"vllm/a": _FakeState(_Status.UNLOADED)},
         )
         result = await resolver.pick(router)
@@ -158,7 +164,9 @@ class TestBasicResolution:
         t1 = _FakeProfile("t1", "llama_cpp/gemma4-26b")
         t2 = _FakeProfile("t2", "llama_cpp/qwen3.8-27b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={
                 "llama_cpp/gemma4-26b": _FakeState(_Status.UNLOADED),
                 "llama_cpp/qwen3.8-27b": _FakeState(_Status.LOADED),
@@ -188,11 +196,13 @@ class TestSessionVeto:
         # has_active_session_holding recibe exclude_session_id como keyword-only
         # desde el arreglo del auto-veto (2026-10-30); el doble tiene que
         # aceptarlo o la llamada real revienta con TypeError.
-        registry_mock.has_active_session_holding = (
-            lambda k, *, exclude_session_id=None: k == "vllm/a"
+        registry_mock.has_active_session_holding = lambda k, *, exclude_session_id=None: (
+            k == "vllm/a"
         )
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={
                 "vllm/a": _FakeState(_Status.LOADED),
                 "vllm/b": _FakeState(_Status.LOADED),
@@ -203,6 +213,60 @@ class TestSessionVeto:
         # vllm/a is loaded but reserved — must go to vllm/b instead.
         assert result.target_profile_id == "t2"
         assert result.reason == "primary_loaded"
+
+    @pytest.mark.asyncio
+    async def test_session_held_target_beats_a_cold_load_that_would_disrupt(self):
+        """2026-11-11: during a voice session on qwen3.8:27b, openclaw's agent
+        asked the same router; the router vetoed the loaded qwen3.8, forced a
+        cold load of gemma4:26b that had nowhere to fit, and every request got
+        409. Sharing the session's worker is slower but answers."""
+        router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "vllm/qwen")
+        t2 = _FakeProfile("t2", "vllm/gemma")
+        registry_mock = MagicMock()
+        registry_mock.has_active_session_holding = lambda k, *, exclude_session_id=None: (
+            k == "vllm/qwen"
+        )
+        resolver, _, _ = _make_resolver(
+            router,
+            t1,
+            t2,
+            states={
+                "vllm/qwen": _FakeState(_Status.LOADED),
+                "vllm/gemma": _FakeState(_Status.UNLOADED),
+            },
+            busy={"vllm/qwen"},  # the voice session is talking
+            session_registry=registry_mock,
+        )
+        result = await resolver.pick(router)
+
+        assert result.target_profile_id == "t1"
+        assert result.reason == "shared_with_session"
+
+    @pytest.mark.asyncio
+    async def test_a_cold_target_that_loads_without_disruption_still_beats_sharing(self):
+        router = _FakeProfile("g", "vllm/base", routing_targets=["t1", "t2"])
+        t1 = _FakeProfile("t1", "vllm/qwen")
+        t2 = _FakeProfile("t2", "vllm/gemma")
+        registry_mock = MagicMock()
+        registry_mock.has_active_session_holding = lambda k, *, exclude_session_id=None: (
+            k == "vllm/qwen"
+        )
+        resolver, _, _ = _make_resolver(
+            router,
+            t1,
+            t2,
+            states={
+                "vllm/qwen": _FakeState(_Status.LOADED),
+                "vllm/gemma": _FakeState(_Status.UNLOADED),
+            },
+            busy=set(),
+            session_registry=registry_mock,
+        )
+        result = await resolver.pick(router)
+
+        assert result.target_profile_id == "t2"
+        assert result.reason == "loadable_no_disruption"
 
     @pytest.mark.asyncio
     async def test_session_does_not_veto_the_target_it_already_holds(self):
@@ -225,7 +289,9 @@ class TestSessionVeto:
 
         registry_mock.has_active_session_holding = _tiene_sesion
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={
                 "vllm/a": _FakeState(_Status.LOADED),
                 "vllm/b": _FakeState(_Status.LOADED),
@@ -253,7 +319,9 @@ class TestBusyHandling:
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={
                 "vllm/a": _FakeState(_Status.LOADED),
                 "vllm/b": _FakeState(_Status.LOADED),
@@ -273,7 +341,9 @@ class TestBusyHandling:
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={
                 "vllm/a": _FakeState(_Status.UNLOADED),
                 "vllm/b": _FakeState(_Status.UNLOADED),
@@ -294,7 +364,9 @@ class TestBusyHandling:
         t1 = _FakeProfile("t1", "vllm/a")
         t2 = _FakeProfile("t2", "vllm/b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={"vllm/a": _FakeState(_Status.UNLOADED)},
             busy=set(),
         )
@@ -315,7 +387,9 @@ class TestBusyHandling:
         t1 = _FakeProfile("t1", "ollama/gemma4:26b-ctx160k")
         t2 = _FakeProfile("t2", "ollama/gemma4:26b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={
                 "ollama/gemma4:26b-ctx160k": _FakeState(_Status.UNLOADED),
                 "ollama/gemma4:26b": _FakeState(_Status.UNLOADED),
@@ -334,7 +408,8 @@ class TestLoopAndMissing:
         router = _FakeProfile("g", "vllm/base", routing_targets=["missing", "t1"])
         t1 = _FakeProfile("t1", "vllm/a")
         resolver, _, _ = _make_resolver(
-            router, t1,
+            router,
+            t1,
             states={"vllm/a": _FakeState(_Status.LOADED)},
         )
         result = await resolver.pick(router)
@@ -346,7 +421,9 @@ class TestLoopAndMissing:
         t1 = _FakeProfile("t1", "vllm/a", enabled=False)
         t2 = _FakeProfile("t2", "vllm/b")
         resolver, _, _ = _make_resolver(
-            router, t1, t2,
+            router,
+            t1,
+            t2,
             states={"vllm/b": _FakeState(_Status.LOADED)},
         )
         result = await resolver.pick(router)
@@ -359,7 +436,8 @@ class TestLoopAndMissing:
         router = _FakeProfile("g", "vllm/base", routing_targets=["g", "t1"])
         t1 = _FakeProfile("t1", "vllm/a")
         resolver, _, _ = _make_resolver(
-            router, t1,
+            router,
+            t1,
             states={"vllm/a": _FakeState(_Status.LOADED)},
         )
         result = await resolver.pick(router)

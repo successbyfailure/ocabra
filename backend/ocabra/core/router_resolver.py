@@ -59,8 +59,8 @@ class CandidateAudit:
     """One step of the resolution walk — for the audit trail."""
 
     target_profile_id: str
-    outcome: str    # "loaded" | "loadable" | "session_veto" | "estimator_slow" |
-                    # "load_would_disrupt" | "not_found" | "disabled" | "loop"
+    outcome: str  # "loaded" | "loadable" | "session_veto" | "estimator_slow" |
+    # "load_would_disrupt" | "not_found" | "disabled" | "loop"
 
 
 @dataclass
@@ -172,6 +172,8 @@ class RouterResolver:
         # state once — ``resolved`` carries that over to pass 2 so neither
         # is computed twice regardless of which pass ends up picking it.
         resolved: list[tuple[ModelProfile, object, object]] = []  # (target, runtime_plan, state)
+        # First loaded target skipped only because a realtime session holds it.
+        vetoed_loaded: ResolvedTarget | None = None
 
         for target_id in target_ids:
             if target_id in visited:
@@ -238,10 +240,21 @@ class RouterResolver:
             # request to its queue is strictly cheaper than paying a cold
             # start elsewhere + potentially evicting a neighbour to make room.
             if state is not None and state.status == ModelStatus.LOADED:
-                if self._session_registry is not None and self._session_registry.has_active_session_holding(
-                    worker_key, exclude_session_id=exclude_session_id
+                if (
+                    self._session_registry is not None
+                    and self._session_registry.has_active_session_holding(
+                        worker_key, exclude_session_id=exclude_session_id
+                    )
                 ):
                     audit.append(CandidateAudit(target_id, "session_veto"))
+                    if vetoed_loaded is None:
+                        vetoed_loaded = ResolvedTarget(
+                            target_profile_id=target.profile_id,
+                            base_model_id=target.base_model_id,
+                            load_overrides=target.load_overrides,
+                            reason="shared_with_session",
+                            considered=audit,
+                        )
                     continue
                 audit.append(CandidateAudit(target_id, "loaded"))
                 logger.info(
@@ -281,8 +294,11 @@ class RouterResolver:
             # 2) Reserved by session even though unloaded — shouldn't happen
             # in practice (unload releases the registry entry) but guard
             # anyway so we don't accidentally hit a stale hold.
-            if self._session_registry is not None and self._session_registry.has_active_session_holding(
-                worker_key, exclude_session_id=exclude_session_id
+            if (
+                self._session_registry is not None
+                and self._session_registry.has_active_session_holding(
+                    worker_key, exclude_session_id=exclude_session_id
+                )
             ):
                 audit.append(CandidateAudit(target.profile_id, "session_veto"))
                 continue
@@ -313,8 +329,12 @@ class RouterResolver:
             # base id (before we knew which target would serve). Without the
             # mask the router always thinks a neighbour is busy and skips
             # its first target — reproduced in production 2026-09-15.
-            router_self_mask: tuple[str, ...] = (router.base_model_id,) if router.base_model_id else ()
-            if self._model_manager.any_busy_worker_except(worker_key, also_exclude=router_self_mask):
+            router_self_mask: tuple[str, ...] = (
+                (router.base_model_id,) if router.base_model_id else ()
+            )
+            if self._model_manager.any_busy_worker_except(
+                worker_key, also_exclude=router_self_mask
+            ):
                 audit.append(CandidateAudit(target.profile_id, "load_would_disrupt_busy"))
                 continue
 
@@ -342,6 +362,23 @@ class RouterResolver:
             router=router.profile_id,
             considered=[(a.target_profile_id, a.outcome) for a in audit],
         )
+        # A loaded target held by a realtime session beats a forced cold
+        # start: the veto exists to keep the voice session fast, but forcing
+        # a load that has nowhere to go turned every request into a 409
+        # (2026-11-11: openclaw's agent asked recomendado-sota during a voice
+        # session on qwen3.8:27b; the router skipped it and forced
+        # gemma4:26b, which needed 23.6 GB with 923 MB free). Sharing the
+        # session's worker makes both slower; a 409 makes the request fail.
+        if vetoed_loaded is not None:
+            vetoed_loaded.considered = audit
+            logger.info(
+                "router_resolver_picked",
+                router=router.profile_id,
+                target=vetoed_loaded.target_profile_id,
+                reason="shared_with_session",
+                considered=[(a.target_profile_id, a.outcome) for a in audit],
+            )
+            return vetoed_loaded
         if last_resort is not None:
             last_resort.reason = "forced_fallback"
             last_resort.considered = audit
