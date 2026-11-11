@@ -112,7 +112,11 @@ def test_registered_in_the_worker_pool() -> None:
     """A backend_type nobody registered resolves to nothing at load time."""
     main_py = Path(__file__).resolve().parents[2] / "ocabra" / "main.py"
     source = main_py.read_text(encoding="utf-8")
-    assert 'register_backend("llamacpp_mks", LlamaCppMksBackend())' in source
+    # With the GPU manager: without it the projector card and "evenly" splits
+    # silently did nothing (to 0.70.6).
+    assert (
+        'register_backend("llamacpp_mks", LlamaCppMksBackend(gpu_manager=gpu_manager))' in source
+    )
 
 
 # ── El error de activacion de vision dice la causa real ───────
