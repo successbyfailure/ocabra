@@ -298,6 +298,15 @@ class Settings(BaseSettings):
     llama_cpp_shrink_min_context: int = 32768
     # Grow shrunk workers back once they are idle and their GPUs have room.
     llama_cpp_regrow_when_idle: bool = True
+    # Two-GPU presets with a context probe start at the context that leaves this
+    # many MB free on each listed GPU (whisper on the 3060: 2 concurrent
+    # transcriptions without diarization peaked at 2,682 MiB, 2026-11-11), and
+    # grow to the probed maximum only when a request needs it. Per preset:
+    # runtime_policy.reserve_mb_by_preset.
+    llama_cpp_multi_gpu_reserve_mb: dict[str, int] = {"0": 2700}
+    # After growing above that starting context, go back to it once the worker
+    # has been idle this long, so the reserve is free again.
+    llama_cpp_return_to_initial_seconds: int = 120
     llama_cpp_cont_batching: bool = True
     llama_cpp_adaptive_admission_enabled: bool = Field(
         default=True,

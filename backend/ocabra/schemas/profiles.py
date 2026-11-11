@@ -37,6 +37,9 @@ class RuntimePolicy(BaseModel):
     # was measured. Informative, and the input to sizing a reserve (whisper)
     # without measuring again.
     context_probe: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # MB to leave free per GPU on a two-GPU preset, by preset; overrides the
+    # global ``llama_cpp_multi_gpu_reserve_mb``. ``{}`` for a preset = no reserve.
+    reserve_mb_by_preset: dict[str, dict[str, int]] = Field(default_factory=dict)
     # Overrides settings.runtime_preset_default_output_reservation_tokens for
     # this profile only — see estimate_request_token_budget() /
     # plan_profile_runtime(). Reasoning-heavy profiles (gemma4, qwen3.8) need

@@ -228,6 +228,17 @@ class LlamaCppBackend(BackendInterface):
         model_file = self._resolve_model_file(model_id, extra_config)
         options = self._build_options(extra_config)
         options["model_file"] = str(model_file)
+        # A two-GPU preset that keeps a reserve free starts below its maximum
+        # (runtime_coordinator._apply_multi_gpu_reserve) and grows in place.
+        section = extra_config.get("llama_cpp") if isinstance(extra_config, dict) else None
+        launch = (
+            self._to_int_or_none(section.get("launch_ctx_size"))
+            if isinstance(section, dict)
+            else None
+        )
+        if launch and options.get("ctx_size") and launch < int(options["ctx_size"]):
+            options["nominal_ctx_size"] = int(options["ctx_size"])
+            options["ctx_size"] = launch
 
         visible_gpus = _compose_visible_devices(
             gpu_indices,
@@ -608,6 +619,15 @@ class LlamaCppBackend(BackendInterface):
             response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
             response.raise_for_status()
             return response.json()
+
+    def nominal_context_options(self, model_id: str) -> dict[str, int | None] | None:
+        """The sizes a worker that started below its maximum may grow back to,
+        or None when it runs the size it was configured with."""
+        options = self._model_configs.get(model_id) or {}
+        nominal = options.get("nominal_ctx_size")
+        if not nominal:
+            return None
+        return {**self.context_options(model_id), "n_ctx": int(nominal)}
 
     def context_options(self, model_id: str) -> dict[str, int | None]:
         """The context sizes a loaded worker runs, as llama-server names them."""

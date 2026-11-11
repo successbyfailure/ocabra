@@ -2303,7 +2303,7 @@ class ModelManager:
                             )
                             state.capabilities = capabilities
                             state.status = ModelStatus.LOADED
-                            state.live_context = None
+                            state.live_context = self._initial_live_context(state, backend)
                             self._live_context_unsupported.discard(state.model_id)
                             state.loaded_at = datetime.now(UTC)
                             state.error_message = None
@@ -3663,6 +3663,33 @@ class ModelManager:
             for candidate in self._states.values()
         )
 
+    def _initial_live_context(self, state: ModelState, backend) -> dict | None:
+        """``live_context`` for a worker that started below its maximum.
+
+        A probed two-GPU preset keeps a reserve free (whisper on the 3060) by
+        starting at a smaller context; it grows to the maximum only when a
+        request needs it, and returns to this starting size after
+        ``llama_cpp_return_to_initial_seconds`` idle.
+        """
+        nominal_of = getattr(backend, "nominal_context_options", None)
+        nominal = nominal_of(state.backend_model_id) if callable(nominal_of) else None
+        if not nominal:
+            return None
+        current = backend.context_options(state.backend_model_id)
+        runtime = state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else {}
+        runtime = runtime if isinstance(runtime, dict) else {}
+        at_max = runtime.get("context_probe_used_mb") or {}
+        return {
+            "n_ctx": current.get("n_ctx"),
+            "n_ctx_slot": current.get("n_ctx"),
+            "n_parallel": current.get("n_parallel"),
+            "n_ubatch": current.get("n_ubatch"),
+            "n_batch": current.get("n_batch"),
+            "nominal": nominal,
+            "nominal_vram_mb": {int(g): int(mb) for g, mb in at_max.items()} or None,
+            "initial_ctx": current.get("n_ctx"),
+        }
+
     def _worker_vram_by_gpu(self, state: ModelState) -> dict[int, int]:
         """VRAM the worker process holds on each of its GPUs, read from NVML now."""
         if self._gpu_manager is None or state.worker_info is None or not state.worker_info.pid:
@@ -4081,6 +4108,41 @@ class ModelManager:
                 missing[gpu_idx] = needed - free
         return missing
 
+    async def _room_to_grow_to(self, state: ModelState, target: int) -> bool:
+        """Whether every GPU has the room to grow ``state`` to ``target`` tokens,
+        prorating what the full nominal context would need."""
+        live = state.live_context or {}
+        nominal_ctx = int((live.get("nominal") or {}).get("n_ctx") or 0)
+        current = int(live.get("n_ctx") or 0)
+        if nominal_ctx <= current or target <= current:
+            return target <= current
+        share = (target - current) / (nominal_ctx - current)
+        current_mb = self._worker_vram_by_gpu(state)
+        for gpu_key, nominal_mb in (live.get("nominal_vram_mb") or {}).items():
+            gpu = int(gpu_key)
+            needed = max(0, int(nominal_mb) - int(current_mb.get(gpu, 0))) * share
+            free = int(await self._gpu_manager.get_physical_free_vram(gpu))
+            if needed > free:
+                return False
+        return True
+
+    async def _return_to_initial(self, model_id: str) -> None:
+        """Back to the starting context after a request took the worker higher,
+        so the reserve it keeps (whisper's room) is free again."""
+        try:
+            state = self._states.get(model_id)
+            if state is None or state.live_context is None or self.is_busy(model_id):
+                return
+            initial = state.live_context.get("initial_ctx")
+            if not initial or int(state.live_context.get("n_ctx") or 0) <= int(initial):
+                return
+            logger.info("live_context_return_to_initial", model_id=model_id, context=initial)
+            await self.resize_context(model_id, context=int(initial))
+        except Exception as exc:  # noqa: BLE001 - retried on the next idle tick
+            logger.info("live_context_return_to_initial_failed", model_id=model_id, error=str(exc))
+        finally:
+            self._regrow_pending.discard(model_id)
+
     async def _regrow_if_room(self, model_id: str) -> None:
         """Idle check: grow a shrunk worker back when its GPUs have room again,
         without evicting anything for it."""
@@ -4090,6 +4152,19 @@ class ModelManager:
                 return
             async with self._acquire_load_gate():
                 if state.live_context is None or self.is_busy(model_id):
+                    return
+                live = state.live_context
+                initial = live.get("initial_ctx")
+                current = int(live.get("n_ctx") or 0)
+                if initial:
+                    # A worker that keeps a reserve free never grows past its
+                    # starting context on its own; only requests take it higher.
+                    if current >= int(initial):
+                        return
+                    if not await self._room_to_grow_to(state, int(initial)):
+                        return
+                    logger.info("live_context_regrow_idle", model_id=model_id, context=initial)
+                    await self.resize_context(model_id, context=int(initial))
                     return
                 missing = await self._missing_vram_to_grow(state)
                 if missing:
@@ -4217,14 +4292,16 @@ class ModelManager:
                 live.get(key) == nominal.get(key) for key in ("n_ctx", "n_parallel", "n_ubatch")
             )
             vision_mb = (state.live_context or {}).get("vision_mb")
+            initial_ctx = (state.live_context or {}).get("initial_ctx")
             state.live_context = (
                 None
-                if back_to_nominal
+                if back_to_nominal and not initial_ctx
                 else {
                     **live,
                     "nominal": nominal,
                     "nominal_vram_mb": nominal_vram,
                     **({"vision_mb": vision_mb} if vision_mb else {}),
+                    **({"initial_ctx": initial_ctx} if initial_ctx else {}),
                 }
             )
             state.capabilities = self._apply_capability_fallbacks(
@@ -4716,11 +4793,34 @@ class ModelManager:
         for model_id, state in list(self._states.items()):
             if state.status != ModelStatus.LOADED:
                 continue
+            live = state.live_context
             if (
-                state.live_context is not None
+                live is not None
+                and live.get("initial_ctx")
+                and int(live.get("n_ctx") or 0) > int(live["initial_ctx"])
+                and model_id not in self._regrow_pending
+                and not self.is_busy(model_id)
+            ):
+                # Grew above its starting context for a large request: once idle
+                # long enough, give the reserve back.
+                anchor = state.last_request_at or state.loaded_at or now
+                idle_s = (now - anchor).total_seconds()
+                if idle_s >= int(settings.llama_cpp_return_to_initial_seconds):
+                    self._regrow_pending.add(model_id)
+                    self._create_background_task(
+                        self._return_to_initial(model_id),
+                        task_name=f"live-context-return:{model_id}",
+                        model_id=model_id,
+                    )
+            elif (
+                live is not None
                 and settings.llama_cpp_regrow_when_idle
                 and model_id not in self._regrow_pending
                 and not self.is_busy(model_id)
+                and not (
+                    live.get("initial_ctx")
+                    and int(live.get("n_ctx") or 0) >= int(live["initial_ctx"])
+                )
             ):
                 self._regrow_pending.add(model_id)
                 self._create_background_task(

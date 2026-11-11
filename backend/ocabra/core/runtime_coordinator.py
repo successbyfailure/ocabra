@@ -521,6 +521,86 @@ def _probe_vision_mb(policy: dict, preset_key: str) -> dict[str, int] | None:
         return None
 
 
+def multi_gpu_launch_context(
+    max_context: int,
+    probe: dict,
+    reserve_mb: dict,
+) -> tuple[int, dict[str, int]] | None:
+    """Starting context of a probed two-GPU preset that keeps ``reserve_mb`` free.
+
+    ``probe`` is ``runtime_policy.context_probe[preset]``: ``used_mb`` and
+    ``limit_mb`` per GPU at the probed maximum and ``kv_mb_per_1k`` per GPU.
+    Returns ``(context, used_mb_at_that_context)`` or ``None`` when the
+    maximum already leaves the reserve free (or there is nothing to go on).
+    """
+    used = probe.get("used_mb") or {}
+    limit = probe.get("limit_mb") or {}
+    kv = probe.get("kv_mb_per_1k") or {}
+    cut = 0.0
+    for gpu, reserve in (reserve_mb or {}).items():
+        gpu = str(gpu)
+        slope = float(kv.get(gpu) or 0)
+        if gpu not in used or gpu not in limit or slope <= 0:
+            continue
+        short = int(reserve) - (int(limit[gpu]) - int(used[gpu]))
+        if short > 0:
+            cut = max(cut, short / slope * 1024)
+    if cut <= 0:
+        return None
+    granularity = 4096
+    launch = int(max_context - cut) // granularity * granularity
+    if launch < 32768 or launch >= max_context:
+        return None
+    at_launch = {
+        str(gpu): max(
+            0, int(int(mb) - float(kv.get(str(gpu)) or 0) * (max_context - launch) / 1024)
+        )
+        for gpu, mb in used.items()
+    }
+    return launch, at_launch
+
+
+def _apply_multi_gpu_reserve(overrides: dict, policy: dict, preset_key: str, gpus) -> None:
+    """Start a probed two-GPU preset below its maximum so the reserve stays free."""
+    from ocabra.config import settings
+
+    if len(tuple(gpus or ())) < 2:
+        return
+    probes = policy.get("context_probe") if isinstance(policy, dict) else None
+    probe = probes.get(preset_key) if isinstance(probes, dict) else None
+    section = overrides.get("llama_cpp")
+    runtime = overrides.get("_runtime")
+    if (
+        not isinstance(probe, dict)
+        or not isinstance(section, dict)
+        or not isinstance(runtime, dict)
+    ):
+        return
+    per_preset = policy.get("reserve_mb_by_preset") if isinstance(policy, dict) else None
+    reserve = (
+        per_preset[preset_key]
+        if isinstance(per_preset, dict) and preset_key in per_preset
+        else settings.llama_cpp_multi_gpu_reserve_mb
+    )
+    try:
+        max_context = int(section.get("ctx_size") or 0)
+    except (TypeError, ValueError):
+        return
+    plan = multi_gpu_launch_context(max_context, probe, reserve) if max_context else None
+    if plan is None:
+        return
+    launch, at_launch = plan
+    section["launch_ctx_size"] = launch
+    runtime["launch_context"] = launch
+    runtime["context_probe_used_mb"] = {
+        str(g): int(mb) for g, mb in (probe.get("used_mb") or {}).items()
+    }
+    # Admission reserves what the starting context takes, not the maximum:
+    # otherwise every load would evict whatever the reserve is for.
+    runtime["capacity_vram_by_gpu_mb"] = at_launch
+    runtime["capacity_vram_mb"] = sum(at_launch.values())
+
+
 async def plan_profile_runtime(
     profile: Any,
     model_manager: Any,
@@ -834,8 +914,12 @@ async def plan_profile_runtime(
 
     preset = preset_by_key[chosen.preset_key]
     overrides = _overrides_for(chosen)
+    _apply_multi_gpu_reserve(overrides, policy, chosen.preset_key, chosen.gpu_indices)
     if not chosen.is_default:
         default_overrides = _overrides_for(default_candidate)
+        _apply_multi_gpu_reserve(
+            default_overrides, policy, default_candidate.preset_key, default_candidate.gpu_indices
+        )
         overrides["_runtime"]["default_worker_key"] = compute_worker_key(
             profile.base_model_id, default_overrides
         )
