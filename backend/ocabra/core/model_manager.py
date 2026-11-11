@@ -2807,6 +2807,10 @@ class ModelManager:
                         freed = 0
                         if deficit and allow_pressure_eviction:
                             await reconcile_physical_residents()
+                            if await self._relieve_gpu_cheaply(model_id, gpu_idx, shard_needed):
+                                available = await admission_free_vram(gpu_idx)
+                                deficit = max(0, shard_needed - available)
+                        if deficit and allow_pressure_eviction:
                             freed = await self._evict_for_space(gpu_idx, deficit)
                             if freed < deficit:
                                 # The polite unload can take several monitor
@@ -2888,9 +2892,11 @@ class ModelManager:
             else:
                 for gpu_idx in gpu_indices:
                     available = await admission_free_vram(gpu_idx)
+                    if vram_needed > available and allow_pressure_eviction:
+                        await reconcile_physical_residents()
+                        if await self._relieve_gpu_cheaply(model_id, gpu_idx, vram_needed):
+                            available = await admission_free_vram(gpu_idx)
                     if vram_needed > available:
-                        if allow_pressure_eviction:
-                            await reconcile_physical_residents()
                         freed = (
                             await self._evict_for_space(gpu_idx, vram_needed - available)
                             if allow_pressure_eviction
@@ -3865,6 +3871,23 @@ class ModelManager:
                 return True
             return bool(await self._try_shrink_for_space(shrinkable, gpu_index, remaining))
         return False
+
+    async def _relieve_gpu_cheaply(self, model_id: str, gpu_idx: int, needed_mb: int) -> bool:
+        """Forced-GPU admission: before the eviction cascade, try the cheap ways
+        to free ``needed_mb`` (total, not deficit) on ``gpu_idx`` — shrinking a
+        llama.cpp context, then evicting cheap idle models plus a shrink — the
+        same order _assign_gpus_for_load follows for a preferred GPU. Whatever
+        is still missing is left to the cascade. Returns whether it freed
+        anything (so the caller only re-reads free VRAM when it changed)."""
+        self._shrink_capacity = {
+            key: mb for key, mb in self._shrink_capacity.items() if key[1] != gpu_idx
+        }
+        for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu_idx]):
+            if self.is_busy(candidate):
+                continue
+            if await self._shrink_candidate_for_load(candidate, gpu_idx, needed_mb):
+                return True
+        return await self._evict_cheap_then_shrink(model_id, gpu_idx, needed_mb)
 
     async def _shrink_candidate_for_load(
         self, candidate_id: str, gpu_pool: int | None, vram_needed: int

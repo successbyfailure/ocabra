@@ -572,6 +572,37 @@ async def test_busy_models_are_never_evicted_by_the_cheap_plan(monkeypatch) -> N
     mm.unload.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_forced_gpu_load_also_evicts_cheap_before_big(monkeypatch) -> None:
+    """Same case with the 3060 forced by a preset (required_gpu_indices), which
+    takes the admission cascade instead of _assign_gpus_for_load: it must not
+    evict qwen3.8 while whisper plus a shrink is enough."""
+    mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    whisper = _with_idle_whisper(monkeypatch, mm, free_mb)
+    mm._reconcile_ollama_state = AsyncMock()
+    mm._evict_for_space = AsyncMock(return_value=0)
+    mm._evict_last_resort_for_space = AsyncMock(return_value=0)
+    mm._get_pressure_eviction_candidates = MagicMock(
+        return_value=[state.model_id, whisper.model_id]
+    )
+
+    gpus = await mm._admit_gpu_load(
+        model_id="llamacpp_mks/qwen3-embedding:4b",
+        vram_needed=3500,
+        preferred_gpu=None,
+        gpu_managed=True,
+        enforce_vllm_headroom=False,
+        vllm_gpu_memory_utilization=None,
+        required_gpu_indices=[0],
+    )
+
+    assert gpus == [0]
+    mm.unload.assert_awaited_once_with(whisper.model_id, reason="vram_pressure")
+    mm._evict_for_space.assert_not_awaited()
+    assert ctx["n"] == 65536
+    assert state.status == ModelStatus.LOADED
+
+
 # -- planner / request path ------------------------------------------------------
 
 

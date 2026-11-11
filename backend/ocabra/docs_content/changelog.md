@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.68.1 — 2026-11-11
+
+### Arreglos
+
+- **El criterio de 0.68.0 también se aplica cuando un perfil fija la
+  tarjeta.** Si un preset obligaba a cargar en una tarjeta concreta, oCabra
+  seguía descargando el modelo grande antes de probar con los ociosos más
+  baratos de recargar y con reducir el contexto.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.68.0 — 2026-11-11
 
 ### Cambios de comportamiento
