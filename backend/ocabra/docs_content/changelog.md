@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.72.0 — 2026-11-11
+
+### Cambios
+
+- **`/ocabra/models/activity` añade `finished`: las peticiones terminadas en
+  los últimos 20 s**, incluidos los rechazos 429. De cada una da usuario,
+  llave, tipo, estado, tokens (entrada, cache y salida), ritmos de prefill y
+  generación, TTFT, espera en cola y duración. Las peticiones muy cortas
+  (embeddings, transcripciones pequeñas) empiezan y terminan entre dos
+  refrescos del snapshot y antes no llegaban a verse. Nunca incluye IP ni
+  user agent.
+
+---
+
 ## 0.71.0 — 2026-11-11
 
 ### Cambios

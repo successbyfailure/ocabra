@@ -273,7 +273,7 @@ describe("Dashboard", () => {
       expect(screen.getByText("Qwen 14B")).toBeTruthy()
       expect(screen.getByText("Peticiones · 1 h / 24 h")).toBeTruthy()
       expect(screen.getByText("310 W")).toBeTruthy()
-      expect(screen.getByText(/Sin peticiones en cola/)).toBeTruthy()
+      expect(screen.getByText(/Nada esperando/)).toBeTruthy()
     })
 
     expect(listGpus).toHaveBeenCalledTimes(1)
@@ -410,7 +410,7 @@ describe("Dashboard", () => {
       // Cola: puesto, usuario y espera estimada.
       expect(screen.getAllByText("#1").length).toBeGreaterThan(0)
       expect(screen.getByText("eva")).toBeTruthy()
-      expect(screen.getByText("entra en ~8 s")).toBeTruthy()
+      expect(screen.getByTestId("requests-waiting").textContent).toContain("entra en ~8 s")
       // Barra de contexto: marca del tope de una GPU y escala de dos.
       expect(screen.getByText("96k · #0 RTX 3090")).toBeTruthy()
       // La GPU 1 no está en el store del test: sale solo con su índice.
@@ -418,8 +418,8 @@ describe("Dashboard", () => {
       expect(screen.getByText(/rayado: requiere escalar/)).toBeTruthy()
     })
     // La petición en cola no sale como barra en la card, solo en la cola.
-    expect(document.querySelectorAll('[data-stage="queued"]').length).toBe(0)
-    expect(document.querySelectorAll('[data-stage="prefill"]').length).toBe(1)
+    expect(document.querySelectorAll('[data-model-id] [data-stage="queued"]').length).toBe(0)
+    expect(document.querySelectorAll('[data-model-id] [data-stage="prefill"]').length).toBe(1)
   })
 
   it("explains that external runtimes do not count as active models", async () => {

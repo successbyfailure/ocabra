@@ -1594,6 +1594,36 @@ async def _record_stat(
         except Exception:
             agent_id_ctx = None
 
+        # Feed en vivo del dashboard: la petición terminada, unos segundos.
+        # Nunca con IP ni user agent: lo ve cualquier usuario.
+        try:
+            from ocabra.stats import live_feed
+
+            telemetry_now = getattr(request.state, "runtime_telemetry", None)
+            live_feed.record_finished(
+                {
+                    "requestId": getattr(request.state, "inflight_request_id", None),
+                    "model": requested_model,
+                    "backendType": backend_type,
+                    "gpuIndex": gpu_index,
+                    "requestKind": request_kind,
+                    "statusCode": status_code,
+                    "error": (error_message or None) and str(error_message)[:300],
+                    "username": getattr(auth_user, "username", None) if auth_user else None,
+                    "apiKeyName": api_key_name,
+                    "durationMs": int(duration_ms),
+                    "inputTokens": input_tokens,
+                    "cachedTokens": cached_tokens,
+                    "outputTokens": output_tokens,
+                    "promptTokensPerSecond": prompt_tokens_per_second,
+                    "predictedTokensPerSecond": predicted_tokens_per_second,
+                    "ttftMs": getattr(telemetry_now, "ttft_ms", None),
+                    "queueMs": getattr(telemetry_now, "queue_ms", None),
+                }
+            )
+        except Exception:  # noqa: BLE001 — el feed nunca rompe el registro
+            pass
+
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
                 model_id=stat_model_id,

@@ -23,7 +23,7 @@ from ocabra.db.model_config import (
 )
 from ocabra.registry.ollama_registry import OllamaRegistry
 from ocabra.schemas.live_context import LiveContextRequest
-from ocabra.stats import live_activity
+from ocabra.stats import live_activity, live_feed
 
 router = APIRouter(tags=["models"])
 _ollama_registry = OllamaRegistry()
@@ -700,6 +700,9 @@ async def build_models_activity(request: Any) -> dict:
         # MB de RAM del host (RSS en vivo) de los modelos que la usan a
         # propósito aunque corran en GPU, como Strata.
         "ramByModel": ram_by_model,
+        # Terminadas en los últimos 20 s (incluidos los 429): las muy cortas
+        # no llegarían a verse entre dos refrescos.
+        "finished": live_feed.recent_finished(),
         # Estado de cada modelo activo o esperando: cargando (desde cuándo y
         # cuánto suele tardar), esperando espacio (a quién desaloja) o
         # esperando una GPU retenida por un servicio.

@@ -7,7 +7,7 @@ import { CpuWidget, GpuWidget, type HostHistoryPoint } from "@/components/dashbo
 import { FederationSection } from "@/components/dashboard/FederationSection"
 import { KpiStrip } from "@/components/dashboard/KpiStrip"
 import { ModelLiveCard } from "@/components/dashboard/ModelLiveCard"
-import { QueueSection } from "@/components/dashboard/QueueSection"
+import { RequestsSection } from "@/components/dashboard/RequestsSection"
 import { RecentRequestsTable } from "@/components/dashboard/RecentRequestsTable"
 import { Section } from "@/components/dashboard/Section"
 import { GpuBadge } from "@/components/dashboard/GpuBadge"
@@ -166,8 +166,8 @@ export function Dashboard() {
   const serviceList = useMemo(() => Object.values(services), [services])
   const activeServices = useMemo(() => serviceList.filter((s) => s.runtimeLoaded), [serviceList])
   const externalRuntimeServices = useMemo(() => serviceList.filter((s) => !s.enabled && s.serviceAlive), [serviceList])
-  const queuedTotal = useMemo(
-    () => Object.values(activity).reduce((acc, a) => acc + (a.queuedCount ?? 0), 0),
+  const requestsTotal = useMemo(
+    () => Object.values(activity).reduce((acc, a) => acc + (a.inFlight ?? 0), 0),
     [activity],
   )
 
@@ -180,6 +180,15 @@ export function Dashboard() {
     <Tooltip.Provider delayDuration={200}>
       <div className="space-y-6">
         <KpiStrip activity={activity} serverPower={serverPower} />
+
+        <Section title="Peticiones" badge={<CountBadge n={requestsTotal} />}>
+          <RequestsSection
+            activity={activity}
+            modelStates={live.modelStates}
+            models={models}
+            finished={live.finished}
+          />
+        </Section>
 
         <Section title="Modelos activos" badge={<CountBadge n={activeModels.length + activeServices.length} />}>
           <div className="space-y-3">
@@ -267,10 +276,6 @@ export function Dashboard() {
               <EmptyState title="Sin modelos cargados" description="Carga un modelo desde Models o lanza una petición." />
             )}
           </div>
-        </Section>
-
-        <Section title="Cola" badge={<CountBadge n={queuedTotal} tone="amber" />}>
-          <QueueSection activity={activity} models={models} />
         </Section>
 
         <Section title="GPUs y CPU">

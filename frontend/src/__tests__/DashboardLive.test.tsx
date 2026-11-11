@@ -2,7 +2,7 @@
 import { fireEvent, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { GpuWidget } from "@/components/dashboard/DeviceWidget"
-import { QueueSection } from "@/components/dashboard/QueueSection"
+import { RequestsSection } from "@/components/dashboard/RequestsSection"
 import { RequestProgress } from "@/components/dashboard/RequestProgress"
 import { DownloadQueue } from "@/components/downloads/DownloadQueue"
 import { DownloadsIndicator } from "@/components/layout/DownloadsIndicator"
@@ -88,7 +88,7 @@ describe("dashboard en vivo", () => {
         prompt: { totalTokens: 100, cachedTokens: null, processedTokens: null, source: "estimate" },
       })
     render(
-      <QueueSection
+      <RequestsSection
         models={{}}
         activity={{
           m: {
@@ -100,7 +100,7 @@ describe("dashboard en vivo", () => {
         }}
       />,
     )
-    const rows = screen.getAllByRole("listitem")
+    const rows = Array.from(document.querySelectorAll('[data-request-row="waiting"]'))
     expect(rows[0].textContent).toContain("cris")
     expect(rows[0].textContent).toContain("se adelanta: cabe en el KV libre")
     expect(rows[1].textContent).toContain("bea")
@@ -389,5 +389,84 @@ describe("RAM del host de Strata", () => {
     )
     expect(screen.getByText("Qwen3.8 Coder (Strata)")).toBeTruthy()
     expect(screen.getByText("25.6 GB RAM")).toBeTruthy()
+  })
+})
+
+
+describe("sección de peticiones (sustituye a la cola)", () => {
+  it("separa activas y esperando, con usuario, llave, tokens y velocidad", () => {
+    render(
+      <RequestsSection
+        models={{}}
+        activity={{
+          "llamacpp_mks/gemma4:12b": {
+            inFlight: 3,
+            oldestSeconds: 30,
+            slots: 4,
+            requests: [
+              req({
+                requestId: "a", username: "ana", apiKeyName: "opencode", requestKind: "chat", stage: "generating",
+                prompt: { totalTokens: 11_000, cachedTokens: 4096, processedTokens: 11_000, source: "live" },
+                outputTokens: 900, maxOutputTokens: 4096, generationTokensPerSecond: 58.9, prefillTokensPerSecond: 2300,
+                prefillSource: "live", firstTokenAfterMs: 4800,
+              }),
+              req({ requestId: "b", username: null, stage: "backend_wait",
+                prompt: { totalTokens: 3000, cachedTokens: null, processedTokens: null, source: "estimate" } }),
+              req({ requestId: "c", username: "eva", stage: "waiting_for_gpu", waitingOnModelId: "gemma4:26b" }),
+            ],
+          },
+        }}
+        finished={[
+          {
+            requestId: "z", model: "gemma4:12b", backendType: "llamacpp_mks", gpuIndex: 1, requestKind: "embedding",
+            statusCode: 429, error: "model_at_capacity", username: "luis", apiKeyName: null, durationMs: 3,
+            inputTokens: null, cachedTokens: null, outputTokens: null, promptTokensPerSecond: null,
+            predictedTokensPerSecond: null, ttftMs: null, queueMs: null, endedAt: 1, endedAgoMs: 2000,
+          },
+        ]}
+      />,
+    )
+    const active = screen.getByTestId("requests-active")
+    expect(active.textContent).toContain("ana")
+    expect(active.textContent).toContain("🔑 opencode")
+    expect(active.textContent).toContain("entrada 11.0k (4.1k cache)")
+    expect(active.textContent).toContain("salida 900/4.1k")
+    expect(active.textContent).toContain("generación 58.9 t/s")
+    expect(active.textContent).toContain("TTFT 5 s")
+    const waiting = screen.getByTestId("requests-waiting")
+    // Lo que espera espacio en GPU va antes que lo que ya está admitido.
+    const rows = Array.from(waiting.querySelectorAll("[data-request-row]"))
+    expect(rows[0].textContent).toContain("desalojando gemma4:26b")
+    expect(rows[1].textContent).toContain("esperando a que el backend empiece")
+    expect(rows[1].textContent).toContain("anónimo")
+    expect(rows[1].textContent).toContain("entrada ~3.0k")
+    const finished = screen.getByTestId("requests-finished")
+    expect(finished.textContent).toContain("429 rechazada")
+    expect(finished.textContent).toContain("hace 2 s")
+  })
+})
+
+describe("recién terminadas: modelo correcto entre backends", () => {
+  it("casa el nombre lógico con el modelo de su backend", () => {
+    const mk = (modelId: string, backendType: string, displayName: string) =>
+      ({ modelId, backendType, displayName, status: "loaded", currentGpu: [], capabilities: {} }) as unknown as ModelState
+    render(
+      <RequestsSection
+        activity={{}}
+        models={{
+          "ollama/qwen3.8:27b": mk("ollama/qwen3.8:27b", "ollama", "Qwen 3.8 27B (Ollama)"),
+          "llamacpp_mks/qwen3.8:27b": mk("llamacpp_mks/qwen3.8:27b", "llamacpp_mks", "Qwen 3.8 27B (llama.cpp)"),
+        }}
+        finished={[
+          {
+            requestId: "x", model: "qwen3.8:27b", backendType: "llamacpp_mks", gpuIndex: 1, requestKind: "chat",
+            statusCode: 200, error: null, username: "ana", apiKeyName: null, durationMs: 1000, inputTokens: 10,
+            cachedTokens: null, outputTokens: 5, promptTokensPerSecond: null, predictedTokensPerSecond: null,
+            ttftMs: null, queueMs: null, endedAt: 1, endedAgoMs: 1000,
+          },
+        ]}
+      />,
+    )
+    expect(screen.getByTestId("requests-finished").textContent).toContain("Qwen 3.8 27B (llama.cpp)")
   })
 })

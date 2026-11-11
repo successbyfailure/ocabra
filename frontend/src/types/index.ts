@@ -793,6 +793,30 @@ export type RequestStage =
   | "generating"
   | "processing";
 
+/** Petición recién terminada (feed en vivo del dashboard, 20 s). */
+export interface FinishedRequest {
+  requestId: string | null;
+  model: string;
+  backendType: string | null;
+  gpuIndex: number | null;
+  requestKind: string | null;
+  statusCode: number | null;
+  error: string | null;
+  username: string | null;
+  apiKeyName: string | null;
+  durationMs: number;
+  inputTokens: number | null;
+  cachedTokens: number | null;
+  outputTokens: number | null;
+  promptTokensPerSecond: number | null;
+  predictedTokensPerSecond: number | null;
+  ttftMs: number | null;
+  queueMs: number | null;
+  /** Epoch en segundos. */
+  endedAt: number;
+  endedAgoMs: number;
+}
+
 /** Fase de carga de un modelo (dashboard). */
 export interface ModelPhaseInfo {
   /** waiting_for_gpu: desalojando a waitingOn para hacer sitio ·
@@ -881,6 +905,8 @@ export interface ModelActivityMap {
   /** MB de RAM del host (RSS en vivo) de los modelos que la usan a propósito
    *  aunque corran en GPU (Strata). */
   ramByModel?: Record<string, number>;
+  /** Terminadas en los últimos 20 s, la más reciente primero (incluye 429). */
+  finished?: FinishedRequest[];
   /** Fase de carga de cada modelo activo o esperando. */
   modelStates?: Record<string, ModelPhaseInfo>;
   stuckThresholdSeconds: number;
