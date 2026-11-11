@@ -87,11 +87,11 @@ analizar una sección) sobre transcripciones de 239, 2.033 y 5.076 palabras.
 
 | Modelo | corto | medio | largo | Concurrencia ×4 | Contexto |
 |--------|------:|------:|------:|----------------:|---------:|
-| **`nemotron-3.5-lightning:30b`** | **158** | **148** | **134** | 221 (1,9×) | 128k, en las dos tarjetas |
+| **`nemotron-3.5-lightning:30b`** | 158 | **148** | **134** | 221 (1,9×) | 128k, en las dos tarjetas |
+| **`gemma4:26b`** | **175** | 144 | 119 | **234** (2,5×) | 256k |
 | `nemotron-3-nano:30b` | 142 | 134 | 124 | 132 (1,6×) | 1M, en las dos tarjetas |
 | `ornith-1.5:35b` | 150 | 131 | 110 | 180 (2,3×) | 128k · 256k con `extended` |
 | `ravenx` | 135 | 117 | 98 | 147 (1,9×) | 240k |
-| `gemma4:26b` ¹ | 151 | 114 | 116 | **226** (2,4×) | 256k |
 | `flint:40b` | 110 | 97 | 82 | 192 (2,6×) | 64k · 256k con `extended` |
 | `gemma4:12b` | 115 | 96 | 84 | 201 (2,7×) | 256k |
 | `qwen3-coder:30b` | 138 | 86 | 44 | 60 (2,5×) | 116k · 256k con `extended` |
@@ -105,10 +105,6 @@ analizar una sección) sobre transcripciones de 239, 2.033 y 5.076 palabras.
 Cifras en tokens por segundo. "Concurrencia ×4" es el *throughput total* con
 cuatro peticiones simultáneas, y el multiplicador respecto a una sola. Una
 tirada por modelo, con el modelo ya cargado.
-
-¹ `gemma4:26b` se midió con tráfico real de otros usuarios sobre la misma
-tarjeta. Su cifra "medio" sale baja por una tarea que tardó el triple de lo
-normal. Sin interferencias, sus tareas van entre 130 y 165 tok/s.
 
 Respecto a la medición del 8 de noviembre, la actualización de llama.cpp sube
 sobre todo a los modelos MoE (`nemotron-3-nano:30b` de 102 a 134 en el tamaño
@@ -169,7 +165,7 @@ de la petición completa (incluye leer el documento).
 | Modelo | 15k palabras | 25k palabras |
 |--------|-------------:|-------------:|
 | **`nemotron-3.5-lightning:30b`** | **89** | **95** |
-| `gemma4:26b` | 66 | 51 |
+| `gemma4:26b` | 68 | 69 |
 | `ornith-1.5:35b` | 56 | 60 |
 | `flint:40b` | 47 | 53 |
 | `ravenx` | 47 | 50 |
@@ -200,7 +196,7 @@ Streaming, media de tres tiradas en caliente.
 
 | Modelo | Nivel | TTFT |
 |--------|:-----:|-----:|
-| `gemma4:26b` | — | **0,81 s** |
+| `gemma4:26b` | — | **0,80 s** |
 | `nemotron-3.5-lightning:30b` | — | 0,82 s |
 | `ornith-1.5:35b` | — | 0,83 s |
 | `ravenx` | `low`/`medium` | 0,93 s |
@@ -361,12 +357,12 @@ sobre los primeros K resultados**, no como buscador.
 
 | Caso | Modelo | Por qué |
 |------|--------|---------|
-| Chat interactivo | `gemma4:26b` | TTFT 0,81 s y suele estar cargado |
-| Máxima velocidad | `nemotron-3.5-lightning:30b` | 148 tok/s en tamaño medio, pero ocupa las dos tarjetas |
-| Documentos largos | `nemotron-3.5-lightning:30b` u `ornith-1.5:35b` | 95 y 60 tok/s con 25.000 palabras |
+| Chat interactivo | `gemma4:26b` | TTFT 0,80 s y suele estar cargado |
+| Máxima velocidad | `gemma4:26b` o `nemotron-3.5-lightning:30b` | 144 y 148 tok/s en tamaño medio; `gemma4:26b` cabe en una sola tarjeta y es el más rápido en entradas cortas (175) |
+| Documentos largos | `nemotron-3.5-lightning:30b` o `gemma4:26b` | 95 y 69 tok/s con 25.000 palabras |
 | Extracción exhaustiva | `ravenx` razonando o `qwen3-coder:30b` | 72 afirmaciones, cobertura ~0,615 |
 | Extracción fiel | `ravenx` + `off` o `gemma4:26b` | Precisión 0,620 y 0,614 |
-| Volumen / lotes | `gemma4:26b`, `nemotron-3.5-lightning:30b` o `gemma4:12b` | 200-226 tok/s con 4 en paralelo |
+| Volumen / lotes | `gemma4:26b`, `nemotron-3.5-lightning:30b` o `gemma4:12b` | 200-234 tok/s con 4 en paralelo |
 | Razonamiento visible | `qwen3.8:27b` + `medium` | Es uno de los tres que distinguen niveles de verdad |
 | Salida estructurada | cualquiera, validando | Todos dieron JSON válido en extracción; algunos fallan 1 de 4 tareas |
 | Actas con hablantes | `whisper-large-v3-turbo` + `diarize: true` | WER 4,18 %, DER 10,39 %, 17× tiempo real |
