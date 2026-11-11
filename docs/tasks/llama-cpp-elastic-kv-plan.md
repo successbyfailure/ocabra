@@ -1,7 +1,7 @@
 # Plan de KV elástica y paralelismo dinámico en llama.cpp
 
 **Fecha de apertura:** 2026-10-30
-**Estado:** activo; reparto y escalado adaptativo implementados, soak pendiente
+**Estado:** activo; reparto, escalado adaptativo y contexto en vivo implementados; soak, observabilidad y upstream pendientes
 **Backlog maestro:** Bloque 22 de `docs/ROADMAP.md`
 **Backend inicial:** `llama_cpp` nativo
 **Modelos iniciales:** Gemma 4 12B, Gemma 4 26B-A4B y Qwen3.8 27B
@@ -34,7 +34,7 @@ transición drenada mientras implique redistribuir pesos.
 | 2 | Admission control ponderado por tokens | Implementado y validado en canary | Gemma 26B 128k/4 real, cancelación, remanente y oversized; tokenizer exacto pendiente |
 | 3 | Validación de rendimiento y corrección | En curso | Smokes, grounding, cancelación y soak acelerado de 1.000 peticiones completados; matriz diversa y 12 h pendientes |
 | 4 | Observabilidad KV candidata a upstream | Pendiente | Patch aislado y tests llama.cpp |
-| 5 | Recreación de contexto conservando pesos | Endpoint y fontanería implementados (2026-11-10); orquestación automática pendiente | Ver "Evidencia de recreación de contexto" |
+| 5 | Recreación de contexto conservando pesos | Implementado, desplegado y validado en vivo (oCabra 0.65.0–0.68.3, fork `96fff6cab` + tests `64aef9b29`) | Ver "Evidencia de recreación de contexto" y "Orquestación automática" |
 | 6 | Escalado drenado de una a dos GPU | Implementado y validado | Abliterated 64k/1 → 224k/4 con visión → 64k/1; reconciliación, drenado e histéresis probados |
 | 7 | Despliegue gradual y propuestas upstream | Pendiente | Feature flag, rollback y PRs |
 
@@ -58,7 +58,38 @@ pruebas y registrar la evidencia en este documento o en un fichero enlazado de
   - `LlamaCppBackend.reconfigure_context` y `ModelManager.resize_context`: drena, llama al endpoint, guarda `ModelState.live_context` (no en `extra_config`, para no persistirlo), recalcula capacidades y fija las reservas de VRAM con lo medido.
   - La admisión y el planificador usan el contexto real. Si una petición no cabe en el contexto reducido, el worker vuelve a crecer o se devuelve 503 con `Retry-After`.
   - Endpoint de administración: `POST /ocabra/models/{id}/context`.
-- **Pendiente:** la Fase 2 (encoger en vez de evictar y crecer cuando sobra), mostrarlo en el dashboard, la interacción con el tope de imagen de la visión y desplegar el binario del fork con el endpoint.
+- **Cerrado después** (ver la sección siguiente): orquestación automática, dashboard (0.65.1, `liveResized` en `/ocabra/models/activity`), binario del fork desplegado y tope de imagen de la visión (comprobado en vivo).
+
+### Orquestación automática (2026-11-10/11, oCabra 0.67.0–0.68.3)
+
+Activada en producción con `LLAMA_CPP_LIVE_CONTEXT_ENABLED=true`. Ajustes: `llama_cpp_shrink_before_evict` (sí), `llama_cpp_shrink_min_context` (32.768) y `llama_cpp_regrow_when_idle` (sí).
+
+- **Encoger antes de evictar** (0.67.0–0.67.3, `ModelManager._try_shrink_for_space`):
+  - Antes de descargar un worker ocioso del fork para hacer sitio, le divide el contexto a la mitad en cada paso, hasta 32k, midiendo por PID lo que libera en esa GPU. Si no basta, lo devuelve a su tamaño y se evicta como antes.
+  - Se prueba en todas las GPU antes de evictar en ninguna (0.67.1).
+  - Tras el primer paso proyecta linealmente lo que liberaría en el mínimo y corta si no llega (0.67.1).
+  - Espera a que hw-monitor publique la VRAM liberada, con ~2 s de retraso, antes de que decida el scheduler (0.67.2).
+  - Recuerda los workers sin `--props`, como los embeddings (0.67.1).
+- **Crecer cuando hace falta** (`grow_context_back`): si una petición no cabe en el contexto reducido, recupera el nominal desalojando lo que ocupó la VRAM soltada. Mira la VRAM física, no las reservas, que en whisper inflaban el déficit (0.67.3). Lo hace dentro del cerrojo de cargas.
+- **Crecer en ocioso:** `check_idle_evictions` lo devuelve a su tamaño cuando hay sitio, sin desalojar a nadie.
+- **Desalojar lo barato y encoger** (0.68.0–0.68.1, `_evict_cheap_then_shrink`):
+  - Actúa si encoger no basta en una GPU.
+  - Elige el conjunto de modelos ociosos más barato de recargar, por la mediana real de carga (`model_load_stats`), que junto con lo que liberaría el encogimiento cubre el déficit.
+  - Solo se aplica si cuesta menos que desalojar el modelo encogible.
+  - Cubre también la ruta de GPU forzada por preset (0.68.1).
+  - Elegibilidad: la de último recurso (soft-pin sí; hard-pin y sesiones realtime no). "Ocioso" significa sin peticiones en vuelo (`is_busy`).
+- **Medido en vivo** (qwen3.8 `extended` 262k en `tensor` sobre las dos GPU + qwen3-embedding:4b, 6 GB):
+  - Antes se desalojaban mutuamente (45–100 s de recarga cada vez).
+  - Ahora qwen3.8 se encoge a 65k en la 3090 (libera 6.340 MB) y los dos conviven. En la 3060 su parte de KV solo liberaría ~3,2 GB y se descarta tras un paso.
+  - Una petición de ~178k tokens lo devuelve a 262k en 0,45 s desalojando solo los embeddings.
+  - Al irse los embeddings vuelve solo a 262k.
+- **Visión y contexto en vivo** (ornith-1.5:35b, ubatch 512): imagen correcta en nominal, a 32k, con ubatch bajado a 128 con la visión activa y tras restaurar.
+- **Tests:**
+  - oCabra: `tests/test_live_context.py` (34).
+  - Fork: `tools/server/tests/unit/test_live_context.py` (8: 501 sin `--props`, encoger y crecer con salida greedy idéntica, solo batch y valores inválidos).
+- **Pendiente:**
+  - Las bajadas de preset (`runtime_context_downgrade`) siguen recargando. En los perfiles actuales cambian de GPU (`extended` usa las dos y `normal` una), y eso no lo resuelve el contexto en vivo.
+  - Proponerlo upstream (Fase 7).
 
 ### Evidencia de visión bajo demanda (2026-10-31)
 
