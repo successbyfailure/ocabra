@@ -848,3 +848,21 @@ async def test_vision_room_ignores_a_stale_free_figure_right_after_a_load(monkey
 
     assert ctx["n"] < 262144  # it shrank anyway: the direct reading is full
     assert active["on"] is True
+
+
+@pytest.mark.asyncio
+async def test_with_a_probe_vision_takes_just_the_context_it_needs(monkeypatch, tmp_path):
+    """2026-11-11 live: halving to fit a 1.1 GB projector left qwen3.8 at 57k
+    although 90k fitted. With the probe's KV cost per GPU it cuts just enough."""
+    mm, state, backend, ctx, free_mb = _elastic_manager(
+        monkeypatch, free={0: 0, 1: 0}, kv_mb_per_64k=(2000, 1000)
+    )
+    active, _ = _with_vision(mm, state, backend, free_mb, tmp_path, measured={"0": 1500})
+    state.extra_config["_runtime"]["context_probe_kv_mb_per_1k"] = {"0": 2000 / 64, "1": 1000 / 64}
+    mm._in_flight[state.model_id] = 1
+
+    await mm.make_room_for_vision(state.model_id, IMAGE)
+
+    assert active["on"] is True
+    assert ctx["n"] > 131072  # halving would have stopped at 131072
+    assert ctx["n"] >= 262144 - (1500 / (2000 / 64) * 1024) - 2 * 4096

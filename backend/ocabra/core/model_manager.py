@@ -4059,6 +4059,41 @@ class ModelManager:
             size_mb = 1024
         return {main: int(size_mb * 1.1) + 256}
 
+    async def _shrink_exactly(self, model_id: str, gpu: int, needed_mb: int) -> int:
+        """Give back just ``needed_mb`` of context on ``gpu``, using the KV cost
+        per 1k tokens the preset's probe measured. Halving to make room for a
+        1 GB projector left qwen3.8 at 57k when 90k fitted (2026-11-11).
+        Returns the MB freed, 0 when there is no measurement to go on."""
+        state = self._states[model_id]
+        runtime = (
+            state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
+        )
+        kv = (runtime or {}).get("context_probe_kv_mb_per_1k") or {}
+        slope = float(kv.get(str(gpu)) or 0)
+        live = state.live_context or {}
+        backend = self._registered_backend(state.backend_type)
+        current = int(
+            live.get("n_ctx")
+            or (backend.context_options(state.backend_model_id) if backend else {}).get("n_ctx")
+            or 0
+        )
+        if slope <= 0 or current <= 0:
+            return 0
+        granularity = 4096
+        # A step of slack: the KV figure is a straight line through two points.
+        cut = int(needed_mb / slope * 1024) + granularity
+        target = max(granularity, (current - cut) // granularity * granularity)
+        if target >= current:
+            return 0
+        start = self._worker_vram_by_gpu(state).get(gpu, 0)
+        try:
+            await self.resize_context(model_id, context=target, tolerate_in_flight=1)
+        except Exception as exc:  # noqa: BLE001 - fall back to halving
+            logger.info("vision_exact_shrink_failed", model_id=model_id, error=str(exc))
+            return 0
+        freed = max(0, start - self._worker_vram_by_gpu(state).get(gpu, start))
+        return freed if freed >= needed_mb else 0
+
     async def make_room_for_vision(self, model_id: str, body: dict) -> None:
         """Before the first image reaches a llama.cpp worker whose card is full,
         shrink its context so the vision projector fits.
@@ -4094,9 +4129,11 @@ class ModelManager:
                     f"{free} MB are free; this model cannot shrink its context to make room."
                 )
             before = self._worker_vram_by_gpu(state)
-            freed = await self._try_shrink_for_space(
-                model_id, gpu, needed - free, tolerate_in_flight=1
-            )
+            freed = await self._shrink_exactly(model_id, gpu, needed - free)
+            if not freed:
+                freed = await self._try_shrink_for_space(
+                    model_id, gpu, needed - free, tolerate_in_flight=1
+                )
             if not freed:
                 raise RuntimeError(
                     f"The vision projector needs ~{needed} MB on GPU {gpu} and shrinking the "

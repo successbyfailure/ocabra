@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.70.4"
+    app_version: str = "0.70.5"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000

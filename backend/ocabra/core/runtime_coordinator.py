@@ -508,6 +508,13 @@ def _apply_llama_cpp_preset_placement(
     overrides["llama_cpp"] = section
 
 
+def _probe_field(policy: dict, preset_key: str, field: str) -> dict | None:
+    probes = policy.get("context_probe") if isinstance(policy, dict) else None
+    probe = probes.get(preset_key) if isinstance(probes, dict) else None
+    value = probe.get(field) if isinstance(probe, dict) else None
+    return dict(value) if isinstance(value, dict) and value else None
+
+
 def _probe_vision_mb(policy: dict, preset_key: str) -> dict[str, int] | None:
     probes = policy.get("context_probe") if isinstance(policy, dict) else None
     probe = probes.get(preset_key) if isinstance(probes, dict) else None
@@ -898,6 +905,11 @@ async def plan_profile_runtime(
             # probed (runtime_policy.context_probe): lets the worker make just
             # enough room before the first image instead of guessing.
             "context_probe_vision_mb": _probe_vision_mb(policy, candidate_preset.preset_key),
+            # KV cost per 1k tokens on each GPU from the same probe: lets the
+            # worker give back just the context the projector needs.
+            "context_probe_kv_mb_per_1k": _probe_field(
+                policy, candidate_preset.preset_key, "kv_mb_per_1k"
+            ),
             "tracking_worker_key": compute_worker_key(
                 profile.base_model_id,
                 profile.load_overrides,

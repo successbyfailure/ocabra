@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.5 — 2026-11-11
+
+### Arreglos
+
+- **Al cargar la visión, el modelo cede solo el contexto que hace falta.**
+  Antes lo reducía a la mitad: `qwen3.8:27b` pasaba de 114.688 a 57.344 tokens
+  cuando con la visión cargada le cabían unos 90.000. Si el preset tiene una
+  medición, ahora usa el coste real por tarjeta y recorta lo justo.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.4 — 2026-11-11
 
 ### Arreglos
