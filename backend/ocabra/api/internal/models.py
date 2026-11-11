@@ -1007,8 +1007,44 @@ async def load_model(
 
     if state.status == ModelStatus.LOADED:
         raise HTTPException(status_code=409, detail="Model is already loaded")
+
+    # A model with runtime presets is served by a preset worker
+    # (``model::hash``), never by its bare entry: chat, realtime and batches
+    # all load the default preset. Loading the bare config instead started a
+    # second, untracked worker, or failed outright when that config cannot fit
+    # anywhere. Seen 2026-11-11: ornith-1.5:35b's base config is 262k on one
+    # card (24,174 MB); "Load" in the UI got a 409, while its default preset
+    # (131k on the 3090) loads fine.
+    from ocabra.api.openai._deps import ensure_worker_loaded
+    from ocabra.api.openai.realtime import resolve_realtime_llm_runtime_plan
+
+    profile_registry = getattr(request.app.state, "profile_registry", None)
+    worker_key, overrides, preferred_gpu, load_policy = model_id, None, None, None
+    if profile_registry is not None:
+        (
+            worker_key,
+            overrides,
+            preferred_gpu,
+            load_policy,
+        ) = await resolve_realtime_llm_runtime_plan(model_id, profile_registry, mm)
     try:
-        updated = await mm.load(model_id)
+        if worker_key == model_id:
+            updated = await mm.load(model_id)
+        else:
+            worker_state = await mm.get_state(worker_key)
+            if worker_state is not None and worker_state.status == ModelStatus.LOADED:
+                raise HTTPException(status_code=409, detail="Model is already loaded")
+            await ensure_worker_loaded(
+                mm,
+                model_id,
+                worker_key,
+                overrides,
+                preferred_gpu=preferred_gpu,
+                load_policy=load_policy,
+            )
+            updated = (await _overlay_loaded_derived_state(mm, [await mm.get_state(model_id)]))[0]
+    except HTTPException:
+        raise
     except InsufficientVRAMError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:

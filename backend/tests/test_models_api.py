@@ -3,6 +3,7 @@ import struct
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -1127,3 +1128,69 @@ def test_sin_cache_compartida_cada_plaza_recibe_su_parte():
     salida = _apply_capability_fallbacks(estado, {"context_length": 4096})
     assert salida["context_length"] == 131072
     assert salida["context_per_request"] == 32768
+
+
+def _load_request(states: dict):
+    mm = MagicMock()
+    mm.get_state = AsyncMock(side_effect=lambda model_id: states.get(model_id))
+    mm.load = AsyncMock(side_effect=lambda model_id: states[model_id])
+    mm.list_states = AsyncMock(return_value=list(states.values()))
+    registry = MagicMock()
+    request = MagicMock()
+    request.app.state.model_manager = mm
+    request.app.state.profile_registry = registry
+    return request, mm
+
+
+@pytest.mark.asyncio
+async def test_load_button_loads_the_default_preset_worker(monkeypatch):
+    """2026-11-11: "Load" on ornith-1.5:35b loaded its bare config (262k on one
+    card, 24,174 MB) and got a 409; chat loads its default preset instead."""
+    base = ModelState(
+        model_id="llamacpp_mks/ornith-1.5:35b",
+        display_name="ornith",
+        backend_type="llamacpp_mks",
+        status=ModelStatus.CONFIGURED,
+    )
+    request, mm = _load_request({base.model_id: base})
+    plan = ("llamacpp_mks/ornith-1.5:35b::2c258fcb7706", {"_runtime": {}}, 1, "on_demand")
+    monkeypatch.setattr(
+        "ocabra.api.openai.realtime.resolve_realtime_llm_runtime_plan",
+        AsyncMock(return_value=plan),
+    )
+    ensure = AsyncMock()
+    monkeypatch.setattr("ocabra.api.openai._deps.ensure_worker_loaded", ensure)
+    monkeypatch.setattr(
+        models_api, "_overlay_loaded_derived_state", AsyncMock(side_effect=lambda _mm, s: s)
+    )
+
+    await models_api.load_model(base.model_id, request)
+
+    mm.load.assert_not_awaited()
+    ensure.assert_awaited_once_with(
+        mm,
+        base.model_id,
+        plan[0],
+        plan[1],
+        preferred_gpu=1,
+        load_policy="on_demand",
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_button_without_presets_loads_the_model_itself(monkeypatch):
+    base = ModelState(
+        model_id="llamacpp_mks/gemma4:12b",
+        display_name="g",
+        backend_type="llamacpp_mks",
+        status=ModelStatus.CONFIGURED,
+    )
+    request, mm = _load_request({base.model_id: base})
+    monkeypatch.setattr(
+        "ocabra.api.openai.realtime.resolve_realtime_llm_runtime_plan",
+        AsyncMock(return_value=(base.model_id, None, None, None)),
+    )
+
+    await models_api.load_model(base.model_id, request)
+
+    mm.load.assert_awaited_once_with(base.model_id)

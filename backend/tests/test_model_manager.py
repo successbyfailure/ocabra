@@ -2822,3 +2822,46 @@ async def test_pressure_eviction_waits_for_release_before_rechecking(worker_pool
         )
 
     wait_free.assert_awaited_once_with(1, 23_600)
+
+
+@pytest.mark.asyncio
+async def test_pressure_eviction_judges_one_card_when_the_model_fits_one(worker_pool):
+    """2026-11-11: ornith-1.5:35b's bare config (24,174 MB) fits the 3090's
+    24,576 total, so the scheduler will not split it. The preflight summed both
+    cards (35,037 free), evicted whisper and gemma4:26b, and the load failed:
+    the 3090 alone offers 23,647. Nothing must be evicted for that."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_all_states.return_value = [
+        SimpleNamespace(index=0, total_vram_mb=12_288),
+        SimpleNamespace(index=1, total_vram_mb=24_576),
+    ]
+    gpu_manager.get_free_vram.side_effect = lambda gpu: {0: 8_000, 1: 1_200}[gpu]
+    gpu_manager.get_free_vram_if_released.side_effect = lambda gpu, _released: {
+        0: 11_390,
+        1: 23_647,
+    }[gpu]
+    gpu_manager.locked_gpu_indices = MagicMock(return_value=[0])
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = InsufficientVRAMError("full")
+    mm = ModelManager(worker_pool, gpu_manager=gpu_manager, gpu_scheduler=scheduler)
+
+    await add_test_model(mm, model_id="test/ornith")
+    for model_id, gpu in (("test/whisper", 0), ("test/gemma", 1)):
+        candidate = await add_test_model(mm, model_id=model_id, load_policy="pin")
+        candidate.status = ModelStatus.LOADED
+        candidate.current_gpu = [gpu]
+
+    with (
+        patch.object(mm, "unload", new=AsyncMock()) as unload_mock,
+        pytest.raises(InsufficientVRAMError),
+    ):
+        await mm._assign_gpus_for_load(
+            "test/ornith",
+            vram_needed=24_174,
+            preferred_gpu=None,
+            enforce_vllm_headroom=False,
+        )
+
+    unload_mock.assert_not_awaited()

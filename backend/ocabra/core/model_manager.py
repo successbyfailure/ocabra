@@ -3147,13 +3147,18 @@ class ModelManager:
                 # a 3090 that evicting ravenx would have freed to 23,647.
                 if self._gpu_manager is not None:
                     try:
+                        totals_by_gpu: dict[int, int] = {}
                         if gpu_pool is not None:
                             pool_indices = [gpu_pool]
                         else:
-                            pool_indices = [
-                                int(gpu_state.index)
-                                for gpu_state in await self._gpu_manager.get_all_states()
-                            ]
+                            all_gpu_states = await self._gpu_manager.get_all_states()
+                            pool_indices = [int(gpu_state.index) for gpu_state in all_gpu_states]
+                            totals_by_gpu = {
+                                int(gpu_state.index): int(
+                                    getattr(gpu_state, "total_vram_mb", 0) or 0
+                                )
+                                for gpu_state in all_gpu_states
+                            }
                         released = {
                             candidate_id: (
                                 self._states[candidate_id].worker_info.pid
@@ -3163,15 +3168,33 @@ class ModelManager:
                             for candidate_id in candidates
                             if candidate_id in self._states
                         }
-                        free_now_mb = 0
-                        maximum_available_mb = 0
+                        free_by_gpu: dict[int, int] = {}
+                        max_by_gpu: dict[int, int] = {}
                         for gpu_index in pool_indices:
-                            free_now_mb += int(await self._gpu_manager.get_free_vram(gpu_index))
-                            maximum_available_mb += int(
+                            free_by_gpu[gpu_index] = int(
+                                await self._gpu_manager.get_free_vram(gpu_index)
+                            )
+                            max_by_gpu[gpu_index] = int(
                                 await self._gpu_manager.get_free_vram_if_released(
                                     gpu_index, released
                                 )
                             )
+                        # The scheduler only splits a model across GPUs when no
+                        # single card is big enough for it (find_gpu_for_model's
+                        # fits_single_gpu). If one is, the load needs it all on
+                        # ONE card, so judge the best card, not the sum. Seen
+                        # 2026-11-11: ornith (24,174 MB, fits the 3090's 24,576
+                        # total) passed on 35,037 free across both cards, evicted
+                        # whisper and gemma4, then failed: the 3090 offers 23,647.
+                        single_card = any(t >= vram_needed for t in totals_by_gpu.values())
+                        judged_gpu = gpu_pool
+                        if single_card:
+                            judged_gpu = max(max_by_gpu, key=lambda g: max_by_gpu[g])
+                            free_now_mb = free_by_gpu[judged_gpu]
+                            maximum_available_mb = max_by_gpu[judged_gpu]
+                        else:
+                            free_now_mb = sum(free_by_gpu.values())
+                            maximum_available_mb = sum(max_by_gpu.values())
                         # Models with no VRAM lock anywhere (Ollama runners
                         # live in another container, so neither lock nor PID
                         # is ours) keep counting by their estimate, as before.
@@ -3179,7 +3202,7 @@ class ModelManager:
                             candidate_state = self._states[candidate_id]
                             if self._gpu_manager.locked_gpu_indices(candidate_id):
                                 continue
-                            if gpu_pool is not None and gpu_pool not in (
+                            if judged_gpu is not None and judged_gpu not in (
                                 candidate_state.current_gpu or []
                             ):
                                 continue

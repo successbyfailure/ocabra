@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.68.2 — 2026-11-11
+
+### Arreglos
+
+- **«Cargar» en la página de modelos usa el preset por defecto.** Si el
+  modelo tiene presets, carga el mismo worker que usaría un chat: por
+  ejemplo, `ornith-1.5:35b` carga su preset «normal», con 131k de contexto en
+  la RTX 3090. Antes cargaba la configuración base, que en `ornith-1.5:35b`
+  pedía 262k en una sola tarjeta y no cabía en ninguna. Fallaba con 409.
+- **Una carga imposible ya no descarga a los demás antes de fallar.** Si un
+  modelo cabe en una sola tarjeta, oCabra comprueba si cabe en la mejor de
+  ellas, en vez de sumar la memoria libre de todas. Antes, una carga que no
+  podía caber descargaba modelos fijados (Whisper y `gemma4:26b`) y luego
+  fallaba de todos modos. Esos modelos tardaban hasta 2 minutos en volver.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.68.1 — 2026-11-11
 
 ### Arreglos
