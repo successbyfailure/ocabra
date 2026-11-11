@@ -2193,7 +2193,12 @@ async def _serialize_model_state(
     # the "is it a chat model" check below never passed (0.70.1/0.70.2).
     from ocabra.core.model_manager import ModelStatus, ensure_template_caps
 
-    if state.status != ModelStatus.LOADED and isinstance(item.get("capabilities"), dict):
+    # Only GGUF models have a template to read.
+    if (
+        is_llama_cpp_family(state.backend_type)
+        and getattr(state, "status", None) != ModelStatus.LOADED
+        and isinstance(item.get("capabilities"), dict)
+    ):
         template_caps = await ensure_template_caps(state)
         if template_caps and item["capabilities"].get("chat"):
             item["capabilities"] = {**item["capabilities"], **template_caps}
