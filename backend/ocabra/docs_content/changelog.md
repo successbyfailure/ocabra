@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.68.0 — 2026-11-11
+
+### Cambios de comportamiento
+
+- **Para hacer sitio, oCabra descarga primero lo que menos cuesta recargar.**
+  Cuando un modelo no cabe en una tarjeta y reducir el contexto de otro no
+  basta, oCabra prueba antes la combinación más barata: descargar modelos
+  ociosos que tardan poco en volver y reducir el contexto del grande para
+  cubrir el resto. Antes descargaba el modelo grande entero, aunque fuera el
+  que estaba en uso. Por ejemplo, cargar `qwen3-embedding:4b` en la RTX 3060
+  descargaba `qwen3.8:27b`, que tarda entre 45 y 100 s en recargar. Ahora
+  descarga Whisper, que vuelve en unos 10 s, y deja `qwen3.8:27b` cargado con
+  menos contexto. El coste se mide con los tiempos de carga reales de cada
+  modelo. Solo se consideran modelos sin peticiones en curso. Los fijados de
+  forma permanente y los que tienen una sesión en tiempo real nunca se
+  descargan.
+
+**Acción:** ninguna. Un modelo fijado pero ocioso (como Whisper) puede tardar
+unos segundos en su siguiente petición si se descargó para hacer sitio.
+
+---
+
 ## 0.67.6 — 2026-11-11
 
 ### Arreglos

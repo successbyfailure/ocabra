@@ -409,6 +409,9 @@ class ModelManager:
         # Loaded workers that answered "not supported" (started without
         # --props, e.g. embeddings); forgotten when they unload.
         self._live_context_unsupported: set[str] = set()
+        # (model_id, gpu) -> MB shrinking that worker to the floor would free
+        # there, measured by the last _try_shrink_for_space that fell short.
+        self._shrink_capacity: dict[tuple[str, int], int] = {}
 
     @asynccontextmanager
     async def _acquire_load_gate(self):
@@ -3057,6 +3060,10 @@ class ModelManager:
             static_drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
             max_drain_timeout_s = max(static_drain_timeout_s, int(settings.max_drain_timeout_s))
 
+            # Capacities measured by an earlier load are stale (contexts and
+            # residents changed since); this pass measures its own.
+            self._shrink_capacity.clear()
+
             # Shrinking an idle llama.cpp context costs ~0.5 s and is undone
             # later; evicting costs the next request a full reload. So try
             # shrinking on EVERY GPU before evicting on any. Seen live
@@ -3083,6 +3090,23 @@ class ModelManager:
                         )
                     except InsufficientVRAMError:
                         continue
+
+            # Still nothing: on each GPU, try evicting cheap idle models and
+            # shrinking a context for the rest, before evicting a big model.
+            for gpu_pool in gpu_pool_order:
+                if gpu_pool is None:
+                    continue
+                if not await self._evict_cheap_then_shrink(model_id, gpu_pool, vram_needed):
+                    continue
+                try:
+                    return await self._gpu_scheduler.find_gpu_for_model(
+                        vram_needed,
+                        preferred_gpu,
+                        enforce_vllm_headroom=enforce_vllm_headroom,
+                        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                    )
+                except InsufficientVRAMError:
+                    continue
 
             for gpu_pool in gpu_pool_order:
                 candidates = self._get_pressure_eviction_candidates(
@@ -3642,6 +3666,7 @@ class ModelManager:
         minimum = max(1, int(settings.llama_cpp_shrink_min_context))
         ctx = original_ctx
         freed = 0
+        capacity: int | None = None
         while freed < needed_mb:
             target = max(minimum, ctx // 2)
             if target >= ctx:
@@ -3663,6 +3688,7 @@ class ModelManager:
             if freed < needed_mb and original_ctx > ctx:
                 projected = freed * (original_ctx - minimum) / (original_ctx - ctx)
                 if projected < needed_mb:
+                    capacity = int(projected)
                     break
 
         if freed >= needed_mb:
@@ -3686,12 +3712,16 @@ class ModelManager:
                     await self.resize_context(model_id, context=original_ctx)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("shrink_for_space_undo_failed", model_id=model_id, error=str(exc))
+        # What shrinking to the floor could free here: _evict_cheap_then_shrink
+        # combines it with evicting a cheaper idle model on the same GPU.
+        self._shrink_capacity[(model_id, gpu_index)] = capacity if capacity is not None else freed
         logger.info(
             "shrink_for_space_insufficient",
             model_id=model_id,
             gpu_index=gpu_index,
             needed_mb=needed_mb,
             freed_mb=freed,
+            capacity_mb=self._shrink_capacity[(model_id, gpu_index)],
         )
         return 0
 
@@ -3716,6 +3746,125 @@ class ModelManager:
                 return
             await asyncio.sleep(0.25)
         logger.info("shrink_release_not_published", gpu_index=gpu_index, freed_mb=freed_mb)
+
+    async def _reload_cost_seconds(self, model_id: str) -> int:
+        """What evicting a model costs its next request: its recent median load
+        time, or, with no history, a guess from its size (~400 MB/s)."""
+        try:
+            seconds = await self.get_expected_load_seconds(model_id)
+        except Exception:  # noqa: BLE001
+            seconds = None
+        if seconds:
+            return int(seconds)
+        state = self._states.get(model_id)
+        return max(5, int((state.vram_used_mb if state else 0) // 400))
+
+    def _physical_mb_on_gpu(self, model_id: str, gpu_index: int) -> int:
+        """MB a model's process really holds on one GPU (what unloading frees)."""
+        state = self._states.get(model_id)
+        if state is None:
+            return 0
+        used = self._worker_vram_by_gpu(state).get(gpu_index)
+        if used:
+            return int(used)
+        return int(state.vram_used_mb // max(1, len(state.current_gpu or [1])))
+
+    async def _evict_cheap_then_shrink(
+        self, requesting_id: str, gpu_index: int, vram_needed: int
+    ) -> bool:
+        """Free ``vram_needed`` on one GPU by evicting cheap idle models and
+        shrinking a llama.cpp context for the rest, when that costs less than
+        evicting the shrinkable model itself.
+
+        Shrinking alone may fall short while evicting the big model is the
+        costliest way to make room. Example (2026-11-10): qwen3-embedding:4b
+        (6,006 MB) on a 3060 holding whisper (idle, ~2,250 MB, ~10 s to reload)
+        and qwen3.8's share (shrinkable by ~3,160 MB, 45-100 s to reload).
+        Neither alone is enough; the eviction order took qwen3.8 out. Evicting
+        whisper and shrinking qwen3.8 fits for a fraction of the cost.
+
+        Only idle candidates of the usual last-resort list are considered (soft
+        pins included, hard pins and realtime sessions never).
+        """
+        if self._gpu_manager is None or not settings.llama_cpp_shrink_before_evict:
+            return False
+        candidates = [
+            c
+            for c in self._get_pressure_eviction_candidates(requesting_id, gpu_indices=[gpu_index])
+            if not self.is_busy(c)
+        ]
+        shrinkables = [
+            c
+            for c in candidates
+            if self._can_change_context_live(c) and (c, gpu_index) in self._shrink_capacity
+        ]
+        if not shrinkables:
+            return False
+        try:
+            free = int(await self._gpu_manager.get_free_vram(gpu_index))
+        except Exception:  # noqa: BLE001
+            return False
+        deficit = int(vram_needed) - free
+        if deficit <= 0:
+            return False
+
+        for shrinkable in shrinkables:
+            capacity = self._shrink_capacity[(shrinkable, gpu_index)]
+            to_evict = deficit - capacity + _GROW_MARGIN_MB
+            if to_evict <= 0:
+                continue  # shrinking alone was already tried
+            shrinkable_cost = await self._reload_cost_seconds(shrinkable)
+            others = []
+            for c in candidates:
+                if c == shrinkable or self._can_change_context_live(c):
+                    continue
+                others.append((await self._reload_cost_seconds(c), c))
+            chosen: list[str] = []
+            gained = cost = 0
+            for c_cost, c in sorted(others):
+                if gained >= to_evict:
+                    break
+                chosen.append(c)
+                gained += self._physical_mb_on_gpu(c, gpu_index)
+                cost += c_cost
+            if gained < to_evict or cost >= shrinkable_cost:
+                logger.info(
+                    "evict_cheap_then_shrink_skipped",
+                    gpu_index=gpu_index,
+                    shrinkable=shrinkable,
+                    shrinkable_cost_s=shrinkable_cost,
+                    cheap=chosen,
+                    cheap_cost_s=cost,
+                    cheap_freed_mb=gained,
+                    needed_from_eviction_mb=to_evict,
+                )
+                continue
+
+            logger.info(
+                "evict_cheap_then_shrink",
+                requested_model_id=requesting_id,
+                gpu_index=gpu_index,
+                evicting=chosen,
+                evicted_cost_s=cost,
+                instead_of=shrinkable,
+                instead_of_cost_s=shrinkable_cost,
+                shrink_capacity_mb=capacity,
+            )
+            for c in chosen:
+                released = self._physical_mb_on_gpu(c, gpu_index)
+                snapshot = await self._get_vram_free_snapshot([gpu_index])
+                await self.unload(c, reason="vram_pressure")
+                await self._wait_for_vram_released(
+                    released,
+                    baseline_free_mb=snapshot[0] if snapshot is not None else None,
+                    gpu_indices=[gpu_index],
+                )
+            free = int(await self._gpu_manager.get_free_vram(gpu_index))
+            remaining = int(vram_needed) - free
+            if remaining <= 0:
+                return True
+            return bool(await self._try_shrink_for_space(shrinkable, gpu_index, remaining))
+        return False
 
     async def _shrink_candidate_for_load(
         self, candidate_id: str, gpu_pool: int | None, vram_needed: int

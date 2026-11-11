@@ -482,6 +482,96 @@ async def test_shrink_waits_until_the_gpu_shows_the_release(monkeypatch) -> None
     assert stale["reads"] >= 4  # kept polling until the release showed up
 
 
+def _with_idle_whisper(monkeypatch, mm, free_mb, *, whisper_cost=10, qwen_cost=60):
+    """Add an idle whisper (~2,250 MB, no live context) on GPU 0 next to qwen3.8."""
+    whisper = ModelState(
+        model_id="whisper/large-v3-turbo",
+        display_name="w",
+        backend_type="whisper",
+        load_policy=LoadPolicy.PIN,
+        status=ModelStatus.LOADED,
+        current_gpu=[0],
+        vram_used_mb=2250,
+    )
+    mm._states[whisper.model_id] = whisper
+
+    async def unload(model_id, reason=None):
+        if model_id == whisper.model_id:
+            free_mb[0] += 2250
+            whisper.status = ModelStatus.UNLOADED
+
+    mm.unload = AsyncMock(side_effect=unload)
+    mm._get_vram_free_snapshot = AsyncMock(return_value=None)
+    mm._wait_for_vram_released = AsyncMock()
+    costs = {whisper.model_id: whisper_cost}
+    mm.get_expected_load_seconds = AsyncMock(side_effect=lambda m, **_: costs.get(m, qwen_cost))
+    return whisper
+
+
+@pytest.mark.asyncio
+async def test_load_on_the_3060_evicts_idle_whisper_and_shrinks_qwen(monkeypatch) -> None:
+    """Neither evicting whisper (2,250) nor shrinking qwen3.8 there (1,750 at
+    the floor) frees 3,500 alone. Today's order would evict qwen3.8 (60 s to
+    reload); evicting whisper (10 s) and shrinking qwen3.8 is cheaper."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: -100_000})
+    whisper = _with_idle_whisper(monkeypatch, mm, free_mb)
+    mm._gpu_manager.get_all_states = AsyncMock(
+        return_value=[SimpleNamespace(index=0), SimpleNamespace(index=1)]
+    )
+    scheduler = AsyncMock()
+    scheduler.find_gpu_for_model.side_effect = [InsufficientVRAMError("full"), [0]]
+    mm._gpu_scheduler = scheduler
+    mm._get_pressure_eviction_candidates = MagicMock(
+        side_effect=lambda _req, gpu_indices=None: (
+            [state.model_id, whisper.model_id] if gpu_indices == [0] else [state.model_id]
+        )
+    )
+
+    gpus = await mm._assign_gpus_for_load(
+        "llamacpp_mks/qwen3-embedding:4b",
+        vram_needed=3500,
+        preferred_gpu=0,
+        enforce_vllm_headroom=False,
+    )
+
+    assert gpus == [0]
+    mm.unload.assert_awaited_once_with(whisper.model_id, reason="vram_pressure")
+    assert ctx["n"] == 65536  # qwen3.8 stays loaded, shrunk
+    assert state.status == ModelStatus.LOADED
+
+
+@pytest.mark.asyncio
+async def test_cheap_eviction_is_skipped_when_it_costs_more_than_the_big_model(
+    monkeypatch,
+) -> None:
+    mm, state, _, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    whisper = _with_idle_whisper(monkeypatch, mm, free_mb, whisper_cost=90, qwen_cost=60)
+    mm._get_pressure_eviction_candidates = MagicMock(
+        return_value=[state.model_id, whisper.model_id]
+    )
+    mm._shrink_capacity[(state.model_id, 0)] = 1750
+
+    assert await mm._evict_cheap_then_shrink("x", 0, 3500) is False
+    mm.unload.assert_not_awaited()
+    assert ctx["n"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_busy_models_are_never_evicted_by_the_cheap_plan(monkeypatch) -> None:
+    mm, state, _, _, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    whisper = _with_idle_whisper(monkeypatch, mm, free_mb)
+    mm._in_flight[whisper.model_id] = 1
+    mm._get_pressure_eviction_candidates = MagicMock(
+        return_value=[state.model_id, whisper.model_id]
+    )
+    mm._shrink_capacity[(state.model_id, 0)] = 1750
+
+    assert await mm._evict_cheap_then_shrink("x", 0, 3500) is False
+    mm.unload.assert_not_awaited()
+
+
 # -- planner / request path ------------------------------------------------------
 
 
