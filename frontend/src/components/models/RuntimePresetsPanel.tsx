@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ContextProbe } from "./ContextProbe";
 import {
   Check,
   ChevronDown,
@@ -37,6 +38,7 @@ const DEFAULT_POLICY: RuntimePolicy = {
   maxOutputTokens: null,
   validatedContextTokens: {},
   validatedVramMb: {},
+  contextProbe: {},
   defaultOutputReservationTokens: null,
 };
 
@@ -553,6 +555,16 @@ export function RuntimePresetsPanel({ profile, onChanged }: Props) {
                         ? "Midiendo…"
                         : "Medir frío"}
                     </button>
+                  )}
+                  {preset.enabled && (
+                    <ContextProbe
+                      profileId={profile.profileId}
+                      preset={preset}
+                      onApplied={() => {
+                        void refresh();
+                        onChanged();
+                      }}
+                    />
                   )}
                   {!preset.isDefault && preset.enabled && (
                     <button

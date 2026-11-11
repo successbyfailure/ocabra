@@ -120,6 +120,7 @@ describe("RuntimePresetsPanel", () => {
       maxOutputTokens: 65536,
       validatedContextTokens: { normal: 98304 },
       validatedVramMb: { normal: 24000 },
+      contextProbe: { normal: { pool_tokens: 98304, kv_mb_per_1k: { "1": 17 } } },
       defaultOutputReservationTokens: 16384,
     };
     render(<RuntimePresetsPanel profile={profile} onChanged={vi.fn()} />);
@@ -138,6 +139,8 @@ describe("RuntimePresetsPanel", () => {
             maxOutputTokens: 32768,
             validatedContextTokens: { normal: 98304 },
             validatedVramMb: { normal: 24000 },
+            // A probe measured on this preset must survive saving the policy.
+            contextProbe: { normal: { pool_tokens: 98304, kv_mb_per_1k: { "1": 17 } } },
             defaultOutputReservationTokens: 16384,
           }),
         }),

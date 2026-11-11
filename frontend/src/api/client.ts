@@ -3,6 +3,7 @@
 // Streams 4-A/B/C/D consume this client.
 
 import type {
+  ContextProbeJob,
   BackendType,
   LoadPolicy,
   GPUState,
@@ -718,6 +719,9 @@ function toRuntimePolicy(raw: unknown): RuntimePolicy | null {
         >,
       ).map(([key, value]) => [key, Number(value)]),
     ),
+    contextProbe: (isRecord(raw.context_probe ?? raw.contextProbe)
+      ? (raw.context_probe ?? raw.contextProbe)
+      : {}) as Record<string, Record<string, unknown>>,
     defaultOutputReservationTokens:
       raw.default_output_reservation_tokens == null &&
       raw.defaultOutputReservationTokens == null
@@ -744,7 +748,73 @@ function fromRuntimePolicy(
     max_output_tokens: policy.maxOutputTokens,
     validated_context_tokens: policy.validatedContextTokens,
     validated_vram_mb: policy.validatedVramMb,
+    // Pass-through: saving the selection policy must not wipe the probes.
+    context_probe: policy.contextProbe ?? {},
     default_output_reservation_tokens: policy.defaultOutputReservationTokens,
+  };
+}
+
+function numberMap(raw: unknown): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(isRecord(raw) ? raw : {}).map(([key, value]) => [key, Number(value)]),
+  );
+}
+
+export function toContextProbeJob(raw: unknown): ContextProbeJob {
+  const data = isRecord(raw) ? raw : {};
+  const result = isRecord(data.result) ? data.result : null;
+  const vision = result && isRecord(result.vision) ? result.vision : null;
+  return {
+    jobId: String(data.job_id ?? ""),
+    profileId: String(data.profile_id ?? ""),
+    presetKey: String(data.preset_key ?? ""),
+    status: String(data.status ?? "pending") as ContextProbeJob["status"],
+    fullValidation: Boolean(data.full_validation),
+    measureVision: Boolean(data.measure_vision),
+    gpuIndices: Array.isArray(data.gpu_indices) ? data.gpu_indices.map(Number) : [],
+    contextIsPool: data.context_is_pool !== false,
+    parallelism: Number(data.parallelism ?? 1),
+    steps: (Array.isArray(data.steps) ? data.steps : []).map((step) => {
+      const row = isRecord(step) ? step : {};
+      return {
+        context: Number(row.context ?? 0),
+        usedMb: numberMap(row.used_mb),
+        fits: Boolean(row.fits),
+        note: String(row.note ?? ""),
+      };
+    }),
+    evicted: Array.isArray(data.evicted) ? data.evicted.map(String) : [],
+    error: data.error == null ? null : String(data.error),
+    startedAt: Number(data.started_at ?? 0),
+    finishedAt: data.finished_at == null ? null : Number(data.finished_at),
+    result: result
+      ? {
+          maxContext: Number(result.max_context ?? 0),
+          usedMb: numberMap(result.used_mb),
+          limitMb: numberMap(result.limit_mb),
+          kvMbPer1k: numberMap(result.kv_mb_per_1k),
+          cappedBy: String(result.capped_by ?? "memory"),
+          trainedContext: Number(result.trained_context ?? 0),
+          marginMb: Number(result.margin_mb ?? 0),
+          fullValidated: Boolean(result.full_validated),
+          peakMb: result.peak_mb ? numberMap(result.peak_mb) : undefined,
+          validationPromptTokens:
+            result.validation_prompt_tokens == null
+              ? null
+              : Number(result.validation_prompt_tokens),
+          reducedByValidation:
+            result.reduced_by_validation == null
+              ? undefined
+              : Number(result.reduced_by_validation),
+          vision: vision
+            ? {
+                projector: String(vision.projector ?? ""),
+                costMb: numberMap(vision.cost_mb),
+                maxContextWithVision: Number(vision.max_context_with_vision ?? 0),
+              }
+            : null,
+        }
+      : null,
   };
 }
 
@@ -2391,6 +2461,40 @@ export const api = {
           `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/resolved`,
         )
       ).map(toRuntimePresetResolution),
+
+    startContextProbe: async (
+      profileId: string,
+      presetKey: string,
+      options: { fullValidation: boolean; measureVision: boolean },
+    ): Promise<ContextProbeJob> =>
+      toContextProbeJob(
+        await request<unknown>(
+          "POST",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}/context-probe`,
+          {
+            full_validation: options.fullValidation,
+            measure_vision: options.measureVision,
+          },
+        ),
+      ),
+
+    getContextProbe: async (
+      profileId: string,
+      presetKey: string,
+    ): Promise<ContextProbeJob> =>
+      toContextProbeJob(
+        await request<unknown>(
+          "GET",
+          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}/context-probe`,
+        ),
+      ),
+
+    applyContextProbe: async (profileId: string, presetKey: string): Promise<void> => {
+      await request<unknown>(
+        "POST",
+        `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets/${encodeURIComponent(presetKey)}/context-probe/apply`,
+      );
+    },
 
     benchmarkRuntimePreset: async (
       profileId: string,

@@ -1377,7 +1377,60 @@ export interface RuntimePolicy {
   maxOutputTokens: number | null;
   validatedContextTokens: Record<string, number>;
   validatedVramMb: Record<string, number>;
+  /** Detail of the last applied context probe, by preset (snake_case, as the API stores it). */
+  contextProbe: Record<string, Record<string, unknown>>;
   defaultOutputReservationTokens: number | null;
+}
+
+export interface ContextProbeStep {
+  context: number;
+  usedMb: Record<string, number>;
+  fits: boolean;
+  note: string;
+}
+
+export interface ContextProbeJob {
+  jobId: string;
+  profileId: string;
+  presetKey: string;
+  status:
+    | "pending"
+    | "preparing"
+    | "loading"
+    | "probing"
+    | "validating"
+    | "vision"
+    | "restoring"
+    | "done"
+    | "error";
+  fullValidation: boolean;
+  measureVision: boolean;
+  gpuIndices: number[];
+  contextIsPool: boolean;
+  parallelism: number;
+  steps: ContextProbeStep[];
+  evicted: string[];
+  error: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+  result: {
+    maxContext: number;
+    usedMb: Record<string, number>;
+    limitMb: Record<string, number>;
+    kvMbPer1k: Record<string, number>;
+    cappedBy: string;
+    trainedContext: number;
+    marginMb: number;
+    fullValidated: boolean;
+    peakMb?: Record<string, number>;
+    validationPromptTokens?: number | null;
+    reducedByValidation?: number;
+    vision?: {
+      projector: string;
+      costMb: Record<string, number>;
+      maxContextWithVision: number;
+    } | null;
+  } | null;
 }
 
 export interface RuntimePreset {
