@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.9 — 2026-11-11
+
+### Arreglos
+
+- **Cargar la visión en un modelo de dos GPU ya no recorta de más.** El hueco
+  para el proyector se calculaba en la tarjeta donde estaba antes (la de
+  whisper), no en la que lo carga ahora: `qwen3.8:27b` `extended` bajaba a
+  225.280 tokens al recibir la primera imagen, unos 20.000 más de lo necesario.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.8 — 2026-11-11
 
 ### Arreglos

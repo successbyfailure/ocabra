@@ -872,6 +872,6 @@ def test_a_probe_from_before_the_pin_follows_the_projector_card(monkeypatch):
     """The extended probe measured the projector on the 3060 (first visible
     card); once it is pinned to the 3090 the cost must be counted there."""
     mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
-    state.extra_config["_runtime"]["context_probe_vision_mb"] = {"0": 1138}
+    state.extra_config["_runtime"]["context_probe_vision_mb"] = {"0": 1138, "1": 0}
     backend.vision_projector_gpu = MagicMock(return_value=1)
     assert mm._vision_cost_estimate(state, "/nonexistent") == {1: 1138}

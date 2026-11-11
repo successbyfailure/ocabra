@@ -4092,7 +4092,8 @@ class ModelManager:
         if isinstance(runtime, dict):
             measured = (runtime.get("context_probe_vision_mb") or {}) if runtime else {}
             if measured:
-                cost = {int(g): int(mb) for g, mb in measured.items()}
+                # The probe records every card, 0 where the projector is not.
+                cost = {int(g): int(mb) for g, mb in measured.items() if int(mb or 0) > 0}
                 # Probes taken before the projector was pinned measured it on
                 # the first visible card; the size is the same wherever it goes.
                 if pinned is not None and len(cost) == 1 and pinned not in cost:
