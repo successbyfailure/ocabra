@@ -9,6 +9,7 @@ cargan los que siguen sin cargar.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -136,3 +137,77 @@ async def test_sin_pin_pendientes_no_espera(monkeypatch):
     load = await _run(mm, sleeps)
     assert sleeps == []
     load.assert_not_awaited()
+
+
+# ── Con scheduler: el arranque no desaloja a nadie ──────────────────────────
+
+
+class _Pool:
+    def __init__(self):
+        self.backend = SimpleNamespace(get_vram_estimate_mb=AsyncMock(return_value=20000))
+        self._workers = {}
+
+    async def get_backend(self, _backend_type):
+        return self.backend
+
+
+def _mm_con_scheduler(scheduler, *states: ModelState) -> ModelManager:
+    mm = ModelManager(worker_pool=_Pool(), gpu_scheduler=scheduler)
+    for st in states:
+        mm._states[st.model_id] = st
+    return mm
+
+
+async def _arranca(mm: ModelManager, load: AsyncMock, polls: int = 3) -> None:
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds, *a, **k):
+        await real_sleep(0)
+
+    with (
+        patch.object(mm, "_load_model", load),
+        patch("ocabra.core.model_manager.asyncio.sleep", fake_sleep),
+    ):
+        await mm._autoload_pinned()
+        for _ in range(polls * 4):
+            await real_sleep(0)
+    mm._stopped = True
+    for _ in range(4):
+        await real_sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_el_pin_que_cabe_carga_sin_permiso_para_desalojar(monkeypatch):
+    monkeypatch.setattr(settings, "pin_autoload_delay_s", 0)
+    pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
+    scheduler = SimpleNamespace(find_gpu_for_model=AsyncMock(return_value=[1]))
+    mm = _mm_con_scheduler(scheduler, pin)
+
+    async def carga(model_id, **kwargs):
+        pin.status = ModelStatus.LOADED
+        return pin
+
+    load = AsyncMock(side_effect=carga)
+    await _arranca(mm, load)
+
+    load.assert_awaited_once_with("llamacpp_mks/gemma4:26b", allow_pressure_eviction=False)
+
+
+@pytest.mark.asyncio
+async def test_el_pin_que_no_cabe_espera_sin_desalojar_ni_quedar_en_error(monkeypatch):
+    """Un WARM usado hace poco ocupa la tarjeta: el PIN no lo echa."""
+    from ocabra.core.scheduler import InsufficientVRAMError
+
+    monkeypatch.setattr(settings, "pin_autoload_delay_s", 0)
+    pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
+    scheduler = SimpleNamespace(
+        find_gpu_for_model=AsyncMock(side_effect=InsufficientVRAMError("lleno"))
+    )
+    mm = _mm_con_scheduler(scheduler, pin)
+    load = AsyncMock()
+
+    await _arranca(mm, load)
+
+    load.assert_not_awaited()
+    assert pin.status == ModelStatus.CONFIGURED
+    assert scheduler.find_gpu_for_model.await_count >= 2  # sigue vigilando

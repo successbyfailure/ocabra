@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.72.1 — 2026-11-11
+
+### Cambios
+
+- **Al arrancar, los modelos fijados (PIN) ya no desalojan a nadie.** Tras el
+  minuto de espera de la 0.71.0, cada modelo fijado solo carga si cabe en la
+  VRAM libre. Si la tarjeta está ocupada por otro modelo usado hace poco, ese
+  modelo se queda, y el fijado vuelve a comprobarlo cada dos minutos hasta que
+  haya sitio. Pedir un modelo fijado sigue cargándolo en el acto, como
+  cualquier petición.
+
+---
+
 ## 0.72.0 — 2026-11-11
 
 ### Cambios

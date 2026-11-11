@@ -1589,8 +1589,16 @@ class ModelManager:
         same VRAM, one evicting the other. Now the PIN loads wait
         ``pin_autoload_delay_s`` and then for any load in progress to finish
         (up to ``pin_autoload_max_wait_s``), so a request that arrives right
-        after the restart places its model first and the PINs fit around it
-        through the normal load path.
+        after the restart places its model first.
+
+        The PINs then load only into room that is genuinely free, never by
+        evicting: they go through the same polite watcher as a pressure-evicted
+        PIN (_watch_and_reload, ``allow_pressure_eviction=False``), first
+        attempt immediate, then every ``pin_reload_poll_interval_s``. On
+        purpose: WARM models that were used recently stay resident until real
+        pressure, so several big models can stay loaded; PIN is only the
+        default layout for when there is room. A request for a PIN still
+        loads it through the normal (evicting) path.
         """
         delay = max(0, int(settings.pin_autoload_delay_s))
         # Persisted ERROR can mean last run's backend process (and its VRAM
@@ -1624,9 +1632,18 @@ class ModelManager:
                 policy=LoadPolicy.PIN.value,
                 waited_for_loads_s=waited,
             )
+            if self._gpu_scheduler is None:
+                # No scheduler means no eviction either: nothing to be polite
+                # about (and the watcher needs the scheduler to probe room).
+                self._create_background_task(
+                    self._load_model(model_id),
+                    task_name=f"load:{model_id}",
+                    model_id=model_id,
+                )
+                continue
             self._create_background_task(
-                self._load_model(model_id),
-                task_name=f"load:{model_id}",
+                self._watch_and_reload(model_id, immediate=True),
+                task_name=f"watch-and-reload:{model_id}",
                 model_id=model_id,
             )
 
@@ -4807,7 +4824,7 @@ class ModelManager:
                 self._runtime_transitions.pop(base_id, None)
             await self._publish_event(base_id, "runtime_downsize_complete")
 
-    async def _watch_and_reload(self, model_id: str) -> None:
+    async def _watch_and_reload(self, model_id: str, *, immediate: bool = False) -> None:
         """Reclaim the GPU for a soft-pinned model as soon as there is room.
 
         **No deadline on purpose.** This used to give up after
@@ -4833,16 +4850,21 @@ class ModelManager:
             return
         self._pin_reload_watchers.add(model_id)
         try:
-            await self._watch_and_reload_loop(model_id)
+            await self._watch_and_reload_loop(model_id, immediate=immediate)
         finally:
             self._pin_reload_watchers.discard(model_id)
 
-    async def _watch_and_reload_loop(self, model_id: str) -> None:
+    async def _watch_and_reload_loop(self, model_id: str, *, immediate: bool = False) -> None:
+        # CONFIGURED: never loaded since startup (the startup autoload uses
+        # this same polite path, see _autoload_pinned). ``immediate`` skips the
+        # first poll interval for that first attempt.
+        waiting = {ModelStatus.UNLOADED, ModelStatus.CONFIGURED}
+        skip_sleep = immediate
         while not self._stopped and model_id in self._states:
             state = self._states.get(model_id)
             if not state or state.load_policy != LoadPolicy.PIN:
                 return
-            if state.status != ModelStatus.UNLOADED:
+            if state.status not in waiting:
                 return
             # A caller (e.g. ModelManager.ensure_vram_free, on behalf of a
             # service like Hunyuan/TRELLIS.2) may have asked to hold off
@@ -4851,13 +4873,11 @@ class ModelManager:
             if suppressed_until is not None and datetime.now(UTC) < suppressed_until:
                 await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
                 continue
-            await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
+            if not skip_sleep:
+                await asyncio.sleep(max(1, int(settings.pin_reload_poll_interval_s)))
+            skip_sleep = False
             state = self._states.get(model_id)
-            if (
-                not state
-                or state.load_policy != LoadPolicy.PIN
-                or state.status != ModelStatus.UNLOADED
-            ):
+            if not state or state.load_policy != LoadPolicy.PIN or state.status not in waiting:
                 return
             if state.reload_suppressed_until and datetime.now(UTC) < state.reload_suppressed_until:
                 continue
