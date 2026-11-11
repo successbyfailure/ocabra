@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.8 — 2026-11-11
+
+### Arreglos
+
+- **0.70.7 rompió la carga de los presets de dos GPU con visión** (por ejemplo
+  `qwen3.8:27b` con contexto `extended`): respondían 503 `Failed to load model
+  ... exited with rc=2`. Durante unos minutos de esta noche. Arreglado.
+
+**Acción:** ninguna. Si recibiste ese 503, repite la petición.
+
+---
+
 ## 0.70.7 — 2026-11-11
 
 ### Arreglos

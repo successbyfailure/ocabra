@@ -56,6 +56,9 @@ def parse_args() -> argparse.Namespace:
     # LlamaCppLoadConfig.mmproj_model_id docstring for resolution rules.
     parser.add_argument("--mmproj", default=None)
     parser.add_argument("--props", action="store_true")
+    # Which visible device gets the projector (e.g. CUDA1), see
+    # LlamaCppBackend._pick_mmproj_gpu.
+    parser.add_argument("--mmproj-device", default=None)
     # Chat template override forwarded to llama-server. Accepts built-in names
     # (llama3, llama2, chatml, mistral, gemma, …) or a full Jinja string. Needed
     # for GGUFs that ship without a baked ``tokenizer.chat_template`` — see the
@@ -170,6 +173,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--mmproj", args.mmproj])
     if args.props:
         cmd.append("--props")
+    if args.mmproj_device:
+        cmd.extend(["--mmproj-device", args.mmproj_device])
     if args.chat_template:
         cmd.extend(["--chat-template", args.chat_template])
     if args.jinja is not None:

@@ -1176,3 +1176,29 @@ async def test_one_gpu_leaves_the_projector_to_llama_server(tmp_path: Path) -> N
         tmp_path, {"llama_cpp": {"mmproj_model_id": str(mmproj), "vision_mode": "on_demand"}}
     )
     assert "--mmproj-device" not in args
+
+
+@pytest.mark.asyncio
+async def test_the_worker_wrapper_accepts_and_forwards_what_the_backend_emits(
+    tmp_path: Path,
+) -> None:
+    """The backend passes llama-server flags through llama_cpp_worker.py, whose
+    argparse rejects anything it does not declare. 0.70.7 added --mmproj-device
+    to the backend only: every two-GPU vision preset died at load with rc=2."""
+    import sys
+
+    from ocabra.workers.llama_cpp_worker import build_command, parse_args
+
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+    argv, _ = await _capture_two_gpu_load(
+        tmp_path, {"llama_cpp": {"mmproj_model_id": str(mmproj), "vision_mode": "on_demand"}}
+    )
+    worker_argv = argv[2:]  # drop the interpreter and the worker script
+    old = sys.argv
+    sys.argv = ["llama_cpp_worker.py", *worker_argv]
+    try:
+        cmd = build_command(parse_args())
+    finally:
+        sys.argv = old
+    assert cmd[cmd.index("--mmproj-device") + 1] == "CUDA1"
