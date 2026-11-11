@@ -40,6 +40,8 @@ START_CONTEXT = 32768
 #: Other processes may hold this much on a probed GPU without spoiling it.
 _FOREIGN_TOLERANCE_MB = 256
 _DRAIN_TIMEOUT_S = 60.0
+_RELOAD_ATTEMPTS = 4
+_RELOAD_BACKOFF_S = 5.0
 
 
 @dataclass
@@ -398,17 +400,38 @@ class ContextProbeService:
 
     async def _restore(self, base_id, probe_key, pinned_evicted) -> None:
         if probe_key and probe_key in self._mm._states:
+            state = self._mm._states[probe_key]
+            gpus = list(state.current_gpu or [])
+            held = sum(self._mm._worker_vram_by_gpu(state).values())
             try:
+                snapshot = await self._mm._get_vram_free_snapshot(gpus) if gpus else None
                 await self._mm.unload(probe_key, reason="context_probe")
+                # The driver frees a 20 GB worker over a few hw-monitor cycles:
+                # reloading the evicted pins before that gets a 409 (seen live
+                # 2026-11-11: gemma4:26b was left in error on an empty 3090).
+                if gpus and held:
+                    await self._mm._wait_for_vram_released(
+                        held,
+                        baseline_free_mb=snapshot[0] if snapshot else None,
+                        gpu_indices=gpus,
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("context_probe_unload_failed", error=str(exc))
         if base_id:
             self._mm.set_maintenance(base_id, False)
         for model_id in pinned_evicted:
-            try:
-                await self._mm.load(model_id)
-            except Exception as exc:  # noqa: BLE001 - its PIN watcher retries too
-                logger.warning("context_probe_reload_failed", model_id=model_id, error=str(exc))
+            for attempt in range(_RELOAD_ATTEMPTS):
+                try:
+                    await self._mm.load(model_id)
+                    break
+                except Exception as exc:  # noqa: BLE001 - its PIN watcher retries too
+                    logger.warning(
+                        "context_probe_reload_failed",
+                        model_id=model_id,
+                        attempt=attempt + 1,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(_RELOAD_BACKOFF_S)
 
 
 def _step_dict(step: ProbeStep) -> dict:

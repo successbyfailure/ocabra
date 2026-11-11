@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.1 — 2026-11-11
+
+### Arreglos
+
+- **`/ocabra/models` también muestra bien las herramientas y el razonamiento
+  de los modelos de llama.cpp que no están cargados.** La 0.69.0 lo arregló
+  solo en `/v1/models`.
+- **Medir el contexto de un preset ya no deja fuera a los modelos que tuvo que
+  descargar.** Esos modelos se recargaban antes de que la tarjeta hubiera
+  liberado la memoria y se quedaban en error. Ahora oCabra espera a que la
+  memoria quede libre y reintenta la carga.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.0 — 2026-11-11
 
 ### Arreglos

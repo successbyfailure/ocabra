@@ -20,6 +20,8 @@ class FakeManager:
         self.loaded: list[str] = []
         self.ctx = 0
         self._states: dict = {}
+        self.load_failures = 0
+        self.waited_for_release: list[int] = []
         whisper = SimpleNamespace(
             model_id="whisper/turbo",
             status=ModelStatus.LOADED,
@@ -58,7 +60,16 @@ class FakeManager:
         self._states.pop(model_id, None)
 
     async def load(self, model_id):
+        if self.load_failures:
+            self.load_failures -= 1
+            raise RuntimeError("Need 23600 MB VRAM")  # the driver had not freed it yet
         self.loaded.append(model_id)
+
+    async def _get_vram_free_snapshot(self, gpus):
+        return [100]
+
+    async def _wait_for_vram_released(self, released, *, baseline_free_mb=None, gpu_indices=None):
+        self.waited_for_release.append(released)
 
     async def get_state(self, model_id):
         return SimpleNamespace(backend_type="llamacpp_mks")
@@ -106,6 +117,7 @@ async def _run(fake, service, **kw):
             worker_info=SimpleNamespace(pid=4242),
             backend_type="llamacpp_mks",
             backend_model_id="qwen3.8:27b",
+            current_gpu=[1],
         )
         fake._states[key] = state
         fake.probe_overrides = overrides
@@ -176,3 +188,18 @@ async def test_only_one_probe_at_a_time():
             service.start("qwen3.8:27b", "normal", full_validation=False, measure_vision=False)
     finally:
         service._lock.release()
+
+
+@pytest.mark.asyncio
+async def test_evicted_pins_come_back_once_the_probe_worker_is_really_gone(monkeypatch):
+    """2026-11-11 live: gemma4:26b was reloaded right after the probe worker was
+    unloaded, got a 409 because the driver had not freed the 3090 yet, and was
+    left in error on an empty card."""
+    monkeypatch.setattr("ocabra.core.context_probe_service._RELOAD_BACKOFF_S", 0)
+    fake = FakeManager()
+    fake.load_failures = 1
+    job = await _run(fake, _service(fake))
+
+    assert job.status == "done", job.error
+    assert fake.waited_for_release and fake.waited_for_release[0] > 20000
+    assert fake.loaded == ["whisper/turbo"]  # second attempt
