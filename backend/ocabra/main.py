@@ -503,8 +503,10 @@ async def lifespan(app: FastAPI):
     worker_pool.register_backend("diffusers", DiffusersBackend())
     worker_pool.register_backend("mage", MageFlowBackend())
     worker_pool.register_backend("bitnet", BitnetBackend())
-    worker_pool.register_backend("llama_cpp", LlamaCppBackend())
-    worker_pool.register_backend("llamacpp_mks", LlamaCppMksBackend())
+    # The backend reads GPU totals: tensor_split "evenly" and which card gets
+    # the vision projector. Without it both silently did nothing (to 0.70.6).
+    worker_pool.register_backend("llama_cpp", LlamaCppBackend(gpu_manager=gpu_manager))
+    worker_pool.register_backend("llamacpp_mks", LlamaCppMksBackend(gpu_manager=gpu_manager))
     worker_pool.register_backend("ollama", OllamaBackend())
     worker_pool.register_backend("sglang", SGLangBackend())
     worker_pool.register_backend("strata", StrataBackend())

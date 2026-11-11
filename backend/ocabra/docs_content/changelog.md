@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.7 — 2026-11-11
+
+### Arreglos
+
+- **El proyector de visión de 0.70.6 seguía cargándose en la GPU de whisper.**
+  El backend de llama.cpp no recibía el estado de las GPU, así que no sabía cuál
+  era la tarjeta grande. Por la misma causa, `split_strategy: "evenly"` no
+  calculaba el reparto entre tarjetas y lo dejaba en manos de llama.cpp.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.6 — 2026-11-11
 
 ### Arreglos
