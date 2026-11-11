@@ -32,6 +32,11 @@ class RuntimePolicy(BaseModel):
     # from the context proof because GGUF/graph estimators can exceed the
     # physical card even when that concrete runtime has loaded successfully.
     validated_vram_mb: dict[str, int] = Field(default_factory=dict)
+    # Detail of the last applied context probe, by preset: VRAM per GPU at the
+    # maximum, KV cost per 1k tokens per GPU, projector cost, when and how it
+    # was measured. Informative, and the input to sizing a reserve (whisper)
+    # without measuring again.
+    context_probe: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # Overrides settings.runtime_preset_default_output_reservation_tokens for
     # this profile only — see estimate_request_token_budget() /
     # plan_profile_runtime(). Reasoning-heavy profiles (gemma4, qwen3.8) need
@@ -155,6 +160,21 @@ class RuntimePresetResolutionOut(BaseModel):
     fits: bool
     runtime_key: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+class ContextProbeRequest(BaseModel):
+    """Start measuring the largest context a runtime preset fits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_validation: bool = Field(
+        default=False,
+        description="Fill the pool with one long prompt to see the peak in use (slow).",
+    )
+    measure_vision: bool = Field(
+        default=True,
+        description="Load the vision projector at the end to measure what it costs.",
+    )
 
 
 class RuntimePresetBenchmarkRequest(BaseModel):

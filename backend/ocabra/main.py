@@ -647,6 +647,9 @@ async def lifespan(app: FastAPI):
         if diarized_count:
             logger.info("diarized_profiles_seeded", count=diarized_count)
     app.state.profile_registry = profile_registry
+    from ocabra.core.context_probe_service import ContextProbeService
+
+    app.state.context_probe = ContextProbeService(model_manager, profile_registry, worker_pool)
     # Late-bind profile_registry into the compile manager (created earlier so
     # it can start recovering stale jobs) so completed engines get a default
     # profile alongside their model_config registration.

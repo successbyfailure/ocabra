@@ -716,7 +716,26 @@ class LlamaCppBackend(BackendInterface):
             raise ValueError(f"Vision is disabled for llama.cpp model '{model_id}'")
         if mode == "enabled" or model_id in self._vision_active:
             return
+        await self.activate_vision(model_id)
 
+    def vision_projector_path(self, model_id: str) -> str | None:
+        """The mmproj an on-demand worker would load, or None without vision."""
+        options = self._model_configs.get(model_id) or {}
+        if str(options.get("vision_mode") or "disabled") == "disabled":
+            return None
+        path = options.get("mmproj_path")
+        return str(path) if path else None
+
+    def vision_is_active(self, model_id: str) -> bool:
+        options = self._model_configs.get(model_id) or {}
+        return str(options.get("vision_mode")) == "enabled" or model_id in self._vision_active
+
+    async def activate_vision(self, model_id: str) -> None:
+        """Load the vision projector into a running on-demand worker."""
+        options = self._model_configs.get(model_id)
+        if options is None:
+            raise KeyError(f"No llama.cpp config for model '{model_id}'")
+        lock = self._vision_locks.setdefault(model_id, asyncio.Lock())
         entry = self._processes.get(model_id)
         if entry is None:
             raise KeyError(f"No llama.cpp worker for model '{model_id}'")

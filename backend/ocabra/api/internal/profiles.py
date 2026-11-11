@@ -20,6 +20,7 @@ from ocabra.core.runtime_preset_capacity import (
 )
 from ocabra.database import AsyncSessionLocal
 from ocabra.schemas.profiles import (
+    ContextProbeRequest,
     ProfileAliasCreate,
     ProfileAliasOut,
     ProfileClone,
@@ -333,6 +334,178 @@ async def preview_runtime_preset(
     if not rows:
         raise HTTPException(status_code=400, detail="Could not resolve preview")
     return RuntimePresetResolutionOut.model_validate(rows[0]).model_dump(mode="json")
+
+
+def _get_context_probe(request: Request):
+    service = getattr(request.app.state, "context_probe", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="context probe service not available")
+    return service
+
+
+@router.post(
+    "/profiles/{profile_id}/runtime-presets/{preset_key}/context-probe",
+    summary="Measure the largest context a runtime preset fits",
+    status_code=202,
+    responses={
+        404: {"description": "Profile or preset not found"},
+        409: {"description": "Another context probe is running"},
+    },
+)
+async def start_context_probe(
+    profile_id: str,
+    preset_key: str,
+    body: ContextProbeRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Start a context probe for one preset, in the background.
+
+    Loads the preset's model on its GPUs with a small context and grows it in
+    place, measuring real VRAM per GPU, up to ``vram_buffer_mb`` below what
+    each card can hold. The vision projector is not part of the budget.
+
+    **It evicts whatever is loaded on the preset's GPUs** (pinned models come
+    back at the end) and puts the profile's model in maintenance while it runs.
+
+    Parameters:
+        profile_id: the execution profile.
+        preset_key: the runtime preset to measure.
+        body: ``full_validation`` fills the pool with one long prompt to see
+            the peak in use (minutes on large contexts); ``measure_vision``
+            loads the projector at the end to record what it costs.
+
+    Returns:
+        The job (``status``, ``steps`` as they happen, ``result`` when done).
+        Poll ``GET`` on the same path.
+    """
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+    if not any(p.preset_key == preset_key for p in profile.runtime_presets or []):
+        raise HTTPException(status_code=404, detail=f"Preset '{preset_key}' not found")
+    service = _get_context_probe(request)
+    try:
+        job = service.start(
+            profile_id,
+            preset_key,
+            full_validation=body.full_validation,
+            measure_vision=body.measure_vision,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job.to_dict()
+
+
+@router.get(
+    "/profiles/{profile_id}/runtime-presets/{preset_key}/context-probe",
+    summary="Progress and result of the last context probe of a preset",
+    responses={404: {"description": "No probe for this preset"}},
+)
+async def get_context_probe(
+    profile_id: str,
+    preset_key: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Return the last context probe of a preset.
+
+    Parameters:
+        profile_id: the execution profile.
+        preset_key: the runtime preset.
+
+    Returns:
+        The job: ``status`` (preparing, loading, probing, validating, vision,
+        restoring, done, error), ``steps`` (context and MB per GPU of each
+        step), ``evicted`` and, when done, ``result``.
+    """
+    job = _get_context_probe(request).latest(profile_id, preset_key)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No context probe for this preset")
+    return job.to_dict()
+
+
+@router.post(
+    "/profiles/{profile_id}/runtime-presets/{preset_key}/context-probe/apply",
+    summary="Apply the last context probe to the preset",
+    responses={
+        404: {"description": "No finished probe for this preset"},
+        409: {"description": "The probe did not finish successfully"},
+    },
+)
+async def apply_context_probe(
+    profile_id: str,
+    preset_key: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Write the measured maximum into the preset and the profile policy.
+
+    Sets the preset to a fixed context of the measured maximum, and records in
+    ``runtime_policy`` the validated context and VRAM for that preset plus the
+    probe's detail (``context_probe``: MB per GPU, KV cost per 1k tokens, the
+    projector's cost).
+
+    Parameters:
+        profile_id: the execution profile.
+        preset_key: the runtime preset.
+
+    Returns:
+        The updated profile.
+    """
+    job = _get_context_probe(request).latest(profile_id, preset_key)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No context probe for this preset")
+    if job.status != "done" or not job.result:
+        raise HTTPException(status_code=409, detail=f"The probe is '{job.status}', not done")
+    result = job.result
+    pool_tokens = int(result["max_context"])
+    context_tokens = (
+        pool_tokens if job.context_is_pool else max(1, pool_tokens // max(1, job.parallelism))
+    )
+    peak = result.get("peak_mb") or result.get("used_mb") or {}
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+    policy = dict(getattr(profile, "runtime_policy", None) or {})
+    validated_ctx = dict(policy.get("validated_context_tokens") or {})
+    validated_vram = dict(policy.get("validated_vram_mb") or {})
+    probes = dict(policy.get("context_probe") or {})
+    validated_ctx[preset_key] = context_tokens
+    validated_vram[preset_key] = int(sum(int(v) for v in peak.values()))
+    probes[preset_key] = {
+        "pool_tokens": pool_tokens,
+        "context_tokens": context_tokens,
+        "gpu_indices": job.gpu_indices,
+        "used_mb": result.get("used_mb"),
+        "peak_mb": result.get("peak_mb"),
+        "limit_mb": result.get("limit_mb"),
+        "kv_mb_per_1k": result.get("kv_mb_per_1k"),
+        "margin_mb": result.get("margin_mb"),
+        "capped_by": result.get("capped_by"),
+        "full_validated": bool(result.get("full_validated")),
+        "vision": result.get("vision"),
+        "measured_at": result.get("measured_at"),
+    }
+    policy.update(
+        validated_context_tokens=validated_ctx,
+        validated_vram_mb=validated_vram,
+        context_probe=probes,
+    )
+    async with AsyncSessionLocal() as session:
+        try:
+            await registry.update_runtime_preset(
+                session,
+                profile_id,
+                preset_key,
+                {"context_mode": "fixed", "context_tokens": context_tokens},
+            )
+            profile = await registry.update(session, profile_id, {"runtime_policy": policy})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _profile_to_dict(profile)
 
 
 @router.post(
