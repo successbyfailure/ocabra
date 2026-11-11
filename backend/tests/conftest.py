@@ -175,3 +175,13 @@ async def _dispose_db_engine_between_tests():
     from ocabra.database import engine
 
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _pin_autoload_sin_retraso(monkeypatch):
+    """En produccion la autocarga de los PIN espera 60 s tras el arranque; los
+    tests que llaman a ``ModelManager.start()`` la quieren inmediata. Los tests
+    del retraso lo vuelven a fijar con su propio monkeypatch."""
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "pin_autoload_delay_s", 0)

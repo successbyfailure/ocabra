@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.70.10"
+    app_version: str = "0.71.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -581,6 +581,16 @@ class Settings(BaseSettings):
     # harmless since allow_pressure_eviction=False makes that attempt a
     # no-op, but still a wasted attempt worth avoiding).
     pin_reload_poll_interval_s: int = 120
+    # Segundos que espera la autocarga de los PIN tras arrancar el api. Al
+    # reiniciar con carga, la primera peticion y la autocarga peleaban por la
+    # VRAM (las dos cargando a la vez, una desalojando a la otra). Con el
+    # retraso la peticion carga lo que necesita y los PIN entran despues, solo
+    # si siguen descargados y no hay otra carga en marcha. 0 = cargar al
+    # arrancar, como antes.
+    pin_autoload_delay_s: int = 60
+    # Tope de espera adicional a que terminen las cargas en curso antes de
+    # autocargar los PIN; pasado, se cargan igualmente.
+    pin_autoload_max_wait_s: int = 300
     # Tope para el POST /tokenize con el que el planificador consigue un
     # conteo exacto antes de rechazar un prompt por tamano. Corto a
     # proposito: si el worker no contesta ya, se prefiere intentar la

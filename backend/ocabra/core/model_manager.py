@@ -392,6 +392,7 @@ class ModelManager:
         self._eviction_wait_for: dict[str, str] = {}
         self._timeout_counts: dict[str, int] = {}  # model_id -> timeout count
         self._busy_watchdog_task: asyncio.Task | None = None
+        self._pin_autoload_task: asyncio.Task | None = None
         self._vram_watchdog_task: asyncio.Task | None = None
         self._stopped: bool = False
         # Cache of expected load times (seconds) keyed by model_id.
@@ -1542,40 +1543,14 @@ class ModelManager:
         self._create_background_task(
             self.warm_template_capabilities(), task_name="warm-template-capabilities"
         )
-        for model_id, state in self._states.items():
-            # PIN: always preload, never evictable.
-            # WARM: load on first request and then keep resident until VRAM
-            # pressure requires eviction. ON_DEMAND also stays lazy.
-            # A long-lived Ollama pool may already hold the PIN across an API
-            # restart.  Reconciliation above adopts that worker as LOADED;
-            # scheduling another load would move it through LOADING and make
-            # it temporarily invisible to pressure eviction even though it is
-            # still consuming physical VRAM.
-            if state.load_policy == LoadPolicy.PIN and state.status != ModelStatus.LOADED:
-                if state.status == ModelStatus.ERROR:
-                    # Persisted ERROR state can mean last run's backend
-                    # process (and its VRAM lock) is still alive — see
-                    # unload()'s ERROR-handling above. Clear it first so
-                    # the reload below doesn't immediately collide with its
-                    # own stale lock on every restart.
-                    try:
-                        await self.unload(model_id, reason="startup_error_recovery")
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "startup_error_recovery_unload_failed",
-                            model_id=model_id,
-                            error=str(exc),
-                        )
-                logger.info(
-                    "auto_loading_managed_model",
-                    model_id=model_id,
-                    policy=state.load_policy.value,
-                )
-                self._create_background_task(
-                    self._load_model(model_id),
-                    task_name=f"load:{model_id}",
-                    model_id=model_id,
-                )
+        # PIN: always preload, never evictable. WARM: load on first request
+        # and then keep resident until VRAM pressure requires eviction.
+        # ON_DEMAND also stays lazy. The PIN preload is delayed (see
+        # _autoload_pinned) so the first request after a restart does not
+        # fight it for VRAM.
+        self._pin_autoload_task = self._create_background_task(
+            self._autoload_pinned(), task_name="pin-autoload"
+        )
         # Bare asyncio.create_task here previously: if either loop ever died from
         # an exception the `while True` structure doesn't catch (or the task got
         # GC'd for lack of a live reference before this assignment completed),
@@ -1591,10 +1566,74 @@ class ModelManager:
             self._vram_watchdog(), task_name="vram-watchdog"
         )
 
+    def _pinned_needing_load(self) -> list[str]:
+        # A long-lived Ollama pool may already hold the PIN across an API
+        # restart. Reconciliation adopts that worker as LOADED; scheduling
+        # another load would move it through LOADING and make it temporarily
+        # invisible to pressure eviction even though it is still consuming
+        # physical VRAM. A request may also have loaded (or be loading) the
+        # PIN during the startup delay.
+        return [
+            model_id
+            for model_id, state in self._states.items()
+            if state.load_policy == LoadPolicy.PIN
+            and state.status not in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}
+            and model_id not in self._load_in_progress
+        ]
+
+    async def _autoload_pinned(self) -> None:
+        """Load the PIN models some time after startup.
+
+        Restarting with traffic used to start every PIN load at t=0 while the
+        first request was also loading its model: two loads racing for the
+        same VRAM, one evicting the other. Now the PIN loads wait
+        ``pin_autoload_delay_s`` and then for any load in progress to finish
+        (up to ``pin_autoload_max_wait_s``), so a request that arrives right
+        after the restart places its model first and the PINs fit around it
+        through the normal load path.
+        """
+        delay = max(0, int(settings.pin_autoload_delay_s))
+        # Persisted ERROR can mean last run's backend process (and its VRAM
+        # lock) is still alive — see unload()'s ERROR handling. Clear it now,
+        # not after the delay, so the stale lock does not mislead the loads
+        # requests make in the meantime.
+        for model_id, state in list(self._states.items()):
+            if state.load_policy == LoadPolicy.PIN and state.status == ModelStatus.ERROR:
+                try:
+                    await self.unload(model_id, reason="startup_error_recovery")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "startup_error_recovery_unload_failed",
+                        model_id=model_id,
+                        error=str(exc),
+                    )
+        if delay and self._pinned_needing_load():
+            logger.info("pin_autoload_delayed", seconds=delay, models=self._pinned_needing_load())
+            await asyncio.sleep(delay)
+        waited = 0.0
+        max_wait = max(0, int(settings.pin_autoload_max_wait_s))
+        while self._load_in_progress and waited < max_wait and not self._stopped:
+            await asyncio.sleep(2)
+            waited += 2
+        if self._stopped:
+            return
+        for model_id in self._pinned_needing_load():
+            logger.info(
+                "auto_loading_managed_model",
+                model_id=model_id,
+                policy=LoadPolicy.PIN.value,
+                waited_for_loads_s=waited,
+            )
+            self._create_background_task(
+                self._load_model(model_id),
+                task_name=f"load:{model_id}",
+                model_id=model_id,
+            )
+
     async def stop(self) -> None:
         """Signal all background loops to exit."""
         self._stopped = True
-        for task_attr in ("_busy_watchdog_task", "_vram_watchdog_task"):
+        for task_attr in ("_busy_watchdog_task", "_vram_watchdog_task", "_pin_autoload_task"):
             task = getattr(self, task_attr, None)
             if task:
                 task.cancel()

@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.71.0 — 2026-11-11
+
+### Cambios
+
+- **Los modelos fijados (PIN) se cargan un minuto después de arrancar.** Antes
+  empezaban a cargar en el mismo instante del arranque, y si en ese momento
+  llegaba una petición, su modelo y los fijados se peleaban por la VRAM: la
+  petición podía esperar mucho más de lo normal, o fallar, mientras
+  un modelo desalojaba a otro. Ahora la petición carga primero lo que
+  necesita, y los fijados entran después, cuando acaba esa carga y solo si
+  siguen descargados. Durante ese primer minuto, pedir un modelo fijado lo
+  carga en el acto, como cualquier otro, así que la primera petición a uno de
+  ellos tras un reinicio puede tardar lo que tarde en cargarse.
+
+---
+
 ## 0.70.10 — 2026-11-11
 
 ### Cambios
