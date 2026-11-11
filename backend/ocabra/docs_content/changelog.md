@@ -16,6 +16,42 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.0 — 2026-11-11
+
+### Arreglos
+
+- **La primera imagen ya no tumba un modelo que tiene la tarjeta llena.** Antes,
+  si un modelo de llama.cpp ocupaba toda la tarjeta y llegaba una imagen, el
+  proyector de visión no cabía y el worker se caía. El cliente recibía la
+  conexión cortada (`incomplete chunked read`), como le pasó a `gemma4:26b` el
+  10 de noviembre. Ahora oCabra reduce primero el contexto lo justo para que
+  quepa el proyector y luego lo carga. Si ni así cabe, la petición falla con un
+  error que lo explica y el modelo sigue vivo para las peticiones sin imagen.
+- **Transcribir con diarización ya no se queda sin memoria si la RTX 3060 está
+  llena.** Diarizar cuesta unos 3,4 GB más que transcribir. Antes de una
+  transcripción que lo necesita, oCabra reduce el contexto del modelo grande
+  que comparte la tarjeta. El diarizador se descarga tras 5 minutos sin
+  diarizar y devuelve esa memoria.
+
+### Nuevo
+
+- **Medición del contexto máximo de un preset**, desde la página de modelos
+  (perfil → presets → «Medir contexto máximo») o con
+  `POST /ocabra/profiles/{perfil}/runtime-presets/{preset}/context-probe`.
+  Mide en la tarjeta real hasta dónde cabe el contexto, dejando el margen de
+  seguridad (`vram_buffer_mb`). Mientras mide, descarga lo que haya en esas
+  GPU y el modelo responde `503` con `Retry-After`. «Aplicar» lo guarda en el
+  preset.
+- **Los presets de dos tarjetas medidos dejan sitio a Whisper en la RTX 3060.**
+  Arrancan con el contexto que deja libre la reserva (2.700 MB por defecto) y
+  crecen hasta el máximo medido solo cuando una petición lo pide. A los 120 s
+  sin peticiones vuelven al contexto de arranque.
+
+**Acción:** ninguna. Si una petición pide más contexto del que el modelo tiene
+en ese momento, la primera vez tarda unos segundos más mientras crece.
+
+---
+
 ## 0.69.0 — 2026-11-11
 
 ### Cambios de comportamiento
