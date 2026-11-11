@@ -1026,7 +1026,9 @@ async def load_model(
             overrides,
             preferred_gpu,
             load_policy,
-        ) = await resolve_realtime_llm_runtime_plan(model_id, profile_registry, mm)
+        ) = await resolve_realtime_llm_runtime_plan(
+            model_id, profile_registry=profile_registry, model_manager=mm
+        )
     try:
         if worker_key == model_id:
             updated = await mm.load(model_id)

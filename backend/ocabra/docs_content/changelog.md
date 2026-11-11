@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.68.3 — 2026-11-11
+
+### Arreglos
+
+- **«Cargar» volvía a fallar en los modelos con presets.** La 0.68.2 devolvía
+  un 500 en vez de cargar el preset por defecto. No descargaba nada.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.68.2 — 2026-11-11
 
 ### Arreglos

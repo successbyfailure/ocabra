@@ -3,7 +3,7 @@ import struct
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
 
@@ -1154,12 +1154,17 @@ async def test_load_button_loads_the_default_preset_worker(monkeypatch):
     )
     request, mm = _load_request({base.model_id: base})
     plan = ("llamacpp_mks/ornith-1.5:35b::2c258fcb7706", {"_runtime": {}}, 1, "on_demand")
+    # autospec: the mocks reject calls the real functions would reject (a
+    # positional profile_registry got a TypeError in production 2026-11-11).
+    from ocabra.api.openai import _deps, realtime
+
     monkeypatch.setattr(
-        "ocabra.api.openai.realtime.resolve_realtime_llm_runtime_plan",
-        AsyncMock(return_value=plan),
+        realtime,
+        "resolve_realtime_llm_runtime_plan",
+        create_autospec(realtime.resolve_realtime_llm_runtime_plan, return_value=plan),
     )
-    ensure = AsyncMock()
-    monkeypatch.setattr("ocabra.api.openai._deps.ensure_worker_loaded", ensure)
+    ensure = create_autospec(_deps.ensure_worker_loaded)
+    monkeypatch.setattr(_deps, "ensure_worker_loaded", ensure)
     monkeypatch.setattr(
         models_api, "_overlay_loaded_derived_state", AsyncMock(side_effect=lambda _mm, s: s)
     )
@@ -1186,9 +1191,15 @@ async def test_load_button_without_presets_loads_the_model_itself(monkeypatch):
         status=ModelStatus.CONFIGURED,
     )
     request, mm = _load_request({base.model_id: base})
+    from ocabra.api.openai import realtime
+
     monkeypatch.setattr(
-        "ocabra.api.openai.realtime.resolve_realtime_llm_runtime_plan",
-        AsyncMock(return_value=(base.model_id, None, None, None)),
+        realtime,
+        "resolve_realtime_llm_runtime_plan",
+        create_autospec(
+            realtime.resolve_realtime_llm_runtime_plan,
+            return_value=(base.model_id, None, None, None),
+        ),
     )
 
     await models_api.load_model(base.model_id, request)
