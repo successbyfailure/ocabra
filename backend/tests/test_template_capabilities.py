@@ -96,3 +96,21 @@ async def test_a_loaded_model_keeps_what_its_worker_reported(tmp_path, monkeypat
     caps, source = resolve_display_capabilities(state)
     assert source == "live"
     assert caps["tools"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_listing_reads_the_template_even_without_the_startup_warm_up(
+    tmp_path, monkeypatch
+):
+    """0.70.1 in production: the startup warm-up left the cache empty and the
+    list kept the stale cached capabilities. The list now reads on demand."""
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import ensure_template_caps
+
+    monkeypatch.setattr(mm_module, "_TEMPLATE_CAPS_BY_FILE", {})
+    state = _cold_flint(_gguf(tmp_path / "flint.gguf", FLINT_LIKE))
+    state.capabilities = BackendCapabilities(chat=True, tools=False, reasoning=False)
+
+    assert await ensure_template_caps(state) == {"tools": True, "reasoning": True}
+    caps, _ = resolve_display_capabilities(state)
+    assert caps["tools"] is True and caps["reasoning"] is True

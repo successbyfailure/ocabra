@@ -2153,10 +2153,10 @@ async def _serialize_model_state(
     item = state.to_dict()
     # A cold llama.cpp model lists the tools/reasoning its own GGUF template
     # declares, as /v1/models does (flint:40b showed both off, 2026-11-11).
-    from ocabra.core.model_manager import ModelStatus, _template_caps_for
+    from ocabra.core.model_manager import ModelStatus, ensure_template_caps
 
     if state.status != ModelStatus.LOADED and isinstance(item.get("capabilities"), dict):
-        template_caps = _template_caps_for(state)
+        template_caps = await ensure_template_caps(state)
         if template_caps and item["capabilities"].get("chat"):
             item["capabilities"] = {**item["capabilities"], **template_caps}
     # Live capability state, as opposed to the static "supports vision" flag.

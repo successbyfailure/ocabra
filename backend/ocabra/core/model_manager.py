@@ -1526,22 +1526,13 @@ class ModelManager:
         ``resolve_display_capabilities`` uses it for models that are not
         loaded, so the list shows what the model really supports.
         """
-        from pathlib import Path
-
-        from ocabra.registry.local_scanner import gguf_template_capabilities
-
+        read = failed = 0
         for state in list(self._states.values()):
-            caps = None
-            if is_llama_cpp_family(state.backend_type or ""):
-                section = (state.extra_config or {}).get("llama_cpp")
-                path = section.get("model_path") if isinstance(section, dict) else None
-                if path and str(path) not in _TEMPLATE_CAPS_BY_FILE:
-                    try:
-                        caps = await asyncio.to_thread(gguf_template_capabilities, Path(str(path)))
-                    except Exception as exc:  # noqa: BLE001 - display hint only
-                        logger.debug("template_caps_read_failed", path=path, error=str(exc))
-                    if caps:
-                        _TEMPLATE_CAPS_BY_FILE[str(path)] = caps
+            if await ensure_template_caps(state) is not None:
+                read += 1
+            elif _template_path(state):
+                failed += 1
+        logger.info("template_capabilities_warmed", models=read, unreadable=failed)
 
     async def start(self) -> None:
         await self._load_configs_from_db()
@@ -5725,7 +5716,7 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
 _TEMPLATE_CAPS_BY_FILE: dict[str, dict[str, bool]] = {}
 
 
-def _template_caps_for(state: "ModelState") -> dict[str, bool] | None:
+def _template_path(state: "ModelState") -> str | None:
     if not is_llama_cpp_family(state.backend_type or ""):
         return None
     section = (
@@ -5734,7 +5725,34 @@ def _template_caps_for(state: "ModelState") -> dict[str, bool] | None:
         else None
     )
     path = section.get("model_path") if isinstance(section, dict) else None
-    return _TEMPLATE_CAPS_BY_FILE.get(str(path)) if path else None
+    return str(path) if path else None
+
+
+def _template_caps_for(state: "ModelState") -> dict[str, bool] | None:
+    path = _template_path(state)
+    return _TEMPLATE_CAPS_BY_FILE.get(path) if path else None
+
+
+async def ensure_template_caps(state: "ModelState") -> dict[str, bool] | None:
+    """The template capabilities of a llama.cpp model, reading its GGUF once
+    (in a thread) when they are not cached yet."""
+    from pathlib import Path
+
+    from ocabra.registry.local_scanner import gguf_template_capabilities
+
+    path = _template_path(state)
+    if not path:
+        return None
+    if path in _TEMPLATE_CAPS_BY_FILE:
+        return _TEMPLATE_CAPS_BY_FILE[path]
+    try:
+        caps = await asyncio.to_thread(gguf_template_capabilities, Path(path))
+    except Exception as exc:  # noqa: BLE001 - display hint only
+        logger.info("template_caps_read_failed", path=path, error=str(exc))
+        caps = None
+    if caps:
+        _TEMPLATE_CAPS_BY_FILE[path] = caps
+    return caps
 
 
 def resolve_display_capabilities(state: "ModelState") -> tuple[dict, str]:

@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.2 — 2026-11-11
+
+### Arreglos
+
+- **Las capacidades de los modelos no cargados ahora sí salen de su
+  plantilla.** En la 0.70.1 los listados seguían mostrando las capacidades
+  antiguas (`flint:40b` sin herramientas ni razonamiento). Ahora se leen de la
+  plantilla del modelo la primera vez que hacen falta.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.1 — 2026-11-11
 
 ### Arreglos

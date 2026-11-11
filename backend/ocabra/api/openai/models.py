@@ -232,6 +232,7 @@ async def list_models(
     from ocabra.core.model_manager import (
         ModelStatus,
         configured_reasoning_default,
+        ensure_template_caps,
         resolve_display_capabilities,
     )
 
@@ -287,6 +288,7 @@ async def list_models(
         local_model_ids.add(profile.base_model_id)
         local_profile_ids.add(profile.profile_id)
 
+        await ensure_template_caps(base_state)
         capabilities, capabilities_source = resolve_display_capabilities(base_state)
         recommended_output = _resolve_recommended_output_tokens(model_manager, profile)
         context_length = int(capabilities.get("context_length") or 0)
