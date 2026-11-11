@@ -1619,6 +1619,13 @@ async def _record_stat(
                     "predictedTokensPerSecond": predicted_tokens_per_second,
                     "ttftMs": getattr(telemetry_now, "ttft_ms", None),
                     "queueMs": getattr(telemetry_now, "queue_ms", None),
+                    # Transcripciones: con durationMs da el factor de tiempo real.
+                    "audioSeconds": (
+                        round(float(work_size_meta["audio_seconds"]), 1)
+                        if isinstance(work_size_meta, dict)
+                        and isinstance(work_size_meta.get("audio_seconds"), (int, float))
+                        else None
+                    ),
                 }
             )
         except Exception:  # noqa: BLE001 — el feed nunca rompe el registro

@@ -470,3 +470,51 @@ describe("recién terminadas: modelo correcto entre backends", () => {
     expect(screen.getByTestId("requests-finished").textContent).toContain("Qwen 3.8 27B (llama.cpp)")
   })
 })
+
+describe("velocidad de whisper en vivo", () => {
+  it("formatea reloj, factor y avance", async () => {
+    const { fmtClock, fmtRealtime, audioProgressText } = await import("@/components/dashboard/format")
+    expect(fmtClock(200)).toBe("3:20")
+    expect(fmtClock(3725)).toBe("1:02:05")
+    expect(fmtRealtime(14.2)).toBe("×14")
+    expect(fmtRealtime(0.8)).toBe("×0.8")
+    expect(
+      audioProgressText({ phase: "transcribing", totalSeconds: 720, processedSeconds: 200, pct: 27.8, realtimeFactor: 14 }),
+    ).toBe("transcribiendo 3:20 / 12:00 (28%) · ×14 tiempo real")
+    expect(audioProgressText({ phase: "diarizing", totalSeconds: 720, processedSeconds: 720, pct: 100, realtimeFactor: 14 })).toBe(
+      "diarizando (quién habla)",
+    )
+  })
+
+  it("la fila activa y la terminada muestran el tiempo real", () => {
+    render(
+      <RequestsSection
+        models={{}}
+        activity={{
+          "whisper/whisper-large-v3-turbo": {
+            inFlight: 1,
+            oldestSeconds: 14,
+            slots: null,
+            requests: [
+              req({
+                requestId: "w", username: "assistant-android", requestKind: "audio_transcription", stage: "processing",
+                streaming: false,
+                audio: { phase: "transcribing", totalSeconds: 720, processedSeconds: 200, pct: 27.8, realtimeFactor: 14, segments: 7 },
+              }),
+            ],
+          },
+        }}
+        finished={[
+          {
+            requestId: "t", model: "whisper-large-v3-turbo", backendType: "whisper", gpuIndex: 0,
+            requestKind: "audio_transcription", statusCode: 200, error: null, username: "ana", apiKeyName: null,
+            durationMs: 51_000, inputTokens: null, cachedTokens: null, outputTokens: 1200, promptTokensPerSecond: null,
+            predictedTokensPerSecond: null, ttftMs: null, queueMs: null, audioSeconds: 720, endedAt: 1, endedAgoMs: 1000,
+          },
+        ]}
+      />,
+    )
+    expect(screen.getByTestId("requests-active").textContent).toContain("transcribiendo 3:20 / 12:00 (28%) · ×14 tiempo real")
+    expect(screen.getByTestId("requests-finished").textContent).toContain("audio 12:00 · ×14 tiempo real")
+  })
+})

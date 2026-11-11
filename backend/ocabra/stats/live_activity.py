@@ -401,6 +401,14 @@ def _live_remaining_ms(detail: dict[str, Any], rates: dict[str, Any] | None) -> 
             expected_out = None
     hist_gen = (rates or {}).get("generation")
     stage = detail.get("stage")
+    audio = detail.get("audio") or {}
+    if (
+        audio.get("phase") == "transcribing"
+        and audio.get("realtimeFactor")
+        and audio.get("totalSeconds")
+    ):
+        left_audio = max(0.0, audio["totalSeconds"] - (audio.get("processedSeconds") or 0.0))
+        return int(left_audio / audio["realtimeFactor"] * 1000)
     if (
         stage == "prefill"
         and prompt.get("source") == "live"
@@ -1027,9 +1035,12 @@ def mark_stalls(details: list[dict[str, Any]]) -> None:
     for detail in details:
         stage = detail.get("stage")
         live_prompt = (detail.get("prompt") or {}).get("source") == "live"
+        transcribing = (detail.get("audio") or {}).get("phase") == "transcribing"
         watched = (
-            stage == "generating" and (detail.get("streaming") or detail.get("progressTracked"))
-        ) or (stage == "prefill" and live_prompt)
+            (stage == "generating" and (detail.get("streaming") or detail.get("progressTracked")))
+            or (stage == "prefill" and live_prompt)
+            or transcribing
+        )
         detail["stalled"] = bool(
             watched and (detail.get("lastActivitySecondsAgo") or 0) >= STALL_SECONDS
         )
@@ -1181,3 +1192,56 @@ async def ram_by_model(worker_pids: dict[str, list[int]]) -> dict[str, int]:
             _ram_cache[model] = (now, mb)
             result[model] = mb
     return {m: mb for m, mb in result.items() if mb > 0}
+
+
+# ── whisper (faster-whisper): avance real de la transcripción ───────────────
+
+_AUDIO_TTL_S = 1.0
+_audio_cache: dict[int, tuple[float, dict[str, dict[str, Any]]]] = {}
+
+
+async def whisper_progress(port: int | None) -> dict[str, dict[str, Any]]:
+    """``GET /progress`` del worker de whisper: avance por id de petición."""
+    if not port:
+        return {}
+    now = time.monotonic()
+    cached = _audio_cache.get(port)
+    if cached and now - cached[0] < _AUDIO_TTL_S:
+        return cached[1]
+    jobs: dict[str, dict[str, Any]] = {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(0.8)) as client:
+            resp = await client.get(f"http://127.0.0.1:{port}/progress")
+            if resp.status_code == 200 and isinstance(resp.json().get("jobs"), dict):
+                jobs = resp.json()["jobs"]
+    except (httpx.HTTPError, OSError, ValueError, AttributeError):
+        jobs = {}
+    _audio_cache[port] = (now, jobs)
+    return jobs
+
+
+def apply_audio_progress(details: list[dict[str, Any]], jobs: dict[str, dict[str, Any]]) -> None:
+    """Avance y velocidad respecto al tiempo real de cada transcripción.
+
+    ``realtimeFactor``: segundos de audio transcritos por segundo de reloj
+    desde que empezó a transcribir (×14 = 14 veces más rápido que el audio).
+    En la fase de diarización no hay avance que medir.
+    """
+    for detail in details:
+        job = jobs.get(detail["requestId"])
+        if not job:
+            continue
+        total = job.get("audioSeconds")
+        processed = float(job.get("processedSeconds") or 0.0)
+        elapsed_s = (job.get("elapsedMs") or 0) / 1000
+        rate = round(processed / elapsed_s, 1) if elapsed_s >= 1 and processed > 0 else None
+        detail["audio"] = {
+            "phase": job.get("phase"),
+            "totalSeconds": total,
+            "processedSeconds": round(processed, 1),
+            "pct": round(min(100.0, 100.0 * processed / total), 1) if total else None,
+            "realtimeFactor": rate,
+            "segments": job.get("segments", 0),
+        }
+        detail["lastActivitySecondsAgo"] = round((job.get("lastUpdateMsAgo") or 0) / 1000, 1)
+        detail["progressTracked"] = True

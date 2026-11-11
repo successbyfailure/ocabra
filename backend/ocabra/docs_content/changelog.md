@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.73.0 — 2026-11-11
+
+### Cambios
+
+- **Avance y velocidad de las transcripciones en curso con whisper.**
+  `/ocabra/models/activity` añade a cada transcripción en curso un objeto
+  `audio`. Trae la fase (`transcribing` o `diarizing`), la duración total del
+  audio, los segundos ya transcritos, el porcentaje y `realtimeFactor`: los
+  segundos de audio por segundo de reloj (14 = catorce veces más rápido que
+  el audio). El tiempo restante se calcula con esa velocidad. Solo funciona
+  con el backend faster-whisper; whisper.cpp no publica su avance. Durante la
+  diarización no hay porcentaje.
+- **Duración del audio en las transcripciones terminadas.**
+  `/ocabra/stats/recent` y el feed `finished` de la actividad añaden
+  `audioSeconds`. Junto con la duración de la petición da su factor de
+  tiempo real.
+
+---
+
 ## 0.72.3 — 2026-11-11
 
 ### Correcciones

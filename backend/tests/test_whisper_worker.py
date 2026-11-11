@@ -227,3 +227,54 @@ async def test_a_profile_that_always_diarizes_keeps_its_diarizer(monkeypatch):
     await asyncio.sleep(0.05)
     task.cancel()
     assert rt.diarization_pipeline is not None
+
+
+def test_run_transcription_reports_progress_as_segments_decode():
+    """faster-whisper entrega los segmentos al decodificarlos: el fin de cada
+    uno es el avance real. Al terminar de transcribir, todo el audio."""
+    seen: list[float] = []
+    progress: dict = {"phase": "transcribing", "startedMonotonic": 0.0, "updatedMonotonic": 0.0}
+
+    def segments():
+        for i, end in enumerate((30.0, 60.0, 95.5)):
+            # Lo que había apuntado al pedir este segmento.
+            seen.append(progress.get("processedSeconds", 0.0))
+            yield SimpleNamespace(start=end - 30, end=end, text=f" t{i}", no_speech_prob=0.0, avg_logprob=-0.1, words=None)
+
+    class FakeModel:
+        def transcribe(self, *args, **kwargs):
+            return segments(), SimpleNamespace(duration=120.0, language="es", language_probability=0.99)
+
+    result = whisper_worker._run_transcription(
+        "/tmp/x.wav", FakeModel(), "es", None, 0.0, False, None, ["segment"], progress=progress
+    )
+    assert seen == [0.0, 30.0, 60.0]
+    assert progress["audioSeconds"] == 120.0
+    assert progress["segments"] == 3
+    # Tras el último segmento (VAD se salta el silencio final): todo el audio.
+    assert progress["processedSeconds"] == 120.0
+    assert len(result["segments"]) == 3
+
+
+def test_progress_endpoint_lists_jobs():
+    # Construir la app no carga el modelo: eso lo hace el lifespan al arrancar.
+    app = whisper_worker.create_app("tiny", [])
+    whisper_worker.runtime.progress.clear()
+    whisper_worker.runtime.progress["req-1"] = {
+        "phase": "transcribing",
+        "audioSeconds": 120.0,
+        "processedSeconds": 30.0,
+        "segments": 1,
+        "startedMonotonic": whisper_worker.time.monotonic() - 2,
+        "updatedMonotonic": whisper_worker.time.monotonic() - 1,
+    }
+    import asyncio
+    import json
+
+    routes = {r.path: r for r in app.routes}
+    assert "/progress" in routes
+    jobs = json.loads(asyncio.run(routes["/progress"].endpoint()).body)["jobs"]
+    assert jobs["req-1"]["processedSeconds"] == 30.0
+    assert jobs["req-1"]["audioSeconds"] == 120.0
+    assert 1500 <= jobs["req-1"]["elapsedMs"] <= 3500
+    whisper_worker.runtime.progress.clear()

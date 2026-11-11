@@ -1030,3 +1030,66 @@ def test_only_host_ram_backends_are_measured():
     assert "strata" in la.HOST_RAM_BACKENDS
     # En llama.cpp el RSS incluye los pesos mapeados ya copiados a la GPU.
     assert "llamacpp_mks" not in la.HOST_RAM_BACKENDS
+
+
+# ── 2026-11-11: velocidad de whisper en vivo ────────────────────────────────
+
+
+def test_audio_progress_gives_pct_and_realtime_factor():
+    """12 min de audio, 3:20 transcritos en 14,3 s → ×14 tiempo real."""
+    d = {"requestId": "w", "stage": "processing", "lastActivitySecondsAgo": 40.0}
+    jobs = {
+        "w": {
+            "phase": "transcribing",
+            "audioSeconds": 720.0,
+            "processedSeconds": 200.0,
+            "segments": 7,
+            "elapsedMs": 14_300,
+            "lastUpdateMsAgo": 900,
+        },
+    }
+    la.apply_audio_progress([d], jobs)
+    assert d["audio"]["pct"] == pytest.approx(27.8, abs=0.1)
+    assert d["audio"]["realtimeFactor"] == 14.0
+    assert d["lastActivitySecondsAgo"] == 0.9
+    other = {"requestId": "otra", "stage": "processing"}
+    la.apply_audio_progress([other], jobs)
+    assert "audio" not in other
+
+
+@pytest.mark.asyncio
+async def test_transcription_remaining_uses_live_realtime_factor():
+    la._estimate_cache.clear()
+    d = {
+        "requestId": "w",
+        "stage": "processing",
+        "elapsedMs": 14_300,
+        "admittedAfterMs": 0,
+        "maxOutputTokens": None,
+        "prompt": {"totalTokens": None, "source": "estimate"},
+        "audio": {
+            "phase": "transcribing",
+            "totalSeconds": 720.0,
+            "processedSeconds": 200.0,
+            "realtimeFactor": 14.0,
+        },
+    }
+    await la.attach_estimates([d], estimator=None, model_id="m", backend_type="whisper", slots=None)
+    # 520 s de audio a ×14 = 37,1 s.
+    assert d["estimatedRemainingMs"] == 37_142
+
+
+def test_transcription_stall_is_watched_but_diarizing_is_not():
+    transcribing = {
+        "stage": "processing",
+        "lastActivitySecondsAgo": 20.0,
+        "audio": {"phase": "transcribing"},
+    }
+    diarizing = {
+        "stage": "processing",
+        "lastActivitySecondsAgo": 60.0,
+        "audio": {"phase": "diarizing"},
+    }
+    la.mark_stalls([transcribing, diarizing])
+    assert transcribing["stalled"] is True
+    assert diarizing["stalled"] is False

@@ -434,6 +434,15 @@ async def transcriptions(
                                 )
                             },
                             data=form_data,
+                            # El worker apunta el avance bajo este id
+                            # (GET /progress) y el dashboard lo casa con la
+                            # petición en vuelo. ``worker`` es el resuelto,
+                            # también si es el gemelo -diarized.
+                            headers=(
+                                {"X-Ocabra-Request-Id": inflight_request_id}
+                                if isinstance(inflight_request_id, str) and inflight_request_id
+                                else None
+                            ),
                         )
                         resp.raise_for_status()
                 break

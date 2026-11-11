@@ -533,6 +533,20 @@ async def build_models_activity(request: Any) -> dict:
                     live_activity.apply_slot_progress(requests_detail, slots_now, now=time.time())
                 except Exception:  # noqa: BLE001 — sin slots, se queda con lo estimado
                     pass
+            # whisper: avance real de cada transcripción desde /progress de
+            # sus workers (también el gemelo -diarized, que va por otro
+            # worker key y otro puerto).
+            if state.backend_type == "whisper" and requests_detail:
+                get_worker = getattr(worker_pool, "get_worker", None)
+                audio_jobs: dict = {}
+                for key in keys:
+                    info = get_worker(key) if callable(get_worker) else None
+                    if info is not None and getattr(info, "port", None):
+                        try:
+                            audio_jobs.update(await live_activity.whisper_progress(info.port))
+                        except Exception:  # noqa: BLE001 — sin avance, se queda estimado
+                            pass
+                live_activity.apply_audio_progress(requests_detail, audio_jobs)
             requests_detail.sort(
                 key=lambda d: (
                     d["stage"] == "queued",

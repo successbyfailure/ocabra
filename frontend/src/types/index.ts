@@ -774,6 +774,16 @@ export interface ActiveRequestProgress {
    *  modelo y se cuenta hasta su max_tokens. */
   remainingIsUpperBound?: boolean;
   queueWaitEstimateMs?: number | null;
+  /** Transcripción (faster-whisper): avance real del audio y velocidad
+   *  respecto al tiempo real (×N = N veces más rápido que el audio). */
+  audio?: {
+    phase: "transcribing" | "diarizing" | null;
+    totalSeconds: number | null;
+    processedSeconds: number;
+    pct: number | null;
+    realtimeFactor: number | null;
+    segments: number;
+  };
   /** El backend ve una señal de vida (tokens o progreso de prefill) y lleva
    *  15 s parada. Las peticiones sin señal que vigilar nunca se marcan. */
   stalled?: boolean;
@@ -812,6 +822,8 @@ export interface FinishedRequest {
   predictedTokensPerSecond: number | null;
   ttftMs: number | null;
   queueMs: number | null;
+  /** Transcripciones: duración del audio (con durationMs, el ×N final). */
+  audioSeconds?: number | null;
   /** Epoch en segundos. */
   endedAt: number;
   endedAgoMs: number;
@@ -1062,6 +1074,8 @@ export interface RecentRequest {
   effectiveContext?: number | null;
   runtimePreset?: string | null;
   gpuIndex?: number | null;
+  /** Transcripciones: duración del audio (con durationMs, el ×N final). */
+  audioSeconds?: number | null;
   runtimeTelemetry?: {
     prompt_tokens_estimate?: number;
     kv_tokens_reserved?: number;

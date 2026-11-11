@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 if TYPE_CHECKING:  # numpy es una dependencia opcional del backend de audio
@@ -69,6 +69,11 @@ class WhisperRuntime:
         self.diarizer_idle_unload_s: float = 300.0
         self.diarizations_in_flight: int = 0
         self.last_diarization_at: float = 0.0
+        # Avance de cada transcripción en curso, por el id de petición que
+        # manda oCabra (cabecera X-Ocabra-Request-Id). faster-whisper entrega
+        # los segmentos a medida que los decodifica, cada uno con su fin en el
+        # audio: eso es el avance real. Lo lee el dashboard en GET /progress.
+        self.progress: dict[str, dict[str, Any]] = {}
 
 
 runtime = WhisperRuntime()
@@ -137,6 +142,30 @@ def create_app(
             raise HTTPException(status_code=503, detail=detail)
         return JSONResponse({"status": "ok"})
 
+    @app.get("/progress")
+    async def progress() -> JSONResponse:
+        """Avance de las transcripciones en curso, por id de petición.
+
+        Por cada una: ``phase`` (``transcribing`` o ``diarizing``), duración del
+        audio, segundos de audio ya transcritos, segmentos y tiempo desde que
+        empezó a transcribir. Solo lectura; vacío si no hay ninguna.
+        """
+        now = time.monotonic()
+        jobs = {
+            rid: {
+                "phase": job.get("phase"),
+                "audioSeconds": job.get("audioSeconds"),
+                "processedSeconds": job.get("processedSeconds", 0.0),
+                "segments": job.get("segments", 0),
+                "elapsedMs": int((now - job["startedMonotonic"]) * 1000),
+                "lastUpdateMsAgo": int(
+                    (now - job.get("updatedMonotonic", job["startedMonotonic"])) * 1000
+                ),
+            }
+            for rid, job in list(runtime.progress.items())
+        }
+        return JSONResponse({"jobs": jobs})
+
     @app.get("/info")
     async def info() -> JSONResponse:
         return JSONResponse(
@@ -167,6 +196,7 @@ def create_app(
         diarize: str | None = Form(default=None),  # noqa: B008
         vad_filter: str | None = Form(default=None),  # noqa: B008
         condition_on_previous_text: str | None = Form(default=None),  # noqa: B008
+        x_ocabra_request_id: str | None = Header(default=None),  # noqa: B008
     ):
         if runtime.model is None:
             raise HTTPException(status_code=503, detail=runtime.error or "Whisper model not loaded")
@@ -205,6 +235,12 @@ def create_app(
         if use_diarization:
             runtime.diarizations_in_flight += 1
 
+        job: dict[str, Any] | None = None
+        if x_ocabra_request_id:
+            started = time.monotonic()
+            job = {"phase": "transcribing", "startedMonotonic": started, "updatedMonotonic": started}
+            runtime.progress[x_ocabra_request_id] = job
+
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(audio_bytes)
@@ -224,6 +260,7 @@ def create_app(
                     timestamp_granularities,
                     vad_filter=vad_effective,
                     condition_on_previous_text=condition_effective,
+                    progress=job,
                 )
             except DiarizationOutOfMemory as exc:
                 # oCabra reads this code to free memory on the card and retry.
@@ -254,6 +291,8 @@ def create_app(
                 else:
                     raise
         finally:
+            if x_ocabra_request_id:
+                runtime.progress.pop(x_ocabra_request_id, None)
             if use_diarization:
                 runtime.diarizations_in_flight -= 1
                 runtime.last_diarization_at = time.monotonic()
@@ -596,6 +635,7 @@ def _run_transcription(
     *,
     vad_filter: bool = True,
     condition_on_previous_text: bool = False,
+    progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     granularities = list(timestamp_granularities or ["segment"])
     expose_words = "word" in granularities
@@ -620,9 +660,19 @@ def _run_transcription(
 
     segment_list: list[dict[str, Any]] = []
     text_parts: list[str] = []
+    if progress is not None:
+        # Duración total del audio: se conoce antes de decodificar nada.
+        duration = getattr(info, "duration", None)
+        progress["audioSeconds"] = float(duration) if duration else None
 
     for idx, segment in enumerate(segments):
         text_parts.append(segment.text)
+        if progress is not None:
+            # El generador de faster-whisper decodifica al pedir el siguiente
+            # segmento: su fin es hasta dónde va la transcripción.
+            progress["processedSeconds"] = float(segment.end)
+            progress["segments"] = idx + 1
+            progress["updatedMonotonic"] = time.monotonic()
         entry: dict[str, Any] = {
             "id": idx,
             "start": float(segment.start),
@@ -649,7 +699,15 @@ def _run_transcription(
     diarization_turns: list[dict[str, Any]] | None = None
     speakers: list[str] = []
     speaker_embeddings: dict[str, list[float]] = {}
+    if progress is not None:
+        # Transcrito entero (también el silencio final que VAD se salta).
+        if progress.get("audioSeconds"):
+            progress["processedSeconds"] = progress["audioSeconds"]
+        progress["updatedMonotonic"] = time.monotonic()
     if diarizing:
+        if progress is not None:
+            progress["phase"] = "diarizing"
+            progress["updatedMonotonic"] = time.monotonic()
         diar_result = diarize_audio_file(diarization_pipeline, audio_path)
         diarization_turns = diar_result["turns"]
         # Split segments on speaker turns (using word timestamps when present)

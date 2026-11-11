@@ -9,7 +9,7 @@ import type {
 } from "@/types"
 import { BackendIcon } from "./BackendIcon"
 import { GpuBadge } from "./GpuBadge"
-import { STAGE_META, VISUAL, fmtDuration, fmtTokens, fmtTps } from "./format"
+import { STAGE_META, VISUAL, audioProgressText, fmtClock, fmtDuration, fmtRealtime, fmtTokens, fmtTps } from "./format"
 import { RequestKindBadge } from "./RequestKindBadge"
 
 const ACTIVE_STAGES = new Set(["prefill", "generating", "processing"])
@@ -93,13 +93,22 @@ function ActiveRow({ row }: { row: Row }) {
           <RequestKindBadge kind={req.requestKind} />
         </span>
         <span className={`shrink-0 font-medium ${visual.text}`}>
-          {req.stalled ? "sin actividad" : STAGE_META[stage].label}
-          {stage === "prefill" && req.prefillPct != null ? ` ${req.prefillPct.toFixed(0)}%` : ""}
+          {req.stalled
+            ? "sin actividad"
+            : req.audio
+              ? audioProgressText(req.audio)
+              : STAGE_META[stage].label}
+          {!req.audio && stage === "prefill" && req.prefillPct != null ? ` ${req.prefillPct.toFixed(0)}%` : ""}
         </span>
       </div>
       <div className="flex items-center justify-between gap-2">
         <ModelTag modelId={row.modelId} model={row.model} />
       </div>
+      {req.audio?.phase === "transcribing" && req.audio.pct != null && (
+        <div className="h-1 overflow-hidden rounded-full bg-muted" title="Audio transcrito">
+          <span className="block h-full animate-flow" style={{ width: `${req.audio.pct}%`, background: `repeating-linear-gradient(90deg, ${VISUAL.prefill.color} 0 8px, ${VISUAL.prefill.color}99 8px 12px)` }} />
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
         <InputTokens req={req} />
         {req.outputTokens != null && (
@@ -245,6 +254,13 @@ function FinishedRow({ item, models }: { item: FinishedRequest; models: Record<s
       {item.promptTokensPerSecond != null && <Stat label="prefill" value={fmtTps(item.promptTokensPerSecond)} />}
       {item.predictedTokensPerSecond != null && <Stat label="generación" value={fmtTps(item.predictedTokensPerSecond)} />}
       {item.ttftMs != null && <Stat label="TTFT" value={fmtDuration(item.ttftMs)} />}
+      {item.audioSeconds ? (
+        <Stat
+          label="audio"
+          value={`${fmtClock(item.audioSeconds)} · ${fmtRealtime(item.audioSeconds / Math.max(0.001, item.durationMs / 1000))} tiempo real`}
+          title="Duración del audio y velocidad respecto al tiempo real"
+        />
+      ) : null}
       {item.queueMs ? <Stat label="cola" value={fmtDuration(item.queueMs)} /> : null}
       <Stat label="duró" value={fmtDuration(item.durationMs)} />
       <span className="ml-auto text-muted-foreground">hace {Math.round((item.endedAgoMs ?? 0) / 1000)} s</span>

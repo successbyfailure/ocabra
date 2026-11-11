@@ -2,7 +2,7 @@ import { X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { ActiveRequestProgress } from "@/types"
-import { STALL_SECONDS, STAGE_META, VISUAL, fmtDuration, fmtTokens, fmtTps } from "./format"
+import { STALL_SECONDS, STAGE_META, VISUAL, audioProgressText, fmtDuration, fmtTokens, fmtTps } from "./format"
 import { RequestKindBadge } from "./RequestKindBadge"
 
 const STRIPES =
@@ -74,6 +74,7 @@ export function RequestProgress({
       return `#${pos} en cola${wait}`
     }
     if (stage === "waiting_for_gpu" && req.waitingOnModelId) return `esperando a que libere GPU ${req.waitingOnModelId}`
+    if (req.audio) return audioProgressText(req.audio)
     if (stage === "backend_wait") return "admitida · esperando a que el backend empiece"
     if (stage === "processing") return "procesando · sin streaming, sin progreso del backend"
     if (stage === "prefill" && promptLive && prompt?.totalKnown === false) {
@@ -220,6 +221,12 @@ export function RequestProgress({
         {/* Ahora */}
         <span className="absolute inset-y-0 w-px animate-pulse bg-foreground/80" style={{ left: `${at(elapsed)}%` }} />
       </div>
+
+      {req.audio?.phase === "transcribing" && req.audio.pct != null && (
+        <div className="mt-0.5 h-0.5 overflow-hidden rounded-full bg-muted" title="Audio transcrito (avance real)">
+          <span className="block h-full bg-sky-400" style={{ width: `${req.audio.pct}%` }} />
+        </div>
+      )}
 
       {stage === "prefill" && req.prefillPct != null && (
         <div

@@ -3,7 +3,7 @@ import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import type { RecentRequest } from "@/types"
 import { BackendIcon } from "./BackendIcon"
-import { fmtContext, fmtDuration, fmtTokens, fmtTps } from "./format"
+import { fmtClock, fmtContext, fmtDuration, fmtRealtime, fmtTokens, fmtTps } from "./format"
 import { useGpuStore } from "@/stores/gpuStore"
 import { GpuBadge } from "./GpuBadge"
 import { RequestKindBadge } from "./RequestKindBadge"
@@ -131,7 +131,15 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{queueMs ? fmtDuration(queueMs) : "—"}</td>
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{ttft != null ? fmtDuration(ttft) : "—"}</td>
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtTps(r.promptTokensPerSecond)}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtTps(r.predictedTokensPerSecond)}</td>
+        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+          {r.audioSeconds && r.durationMs ? (
+            <span title={`${fmtClock(r.audioSeconds)} de audio en ${fmtDuration(r.durationMs)}`}>
+              {fmtRealtime(r.audioSeconds / (r.durationMs / 1000))} t. real
+            </span>
+          ) : (
+            fmtTps(r.predictedTokensPerSecond)
+          )}
+        </td>
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtDuration(r.durationMs)}</td>
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
           {r.inputTokens != null || r.outputTokens != null ? (

@@ -20,6 +20,15 @@ from ocabra.stats.cost_calculator import estimate_cost_for_rows
 _WORKER_HASH_RE = re.compile(r"::[0-9a-f]{12}$")
 
 
+def _audio_seconds(meta: object) -> float | None:
+    """Segundos de audio de ``work_size_meta`` (transcripciones), si los hay."""
+    if isinstance(meta, dict):
+        value = meta.get("audio_seconds")
+        if isinstance(value, (int, float)) and value > 0:
+            return round(float(value), 1)
+    return None
+
+
 def _model_key_of_worker(worker_id: str) -> str:
     """``llamacpp_mks/gemma4:26b::0123456789ab`` → ``gemma4:26b``."""
     return _WORKER_HASH_RE.sub("", worker_id).split("/", 1)[-1]
@@ -886,6 +895,9 @@ def _rendimiento_de_la_peticion(r) -> dict:
         "effectiveContext": getattr(r, "effective_context", None),
         "runtimePreset": getattr(r, "runtime_preset", None),
         "gpuIndex": getattr(r, "gpu_index", None),
+        # Duración del audio de una transcripción: con duration_ms da el
+        # factor de tiempo real (×N) en el dashboard.
+        "audioSeconds": _audio_seconds(getattr(r, "work_size_meta", None)),
     }
 
 

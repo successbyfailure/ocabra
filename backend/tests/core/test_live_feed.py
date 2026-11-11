@@ -67,3 +67,31 @@ async def test_record_stat_feeds_finished_requests_even_without_db():
     assert item["username"] == "luis" and item["apiKeyName"] == "opencode"
     assert item["requestKind"] == "embedding"
     assert "10.0.0.7" not in str(item) and "secreto" not in str(item)
+
+
+@pytest.mark.asyncio
+async def test_finished_transcription_carries_audio_seconds():
+    from ocabra.stats.collector import _record_stat
+
+    live_feed.clear()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace()),
+        state=SimpleNamespace(auth_user=None, inflight_request_id="t", runtime_telemetry=None),
+        headers={},
+        client=None,
+    )
+    await _record_stat(
+        request=request,
+        model_id="whisper-large-v3-turbo",
+        started_at=datetime.now(UTC),
+        duration_ms=51_000.0,
+        error_message=None,
+        status_code=200,
+        endpoint_path="/v1/audio/transcriptions",
+        request_kind="audio_transcription",
+        input_tokens=None,
+        output_tokens=1200,
+        work_size_meta={"audio_seconds": 720.0},
+    )
+    [item] = live_feed.recent_finished()
+    assert item["audioSeconds"] == 720.0

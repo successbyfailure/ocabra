@@ -104,3 +104,34 @@ export function fmtContext(n: number | null | undefined): string {
   if (n >= 1024 && n % 1024 === 0) return `${n / 1024}k`
   return fmtTokens(n)
 }
+
+
+/** Reloj de audio: 75 → "1:15", 3725 → "1:02:05". */
+export function fmtClock(seconds: number | null | undefined): string {
+  if (seconds == null) return "—"
+  const s = Math.max(0, Math.round(seconds))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const ss = String(s % 60).padStart(2, "0")
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`
+}
+
+/** Velocidad respecto al tiempo real: 14.2 → "×14", 0.8 → "×0.8". */
+export function fmtRealtime(factor: number | null | undefined): string {
+  if (factor == null || factor <= 0) return "—"
+  return `×${factor >= 10 ? Math.round(factor) : factor.toFixed(1)}`
+}
+
+/** Texto del avance de una transcripción en curso. */
+export function audioProgressText(audio: {
+  phase: string | null
+  totalSeconds: number | null
+  processedSeconds: number
+  pct: number | null
+  realtimeFactor: number | null
+}): string {
+  if (audio.phase === "diarizing") return "diarizando (quién habla)"
+  const pct = audio.pct != null ? ` (${audio.pct.toFixed(0)}%)` : ""
+  const speed = audio.realtimeFactor ? ` · ${fmtRealtime(audio.realtimeFactor)} tiempo real` : ""
+  return `transcribiendo ${fmtClock(audio.processedSeconds)} / ${fmtClock(audio.totalSeconds)}${pct}${speed}`
+}
