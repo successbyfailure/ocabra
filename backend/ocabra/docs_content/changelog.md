@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.73.1 — 2026-11-11
+
+### Arreglos
+
+- **Las transcripciones guardan siempre la duración del audio.** Antes solo
+  se conocía si la respuesta la traía, y con `response_format=json` (el
+  formato por defecto) no venía: `audioSeconds` quedaba vacío y no había
+  factor de tiempo real. Ahora el worker la manda en la cabecera
+  `X-Audio-Duration`, en todos los formatos. `verbose_json` incluye además
+  `duration`, como la API de OpenAI. Solo aplica a las transcripciones
+  nuevas.
+
+---
+
 ## 0.73.0 — 2026-11-11
 
 ### Cambios

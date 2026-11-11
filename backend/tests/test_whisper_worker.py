@@ -254,6 +254,8 @@ def test_run_transcription_reports_progress_as_segments_decode():
     # Tras el último segmento (VAD se salta el silencio final): todo el audio.
     assert progress["processedSeconds"] == 120.0
     assert len(result["segments"]) == 3
+    # La duración viaja en el resultado (y de ahí en la cabecera X-Audio-Duration).
+    assert result["duration"] == 120.0
 
 
 def test_progress_endpoint_lists_jobs():

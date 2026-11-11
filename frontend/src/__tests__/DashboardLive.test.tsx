@@ -518,3 +518,25 @@ describe("velocidad de whisper en vivo", () => {
     expect(screen.getByTestId("requests-finished").textContent).toContain("audio 12:00 · ×14 tiempo real")
   })
 })
+
+describe("últimas peticiones: velocidad de transcripción", () => {
+  it("muestra el ×N tiempo real y la duración del audio", async () => {
+    const { api } = await import("@/api/client")
+    ;(api.stats as unknown as { recent: unknown }).recent = vi.fn().mockResolvedValue({
+      requests: [
+        {
+          id: "t", modelId: "whisper-large-v3-turbo", backendType: "whisper", requestKind: "audio_transcription",
+          endpointPath: "/v1/audio/transcriptions", statusCode: 200, startedAt: new Date().toISOString(),
+          durationMs: 5192, inputTokens: null, outputTokens: 900, error: null, userId: null, username: "ana",
+          groupId: null, groupName: null, apiKeyName: null, clientAddr: null, userAgent: null, inFlight: false,
+          audioSeconds: 150.3,
+        },
+      ],
+    })
+    const { RecentRequestsTable } = await import("@/components/dashboard/RecentRequestsTable")
+    render(<RecentRequestsTable />)
+    const cell = await screen.findByTestId("transcription-speed")
+    expect(cell.textContent).toContain("×29 tiempo real")
+    expect(cell.textContent).toContain("2:30 de audio")
+  })
+})

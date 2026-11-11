@@ -1146,6 +1146,12 @@ class StatsMiddleware(BaseHTTPMiddleware):
             work_size_meta = _extract_work_size_meta(
                 request_kind, request_payload, response_payload
             )
+            # Transcripciones: si la respuesta no trae la duración del audio
+            # (formato json o texto), la que el worker mandó en su cabecera.
+            header_audio_s = getattr(request.state, "audio_seconds", None)
+            if request_kind == "audio_transcription" and isinstance(header_audio_s, (int, float)):
+                if not (isinstance(work_size_meta, dict) and work_size_meta.get("audio_seconds")):
+                    work_size_meta = {**(work_size_meta or {}), "audio_seconds": float(header_audio_s)}
             # Bloque 20 — router attribution. ``resolve_profile`` stashes
             # the router profile_id on ``request.state`` (BaseHTTPMiddleware
             # breaks contextvar propagation across ``call_next``, but

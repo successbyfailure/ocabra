@@ -303,17 +303,23 @@ def create_app(
         text = result["text"]
         segments = result["segments"]
         detected_language = result["language"]
+        # La duración va en una cabecera para todos los formatos: así oCabra
+        # la tiene (factor de tiempo real) sin cambiar el cuerpo que recibe el
+        # cliente. En verbose_json va además como "duration", igual que OpenAI.
+        duration = result.get("duration")
+        duration_headers = {"X-Audio-Duration": f"{duration:.3f}"} if duration else None
 
         if normalized_format == "text":
-            return PlainTextResponse(to_text(segments))
+            return PlainTextResponse(to_text(segments), headers=duration_headers)
         if normalized_format == "srt":
-            return PlainTextResponse(to_srt(segments))
+            return PlainTextResponse(to_srt(segments), headers=duration_headers)
         if normalized_format == "vtt":
-            return PlainTextResponse(to_vtt(segments))
+            return PlainTextResponse(to_vtt(segments), headers=duration_headers)
         if normalized_format == "verbose_json":
             payload = {
                 "text": text,
                 "language": detected_language,
+                "duration": duration,
                 "segments": segments,
                 "timestamp_granularities": timestamp_granularities,
             }
@@ -324,9 +330,9 @@ def create_app(
                 payload["speakers"] = result.get("speakers", [])
                 if result.get("speaker_embeddings"):
                     payload["speaker_embeddings"] = result["speaker_embeddings"]
-            return JSONResponse(payload)
+            return JSONResponse(payload, headers=duration_headers)
 
-        return JSONResponse({"text": text})
+        return JSONResponse({"text": text}, headers=duration_headers)
 
     return app
 
@@ -732,6 +738,8 @@ def _run_transcription(
         "text": final_text,
         "segments": segment_list,
         "language": getattr(info, "language", language or "unknown"),
+        # Duración del audio: oCabra la usa para el factor de tiempo real.
+        "duration": float(getattr(info, "duration", 0.0) or 0.0) or None,
     }
     if expose_words:
         payload["words"] = [

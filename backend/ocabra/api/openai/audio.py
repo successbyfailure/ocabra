@@ -445,6 +445,15 @@ async def transcriptions(
                             ),
                         )
                         resp.raise_for_status()
+                        # Duración del audio que informa el worker: con ella
+                        # las estadísticas calculan el factor de tiempo real
+                        # aunque el formato de respuesta no la traiga.
+                        try:
+                            request.state.audio_seconds = float(
+                                resp.headers.get("x-audio-duration") or 0
+                            ) or None
+                        except (TypeError, ValueError, AttributeError):
+                            pass
                 break
             except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
                 # The worker is alive and busy: it accepted the request and is

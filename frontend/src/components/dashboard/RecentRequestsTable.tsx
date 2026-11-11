@@ -68,7 +68,9 @@ export function RecentRequestsTable() {
                 <th className={`${TH} text-right`} title="Espera en la cola de admisión">Cola</th>
                 <th className={`${TH} text-right`} title="Tiempo hasta el primer token">TTFT</th>
                 <th className={`${TH} text-right`}>Prefill</th>
-                <th className={`${TH} text-right`}>Generación</th>
+                <th className={`${TH} text-right`} title="Tokens por segundo generando; en transcripciones, velocidad respecto al tiempo real del audio">
+                  Generación
+                </th>
                 <th className={`${TH} text-right`}>Duración</th>
                 <th className={`${TH} text-right`} title="Entrada · de cache · salida">Tokens</th>
                 <th className={`${TH} text-left`}>Estado</th>
@@ -133,8 +135,14 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtTps(r.promptTokensPerSecond)}</td>
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
           {r.audioSeconds && r.durationMs ? (
-            <span title={`${fmtClock(r.audioSeconds)} de audio en ${fmtDuration(r.durationMs)}`}>
-              {fmtRealtime(r.audioSeconds / (r.durationMs / 1000))} t. real
+            // Transcripción: velocidad respecto al tiempo real del audio.
+            <span
+              className="block text-sky-300"
+              title={`${fmtClock(r.audioSeconds)} de audio transcritos en ${fmtDuration(r.durationMs)}`}
+              data-testid="transcription-speed"
+            >
+              {fmtRealtime(r.audioSeconds / (r.durationMs / 1000))} tiempo real
+              <span className="block text-[10.5px] text-muted-foreground">{fmtClock(r.audioSeconds)} de audio</span>
             </span>
           ) : (
             fmtTps(r.predictedTokensPerSecond)
