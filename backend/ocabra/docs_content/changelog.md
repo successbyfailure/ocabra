@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.4 — 2026-11-11
+
+### Arreglos
+
+- **La primera imagen después de cargar un modelo ya no lo tumba.** La 0.70.0
+  hacía sitio al proyector de visión, pero si la imagen llegaba nada más
+  terminar la carga, oCabra todavía veía la tarjeta vacía, no hacía sitio y el
+  modelo se caía. Ahora mide la memoria de cada proceso en ese mismo momento.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.3 — 2026-11-11
 
 ### Arreglos

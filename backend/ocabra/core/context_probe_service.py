@@ -40,8 +40,6 @@ START_CONTEXT = 32768
 #: Other processes may hold this much on a probed GPU without spoiling it.
 _FOREIGN_TOLERANCE_MB = 256
 _DRAIN_TIMEOUT_S = 60.0
-_RELOAD_ATTEMPTS = 4
-_RELOAD_BACKOFF_S = 5.0
 
 
 @dataclass
@@ -249,9 +247,15 @@ class ContextProbeService:
                 if time.monotonic() > deadline:
                     raise ProbeError(f"'{state.model_id}' kept serving requests on GPU {gpus}")
                 await asyncio.sleep(1.0)
-            await self._mm.unload(state.model_id, reason="context_probe")
+            pinned_model = state.load_policy == LoadPolicy.PIN
+            # A pinned model leaves "under pressure", which starts its own
+            # reload watcher: it comes back by itself once the probe frees the
+            # card, the same way it does after any eviction.
+            await self._mm.unload(
+                state.model_id, reason="pressure" if pinned_model else "context_probe"
+            )
             job.evicted.append(state.model_id)
-            if state.load_policy == LoadPolicy.PIN:
+            if pinned_model:
                 pinned.append(state.model_id)
         return pinned
 
@@ -419,19 +423,8 @@ class ContextProbeService:
                 logger.warning("context_probe_unload_failed", error=str(exc))
         if base_id:
             self._mm.set_maintenance(base_id, False)
-        for model_id in pinned_evicted:
-            for attempt in range(_RELOAD_ATTEMPTS):
-                try:
-                    await self._mm.load(model_id)
-                    break
-                except Exception as exc:  # noqa: BLE001 - its PIN watcher retries too
-                    logger.warning(
-                        "context_probe_reload_failed",
-                        model_id=model_id,
-                        attempt=attempt + 1,
-                        error=str(exc),
-                    )
-                    await asyncio.sleep(_RELOAD_BACKOFF_S)
+        # Pinned models evicted for the probe come back through their own
+        # reload watcher (started by the "pressure" unload), not from here.
 
 
 def _step_dict(step: ProbeStep) -> dict:

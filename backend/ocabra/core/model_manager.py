@@ -3972,6 +3972,22 @@ class ModelManager:
                 return True
         return await self._evict_cheap_then_shrink(model_id, gpu_idx, needed_mb)
 
+    async def _fresh_free_vram(self, gpu: int) -> int:
+        """Free VRAM on a GPU from a direct per-process reading, minus the buffer.
+
+        ``get_physical_free_vram`` follows hw-monitor, which refreshes every
+        ~2 s: right after a load it still shows the card empty. Seen live
+        2026-11-11: an image arrived just after qwen3.8 filled the 3090, the
+        stale figure said the projector fitted, and the worker died with
+        cudaMalloc. The admission ceiling minus what every process holds now
+        does not lag.
+        """
+        ceiling = self._gpu_manager.admission_ceiling_mb(gpu, physical=True)
+        if ceiling is None:
+            return int(await self._gpu_manager.get_physical_free_vram(gpu))
+        held = sum(int(mb) for mb in self._gpu_manager.get_process_vram_mb(gpu).values())
+        return max(0, int(ceiling) - held - int(settings.vram_buffer_mb))
+
     async def make_room_for_whisper(self, model_id: str, *, diarize: bool) -> None:
         """Before a transcription that will grow whisper past its estimate, shrink
         a llama.cpp model's context on its GPU if the card lacks the room.
@@ -3992,7 +4008,7 @@ class ModelManager:
         if extra <= 0:
             return
         gpu = int(state.current_gpu[0])
-        free = int(await self._gpu_manager.get_physical_free_vram(gpu))
+        free = await self._fresh_free_vram(gpu)
         if free >= extra:
             return
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
@@ -4069,7 +4085,7 @@ class ModelManager:
             return
         cost = await asyncio.to_thread(self._vision_cost_estimate, state, path)
         for gpu, needed in cost.items():
-            free = int(await self._gpu_manager.get_physical_free_vram(gpu))
+            free = await self._fresh_free_vram(gpu)
             if free >= needed:
                 continue
             if not self._can_change_context_live(model_id):

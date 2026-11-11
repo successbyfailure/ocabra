@@ -305,6 +305,11 @@ def _elastic_manager(monkeypatch, *, free=None, kv_mb_per_64k=(500, 1000)):
         side_effect=lambda idx: free_mb[idx] + full[idx] - vram(idx)[4242]
     )
     gpu.get_physical_free_vram = gpu.get_free_vram
+    # What a direct reading gives (ModelManager._fresh_free_vram): the card's
+    # usable ceiling, consistent with the free figure above, minus processes.
+    gpu.admission_ceiling_mb = MagicMock(
+        side_effect=lambda idx, physical=True: free_mb[idx] + full[idx] + 512
+    )
     backend.reconfigure_context = AsyncMock(side_effect=reconfigure)
     return mm, state, backend, ctx, free_mb
 
@@ -826,3 +831,20 @@ async def test_growing_back_counts_the_projector_that_stays_loaded(monkeypatch, 
     # GPU 0 gave up KV for the projector; growing back needs those MB again
     # although the worker's total footprint now includes the projector.
     assert missing.get(0, 0) >= 900 - 256
+
+
+@pytest.mark.asyncio
+async def test_vision_room_ignores_a_stale_free_figure_right_after_a_load(monkeypatch, tmp_path):
+    """2026-11-11 live: the image arrived seconds after qwen3.8 filled the 3090;
+    hw-monitor still showed the card empty, so no room was made and the worker
+    died with cudaMalloc when the projector loaded."""
+    mm, state, backend, ctx, free_mb = _elastic_manager(monkeypatch, free={0: 0, 1: 0})
+    active, _ = _with_vision(mm, state, backend, free_mb, tmp_path)
+    # hw-monitor: stale, from before the load.
+    mm._gpu_manager.get_physical_free_vram = AsyncMock(return_value=20000)
+    mm._in_flight[state.model_id] = 1
+
+    await mm.make_room_for_vision(state.model_id, IMAGE)
+
+    assert ctx["n"] < 262144  # it shrank anyway: the direct reading is full
+    assert active["on"] is True

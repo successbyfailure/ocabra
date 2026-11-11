@@ -21,6 +21,7 @@ class FakeManager:
         self.ctx = 0
         self._states: dict = {}
         self.load_failures = 0
+        self.unload_reasons: dict = {}
         self.waited_for_release: list[int] = []
         whisper = SimpleNamespace(
             model_id="whisper/turbo",
@@ -57,6 +58,7 @@ class FakeManager:
 
     async def unload(self, model_id, reason=None):
         self.unloaded.append(model_id)
+        self.unload_reasons[model_id] = reason
         self._states.pop(model_id, None)
 
     async def load(self, model_id):
@@ -150,9 +152,12 @@ async def test_probe_measures_and_puts_everything_back():
     # 16 GB + 17 MB/1k up to 23.6 GB → ~457k, capped by the 1M default
     assert job.result["max_context"] >= 450000
     assert job.result["used_mb"][1] <= 23600
-    # Only what sat on GPU 1 was evicted; the pinned one came back.
+    # Only what sat on GPU 1 was evicted. The pinned one left "under pressure",
+    # so its own reload watcher brings it back; the probe does not reload it.
     assert job.evicted == ["whisper/turbo", "llamacpp_mks/qwen3-embedding:4b"]
-    assert fake.loaded == ["whisper/turbo"]
+    assert fake.unload_reasons["whisper/turbo"] == "pressure"
+    assert fake.unload_reasons["llamacpp_mks/qwen3-embedding:4b"] == "context_probe"
+    assert fake.loaded == []
     # The probe worker is gone and maintenance was lifted.
     assert fake.probe_key in fake.unloaded
     assert fake.maintenance == [
@@ -175,7 +180,6 @@ async def test_a_failing_probe_still_cleans_up():
     assert "reserved memory" in job.error
     assert fake.probe_key in fake.unloaded
     assert fake.maintenance[-1] == ("llamacpp_mks/qwen3.8:27b", False)
-    assert fake.loaded == ["whisper/turbo"]
 
 
 @pytest.mark.asyncio
@@ -191,15 +195,11 @@ async def test_only_one_probe_at_a_time():
 
 
 @pytest.mark.asyncio
-async def test_evicted_pins_come_back_once_the_probe_worker_is_really_gone(monkeypatch):
-    """2026-11-11 live: gemma4:26b was reloaded right after the probe worker was
-    unloaded, got a 409 because the driver had not freed the 3090 yet, and was
-    left in error on an empty card."""
-    monkeypatch.setattr("ocabra.core.context_probe_service._RELOAD_BACKOFF_S", 0)
+async def test_the_probe_waits_for_its_worker_to_be_really_gone(monkeypatch):
+    """2026-11-11 live: the card was not free yet right after unloading the
+    probe worker; the next load (a pin's watcher, or a request) got a 409."""
     fake = FakeManager()
-    fake.load_failures = 1
     job = await _run(fake, _service(fake))
 
     assert job.status == "done", job.error
     assert fake.waited_for_release and fake.waited_for_release[0] > 20000
-    assert fake.loaded == ["whisper/turbo"]  # second attempt
