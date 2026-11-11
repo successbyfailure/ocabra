@@ -6,8 +6,9 @@ de datos de transcripciones de reuniones, resumen de documentos largos,
 transcripción de audio en español, recuperación sobre un corpus real— más los
 percentiles del tráfico que pasa por este servidor.
 
-**Medido**: LLM el 8 de noviembre de 2026; voz y embeddings el 5-6 de
-noviembre. Hardware: RTX 3060 (12 GB) + RTX 3090 (24 GB).
+**Medido**: LLM el 11 de noviembre de 2026, con el llama.cpp actualizado y
+oCabra 0.68; voz y embeddings el 5-6 de noviembre. Hardware: RTX 3060 (12 GB)
++ RTX 3090 (24 GB).
 
 Hay una copia en Markdown sin maquetar en `GET /docs/models.md`, que es la
 misma fuente que genera esta página. Los cambios de comportamiento de la API
@@ -30,9 +31,13 @@ resultado— pídelo como `<motor>/<modelo>`: `ollama/gemma4:26b`,
 
 ## Antes de leer las tablas
 
-- **La 3090 es un hueco único.** Los modelos de 27B-33B piden entre 23 y 25 GB
-  cada uno, así que **solo cabe uno a la vez**. Pedir un modelo grande desaloja
-  al que estuviera. No esperes tener dos disponibles en caliente.
+- **La 3090 es un hueco único.** Los modelos de 27B-40B piden entre 22 y 25 GB
+  cada uno, así que **solo cabe uno grande a la vez**. Pedir otro grande
+  desaloja al que estuviera. No esperes tener dos disponibles en caliente.
+  Lo que sí ocurre es que un modelo grande ocioso **reduce su contexto** para
+  dejar sitio a uno pequeño, como un embedding, en vez de salir. Si después le
+  llega una petición que no cabe en el contexto reducido, lo recupera en menos
+  de un segundo.
 - **Hay 4 peticiones concurrentes por modelo.** Si las cuatro ranuras están
   ocupadas, tu petición espera. Ese tiempo de cola no está en estas cifras pero
   sí en `GET /ocabra/stats/performance`.
@@ -82,30 +87,39 @@ analizar una sección) sobre transcripciones de 239, 2.033 y 5.076 palabras.
 
 | Modelo | corto | medio | largo | Concurrencia ×4 | Contexto |
 |--------|------:|------:|------:|----------------:|---------:|
-| **`gemma4:26b`** | **158** | **123** | **102** | **206** (2,7×) | 256k |
-| `nemotron-3-nano:30b` | 134 | 102 | 91 | 88 (2,7×) | 512k |
-| `ravenx` | 130 | 97 | 87 | **188** (5,0×) | 240k |
-| `gemma4:12b` | 114 | 92 | 75 | 170 (3,0×) | 256k |
-| `qwen3.8:27b` | 67 | 62 | 47 | 80 (3,0×) | 96k · 256k con `extended` |
-| `mistral:7b` | 55 | 31 | 18 | 16 (2,0×) | 32k |
-| `qwen3:8b` | 51 | 33 | 19 | 40 (2,3×) | 32k |
-| `qwen3:32b` | 25 | 17 | 11 | 34 (3,6×) | 40k |
-| `nemotron3:33b` | — | — | 85 | 109 (1,7×) | 65k |
+| **`nemotron-3.5-lightning:30b`** | **158** | **148** | **134** | 221 (1,9×) | 128k, en las dos tarjetas |
+| `nemotron-3-nano:30b` | 142 | 134 | 124 | 132 (1,6×) | 1M, en las dos tarjetas |
+| `ornith-1.5:35b` | 150 | 131 | 110 | 180 (2,3×) | 128k · 256k con `extended` |
+| `ravenx` | 135 | 117 | 98 | 147 (1,9×) | 240k |
+| `gemma4:26b` ¹ | 151 | 114 | 116 | **226** (2,4×) | 256k |
+| `flint:40b` | 110 | 97 | 82 | 192 (2,6×) | 64k · 256k con `extended` |
+| `gemma4:12b` | 115 | 96 | 84 | 201 (2,7×) | 256k |
+| `qwen3-coder:30b` | 138 | 86 | 44 | 60 (2,5×) | 116k · 256k con `extended` |
+| `qwen3:8b` | 104 | 69 | 41 | 130 (**3,4×**) | 40k |
+| `qwen3.8:27b` | 52 | 63 | 50 | 87 (2,6×) | 96k · 256k con `extended` |
+| `qwen3.8:27b-abliterated` | 60 | 58 | 42 | 78 (2,5×) | 16k · 224k con `extended` |
+| `bonsai-2:27b` | 59 | 52 | 45 | 87 (2,0×) | 256k |
+| `ravenx-chaos-agent` | 35 | 28 | 22 | 51 (2,5×) | 128k · 256k con `extended` |
+| `qwen3:32b` | 30 | 21 | 16 | 36 (2,5×) | 30k · 40k con `dual-gpu` |
 
 Cifras en tokens por segundo. "Concurrencia ×4" es el *throughput total* con
-cuatro peticiones simultáneas, y el multiplicador respecto a una sola.
+cuatro peticiones simultáneas, y el multiplicador respecto a una sola. Una
+tirada por modelo, con el modelo ya cargado.
 
-`gemma4:26b` es el más rápido en todos los tamaños y dobla en velocidad a
-modelos de 8B porque usa decodificación especulativa (igual que `gemma4:12b`,
-`qwen3.8:27b` y `qwen3.8:27b-abliterated`). Si vas a mandar volumen, `ravenx`
-es el que mejor escala: ×5 al pasar de una petición a cuatro.
+¹ `gemma4:26b` se midió con tráfico real de otros usuarios sobre la misma
+tarjeta. Su cifra "medio" sale baja por una tarea que tardó el triple de lo
+normal. Sin interferencias, sus tareas van entre 130 y 165 tok/s.
 
-**`nemotron3:33b` no es recomendable.** Es el único modelo que queda sobre
-Ollama y, si las GPUs están ocupadas cuando le toca cargar, Ollama lo reparte
-en CPU y se queda ahí todo su keep-alive: medido a **0,3 tok/s**, con
-peticiones de dos minutos para 32 tokens. Sus cifras buenas de esta tabla son
-de cuando le toca entero en GPU, y no puedes saber en qué caso estás. Usa
-`nemotron-3-nano:30b`, que es el mismo tipo de modelo sobre llama.cpp.
+Respecto a la medición del 8 de noviembre, la actualización de llama.cpp sube
+sobre todo a los modelos MoE (`nemotron-3-nano:30b` de 102 a 134 en el tamaño
+medio, `ravenx` de 97 a 117) y a `qwen3:8b`, que pasa de 33 a 69. La mejora
+grande, sin embargo, está en **leer el prompt**, que en esta tabla apenas se
+nota: en los MoE se lee entre 2,7 y 4,7 veces más rápido. Se ve en la tabla de
+documentos largos.
+
+Los `-coder` y los qwen3 densos pierden mucha velocidad en las entradas
+largas (`qwen3-coder:30b` va de 138 a 44). Para documentos grandes, mira la
+tabla de abajo antes de elegir.
 
 ## Calidad de extracción
 
@@ -118,48 +132,67 @@ Extraer afirmaciones de una transcripción de 2.033 palabras y comparar contra
 
 | Modelo | Afirmaciones | Cobertura | Precisión |
 |--------|-------------:|----------:|----------:|
-| `nemotron-3-nano:30b` | 80 | **0,619** | 0,613 |
-| `gemma4:12b` | 35 | 0,559 | **0,685** |
-| `qwen3:8b` | 41 | 0,538 | 0,591 |
-| `qwen3:32b` | 26 | 0,522 | 0,617 |
-| `gemma4:26b` | 33 | 0,521 | 0,574 |
-| `ravenx` (`off`) | 54 | 0,585 | 0,599 |
-| `qwen3.8:27b` (`off`) | 69 | 0,574 | 0,561 |
-| `qwen3.8:27b` (`medium`) | 36 | 0,547 | 0,614 |
-| `mistral:7b` | — | — | — |
+| `ravenx` (razonando) | 72 | **0,617** | 0,602 |
+| `qwen3-coder:30b` | 72 | 0,613 | 0,617 |
+| `ravenx` (`off`) | 50 | 0,601 | **0,620** |
+| `ravenx-chaos-agent` | 75 | 0,601 | 0,602 |
+| `qwen3.8:27b` (`off`) | 74 | 0,581 | 0,562 |
+| `ornith-1.5:35b` | 45 | 0,561 | 0,588 |
+| `nemotron-3.5-lightning:30b` | 34 | 0,554 | 0,600 |
+| `qwen3.8:27b` (`low`) | 34 | 0,550 | 0,603 |
+| `nemotron-3-nano:30b` | 41 | 0,550 | 0,578 |
+| `qwen3.8:27b` (`medium`) | 34 | 0,542 | 0,608 |
+| `gemma4:26b` | 30 | 0,535 | 0,614 |
+| `qwen3.8:27b-abliterated` | 36 | 0,535 | 0,595 |
+| `qwen3:32b` | 31 | 0,533 | 0,587 |
+| `bonsai-2:27b` | 41 | 0,527 | 0,564 |
+| `flint:40b` | 29 | 0,523 | 0,589 |
+| `gemma4:12b` | 30 | 0,507 | 0,566 |
+| `qwen3:8b` | 23 | 0,488 | 0,605 |
 
-`mistral:7b` no produjo JSON válido en ninguna tirada: **no lo uses para
-salida estructurada**.
+Todos dieron JSON válido en esta prueba. En las de velocidad,
+`nemotron-3-nano:30b`, `qwen3-coder:30b`, `ravenx` y `qwen3:8b` fallaron 1 de 4
+tareas en algún tamaño: si dependes de JSON estricto, valida y reintenta.
 
-Lo importante aquí no es el ranking, es que **velocidad y calidad no van
-juntas**: `gemma4:26b` es el más rápido y el que menos extrae; `gemma4:12b` es
-el más fiel de todo el parque; `nemotron-3-nano:30b` es el mejor equilibrio.
+Es **una tirada por modelo**: diferencias de ±0,03 entre dos modelos son ruido.
+Lo que se repite entre mediciones es el patrón: los que sacan muchas
+afirmaciones (`ravenx`, `qwen3-coder:30b`, `ravenx-chaos-agent`, `qwen3.8:27b`
+con `off`) cubren más, y los que sacan pocas (`gemma4`, `flint:40b`) son más
+conservadores. **Velocidad y calidad no van juntas**: `nemotron-3.5-lightning:30b`
+es el más rápido y queda en mitad de tabla.
 
 ## Documentos largos
 
-Resumen de transcripciones de 15.000 y 25.000 palabras.
+Resumen de transcripciones de 15.000 y 25.000 palabras, en tokens por segundo
+de la petición completa (incluye leer el documento).
 
 | Modelo | 15k palabras | 25k palabras |
 |--------|-------------:|-------------:|
-| **`gemma4:26b`** | **41** | **50** |
-| `gemma4:12b` | 35 | 40 |
-| `nemotron3:33b` | 39 | 37 |
-| `ravenx` | 19 | 24 |
-| `qwen3.8:27b` | 21 | 24 |
-| `nemotron-3-nano:30b` | 18 | 20 |
-| `mistral:7b` | 17 | no cabe |
-| `qwen3:8b` | 7 | no cabe |
-| `qwen3:32b` | 5 | no cabe |
+| **`nemotron-3.5-lightning:30b`** | **89** | **95** |
+| `gemma4:26b` | 66 | 51 |
+| `ornith-1.5:35b` | 56 | 60 |
+| `flint:40b` | 47 | 53 |
+| `ravenx` | 47 | 50 |
+| `gemma4:12b` | 46 | 49 |
+| `nemotron-3-nano:30b` | 30 | 54 |
+| `bonsai-2:27b` | 24 | 26 |
+| `qwen3.8:27b-abliterated` | 24 | 24 |
+| `qwen3.8:27b` | 23 | 28 |
+| `qwen3:8b` | 16 | no cabe |
+| `ravenx-chaos-agent` | 9 | 12 |
+| `qwen3-coder:30b` | 12 | 9 |
+| `qwen3:32b` | 7 | no cabe |
 
-**Un documento de 25.000 palabras son unos 43.000 tokens**, así que no entra en
-`qwen3:8b` (32k), `mistral:7b` (32k) ni `qwen3:32b` (40k): recibirás un `400`
-`context_length_exceeded`. Sí entra en los demás. A 15.000 palabras (~29.000
-tokens) entran todos.
+**Un documento de 25.000 palabras son entre 41.000 y 45.000 tokens** según el
+modelo, así que no entra en `qwen3:8b` (40k) ni en `qwen3:32b` (40k): recibirás
+un `400` `context_length_exceeded`. Sí entra en los demás. A 15.000 palabras
+(entre 24.700 y 26.800 tokens) entran todos.
 
-Y ojo con el tokenizador: el **mismo** texto de 25.000 palabras son 46.860
-tokens para la familia Qwen y **52.133 para `mistral:7b`**, un 11 % más. Si
-vas al límite de la ventana, cuenta con el modelo concreto, no con una regla
-de palabras.
+Ojo con el tokenizador: el **mismo** texto de 25.000 palabras son 41.214 tokens
+para `gemma4`, 41.916 para la familia Qwen 3.5 (`qwen3.8`, `ravenx`, `ornith`,
+`bonsai`), 42.841 para `nemotron` y **44.793 para `qwen3-coder:30b`**, un 9 % más
+que `gemma4`. Si vas al límite de la ventana, cuenta con el modelo concreto, no
+con una regla de palabras.
 
 ## Latencia al primer token
 
@@ -167,23 +200,30 @@ Streaming, media de tres tiradas en caliente.
 
 | Modelo | Nivel | TTFT |
 |--------|:-----:|-----:|
-| `ravenx` | `off` | **1,25 s** |
-| `nemotron-3-nano:30b` | — | 1,42 s |
-| `qwen3.8:27b` | `off` | 1,85 s |
-| `ravenx` | `low`/`medium` | 2,15 s |
-| `gemma4:26b` | — | 2,46 s |
-| `mistral:7b` | — | 2,88 s |
-| `qwen3.8:27b` | `low` | 3,11 s |
-| `gemma4:12b` | — | 3,23 s |
-| `qwen3.8:27b` | `medium` | 3,47 s |
-| `qwen3:8b` | — | 8,74 s |
-| `qwen3:32b` | — | **22,73 s** |
+| `gemma4:26b` | — | **0,81 s** |
+| `nemotron-3.5-lightning:30b` | — | 0,82 s |
+| `ornith-1.5:35b` | — | 0,83 s |
+| `ravenx` | `low`/`medium` | 0,93 s |
+| `gemma4:12b` | — | 1,02 s |
+| `ravenx` | `off` | 1,05 s |
+| `flint:40b` | — | 1,47 s |
+| `qwen3:8b` | — | 1,51 s |
+| `nemotron-3-nano:30b` | — | 1,58 s |
+| `qwen3-coder:30b` | — | 1,68 s |
+| `bonsai-2:27b` | — | 1,72 s |
+| `qwen3.8:27b` | `low` | 1,76 s |
+| `qwen3.8:27b` | `off` | 1,83 s |
+| `qwen3.8:27b` | `medium` | 1,93 s |
+| `qwen3.8:27b-abliterated` | — | 2,07 s |
+| `ravenx-chaos-agent` | — | 2,17 s |
+| `qwen3:32b` | — | **3,89 s** |
 
-Para chat interactivo, `reasoning_effort: "off"` es lo que más baja el TTFT:
-`ravenx` pasa de 2,15 s a 1,25 s y `qwen3.8:27b` de 3,47 s a 1,85 s.
+Con el llama.cpp actual **el nivel de razonamiento apenas cambia el TTFT**: la
+diferencia entre niveles es de décimas. El 8 de noviembre, `off` lo bajaba casi
+a la mitad.
 
-`qwen3:32b` tarda 22 s en empezar incluso cargado, porque se reparte entre las
-dos tarjetas. No lo uses para nada interactivo.
+`qwen3:32b` sigue siendo el más lento en arrancar, aunque ha bajado de 22,7 a
+3,9 s. No lo uses para nada interactivo.
 
 ## Razonamiento
 
@@ -201,8 +241,8 @@ Qué conviene pedir, medido:
 
 | Modelo | Recomendación |
 |--------|---------------|
-| `ravenx` | **`off` siempre.** Con razonamiento extrae menos y peor, y el TTFT casi se dobla. |
-| `qwen3.8:27b` | `off` si quieres exhaustividad (69 afirmaciones), `medium` si quieres precisión (0,614). |
+| `ravenx` | Razonando si quieres exhaustividad (72 afirmaciones, cobertura 0,617); `off` si quieres precisión (0,620). Solo tiene interruptor: `low` y `medium` dan lo mismo. |
+| `qwen3.8:27b` | `off` si quieres exhaustividad (74 afirmaciones), `medium` si quieres precisión (0,608). |
 
 Cuánto piensan de media, cuando piensan, sobre el tráfico real del servidor:
 
@@ -223,20 +263,19 @@ con `max_tokens: 4096` y `medium` el modelo piensa como mucho 3.072 tokens.
 
 ## Visión
 
-`gemma4:26b` y `gemma4:12b` aceptan imágenes (`image_url` en las content
-parts). El proyector visual se carga **cuando llega la primera imagen**, no al
-arrancar: esa primera petición tarda unos segundos más. Ningún otro modelo de
-texto del parque acepta imágenes.
+Aceptan imágenes (`image_url` en las content parts) `gemma4:26b`,
+`gemma4:12b`, `qwen3.8:27b`, `qwen3.8:27b-abliterated` y `ornith-1.5:35b`. El
+proyector visual se carga **cuando llega la primera imagen**, no al arrancar:
+esa primera petición tarda unos segundos más.
 
 ## Disponibilidad
 
 | Modelo | Nota |
 |--------|------|
-| `gemma4:26b` | Fijado en la 3090, **pero su pin es evictable**: reserva 23.600 de los 24.576 MB, así que cuando otro modelo grande se queda la tarjeta sale, y no vuelve hasta que quede libre. Entre tanto responde `409`. Si tu carga alterna modelos grandes, usa `recomendado-ha-chatbots`. |
+| `gemma4:26b` | Fijado en la 3090, **pero su pin es evictable**: ocupa casi toda la tarjeta, así que cuando otro modelo grande se la queda, sale. Vuelve solo en cuanto queda sitio (puede tardar un par de minutos), o antes si le llega una petición, que paga la carga. Si tu carga alterna modelos grandes, usa `recomendado-ha-chatbots`. |
 | `qwen3.8:27b` | Se mantiene caliente. |
 | `qwen3-embedding:8b` | Se mantiene caliente. |
-| `whisper-large-v3-turbo` | Fijado en la 3060, así que transcribir no compite por la 3090. |
-| `nemotron3:33b` | Ver el aviso de la tabla de velocidad. |
+| `whisper-large-v3-turbo` | Fijado en la 3060, así que transcribir no compite por la 3090. Si hace falta sitio en la 3060 y está ocioso, puede salir antes que un modelo grande, porque vuelve en unos 10 s. |
 | El resto | Bajo demanda: la primera petición paga la carga. |
 
 ---
@@ -322,14 +361,14 @@ sobre los primeros K resultados**, no como buscador.
 
 | Caso | Modelo | Por qué |
 |------|--------|---------|
-| Chat interactivo | `ravenx` + `reasoning_effort: "off"` | TTFT 1,25 s, 130 tok/s en entradas cortas |
-| Máxima velocidad | `gemma4:26b` | 123 tok/s, 206 con concurrencia — si la 3090 está libre |
-| Documentos largos | `gemma4:26b` o `gemma4:12b` | 50 y 40 tok/s con 25.000 palabras |
-| Extracción exhaustiva | `nemotron-3-nano:30b` | Mejor cobertura (0,619) con precisión alta |
-| Extracción fiel | `gemma4:12b` | La precisión más alta del parque (0,685) |
-| Volumen / lotes | `ravenx` + `off` | 188 tok/s con 4 en paralelo, escala ×5 |
+| Chat interactivo | `gemma4:26b` | TTFT 0,81 s y suele estar cargado |
+| Máxima velocidad | `nemotron-3.5-lightning:30b` | 148 tok/s en tamaño medio, pero ocupa las dos tarjetas |
+| Documentos largos | `nemotron-3.5-lightning:30b` u `ornith-1.5:35b` | 95 y 60 tok/s con 25.000 palabras |
+| Extracción exhaustiva | `ravenx` razonando o `qwen3-coder:30b` | 72 afirmaciones, cobertura ~0,615 |
+| Extracción fiel | `ravenx` + `off` o `gemma4:26b` | Precisión 0,620 y 0,614 |
+| Volumen / lotes | `gemma4:26b`, `nemotron-3.5-lightning:30b` o `gemma4:12b` | 200-226 tok/s con 4 en paralelo |
 | Razonamiento visible | `qwen3.8:27b` + `medium` | Es uno de los tres que distinguen niveles de verdad |
-| Salida estructurada | cualquiera **menos** `mistral:7b` | `mistral:7b` no produjo JSON válido |
+| Salida estructurada | cualquiera, validando | Todos dieron JSON válido en extracción; algunos fallan 1 de 4 tareas |
 | Actas con hablantes | `whisper-large-v3-turbo` + `diarize: true` | WER 4,18 %, DER 10,39 %, 17× tiempo real |
 | Transcripción rápida | `whisper-large-v3-turbo` | WER 3,77 %, 36× tiempo real |
 | Transcribir sin GPU | `whisper.cpp` sin diarizar | WER 5 %, no toca VRAM |
