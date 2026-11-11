@@ -272,7 +272,8 @@ async def get_models_activity(
         bar data for every loaded model (tiers per GPU placement, active
         window, reserved/used per request). Plus ``stuckThresholdSeconds`` and
         ``idleTimeoutSeconds``. ``vramByGpu``: MB measured by NVML for each
-        model on each GPU. ``modelStates``: load phase per model (loading,
+        model on each GPU. ``ramByModel``: live host RAM (RSS) of models whose
+        backend keeps weights in host RAM (Strata). ``modelStates``: load phase per model (loading,
         waiting for free VRAM and whom it evicts, waiting for a GPU held by a
         service) with load elapsed and typical load time. Also pushed every second over ``/ocabra/ws``
         to clients that subscribe to ``models_activity``.
@@ -680,11 +681,25 @@ async def build_models_activity(request: Any) -> dict:
         vram_by_gpu = await live_activity.vram_by_gpu(worker_pids, gpu_states)
     except Exception:  # noqa: BLE001 — sin desglose, la UI reparte a partes iguales
         vram_by_gpu = {}
+    backend_by_model = {state.model_id: state.backend_type for state in states}
+    try:
+        ram_by_model = await live_activity.ram_by_model(
+            {
+                model: pids
+                for model, pids in worker_pids.items()
+                if backend_by_model.get(model) in live_activity.HOST_RAM_BACKENDS
+            }
+        )
+    except Exception:  # noqa: BLE001
+        ram_by_model = {}
     return {
         "activity": activity,
         "contexts": contexts,
         # MB medidos por NVML de cada modelo en cada GPU ({modelo: {gpu: MB}}).
         "vramByGpu": vram_by_gpu,
+        # MB de RAM del host (RSS en vivo) de los modelos que la usan a
+        # propósito aunque corran en GPU, como Strata.
+        "ramByModel": ram_by_model,
         # Estado de cada modelo activo o esperando: cargando (desde cuándo y
         # cuánto suele tardar), esperando espacio (a quién desaloja) o
         # esperando una GPU retenida por un servicio.

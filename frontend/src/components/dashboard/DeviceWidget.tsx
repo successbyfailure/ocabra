@@ -96,6 +96,7 @@ function DeviceModels({
   ollamaRuntime = {},
   emptyLabel,
   vramOnDevice,
+  ramOf,
   modelStates = {},
   stuckThreshold = 300,
 }: {
@@ -107,6 +108,8 @@ function DeviceModels({
   stuckThreshold?: number
   /** MB del modelo en este dispositivo, si se conoce (si no, el total). */
   vramOnDevice?: (m: ModelState) => number | undefined
+  /** RAM del host en vivo del modelo, si se mide (Strata). */
+  ramOf?: (m: ModelState) => number | undefined
 }) {
   if (models.length === 0) return <p className="text-[11.5px] text-muted-foreground">{emptyLabel}</p>
   return (
@@ -145,7 +148,7 @@ function DeviceModels({
                       <span>{gb(m.vramUsedMb)} GB</span>
                     )
                   })()}
-                {m.ramUsedMb > 0 && <span>{gb(m.ramUsedMb)} GB RAM</span>}
+                {(ramOf?.(m) ?? m.ramUsedMb) > 0 && <span>{gb(ramOf?.(m) ?? m.ramUsedMb)} GB RAM</span>}
               </span>
             </div>
             {rt && (
@@ -356,6 +359,7 @@ export function CpuWidget({
   ollamaRuntime,
   modelStates,
   stuckThreshold,
+  ramByModel = {},
 }: {
   stats: HostStats
   serverPower: ServerPower | null
@@ -365,8 +369,33 @@ export function CpuWidget({
   ollamaRuntime: Record<string, OllamaRuntimeInfo>
   modelStates?: Record<string, ModelPhaseInfo>
   stuckThreshold?: number
+  /** RAM del host en vivo por modelo (Strata y otros que la usan a propósito). */
+  ramByModel?: Record<string, number>
 }) {
   const cpuPower = serverPower?.cpuPowerW ?? null
+  // Parte de la RAM de cada modelo en la barra; el resto, "otros".
+  const ramOf = (m: ModelState) => ramByModel[m.modelId] ?? (m.ramUsedMb > 0 ? m.ramUsedMb : undefined)
+  const ramSegments: BarSegment[] = []
+  let ramAttributed = 0
+  models.forEach((m, i) => {
+    const mb = ramOf(m)
+    if (!mb || stats.memTotalMb <= 0) return
+    ramAttributed += mb
+    ramSegments.push({
+      key: m.modelId,
+      pct: pct(mb, stats.memTotalMb),
+      color: MODEL_HUES[i % MODEL_HUES.length],
+      title: `${m.displayName} — ${gb(mb)} GB de RAM`,
+    })
+  })
+  if (ramSegments.length > 0 && stats.memUsedMb > ramAttributed) {
+    ramSegments.push({
+      key: "otros",
+      pct: pct(stats.memUsedMb - ramAttributed, stats.memTotalMb),
+      color: "#6b7280",
+      title: `${gb(stats.memUsedMb - ramAttributed)} GB del resto del sistema`,
+    })
+  }
   const powerHistory = history.map((p) => p.powerW ?? 0)
   // Escala real: el máximo de la CPU (ajuste, RAPL o TDP del modelo). Solo si
   // no se conoce, el pico observado, y entonces se dice.
@@ -403,6 +432,7 @@ export function CpuWidget({
           value={`${gb(stats.memUsedMb)}/${gb(stats.memTotalMb)} GB`}
           barPct={stats.memPct}
           color={METRIC.mem}
+          segments={ramSegments.length > 0 ? ramSegments : undefined}
           history={history.map((p) => p.memPct)}
         />
         <MetricRow
@@ -426,6 +456,7 @@ export function CpuWidget({
           activity={activity}
           ollamaRuntime={ollamaRuntime}
           emptyLabel="Ningún modelo corriendo en CPU"
+          ramOf={ramOf}
           modelStates={modelStates}
           stuckThreshold={stuckThreshold}
         />

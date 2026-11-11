@@ -878,6 +878,9 @@ export interface ModelActivityMap {
   contexts?: Record<string, ModelContextInfo>;
   /** MB medidos por NVML de cada modelo en cada GPU: {modelId: {"0": MB}}. */
   vramByGpu?: Record<string, Record<string, number>>;
+  /** MB de RAM del host (RSS en vivo) de los modelos que la usan a propósito
+   *  aunque corran en GPU (Strata). */
+  ramByModel?: Record<string, number>;
   /** Fase de carga de cada modelo activo o esperando. */
   modelStates?: Record<string, ModelPhaseInfo>;
   stuckThresholdSeconds: number;

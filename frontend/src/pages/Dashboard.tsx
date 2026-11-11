@@ -145,11 +145,14 @@ export function Dashboard() {
   const cpuModels = useMemo(
     () =>
       loadedModels.filter((m) => {
+        // Usa RAM del host a propósito aunque corra en GPU (Strata): también
+        // es carga del host, sale en su widget con lo que ocupa.
+        if ((live.ramByModel?.[m.modelId] ?? 0) > 0) return true
         if ((m.currentGpu ?? []).length > 0) return false
         const rt = ollamaRuntimeFor(m, ollamaRuntime)
         return rt ? rt.cpuPct > 0 : true
       }),
-    [loadedModels, ollamaRuntime],
+    [loadedModels, ollamaRuntime, live.ramByModel],
   )
   const ollamaOnUnknownGpu = useMemo(
     () =>
@@ -189,6 +192,8 @@ export function Dashboard() {
                 phase={live.modelStates?.[model.modelId]}
                 gpus={gpus}
                 vramByGpu={live.vramByGpu?.[model.modelId]}
+                hostRamMb={live.ramByModel?.[model.modelId]}
+                hostTotalMb={hostStats?.memTotalMb ?? null}
                 nowMs={nowMs}
                 stuckThreshold={stuckThreshold}
                 idleTimeoutSeconds={live.idleTimeoutSeconds}
@@ -289,6 +294,7 @@ export function Dashboard() {
                 models={cpuModels}
                 activity={activity}
                 ollamaRuntime={ollamaRuntime}
+                ramByModel={live.ramByModel}
                 modelStates={live.modelStates}
                 stuckThreshold={stuckThreshold}
               />

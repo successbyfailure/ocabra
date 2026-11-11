@@ -337,3 +337,57 @@ describe("modo pool del fork mks (captura del 2026-11-11)", () => {
     expect(widths.some((w) => w && w !== "0%" && parseFloat(w) > 50)).toBe(true)
   })
 })
+
+describe("RAM del host de Strata", () => {
+  const strata = {
+    modelId: "strata/qwen3.8-coder:iq1_m",
+    displayName: "Qwen3.8 Coder (Strata)",
+    backendType: "strata",
+    status: "loaded",
+    loadPolicy: "on_demand",
+    currentGpu: [0, 1],
+    vramUsedMb: 34993,
+    vramEstimateMb: 34993,
+    ramUsedMb: 0,
+    capabilities: {},
+  } as unknown as ModelState
+
+  it("la card añade una fila de RAM del host a las de GPU", async () => {
+    const { ModelLiveCard } = await import("@/components/dashboard/ModelLiveCard")
+    render(
+      <ModelLiveCard
+        model={strata}
+        gpus={[gpu(0, 12288), gpu(1, 24576)]}
+        vramByGpu={{ "0": 11000, "1": 23000 }}
+        hostRamMb={26_183}
+        hostTotalMb={96_469}
+        nowMs={Date.now()}
+        stuckThreshold={300}
+        onUnload={() => undefined}
+        canCancel={() => false}
+      />,
+    )
+    expect(screen.getByTestId("model-host-ram").textContent).toContain("25.6 / 94.2 GB")
+    expect(screen.getByTestId("model-memory").textContent).toContain("más 25.6 GB de RAM del host")
+  })
+
+  it("el widget de CPU lista el modelo con su RAM", async () => {
+    const { CpuWidget } = await import("@/components/dashboard/DeviceWidget")
+    render(
+      <CpuWidget
+        stats={{
+          cpuPct: 20, cpuCount: 48, cpuCountPhysical: 24, loadAvg1m: 1, loadAvg5m: 1, loadAvg15m: 1,
+          memTotalMb: 96_469, memUsedMb: 60_000, memFreeMb: 36_469, memPct: 62, swapTotalMb: 0, swapUsedMb: 0, swapPct: 0,
+        }}
+        serverPower={null}
+        history={[]}
+        models={[strata]}
+        activity={{}}
+        ollamaRuntime={{}}
+        ramByModel={{ [strata.modelId]: 26_183 }}
+      />,
+    )
+    expect(screen.getByText("Qwen3.8 Coder (Strata)")).toBeTruthy()
+    expect(screen.getByText("25.6 GB RAM")).toBeTruthy()
+  })
+})

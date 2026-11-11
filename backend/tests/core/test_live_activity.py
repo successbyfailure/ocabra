@@ -988,3 +988,45 @@ async def test_remaining_is_an_upper_bound_once_past_the_typical_output():
         [no_cap], estimator=None, model_id="m", backend_type="x", slots=4, rates=rates
     )
     assert no_cap["estimatedRemainingMs"] is None
+
+
+# ── 2026-11-11: RAM del host de los modelos de Strata ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ram_by_model_sums_the_process_tree_and_caches(monkeypatch):
+    """Strata corre en GPU pero mantiene ~27 GB en RAM (el motor es hijo del
+    wrapper de Python). Se suma el RSS de todo el árbol."""
+    la._ram_cache.clear()
+    calls = []
+
+    def fake_rss(pids):
+        calls.append(list(pids))
+        return 27_400
+
+    monkeypatch.setattr(la, "_tree_rss_mb", fake_rss)
+    assert await la.ram_by_model({"strata/qwen": [2555]}) == {"strata/qwen": 27_400}
+    assert await la.ram_by_model({"strata/qwen": [2555]}) == {"strata/qwen": 27_400}
+    assert calls == [[2555]]  # la segunda vez, de la caché
+
+
+def test_tree_rss_counts_children_once(monkeypatch):
+    monkeypatch.setattr(la, "_process_tree", lambda pid: {pid, pid + 1})
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def memory_info(self):
+            return SimpleNamespace(rss=(1024 * 1024) * (100 if self.pid == 1 else 26_000))
+
+    import psutil
+
+    monkeypatch.setattr(psutil, "Process", FakeProcess)
+    assert la._tree_rss_mb([1, 1]) == 26_100
+
+
+def test_only_host_ram_backends_are_measured():
+    assert "strata" in la.HOST_RAM_BACKENDS
+    # En llama.cpp el RSS incluye los pesos mapeados ya copiados a la GPU.
+    assert "llamacpp_mks" not in la.HOST_RAM_BACKENDS

@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.10 — 2026-11-11
+
+### Cambios
+
+- **`/ocabra/models/activity` añade `ramByModel`.** Da los MB de RAM del host
+  (RSS en vivo) de los modelos cuyo backend mantiene pesos en RAM aunque
+  corran en GPU. De momento solo Strata. Antes la RAM de un modelo solo se
+  medía si corría entero en CPU, y una vez al cargarlo: un modelo de Strata en
+  las dos GPU figuraba con 0 MB de RAM y ocupaba unos 26 GB.
+
+---
+
 ## 0.70.9 — 2026-11-11
 
 ### Arreglos

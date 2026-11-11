@@ -17,6 +17,7 @@ import type {
 } from "@/types"
 import { BackendIcon } from "./BackendIcon"
 import { ContextBar, requestHue } from "./ContextBar"
+import { METRIC } from "@/components/gpu/metrics"
 import { VISUAL, fmtContext, fmtDuration, fmtTps, loadedMeta, type VisualState } from "./format"
 import { GpuBadge } from "./GpuBadge"
 import { useGpuStore } from "@/stores/gpuStore"
@@ -130,19 +131,52 @@ export function StatePill({ state, compact = false }: { state: CardState; compac
  * scheduler. Si lo medido supera la reserva, en ámbar: es el patrón previo a
  * un CUDA OOM.
  */
+function HostRamRow({ ramMb, hostTotalMb }: { ramMb: number; hostTotalMb?: number | null }) {
+  const pct = hostTotalMb ? Math.max(0, Math.min(100, (ramMb / hostTotalMb) * 100)) : null
+  return (
+    <div className="grid grid-cols-[110px_1fr_auto] items-center gap-2 text-[11px]" data-testid="model-host-ram">
+      <span className="inline-flex items-center gap-1 justify-self-start rounded-md border border-border px-1.5 py-0 font-medium text-muted-foreground">
+        RAM del host
+      </span>
+      <div
+        className="relative h-2.5 overflow-hidden rounded-full bg-muted"
+        title={`RAM del host que ocupa el modelo (RSS de sus procesos): ${gb(ramMb)} GB${hostTotalMb ? ` de ${gb(hostTotalMb)} GB` : ""}`}
+      >
+        {pct != null && <span className="absolute inset-y-0 left-0" style={{ width: `${pct}%`, background: METRIC.mem }} />}
+      </div>
+      <span className="tabular-nums text-muted-foreground">
+        {gb(ramMb)}
+        {hostTotalMb ? ` / ${gb(hostTotalMb)}` : ""} GB
+      </span>
+    </div>
+  )
+}
+
 function ModelMemory({
   model,
   gpus,
   vramByGpu,
   visual,
+  hostRamMb,
+  hostTotalMb,
 }: {
   model: ModelState
   gpus: GPUState[]
   vramByGpu?: Record<string, number>
   visual: VisualState
+  /** RAM del host en vivo, para backends que la usan aunque corran en GPU. */
+  hostRamMb?: number
+  hostTotalMb?: number | null
 }) {
   const indices = model.currentGpu ?? []
-  if (indices.length === 0) return null
+  if (indices.length === 0) {
+    return hostRamMb ? (
+      <div className="space-y-1" data-testid="model-memory">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Memoria</p>
+        <HostRamRow ramMb={hostRamMb} hostTotalMb={hostTotalMb} />
+      </div>
+    ) : null
+  }
   const n = indices.length
   const reserved = model.vramEstimateMb ?? 0
   const mineOf = (idx: number) => vramByGpu?.[String(idx)] ?? model.vramUsedMb / n
@@ -159,6 +193,7 @@ function ModelMemory({
         <span className={`ml-1.5 font-normal normal-case tracking-normal ${over ? "text-amber-400" : ""}`}>
           {gb(totalMine)} GB{reserved > 0 ? ` de ${gb(reserved)} reservados` : ""}
           {over ? " · por encima de la reserva: riesgo de OOM" : ""}
+          {hostRamMb ? ` · más ${gb(hostRamMb)} GB de RAM del host` : ""}
         </span>
       </p>
       {indices.map((idx) => {
@@ -201,6 +236,7 @@ function ModelMemory({
           </div>
         )
       })}
+      {hostRamMb ? <HostRamRow ramMb={hostRamMb} hostTotalMb={hostTotalMb} /> : null}
     </div>
   )
 }
@@ -234,6 +270,8 @@ export function ModelLiveCard({
   phase,
   gpus = [],
   vramByGpu,
+  hostRamMb,
+  hostTotalMb,
   nowMs,
   stuckThreshold,
   idleTimeoutSeconds,
@@ -246,6 +284,8 @@ export function ModelLiveCard({
   phase?: ModelPhaseInfo
   gpus?: GPUState[]
   vramByGpu?: Record<string, number>
+  hostRamMb?: number
+  hostTotalMb?: number | null
   nowMs: number
   stuckThreshold: number
   idleTimeoutSeconds?: number
@@ -376,7 +416,14 @@ export function ModelLiveCard({
 
       <div className="mt-3 space-y-2">
         <LoadProgress phase={phase} />
-        <ModelMemory model={model} gpus={gpus} vramByGpu={vramByGpu} visual={state.visual} />
+        <ModelMemory
+          model={model}
+          gpus={gpus}
+          vramByGpu={vramByGpu}
+          visual={state.visual}
+          hostRamMb={hostRamMb}
+          hostTotalMb={hostTotalMb}
+        />
         {ctx && (
           <div className="space-y-1">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Contexto</p>

@@ -1134,3 +1134,50 @@ def model_phase(
         "loadingForMs": int((now - min(started)) * 1000) if started else None,
         "typicalLoadMs": typical_ms.get(state.model_id),
     }
+
+
+# ── RAM del host de los modelos que la usan a propósito ─────────────────────
+
+# Backends que mantienen pesos en la RAM del host aunque corran en GPU (Strata
+# carga en RAM lo que no cabe en VRAM y lo trae bajo demanda). Para el resto
+# no se mide: en llama.cpp el RSS incluye los pesos mapeados con mmap que ya
+# están copiados en la GPU, y la cifra engañaría.
+HOST_RAM_BACKENDS = frozenset({"strata"})
+_RAM_TTL_S = 5.0
+_ram_cache: dict[str, tuple[float, int]] = {}
+
+
+def _tree_rss_mb(pids: list[int]) -> int:
+    import psutil
+
+    total = 0
+    seen: set[int] = set()
+    for pid in pids:
+        for member in _process_tree(pid):
+            if member in seen:
+                continue
+            seen.add(member)
+            try:
+                total += psutil.Process(member).memory_info().rss
+            except Exception:  # noqa: BLE001 — proceso muerto o sin permiso
+                continue
+    return int(total / (1024 * 1024))
+
+
+async def ram_by_model(worker_pids: dict[str, list[int]]) -> dict[str, int]:
+    """MB de RAM (RSS) de los procesos de cada modelo, con caché de 5 s."""
+    now = time.monotonic()
+    result: dict[str, int] = {}
+    pending: dict[str, list[int]] = {}
+    for model, pids in worker_pids.items():
+        cached = _ram_cache.get(model)
+        if cached and now - cached[0] < _RAM_TTL_S:
+            result[model] = cached[1]
+        else:
+            pending[model] = pids
+    if pending:
+        measured = await asyncio.to_thread(lambda: {m: _tree_rss_mb(p) for m, p in pending.items()})
+        for model, mb in measured.items():
+            _ram_cache[model] = (now, mb)
+            result[model] = mb
+    return {m: mb for m, mb in result.items() if mb > 0}
