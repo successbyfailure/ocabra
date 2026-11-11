@@ -161,7 +161,10 @@ def _cliente_con_worker(monkeypatch, post_error: Exception):
             return False
 
         async def post(self, *a, **k):
-            raise post_error
+            outcome = post_error.pop(0) if isinstance(post_error, list) else post_error
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
 
     monkeypatch.setattr(audio_mod.httpx, "AsyncClient", _Cliente)
 
@@ -227,3 +230,72 @@ def test_el_timeout_del_worker_sigue_al_de_inferencia(monkeypatch):
 
     monkeypatch.setattr(audio_mod.settings, "inference_request_timeout_seconds", 1500)
     assert audio_mod._worker_timeout() == 1500.0
+
+
+def _diarizacion_sin_memoria():
+    import httpx
+
+    peticion = httpx.Request("POST", "http://127.0.0.1:18004/transcribe")
+    respuesta = httpx.Response(
+        503,
+        json={"detail": "diarization_out_of_memory: no GPU memory even at batch size 4"},
+        request=peticion,
+    )
+    return httpx.HTTPStatusError("503", request=peticion, response=respuesta)
+
+
+def _transcripcion_ok():
+    import httpx
+
+    peticion = httpx.Request("POST", "http://127.0.0.1:18004/transcribe")
+    return httpx.Response(200, json={"text": "hola"}, request=peticion)
+
+
+def test_sin_memoria_para_diarizar_expulsa_y_reintenta_una_vez(monkeypatch):
+    """El worker ya bajo el lote de pyannote hasta 1 y reducir el contexto no
+    basto (qwen3.8 en las dos tarjetas con vision, 2026-11-11): se expulsa lo
+    que hay en la tarjeta de whisper, como en una carga bajo presion."""
+    cliente, mm = _cliente_con_worker(
+        monkeypatch, [_diarizacion_sin_memoria(), _transcripcion_ok()]
+    )
+    mm.evict_for_whisper = AsyncMock(return_value=True)
+    mm.get_state = AsyncMock(return_value=None)  # sin cabeceras X-Ocabra
+    respuesta = cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("a.wav", _WAV, "audio/wav"))],
+        data={"model": "whisper-large-v3-diarized"},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["text"] == "hola"
+    mm.evict_for_whisper.assert_awaited_once()
+
+
+def test_si_ni_expulsando_cabe_da_503_claro_con_retry_after(monkeypatch):
+    cliente, mm = _cliente_con_worker(
+        monkeypatch, [_diarizacion_sin_memoria(), _diarizacion_sin_memoria()]
+    )
+    mm.evict_for_whisper = AsyncMock(return_value=True)
+    respuesta = cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("a.wav", _WAV, "audio/wav"))],
+        data={"model": "whisper-large-v3-diarized"},
+    )
+
+    assert respuesta.status_code == 503
+    assert respuesta.json()["detail"]["error"]["code"] == "diarization_out_of_memory"
+    assert respuesta.headers["Retry-After"] == "30"
+    mm.evict_for_whisper.assert_awaited_once()
+
+
+def test_si_no_hay_nada_que_expulsar_no_reintenta(monkeypatch):
+    cliente, mm = _cliente_con_worker(monkeypatch, [_diarizacion_sin_memoria()])
+    mm.evict_for_whisper = AsyncMock(return_value=False)
+    respuesta = cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("a.wav", _WAV, "audio/wav"))],
+        data={"model": "whisper-large-v3-diarized"},
+    )
+
+    assert respuesta.status_code == 503
+    assert respuesta.json()["detail"]["error"]["code"] == "diarization_out_of_memory"

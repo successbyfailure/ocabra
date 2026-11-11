@@ -191,3 +191,30 @@ async def test_a_third_concurrent_one_asks_only_for_its_share(monkeypatch):
     await mm.make_room_for_whisper(whisper.model_id, diarize=False)
 
     assert ctx["n"] == 262144  # 350 MB needed, 500 free: nothing to do
+
+
+# -- last resort: evict as a load under pressure would ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_evict_for_whisper_unloads_the_model_on_its_card(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    free = iter([4000])
+    mm._fresh_free_vram = AsyncMock(side_effect=lambda gpu: next(free))
+    mm.unload = AsyncMock()
+    mm._wait_for_vram_released = AsyncMock()
+    mm._get_vram_free_snapshot = AsyncMock(return_value=[0])
+
+    assert await mm.evict_for_whisper(whisper.model_id) is True
+    mm.unload.assert_awaited_once_with(qwen.model_id, reason="pressure")
+
+
+@pytest.mark.asyncio
+async def test_evict_for_whisper_leaves_a_busy_model_alone(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._in_flight[qwen.model_id] = 1
+    mm._fresh_free_vram = AsyncMock(return_value=0)
+    mm.unload = AsyncMock()
+
+    assert await mm.evict_for_whisper(whisper.model_id) is False
+    mm.unload.assert_not_awaited()

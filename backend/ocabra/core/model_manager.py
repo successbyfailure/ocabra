@@ -3996,7 +3996,9 @@ class ModelManager:
         pyannote in the same process (+~3.4 GB) and each extra concurrent
         request adds ~350 MB; that memory is allocated inside the request, where
         nothing can make room for it, so it is made here, before. Best effort:
-        if no context can give way, the request goes ahead as before.
+        if no context can give way the request goes ahead; the diarizer then
+        retries at smaller batch sizes and, failing that, the endpoint falls
+        back to :meth:`evict_for_whisper`.
         """
         state = self._states.get(model_id)
         if state is None or self._gpu_manager is None or not state.current_gpu:
@@ -4035,6 +4037,45 @@ class ModelManager:
             diarize=diarize,
         )
 
+    async def evict_for_whisper(self, model_id: str) -> bool:
+        """Last resort when the diarizer ran out of memory even at batch size
+        1: evict models on whisper's card the way a load under pressure does
+        (same candidate order, soft pins included, hard pins never), until the
+        diarizer's extra fits. Busy models are left alone. Returns True when
+        the room was made, so the caller retries the transcription once.
+        """
+        state = self._states.get(model_id)
+        if state is None or self._gpu_manager is None or not state.current_gpu:
+            return False
+        gpu = int(state.current_gpu[0])
+        needed = int(settings.whisper_diarization_extra_mb)
+        for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
+            if candidate == model_id:
+                continue
+            if self.is_busy(candidate):
+                logger.info("whisper_eviction_skip_busy", whisper=model_id, candidate=candidate)
+                continue
+            released = self._physical_mb_on_gpu(candidate, gpu)
+            snapshot = await self._get_vram_free_snapshot([gpu])
+            logger.info(
+                "whisper_eviction",
+                whisper=model_id,
+                evicting=candidate,
+                gpu_index=gpu,
+                needed_mb=needed,
+            )
+            await self.unload(candidate, reason="pressure")
+            await self._wait_for_vram_released(
+                released,
+                baseline_free_mb=snapshot[0] if snapshot is not None else None,
+                gpu_indices=[gpu],
+            )
+            if await self._fresh_free_vram(gpu) >= needed:
+                return True
+        free = await self._fresh_free_vram(gpu)
+        logger.info("whisper_eviction_insufficient", whisper=model_id, gpu_index=gpu, free_mb=free)
+        return free >= needed
+
     def _vision_cost_estimate(self, state: ModelState, path: str) -> dict[int, int]:
         """MB the projector will take per GPU: the probe's measurement for this
         preset when there is one, else its file size plus compute headroom."""
@@ -4043,16 +4084,29 @@ class ModelManager:
             if isinstance(state.extra_config, dict)
             else None
         )
+        backend = self._registered_backend(state.backend_type)
+        getter = getattr(backend, "vision_projector_gpu", None)
+        pinned = getter(state.backend_model_id) if callable(getter) else None
+        if not isinstance(pinned, int):
+            pinned = None
         if isinstance(runtime, dict):
             measured = (runtime.get("context_probe_vision_mb") or {}) if runtime else {}
             if measured:
-                return {int(g): int(mb) for g, mb in measured.items()}
+                cost = {int(g): int(mb) for g, mb in measured.items()}
+                # Probes taken before the projector was pinned measured it on
+                # the first visible card; the size is the same wherever it goes.
+                if pinned is not None and len(cost) == 1 and pinned not in cost:
+                    return {pinned: next(iter(cost.values()))}
+                return cost
         gpus = [int(g) for g in state.current_gpu or []]
         if not gpus:
             return {}
-        section = (state.extra_config or {}).get("llama_cpp") or {}
-        main = section.get("main_gpu") if isinstance(section, dict) else None
-        main = int(main) if main is not None and int(main) in gpus else gpus[0]
+        if pinned is not None and pinned in gpus:
+            main = pinned
+        else:
+            section = (state.extra_config or {}).get("llama_cpp") or {}
+            main = section.get("main_gpu") if isinstance(section, dict) else None
+            main = int(main) if main is not None and int(main) in gpus else gpus[0]
         try:
             size_mb = os.path.getsize(path) / 1024 / 1024
         except OSError:

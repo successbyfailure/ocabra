@@ -345,6 +345,10 @@ class LlamaCppBackend(BackendInterface):
                 cmd.extend(["--mmproj", str(mmproj_path)])
             else:
                 cmd.append("--props")
+            mmproj_gpu = await self._pick_mmproj_gpu(visible_gpus, options)
+            if mmproj_gpu is not None and options["gpu_layers"] > 0:
+                options["mmproj_gpu"] = mmproj_gpu
+                cmd.extend(["--mmproj-device", f"CUDA{visible_gpus.index(mmproj_gpu)}"])
 
         if options.get("parallel_slots") is not None:
             cmd.extend(["--parallel", str(int(options["parallel_slots"]))])
@@ -746,6 +750,12 @@ class LlamaCppBackend(BackendInterface):
         path = options.get("mmproj_path")
         return str(path) if path else None
 
+    def vision_projector_gpu(self, model_id: str) -> int | None:
+        """The physical GPU the projector was pinned to, or None when
+        llama-server picks (a single GPU)."""
+        value = (self._model_configs.get(model_id) or {}).get("mmproj_gpu")
+        return int(value) if value is not None else None
+
     def vision_is_active(self, model_id: str) -> bool:
         options = self._model_configs.get(model_id) or {}
         return str(options.get("vision_mode")) == "enabled" or model_id in self._vision_active
@@ -914,6 +924,7 @@ class LlamaCppBackend(BackendInterface):
                 self._get_option(extra_config, "vision_mode", None),
                 self._normalize_str(self._get_option(extra_config, "mmproj_model_id", None)),
             ),
+            "mmproj_gpu": self._to_int_or_none(self._get_option(extra_config, "mmproj_gpu", None)),
             "runtime": self._get_option(extra_config, "runtime", None),
             "parallel_slots": self._to_int_or_none(
                 self._get_option(extra_config, "parallel_slots", settings.llama_cpp_parallel_slots)
@@ -1237,6 +1248,35 @@ class LlamaCppBackend(BackendInterface):
         if float(value).is_integer():
             return str(int(value))
         return f"{float(value):g}"
+
+    async def _pick_mmproj_gpu(self, visible_gpus: list[int], options: dict) -> int | None:
+        """The GPU the vision projector goes on when the model spans several.
+
+        Left to itself llama-server puts it on the first visible device, which
+        here is the 3060 that also hosts whisper: qwen3.8 extended spent 1.1 GB
+        of whisper's reserve on it and a diarized transcription had no room
+        left (2026-11-11). The largest card has the most context to give back,
+        so it goes there unless the preset names one (``mmproj_gpu``).
+        Returns None on a single GPU, where there is nothing to choose.
+        """
+        if len(visible_gpus) < 2:
+            return None
+        configured = self._to_int_or_none(options.get("mmproj_gpu"))
+        if configured is not None and configured in visible_gpus:
+            return configured
+        best, best_total = None, 0
+        for idx in visible_gpus:
+            state = None
+            getter = getattr(self._gpu_manager, "get_state", None)
+            if callable(getter):
+                try:
+                    state = await getter(idx)
+                except Exception:  # noqa: BLE001
+                    state = None
+            total = int(getattr(state, "total_vram_mb", 0) or 0) if state is not None else 0
+            if total > best_total:
+                best, best_total = idx, total
+        return best
 
     async def _compute_evenly_tensor_split(self, gpu_indices: list[int]) -> list[float] | None:
         """Compute split ratios proportional to each GPU's total VRAM.

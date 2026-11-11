@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from diarization_lib import (  # noqa: E402
     DEFAULT_DIARIZATION_MODEL_ID,
+    DiarizationOutOfMemory,
     diarize_audio_file,
     load_diarization_pipeline,
     parse_optional_bool,
@@ -224,6 +225,9 @@ def create_app(
                     vad_filter=vad_effective,
                     condition_on_previous_text=condition_effective,
                 )
+            except DiarizationOutOfMemory as exc:
+                # oCabra reads this code to free memory on the card and retry.
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
             except Exception as exc:
                 if runtime.device == "cuda" and _is_missing_cudnn_error(exc):
                     runtime.model = await asyncio.to_thread(

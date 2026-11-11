@@ -1119,3 +1119,60 @@ async def test_worker_does_not_borrow_another_backends_cuda_runtime(
         await backend.load("demo", [1], port=18032, extra_config={})
 
     assert create_proc.await_args.kwargs["env"]["LD_LIBRARY_PATH"] == "/usr/local/lib/llama_cpp"
+
+
+async def _capture_two_gpu_load(tmp_path: Path, extra_config: dict[str, Any]) -> tuple:
+    gguf = tmp_path / "demo.gguf"
+    if not gguf.exists():
+        gguf.write_bytes(b"GGUF" * 1024)
+    totals = {0: 12288, 1: 24576}  # 3060, 3090
+
+    async def _state(idx):
+        return SimpleNamespace(total_vram_mb=totals[idx])
+
+    backend = LlamaCppBackend(gpu_manager=SimpleNamespace(get_state=_state))
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch(
+            "asyncio.create_subprocess_exec", new=AsyncMock(return_value=_fake_proc())
+        ) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _stub_settings(mock_settings, str(tmp_path))
+        await backend.load("demo", [0, 1], port=18098, extra_config=extra_config)
+    return list(create_proc.await_args.args), backend
+
+
+@pytest.mark.asyncio
+async def test_two_gpu_vision_goes_on_the_largest_card(tmp_path: Path) -> None:
+    """Left to llama-server the projector lands on the first visible card, the
+    3060 whisper shares: qwen3.8 extended spent 1.1 GB of whisper's reserve on
+    it and a diarization had no room (2026-11-11)."""
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+    args, backend = await _capture_two_gpu_load(
+        tmp_path, {"llama_cpp": {"mmproj_model_id": str(mmproj), "vision_mode": "on_demand"}}
+    )
+    assert args[args.index("--mmproj-device") + 1] == "CUDA1"
+    assert backend.vision_projector_gpu("demo") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_preset_can_pin_the_projector_card(tmp_path: Path) -> None:
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+    args, _ = await _capture_two_gpu_load(
+        tmp_path,
+        {"llama_cpp": {"mmproj_model_id": str(mmproj), "vision_mode": "on_demand", "mmproj_gpu": 0}},
+    )
+    assert args[args.index("--mmproj-device") + 1] == "CUDA0"
+
+
+@pytest.mark.asyncio
+async def test_one_gpu_leaves_the_projector_to_llama_server(tmp_path: Path) -> None:
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+    args = await _capture_load_cmd(
+        tmp_path, {"llama_cpp": {"mmproj_model_id": str(mmproj), "vision_mode": "on_demand"}}
+    )
+    assert "--mmproj-device" not in args

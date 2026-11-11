@@ -167,3 +167,51 @@ def test_to_vtt_includes_speaker_voice_tag():
 def test_format_srt_ts_and_vtt_ts():
     assert diarization_lib.format_srt_ts(3661.25) == "01:01:01,250"
     assert diarization_lib.format_vtt_ts(3661.25) == "01:01:01.250"
+
+
+class _FakePipeline:
+    """Runs out of memory while its segmentation batch is above ``fits_at``."""
+
+    def __init__(self, fits_at: int) -> None:
+        self.segmentation_batch_size = 32
+        self.embedding_batch_size = 32
+        self.fits_at = fits_at
+        self.calls = 0
+
+    def __call__(self, audio):
+        self.calls += 1
+        if self.segmentation_batch_size > self.fits_at:
+            raise MemoryError("batch_size ( 32) is probably too large.")
+        return "annotation"
+
+
+def test_out_of_memory_retries_with_smaller_batches():
+    pipeline = _FakePipeline(fits_at=8)
+    assert diarization_lib.run_pipeline_with_backoff(pipeline, {}) == "annotation"
+    assert pipeline.calls == 3  # 32 -> 16 -> 8
+    assert pipeline.segmentation_batch_size == 8
+    assert pipeline.embedding_batch_size == 8
+
+
+def test_out_of_memory_at_the_floor_raises_a_recognisable_error():
+    import pytest
+
+    pipeline = _FakePipeline(fits_at=0)
+    with pytest.raises(diarization_lib.DiarizationOutOfMemory, match="diarization_out_of_memory"):
+        diarization_lib.run_pipeline_with_backoff(pipeline, {})
+    assert pipeline.calls == 4  # 32, 16, 8, 4
+    assert pipeline.segmentation_batch_size == 4
+
+
+def test_other_errors_are_not_retried():
+    import pytest
+
+    class _Broken(_FakePipeline):
+        def __call__(self, audio):
+            self.calls += 1
+            raise ValueError("bad audio")
+
+    pipeline = _Broken(fits_at=32)
+    with pytest.raises(ValueError):
+        diarization_lib.run_pipeline_with_backoff(pipeline, {})
+    assert pipeline.calls == 1

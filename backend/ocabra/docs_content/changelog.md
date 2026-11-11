@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.6 — 2026-11-11
+
+### Arreglos
+
+- **Diarizar junto a un modelo que llena las dos tarjetas ya no da 500.** Con
+  `qwen3.8:27b` en su preset de 262k y la visión cargada, una transcripción con
+  `diarize=true` se quedaba sin memoria en la GPU de whisper y devolvía un 500
+  opaco. Ahora se intenta, por orden:
+  1. El proyector de visión de los modelos repartidos entre dos GPU se carga en
+     la tarjeta grande, no en la que comparte con whisper.
+  2. Si pyannote se queda sin memoria, reintenta con lotes más pequeños
+     (32 → 16 → 8 → 4). Diariza más despacio, pero no echa a nadie.
+  3. Si ni así cabe, se expulsa el modelo de esa tarjeta, como en cualquier
+     carga sin sitio, y se repite la transcripción. Ese modelo tarda en volver
+     a cargarse en su siguiente petición.
+  4. Si tampoco hay nada que expulsar, responde **503** con código
+     `diarization_out_of_memory` y `Retry-After: 30`.
+
+**Acción:** ninguna. Si tratas los 503, ya puedes reintentar este según
+`Retry-After` o repetir la petición sin `diarize`.
+
+---
+
 ## 0.70.5 — 2026-11-11
 
 ### Arreglos

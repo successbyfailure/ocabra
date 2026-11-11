@@ -286,6 +286,73 @@ def split_segments_by_speaker(
     return result
 
 
+class DiarizationOutOfMemory(MemoryError):
+    """The diarizer ran out of GPU memory even at batch size 1."""
+
+
+_BATCH_ATTRS = ("segmentation_batch_size", "embedding_batch_size")
+# Below this the diarizer gets slow for little memory back; past it oCabra
+# frees memory on the card instead.
+MIN_DIARIZATION_BATCH = 4
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    # pyannote turns CUDA OOM into MemoryError("batch_size (32) is probably too
+    # large"); other paths raise torch.cuda.OutOfMemoryError (a RuntimeError).
+    return isinstance(exc, MemoryError) or "out of memory" in str(exc).lower()
+
+
+def _lower_batch_sizes(pipeline: Any) -> dict[str, int] | None:
+    """Halve the pipeline's batch sizes (32 -> 16 -> 8 -> 4). Returns the new
+    values, or None when they are all at the floor already."""
+    lowered: dict[str, int] = {}
+    for attr in _BATCH_ATTRS:
+        try:
+            current = int(getattr(pipeline, attr))
+        except Exception:  # noqa: BLE001 - attribute missing on this pipeline
+            continue
+        if current > MIN_DIARIZATION_BATCH:
+            new = max(MIN_DIARIZATION_BATCH, current // 2)
+            setattr(pipeline, attr, new)
+            lowered[attr] = new
+    return lowered or None
+
+
+def _release_cuda_cache() -> None:
+    try:
+        import torch as _torch
+
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_pipeline_with_backoff(pipeline: Any, audio_input: Any) -> Any:
+    """Run the diarizer, lowering its batch sizes each time it runs out of GPU
+    memory. Slower, but it fits next to a model that filled the card: qwen3.8
+    on both GPUs with its projector left pyannote no room at batch 32
+    (2026-11-11). The lowered sizes stay until the diarizer is unloaded,
+    because the card stays as full as it was. When even batch
+    ``MIN_DIARIZATION_BATCH`` runs out of memory it raises
+    :class:`DiarizationOutOfMemory`, so the caller can free memory and retry.
+    """
+    while True:
+        try:
+            return pipeline(audio_input)
+        except Exception as exc:
+            if not _is_out_of_memory(exc):
+                raise
+            lowered = _lower_batch_sizes(pipeline)
+            _release_cuda_cache()
+            if lowered is None:
+                raise DiarizationOutOfMemory(
+                    "diarization_out_of_memory: no GPU memory for the diarizer even at "
+                    f"batch size {MIN_DIARIZATION_BATCH}"
+                ) from exc
+            logger.warning("diarization_out_of_memory_retrying: %s", lowered)
+
+
 def diarize_audio_file(
     pipeline: Any,
     audio_path: str,
@@ -314,7 +381,7 @@ def diarize_audio_file(
     waveform = _torch.from_numpy(waveform_np)
     audio_input: Any = {"waveform": waveform, "sample_rate": sr_target}
 
-    annotation = pipeline(audio_input)
+    annotation = run_pipeline_with_backoff(pipeline, audio_input)
     turns = collect_diarization_turns(annotation)
     speakers = sorted({turn["speaker"] for turn in turns})
 

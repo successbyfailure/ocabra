@@ -380,6 +380,23 @@ async def transcriptions(
                     headers={"Retry-After": "10"},
                 ) from exc
             except httpx.HTTPStatusError as exc:
+                if (
+                    exc.response.status_code == 503
+                    and "diarization_out_of_memory" in exc.response.text
+                ):
+                    # The worker already retried at smaller batch sizes and the
+                    # context shrink above was not enough: evict what is on
+                    # whisper's card, as a load under pressure would, and retry.
+                    if attempt == 0 and await model_manager.evict_for_whisper(worker_key):
+                        continue
+                    raise _openai_error(
+                        f"No GPU memory to diarize with '{worker_key}' right now. Retry "
+                        "later or send the request without diarization.",
+                        "server_error",
+                        code="diarization_out_of_memory",
+                        status_code=503,
+                        headers={"Retry-After": "30"},
+                    ) from exc
                 raise_upstream_http_error(exc)
     finally:
         model_manager.end_request(worker_key, inflight_request_id)
