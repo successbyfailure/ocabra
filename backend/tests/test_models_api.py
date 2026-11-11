@@ -1205,3 +1205,55 @@ async def test_load_button_without_presets_loads_the_model_itself(monkeypatch):
     await models_api.load_model(base.model_id, request)
 
     mm.load.assert_awaited_once_with(base.model_id)
+
+
+@pytest.mark.asyncio
+async def test_a_never_loaded_llama_cpp_model_lists_its_template_capabilities(
+    tmp_path, monkeypatch
+):
+    """0.70.1/0.70.2 in production: a model never loaded in this process starts
+    with every flag off, the backend then fills them from the name (tools off
+    for flint:40b), and the template override ran before that and was skipped."""
+    import struct
+
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core import model_manager as mm_module
+    from ocabra.core.model_manager import LoadPolicy
+
+    def s(text):
+        raw = text.encode()
+        return struct.pack("<Q", len(raw)) + raw
+
+    key = b"tokenizer.chat_template"
+    gguf = tmp_path / "flint.gguf"
+    gguf.write_bytes(
+        b"GGUF"
+        + struct.pack("<IQQ", 3, 0, 1)
+        + struct.pack("<Q", len(key))
+        + key
+        + struct.pack("<I", 8)
+        + s("<tool_call><think>")
+    )
+    monkeypatch.setattr(mm_module, "_TEMPLATE_CAPS_BY_FILE", {})
+    state = ModelState(
+        model_id="llamacpp_mks/flint:40b",
+        display_name="flint:40b",
+        backend_type="llamacpp_mks",
+        load_policy=LoadPolicy.ON_DEMAND,
+        status=ModelStatus.CONFIGURED,
+        extra_config={"llama_cpp": {"model_path": str(gguf)}},
+    )
+
+    class _Backend:
+        async def get_capabilities(self, _model):
+            return BackendCapabilities(chat=True, completion=True, tools=False, reasoning=False)
+
+    class _Pool:
+        async def get_backend(self, _type):
+            return _Backend()
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(worker_pool=_Pool())))
+    payload = await models_api._serialize_model_state(request, state, {}, schedules=[])
+
+    assert payload["capabilities"]["tools"] is True
+    assert payload["capabilities"]["reasoning"] is True

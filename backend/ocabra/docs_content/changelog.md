@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.70.3 — 2026-11-11
+
+### Arreglos
+
+- **`/ocabra/models` muestra por fin las capacidades de la plantilla en los
+  modelos de llama.cpp no cargados.** La 0.70.2 lo arreglaba solo a medias: en
+  los modelos que no se habían cargado desde el último reinicio seguía saliendo
+  `flint:40b` sin herramientas ni razonamiento.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.70.2 — 2026-11-11
 
 ### Arreglos

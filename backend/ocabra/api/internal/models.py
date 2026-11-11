@@ -2151,14 +2151,6 @@ async def _serialize_model_state(
     schedules: list[dict] | None = None,
 ) -> dict:
     item = state.to_dict()
-    # A cold llama.cpp model lists the tools/reasoning its own GGUF template
-    # declares, as /v1/models does (flint:40b showed both off, 2026-11-11).
-    from ocabra.core.model_manager import ModelStatus, ensure_template_caps
-
-    if state.status != ModelStatus.LOADED and isinstance(item.get("capabilities"), dict):
-        template_caps = await ensure_template_caps(state)
-        if template_caps and item["capabilities"].get("chat"):
-            item["capabilities"] = {**item["capabilities"], **template_caps}
     # Live capability state, as opposed to the static "supports vision" flag.
     # The Makespace llama.cpp fork loads and drops the multimodal projector at
     # runtime, so a model can support vision while not currently holding it —
@@ -2177,6 +2169,16 @@ async def _serialize_model_state(
             item["vision_state"] = None
     item["disk_size_bytes"] = await _resolve_disk_size_bytes(state, ollama_sizes)
     item["capabilities"] = await _resolve_capabilities_payload(request, state, item["capabilities"])
+    # A cold llama.cpp model lists the tools/reasoning its own GGUF template
+    # declares (flint:40b showed both off, 2026-11-11). After the resolver:
+    # before it, a model never loaded in this process has every flag off, so
+    # the "is it a chat model" check below never passed (0.70.1/0.70.2).
+    from ocabra.core.model_manager import ModelStatus, ensure_template_caps
+
+    if state.status != ModelStatus.LOADED and isinstance(item.get("capabilities"), dict):
+        template_caps = await ensure_template_caps(state)
+        if template_caps and item["capabilities"].get("chat"):
+            item["capabilities"] = {**item["capabilities"], **template_caps}
 
     # Attach profiles if the registry is available
     profile_registry = getattr(request.app.state, "profile_registry", None)
