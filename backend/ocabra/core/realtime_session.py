@@ -1715,7 +1715,7 @@ class RealtimeSession:
         error_message: str | None = None
         output_tokens = 0
         request_id = self._model_manager.begin_request(
-            self.stt_model_id, source="realtime_stt"
+            self.stt_model_id, source="realtime_stt", user=self._user
         )
         try:
             worker = await self._ensure_stt_worker()
@@ -1786,7 +1786,7 @@ class RealtimeSession:
         error_message: str | None = None
         output_tokens = 0
         request_id = self._model_manager.begin_request(
-            self.stt_model_id, source="realtime_stt"
+            self.stt_model_id, source="realtime_stt", user=self._user
         )
         try:
             worker = await self._ensure_stt_worker()

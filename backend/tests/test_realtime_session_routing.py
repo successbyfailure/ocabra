@@ -195,6 +195,7 @@ async def test_transcribe_holds_realtime_activity_lease(monkeypatch) -> None:
     session._model_manager.begin_request.assert_called_once_with(
         session.stt_model_id,
         source="realtime_stt",
+        user=session._user,
     )
     session._model_manager.end_request.assert_called_once_with(
         session.stt_model_id,

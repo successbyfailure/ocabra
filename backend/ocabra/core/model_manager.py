@@ -107,6 +107,17 @@ ENCODER_REQUEST_KINDS = frozenset(
 )
 
 
+def _request_attribution(user) -> dict:
+    """user_id/username/api_key_name of a ``UserContext`` for in-flight rows."""
+    if user is None or getattr(user, "is_anonymous", False):
+        return {}
+    return {
+        "user_id": getattr(user, "user_id", None),
+        "username": getattr(user, "username", None),
+        "api_key_name": getattr(user, "api_key_name", None),
+    }
+
+
 class ModelStatus(str, Enum):
     DISCOVERED = "discovered"
     CONFIGURED = "configured"
@@ -476,9 +487,18 @@ class ModelManager:
         finally:
             lock.release()
 
-    def begin_request(self, model_id: str, *, source: str = "api") -> str:
-        """Mark one request as in-flight. Returns request_id."""
-        request_id = self.try_begin_request(model_id, max_inflight=0, source=source)
+    def begin_request(self, model_id: str, *, source: str = "api", user=None) -> str:
+        """Mark one request as in-flight. Returns request_id.
+
+        ``user`` (a ``UserContext``) attributes the request, so the dashboard's
+        live requests show who is behind it. The handlers that call this
+        directly (audio, images, video, realtime, agent runs) are the ones the
+        stats middleware does not admit itself, and without it their rows
+        showed up as "anónimo".
+        """
+        request_id = self.try_begin_request(
+            model_id, max_inflight=0, source=source, **_request_attribution(user)
+        )
         assert request_id is not None  # max_inflight<=0 never rejects
         return request_id
 

@@ -170,7 +170,7 @@ async def image_generations(
     # doesn't match the canonical state key — image generation requests can
     # take minutes (sequential offload on contended GPUs), well past the
     # 300s idle_timeout, so we need the canonical-keyed marker too.
-    inflight_request_id = model_manager.begin_request(worker_key)
+    inflight_request_id = model_manager.begin_request(worker_key, user=user)
     try:
         result = await worker_pool.forward_request(worker_key, "/generate", worker_body)
     except httpx.HTTPStatusError as exc:
@@ -435,7 +435,7 @@ async def image_edits(
     )
 
     worker_pool = request.app.state.worker_pool
-    inflight_request_id = model_manager.begin_request(worker_key)
+    inflight_request_id = model_manager.begin_request(worker_key, user=user)
     try:
         result = await worker_pool.forward_request(worker_key, "/edit", worker_body)
     except httpx.HTTPStatusError as exc:

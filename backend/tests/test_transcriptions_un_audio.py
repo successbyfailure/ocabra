@@ -299,3 +299,65 @@ def test_si_no_hay_nada_que_expulsar_no_reintenta(monkeypatch):
 
     assert respuesta.status_code == 503
     assert respuesta.json()["detail"]["error"]["code"] == "diarization_out_of_memory"
+
+
+# ── Atribucion de la peticion en curso (2026-11-11) ─────────────────────────
+
+
+def test_la_transcripcion_en_curso_lleva_su_usuario(monkeypatch):
+    """La seccion Peticiones del dashboard mostraba "anónimo" en las
+    transcripciones: el handler marcaba la peticion en curso sin usuario."""
+    import httpx
+
+    from ocabra.core.model_manager import ModelManager
+
+    cliente, mm = _cliente_con_worker(monkeypatch, httpx.ReadTimeout("slow"))
+    vistos: list[dict] = []
+    real = ModelManager(worker_pool=None)
+
+    def begin_request(model_id, **kwargs):
+        rid = real.begin_request(model_id, **kwargs)
+        active = real._active_requests[rid]
+        vistos.append({"username": active.username, "api_key_name": active.api_key_name})
+        return rid
+
+    mm.begin_request = MagicMock(side_effect=begin_request)
+    usuario = UserContext(
+        user_id="u-1",
+        username="revilla",
+        role="user",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=False,
+        api_key_name="portatil",
+    )
+
+    async def _usuario():
+        return usuario
+
+    for dep in (get_current_user, get_openai_user):
+        cliente.app.dependency_overrides[dep] = _usuario
+
+    cliente.post(
+        "/v1/audio/transcriptions",
+        files=[("file", ("a.wav", _WAV, "audio/wav"))],
+        data={"model": "whisper-large-v3-diarized"},
+    )
+
+    assert vistos == [{"username": "revilla", "api_key_name": "portatil"}]
+
+
+def test_un_anonimo_sigue_sin_usuario():
+    from ocabra.core.model_manager import ModelManager
+
+    real = ModelManager(worker_pool=None)
+    anon = UserContext(
+        user_id=None,
+        username=None,
+        role="user",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=True,
+    )
+    rid = real.begin_request("whisper/x", user=anon)
+    assert real._active_requests[rid].username is None

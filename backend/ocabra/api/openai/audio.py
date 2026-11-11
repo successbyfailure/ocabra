@@ -252,7 +252,7 @@ async def transcriptions(
     sidecar_result: Any = None
     last_error: Exception | None = None
 
-    inflight_request_id = model_manager.begin_request(worker_key)
+    inflight_request_id = model_manager.begin_request(worker_key, user=user)
     if state.backend_type == "whisper":
         # Diarizing or many transcriptions at once grow whisper's footprint past
         # what it is sized for: ask a llama.cpp model on its card to shrink its

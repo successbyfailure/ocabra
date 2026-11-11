@@ -65,7 +65,7 @@ async def upscale_video(
     request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool
-    inflight_request_id = model_manager.begin_request(worker_key)
+    inflight_request_id = model_manager.begin_request(worker_key, user=_user)
     try:
         for attempt in range(2):
             worker = worker_pool.get_worker(worker_key)

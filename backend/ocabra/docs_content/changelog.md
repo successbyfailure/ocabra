@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.72.2 — 2026-11-11
+
+### Correcciones
+
+- **Las peticiones en curso de audio, imágenes, vídeo, voz en tiempo real y
+  agentes ya dicen de quién son.** En `/ocabra/models/activity` (y en la
+  sección Peticiones del dashboard) salían sin `username`, como "anónimo",
+  porque esos endpoints marcaban la petición en curso sin el usuario. Las de
+  chat, completions y embeddings ya lo traían.
+
+---
+
 ## 0.72.1 — 2026-11-11
 
 ### Cambios

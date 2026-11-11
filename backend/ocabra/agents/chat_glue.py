@@ -72,7 +72,9 @@ class ProfileWorkerInvoker(WorkerInvoker):
         backend_model_id: str,
         vision_capable: bool,
         model_manager,
+        user=None,
     ) -> None:
+        self._user = user
         self._worker_pool = worker_pool
         self._worker_key = worker_key
         self._backend_model_id = backend_model_id
@@ -123,7 +125,7 @@ class ProfileWorkerInvoker(WorkerInvoker):
         Holding an additional lease for the whole run keeps ``is_busy`` true
         end-to-end.
         """
-        request_id = self._model_manager.begin_request(self._worker_key)
+        request_id = self._model_manager.begin_request(self._worker_key, user=self._user)
         try:
             yield
         finally:
@@ -166,6 +168,7 @@ async def build_invoker_for_agent(
             backend_model_id=backend_model_id,
             vision_capable=vision_capable,
             model_manager=model_manager,
+            user=user,
         )
     if agent.base_model_id:
         # Treat it like a profile id: many deployments use base_model_id as the
@@ -189,6 +192,7 @@ async def build_invoker_for_agent(
             backend_model_id=backend_model_id,
             vision_capable=vision_capable,
             model_manager=model_manager,
+            user=user,
         )
     raise _openai_error(
         f"Agent '{agent.slug}' has no base model configured.",
