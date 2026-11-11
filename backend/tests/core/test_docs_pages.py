@@ -204,3 +204,46 @@ def test_la_referencia_documenta_todos_los_endpoints_de_batches():
 
     sin_documentar = sorted(e for e in ALLOWED_ENDPOINTS if f"`{e}`" not in _API_DESCRIPTION)
     assert not sin_documentar, f"endpoints de Batches sin documentar en /docs: {sin_documentar}"
+
+
+# ── Markdown crudo frente a navegador ───────────────────────────────────────
+
+NAVEGADOR = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8"
+
+
+@pytest.mark.parametrize("pagina", ["changelog", "models"])
+def test_un_navegador_recibe_la_pagina_maquetada_en_la_url_md(client, pagina):
+    """Abrir /docs/models.md en el navegador mostraba el Markdown como texto."""
+    resp = client.get(f"/docs/{pagina}.md", headers={"Accept": NAVEGADOR})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "<table" in resp.text or "<h1" in resp.text
+    assert resp.headers["vary"] == "Accept"
+
+
+@pytest.mark.parametrize(
+    "accept",
+    [
+        "",
+        "*/*",
+        "text/markdown",
+        "text/plain",
+        "text/markdown, text/html;q=0.9",
+        "text/html;q=0.5, text/plain",
+    ],
+)
+def test_curl_y_agentes_siguen_recibiendo_markdown(client, accept):
+    headers = {"Accept": accept} if accept else {}
+    resp = client.get("/docs/models.md", headers=headers)
+    assert resp.headers["content-type"].startswith("text/markdown")
+    assert resp.text.startswith("# Modelos")
+
+
+def test_raw_fuerza_el_markdown_desde_el_navegador(client):
+    resp = client.get("/docs/models.md?raw=1", headers={"Accept": NAVEGADOR})
+    assert resp.headers["content-type"].startswith("text/markdown")
+    assert resp.text.startswith("# Modelos")
+
+
+def test_el_pie_enlaza_a_la_fuente_cruda(client):
+    assert 'href="/docs/models.md?raw=1"' in client.get("/docs/models").text

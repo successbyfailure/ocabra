@@ -18,8 +18,8 @@ import re
 import unicodedata
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 router = APIRouter()
 
@@ -229,7 +229,7 @@ def _envolver(pagina: str, titulo: str, cuerpo: str, version: str) -> str:
 <nav><span class="marca">oCabra {html.escape(version)}</span>{enlaces}
 <a href="/docs">Referencia de la API</a></nav>
 <main>{cuerpo}</main>
-<div class="pie">Fuente en Markdown: <code>/docs/{html.escape(pagina)}.md</code></div>
+<div class="pie">Fuente en Markdown: <a href="/docs/{html.escape(pagina)}.md?raw=1"><code>/docs/{html.escape(pagina)}.md</code></a></div>
 </body></html>"""
 
 
@@ -240,27 +240,64 @@ def _leer(nombre_fichero: str) -> str:
     return ruta.read_text(encoding="utf-8")
 
 
+def _prefiere_html(accept: str) -> bool:
+    """Si la petición prefiere HTML a Markdown o texto plano.
+
+    Los navegadores piden ``text/html`` explícitamente y por delante de todo;
+    ``curl`` y la mayoría de agentes mandan ``*/*`` o piden ``text/markdown``.
+    Solo se sirve HTML cuando ``text/html`` gana a ``text/markdown`` y a
+    ``text/plain`` por calidad (``q``), o aparece y ellos no; un comodín no
+    cuenta como preferencia por nada.
+    """
+    pesos: dict[str, float] = {}
+    for parte in accept.split(","):
+        tipo, *params = [x.strip() for x in parte.split(";")]
+        if not tipo:
+            continue
+        q = 1.0
+        for param in params:
+            if param.startswith("q="):
+                try:
+                    q = float(param[2:])
+                except ValueError:
+                    q = 0.0
+        pesos[tipo.lower()] = max(q, pesos.get(tipo.lower(), 0.0))
+    html_q = pesos.get("text/html", 0.0)
+    if html_q <= 0:
+        return False
+    return html_q > max(pesos.get("text/markdown", 0.0), pesos.get("text/plain", 0.0))
+
+
 @router.get(
     "/docs/{pagina}.md",
     include_in_schema=False,
     response_class=PlainTextResponse,
 )
-async def pagina_markdown(pagina: str) -> PlainTextResponse:
+async def pagina_markdown(pagina: str, request: Request, raw: bool = False) -> Response:
     """Devuelve la fuente en Markdown de una página de documentación.
 
     Pensado para agentes y para ``curl``: es exactamente el mismo contenido que
-    renderiza la versión HTML, sin maquetar.
+    renderiza la versión HTML, sin maquetar. Si quien la pide es un navegador
+    (prefiere ``text/html`` en ``Accept``), recibe la página maquetada, como en
+    ``/docs/{pagina}``; ``?raw=1`` fuerza el Markdown también desde el navegador.
 
     Parámetros:
         pagina: ``changelog`` o ``models``.
+        raw: devolver siempre el Markdown, sea quien sea el cliente.
 
     Respuesta:
-        ``text/markdown`` con el documento, o 404 si la página no existe.
+        ``text/markdown`` con el documento (o ``text/html`` para un navegador),
+        o 404 si la página no existe. Lleva ``Vary: Accept``.
     """
     entrada = PAGES.get(pagina)
     if entrada is None:
         raise HTTPException(status_code=404, detail="documentation page not found")
-    return PlainTextResponse(_leer(entrada[0]), media_type="text/markdown; charset=utf-8")
+    if not raw and _prefiere_html(request.headers.get("accept", "")):
+        respuesta: Response = await pagina_html(pagina)
+    else:
+        respuesta = PlainTextResponse(_leer(entrada[0]), media_type="text/markdown; charset=utf-8")
+    respuesta.headers["Vary"] = "Accept"
+    return respuesta
 
 
 @router.get("/docs/{pagina}", include_in_schema=False, response_class=HTMLResponse)

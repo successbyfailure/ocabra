@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.68.5 — 2026-11-11
+
+### Cambios de comportamiento
+
+- **`/docs/changelog.md` y `/docs/models.md` se leen formateadas en el
+  navegador.** Antes el navegador mostraba el Markdown como texto plano. Ahora,
+  si la petición prefiere `text/html` (lo que hace un navegador), recibe la
+  misma página que `/docs/changelog` o `/docs/models`. `curl`, los scripts y
+  los agentes que mandan `*/*` o piden `text/markdown` siguen recibiendo el
+  Markdown sin maquetar. La respuesta lleva `Vary: Accept`.
+
+**Acción:** solo si tu agente pide la página con cabeceras de navegador
+(`Accept: text/html,…`) y espera Markdown. En ese caso añade `?raw=1` o pide
+`Accept: text/markdown`.
+
+---
+
 ## 0.68.4 — 2026-11-11
 
 ### Arreglos

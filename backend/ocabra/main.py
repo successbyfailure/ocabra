@@ -844,7 +844,8 @@ dos paginas aparte, pensadas para quien construye sobre oCabra:
 Ambas se sirven tambien en Markdown crudo añadiendo `.md`
 ([`/docs/changelog.md`](/docs/changelog.md),
 [`/docs/models.md`](/docs/models.md)) — misma fuente, sin maquetar, pensado
-para agentes y para `curl`.
+para agentes y para `curl`. Un navegador recibe ahí la página maquetada; añade
+`?raw=1` para ver el Markdown también desde él.
 
 ## Autenticacion
 
