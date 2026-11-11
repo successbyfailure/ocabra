@@ -91,6 +91,42 @@ Activada en producción con `LLAMA_CPP_LIVE_CONTEXT_ENABLED=true`. Ajustes: `lla
   - Las bajadas de preset (`runtime_context_downgrade`) siguen recargando. En los perfiles actuales cambian de GPU (`extended` usa las dos y `normal` una), y eso no lo resuelve el contexto en vivo.
   - Proponerlo upstream (Fase 7).
 
+### Contexto máximo medido y reserva para whisper (en curso, 2026-11-11)
+
+Petición del usuario, con sus decisiones:
+
+1. **Medir el contexto máximo** de un preset (una tarjeta o dos), con UI.
+   - Se carga con un contexto pequeño y se amplía en caliente midiendo la VRAM real por GPU hasta el margen de seguridad.
+   - Margen = `vram_buffer_mb` (512 MB, ajuste global existente), **sin contar el proyector de visión**.
+   - Prueba final con el pool lleno: **opcional**.
+   - El resultado va a `runtime_policy.validated_context_tokens` / `validated_vram_mb` y al detalle por GPU (MB de KV por 1k tokens, coste del proyector).
+2. **Visión con la tarjeta al máximo:** al llegar la primera imagen, si el proyector no cabe, se reduce el contexto momentáneamente y luego se activa la visión. Es justo el caso que tumbó gemma4:26b el 10/11.
+3. **Una sola tarjeta (3090):** se usa entera; el contexto del preset es el máximo medido.
+4. **Dos tarjetas:**
+   - El techo es el máximo medido.
+   - Se carga con el contexto que deja libre en la 3060 una reserva para whisper, configurable global y por preset.
+   - Si una petición necesita más, crece hasta el techo desalojando whisper.
+   - Tras **120 s** (configurable) vuelve al contexto inicial; el recrecimiento ocioso no pasa de ahí.
+
+Medido para la reserva (whisper-large-v3-turbo, proceso propio, 11/11):
+
+| Uso | Pico |
+|---|---:|
+| Ocioso | 2.184 MiB |
+| 4 transcripciones a la vez | 3.386 MiB |
+| 4 a la vez con diarización | 6.108 MiB, y retiene 5.328 después |
+
+La reserva de oCabra (3.500) cubre el caso sin diarización. Con diarización se queda corta por ~2,6 GB: pendiente de decidir (reserva mayor, o encoger al llegar una diarización y liberar la memoria después).
+
+`--fit` se mantiene: solo rellena lo que oCabra no fija (el contexto solo si es 0, `common/fit.cpp:219`), así que no interfiere con la medición.
+
+Orden:
+
+- **Fase A:** medición (backend, API y UI).
+- **Fase B:** visión con la tarjeta llena.
+- **Fase C:** una tarjeta.
+- **Fase D:** dos tarjetas con reserva y vuelta a los 120 s.
+
 ### Evidencia de visión bajo demanda (2026-10-31)
 
 - oCabra persiste `vision_mode` y `mmproj_model_id`, muestra las tres políticas
