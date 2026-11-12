@@ -1,6 +1,6 @@
 # Nuevo editor de modelos — propuesta de diseño
 
-Estado: **implementado en la v0.74.0** (2026-11-12). Diseñado primero a partir
+Estado: **implementado y desplegado (v0.74.0 + v0.74.1)** el 2026-11-12. Diseñado primero a partir
 de lo que el backend acepta y expone, sin mirar el editor viejo; después se
 repasó el editor viejo para no perder nada (ver §9). Decisiones del usuario:
 página completa, con todas las mejoras y arreglos.
