@@ -46,6 +46,17 @@ class RequestRuntimeTelemetry:
     def mark_load(self, duration_ms: int) -> None:
         self.load_ms = max(0, int(duration_ms))
 
+    def mark_prefill_since(self, started: float, now: float | None = None) -> None:
+        """Prefill = lo que tardó el worker desde ``started`` (``time.monotonic``).
+
+        Para quien solo hace prefill (embeddings) y cuyo motor no informa de
+        ``timings.prompt_ms``: la llamada al worker ya no incluye ni la cola
+        de oCabra ni la carga del modelo, que pasan antes de ``started``.
+        """
+        if self.prefill_ms is None:
+            observed = time.monotonic() if now is None else now
+            self.prefill_ms = max(0, int((observed - started) * 1000))
+
     def mark_first_token(self, now: float | None = None) -> None:
         if self.ttft_ms is None:
             observed = time.monotonic() if now is None else now
@@ -66,3 +77,15 @@ class RequestRuntimeTelemetry:
             "admission_lease_id": self.admission_lease_id,
         }
         return {key: int(value) for key, value in values.items() if value is not None}
+
+
+def mark_prefill_since(request_state: object, started: float) -> None:
+    """Anota el prefill en la telemetría de la petición, si la hay.
+
+    Lo usan los endpoints de embeddings justo después de que el worker
+    responde: es el tiempo con el que el middleware de stats calcula los
+    tokens/s de prefill, que el worker no devuelve.
+    """
+    telemetry = getattr(request_state, "runtime_telemetry", None)
+    if isinstance(telemetry, RequestRuntimeTelemetry):
+        telemetry.mark_prefill_since(started)

@@ -5,6 +5,8 @@ POST /api/embed      — Ollama v0.3+ embeddings endpoint (supports input arrays
 
 from __future__ import annotations
 
+import time
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
@@ -21,6 +23,7 @@ from ocabra.api.openai._deps import (
     merge_profile_defaults,
     resolve_profile,
 )
+from ocabra.core.request_telemetry import mark_prefill_since
 
 from ._mapper import resolve_model
 from ._shared import get_ollama_user
@@ -144,6 +147,7 @@ async def _run_embeddings(
 
     worker_pool = request.app.state.worker_pool
     raw_input = merged_body.get("input") or merged_body.get("prompt") or ""
+    forward_started = time.monotonic()
 
     if state.backend_type == "ollama":
         # Try /api/embed first (Ollama v0.3+); fall back to /api/embeddings for older versions.
@@ -181,6 +185,9 @@ async def _run_embeddings(
         )
         vectors = [item.get("embedding", []) for item in result.get("data", [])]
 
+    # Un embedding es todo prefill: con este tiempo el middleware de stats
+    # calcula los tokens/s que el worker no devuelve.
+    mark_prefill_since(request.state, forward_started)
     response: dict = {"model": ollama_model, "embeddings": vectors}
     # Preserve token-count fields so the stats middleware can record usage.
     for field in ("prompt_eval_count", "total_duration", "load_duration"):

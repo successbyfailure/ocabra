@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 
-from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry, mark_prefill_since
 from ocabra.core.worker_pool import InferenceTimeoutError
 from ocabra.stats.collector import (
     StatsMiddleware,
@@ -22,6 +22,7 @@ from ocabra.stats.collector import (
     _extract_stream_error,
     _extract_usage_tokens,
     _mark_stream_first_token,
+    _prefill_only_prompt_tps,
     _resolve_inflight_model_id,
     _stream_error_status,
     _stream_output_tokens,
@@ -294,6 +295,39 @@ def test_engine_runtime_telemetry_extracts_prefill_and_slot() -> None:
 
     assert telemetry.prefill_ms == 1234
     assert telemetry.slot_id == 3
+
+
+def test_embedding_prompt_tps_uses_worker_time_not_wall_clock() -> None:
+    # 2026-11-12: los embeddings no guardaban velocidad (el worker no
+    # devuelve ``timings``). Se mide la llamada al worker, sin cola ni carga.
+    telemetry = RequestRuntimeTelemetry(started_monotonic=0.0)
+    request = SimpleNamespace(state=SimpleNamespace(runtime_telemetry=telemetry))
+    telemetry.mark_prefill_since(5.0, now=5.5)
+
+    assert telemetry.prefill_ms == 500
+    assert _prefill_only_prompt_tps(request, "embedding", 1000) == 2000.0
+    assert _prefill_only_prompt_tps(request, "ollama_embedding", 250) == 500.0
+
+
+def test_embedding_prompt_tps_none_without_tokens_time_or_wrong_kind() -> None:
+    telemetry = RequestRuntimeTelemetry(started_monotonic=0.0)
+    request = SimpleNamespace(state=SimpleNamespace(runtime_telemetry=telemetry))
+    assert _prefill_only_prompt_tps(request, "embedding", 100) is None  # sin prefill
+
+    telemetry.prefill_ms = 200
+    assert _prefill_only_prompt_tps(request, "embedding", None) is None
+    assert _prefill_only_prompt_tps(request, "embedding", 0) is None
+    assert _prefill_only_prompt_tps(request, "chat", 100) is None
+    no_telemetry = SimpleNamespace(state=SimpleNamespace())
+    assert _prefill_only_prompt_tps(no_telemetry, "embedding", 100) is None
+
+
+def test_mark_prefill_since_keeps_engine_reported_prefill() -> None:
+    telemetry = RequestRuntimeTelemetry(started_monotonic=0.0, prefill_ms=42)
+    mark_prefill_since(SimpleNamespace(runtime_telemetry=telemetry), 0.0)
+    assert telemetry.prefill_ms == 42
+    # Sin telemetría (petición fuera del middleware) no rompe.
+    mark_prefill_since(SimpleNamespace(), 0.0)
 
 
 def test_stream_ttft_is_captured_before_progress_throttle() -> None:

@@ -667,6 +667,26 @@ def _extract_speculative_stats(
     )
 
 
+# Peticiones que solo hacen prefill y cuyo motor no devuelve ``timings``.
+_PREFILL_ONLY_KINDS = {"embedding", "ollama_embedding"}
+
+
+def _prefill_only_prompt_tps(
+    request: Request, request_kind: str, input_tokens: int | None
+) -> float | None:
+    """tokens/s de prefill de un embedding: tokens de entrada entre lo que
+    tardó el worker (``RequestRuntimeTelemetry.prefill_ms``, que anota el
+    endpoint). No se usa ``duration_ms`` porque incluye la cola y la carga
+    del modelo, y con un arranque en frío la cifra no significaría nada."""
+    if request_kind not in _PREFILL_ONLY_KINDS or not input_tokens or input_tokens <= 0:
+        return None
+    telemetry = getattr(request.state, "runtime_telemetry", None)
+    prefill_ms = getattr(telemetry, "prefill_ms", None)
+    if not isinstance(prefill_ms, (int, float)) or prefill_ms <= 0:
+        return None
+    return round(input_tokens / (prefill_ms / 1000.0), 2)
+
+
 def _extract_error_message(payload: dict | None, status_code: int) -> str | None:
     """Preserve the structured API error instead of reducing it to ``HTTP 5xx``."""
     if status_code < 400:
@@ -1176,6 +1196,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
             draft_n, draft_n_accepted, predicted_tps, prompt_tps = _extract_speculative_stats(
                 response_payload
             )
+            if prompt_tps is None:
+                prompt_tps = _prefill_only_prompt_tps(request, request_kind, in_tok)
             # Transcription output: JSON formats are proxied above; for non-JSON
             # (srt/vtt/text) count words from the raw body. Empty/silence → 0
             # (not "—") so the row is consistent.

@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.74.0 — 2026-11-12
+
+### Novedades
+
+- **Los embeddings guardan su velocidad.** Las peticiones a `/v1/embeddings`,
+  `/api/embed` y `/api/embeddings` no registraban ninguna cifra de
+  rendimiento: el motor no la devuelve, y `promptTokensPerSecond` salía vacío
+  en `/ocabra/stats` y en las últimas peticiones del dashboard. Ahora se
+  calcula con los tokens de entrada y el tiempo que tarda el worker, sin
+  contar la espera en cola de oCabra ni la carga del modelo. Así se puede
+  comparar un mismo modelo en CPU y en GPU. Si el worker atiende varias
+  peticiones en paralelo, la cifra incluye su cola interna. La respuesta de
+  los endpoints no cambia.
+
+---
+
 ## 0.73.2 — 2026-11-12
 
 ### Correcciones

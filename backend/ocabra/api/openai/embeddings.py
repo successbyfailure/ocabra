@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import math
 import struct
+import time
 from typing import Annotated, Any
 
 import httpx
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.request_telemetry import mark_prefill_since
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 
 from ._deps import (
@@ -132,6 +134,7 @@ async def embeddings(
         )
 
     worker_pool = request.app.state.worker_pool
+    forward_started = time.monotonic()
     try:
         result = await worker_pool.forward_request(
             worker_key,
@@ -142,6 +145,9 @@ async def embeddings(
         raise_upstream_http_error(exc)
     except (InferenceTimeoutError, WorkerDegradedError) as exc:
         raise_inference_dispatch_error(exc)
+    # Un embedding es todo prefill: con este tiempo el middleware de stats
+    # calcula los tokens/s que el worker no devuelve.
+    mark_prefill_since(request.state, forward_started)
     if isinstance(dimensions, int) and dimensions >= 1:
         _apply_requested_dimensions(result, dimensions)
     resp_headers = await ocabra_response_headers(

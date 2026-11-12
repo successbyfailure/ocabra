@@ -1535,6 +1535,42 @@ class TestEmbeddings:
         assert resp.status_code == 200
         assert resp.json()["object"] == "list"
 
+    def test_embeddings_marks_worker_time_as_prefill(self):
+        # Con ese tiempo el middleware de stats guarda los tokens/s del
+        # embedding (2026-11-12: antes no se guardaba ninguna velocidad).
+        from ocabra.backends.base import BackendCapabilities
+        from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+        from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+
+        state = ModelState(
+            model_id="bert-base",
+            display_name="BERT",
+            backend_type="vllm",
+            status=ModelStatus.LOADED,
+            load_policy=LoadPolicy.ON_DEMAND,
+            capabilities=BackendCapabilities(embeddings=True),
+        )
+        fake_response = {
+            "object": "list",
+            "data": [{"object": "embedding", "embedding": [0.1], "index": 0}],
+            "usage": {"prompt_tokens": 5, "total_tokens": 5},
+        }
+        app = _make_app(model_state=state, worker_result=fake_response)
+        seen: list[RequestRuntimeTelemetry] = []
+
+        @app.middleware("http")
+        async def _telemetry(request, call_next):
+            telemetry = RequestRuntimeTelemetry(started_monotonic=0.0)
+            request.state.runtime_telemetry = telemetry
+            seen.append(telemetry)
+            return await call_next(request)
+
+        resp = TestClient(app).post(
+            "/v1/embeddings", json={"model": "bert-base", "input": "Hello world"}
+        )
+        assert resp.status_code == 200
+        assert seen and seen[0].prefill_ms is not None and seen[0].prefill_ms >= 0
+
     def test_embeddings_proxy_uses_canonical_model_id_for_local_alias(self):
         from ocabra.backends.base import BackendCapabilities
         from ocabra.config import settings
