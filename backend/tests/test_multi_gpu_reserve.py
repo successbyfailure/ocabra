@@ -236,6 +236,7 @@ async def test_if_nothing_can_shrink_the_diarizer_load_evicts_idle_neighbours(mo
 
     mm.evict_for_whisper.assert_awaited_once()
     assert mm.evict_for_whisper.await_args.kwargs["needed_mb"] >= 3400
+    assert mm.evict_for_whisper.await_args.kwargs["only_unshrinkable"] is True
 
 
 @pytest.mark.asyncio
@@ -260,3 +261,22 @@ async def test_plain_transcriptions_never_evict_for_the_diarizer(monkeypatch):
     await mm.make_room_for_whisper(whisper.model_id, diarize=False)
 
     mm.evict_for_whisper.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_proactive_eviction_spares_models_that_can_shrink_live(monkeypatch):
+    """Orden fijado por el usuario: encoger, luego lotes pequenos de pyannote y
+    solo despues expulsar. qwen3.8 en las dos GPU tarda 45-100 s en volver: la
+    ruta preventiva no lo toca; la reactiva (diarization_out_of_memory) si."""
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._fresh_free_vram = AsyncMock(return_value=0)
+    mm.unload = AsyncMock()
+    mm._wait_for_vram_released = AsyncMock()
+    mm._get_vram_free_snapshot = AsyncMock(return_value=[0])
+    mm._can_change_context_live = MagicMock(return_value=True)
+
+    assert await mm.evict_for_whisper(whisper.model_id, only_unshrinkable=True) is False
+    mm.unload.assert_not_awaited()
+
+    await mm.evict_for_whisper(whisper.model_id)
+    mm.unload.assert_awaited_once_with(qwen.model_id, reason="pressure")

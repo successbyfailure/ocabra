@@ -4124,8 +4124,11 @@ class ModelManager:
             # what was in the way; on demand nothing did, and with the 3060
             # holding an 8 GB embedder the transcriptions died with CUDA out
             # of memory (2026-11-12). Evict like that load did: idle models
-            # only, the pressure order, hard pins never.
-            if await self.evict_for_whisper(model_id, needed_mb=extra):
+            # only, the pressure order, hard pins never. Not the ones that
+            # can shrink live (qwen3.8 on both cards: 45-100 s to reload): the
+            # order is shrink, then pyannote's smaller batches, and only then
+            # evict them, which the endpoint does on diarization_out_of_memory.
+            if await self.evict_for_whisper(model_id, needed_mb=extra, only_unshrinkable=True):
                 logger.info("whisper_room_made", whisper=model_id, gpu_index=gpu, evicted=True)
                 return
         logger.info(
@@ -4136,7 +4139,9 @@ class ModelManager:
             diarize=diarize,
         )
 
-    async def evict_for_whisper(self, model_id: str, *, needed_mb: int | None = None) -> bool:
+    async def evict_for_whisper(
+        self, model_id: str, *, needed_mb: int | None = None, only_unshrinkable: bool = False
+    ) -> bool:
         """Last resort when the diarizer ran out of memory even at batch size
         1: evict models on whisper's card the way a load under pressure does
         (same candidate order, soft pins included, hard pins never), until the
@@ -4150,6 +4155,8 @@ class ModelManager:
         needed = int(needed_mb if needed_mb is not None else settings.whisper_diarization_extra_mb)
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
             if candidate == model_id:
+                continue
+            if only_unshrinkable and self._can_change_context_live(candidate):
                 continue
             if self.is_busy(candidate):
                 logger.info("whisper_eviction_skip_busy", whisper=model_id, candidate=candidate)
