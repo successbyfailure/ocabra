@@ -15,8 +15,49 @@ from ocabra.core.vram_planner import (
 PRISMML_DEFAULT_GPU_LAYERS = 99
 
 
+_DIARIZATION_SWITCHES = ("diarization_enabled", "diarizationEnabled")
+
+
+def strip_diarization_overrides(load_overrides: dict | None) -> dict:
+    """``load_overrides`` without the diarization switch (top level and the
+    ``whisper`` section).
+
+    Diarization is a per-request choice, not a separate worker: any whisper
+    worker loads the diarizer on demand and frees it when idle. As part of the
+    worker identity, ``foo`` and ``foo-diarized`` became two processes with the
+    same weights; on the 3060 they did not fit together and alternating
+    requests evicted one another (2026-11-11), and when one reused the other's
+    process the plain profile diarized by default (2026-11-12).
+    """
+    out = {k: v for k, v in (load_overrides or {}).items() if k not in _DIARIZATION_SWITCHES}
+    section = out.get("whisper")
+    if isinstance(section, dict):
+        section = {k: v for k, v in section.items() if k not in _DIARIZATION_SWITCHES}
+        if section:
+            out["whisper"] = section
+        else:
+            out.pop("whisper")
+    return out
+
+
+def overrides_enable_diarization(load_overrides: dict | None) -> bool:
+    """Whether a profile's ``load_overrides`` turn diarization on."""
+    overrides = load_overrides or {}
+    section = overrides.get("whisper") if isinstance(overrides.get("whisper"), dict) else {}
+    for source in (section, overrides):
+        for key in _DIARIZATION_SWITCHES:
+            if key in source:
+                return bool(source[key])
+    return False
+
+
 def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:
-    """Derive the stable worker key for a model profile."""
+    """Derive the stable worker key for a model profile.
+
+    The diarization switch does not take part: see
+    :func:`strip_diarization_overrides`.
+    """
+    load_overrides = strip_diarization_overrides(load_overrides)
     if not load_overrides:
         return base_model_id
     canonical = json.dumps(load_overrides, sort_keys=True, separators=(",", ":"))

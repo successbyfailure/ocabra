@@ -21,7 +21,10 @@ import structlog
 from fastapi import Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, get_current_user
-from ocabra.core.model_manager_helpers import compute_worker_key  # noqa: F401
+from ocabra.core.model_manager_helpers import (  # noqa: F401
+    compute_worker_key,
+    strip_diarization_overrides,
+)
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.runtime_coordinator import (
     OutputTokenLimitError,
@@ -1152,7 +1155,9 @@ async def _ensure_worker_loaded(
             status_code=404,
         )
 
-    merged_extra = {**base_state.extra_config, **(load_overrides or {})}
+    # Without the diarization switch, like the worker key: diarizing is decided
+    # per request (see strip_diarization_overrides).
+    merged_extra = {**base_state.extra_config, **strip_diarization_overrides(load_overrides)}
 
     # Dedicated worker: reuse an existing transient state, but refresh it when
     # no process is running. Mutating a loaded/loading state would make its

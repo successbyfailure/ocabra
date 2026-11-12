@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
-from ocabra.core.model_manager import ModelStatus
+from ocabra.core.model_manager_helpers import overrides_enable_diarization
 
 from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
@@ -60,88 +60,6 @@ def _worker_timeout() -> float:
 # an agent got diarize=true accepted by two whisper.cpp profiles with no
 # speaker labels in the response — whisper_cpp support added the same day).
 _DIARIZATION_CAPABLE_BACKENDS = {"whisper", "whisper_cpp"}
-
-
-def _without_diarization(overrides: dict | None) -> dict:
-    """``load_overrides`` minus the diarization switch (top level and the
-    ``whisper`` section), to tell whether two profiles differ only in that."""
-    out = dict(overrides or {})
-    out.pop("diarization_enabled", None)
-    out.pop("diarizationEnabled", None)
-    section = out.get("whisper")
-    if isinstance(section, dict):
-        section = {
-            k: v
-            for k, v in section.items()
-            if k not in {"diarization_enabled", "diarizationEnabled"}
-        }
-        if section:
-            out["whisper"] = section
-        else:
-            out.pop("whisper")
-    return out
-
-
-def _enables_diarization(overrides: dict | None) -> bool:
-    overrides = overrides or {}
-    section = overrides.get("whisper") if isinstance(overrides.get("whisper"), dict) else {}
-    for source in (section, overrides):
-        for key in ("diarization_enabled", "diarizationEnabled"):
-            if key in source:
-                return bool(source[key])
-    return False
-
-
-async def _loaded_diarized_sibling(
-    model_id: str, user: UserContext, model_manager, profile_registry
-) -> str | None:
-    """Profile id of a resident diarizing twin of ``model_id``'s worker.
-
-    faster-whisper keeps one worker per profile ``load_overrides``, so
-    ``faster-whisper-large-v3`` and ``faster-whisper-large-v3-diarized`` are two
-    processes with the same weights. On the 3060, next to the pinned turbo,
-    they do not fit together, and a client alternating plain and diarized
-    requests made each one evict the other (8 times in 45 min, 2026-11-11).
-    A diarizing worker transcribes without diarizing when asked to, and its
-    diarizer only holds memory while in use, so a plain request whose own
-    worker is not loaded goes to the twin when the twin is. Only direct
-    profiles of the whisper backend, only twins that differ in nothing but
-    diarization and that the caller may use.
-    """
-    if not model_id:
-        return None
-    try:
-        profile = await profile_registry.get(model_id)
-    except Exception:  # noqa: BLE001 - never block a transcription on this
-        return None
-    if profile is None or not getattr(profile, "enabled", True) or not profile.base_model_id:
-        return None
-    if _enables_diarization(profile.load_overrides):
-        return None
-    base_state = await model_manager.get_state(profile.base_model_id)
-    if base_state is None or base_state.backend_type != "whisper":
-        return None
-    own = await model_manager.get_state(
-        compute_worker_key(profile.base_model_id, profile.load_overrides)
-    )
-    if own is not None and own.status == ModelStatus.LOADED:
-        return None
-    wanted = _without_diarization(profile.load_overrides)
-    for twin in await profile_registry.list_by_model(profile.base_model_id):
-        if twin.profile_id == profile.profile_id or not getattr(twin, "enabled", True):
-            continue
-        if not _enables_diarization(twin.load_overrides):
-            continue
-        if _without_diarization(twin.load_overrides) != wanted:
-            continue
-        if not user.can_access_model(twin.profile_id, profile.base_model_id):
-            continue
-        twin_state = await model_manager.get_state(
-            compute_worker_key(twin.base_model_id, twin.load_overrides)
-        )
-        if twin_state is not None and twin_state.status == ModelStatus.LOADED:
-            return twin.profile_id
-    return None
 
 
 def _is_diarize_requested(raw: str | None) -> bool:
@@ -302,24 +220,8 @@ async def transcriptions(
             )
             # Fall through to local processing.
 
-    shared_diarized = None
-    if not _is_diarize_requested(diarize):
-        shared_diarized = await _loaded_diarized_sibling(
-            model_id, user, model_manager, profile_registry
-        )
-    if shared_diarized is not None:
-        # The worker of the same model that diarizes is resident and ours is
-        # not: transcribe there, without diarizing, instead of loading a second
-        # worker of the same weights. The worker diarizes by default
-        # (--diarize), so the flag goes explicitly as false.
-        logger.info(
-            "transcription_shares_diarized_worker",
-            requested=model_id,
-            profile=shared_diarized,
-        )
-        diarize = "false"
     profile, state = await resolve_profile(
-        shared_diarized or model_id,
+        model_id,
         model_manager,
         profile_registry,
         user=user,
@@ -327,6 +229,18 @@ async def transcriptions(
         request_state=request.state,
     )
     check_capability(state, "audio_transcription", "audio transcription")
+    if diarize is None and state.backend_type == "whisper":
+        # Always explicit: the plain and the -diarized profile share one worker
+        # (the diarization switch is not part of the worker key), so the
+        # worker's own default must not decide. A -diarized profile diarizes
+        # unless the client says otherwise; any other profile does not.
+        defaults = getattr(profile, "request_defaults", None) or {}
+        profile_diarizes = overrides_enable_diarization(profile.load_overrides) or (
+            _is_diarize_requested(str(defaults.get("diarize")))
+            if defaults.get("diarize") is not None
+            else False
+        )
+        diarize = "true" if profile_diarizes else "false"
     diarize_requested = _is_diarize_requested(diarize)
     if diarize_requested and state.backend_type not in _DIARIZATION_CAPABLE_BACKENDS:
         raise _openai_error(

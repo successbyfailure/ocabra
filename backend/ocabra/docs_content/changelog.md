@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.73.3 — 2026-11-12
+
+### Correcciones
+
+- **Un perfil whisper normal ya no diariza por su cuenta.** El perfil normal y
+  su `-diarized` podían acabar en el mismo proceso. Si ese proceso lo había
+  arrancado el diarizado, las transcripciones del perfil normal salían
+  diarizadas: más lentas y con hablantes que nadie había pedido. Ahora
+  oCabra dice en cada petición si se diariza: el perfil `-diarized` diariza y
+  el normal no, salvo que el cliente mande `diarize` explícito.
+- **El diarizador se libera cuando no se usa.** El de los perfiles
+  `-diarized` se quedaba cargado para siempre (unos 2 GB de VRAM). Ahora se
+  descarga tras 5 minutos sin diarizar, como en el resto. La primera
+  diarización después de esa pausa tarda unos segundos más, lo que cuesta
+  volver a cargarlo.
+- **El perfil normal y el `-diarized` del mismo modelo comparten un solo
+  worker.** Antes podían cargar dos copias de los mismos pesos, que no
+  cabían juntas en su tarjeta: alternar los dos tipos de petición hacía que
+  cada una desalojase a la otra. Esto sustituye al desvío de la 0.72.3.
+
+---
+
 ## 0.73.2 — 2026-11-12
 
 ### Correcciones

@@ -120,6 +120,8 @@ def create_app(
                     runtime.device,
                     os.getenv("HF_TOKEN", "").strip() or None,
                 )
+                # Counts as use: kept for the idle window, then freed.
+                runtime.last_diarization_at = time.monotonic()
         except Exception as exc:
             runtime.model = None
             runtime.error = str(exc)
@@ -137,9 +139,8 @@ def create_app(
     async def health() -> JSONResponse:
         if runtime.model is None:
             raise HTTPException(status_code=503, detail=runtime.error or "Model not ready")
-        if runtime.diarize_default and runtime.diarization_pipeline is None:
-            detail = runtime.diarization_error or "Diarization pipeline not ready"
-            raise HTTPException(status_code=503, detail=detail)
+        # No diarizer loaded is fine: it loads on demand (and is freed when idle,
+        # also with --diarize), so it cannot make the worker unhealthy.
         return JSONResponse({"status": "ok"})
 
     @app.get("/progress")
@@ -771,8 +772,10 @@ def _drop_diarizer() -> None:
 async def _reap_idle_diarizer(interval_s: float = 30.0) -> None:
     """Unload the on-demand diarizer once it has been idle long enough.
 
-    Never while a diarization is running, and never for a profile that
-    diarizes every request (``diarize_default``): that one needs it loaded.
+    Never while a diarization is running. A worker started with ``--diarize``
+    (``diarize_default``) frees it too: it used to keep it forever, ~2 GB of
+    the 3060 held by a worker that only diarized now and then (2026-11-12),
+    and the next diarization reloads it on demand like on any other worker.
     """
     while True:
         await asyncio.sleep(interval_s)
@@ -780,7 +783,6 @@ async def _reap_idle_diarizer(interval_s: float = 30.0) -> None:
         if (
             idle_limit > 0
             and runtime.diarization_pipeline is not None
-            and not runtime.diarize_default
             and runtime.diarizations_in_flight == 0
             and time.monotonic() - runtime.last_diarization_at >= idle_limit
         ):

@@ -213,7 +213,10 @@ async def test_an_idle_diarizer_is_unloaded_but_never_mid_diarization(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_a_profile_that_always_diarizes_keeps_its_diarizer(monkeypatch):
+async def test_a_worker_started_with_diarize_also_frees_its_idle_diarizer(monkeypatch):
+    """2026-11-12: con --diarize el diarizador no se liberaba nunca (~2 GB de
+    la 3060 retenidos por un worker que diarizaba de vez en cuando). Se
+    recarga bajo demanda en la siguiente diarizacion."""
     import asyncio
     import time
 
@@ -221,12 +224,16 @@ async def test_a_profile_that_always_diarizes_keeps_its_diarizer(monkeypatch):
     monkeypatch.setattr(rt, "diarize_default", True)
     monkeypatch.setattr(rt, "diarizer_idle_unload_s", 1.0)
     monkeypatch.setattr(rt, "diarization_pipeline", object())
+    monkeypatch.setattr(rt, "embedding_inference", object())
     monkeypatch.setattr(rt, "diarizations_in_flight", 0)
     monkeypatch.setattr(rt, "last_diarization_at", time.monotonic() - 999)
+    monkeypatch.setattr(
+        whisper_worker, "_drop_diarizer", lambda: setattr(rt, "diarization_pipeline", None)
+    )
     task = asyncio.create_task(whisper_worker._reap_idle_diarizer(interval_s=0.01))
     await asyncio.sleep(0.05)
     task.cancel()
-    assert rt.diarization_pipeline is not None
+    assert rt.diarization_pipeline is None
 
 
 def test_run_transcription_reports_progress_as_segments_decode():

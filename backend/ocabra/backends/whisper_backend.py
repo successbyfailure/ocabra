@@ -189,7 +189,9 @@ class WhisperBackend(BackendInterface):
         env["PYTHONUNBUFFERED"] = "1"
         if gpu_indices:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_indices)
-        if diarization_enabled and settings.hf_token and not env.get("HF_TOKEN"):
+        # Always, not only with diarization_enabled: every worker loads the
+        # diarizer on demand when a request asks for it (pyannote is gated).
+        if settings.hf_token and not env.get("HF_TOKEN"):
             env["HF_TOKEN"] = settings.hf_token
 
         # Slim image has no CUDA toolkit. Torch wheels under
