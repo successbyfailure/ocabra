@@ -25,25 +25,11 @@ const api = vi.hoisted(() => ({
 vi.mock("@/api/client", () => ({ api }))
 vi.mock("@/hooks/useWebSocket", () => ({ useWebSocket: vi.fn() }))
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
-// The real modal pulls in a lot (groups, estimates…); only which deployment
-// it was opened for matters here.
-vi.mock("@/components/models/ModelConfigModal", () => ({
-  ModelConfigModal: ({ model, open }: { model: ModelState | null; open: boolean }) =>
-    open && model ? <div data-testid="config-modal">{model.modelId}</div> : null,
-  ModelConfigForm: ({
-    model,
-    active,
-    footerStart,
-  }: {
-    model: ModelState | null
-    active?: boolean
-    footerStart?: import("react").ReactNode
-  }) => (
-    <div data-testid="config-form" data-active={String(active)}>
-      {model?.modelId}
-      {footerStart}
-    </div>
-  ),
+// El editor es una página: solo importa a qué despliegue navega.
+const navigate = vi.fn()
+vi.mock("react-router-dom", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-router-dom")>()),
+  useNavigate: () => navigate,
 }))
 
 function deploymentState(modelId: string, backendType: ModelState["backendType"]): ModelState {
@@ -201,10 +187,10 @@ describe("Models · vista por modelo", () => {
     )
   })
 
-  it("opens the deployment config modal when a deployment is clicked", async () => {
+  it("opens the editor page of the clicked deployment", async () => {
     const card = await renderModelView()
     fireEvent.click(within(card).getByLabelText(/^ollama · desplegado/))
-    expect((await screen.findByTestId("config-modal")).textContent).toBe("ollama/gemma4:26b")
+    expect(navigate).toHaveBeenCalledWith(`/models/edit/${encodeURIComponent("ollama/gemma4:26b")}`)
   })
 
   it("keeps the per-deployment view reachable", async () => {
@@ -219,58 +205,9 @@ describe("Models · vista por modelo", () => {
     expect(within(card).getByTestId("preferred-gpu-ollama").textContent).toBe("GPU auto")
   })
 
-  describe("editor", () => {
-    async function openEditor() {
-      const card = await renderModelView()
-      fireEvent.click(within(card).getByRole("button", { name: "Editar gemma4:26b" }))
-      return await screen.findByRole("dialog")
-    }
-
-    it("General tab renames, switches the default and adds a backend", async () => {
-      const dialog = await openEditor()
-      expect(within(dialog).getByText("Editar modelo")).toBeTruthy()
-
-      fireEvent.change(within(dialog).getByLabelText("Nombre visible"), { target: { value: "Gemma 4 26B" } })
-      fireEvent.click(within(dialog).getByRole("button", { name: "Guardar nombre" }))
-      await waitFor(() =>
-        expect(api.logicalModels.patch).toHaveBeenCalledWith("gemma4:26b", { displayName: "Gemma 4 26B" }),
-      )
-
-      fireEvent.change(within(dialog).getByLabelText("Backend por defecto"), { target: { value: "ollama" } })
-      await waitFor(() =>
-        expect(api.logicalModels.patch).toHaveBeenCalledWith("gemma4:26b", { defaultBackend: "ollama" }),
-      )
-
-      fireEvent.change(within(dialog).getByLabelText("Añadir backend"), { target: { value: "llama_cpp" } })
-      fireEvent.click(within(dialog).getByRole("button", { name: /Añadir$/ }))
-      await waitFor(() =>
-        expect(api.logicalModels.addDeployment).toHaveBeenCalledWith("gemma4:26b", { backend: "llama_cpp" }),
-      )
-    })
-
-    it("has one tab per deployment (★ on the default) embedding that deployment's form", async () => {
-      const dialog = await openEditor()
-      const tabs = within(dialog).getAllByRole("tab").map((tab) => tab.textContent)
-      expect(tabs).toEqual(["General", "★ llama.cpp mks", "ollama"])
-
-      fireEvent.mouseDown(within(dialog).getByRole("tab", { name: "ollama" }))
-      const form = await within(dialog).findByTestId("config-form")
-      expect(form.textContent).toContain("ollama/gemma4:26b")
-      expect(form.getAttribute("data-active")).toBe("true")
-    })
-
-    it("removes a deployment from its tab through the same confirmation", async () => {
-      const dialog = await openEditor()
-      fireEvent.mouseDown(within(dialog).getByRole("tab", { name: "★ llama.cpp mks" }))
-      const form = await within(dialog).findByTestId("config-form")
-      fireEvent.click(within(form).getByRole("button", { name: /Quitar despliegue/ }))
-
-      const confirm = await screen.findByRole("dialog", { name: "Quitar despliegue" })
-      expect(confirm.textContent).toContain("los ficheros del modelo se conservan")
-      fireEvent.click(within(confirm).getByRole("button", { name: "Quitar" }))
-      await waitFor(() =>
-        expect(api.logicalModels.removeDeployment).toHaveBeenCalledWith("gemma4:26b", "llamacpp_mks"),
-      )
-    })
+  it("Editar opens the editor on the default deployment", async () => {
+    const card = await renderModelView()
+    fireEvent.click(within(card).getByRole("button", { name: "Editar gemma4:26b" }))
+    expect(navigate).toHaveBeenCalledWith(`/models/edit/${encodeURIComponent("llamacpp_mks/gemma4:26b")}`)
   })
 })

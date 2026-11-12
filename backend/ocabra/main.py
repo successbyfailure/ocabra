@@ -1289,6 +1289,12 @@ from ocabra.api.internal.ws import router as ws_router  # noqa: E402
 app.include_router(gpus_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(status_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(video_router, prefix="/ocabra", include_in_schema=False)
+# Profiles before models: models' catch-all GET /models/{model_id:path} would
+# otherwise swallow GET /models/{id}/profiles (it answered 404 "model
+# '<id>/profiles' not found").
+from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
+
+app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(logical_models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)
@@ -1322,7 +1328,6 @@ from ocabra.api.internal.auth import router as auth_router  # noqa: E402
 from ocabra.api.internal.config import router as config_router  # noqa: E402
 from ocabra.api.internal.estimate import router as estimate_router  # noqa: E402
 from ocabra.api.internal.groups import router as groups_router  # noqa: E402
-from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
 from ocabra.api.internal.sessions import router as sessions_router  # noqa: E402
 from ocabra.api.internal.stats import router as stats_router  # noqa: E402
 from ocabra.api.internal.trtllm import router as trtllm_router  # noqa: E402
@@ -1338,8 +1343,6 @@ app.include_router(users_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(groups_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(estimate_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(sessions_router, prefix="/ocabra", include_in_schema=False)
-
-app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
 
 # Agents + MCP (plan: docs/tasks/agents-mcp-plan.md)
 from ocabra.api.internal.agents import router as agents_router  # noqa: E402

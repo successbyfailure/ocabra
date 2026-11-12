@@ -480,3 +480,27 @@ def test_patch_requires_model_manager():
     dependency = inspect.signature(api.update_model).parameters["_user"].default.dependency
     closure = {c.cell_contents for c in dependency.__closure__ or []}
     assert "model_manager" in closure
+
+
+def test_model_subroutes_are_registered_before_the_catch_all():
+    """``GET /models/{model_id:path}`` swallows any later ``GET
+    /models/{id}/<sub>``: speculative-candidates answered 404 ("model
+    '<id>/speculative-candidates' not found") from day one."""
+    from ocabra.api.internal.models import router
+
+    gets = [r.path for r in router.routes if "GET" in getattr(r, "methods", set())]
+    catch_all = gets.index("/models/{model_id:path}")
+    late = [p for p in gets[catch_all + 1 :] if p.startswith("/models/{model_id:path}/")]
+    assert not late, f"shadowed by the catch-all: {late}"
+
+
+def test_no_model_subroute_is_shadowed_app_wide():
+    """Other routers also mount ``/models/{id}/<sub>`` GETs; the profiles one
+    (``GET /ocabra/models/{id}/profiles``) answered 404 because the models
+    router, included first, matched it with its catch-all."""
+    from ocabra.main import app
+
+    gets = [r.path for r in app.routes if "GET" in getattr(r, "methods", set())]
+    catch_all = gets.index("/ocabra/models/{model_id:path}")
+    late = [p for p in gets[catch_all + 1 :] if p.startswith("/ocabra/models/{model_id:path}/")]
+    assert not late, f"shadowed by the catch-all: {late}"

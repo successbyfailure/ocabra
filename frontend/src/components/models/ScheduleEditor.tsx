@@ -7,12 +7,22 @@ interface ScheduleEditorProps {
   onChange: (next: EvictionSchedule[]) => void
 }
 
-const WEEK_DAYS = ["L", "M", "X", "J", "V", "S", "D"]
+// Orden de la semana española; el valor es el día de cron (0 = domingo), que
+// es lo que guarda el backend. Antes el botón "L" guardaba el 0 (domingo).
+const WEEK_DAYS: { label: string; value: number }[] = [
+  { label: "L", value: 1 },
+  { label: "M", value: 2 },
+  { label: "X", value: 3 },
+  { label: "J", value: 4 },
+  { label: "V", value: 5 },
+  { label: "S", value: 6 },
+  { label: "D", value: 0 },
+]
 
 function summarizeDays(days: number[]) {
   const labels = days
     .sort((a, b) => a - b)
-    .map((day) => ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"][day])
+    .map((day) => ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"][day])
   if (labels.length === 0) return "sin dias"
   if (labels.length === 7) return "todos los dias"
   return labels.join(", ")
@@ -88,18 +98,18 @@ export function ScheduleEditor({ value, onChange }: ScheduleEditorProps) {
           </div>
 
           <div className="flex flex-wrap gap-1">
-            {WEEK_DAYS.map((day, idx) => {
-              const active = schedule.days.includes(idx)
+            {WEEK_DAYS.map((day) => {
+              const active = schedule.days.includes(day.value)
               return (
                 <button
-                  key={`${schedule.id}-${day}`}
+                  key={`${schedule.id}-${day.label}`}
                   type="button"
-                  onClick={() => toggleDay(schedule.id, idx)}
+                  onClick={() => toggleDay(schedule.id, day.value)}
                   className={`h-7 w-7 rounded text-xs font-semibold ${
                     active ? "bg-primary/30 text-primary" : "bg-muted text-muted-foreground"
                   }`}
                 >
-                  {day}
+                  {day.label}
                 </button>
               )
             })}

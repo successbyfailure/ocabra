@@ -5,6 +5,7 @@ import { ProtectedRoute } from "@/components/auth/ProtectedRoute"
 import { Login } from "@/pages/Login"
 import { Dashboard } from "@/pages/Dashboard"
 import { Models } from "@/pages/Models"
+import { ModelEditor } from "@/pages/ModelEditor"
 import { Explore } from "@/pages/Explore"
 import { Playground } from "@/pages/Playground"
 import { Stats } from "@/pages/Stats"
@@ -43,6 +44,7 @@ export default function App() {
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/models" element={<Models />} />
+                <Route path="/models/edit/*" element={<ModelEditor />} />
                 <Route path="/services" element={<Services />} />
                 <Route path="/playground" element={<Playground />} />
                 <Route path="/stats" element={<Stats />} />

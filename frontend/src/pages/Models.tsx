@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { useNavigate } from "react-router-dom"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
@@ -6,9 +7,7 @@ import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
 import { LogicalModelCard } from "@/components/models/LogicalModelCard"
-import { LogicalModelEditor } from "@/components/models/LogicalModelEditor"
 import { ModelGridCard } from "@/components/models/ModelGridCard"
-import { ModelConfigModal } from "@/components/models/ModelConfigModal"
 import { ProfileModal } from "@/components/models/ProfileModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import {
@@ -26,7 +25,6 @@ import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { SkeletonList } from "@/components/common/Skeleton"
 import { StyledSelect } from "@/components/common/StyledSelect"
 import type {
-  BackendExtraConfig,
   BackendType,
   LoadPolicy,
   LogicalModel,
@@ -79,14 +77,15 @@ export function Models() {
   const [busyModelId, setBusyModelId] = useState<string | null>(null)
   const [updatingAll, setUpdatingAll] = useState(false)
   const [refreshingMetadata, setRefreshingMetadata] = useState(false)
-  const [configModel, setConfigModel] = useState<ModelState | null>(null)
+  const navigate = useNavigate()
+  // El editor de modelos es una página: /models/edit/<backend>/<modelo>.
+  const openEditor = (modelId: string) => navigate(`/models/edit/${encodeURIComponent(modelId)}`)
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
   const [storage, setStorage] = useState<ModelsStorageStats | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>("model")
   const [logicalModels, setLogicalModels] = useState<LogicalModel[]>([])
   const [logicalError, setLogicalError] = useState<string | null>(null)
-  const [editKey, setEditKey] = useState<string | null>(null)
   const [removeTarget, setRemoveTarget] = useState<{ model: LogicalModel; deployment: ModelDeployment } | null>(null)
 
   // Confirm dialog state
@@ -355,26 +354,6 @@ export function Models() {
     })
   }
 
-  const saveConfig = async (
-    modelId: string,
-    patch: {
-      loadPolicy: LoadPolicy
-      preferredGpu: number | null
-      pinPermanent: boolean
-      schedules: ModelState["schedules"]
-      extraConfig?: BackendExtraConfig
-    },
-  ) => {
-    await runAction(modelId, async () => {
-      await api.models.patch(modelId, {
-        loadPolicy: patch.loadPolicy,
-        preferredGpu: patch.preferredGpu,
-        pinPermanent: patch.pinPermanent,
-        schedules: patch.schedules,
-        extraConfig: patch.extraConfig,
-      })
-    })
-  }
 
   const openProfileModal = (model: ModelState, profile: ModelProfile | null) => {
     setProfileModalModel(model)
@@ -411,12 +390,6 @@ export function Models() {
       return `${model.modelKey} se sirve ahora con ${backend}`
     })
 
-  const handleRename = (model: LogicalModel, displayName: string) =>
-    void runLogicalAction(model.modelKey, async () => {
-      await api.logicalModels.patch(model.modelKey, { displayName })
-      return `Nombre visible actualizado: ${displayName}`
-    })
-
   const handleAddDeployment = (model: LogicalModel, backend: BackendType) =>
     void runLogicalAction(model.modelKey, async () => {
       await api.logicalModels.addDeployment(model.modelKey, { backend })
@@ -427,7 +400,6 @@ export function Models() {
     void runLogicalAction(model.modelKey, async () => {
       const result = await api.logicalModels.removeDeployment(model.modelKey, deployment.backend)
       if (model.deployments.length <= 1) {
-        if (editKey === model.modelKey) setEditKey(null)
         return `${model.modelKey} eliminado (los ficheros se conservan)`
       }
       return result.newDefaultBackend && deployment.isDefault
@@ -435,18 +407,8 @@ export function Models() {
         : "Despliegue quitado"
     })
 
-  const openDeploymentConfig = async (modelId: string) => {
-    const known = models[modelId]
-    if (known) {
-      setConfigModel(known)
-      return
-    }
-    try {
-      setConfigModel(await api.models.get(modelId))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : `No se pudo abrir ${modelId}`)
-    }
-  }
+  const openDeploymentConfig = (modelId: string) => openEditor(modelId)
+
 
   const removeDescription = (() => {
     if (!removeTarget) return ""
@@ -683,8 +645,8 @@ export function Models() {
                 categoryLabel={MODEL_CATEGORY_LABELS[category]}
                 deploymentStates={models}
                 busy={busyModelId === model.modelKey}
-                onConfigure={(modelId) => void openDeploymentConfig(modelId)}
-                onEdit={(item) => setEditKey(item.modelKey)}
+                onConfigure={(modelId) => openDeploymentConfig(modelId)}
+                onEdit={(item) => openEditor((item.deployments.find((d) => d.isDefault) ?? item.deployments[0])?.modelId ?? `${item.defaultBackend}/${item.modelKey}`)}
                 onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
                 onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
                 onSetDefault={handleSetDefaultBackend}
@@ -721,7 +683,7 @@ export function Models() {
                   })
                 }
                 onTogglePin={(item) => void togglePin(item)}
-                onConfigure={(item) => setConfigModel(item)}
+                onConfigure={(item) => openEditor(item.modelId)}
                 onDelete={(item) => setDeleteModel(item)}
                 onCompile={(item) => setCompileModel(item)}
                 onUpdate={(item) => void handleUpdateModel(item)}
@@ -739,13 +701,6 @@ export function Models() {
         </div>
       )}
 
-      <ModelConfigModal
-        model={configModel}
-        gpus={gpus}
-        open={Boolean(configModel)}
-        onOpenChange={(open) => !open && setConfigModel(null)}
-        onSave={saveConfig}
-      />
 
       <CompileModal
         model={compileModel}
@@ -812,19 +767,6 @@ export function Models() {
         </Dialog.Portal>
       </Dialog.Root>
 
-      <LogicalModelEditor
-        model={editKey ? (logicalModels.find((item) => item.modelKey === editKey) ?? null) : null}
-        open={Boolean(editKey)}
-        onOpenChange={(open) => !open && setEditKey(null)}
-        gpus={gpus}
-        deploymentStates={models}
-        busy={editKey != null && busyModelId === editKey}
-        onRename={handleRename}
-        onSetDefault={handleSetDefaultBackend}
-        onAddDeployment={handleAddDeployment}
-        onRemoveDeployment={(model, deployment) => setRemoveTarget({ model, deployment })}
-        onSaveDeployment={saveConfig}
-      />
 
       {/* Remove one deployment (config only) */}
       <ConfirmDialog

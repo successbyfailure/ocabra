@@ -962,6 +962,80 @@ async def get_model_capacity(
 
 
 @router.get(
+    "/models/{model_id:path}/speculative-candidates",
+    summary="List speculative-decoding draft candidates",
+    description=(
+        "Return llama.cpp models whose tokenizer fingerprint "
+        "(``vocab_size``, ``bos_id``, ``eos_id``) matches the given target "
+        "model and that are therefore safe to use as a speculative-decoding "
+        "draft. The target model itself is excluded."
+    ),
+    responses={404: {"description": "Model not found"}},
+)
+async def list_speculative_candidates(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> list[dict]:
+    """List llama.cpp draft candidates compatible with ``model_id``.
+
+    Args:
+        model_id: Canonical model_id of the target (large) model.
+
+    Returns:
+        List of ``{model_id, display_name, vocab_size, bos_id, eos_id}``
+        dictionaries, sorted by ``model_id``.
+    """
+    import sqlalchemy as sa
+
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.model_config import ModelConfig
+
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    async with AsyncSessionLocal() as session:
+        target = (
+            await session.execute(sa.select(ModelConfig).where(ModelConfig.model_id == model_id))
+        ).scalar_one_or_none()
+        if target is None or target.vocab_size is None:
+            return []
+
+        rows = (
+            (
+                await session.execute(
+                    sa.select(ModelConfig).where(
+                        ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY),
+                        ModelConfig.model_id != model_id,
+                        ModelConfig.vocab_size == target.vocab_size,
+                        ModelConfig.bos_id == target.bos_id,
+                        ModelConfig.eos_id == target.eos_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    return sorted(
+        (
+            {
+                "model_id": row.model_id,
+                "display_name": row.display_name or row.model_id,
+                "vocab_size": row.vocab_size,
+                "bos_id": row.bos_id,
+                "eos_id": row.eos_id,
+            }
+            for row in rows
+        ),
+        key=lambda item: item["model_id"],
+    )
+
+
+
+@router.get(
     "/models/{model_id:path}/config-schema",
     summary="Editable options of a model's backend",
     responses={404: {"description": "Model not found"}},
@@ -1535,79 +1609,6 @@ async def estimate_model_memory(
         extra_config=extra_config,
         preferred_gpu=body.preferred_gpu,
         run_probe=body.run_probe,
-    )
-
-
-@router.get(
-    "/models/{model_id:path}/speculative-candidates",
-    summary="List speculative-decoding draft candidates",
-    description=(
-        "Return llama.cpp models whose tokenizer fingerprint "
-        "(``vocab_size``, ``bos_id``, ``eos_id``) matches the given target "
-        "model and that are therefore safe to use as a speculative-decoding "
-        "draft. The target model itself is excluded."
-    ),
-    responses={404: {"description": "Model not found"}},
-)
-async def list_speculative_candidates(
-    model_id: str,
-    request: Request,
-    _user: UserContext = Depends(require_role("user")),
-) -> list[dict]:
-    """List llama.cpp draft candidates compatible with ``model_id``.
-
-    Args:
-        model_id: Canonical model_id of the target (large) model.
-
-    Returns:
-        List of ``{model_id, display_name, vocab_size, bos_id, eos_id}``
-        dictionaries, sorted by ``model_id``.
-    """
-    import sqlalchemy as sa
-
-    from ocabra.database import AsyncSessionLocal
-    from ocabra.db.model_config import ModelConfig
-
-    mm = request.app.state.model_manager
-    state = await mm.get_state(model_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-
-    async with AsyncSessionLocal() as session:
-        target = (
-            await session.execute(sa.select(ModelConfig).where(ModelConfig.model_id == model_id))
-        ).scalar_one_or_none()
-        if target is None or target.vocab_size is None:
-            return []
-
-        rows = (
-            (
-                await session.execute(
-                    sa.select(ModelConfig).where(
-                        ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY),
-                        ModelConfig.model_id != model_id,
-                        ModelConfig.vocab_size == target.vocab_size,
-                        ModelConfig.bos_id == target.bos_id,
-                        ModelConfig.eos_id == target.eos_id,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    return sorted(
-        (
-            {
-                "model_id": row.model_id,
-                "display_name": row.display_name or row.model_id,
-                "vocab_size": row.vocab_size,
-                "bos_id": row.bos_id,
-                "eos_id": row.eos_id,
-            }
-            for row in rows
-        ),
-        key=lambda item: item["model_id"],
     )
 
 
@@ -2224,6 +2225,13 @@ def _estimate_llama_cpp_memory(
                 if v
             },
             "estimated_max_context_length": estimated_max_context_length,
+            # ctx_size is llama.cpp's TOTAL KV (split across slots, or the
+            # shared pool): compare it with this, not with the per-slot max.
+            "estimated_max_total_context": (
+                estimated_max_context_length * parallel_slots
+                if estimated_max_context_length
+                else None
+            ),
             "model_loading_memory_mb": total_mb,
             "fits_current_gpu": (total_mb <= total_vram_mb if total_vram_mb is not None else None),
             "source": "gguf_header",

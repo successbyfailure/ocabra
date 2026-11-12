@@ -16,6 +16,57 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.74.0 — 2026-11-12
+
+### Cambios
+
+- **Acción: cambiar la configuración de un modelo exige el rol
+  `model_manager`.** `PATCH /ocabra/models/{id}` aceptaba a cualquier usuario
+  autenticado, aunque esa configuración acaba en la línea de comandos del
+  worker. Ahora responde `403` a los usuarios normales, igual que perfiles y
+  presets. Cargar y descargar modelos sigue abierto a todos.
+- **`PATCH /ocabra/models/{id}` valida `extraConfig`.** Una opción con un tipo
+  o un valor imposible (`ctx_size: "32k"`, `parallel_slots: 0`, un
+  `cache_type_k` que no existe) devuelve `400` con `detail.errors`
+  (`key`, `label`, `message`) en vez de guardarse y fallar en la siguiente
+  carga. Las claves desconocidas se siguen aceptando.
+- **`vramEstimateMb` en el `PATCH` ya tiene efecto.** Antes se descartaba en
+  silencio. Ahora fija la reserva de VRAM en los modelos llama.cpp y vLLM, y
+  da `400` en los backends que no la admiten. Cambiar `backendType` da `400`:
+  un modelo cambia de backend añadiendo un despliegue.
+- **Los `request_defaults` de un router se aplican.** Antes el router se
+  sustituía por el perfil elegido y sus valores por defecto se perdían. Ahora
+  van por encima de los del perfil destino y por debajo de lo que mande el
+  cliente.
+- **Los `load_overrides` de un perfil se fusionan con la configuración del
+  modelo.** Un perfil que cambiaba una sola opción de vLLM o llama.cpp
+  sustituía la sección entera, y el resto de opciones del modelo se perdían en
+  ese worker. Ahora solo cambia lo que el perfil indica; un `null` quita la
+  opción.
+- **Los horarios de un modelo funcionan con cualquier política de carga.**
+  Solo actuaban sobre los modelos `warm`; en `pin` y `on_demand` no hacían
+  nada. Un modelo fijado ya no se recarga dentro de su franja.
+
+### Correcciones
+
+- `GET /ocabra/models/{id}/profiles` y
+  `GET /ocabra/models/{id}/speculative-candidates` respondían siempre `404`
+  ("model '<id>/profiles' not found"): otra ruta se los comía.
+- vLLM con un preset de KV `q8` o `q4` arrancaba sin `--kv-cache-dtype`, así
+  que usaba fp16 mientras la comprobación de si cabe calculaba la mitad o un
+  cuarto. Ahora arranca en `fp8`, que es lo que vLLM admite, y el cálculo lo
+  tiene en cuenta.
+- El `keep_alive_seconds` de un modelo llama.cpp del fork de oCabra
+  (`llamacpp_mks`) guardado en su sección `llama_cpp` se ignoraba y el modelo
+  se descargaba con el tiempo global.
+- `split_mode: "tensor"` se marcaba como no válido en la estimación de
+  memoria aunque llama.cpp lo acepta.
+- TensorRT-LLM: el contexto se pasaba como presupuesto de tokens por paso
+  (`--max_num_tokens`) en vez de como longitud máxima (`--max_seq_len`).
+- Un horario mal formado en el `PATCH` daba `500`; ahora da `400`.
+
+---
+
 ## 0.73.4 — 2026-11-12
 
 ### Correcciones

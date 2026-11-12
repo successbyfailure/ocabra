@@ -1717,6 +1717,8 @@ function extractErrorMessage(err: unknown): string | undefined {
   if (!isRecord(err)) return undefined;
   const detail = err.detail;
   if (typeof detail === "string") return detail;
+  // /ocabra/* validation errors: {"detail": {"message": ..., "errors": [...]}}
+  if (isRecord(detail) && typeof detail.message === "string") return detail.message;
   if (
     isRecord(detail) &&
     isRecord(detail.error) &&
@@ -1729,7 +1731,7 @@ function extractErrorMessage(err: unknown): string | undefined {
   return undefined;
 }
 
-async function request<T>(
+export async function request<T>(
   method: string,
   path: string,
   body?: unknown,
