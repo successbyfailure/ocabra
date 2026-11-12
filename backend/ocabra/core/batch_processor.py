@@ -37,6 +37,10 @@ logger = structlog.get_logger(__name__)
 # broken" — scoped narrowly (not every 409) so a genuinely permanent
 # conflict still fails the line instead of retrying forever.
 _TRANSIENT_BATCH_ERROR_CODES = frozenset({"insufficient_vram"})
+# 503s from whisper when its card had no memory at that moment: the endpoint
+# already evicted and retried once; a requeued line gets another go once the
+# card frees up (2026-11-12: a diarized batch failed line after line).
+_TRANSIENT_BATCH_503_CODES = frozenset({"diarization_out_of_memory", "transcription_out_of_memory"})
 
 
 def _read_input_lines(path: Path) -> list[str]:
@@ -58,7 +62,10 @@ def _is_transient_batch_error(status_code: int, error_payload: dict[str, Any]) -
     a transient resource conflict should requeue the same way a priority
     cooldown/preemption already does, not fail outright on bad timing.
     """
-    return status_code == 409 and error_payload.get("code") in _TRANSIENT_BATCH_ERROR_CODES
+    code = error_payload.get("code")
+    if status_code == 503 and code in _TRANSIENT_BATCH_503_CODES:
+        return True
+    return status_code == 409 and code in _TRANSIENT_BATCH_ERROR_CODES
 
 
 class BatchProcessor:
@@ -855,6 +862,16 @@ class BatchProcessor:
                 err = response.json()
             except Exception:
                 err = {"message": response.text}
+            # oCabra's endpoints answer {"detail": {"error": {...}}} (FastAPI's
+            # HTTPException); without unwrapping it every code read as
+            # "http_<status>" and the transient ones (insufficient_vram, the
+            # whisper out-of-memory 503s) were never requeued.
+            if (
+                isinstance(err, dict)
+                and isinstance(err.get("detail"), dict)
+                and isinstance(err["detail"].get("error"), dict)
+            ):
+                err = err["detail"]
             error_payload = err.get("error") if isinstance(err, dict) and "error" in err else err
             if not isinstance(error_payload, dict):
                 error_payload = {"message": str(error_payload)}

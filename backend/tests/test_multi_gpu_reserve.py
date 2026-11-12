@@ -218,3 +218,45 @@ async def test_evict_for_whisper_leaves_a_busy_model_alone(monkeypatch):
 
     assert await mm.evict_for_whisper(whisper.model_id) is False
     mm.unload.assert_not_awaited()
+
+
+# -- diarizador bajo demanda en un worker compartido (2026-11-12) ---------------
+
+
+@pytest.mark.asyncio
+async def test_if_nothing_can_shrink_the_diarizer_load_evicts_idle_neighbours(monkeypatch):
+    """La 3060 con un embedder de 8 GB que no encoge: antes la peticion seguia
+    sin sitio y faster-whisper moria con CUDA out of memory (500)."""
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._in_flight[whisper.model_id] = 1
+    mm._can_change_context_live = MagicMock(return_value=False)
+    mm.evict_for_whisper = AsyncMock(return_value=True)
+
+    await mm.make_room_for_whisper(whisper.model_id, diarize=True)
+
+    mm.evict_for_whisper.assert_awaited_once()
+    assert mm.evict_for_whisper.await_args.kwargs["needed_mb"] >= 3400
+
+
+@pytest.mark.asyncio
+async def test_a_diarizer_used_moments_ago_is_still_loaded_and_needs_no_room(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._in_flight[whisper.model_id] = 1
+    mm._can_change_context_live = MagicMock(return_value=False)
+    mm.evict_for_whisper = AsyncMock(return_value=True)
+
+    await mm.make_room_for_whisper(whisper.model_id, diarize=True)
+    await mm.make_room_for_whisper(whisper.model_id, diarize=True)
+
+    mm.evict_for_whisper.assert_awaited_once()  # solo la primera
+
+
+@pytest.mark.asyncio
+async def test_plain_transcriptions_never_evict_for_the_diarizer(monkeypatch):
+    mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
+    mm._in_flight[whisper.model_id] = 1
+    mm.evict_for_whisper = AsyncMock(return_value=True)
+
+    await mm.make_room_for_whisper(whisper.model_id, diarize=False)
+
+    mm.evict_for_whisper.assert_not_awaited()

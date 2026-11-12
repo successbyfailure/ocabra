@@ -412,20 +412,31 @@ async def transcriptions(
                     headers={"Retry-After": "10"},
                 ) from exc
             except httpx.HTTPStatusError as exc:
-                if (
-                    exc.response.status_code == 503
-                    and "diarization_out_of_memory" in exc.response.text
-                ):
+                out_of_memory = exc.response.status_code == 503 and (
+                    "diarization_out_of_memory" in exc.response.text
+                    or "transcription_out_of_memory" in exc.response.text
+                )
+                if out_of_memory:
                     # The worker already retried at smaller batch sizes and the
                     # context shrink above was not enough: evict what is on
                     # whisper's card, as a load under pressure would, and retry.
                     if attempt == 0 and await model_manager.evict_for_whisper(worker_key):
                         continue
+                    diarizing = "diarization_out_of_memory" in exc.response.text
                     raise _openai_error(
-                        f"No GPU memory to diarize with '{worker_key}' right now. Retry "
-                        "later or send the request without diarization.",
+                        (
+                            f"No GPU memory to diarize with '{worker_key}' right now. Retry "
+                            "later or send the request without diarization."
+                        )
+                        if diarizing
+                        else f"No GPU memory to transcribe with '{worker_key}' right now. "
+                        "Retry later.",
                         "server_error",
-                        code="diarization_out_of_memory",
+                        code=(
+                            "diarization_out_of_memory"
+                            if diarizing
+                            else "transcription_out_of_memory"
+                        ),
                         status_code=503,
                         headers={"Retry-After": "30"},
                     ) from exc

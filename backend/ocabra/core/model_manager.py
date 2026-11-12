@@ -425,6 +425,10 @@ class ModelManager:
         # (model_id, gpu) -> MB shrinking that worker to the floor would free
         # there, measured by the last _try_shrink_for_space that fell short.
         self._shrink_capacity: dict[tuple[str, int], int] = {}
+        # Last time each whisper worker was asked to diarize (time.monotonic()).
+        # Its diarizer stays loaded until whisper_diarizer_idle_unload_s
+        # without use, so within that window its memory is already taken.
+        self._whisper_diarized_at: dict[str, float] = {}
 
     @asynccontextmanager
     async def _acquire_load_gate(self):
@@ -4081,8 +4085,17 @@ class ModelManager:
             return
         concurrent = self._in_flight_count(model_id)  # this request included
         extra = max(0, concurrent - 2) * int(settings.whisper_extra_per_request_mb)
+        diarizer_missing = False
         if diarize:
-            extra += int(settings.whisper_diarization_extra_mb)
+            now = time.monotonic()
+            last = self._whisper_diarized_at.get(model_id)
+            # Margin below the worker's idle unload, so a diarizer about to be
+            # freed counts as gone.
+            window = max(0.0, float(settings.whisper_diarizer_idle_unload_s) - 30.0)
+            diarizer_missing = last is None or now - last >= window
+            self._whisper_diarized_at[model_id] = now
+            if diarizer_missing:
+                extra += int(settings.whisper_diarization_extra_mb)
         if extra <= 0:
             return
         gpu = int(state.current_gpu[0])
@@ -4105,6 +4118,16 @@ class ModelManager:
                     concurrent=concurrent,
                 )
                 return
+        if diarizer_missing:
+            # The diarizer loads inside this request, where nothing can make
+            # room any more. When it was a worker of its own its load evicted
+            # what was in the way; on demand nothing did, and with the 3060
+            # holding an 8 GB embedder the transcriptions died with CUDA out
+            # of memory (2026-11-12). Evict like that load did: idle models
+            # only, the pressure order, hard pins never.
+            if await self.evict_for_whisper(model_id, needed_mb=extra):
+                logger.info("whisper_room_made", whisper=model_id, gpu_index=gpu, evicted=True)
+                return
         logger.info(
             "whisper_room_unavailable",
             whisper=model_id,
@@ -4113,7 +4136,7 @@ class ModelManager:
             diarize=diarize,
         )
 
-    async def evict_for_whisper(self, model_id: str) -> bool:
+    async def evict_for_whisper(self, model_id: str, *, needed_mb: int | None = None) -> bool:
         """Last resort when the diarizer ran out of memory even at batch size
         1: evict models on whisper's card the way a load under pressure does
         (same candidate order, soft pins included, hard pins never), until the
@@ -4124,7 +4147,7 @@ class ModelManager:
         if state is None or self._gpu_manager is None or not state.current_gpu:
             return False
         gpu = int(state.current_gpu[0])
-        needed = int(settings.whisper_diarization_extra_mb)
+        needed = int(needed_mb if needed_mb is not None else settings.whisper_diarization_extra_mb)
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
             if candidate == model_id:
                 continue

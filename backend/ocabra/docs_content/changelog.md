@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.73.4 — 2026-11-12
+
+### Correcciones
+
+- **Las transcripciones diarizadas ya no fallan con `500 Internal Server Error`
+  cuando la tarjeta de whisper está llena.** Desde la 0.73.3 el diarizador se
+  carga bajo demanda, y si su tarjeta no tenía sitio (por ejemplo, con un
+  modelo de embeddings grande al lado) la transcripción se quedaba sin
+  memoria de GPU. Ahora, antes de diarizar, oCabra desaloja modelos ociosos de
+  esa tarjeta para hacerle sitio, como hacía cuando el diarizado era un worker
+  aparte. Si aun así falta memoria, la respuesta es `503` con
+  `code: "transcription_out_of_memory"` (o `diarization_out_of_memory`) y
+  `Retry-After`, en vez de un 500.
+- **Batches: los errores transitorios vuelven a reencolarse.** El procesador
+  de lotes no leía el código de error de las respuestas de oCabra, así que
+  `insufficient_vram` y las faltas de memoria de whisper fallaban la línea a
+  la primera en vez de reintentarla. Ahora se reintentan hasta el plazo de
+  reintento del lote. Además, el `error` de las líneas fallidas en el fichero
+  de errores pasa a ser el objeto de error (`code`, `message`, `type`,
+  `param`), no el envoltorio `{"detail": {"error": …}}`.
+
+---
+
 ## 0.73.3 — 2026-11-12
 
 ### Correcciones

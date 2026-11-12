@@ -289,6 +289,13 @@ def create_app(
                         runtime.diarization_pipeline,
                         timestamp_granularities,
                     )
+                elif "out of memory" in str(exc).lower():
+                    # Same contract as DiarizationOutOfMemory: a 503 with a code
+                    # oCabra reads to free the card and retry, instead of a bare
+                    # 500 (2026-11-12: a diarized batch on a full 3060).
+                    raise HTTPException(
+                        status_code=503, detail=f"transcription_out_of_memory: {exc}"
+                    ) from exc
                 else:
                     raise
         finally:
