@@ -612,7 +612,7 @@ export function SlotsChart({
               {m > 0 && m <= xMax * 1.01 && (
                 <circle cx={lx(m)} cy={ly(limit)} r={3} fill={color} />
               )}
-              <text x={W - P.r + 4} y={P.t + 12 + i * 13} className="text-[10px]" fill={color} fontWeight={active ? 700 : 400}>
+              <text x={W - P.r + 4} y={H - P.b - (series.length - 1 - i) * 13} className="text-[10px]" fill={color} fontWeight={active ? 700 : 400}>
                 {value.pool ? `pool · ${s} a la vez` : `${s} a la vez`} → {m > 0 ? fmtContext(Math.min(m, arch.native_context || m)) : "no cabe"}
               </text>
             </g>
