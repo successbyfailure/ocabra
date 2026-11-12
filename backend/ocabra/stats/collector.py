@@ -8,6 +8,7 @@ Tracks OpenAI-compatible `/v1/*` and Ollama-compatible inference routes under
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -302,6 +303,12 @@ def _stream_output_tokens(
                     if isinstance(reasoning, str) and reasoning:
                         words += len(reasoning.split())
                         found = True
+                tool_words = _tool_call_words(
+                    delta.get("tool_calls") if isinstance(delta, dict) else None
+                )
+                if tool_words is not None:
+                    words += tool_words
+                    found = True
     elif "ndjson" in content_type:
         for line in text.splitlines():
             line = line.strip()
@@ -323,6 +330,42 @@ def _stream_output_tokens(
                 if isinstance(thinking, str) and thinking:
                     words += len(thinking.split())
                     found = True
+            tool_words = _tool_call_words(msg.get("tool_calls") if isinstance(msg, dict) else None)
+            if tool_words is not None:
+                words += tool_words
+                found = True
+    return words if found else None
+
+
+_ARG_PIECES = re.compile(r"\w+|[^\w\s]+")
+
+
+def _tool_call_words(tool_calls: object) -> int | None:
+    """Approx tokens generated as tool-call arguments in one stream event.
+
+    The arguments are model output like any other: an agent writing a file
+    through a tool emits the whole file there. Without this the live counter
+    froze while the model kept generating — ravenx showed ~1 t/s in the
+    dashboard with 156 tokens counted and 8.300 decoded by llama-server
+    (2026-11-12). OpenAI streams ``function.arguments`` as string pieces;
+    Ollama sends the whole call with ``arguments`` as an object.
+    """
+    if not isinstance(tool_calls, list):
+        return None
+    words = 0
+    found = False
+    for call in tool_calls:
+        fn = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(fn, dict):
+            continue
+        args = fn.get("arguments")
+        if isinstance(args, dict | list):
+            args = json.dumps(args, ensure_ascii=False)
+        if isinstance(args, str) and args:
+            # JSON and code have few spaces: count words and punctuation runs,
+            # or a 200-character argument would weigh like one word.
+            words += max(1, len(_ARG_PIECES.findall(args)))
+            found = True
     return words if found else None
 
 

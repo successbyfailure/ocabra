@@ -106,6 +106,50 @@ class TestStreamOutputTokensReasoningVisibility:
         assert result == 3
 
 
+class TestStreamOutputCountsToolCallArguments:
+    """2026-11-12: un agente escribia un fichero largo en una tool call de
+    ravenx; el contador en vivo se quedo en 156 tokens (≈1 t/s en el
+    dashboard) mientras llama-server llevaba 8.300 generados, porque solo se
+    contaban content y reasoning_content."""
+
+    def _sse(self, *pieces: str) -> bytes:
+        import json as _json
+
+        out = b""
+        for i, piece in enumerate(pieces):
+            delta = {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        **({"id": "c1", "type": "function"} if i == 0 else {}),
+                        "function": {"name": "write_file", "arguments": piece}
+                        if i == 0
+                        else {"arguments": piece},
+                    }
+                ]
+            }
+            out += b"data: " + _json.dumps({"choices": [{"delta": delta}]}).encode() + b"\n\n"
+        return out
+
+    def test_los_argumentos_de_una_tool_call_cuentan_como_salida(self) -> None:
+        body = self._sse('{"path": "hola.py", ', '"content": "print(\'hola mundo\')\\n"}')
+        assert (_stream_output_tokens(body, "text/event-stream") or 0) >= 8
+
+    def test_el_contador_crece_mientras_la_tool_call_crece(self) -> None:
+        corto = self._sse('{"content": "', "linea uno ")
+        largo = self._sse('{"content": "', *(["linea ", "otra "] * 50))
+        a = _stream_output_tokens(corto, "text/event-stream", include_reasoning=True)
+        b = _stream_output_tokens(largo, "text/event-stream", include_reasoning=True)
+        assert a is not None and b is not None and b > a + 50
+
+    def test_ollama_tool_call_con_argumentos_como_objeto(self) -> None:
+        body = (
+            b'{"message":{"tool_calls":[{"function":{"name":"write_file",'
+            b'"arguments":{"path":"hola.py","content":"print(1)"}}}]}}\n'
+        )
+        assert (_stream_output_tokens(body, "application/x-ndjson") or 0) >= 5
+
+
 class TestCountInputTokensIncludesTools:
     """2026-10-29 — reproduced live: a Home Assistant request's live-progress
     card showed '~128 tok entrada' while the real prompt (confirmed via the

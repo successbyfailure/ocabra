@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.73.2 — 2026-11-12
+
+### Correcciones
+
+- **El ritmo en vivo de las peticiones que generan tool calls ya es el real.**
+  El contador de tokens en curso solo sumaba el texto y el razonamiento, no los
+  argumentos de las llamadas a herramientas. Un agente que escribe un fichero
+  dentro de una tool call aparecía en `/ocabra/models/activity` (y en el
+  dashboard) parado, a ~1 t/s, mientras el modelo generaba a su ritmo normal.
+  El registro final ya era correcto porque sale de la cifra del backend; si el
+  backend no la da, ahora también cuenta esos argumentos.
+
+---
+
 ## 0.73.1 — 2026-11-11
 
 ### Arreglos
