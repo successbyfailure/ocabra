@@ -660,3 +660,95 @@ def test_ollama_env_file_round_trip(tmp_path):
     write_ollama_env_file(4, 32768, str(path))
     lines = [line for line in path.read_text().splitlines() if not line.startswith("#")]
     assert parse_ollama_env(lines) == {"numParallel": 4, "maxContext": 32768}
+
+
+# ── Every LLM has a "normal" preset ─────────────────────────────────────────
+
+
+def test_normal_preset_mirrors_a_llama_pool_on_one_gpu():
+    from ocabra.core.default_presets import preset_from_base
+
+    state = _state(
+        backend_type="llamacpp_mks",
+        preferred_gpu=1,
+        extra_config={"llama_cpp": {"ctx_size": 262144, "parallel_slots": 4, "kv_unified": True,
+                                    "cache_type_k": "q8_0", "disabled_gpus": [0], "split_mode": "none"}},
+    )
+    p = preset_from_base(state, [0, 1])
+    assert (p["context_mode"], p["context_tokens"], p["parallelism"], p["kv_cache_dtype"]) == ("fixed", 262144, 4, "q8")
+    assert (p["placement_policy"], p["preferred_gpus"]) == ("forced", [1])
+    assert p["is_default"] and p["enabled"]
+
+
+def test_normal_preset_per_slot_context_without_pool_and_auto_placement():
+    from ocabra.core.default_presets import preset_from_base
+
+    state = _state(backend_type="llamacpp_mks", extra_config={"llama_cpp": {"ctx_size": 32768, "parallel_slots": 2}})
+    p = preset_from_base(state, [0, 1])
+    assert p["context_tokens"] == 16384  # ctx_size is the total, split across slots
+    assert (p["placement_policy"], p["preferred_gpus"], p["kv_cache_dtype"]) == ("auto", None, "fp16")
+
+
+def test_normal_preset_for_vllm_without_length_is_max():
+    from ocabra.core.default_presets import preset_from_base
+
+    p = preset_from_base(_state(backend_type="vllm", extra_config={"vllm": {"max_num_seqs": 8}}), [0])
+    assert (p["context_mode"], p["context_tokens"], p["parallelism"]) == ("max", None, 8)
+    assert preset_from_base(_state(backend_type="whisper"), [0]) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fits", [True, False])
+async def test_seeding_keeps_a_fitting_preset_and_drops_one_that_does_not(monkeypatch, fits):
+    from ocabra.core import default_presets
+    from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
+
+    profile = SimpleNamespace(profile_id="g", profile_kind="execution", category="llm", is_default=True,
+                              base_model_id="llamacpp_mks/g", runtime_presets=[])
+    registry = MagicMock()
+    registry._profiles = {"g": profile}
+    registry.get = AsyncMock(return_value=profile)
+    registry.create_runtime_preset = AsyncMock()
+    registry.delete_runtime_preset = AsyncMock()
+    mm = MagicMock()
+    mm.get_state = AsyncMock(return_value=_state(model_id="llamacpp_mks/g", extra_config={"llama_cpp": {"ctx_size": 8192}}))
+    mm.gpu_manager = MagicMock(get_all_states=AsyncMock(return_value=[SimpleNamespace(index=0)]))
+    monkeypatch.setattr(runtime_capacity_cache, "resolve", AsyncMock(return_value=[{"preset_key": "normal", "resolved": True, "fits": fits}]))
+
+    class _Session:
+        async def __aenter__(self):
+            return MagicMock(commit=AsyncMock())
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("ocabra.database.AsyncSessionLocal", lambda: _Session())
+    out = await default_presets.ensure_llm_default_presets(registry, mm)
+    assert registry.create_runtime_preset.await_count == 1
+    if fits:
+        assert out == {"created": ["g"], "skipped": []}
+        registry.delete_runtime_preset.assert_not_awaited()
+    else:
+        assert out == {"created": [], "skipped": ["g"]}
+        registry.delete_runtime_preset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_last_preset_of_an_llm_cannot_be_deleted():
+    from fastapi import HTTPException
+
+    import ocabra.api.internal.profiles as mod
+
+    profile = SimpleNamespace(category="llm", base_model_id="llamacpp_mks/g", runtime_presets=[object()])
+    registry = MagicMock(get=AsyncMock(return_value=profile))
+    mm = MagicMock(get_state=AsyncMock(return_value=SimpleNamespace(backend_type="llamacpp_mks")))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
+    original = mod._get_registry
+    mod._get_registry = lambda _r: registry
+    try:
+        with pytest.raises(HTTPException):
+            await mod._reject_removing_last_llm_preset(request, "g")
+        profile.runtime_presets = [object(), object()]
+        await mod._reject_removing_last_llm_preset(request, "g")
+    finally:
+        mod._get_registry = original

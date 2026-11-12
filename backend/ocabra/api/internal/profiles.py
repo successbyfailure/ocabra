@@ -596,6 +596,24 @@ async def benchmark_runtime_preset(
 
 
 
+async def _reject_removing_last_llm_preset(request: Request, profile_id: str) -> None:
+    """An LLM always keeps at least one preset: with none, its base would load
+    on its own and every rung view would lose its anchor (2026-11-12)."""
+    from ocabra.core.default_presets import PRESET_BACKENDS
+
+    profile = await _get_registry(request).get(profile_id)
+    if profile is None or getattr(profile, "category", None) != "llm":
+        return
+    if len(getattr(profile, "runtime_presets", None) or []) > 1:
+        return
+    state = await request.app.state.model_manager.get_state(profile.base_model_id or "")
+    if getattr(state, "backend_type", None) in PRESET_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail="An LLM keeps at least one runtime preset; edit this one instead of deleting it.",
+        )
+
+
 async def _reject_ollama_presets(request: Request, profile_id: str) -> None:
     """Ollama models share one daemon with a global context and parallelism;
     a per-profile preset ladder has nothing to switch between."""
@@ -736,7 +754,8 @@ async def delete_runtime_preset(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
-    """Delete one runtime preset."""
+    """Delete one runtime preset. The last preset of an LLM cannot go (400)."""
+    await _reject_removing_last_llm_preset(request, profile_id)
     reason = await _unfit_preset_reason(request, profile_id, exclude=preset_key)
     if reason:
         raise HTTPException(status_code=400, detail=reason)

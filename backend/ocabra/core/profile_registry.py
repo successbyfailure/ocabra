@@ -954,7 +954,10 @@ class ProfileRegistry:
                     return None
                 created = await self._ensure_default_profile_for(session, model)
                 await session.commit()
-                return created
+            hook = getattr(self, "default_preset_hook", None)
+            if created and hook is not None:
+                await hook(model_id)
+            return created
         except Exception as exc:
             logger.warning(
                 "on_model_added_failed",

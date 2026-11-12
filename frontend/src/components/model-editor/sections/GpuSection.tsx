@@ -102,7 +102,7 @@ function GpuPicker({
   )
 }
 
-function PreferredGpuPanel({ editor, readOnly, gpus, liveVramByGpu }: SectionProps) {
+export function PreferredGpuPanel({ editor, readOnly, gpus, liveVramByGpu }: SectionProps) {
   const d = editor.draft!
   return (
     <Panel title="¿Dónde corre?" subtitle="GPU en la que el planificador intenta cargar este despliegue primero.">
@@ -340,7 +340,7 @@ export function SplitBar({
 }
 
 /** Capas en GPU frente a CPU, dibujadas una a una. */
-function GpuLayersPanel({ editor, readOnly }: SectionProps) {
+export function GpuLayersPanel({ editor, readOnly }: SectionProps) {
   const section = editor.schema!.section === LLAMA ? LLAMA : "bitnet"
   const field = editor.fieldByKey.get(`${section}.gpu_layers`)
   const { data: cap } = useCapacity(editor.model?.model_id)
@@ -396,7 +396,7 @@ function GpuLayersPanel({ editor, readOnly }: SectionProps) {
 }
 
 /** Fracción de la GPU que reservan vLLM / SGLang al arrancar. */
-function FractionPanel({ editor, readOnly, gpus }: SectionProps) {
+export function FractionPanel({ editor, readOnly, gpus }: SectionProps) {
   const field = editor.fieldByKey.get("vllm.gpu_memory_utilization") ?? editor.fieldByKey.get("sglang.mem_fraction_static")
   if (!field) return null
   const raw = getPath(editor.draft!.extraConfig, field.path)

@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.76.0 — 2026-11-12
+
+### Cambios
+
+- **Todo modelo de lenguaje tiene al menos un preset de contexto.** A los que
+  no tenían ninguno se les crea `normal` (por defecto), copia exacta de lo que
+  ya cargaban: mismo contexto, peticiones simultáneas, precisión de la KV y
+  GPUs. No cambia cómo responden, pero ahora `normal` aparece en
+  `…/runtime-presets` y se puede pedir con `ocabra.context_preset`. Si el
+  planificador calcula que ese preset no cabe, no se crea y el modelo sigue
+  como estaba. Embeddings, rerank y Ollama no tienen presets.
+- **No se puede borrar el último preset de un modelo de lenguaje**
+  (`DELETE /ocabra/profiles/{id}/runtime-presets/{key}` responde `400`): se
+  edita en su lugar.
+
+---
+
 ## 0.75.0 — 2026-11-12
 
 ### Cambios

@@ -649,6 +649,22 @@ async def lifespan(app: FastAPI):
         if diarized_count:
             logger.info("diarized_profiles_seeded", count=diarized_count)
     app.state.profile_registry = profile_registry
+    # Every LLM gets a "normal" preset equal to what its base loads today; new
+    # models get theirs when registered (on_model_added).
+    from ocabra.core.default_presets import ensure_llm_default_presets
+
+    async def _seed_default_presets(model_id: str | None = None) -> None:
+        seeded = await ensure_llm_default_presets(
+            profile_registry, model_manager, only_model_id=model_id
+        )
+        if seeded["created"] or seeded["skipped"]:
+            logger.info("default_presets", **seeded)
+
+    profile_registry.default_preset_hook = _seed_default_presets
+    try:
+        await _seed_default_presets()
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.warning("default_presets_failed", error=str(exc))
     from ocabra.core.context_probe_service import ContextProbeService
 
     app.state.context_probe = ContextProbeService(model_manager, profile_registry, worker_pool)

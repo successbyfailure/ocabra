@@ -349,6 +349,23 @@ no el editor mostraría controles que no hacen nada:
   - Sin presets: la migración 0035 borra los 17 que había y la API rechaza
     nuevos.
 
+**Cuarta tanda (v0.76.0): presets primero.**
+- Con presets activos, la base nunca se carga sola (cada petición y "Cargar"
+  eligen un preset). En Capacidad los peldaños son solo los presets, y entra
+  seleccionado el ★. La base pasa a ser "Común a todos": capas en GPU, modo de
+  la KV, fracción del motor y la colocación y el contexto que no fija ningún
+  preset. Ya no hay barras de memoria inventadas.
+- Todo LLM tiene al menos un preset: `core/default_presets.py` crea "normal"
+  (copia de lo que carga la base) al arrancar y al registrar un modelo. Si el
+  planificador dice que no cabe, no lo crea. La API no deja borrar el último
+  preset de un LLM.
+- Embeddings y rerank (llama.cpp) tienen su propio lienzo, "encoder": solo
+  peticiones simultáneas y entrada máxima, sin presets. El batch no hace falta
+  tocarlo: llama-server lo ajusta en modo embeddings.
+- Pendiente de decisión: gemma4:26b sigue sin preset. El planificador da
+  139.584 como máximo con 4 slots en la 3090, frente a los 262.144 de su
+  base. Midiendo su contexto real se fijaría un valor validado.
+
 **Lo que queda, por diseño.**
 - La memoria por GPU de llama.cpp es una estimación desde el GGUF, no una
   medida. La medida real está en el dashboard (`vramByGpu`).

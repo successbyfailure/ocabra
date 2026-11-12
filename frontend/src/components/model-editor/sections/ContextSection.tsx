@@ -234,7 +234,7 @@ function LlamaContext({ editor, readOnly, gpus, presets = [] }: SectionProps) {
 }
 
 /** Dibujo de cómo se reparte la KV: N cajas iguales o un depósito común. */
-function KvModeDiagram({
+export function KvModeDiagram({
   unified,
   slots,
   ctx,

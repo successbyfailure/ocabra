@@ -185,7 +185,7 @@ describe("ModelEditor", () => {
     expect(await screen.findByTestId("capacity-section")).toBeTruthy()
   })
 
-  it("capacity lists the base and each preset as rungs; picking a preset focuses it", async () => {
+  it("with presets, capacity lists only the presets (default focused) plus the shared settings", async () => {
     const preset = (key: string, ctx: number, isDefault = false) => ({
       id: key, profileId: "m", presetKey: key, label: key, contextMode: "fixed", contextTokens: ctx, parallelism: 2,
       kvCacheDtype: "q8", placementPolicy: "auto", preferredGpus: null, executionPolicy: "auto", enabled: true,
@@ -204,11 +204,33 @@ describe("ModelEditor", () => {
     ])
     renderEditor("capacity")
     const selector = await screen.findByTestId("rung-selector")
-    await waitFor(() => expect(selector.querySelectorAll("[data-rung]")).toHaveLength(3))
-    expect(selector.textContent).toContain("Base (sin preset)")
-    fireEvent.click(selector.querySelector('[data-rung="normal"]') as HTMLElement)
+    // Con presets la base nunca se carga sola: no es un peldaño, es "Común a todos".
+    await waitFor(() => expect(selector.querySelector('[data-rung="normal"]')).toBeTruthy())
+    expect(selector.querySelector('[data-rung="base"]')).toBeNull()
+    expect(selector.querySelector('[data-rung="largo"]')).toBeTruthy()
+    // Entra en el preset por defecto, enfocado.
     expect(await screen.findByTestId("focused-rung")).toBeTruthy()
     expect(screen.queryByTestId("base-memory")).toBeNull()
+    fireEvent.click(selector.querySelector('[data-rung="common"]') as HTMLElement)
+    const shared = await screen.findByTestId("shared-canvas")
+    // Lo que fija cada preset no aparece en lo común.
+    expect(shared.querySelector('[data-field="llama_cpp.ctx_size"]')).toBeNull()
+    expect(shared.querySelector('[data-field="llama_cpp.split_mode"]')).toBeNull()
+  })
+
+  it("embedding models get the encoder canvas and no preset ladder", async () => {
+    modelEditorApi.get.mockResolvedValue(
+      model({
+        capabilities: { embeddings: true, chat: false } as RawModel["capabilities"],
+        extra_config: { llama_cpp: { ctx_size: 32768, parallel_slots: 4 } },
+      }),
+    )
+    renderEditor("capacity")
+    const panel = await screen.findByTestId("encoder-panel")
+    // 32768 total / 4 slots (sin pool) = 8k por texto.
+    expect(panel.textContent).toContain("8k tokens por texto")
+    expect(screen.queryByText("Nuevo peldaño")).toBeNull()
+    expect(screen.queryByTestId("capacity-chart")).toBeNull()
   })
 
   it("ollama models get the global server card and no preset ladder", async () => {

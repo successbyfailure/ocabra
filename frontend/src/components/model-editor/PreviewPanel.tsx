@@ -125,7 +125,7 @@ export function PreviewPanel({
 
       <div className="space-y-1.5 rounded-xl border border-border bg-card p-3" data-testid="preview-fit">
         <div className="text-xs font-medium">Encaje</div>
-        {verdict ? (
+        {presets.length > 0 ? null : verdict ? (
           <div className="flex flex-wrap items-center gap-1.5 text-[11px]" data-testid="preview-base">
             <span className={verdict.tone === "ok" ? "text-emerald-300" : verdict.tone === "warn" ? "text-amber-300" : "text-red-300"}>
               {verdict.tone === "error" ? "✗" : "✓"}
