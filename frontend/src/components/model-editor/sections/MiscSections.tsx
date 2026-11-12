@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react"
 import { Eye, EyeOff, ImageIcon, Sparkles } from "lucide-react"
 import { api } from "@/api/client"
+import { modelEditorApi } from "@/api/modelEditor"
+import { toast } from "sonner"
 import { cn } from "@/lib/cn"
 import { getPath, isObject } from "../draft"
 import { fmtMb } from "../PreviewPanel"
 import { FieldRow, NumberInput, SchemaFields } from "../SchemaField"
 import type { Json, JsonObject } from "../types"
-import { Callout, Hint, Panel, Segmented, inputCls } from "../ui"
+import { Callout, Hint, Panel, Segmented, Toggle, inputCls } from "../ui"
 import type { SectionProps } from "./types"
 
 // ── Respuesta ───────────────────────────────────────────────────────────────
 
-export function ResponseSection({ editor, readOnly }: SectionProps) {
+export function ResponseSection({ editor, readOnly, insights }: SectionProps) {
+  const tpl = insights?.template ?? null
   const reasoningCapable = Boolean(editor.model?.capabilities?.reasoning)
   const effort = editor.fieldByKey.get("default_reasoning_effort")
   const reasoningKeys = ["llama_cpp.reasoning", "llama_cpp.reasoning_format", "llama_cpp.reasoning_budget"]
@@ -33,10 +36,22 @@ export function ResponseSection({ editor, readOnly }: SectionProps) {
               <SchemaFields editor={editor} only={reasoningKeys} readOnly={readOnly} showAdvanced />
             </div>
           )}
-          <Hint>
-            Solo surte efecto si la plantilla de chat del modelo lee el esfuerzo (no todas lo hacen); los valores por petición del
-            cliente siempre ganan.
-          </Hint>
+          {tpl ? (
+            tpl.effortLevels ? (
+              <Callout tone="ok">La plantilla de chat del modelo lee el nivel de esfuerzo: los niveles cambian cuánto piensa.</Callout>
+            ) : tpl.thinkingSwitch ? (
+              <Callout tone="warn">
+                La plantilla solo distingue pensar o no pensar: «Apagado» lo desactiva, pero bajo, medio y alto dan el mismo resultado.
+              </Callout>
+            ) : (
+              <Callout tone="warn">La plantilla de chat de este modelo no lee el esfuerzo de razonamiento: este ajuste no tiene efecto.</Callout>
+            )
+          ) : (
+            <Hint>
+              Solo surte efecto si la plantilla de chat del modelo lee el esfuerzo (no todas lo hacen); los valores por petición del
+              cliente siempre ganan.
+            </Hint>
+          )}
         </Panel>
       )}
       <SchemaFields
@@ -277,7 +292,8 @@ export function GroupSection(props: SectionProps & { group: string; title: strin
 
 // ── Avanzado ────────────────────────────────────────────────────────────────
 
-export function AdvancedSection({ editor, readOnly }: SectionProps & { onMaintenance?: (on: boolean) => void }) {
+export function AdvancedSection({ editor, readOnly, insights, reloadInsights }: SectionProps) {
+  const [maintBusy, setMaintBusy] = useState(false)
   const [raw, setRaw] = useState("")
   const [bad, setBad] = useState<string | null>(null)
   const extra = editor.draft?.extraConfig ?? {}
@@ -289,6 +305,30 @@ export function AdvancedSection({ editor, readOnly }: SectionProps & { onMainten
   const unknown = editor.preview?.unknownKeys ?? editor.schema?.unknownKeys ?? []
   return (
     <div className="space-y-4">
+      <Panel
+        title="Mantenimiento"
+        subtitle="Mientras está activo, las peticiones a este modelo reciben 503 con Retry-After. No se guarda: se pierde al reiniciar el servidor."
+      >
+        <Toggle
+          checked={Boolean(insights?.maintenance)}
+          disabled={readOnly || maintBusy || !editor.model}
+          testId="maintenance"
+          label={<span className="text-sm">{insights?.maintenance ? "En mantenimiento" : "Atendiendo peticiones"}</span>}
+          onChange={async (on) => {
+            if (!editor.model) return
+            setMaintBusy(true)
+            try {
+              await modelEditorApi.setMaintenance(editor.model.model_id, on)
+              toast.success(on ? "Modelo en mantenimiento" : "Mantenimiento desactivado")
+              await reloadInsights?.()
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : String(err))
+            } finally {
+              setMaintBusy(false)
+            }
+          }}
+        />
+      </Panel>
       <SchemaFields title="Opciones avanzadas" editor={editor} group="advanced" readOnly={readOnly} showAdvanced />
       <Panel
         title="Configuración en crudo"

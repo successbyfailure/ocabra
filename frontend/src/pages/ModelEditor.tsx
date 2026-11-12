@@ -31,7 +31,7 @@ import { useLiveActivity } from "@/components/dashboard/useLiveActivity"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { CompileModal } from "@/components/models/CompileModal"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
-import { PreviewPanel } from "@/components/model-editor/PreviewPanel"
+import { MobilePreviewBar, PreviewPanel } from "@/components/model-editor/PreviewPanel"
 import { AccessSection } from "@/components/model-editor/sections/AccessSection"
 import { ContextSection } from "@/components/model-editor/sections/ContextSection"
 import { GpuSection } from "@/components/model-editor/sections/GpuSection"
@@ -44,6 +44,8 @@ import type { SectionProps } from "@/components/model-editor/sections/types"
 import { Callout, Chip } from "@/components/model-editor/ui"
 import { useModelEditor } from "@/components/model-editor/useModelEditor"
 import { usePresetLadder } from "@/components/model-editor/usePresetLadder"
+import { modelEditorApi } from "@/api/modelEditor"
+import type { ModelInsights } from "@/components/model-editor/types"
 import { useIsAdmin, useIsModelManager } from "@/hooks/useAuth"
 import { cn } from "@/lib/cn"
 import { useGpuStore } from "@/stores/gpuStore"
@@ -113,6 +115,18 @@ export function ModelEditor() {
   const [confirm, setConfirm] = useState<null | "unload" | "reload" | "delete">(null)
   const [compileOpen, setCompileOpen] = useState(false)
   const [pendingNav, setPendingNav] = useState<string | null>(null)
+  const [insights, setInsights] = useState<ModelInsights | null>(null)
+  const reloadInsights = useCallback(async () => {
+    if (!modelId) return
+    try {
+      setInsights(await modelEditorApi.insights(modelId))
+    } catch {
+      setInsights(null)
+    }
+  }, [modelId])
+  useEffect(() => {
+    void reloadInsights()
+  }, [reloadInsights])
 
   const refreshLogical = useCallback(async () => {
     if (!modelId) return
@@ -193,7 +207,7 @@ export function ModelEditor() {
   const loading = m.status === "loading"
   const needsReload = loaded && editor.changes.some((c) => c.reload)
 
-  const props: SectionProps = { editor, readOnly, isAdmin, logical, refreshLogical, gpus, liveVramByGpu, presets: ladder.rungs }
+  const props: SectionProps = { editor, readOnly, isAdmin, logical, refreshLogical, gpus, liveVramByGpu, presets: ladder.rungs, insights, reloadInsights }
 
   const run = async (label: string, fn: () => Promise<unknown>, ok: string) => {
     setBusy(label)
@@ -359,9 +373,12 @@ export function ModelEditor() {
         </main>
 
         {/* Vista previa */}
-        <div className="lg:sticky lg:top-28 lg:max-h-[calc(100vh-8rem)] lg:self-start lg:overflow-y-auto">
+        <div className="hidden lg:sticky lg:top-28 lg:block lg:max-h-[calc(100vh-8rem)] lg:self-start lg:overflow-y-auto">
           <PreviewPanel editor={editor} gpus={gpus} liveVramByGpu={liveVramByGpu} presets={ladder.rungs} />
         </div>
+      </div>
+      <MobilePreviewBar editor={editor} gpus={gpus} liveVramByGpu={liveVramByGpu} presets={ladder.rungs} />
+      <div className="h-12 lg:hidden" aria-hidden>
       </div>
 
       <ConfirmDialog

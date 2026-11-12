@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 import { Copy, Pause, Play, Plus, Star, Trash2, Upload } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
@@ -47,8 +47,11 @@ export function ProfilesSection(props: SectionProps) {
   const [profiles, setProfiles] = useState<ModelProfile[]>([])
   const [routers, setRouters] = useState<ModelProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [selected, setSelected] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
+  // ?p=<perfil> abre ese perfil; ?new=1 abre el formulario de perfil nuevo
+  // (enlaces desde /profiles y desde las tarjetas de Modelos).
+  const [search] = useSearchParams()
+  const [selected, setSelected] = useState<string | null>(() => search.get("p"))
+  const [creating, setCreating] = useState(() => search.get("new") === "1")
 
   const load = useCallback(async () => {
     if (!modelId) return
@@ -167,7 +170,7 @@ export function ProfilesSection(props: SectionProps) {
 
       <Panel
         title="Routers que apuntan aquí"
-        subtitle="Un router elige entre varios perfiles; sus valores por defecto se aplican entre los del perfil elegido y los del cliente."
+        subtitle="Un router prueba sus destinos en orden (primero el que ya esté cargado). Con ‹ › cambias la posición de este modelo; sus valores por defecto se aplican entre los del perfil elegido y los del cliente."
         actions={
           <Link to="/routers" className="text-xs text-sky-300 hover:underline">
             Gestionar routers
@@ -182,18 +185,44 @@ export function ProfilesSection(props: SectionProps) {
               <li key={r.profileId} className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-foreground">{r.profileId}</span>
                 <span className="text-muted-foreground">→</span>
-                {(r.routingTargets ?? []).map((t, i) => (
-                  <span
-                    key={t}
-                    className={cn(
-                      "rounded border px-1.5 py-px font-mono",
-                      profiles.some((p) => p.profileId === t) ? "border-sky-500/40 text-sky-200" : "border-border text-muted-foreground",
-                    )}
-                    title={`Posición ${i + 1}`}
-                  >
-                    {t}
-                  </span>
-                ))}
+                {(r.routingTargets ?? []).map((t, i, all) => {
+                  const ours = profiles.some((p) => p.profileId === t)
+                  const move = async (dir: -1 | 1) => {
+                    const next = [...all]
+                    const j = i + dir
+                    if (j < 0 || j >= next.length) return
+                    ;[next[i], next[j]] = [next[j], next[i]]
+                    try {
+                      await api.profiles.update(r.profileId, { routingTargets: next })
+                      toast.success(`${t} pasa a la posición ${j + 1} en ${r.profileId}`)
+                      await afterWrite()
+                    } catch (err) {
+                      toast.error(errMsg(err))
+                    }
+                  }
+                  return (
+                    <span
+                      key={t}
+                      className={cn(
+                        "inline-flex items-center gap-0.5 rounded border px-1.5 py-px font-mono",
+                        ours ? "border-sky-500/40 text-sky-200" : "border-border text-muted-foreground",
+                      )}
+                      title={`Posición ${i + 1}`}
+                    >
+                      {ours && !readOnly && i > 0 && (
+                        <button type="button" aria-label={`Subir ${t} en ${r.profileId}`} className="hover:text-white" onClick={() => void move(-1)}>
+                          ‹
+                        </button>
+                      )}
+                      {t}
+                      {ours && !readOnly && i < all.length - 1 && (
+                        <button type="button" aria-label={`Bajar ${t} en ${r.profileId}`} className="hover:text-white" onClick={() => void move(1)}>
+                          ›
+                        </button>
+                      )}
+                    </span>
+                  )
+                })}
               </li>
             ))}
           </ul>

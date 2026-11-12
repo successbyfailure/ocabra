@@ -8,7 +8,6 @@ import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
 import { LogicalModelCard } from "@/components/models/LogicalModelCard"
 import { ModelGridCard } from "@/components/models/ModelGridCard"
-import { ProfileModal } from "@/components/models/ProfileModal"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import {
   categorizeModel,
@@ -92,9 +91,6 @@ export function Models() {
   const [confirmAction, setConfirmAction] = useState<{ modelId: string; action: "load" | "unload" } | null>(null)
 
   // Profile modal state
-  const [profileModalModel, setProfileModalModel] = useState<ModelState | null>(null)
-  const [profileModalProfile, setProfileModalProfile] = useState<ModelProfile | null>(null)
-  const [profileModalOpen, setProfileModalOpen] = useState(false)
 
   useWebSocket()
 
@@ -355,10 +351,10 @@ export function Models() {
   }
 
 
+  // Los perfiles se editan en el editor del modelo (sección Perfiles).
   const openProfileModal = (model: ModelState, profile: ModelProfile | null) => {
-    setProfileModalModel(model)
-    setProfileModalProfile(profile)
-    setProfileModalOpen(true)
+    const query = new URLSearchParams(profile ? { s: "profiles", p: profile.profileId } : { s: "profiles", new: "1" })
+    navigate(`/models/edit/${encodeURIComponent(model.modelId)}?${query.toString()}`)
   }
 
   const handleToggleProfileEnabled = async (profile: ModelProfile) => {
@@ -709,22 +705,6 @@ export function Models() {
         onLoadNow={(modelId) => void runAction(modelId, () => loadModel(modelId))}
       />
 
-      {/* Profile create/edit modal */}
-      {profileModalModel && (
-        <ProfileModal
-          open={profileModalOpen}
-          onOpenChange={(next) => {
-            setProfileModalOpen(next)
-            if (!next) {
-              setProfileModalModel(null)
-              setProfileModalProfile(null)
-            }
-          }}
-          model={profileModalModel}
-          profile={profileModalProfile}
-          onSaved={() => void refresh()}
-        />
-      )}
 
       {/* Delete model dialog with cascade warning */}
       <Dialog.Root open={Boolean(deleteModel)} onOpenChange={(next) => !next && setDeleteModel(null)}>

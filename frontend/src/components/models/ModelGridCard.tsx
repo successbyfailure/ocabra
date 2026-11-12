@@ -23,7 +23,6 @@ import { BackendBadge } from "@/components/models/BackendBadge"
 import { LoadPolicyBadge } from "@/components/models/LoadPolicyBadge"
 import { ModelIcon } from "@/components/models/ModelIcon"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
-import { CATEGORY_COLORS } from "@/components/models/ProfileModal"
 import { formatTokenCount, getModelContextSummary, getVllmConfig, type ModelCategory } from "@/lib/modelContext"
 import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
 
@@ -91,6 +90,18 @@ function CategoryPill({ category }: { category: ProfileCategory }) {
       {category}
     </span>
   )
+}
+
+// Colores de la categoría de un perfil (antes vivían en el modal retirado).
+const CATEGORY_COLORS: Record<ProfileCategory, string> = {
+  llm: "bg-blue-500/20 text-blue-300 border-blue-500/40",
+  embedding: "bg-cyan-500/20 text-cyan-300 border-cyan-500/40",
+  rerank: "bg-indigo-500/20 text-indigo-300 border-indigo-500/40",
+  tts: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
+  stt: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+  image: "bg-purple-500/20 text-purple-300 border-purple-500/40",
+  music: "bg-pink-500/20 text-pink-300 border-pink-500/40",
+  video_upscaling: "bg-orange-500/20 text-orange-300 border-orange-500/40",
 }
 
 export function ModelGridCard({

@@ -493,3 +493,21 @@ def test_el_cliente_manda_sobre_el_perfil(monkeypatch):
     cliente, _mm, enviados = _cliente_perfil(monkeypatch, diarizado=False)
     _transcribe(cliente, diarize="true")
     assert enviados[0]["diarize"] == "true"
+
+
+def test_las_estadisticas_guardan_el_perfil_pedido(monkeypatch):
+    """Las transcripciones llegan en multipart: el middleware de stats no ve
+    ``model`` y toma el nombre de ``request.state``. Era la clave del worker,
+    que normal y -diarized comparten, así que toda transcripción diarizada
+    salía en las estadísticas como una normal."""
+    vistos: list[str | None] = []
+    cliente, _mm, _env = _cliente_perfil(monkeypatch, diarizado=True)
+
+    @cliente.app.middleware("http")
+    async def _captura(request, call_next):
+        response = await call_next(request)
+        vistos.append(getattr(request.state, "stats_model_id", None))
+        return response
+
+    assert _transcribe(cliente).status_code == 200
+    assert vistos == ["faster-whisper-large-v3-diarized"]

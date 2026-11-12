@@ -1,6 +1,7 @@
 import type { GPUState, LogicalModel } from "@/types"
 import type { ModelEditorState } from "../useModelEditor"
 import type { LadderRung } from "../usePresetLadder"
+import type { ModelInsights } from "../types"
 
 /** Lo que recibe cada sección del editor. */
 export interface SectionProps {
@@ -17,4 +18,7 @@ export interface SectionProps {
   /** Presets activos del perfil por defecto: si hay, mandan sobre el contexto,
    *  los slots, la KV y las GPUs de la configuración base. */
   presets?: LadderRung[]
+  /** Lo medido del modelo (ritmos, carga en frío) y lo que lee su plantilla. */
+  insights?: ModelInsights | null
+  reloadInsights?: () => Promise<void>
 }

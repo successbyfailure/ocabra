@@ -29,6 +29,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   comparar un mismo modelo en CPU y en GPU. Si el worker atiende varias
   peticiones en paralelo, la cifra incluye su cola interna. La respuesta de
   los endpoints no cambia.
+- **Las transcripciones guardan el perfil que pidió el cliente.** Una
+  transcripción a `whisper-large-v3-turbo-diarized` se registraba con el
+  nombre del worker, que comparte con `whisper-large-v3-turbo`, así que no
+  quedaba rastro de que fuera diarizada. Ahora se guarda el nombre pedido.
+  Las filas de `GET /ocabra/stats/recent` lo traen en `requestedModel`;
+  `modelId` sigue siendo el modelo.
+- **`GET /ocabra/models/{id}/insights`** (nuevo): ritmos medidos de prefill y
+  generación, salida típica y tiempo de carga en frío del modelo; si su
+  plantilla de chat lee `reasoning_effort` y `enable_thinking`; y si está en
+  mantenimiento.
 
 ---
 

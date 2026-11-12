@@ -287,3 +287,36 @@ export function formatArgv(argv: string[]): string {
   }
   return lines.join(" \\\n  ")
 }
+
+/** En pantallas estrechas la vista previa vive en una barra inferior que se
+ *  despliega: resumen (cambios, errores, si cabe) y el panel completo al tocar. */
+export function MobilePreviewBar(props: Parameters<typeof PreviewPanel>[0]) {
+  const [open, setOpen] = useState(false)
+  const { editor } = props
+  const errors = editor.previewErrors.length
+  const changes = editor.changes.length
+  const reloads = editor.changes.filter((c) => c.reload).length
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-30 lg:hidden" data-testid="mobile-preview">
+      {open && (
+        <div className="max-h-[70vh] overflow-y-auto border-t border-border bg-background p-3 shadow-2xl">
+          <PreviewPanel {...props} />
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 border-t border-border bg-card px-4 py-2 text-xs"
+        aria-expanded={open}
+      >
+        <span className="font-medium">Vista previa</span>
+        <span className="flex items-center gap-2">
+          {errors > 0 && <Chip tone="error">{errors} con error</Chip>}
+          <Chip tone={changes ? "info" : "muted"}>{changes} cambio{changes === 1 ? "" : "s"}</Chip>
+          {reloads > 0 && <Chip tone="warn">⟳ {reloads}</Chip>}
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} className="-rotate-90" />}
+        </span>
+      </button>
+    </div>
+  )
+}

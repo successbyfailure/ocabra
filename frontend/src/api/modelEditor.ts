@@ -2,6 +2,7 @@ import { request } from "@/api/client"
 import type {
   CapacityInfo,
   ConfigSchema,
+  ModelInsights,
   JsonObject,
   PreviewResult,
   RawModel,
@@ -14,6 +15,8 @@ const enc = encodeURIComponent
  *  como se guarda (snake_case), sin la vista camelCase del resto del cliente. */
 export const modelEditorApi = {
   get: (modelId: string) => request<RawModel>("GET", `/ocabra/models/${enc(modelId)}`),
+
+  insights: (modelId: string) => request<ModelInsights>("GET", `/ocabra/models/${enc(modelId)}/insights`),
 
   schema: (modelId: string) =>
     request<ConfigSchema>("GET", `/ocabra/models/${enc(modelId)}/config-schema`),

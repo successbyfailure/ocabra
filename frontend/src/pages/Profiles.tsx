@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react"
-import { ChevronDown, ChevronRight, Layers3, Pencil, Plus, RefreshCw, Search } from "lucide-react"
+import { Gauge, Layers3, Pencil, Plus, RefreshCw, Search } from "lucide-react"
+import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import { ProfileModal } from "@/components/models/ProfileModal"
-import { RuntimePresetsPanel } from "@/components/models/RuntimePresetsPanel"
 import type { ModelProfile, ModelState, ProfileCategory } from "@/types"
 
 const CATEGORY_LABELS: Record<ProfileCategory, string> = {
@@ -23,11 +22,12 @@ export function Profiles() {
   const [query, setQuery] = useState("")
   const [category, setCategory] = useState<ProfileCategory | "all">("all")
   const [loading, setLoading] = useState(true)
-  const [expanded, setExpanded] = useState<string | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [modalProfile, setModalProfile] = useState<ModelProfile | null>(null)
-  const [modalModel, setModalModel] = useState<ModelState | null>(null)
   const [createModelId, setCreateModelId] = useState("")
+  const navigate = useNavigate()
+  // Perfiles y presets se editan en el editor del modelo base; esta página es
+  // el índice para buscarlos entre todos los modelos.
+  const editorUrl = (baseModelId: string, section: "profiles" | "presets", extra: Record<string, string> = {}) =>
+    `/models/edit/${encodeURIComponent(baseModelId)}?${new URLSearchParams({ s: section, ...extra }).toString()}`
 
   const refresh = async () => {
     try {
@@ -73,20 +73,15 @@ export function Profiles() {
       toast.error("No hay modelos físicos disponibles")
       return
     }
-    setModalModel(model)
-    setModalProfile(null)
-    setModalOpen(true)
+    navigate(editorUrl(model.modelId, "profiles", { new: "1" }))
   }
 
-  const openEdit = (profile: ModelProfile) => {
-    const model = profile.baseModelId ? modelsById.get(profile.baseModelId) : undefined
-    if (!model) {
-      toast.error(`El modelo base ${profile.baseModelId ?? "desconocido"} no está disponible`)
+  const openEdit = (profile: ModelProfile, section: "profiles" | "presets" = "profiles") => {
+    if (!profile.baseModelId) {
+      toast.error("El perfil no tiene modelo base")
       return
     }
-    setModalModel(model)
-    setModalProfile(profile)
-    setModalOpen(true)
+    navigate(editorUrl(profile.baseModelId, section, { p: profile.profileId }))
   }
 
   const toggleEnabled = async (profile: ModelProfile) => {
@@ -140,13 +135,11 @@ export function Profiles() {
 
       <div className="space-y-3">
         {visible.map((profile) => {
-          const isExpanded = expanded === profile.profileId
           const defaultPreset = profile.runtimePresets.find((preset) => preset.isDefault)
           return (
             <section key={profile.profileId} className={`rounded-lg border bg-card ${profile.enabled ? "border-border" : "border-border/50 opacity-70"}`}>
               <div className="flex flex-wrap items-center justify-between gap-3 p-4">
-                <button type="button" onClick={() => setExpanded(isExpanded ? null : profile.profileId)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
-                  {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                <button type="button" onClick={() => openEdit(profile)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{profile.displayName || profile.profileId}</span>
@@ -163,17 +156,15 @@ export function Profiles() {
                 </button>
                 <div className="flex items-center gap-2">
                   <button type="button" onClick={() => void toggleEnabled(profile)} className="rounded border border-border px-2.5 py-1.5 text-xs hover:bg-muted">{profile.enabled ? "Desactivar" : "Activar"}</button>
+                  {profile.category === "llm" && (
+                    <button type="button" onClick={() => openEdit(profile, "presets")} className="inline-flex items-center gap-1 rounded border border-border px-2.5 py-1.5 text-xs hover:bg-muted"><Gauge size={13} /> Presets</button>
+                  )}
                   <button type="button" onClick={() => openEdit(profile)} className="inline-flex items-center gap-1 rounded border border-border px-2.5 py-1.5 text-xs hover:bg-muted"><Pencil size={13} /> Editar</button>
                 </div>
               </div>
-              {isExpanded && (
-                <div className="border-t border-border p-4">
-                  {profile.aliases.length > 0 && (
-                    <div className="mb-3 rounded-md bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
-                      Compatibilidad: {profile.aliases.map((alias) => `${alias.aliasId}${alias.presetKey ? ` → ${alias.presetKey}` : ""}`).join(" · ")}
-                    </div>
-                  )}
-                  <RuntimePresetsPanel profile={profile} onChanged={() => void refresh()} />
+              {profile.aliases.length > 0 && (
+                <div className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">
+                  Alias: {profile.aliases.map((alias) => `${alias.aliasId}${alias.presetKey ? ` → ${alias.presetKey}` : ""}`).join(" · ")}
                 </div>
               )}
             </section>
@@ -181,15 +172,6 @@ export function Profiles() {
         })}
       </div>
 
-      {modalModel && (
-        <ProfileModal
-          open={modalOpen}
-          onOpenChange={setModalOpen}
-          model={modalModel}
-          profile={modalProfile}
-          onSaved={() => void refresh()}
-        />
-      )}
     </div>
   )
 }

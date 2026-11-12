@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { MemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { ModelProfile, RuntimePreset, RuntimePresetResolution } from "@/types"
 import { PresetsSection } from "../PresetsSection"
@@ -120,7 +121,7 @@ describe("PresetsSection", () => {
       profile([preset("max", null), preset("128k", 131072), preset("32k", 32768, { isDefault: true })]),
     ])
     resolveRuntimePresets.mockResolvedValue([resolution("max", 200000)])
-    render(<PresetsSection {...props()} />)
+    render(<MemoryRouter><PresetsSection {...props()} /></MemoryRouter>)
     const ladder = await screen.findByTestId("ladder")
     await waitFor(() => {
       const keys = Array.from(ladder.querySelectorAll("[data-rung]")).map((el) => el.getAttribute("data-rung"))
@@ -130,7 +131,7 @@ describe("PresetsSection", () => {
 
   it("does not let the default rung be disabled or deleted while others exist", async () => {
     listByModel.mockResolvedValue([profile([preset("64k", 65536, { isDefault: true }), preset("128k", 131072)])])
-    render(<PresetsSection {...props()} />)
+    render(<MemoryRouter><PresetsSection {...props()} /></MemoryRouter>)
     const disabled = (id: string) => (screen.getByTestId(id) as HTMLButtonElement).disabled
     await screen.findByTestId("toggle-64k")
     expect(disabled("toggle-64k")).toBe(true)
@@ -141,7 +142,7 @@ describe("PresetsSection", () => {
 
   it("creates the 4-rung suggested ladder in one click", async () => {
     listByModel.mockResolvedValue([profile([])])
-    render(<PresetsSection {...props()} />)
+    render(<MemoryRouter><PresetsSection {...props()} /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId("create-ladder"))
     await waitFor(() => expect(createRuntimePreset).toHaveBeenCalledTimes(4))
     const keys = createRuntimePreset.mock.calls.map((c) => (c[1] as { presetKey: string }).presetKey)
@@ -165,7 +166,7 @@ describe("PresetsSection", () => {
       defaultOutputReservationTokens: 16384,
     }
     listByModel.mockResolvedValue([profile([preset("normal", 98304, { isDefault: true })], { runtimePolicy: calibrated })])
-    render(<PresetsSection {...props()} />)
+    render(<MemoryRouter><PresetsSection {...props()} /></MemoryRouter>)
     fireEvent.change(await screen.findByLabelText("Máximo de salida (tokens)"), { target: { value: "32768" } })
     fireEvent.click(screen.getByText("Guardar política"))
     await waitFor(() =>
@@ -177,7 +178,7 @@ describe("PresetsSection", () => {
 
   it("is read-only without the role", async () => {
     listByModel.mockResolvedValue([profile([preset("64k", 65536, { isDefault: true })])])
-    render(<PresetsSection {...props(true)} />)
+    render(<MemoryRouter><PresetsSection {...props(true)} /></MemoryRouter>)
     const rung = await screen.findByTestId("ladder")
     expect(within(rung).queryByText("Editar")).toBeNull()
     expect(screen.queryByText("Guardar política")).toBeNull()

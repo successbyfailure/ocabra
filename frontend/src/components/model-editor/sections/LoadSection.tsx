@@ -6,6 +6,7 @@ import { getPath } from "../draft"
 import { FieldRow, SchemaFields } from "../SchemaField"
 import { Callout, Hint, Panel, Segmented, Toggle, inputCls } from "../ui"
 import type { SectionProps } from "./types"
+import { LoadCostHint } from "./SummaryInsights"
 
 const POLICIES: {
   value: LoadPolicy
@@ -107,6 +108,7 @@ export function LoadSection(props: SectionProps) {
             )
           })}
         </div>
+        <LoadCostHint insights={props.insights} policy={d.loadPolicy} />
         {d.loadPolicy === "pin" && (
           <div className="mt-3 rounded-lg border border-border bg-muted/20 p-3">
             <Toggle

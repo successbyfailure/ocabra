@@ -8,6 +8,7 @@ import type { ConfigSchema, RawModel, SchemaField } from "../types"
 
 const modelEditorApi = vi.hoisted(() => ({
   get: vi.fn(),
+  insights: vi.fn(),
   schema: vi.fn(),
   preview: vi.fn(),
   capacity: vi.fn(),
@@ -28,6 +29,7 @@ const api = vi.hoisted(() => ({
   },
   profiles: { listByModel: vi.fn(), listAll: vi.fn(), resolveRuntimePresets: vi.fn() },
   groups: { list: vi.fn(), listModels: vi.fn() },
+  stats: { recent: vi.fn() },
 }))
 vi.mock("@/api/modelEditor", () => ({ modelEditorApi }))
 vi.mock("@/api/client", () => ({ api }))
@@ -124,6 +126,19 @@ describe("ModelEditor", () => {
     })
     modelEditorApi.get.mockResolvedValue(model())
     modelEditorApi.schema.mockResolvedValue(schema)
+    modelEditorApi.insights.mockResolvedValue({
+      rates: { prefillTps: 2000, prefillSource: "historical", generationTps: 40, typicalOutputTokens: 800 },
+      typicalLoadMs: 45000,
+      template: { effortLevels: false, thinkingSwitch: true },
+      profileIds: ["m"],
+      maintenance: false,
+    })
+    api.stats.recent.mockResolvedValue({
+      requests: [
+        { id: "r1", modelId: "m", requestedModel: "m", startedAt: "2026-11-12T10:00:00Z", durationMs: 1200, statusCode: 200, inputTokens: 100, outputTokens: 20, predictedTokensPerSecond: 40, inFlight: false },
+        { id: "r2", modelId: "otro", startedAt: "2026-11-12T10:00:00Z", durationMs: 1, statusCode: 200, inFlight: false },
+      ],
+    })
     modelEditorApi.preview.mockResolvedValue({
       errors: [],
       unknownKeys: [],
@@ -203,6 +218,26 @@ describe("ModelEditor", () => {
     await waitFor(() => expect(modelEditorApi.patch).toHaveBeenCalled())
     const body = modelEditorApi.patch.mock.calls[0][1]
     expect(body.schedules[0].days).toEqual([0, 1, 2, 3, 4, 5])
+  })
+
+  it("summary shows measured performance, cold-load cost and only this model's requests", async () => {
+    renderEditor()
+    const perf = await screen.findByTestId("performance")
+    expect(perf.textContent).toContain("2.0k t/s")
+    expect(perf.textContent).toContain("45 s")
+    // 4000/2000 + 800/40 = 22 s
+    expect(perf.textContent).toContain("22 s")
+    const recent = await screen.findByTestId("model-recent")
+    expect(recent.querySelectorAll("tr")).toHaveLength(1)
+  })
+
+  it("warns when the template only switches thinking on and off", async () => {
+    modelEditorApi.schema.mockResolvedValue({
+      ...schema,
+      fields: [...schema.fields, f("default_reasoning_effort", "response", { type: "enum", label: "Esfuerzo", options: [{ value: "low", label: "Bajo" }] })],
+    })
+    renderEditor("response")
+    expect(await screen.findByText(/solo distingue pensar o no pensar/)).toBeTruthy()
   })
 
   it("shows the exact launch command", async () => {

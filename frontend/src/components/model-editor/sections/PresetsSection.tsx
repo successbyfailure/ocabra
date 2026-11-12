@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Check, Copy, Pencil, Plus, Star, Trash2, X } from "lucide-react"
+import { useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { modelEditorApi } from "@/api/modelEditor"
@@ -50,7 +51,9 @@ export function PresetsSection(props: SectionProps) {
   const { editor, readOnly } = props
   const modelId = editor.model?.model_id ?? null
   const [profiles, setProfiles] = useState<ModelProfile[] | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // ?p=<perfil> (desde /profiles) elige el perfil de entrada.
+  const [search] = useSearchParams()
+  const [selectedId, setSelectedId] = useState<string | null>(() => search.get("p"))
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const loadProfiles = useCallback(async () => {

@@ -573,3 +573,42 @@ async def test_preview_fills_missing_paths_from_the_artifact(monkeypatch):
     await api.preview_model_config("m", body, request, _user=None)
     assert seen["extra"]["llama_cpp"]["model_path"] == "/data/m.gguf"
     assert seen["extra"]["llama_cpp"]["ctx_size"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_insights_reports_rates_load_time_and_template_controls(monkeypatch, tmp_path):
+    from ocabra.api.internal import models as api
+    from ocabra.stats import live_activity
+
+    async def fake_rates(keys, estimator):
+        return {"qwen": {"prefill": (2200.0, "historical"), "generation": 44.8, "output": 900}}
+
+    async def fake_load():
+        return {"llamacpp_mks/qwen": 41000}
+
+    monkeypatch.setattr(live_activity, "model_rates", fake_rates)
+    monkeypatch.setattr(live_activity, "typical_load_ms", fake_load)
+    monkeypatch.setattr(
+        "ocabra.registry.local_scanner.parse_gguf_chat_template",
+        lambda path: "{% if enable_thinking %}<think>{% endif %}",
+    )
+    state = _state(model_id="llamacpp_mks/qwen", extra_config={"llama_cpp": {"model_path": str(tmp_path / "q.gguf")}})
+    mm = MagicMock()
+    mm.get_state = AsyncMock(return_value=state)
+    registry = MagicMock()
+    registry.list_by_model = AsyncMock(return_value=[SimpleNamespace(profile_id="qwen", is_default=True)])
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm, profile_registry=registry)))
+    out = await api.get_model_insights("llamacpp_mks/qwen", request, _user=None)
+    assert out["rates"] == {"prefillTps": 2200.0, "prefillSource": "historical", "generationTps": 44.8, "typicalOutputTokens": 900}
+    assert out["typicalLoadMs"] == 41000
+    # Reads enable_thinking (on/off) but not reasoning_effort (levels).
+    assert out["template"] == {"effortLevels": False, "thinkingSwitch": True}
+    assert out["profileIds"] == ["qwen"]
+
+
+def test_recent_rows_carry_the_requested_name():
+    import inspect
+
+    from ocabra.stats import aggregator
+
+    assert '"requestedModel"' in inspect.getsource(aggregator)

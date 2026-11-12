@@ -14,6 +14,7 @@ import { fmtMb } from "../PreviewPanel"
 import type { JsonObject } from "../types"
 import { Callout, Chip, Hint, Panel, inputCls } from "../ui"
 import type { SectionProps } from "./types"
+import { PerformancePanel, RecentForModel } from "./SummaryInsights"
 
 function fmtDate(value: string | null | undefined): string | null {
   if (!value) return null
@@ -68,6 +69,8 @@ export function SummarySection(props: SectionProps & { modelState: ModelState | 
           )}
         </Callout>
       )}
+
+      <PerformancePanel {...props} onGoTo={onGoTo} />
 
       <Panel title="Modelo" subtitle="El nombre público es el que piden los clientes; cada despliegue lo sirve con un backend.">
         <div className="grid gap-4 md:grid-cols-2">
@@ -208,6 +211,8 @@ export function SummarySection(props: SectionProps & { modelState: ModelState | 
       </Panel>
 
       {(vllm.recipe_id || vllm.probe_status) && <VllmRecipeCard {...props} vllm={vllm} />}
+
+      <RecentForModel {...props} />
 
       <ConfirmDialog
         open={removeTarget != null}

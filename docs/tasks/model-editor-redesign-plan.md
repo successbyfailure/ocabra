@@ -308,6 +308,22 @@ no el editor mostraría controles que no hacen nada:
 - `remote_warm_threshold_seconds` queda documentado como sin efecto. Se acepta
   porque hay políticas guardadas con él.
 
+**Segunda tanda (v0.74.2).**
+- Resumen: rendimiento medido (prefill, generación, salida típica, carga en
+  frío y petición típica), últimas peticiones del modelo y accesos a
+  Playground y a "Medir". Todo sale de `GET /models/{id}/insights`.
+- Carga: el coste de la carga en frío, con la recomendación de política.
+- Respuesta: aviso según lo que lee la plantilla GGUF (`reasoning_effort`
+  frente a `enable_thinking`).
+- Avanzado: interruptor de mantenimiento.
+- Perfiles: subir o bajar este modelo en los routers que lo usan.
+- Móvil: la vista previa va en una barra inferior desplegable.
+- Retirados `ProfileModal` y `RuntimePresetsPanel`. `/profiles` es un índice
+  que lleva al editor (`?s=profiles&p=…`, `?s=presets&p=…`, `?new=1`); las
+  tarjetas de Modelos también.
+- Transcripciones: las estadísticas guardan el perfil pedido (`-diarized`) y
+  `/stats/recent` trae `requestedModel`, que el dashboard muestra.
+
 **Lo que queda, por diseño.**
 - La memoria por GPU de llama.cpp es una estimación desde el GGUF, no una
   medida. La medida real está en el dashboard (`vramByGpu`).

@@ -1041,6 +1041,8 @@ export interface OverviewStats {
 export interface RecentRequest {
   id: string;
   modelId: string;
+  /** Nombre que usó el cliente (perfil, alias): distingue un -diarized. */
+  requestedModel?: string | null;
   backendType: string | null;
   requestKind: string | null;
   endpointPath: string | null;

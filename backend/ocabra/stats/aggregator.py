@@ -844,6 +844,9 @@ async def get_recent_requests(limit: int = 20) -> dict:
             {
                 "id": str(r.id),
                 "modelId": r.model_id,
+                # The name the client used (profile, alias): tells a
+                # "-diarized" transcription from a plain one of the same model.
+                "requestedModel": getattr(r, "requested_model", None),
                 "backendType": r.backend_type,
                 "requestKind": r.request_kind,
                 "endpointPath": r.endpoint_path,
@@ -923,6 +926,9 @@ async def get_recent_requests_for_user(user_id: str, limit: int = 20) -> dict:
             {
                 "id": str(r.id),
                 "modelId": r.model_id,
+                # The name the client used (profile, alias): tells a
+                # "-diarized" transcription from a plain one of the same model.
+                "requestedModel": getattr(r, "requested_model", None),
                 "backendType": r.backend_type,
                 "requestKind": r.request_kind,
                 "endpointPath": r.endpoint_path,

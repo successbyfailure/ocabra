@@ -1036,6 +1036,87 @@ async def list_speculative_candidates(
 
 
 @router.get(
+    "/models/{model_id:path}/insights",
+    summary="Measured behaviour of a model, for the model editor",
+    responses={404: {"description": "Model not found"}},
+)
+async def get_model_insights(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """What oCabra has measured about a model and what its template supports.
+
+    Response:
+    - ``rates``: measured prefill t/s (with its source: ``historical`` or
+      ``regression``), generation t/s and typical (p75) output tokens, from the
+      last hours of real traffic of the model's default profile.
+    - ``typicalLoadMs``: median cold-load time over the last 30 days.
+    - ``template``: for llama.cpp models, whether the GGUF chat template reads
+      ``reasoning_effort`` (``effortLevels``) and ``enable_thinking``
+      (``thinkingSwitch``); null when unknown.
+    - ``profileIds``: the profile ids whose traffic counts as this model's.
+    - ``maintenance``: whether the model is in maintenance mode (503s).
+    """
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    profile_ids: list[str] = []
+    registry = getattr(request.app.state, "profile_registry", None)
+    if registry is not None:
+        try:
+            profiles = await registry.list_by_model(model_id)
+            profile_ids = [
+                p.profile_id
+                for p in sorted(profiles, key=lambda p: (not p.is_default, p.profile_id))
+            ]
+        except Exception:  # noqa: BLE001 — sin perfiles se mide por el id
+            profile_ids = []
+    keys = [*profile_ids, model_id]
+    estimator = getattr(request.app.state, "duration_estimator", None)
+    try:
+        rates_by_key = await live_activity.model_rates(set(keys), estimator)
+    except Exception:  # noqa: BLE001
+        rates_by_key = {}
+    picked = next((rates_by_key[k] for k in keys if rates_by_key.get(k)), {})
+    prefill = picked.get("prefill")
+    try:
+        load_ms = (await live_activity.typical_load_ms()).get(model_id)
+    except Exception:  # noqa: BLE001
+        load_ms = None
+    template = None
+    if is_llama_cpp_family(state.backend_type):
+        from ocabra.core.model_manager import _template_path
+        from ocabra.registry.local_scanner import gguf_reasoning_controls
+
+        path = _template_path(state)
+        if path:
+            try:
+                controls = await asyncio.to_thread(gguf_reasoning_controls, Path(path))
+            except Exception:  # noqa: BLE001
+                controls = None
+            if controls is not None:
+                template = {
+                    "effortLevels": controls["effort_levels"],
+                    "thinkingSwitch": controls["thinking_switch"],
+                }
+    return {
+        "rates": {
+            "prefillTps": prefill[0] if prefill else None,
+            "prefillSource": prefill[1] if prefill else None,
+            "generationTps": picked.get("generation"),
+            "typicalOutputTokens": picked.get("output"),
+        },
+        "typicalLoadMs": load_ms,
+        "template": template,
+        # In-memory maintenance switch (POST …/maintenance): requests get 503.
+        "maintenance": bool(mm.is_in_maintenance(model_id)),
+        "profileIds": profile_ids,
+    }
+
+
+@router.get(
     "/models/{model_id:path}/config-schema",
     summary="Editable options of a model's backend",
     responses={404: {"description": "Model not found"}},

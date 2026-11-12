@@ -252,7 +252,11 @@ async def transcriptions(
             code="diarization_not_supported",
         )
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
-    request.state.stats_model_id = worker_key
+    # Multipart: the stats middleware cannot read ``model`` from the body, so
+    # it takes the name from here. The profile the client asked for, not the
+    # worker key: plain and -diarized share a worker, and recording the key
+    # made every diarized transcription look like a plain one.
+    request.state.stats_model_id = profile.profile_id
 
     worker_pool = request.app.state.worker_pool
     # whisper.cpp has no in-process pyannote to lazy-load diarization into
@@ -735,7 +739,11 @@ async def generate_music(
 
     merged_body = merge_profile_defaults(profile, body)
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
-    request.state.stats_model_id = worker_key
+    # Multipart: the stats middleware cannot read ``model`` from the body, so
+    # it takes the name from here. The profile the client asked for, not the
+    # worker key: plain and -diarized share a worker, and recording the key
+    # made every diarized transcription look like a plain one.
+    request.state.stats_model_id = profile.profile_id
 
     worker_pool = request.app.state.worker_pool
     worker = worker_pool.get_worker(worker_key)

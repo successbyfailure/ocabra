@@ -159,3 +159,17 @@ export interface DraftChange {
   reload: boolean
   memory: boolean
 }
+
+/** GET /models/{id}/insights: lo medido del modelo y lo que lee su plantilla. */
+export interface ModelInsights {
+  rates: {
+    prefillTps: number | null
+    prefillSource: "historical" | "regression" | null
+    generationTps: number | null
+    typicalOutputTokens: number | null
+  }
+  typicalLoadMs: number | null
+  template: { effortLevels: boolean; thinkingSwitch: boolean } | null
+  profileIds: string[]
+  maintenance: boolean
+}

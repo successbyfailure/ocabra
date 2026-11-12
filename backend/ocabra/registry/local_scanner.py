@@ -316,6 +316,23 @@ def gguf_template_capabilities(path: Path) -> dict[str, bool] | None:
     }
 
 
+def gguf_reasoning_controls(path: Path) -> dict[str, bool] | None:
+    """What a GGUF's chat template does with oCabra's reasoning controls.
+
+    ``effort_levels``: the template reads ``reasoning_effort`` (levels change
+    how much it thinks). ``thinking_switch``: it reads ``enable_thinking``
+    (thinking can be turned on/off). A template with neither ignores the
+    model's default reasoning effort entirely.
+    """
+    template = parse_gguf_chat_template(path) or ""
+    if not template:
+        return None
+    return {
+        "effort_levels": "reasoning_effort" in template,
+        "thinking_switch": "enable_thinking" in template,
+    }
+
+
 # --- Which --spec-type a draft GGUF needs ---------------------------------
 # A draft model is useless to llama-server unless it is also told *how* to
 # drive it, and a draft with no type is not "no speculation": the server loads

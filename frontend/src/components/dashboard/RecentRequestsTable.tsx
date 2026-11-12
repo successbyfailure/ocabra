@@ -106,6 +106,13 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
             {r.backendType && <BackendIcon backendType={r.backendType} showLabel={false} />}
             <span className="truncate font-medium" title={r.modelId}>{r.modelId}</span>
           </div>
+          {r.requestedModel && r.requestedModel !== r.modelId && (
+            // El nombre que pidió el cliente: distingue un -diarized (mismo
+            // worker y mismo modelo que la transcripción normal).
+            <div className="truncate font-mono text-[10.5px] text-sky-300/80" title="Nombre con el que lo pidió el cliente" data-testid="requested-model">
+              como {r.requestedModel}
+            </div>
+          )}
           {(meta || r.gpuIndex != null) && (
             <div className="flex items-center gap-1.5 truncate text-[10.5px] text-muted-foreground">
               {r.gpuIndex != null && <GpuBadge index={r.gpuIndex} gpus={gpus} />}
