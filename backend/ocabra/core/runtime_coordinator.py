@@ -14,7 +14,7 @@ from ocabra.config import settings
 from ocabra.core.model_manager_helpers import compute_worker_key, resolve_llama_cpp_option
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.output_limits import resolve_max_output_tokens
-from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
+from ocabra.core.runtime_preset_capacity import preset_placement, runtime_capacity_cache
 from ocabra.core.runtime_presets import (
     ContextCapacityError,
     ResolvedRuntimePreset,
@@ -508,6 +508,41 @@ def _apply_llama_cpp_preset_placement(
     overrides["llama_cpp"] = section
 
 
+def _apply_preset_placement_options(
+    overrides: dict[str, Any],
+    state: Any,
+    preset: ResolvedRuntimePreset,
+    placement: dict[str, Any] | None,
+) -> None:
+    """Write a preset's own placement into the derived worker's llama.cpp flags.
+
+    Runs after :func:`_apply_llama_cpp_preset_placement` (which picked the
+    GPUs and the default multi-GPU flags). A preset with a ``placement`` owns
+    its layers on GPU (``None`` = all of them) and its MoE experts on CPU;
+    ``split_mode`` and ``tensor_split`` only apply when the preset spreads
+    over several GPUs, the latter only with one ratio per GPU. A preset
+    without placement changes nothing, so existing workers keep their key.
+    """
+    if not placement or not is_llama_cpp_family(getattr(state, "backend_type", "")):
+        return
+    section = overrides.get("llama_cpp")
+    if not isinstance(section, dict):
+        section = {}
+        overrides["llama_cpp"] = section
+    gpu_layers = placement.get("gpu_layers")
+    section["gpu_layers"] = int(gpu_layers) if gpu_layers is not None else 999
+    n_cpu_moe = placement.get("n_cpu_moe")
+    section["n_cpu_moe"] = int(n_cpu_moe) if n_cpu_moe else None
+    selected = list(dict.fromkeys(int(index) for index in preset.gpu_indices))
+    if len(selected) > 1:
+        split_mode = placement.get("split_mode")
+        if split_mode in {"layer", "row", "tensor"}:
+            section["split_mode"] = split_mode
+        tensor_split = placement.get("tensor_split")
+        if isinstance(tensor_split, list) and len(tensor_split) == len(selected):
+            section["tensor_split"] = [float(value) for value in tensor_split]
+
+
 def _probe_field(policy: dict, preset_key: str, field: str) -> dict | None:
     probes = policy.get("context_probe") if isinstance(policy, dict) else None
     probe = probes.get(preset_key) if isinstance(probes, dict) else None
@@ -850,6 +885,10 @@ async def plan_profile_runtime(
             capacity_vram_mb = 0
         candidate_overrides = dict(profile.load_overrides or {})
         _apply_llama_cpp_preset_placement(candidate_overrides, state, candidate, gpu_states)
+        candidate_placement = preset_placement(candidate_preset)
+        _apply_preset_placement_options(
+            candidate_overrides, state, candidate, candidate_placement
+        )
         unified_pool = False
         if is_llama_cpp_family(getattr(state, "backend_type", "")):
             section = candidate_overrides.get("llama_cpp")
@@ -922,6 +961,10 @@ async def plan_profile_runtime(
                 policy.get("small_requests_extend_large_ttl", False)
             ),
         }
+        if candidate_placement and is_llama_cpp_family(getattr(state, "backend_type", "")):
+            # Only when set: adding the key to every preset would change the
+            # worker key of every runtime already loaded.
+            candidate_overrides["_runtime"]["placement"] = dict(candidate_placement)
         return candidate_overrides
 
     preset = preset_by_key[chosen.preset_key]

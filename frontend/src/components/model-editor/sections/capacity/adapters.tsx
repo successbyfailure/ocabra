@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { FlaskConical, Star, Trash2 } from "lucide-react"
+import { FlaskConical, Play, Star, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
@@ -10,11 +10,13 @@ import { getPath } from "../../draft"
 import type { Json } from "../../types"
 import type { ModelEditorState } from "../../useModelEditor"
 import { Callout, Hint, Segmented, Toggle, inputCls } from "../../ui"
-import { GpuLayersPanel } from "../GpuSection"
+import { modelEditorApi } from "@/api/modelEditor"
 import { AliasList } from "../presets/PresetParts"
 import { EMPTY_PRESET, PRESET_KEY_RE, presetToForm } from "../presets/presetLogic"
 import type { SectionProps } from "../types"
 import { useCapacity } from "../useCapacity"
+import { DevicePlacement, type Placement } from "./DevicePlacement"
+import { activeGpus, readBasePlacement, readPresetPlacement, writeBasePlacement, writePresetPlacement } from "./placementMapping"
 import { Workbench, type KvLabel, type MemoryShare, type WorkbenchState } from "./Workbench"
 
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
@@ -29,9 +31,17 @@ const CACHE_TYPE: Record<KvLabel, string | undefined> = { fp16: undefined, bf16:
 
 // ── Base de llama.cpp (modelos sin presets) ─────────────────────────────────
 
-function readBase(editor: ModelEditorState, gpuIndices: number[]): WorkbenchState {
-  const d = editor.draft!
-  const sec = (getPath(d.extraConfig, ["llama_cpp"]) ?? {}) as Record<string, Json>
+function baseSection(editor: ModelEditorState) {
+  return (getPath(editor.draft!.extraConfig, ["llama_cpp"]) ?? {}) as Record<string, Json>
+}
+
+function readBasePlacementOf(editor: ModelEditorState, gpuIndices: number[], layers: number | null): Placement {
+  const f = editor.fieldByKey.get("llama_cpp.gpu_layers")?.default
+  return readBasePlacement(baseSection(editor), editor.draft!.preferredGpu ?? null, gpuIndices, layers, typeof f === "number" ? f : null)
+}
+
+function readBase(editor: ModelEditorState, placement: Placement): WorkbenchState {
+  const sec = baseSection(editor)
   const def = (k: string, fb: number) => {
     const v = sec[k]
     if (typeof v === "number") return v
@@ -41,32 +51,16 @@ function readBase(editor: ModelEditorState, gpuIndices: number[]): WorkbenchStat
   const slots = Math.max(1, def("parallel_slots", 1))
   const pool = sec.kv_unified === true
   const total = def("ctx_size", 4096)
-  const disabled = new Set((Array.isArray(sec.disabled_gpus) ? sec.disabled_gpus : []) as number[])
-  const visible = gpuIndices.filter((g) => !disabled.has(g))
-  let gpus: number[] | null = null
-  let main: number | null = null
-  if (sec.split_mode === "none") {
-    const pref = d.preferredGpu != null && visible.includes(d.preferredGpu) ? d.preferredGpu : (visible[0] ?? d.preferredGpu)
-    gpus = pref != null ? [pref] : null
-    main = pref ?? null
-  } else if (disabled.size || d.preferredGpu != null) {
-    gpus = visible.length ? visible : null
-    const mainPos = typeof sec.main_gpu === "number" ? sec.main_gpu : 0
-    main = visible[mainPos] ?? visible[0] ?? null
-  }
   return {
     context: pool ? total : Math.max(1, Math.floor(total / slots)),
     slots,
     pool,
     kv: kvFromCacheType(sec.cache_type_k),
-    gpus,
-    main,
-    ratios: Array.isArray(sec.tensor_split) ? (sec.tensor_split as number[]) : null,
-    splitMode: typeof sec.split_mode === "string" && sec.split_mode !== "none" ? sec.split_mode : undefined,
+    gpus: activeGpus(placement),
   }
 }
 
-function writeBase(editor: ModelEditorState, gpuIndices: number[], next: WorkbenchState) {
+function writeBase(editor: ModelEditorState, next: WorkbenchState) {
   const set = (k: string, v: Json | undefined) => editor.setField(["llama_cpp", k], v)
   set("ctx_size", next.pool ? next.context : next.context * next.slots)
   set("parallel_slots", next.slots)
@@ -75,74 +69,157 @@ function writeBase(editor: ModelEditorState, gpuIndices: number[], next: Workben
   set("cache_type_k", ct)
   set("cache_type_v", ct)
   if (ct) set("flash_attn", true)
-  if (next.gpus == null) {
-    editor.update({ preferredGpu: null })
-    set("disabled_gpus", undefined)
-    set("split_mode", undefined)
-    set("main_gpu", undefined)
-    set("tensor_split", undefined)
-  } else if (next.gpus.length === 1) {
-    editor.update({ preferredGpu: next.gpus[0] })
-    const others = gpuIndices.filter((g) => g !== next.gpus![0])
-    set("disabled_gpus", others.length ? others : undefined)
-    set("split_mode", "none")
-    set("main_gpu", undefined)
-    set("tensor_split", undefined)
-  } else {
-    const others = gpuIndices.filter((g) => !next.gpus!.includes(g))
-    const main = next.main ?? next.gpus[0]
-    editor.update({ preferredGpu: main })
-    set("disabled_gpus", others.length ? others : undefined)
-    set("split_mode", next.splitMode)
-    const pos = next.gpus.indexOf(main)
-    set("main_gpu", pos > 0 ? pos : undefined)
-    set("tensor_split", next.ratios && next.ratios.length === next.gpus.length ? next.ratios : undefined)
-  }
+}
+
+type SmokeResult = Awaited<ReturnType<typeof modelEditorApi.smokeTest>>
+
+/** Las dos pruebas de un peldaño: si carga y responde tal cual, y cuánto
+ *  contexto cabe de verdad (solo llama.cpp mks, que amplía en caliente). */
+function RungTests({
+  readOnly,
+  testLabel,
+  testBlocked,
+  onTest,
+  testing,
+  result,
+  probe,
+  probeBlocked,
+}: {
+  readOnly: boolean
+  testLabel: string
+  testBlocked: string | null
+  onTest: () => void
+  testing: boolean
+  result: string | null
+  /** null = el backend no sabe medir el contexto en caliente. */
+  probe: React.ReactNode | null
+  probeBlocked: string | null
+}) {
+  return (
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))] gap-4" data-testid="rung-tests">
+      <div className="space-y-2 rounded-xl border border-border p-3">
+        <p className="text-xs font-medium">¿Carga y responde así?</p>
+        <Hint>Carga el modelo en frío con esta configuración y le manda una petición mínima. Si estaba cargado se descarga antes.</Hint>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={readOnly || testing || testBlocked != null}
+            title={testBlocked ?? undefined}
+            onClick={onTest}
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/50 px-3 py-1.5 text-xs hover:bg-emerald-500/10 disabled:opacity-40"
+            data-testid="smoke-test"
+          >
+            <Play size={13} /> {testing ? "Probando…" : testLabel}
+          </button>
+          {testBlocked && <Hint>{testBlocked}</Hint>}
+        </div>
+        {result && <p className="text-[11.5px] tabular-nums">{result}</p>}
+      </div>
+      {probe !== null && (
+        <div className="space-y-2 rounded-xl border border-border p-3">
+          <p className="text-xs font-medium">¿Cuánto contexto cabe de verdad?</p>
+          <Hint>
+            La gráfica es una estimación. El sondeo carga el modelo y amplía el contexto en caliente hasta el límite de sus GPUs; lo medido queda
+            como valor validado y aparece en la gráfica.
+          </Hint>
+          {probeBlocked ? <Hint tone="warn">{probeBlocked}</Hint> : probe}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function describeSmoke(r: SmokeResult): string {
+  if (r.error) return `✗ ${r.error}`
+  const parts = [r.loaded ? `cargó en ${r.load_ms != null ? `${(r.load_ms / 1000).toFixed(1)} s` : "?"}` : "no cargó"]
+  if (r.request_kind) parts.push(r.request_ok ? `${r.request_kind} ✓ en ${r.request_ms ?? "?"} ms` : `${r.request_kind} ✗`)
+  if (r.tokens_per_second) parts.push(`${r.tokens_per_second.toFixed(1)} t/s`)
+  return `${r.request_ok === false || !r.loaded ? "✗" : "✓"} ${parts.join(" · ")}`
 }
 
 /** Capacidad de un modelo llama.cpp sin presets: su base es lo que carga. */
 export function BaseLlamaWorkbench(props: SectionProps & { onCreatePreset?: () => void }) {
   const { editor, readOnly, gpus, liveVramByGpu, onCreatePreset } = props
   const gpuIndices = gpus.map((g) => g.index)
-  const value = readBase(editor, gpuIndices)
-  const { data: cap } = useCapacity(editor.model?.model_id, { gpu: value.main ?? value.gpus?.[0] ?? null, slots: [1], kvDtype: value.kv === "q4" ? "q4" : value.kv === "fp16" ? "fp16" : "q8" })
+  const rough = readBasePlacementOf(editor, gpuIndices, null)
+  const { data: cap } = useCapacity(editor.model?.model_id, { gpu: rough.star ?? rough.marked[0] ?? null, slots: [1], kvDtype: "q8" })
+  const layers = cap?.arch?.layers ?? null
+  const placement = readBasePlacementOf(editor, gpuIndices, layers)
+  const value = readBase(editor, placement)
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
   const memory: MemoryShare[] = (editor.preview?.gpus ?? []).map((g) => ({
     gpu: g.index,
     parts: Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb },
   }))
+  const mks = editor.model?.backend_type === "llamacpp_mks"
+  const smoke = async () => {
+    if (!editor.model) return
+    setTesting(true)
+    setResult(null)
+    try {
+      setResult(describeSmoke(await modelEditorApi.smokeTest(editor.model.model_id, true)))
+    } catch (e) {
+      setResult(`✗ ${errMsg(e, "No se pudo probar")}`)
+    } finally {
+      setTesting(false)
+    }
+  }
   return (
     <Workbench
       title="Memoria y contexto"
-      subtitle="Cambia un control y mira cómo se mueve la memoria a la derecha. Se guarda con Guardar."
+      subtitle="Cambia un control y mira cómo se mueve la memoria. Se guarda con Guardar."
       value={value}
-      onChange={(patch) => writeBase(editor, gpuIndices, { ...value, ...patch })}
+      onChange={(patch) => writeBase(editor, { ...value, ...patch })}
       readOnly={readOnly}
       gpus={gpus}
       liveVramByGpu={liveVramByGpu}
       memory={memory}
       cap={cap}
       native={cap?.arch?.native_context ?? (Number(editor.model?.capabilities?.native_context_length) || null)}
-      allowRatios
       allowMax={false}
       poolEditable
-      extraKnobs={<GpuLayersPanel {...props} />}
+      devices={
+        <DevicePlacement
+          value={placement}
+          onChange={(patch) =>
+            writeBasePlacement(
+              (k, v) => editor.setField(["llama_cpp", k], v),
+              (g) => editor.update({ preferredGpu: g }),
+              gpuIndices,
+              { ...placement, ...patch },
+              patch,
+            )
+          }
+          gpus={gpus}
+          readOnly={readOnly}
+          liveVramByGpu={liveVramByGpu}
+          memory={memory}
+          layers={layers}
+        />
+      }
       footer={
-        onCreatePreset && (
-          <div className="flex flex-wrap items-center justify-between gap-3" data-testid="probe-needs-preset">
-            <div className="text-xs">
-              <p className="font-medium">Medir el contexto máximo real</p>
-              <p className="text-muted-foreground">
-                El sondeo carga el modelo y amplía el contexto hasta el límite, pero mide sobre un peldaño. Este modelo no tiene ninguno:
-                crea uno en modo «lo que quepa» y mídelo desde él.
-              </p>
-            </div>
-            {!readOnly && (
-              <button type="button" onClick={onCreatePreset} className="inline-flex items-center gap-1 rounded-md border border-violet-500/50 px-3 py-1.5 text-xs hover:bg-violet-500/10">
-                <FlaskConical size={13} /> Crear peldaño y medir
-              </button>
-            )}
-          </div>
-        )
+        <RungTests
+          readOnly={readOnly}
+          testLabel="Probar tal cual"
+          testBlocked={editor.dirty ? "Guarda los cambios antes de probar." : null}
+          onTest={() => void smoke()}
+          testing={testing}
+          result={result}
+          probe={
+            mks ? (
+              <div className="flex flex-wrap items-center gap-2" data-testid="probe-needs-preset">
+                <Hint>El sondeo mide sobre un peldaño y este modelo no tiene ninguno: crea uno en modo «lo que quepa» y mídelo desde él.</Hint>
+                {!readOnly && onCreatePreset && (
+                  <button type="button" onClick={onCreatePreset} className="inline-flex items-center gap-1 rounded-md border border-violet-500/50 px-3 py-1.5 text-xs hover:bg-violet-500/10">
+                    <FlaskConical size={13} /> Crear peldaño y medir
+                  </button>
+                )}
+              </div>
+            ) : null
+          }
+          probeBlocked={null}
+        />
       }
     />
   )
@@ -150,17 +227,14 @@ export function BaseLlamaWorkbench(props: SectionProps & { onCreatePreset?: () =
 
 // ── Un preset ───────────────────────────────────────────────────────────────
 
-function formToState(form: RuntimePresetCreate, pool: boolean, slotsFallback: number): WorkbenchState {
-  const gpus = form.placementPolicy === "auto" ? null : (form.preferredGpus ?? null)
+function formToState(form: RuntimePresetCreate, pool: boolean, slotsFallback: number, placement: Placement): WorkbenchState {
   return {
     context: form.contextTokens ?? 65536,
     maxMode: form.contextMode === "max",
     slots: form.parallelism || slotsFallback,
     pool,
     kv: (form.kvCacheDtype as KvLabel) ?? "q8",
-    gpus,
-    main: gpus?.[0] ?? null,
-    ratios: null,
+    gpus: activeGpus(placement),
   }
 }
 
@@ -204,8 +278,15 @@ export function PresetWorkbench({
   const dirty = JSON.stringify(form) !== JSON.stringify(initial)
   const isNew = preset == null
   const keyValid = PRESET_KEY_RE.test(form.presetKey) && !(isNew && profile.runtimePresets.some((p) => p.presetKey === form.presetKey))
-  const value = formToState(form, pool, 2)
-  const { data: cap } = useCapacity(editor.model?.model_id, { gpu: value.gpus?.[0] ?? null, slots: [1], kvDtype: value.kv === "q4" ? "q4" : value.kv === "fp16" || value.kv === "bf16" ? "fp16" : "q8" })
+  const gpuIndices = gpus.map((g) => g.index)
+  const rough = readPresetPlacement(form, gpuIndices, null)
+  const kvDtype = form.kvCacheDtype === "q4" ? "q4" : form.kvCacheDtype === "fp16" || form.kvCacheDtype === "bf16" ? "fp16" : "q8"
+  const { data: cap } = useCapacity(editor.model?.model_id, { gpu: activeGpus(rough)?.[0] ?? null, slots: [1], kvDtype })
+  const layers = cap?.arch?.layers ?? null
+  const placement = readPresetPlacement(form, gpuIndices, layers)
+  const value = formToState(form, pool, 2, placement)
+  const [result, setResult] = useState<string | null>(null)
+  const mks = editor.model?.backend_type === "llamacpp_mks"
 
   useEffect(() => {
     if (form.contextMode === "fixed" && !form.contextTokens) return
@@ -237,8 +318,6 @@ export function PresetWorkbench({
       contextTokens: next.maxMode ? null : next.context,
       parallelism: next.slots,
       kvCacheDtype: next.kv,
-      placementPolicy: next.gpus ? "forced" : "auto",
-      preferredGpus: next.gpus,
     }))
   }
 
@@ -255,7 +334,7 @@ export function PresetWorkbench({
     }
   }
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
     setSaving(true)
     try {
       const payload: RuntimePresetCreate = { ...form, contextTokens: form.contextMode === "max" ? null : form.contextTokens }
@@ -268,8 +347,10 @@ export function PresetWorkbench({
       toast.success("Peldaño guardado; se aplica en la siguiente carga")
       await onChanged()
       if (isNew) onDone(form.presetKey)
+      return true
     } catch (e) {
       toast.error(errMsg(e, "No se pudo guardar el peldaño"))
+      return false
     } finally {
       setSaving(false)
     }
@@ -327,11 +408,6 @@ export function PresetWorkbench({
               />
             )}
             {!readOnly && (
-              <button type="button" disabled={busy != null} className="rounded border border-border px-2 py-1 hover:bg-muted" onClick={() => setConfirm("bench")}>
-                {busy === "bench" ? "Midiendo…" : "Medir en frío"}
-              </button>
-            )}
-            {!readOnly && (
               <button
                 type="button"
                 disabled={busy != null || profile.runtimePresets.length <= 1 || preset.isDefault}
@@ -350,20 +426,27 @@ export function PresetWorkbench({
     </div>
   )
 
+  const probeGpus = form.placementPolicy !== "auto" && (form.preferredGpus?.length ?? 0) > 0
   const footer = (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <div className="space-y-2">
-        <p className="text-xs font-medium">¿Cuánto cabe de verdad?</p>
-        <Hint>
-          La gráfica es una estimación. El sondeo carga el modelo con este peldaño y amplía el contexto en caliente hasta el límite; lo medido
-          queda como valor validado y aparece en la gráfica.
-        </Hint>
-        {preset && !isNew ? (
-          <ContextProbe profileId={profile.profileId} preset={preset} onApplied={() => void onChanged()} />
-        ) : (
-          <Hint>Guarda el peldaño para poder medirlo.</Hint>
-        )}
-      </div>
+    <div className="space-y-4">
+      <RungTests
+        readOnly={readOnly}
+        testLabel={isNew ? "Crear y probar" : dirty ? "Guardar y probar" : "Probar tal cual"}
+        testBlocked={!form.label || !keyValid ? "Falta el nombre o la clave." : null}
+        onTest={() => setConfirm("bench")}
+        testing={busy === "bench"}
+        result={result}
+        probe={mks ? preset && !isNew ? <ContextProbe profileId={profile.profileId} preset={preset} onApplied={() => void onChanged()} /> : <span /> : null}
+        probeBlocked={
+          isNew || !preset
+            ? "Guarda el peldaño para poder medirlo."
+            : dirty
+              ? "Guarda los cambios antes de medir."
+              : !probeGpus
+                ? "Marca en «Dónde corre» las GPUs del peldaño (una, o varias a la vez): el sondeo mide sobre GPUs concretas."
+                : null
+        }
+      />
       {preset && !isNew && (
         <div className="space-y-2">
           <p className="text-xs font-medium">Alias</p>
@@ -388,10 +471,20 @@ export function PresetWorkbench({
         memoryNote={shown?.effectiveContext ? <Hint>Contexto efectivo: {Math.round(shown.effectiveContext / 1024)}k · {shown.effectiveParallelism} a la vez.</Hint> : null}
         cap={cap}
         native={cap?.arch?.native_context ?? null}
-        allowRatios={false}
         allowMax
         poolEditable={false}
         measured={measured}
+        devices={
+          <DevicePlacement
+            value={placement}
+            onChange={(patch) => setForm((f) => writePresetPlacement(f, { ...readPresetPlacement(f, gpuIndices, layers), ...patch }, gpuIndices))}
+            gpus={gpus}
+            readOnly={readOnly}
+            liveVramByGpu={liveVramByGpu}
+            memory={memory.length ? memory : null}
+            layers={layers}
+          />
+        }
         footer={footer}
       />
       {!readOnly && (
@@ -420,28 +513,37 @@ export function PresetWorkbench({
       <ConfirmDialog
         open={confirm != null}
         onOpenChange={(o) => !o && setConfirm(null)}
-        title={confirm === "bench" ? "Medir en frío" : "Borrar peldaño"}
+        title={confirm === "bench" ? "Probar el peldaño tal cual" : "Borrar peldaño"}
         description={
           confirm === "bench"
-            ? "Descarga el modelo si está cargado y mide la carga en frío y una generación con este peldaño. Las peticiones en curso pueden fallar."
+            ? `${dirty || isNew ? "Guarda el peldaño, " : ""}descarga el modelo si está cargado y mide la carga en frío y una generación con este peldaño. Las peticiones en curso pueden fallar.`
             : "Se borra el peldaño y sus alias dejarán de resolver."
         }
-        confirmLabel={confirm === "bench" ? "Medir" : "Borrar"}
+        confirmLabel={confirm === "bench" ? "Probar" : "Borrar"}
         variant={confirm === "bench" ? "default" : "danger"}
         onConfirm={() => {
           const c = confirm
           setConfirm(null)
+          if (c === "bench") {
+            const key = preset?.presetKey ?? form.presetKey
+            void (async () => {
+              if ((dirty || isNew) && !(await save())) return
+              setBusy("bench")
+              setResult(null)
+              try {
+                const r = await api.profiles.benchmarkRuntimePreset(profile.profileId, key, true)
+                setResult(`✓ cargó en ${(r.loadMs / 1000).toFixed(1)} s · generó ${r.outputTokens ?? "?"} tokens · ${r.tokensPerSecond?.toFixed(1) ?? "?"} t/s · contexto ${Math.round(r.effectiveContext / 1024)}k`)
+                await onChanged()
+              } catch (e) {
+                setResult(`✗ ${errMsg(e, "No cargó o no respondió")}`)
+              } finally {
+                setBusy(null)
+              }
+            })()
+            return
+          }
           if (!preset) return
-          if (c === "bench")
-            void run(
-              "bench",
-              async () => {
-                const r = await api.profiles.benchmarkRuntimePreset(profile.profileId, preset.presetKey, true)
-                toast.info(`Carga ${Math.round(r.loadMs / 1000)} s · ${r.tokensPerSecond?.toFixed(1) ?? "?"} t/s`)
-              },
-              "Medición completada",
-            )
-          else void run("delete", () => api.profiles.deleteRuntimePreset(profile.profileId, preset.presetKey), "Peldaño borrado").then(() => onDone(null))
+          void run("delete", () => api.profiles.deleteRuntimePreset(profile.profileId, preset.presetKey), "Peldaño borrado").then(() => onDone(null))
         }}
       />
     </>

@@ -338,6 +338,11 @@ class LlamaCppBackend(BackendInterface):
             options.get("disabled_gpus"),
             self._gpu_manager,
         )
+        # "none" keeps every layer on the main GPU and leaves the others idle.
+        # When the load really got several GPUs (split_policy "always", or the
+        # scheduler spreading a model no single GPU holds) spread by layers.
+        if len(visible_gpus) > 1 and options.get("split_mode") == "none":
+            options["split_mode"] = "layer"
         # Auto-compute tensor_split when the user picked "evenly" and did not
         # supply explicit ratios. We need at least two visible GPUs for it to
         # make sense.

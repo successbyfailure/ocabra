@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import math
 import time
 from dataclasses import dataclass
@@ -53,6 +54,7 @@ class RuntimeCapacityCache:
                 preset.kv_cache_dtype,
                 preset.placement_policy,
                 tuple(preset.preferred_gpus or ()),
+                repr(sorted(preset_placement(preset).items())),
                 preset.enabled,
                 preset.is_default,
                 preset.priority,
@@ -185,6 +187,87 @@ def _uses_unified_kv_pool(state: Any) -> bool:
 
 
 
+# Share of an MoE layer's weights that are expert tensors (what --n-cpu-moe
+# moves to RAM). An approximation: the real share depends on the model, and the
+# GGUF metadata the planner reads does not say which tensors are experts.
+_MOE_EXPERT_WEIGHT_SHARE = 0.85
+_MOE_ESTIMATE_WARNING = "estimación aproximada: expertos MoE en CPU"
+_SPLIT_POLICIES = {"single", "when_needed", "always"}
+
+
+@dataclass(frozen=True)
+class _Offload:
+    """How much of a preset stays on GPU when part of it goes to CPU."""
+
+    # Share of the layers on GPU; the KV cache of the other layers sits in RAM.
+    gpu_fraction: float = 1.0
+    gpu_weights_mb: float = 0.0
+    cpu_weights_mb: float = 0.0
+    moe_estimate: bool = False
+
+    @property
+    def active(self) -> bool:
+        return self.gpu_fraction < 1.0 or self.cpu_weights_mb > 0
+
+
+def preset_placement(preset: Any) -> dict[str, Any]:
+    """The preset's own placement (``ProfileRuntimePreset.placement``), or {}."""
+    raw = getattr(preset, "placement", None)
+    if raw is None:
+        return {}
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump(exclude_none=True)
+    return {k: v for k, v in raw.items() if v is not None} if isinstance(raw, dict) else {}
+
+
+def _resolve_offload(arch: Any, weights_mb: float, placement: dict[str, Any]) -> _Offload | None:
+    """GPU share of a preset whose placement keeps layers or experts on CPU.
+
+    ``gpu_layers`` below the model's layer count leaves the rest of the layers
+    (their weights and their KV cache) in RAM. ``n_cpu_moe`` keeps the experts
+    of the first N layers in RAM, approximated as ``_MOE_EXPERT_WEIGHT_SHARE``
+    of those layers' weights. llama.cpp offloads the LAST ``gpu_layers``
+    layers, so only experts of layers that are on GPU leave it.
+    """
+    if arch is None or not placement:
+        return None
+    layers = max(1, int(getattr(arch, "layers", 0) or 0))
+    raw_gpu_layers = placement.get("gpu_layers")
+    gpu_layers = layers if raw_gpu_layers is None else max(0, min(layers, int(raw_gpu_layers)))
+    raw_moe = placement.get("n_cpu_moe")
+    n_cpu_moe = max(0, min(layers, int(raw_moe))) if raw_moe is not None else 0
+    if gpu_layers >= layers and n_cpu_moe <= 0:
+        return None
+    fraction = gpu_layers / layers
+    gpu_weights = weights_mb * fraction
+    if n_cpu_moe > 0:
+        cpu_layers = layers - gpu_layers
+        moe_layers_on_gpu = max(0, n_cpu_moe - cpu_layers)
+        gpu_weights -= weights_mb * moe_layers_on_gpu / layers * _MOE_EXPERT_WEIGHT_SHARE
+    gpu_weights = max(0.0, gpu_weights)
+    return _Offload(
+        gpu_fraction=fraction,
+        gpu_weights_mb=gpu_weights,
+        cpu_weights_mb=max(0.0, weights_mb - gpu_weights),
+        moe_estimate=n_cpu_moe > 0,
+    )
+
+
+def _gpu_arch(arch: Any, offload: _Offload | None) -> Any:
+    """``arch`` with its per-token KV and recurrent state cut to the GPU share."""
+    if arch is None or offload is None or offload.gpu_fraction >= 1.0:
+        return arch
+    elements = arch.kv_bytes_per_token(1.0)
+    # 0 would mean "no override" (full KV); keep a token's worth so the
+    # planner still sees a KV cost for a model with every layer on CPU.
+    scaled = max(2, int(round(elements * offload.gpu_fraction)))
+    return dataclasses.replace(
+        arch,
+        kv_elements_per_token_override=scaled,
+        rs_cache_mb_per_slot=arch.rs_cache_mb_per_slot * offload.gpu_fraction,
+    )
+
+
 def _footprint(
     backend: str,
     arch: Any,
@@ -196,12 +279,18 @@ def _footprint(
     unified_pool: bool,
     gpus: list[dict[str, int]],
     gpu_memory_utilization: float,
+    offload: _Offload | None = None,
+    ratios: list[float] | None = None,
 ) -> dict[str, Any]:
     """Estimated VRAM of a resolved preset, total and per target GPU.
 
     For the model editor: what a load with this preset would occupy, split
-    across its GPUs in proportion to their size (llama.cpp's even split).
+    across its GPUs in proportion to their size (llama.cpp's even split) or
+    to ``ratios`` (the preset's tensor_split) when given for every GPU.
     vLLM/SGLang reserve their memory fraction of each GPU up front.
+
+    With ``offload`` the GPU figures only count what stays on GPU, and
+    ``cpu_mb`` estimates the RAM taken by the rest.
     """
     if effective <= 0 or not gpus:
         return {}
@@ -217,14 +306,20 @@ def _footprint(
     if arch is None:
         return {}
     tokens = effective if unified_pool else effective * max(1, parallelism)
+    slots = max(1, parallelism)
+    gpu_arch = _gpu_arch(arch, offload)
+    gpu_weights = offload.gpu_weights_mb if offload is not None else weights_mb
     parts = {
-        "weights": weights_mb,
-        "kv": vp.kv_vram_mb(arch, tokens, kv_bytes),
-        "rs_cache": vp.rs_cache_vram_mb(arch, slots=max(1, parallelism)),
+        "weights": gpu_weights,
+        "kv": vp.kv_vram_mb(gpu_arch, tokens, kv_bytes),
+        "rs_cache": vp.rs_cache_vram_mb(gpu_arch, slots=slots),
         "fixed": vp.fixed_overhead_vram_mb(arch),
     }
     total = sum(parts.values()) + vp.DEFAULT_OVERHEAD_MB
-    sizes = [max(1, int(g["total_mb"])) for g in gpus]
+    if ratios is not None and len(ratios) == len(gpus) and sum(ratios) > 0:
+        sizes = [max(0.0, float(r)) for r in ratios]
+    else:
+        sizes = [max(1, int(g["total_mb"])) for g in gpus]
     breakdown: dict[int, dict[str, int]] = {}
     for pos, (g, size) in enumerate(zip(gpus, sizes, strict=True)):
         share = size / sum(sizes)
@@ -234,11 +329,18 @@ def _footprint(
             gpu_parts["overhead"] = vp.DEFAULT_OVERHEAD_MB
         breakdown[int(g["index"])] = gpu_parts
     per_gpu = {g: sum(p.values()) for g, p in breakdown.items()}
-    return {
+    out: dict[str, Any] = {
         "estimated_vram_mb": int(total),
         "vram_by_gpu": per_gpu,
         "vram_breakdown_by_gpu": breakdown,
     }
+    if offload is not None and offload.active:
+        cpu_kv = vp.kv_vram_mb(arch, tokens, kv_bytes) - parts["kv"]
+        cpu_rs = vp.rs_cache_vram_mb(arch, slots=slots) - parts["rs_cache"]
+        cpu_mb = int(offload.cpu_weights_mb + max(0.0, cpu_kv) + max(0.0, cpu_rs))
+        if cpu_mb > 0:
+            out["cpu_mb"] = cpu_mb
+    return out
 
 
 def _plan_preset_capacity(
@@ -253,14 +355,21 @@ def _plan_preset_capacity(
     kv_dtype_bytes: float,
     rs_rollback_snapshots: int,
     unified_pool: bool,
+    offload: _Offload | None = None,
 ) -> dict[str, Any]:
     """Plan one preset, translating unified aggregate pools for the planner.
 
     ``vram_planner`` models equal per-slot context because that remains useful
     for fixed slot overhead.  For unified KV we feed it ``pool / slots`` for
     memory accounting, then translate the result back to aggregate tokens.
+
+    ``offload`` plans only what stays on GPU: the GPU share of the weights and
+    a KV cost per token cut to the layers on GPU.
     """
 
+    if offload is not None:
+        arch = _gpu_arch(arch, offload)
+        weights_mb = offload.gpu_weights_mb
     requested: int | str | None
     if preset.context_mode == "max":
         requested = "max"
@@ -363,6 +472,303 @@ def _ordered_candidates(
     )
 
 
+@dataclass
+class _PlanContext:
+    """Everything shared by every preset of one profile resolution."""
+
+    profile: Any
+    backend: str
+    arch: Any
+    weights_mb: float
+    gpus: list[dict[str, int]]
+    gpu_memory_utilization: float
+    rs_rollback_snapshots: int
+    unified_pool: bool
+    model_max: int | None
+    policy: dict[str, Any]
+    policy_max: int | None
+    placement_aware: bool
+
+
+def _unresolved_row(
+    preset: Any,
+    *,
+    model_max: int | None,
+    effective_parallelism: int,
+    target_gpus: list[int],
+    warning: str,
+) -> dict[str, Any]:
+    return {
+        "preset_key": preset.preset_key,
+        "resolved": False,
+        "requested_context": preset.context_tokens,
+        "effective_context": None,
+        "model_max": model_max,
+        "hardware_max": None,
+        "requested_parallelism": preset.parallelism,
+        "effective_parallelism": effective_parallelism,
+        "target_gpus": target_gpus,
+        "fits": False,
+        "runtime_key": None,
+        "warnings": [warning],
+    }
+
+
+def _clamp_effective(
+    ctx: _PlanContext,
+    preset: Any,
+    plan: dict[str, Any],
+) -> tuple[int, int, list[str]]:
+    """Validated override, native-context cap and policy cap of one plan."""
+    effective = int(plan["effective_context"] or 0)
+    hardware_max = int(plan["max_context"] or 0)
+    warnings = list(plan["warnings"])
+    effective, hardware_max, warnings = _apply_validated_context_override(
+        preset=preset,
+        policy=ctx.policy,
+        effective=effective,
+        hardware_max=hardware_max,
+        warnings=warnings,
+    )
+    if ctx.unified_pool and ctx.model_max is not None and effective > ctx.model_max:
+        if preset.context_mode != "max":
+            warnings.append(
+                f"pool {effective} supera el contexto nativo {ctx.model_max}; "
+                f"reducido a {ctx.model_max}"
+            )
+        effective = ctx.model_max
+    if ctx.policy_max is not None and effective > ctx.policy_max:
+        if preset.context_mode != "max":
+            warnings.append(
+                f"contexto {effective} supera el límite validado {ctx.policy_max}; "
+                f"reducido a {ctx.policy_max}"
+            )
+        effective = ctx.policy_max
+    return effective, hardware_max, warnings
+
+
+def _resolved_row(
+    ctx: _PlanContext,
+    preset: Any,
+    *,
+    effective: int,
+    hardware_max: int,
+    warnings: list[str],
+    fits: bool,
+    effective_parallelism: int,
+    target_gpus: list[int],
+    footprint_gpus: list[dict[str, int]],
+    kv_bytes: float,
+    placement: dict[str, Any],
+    offload: _Offload | None,
+) -> dict[str, Any]:
+    runtime_key = None
+    if effective > 0:
+        runtime_key = build_runtime_key(
+            model_id=ctx.profile.base_model_id,
+            backend_type=ctx.backend,
+            effective_context=effective,
+            parallelism=effective_parallelism,
+            kv_cache_dtype=preset.kv_cache_dtype,
+            placement_policy=preset.placement_policy,
+            gpu_indices=tuple(target_gpus),
+            load_flags=ctx.profile.load_overrides,
+            placement=placement or None,
+        )
+    ratios = placement.get("tensor_split") if len(footprint_gpus) > 1 else None
+    return {
+        "preset_key": preset.preset_key,
+        "resolved": True,
+        "requested_context": preset.context_tokens,
+        "effective_context": effective,
+        "model_max": ctx.model_max,
+        "hardware_max": hardware_max,
+        "policy_max": ctx.policy_max,
+        "requested_parallelism": preset.parallelism,
+        "effective_parallelism": effective_parallelism,
+        "target_gpus": list(target_gpus),
+        "fits": fits,
+        "runtime_key": runtime_key,
+        "warnings": warnings,
+        **_footprint(
+            ctx.backend,
+            ctx.arch,
+            ctx.weights_mb,
+            effective=effective,
+            parallelism=effective_parallelism,
+            kv_bytes=kv_bytes,
+            unified_pool=ctx.unified_pool,
+            gpus=list(footprint_gpus),
+            gpu_memory_utilization=ctx.gpu_memory_utilization,
+            offload=offload,
+            ratios=ratios if isinstance(ratios, list) else None,
+        ),
+    }
+
+
+def _resolve_multi_gpu_row(
+    ctx: _PlanContext,
+    preset: Any,
+    target_gpus: list[int],
+    *,
+    effective_parallelism: int,
+    parallelism_warning: str | None,
+    placement: dict[str, Any],
+    offload: _Offload | None,
+) -> dict[str, Any]:
+    """A preset spread over ``target_gpus`` (in main-GPU-first order)."""
+    # Multi-GPU spread: solo soportado hoy para backends con reparto
+    # proporcional real (Ollama con un pool ``shared`` que exponga
+    # todas las GPUs + OLLAMA_SCHED_SPREAD=1; llama.cpp/bitnet con su
+    # --split-mode layer por defecto). vLLM/sglang con tensor_parallel
+    # genuino siguen devolviendo unresolved porque su planner de
+    # sharding no está integrado.
+    if ctx.backend not in _PROPORTIONAL_MULTI_GPU_BACKENDS:
+        return _unresolved_row(
+            preset,
+            model_max=ctx.model_max,
+            effective_parallelism=effective_parallelism,
+            target_gpus=target_gpus,
+            warning="la capacidad multi-GPU requiere el planner de sharding del backend",
+        )
+    by_index = {gpu["index"]: gpu for gpu in ctx.gpus}
+    selected_gpus = [by_index[idx] for idx in target_gpus if idx in by_index]
+    if len(selected_gpus) != len(target_gpus):
+        return _unresolved_row(
+            preset,
+            model_max=ctx.model_max,
+            effective_parallelism=effective_parallelism,
+            target_gpus=target_gpus,
+            warning=f"preferred_gpus={target_gpus} no están todas presentes",
+        )
+    virtual_total = sum(int(gpu["total_mb"]) for gpu in selected_gpus)
+    kv_bytes = kv_dtype_for(ctx.backend, preset.kv_cache_dtype)[0]
+    plan = _plan_preset_capacity(
+        ctx.backend,
+        ctx.arch,
+        ctx.weights_mb,
+        gpu_total_mb=virtual_total,
+        preset=preset,
+        effective_parallelism=effective_parallelism,
+        gpu_memory_utilization=ctx.gpu_memory_utilization,
+        kv_dtype_bytes=kv_bytes,
+        rs_rollback_snapshots=ctx.rs_rollback_snapshots,
+        unified_pool=ctx.unified_pool,
+        offload=offload,
+    )
+    effective, hardware_max, warnings = _clamp_effective(ctx, preset, plan)
+    if effective <= 0 and not warnings:
+        warnings.append("el modelo y su KV cache no caben ni sumando ambas GPUs")
+    fits = effective > 0 and not warnings
+    if parallelism_warning:
+        warnings.append(parallelism_warning)
+    if offload is not None and offload.moe_estimate:
+        warnings.append(_MOE_ESTIMATE_WARNING)
+    return _resolved_row(
+        ctx,
+        preset,
+        effective=effective,
+        hardware_max=hardware_max,
+        warnings=warnings,
+        fits=fits,
+        effective_parallelism=effective_parallelism,
+        target_gpus=target_gpus,
+        footprint_gpus=selected_gpus,
+        kv_bytes=kv_bytes,
+        placement=placement,
+        offload=offload,
+    )
+
+
+def _resolve_single_gpu_row(
+    ctx: _PlanContext,
+    preset: Any,
+    state: Any,
+    *,
+    effective_parallelism: int,
+    parallelism_warning: str | None,
+    placement: dict[str, Any],
+    offload: _Offload | None,
+) -> dict[str, Any]:
+    """A preset on the one GPU of its candidates where it fits best."""
+    candidates = _ordered_candidates(preset, state, ctx.gpus)
+    kv_bytes = kv_dtype_for(ctx.backend, preset.kv_cache_dtype)[0]
+    evaluated: list[tuple[dict[str, int], dict[str, Any]]] = []
+    for gpu in candidates:
+        plan = _plan_preset_capacity(
+            ctx.backend,
+            ctx.arch,
+            ctx.weights_mb,
+            gpu_total_mb=gpu["total_mb"],
+            preset=preset,
+            effective_parallelism=effective_parallelism,
+            gpu_memory_utilization=ctx.gpu_memory_utilization,
+            kv_dtype_bytes=kv_bytes,
+            rs_rollback_snapshots=ctx.rs_rollback_snapshots,
+            unified_pool=ctx.unified_pool,
+            offload=offload,
+        )
+        evaluated.append((gpu, plan))
+
+    if not evaluated:
+        return _unresolved_row(
+            preset,
+            model_max=ctx.model_max,
+            effective_parallelism=effective_parallelism,
+            target_gpus=list(preset.preferred_gpus or []),
+            warning="no hay una GPU elegible para el preset",
+        )
+
+    if preset.placement_policy == "preferred":
+        chosen_gpu, plan = next(
+            (
+                (gpu, candidate_plan)
+                for gpu, candidate_plan in evaluated
+                if candidate_plan["effective_context"] > 0
+            ),
+            evaluated[0],
+        )
+    else:
+        chosen_gpu, plan = max(
+            evaluated,
+            key=lambda item: item[1]["effective_context"],
+        )
+    effective, hardware_max, warnings = _clamp_effective(ctx, preset, plan)
+    if effective <= 0 and not warnings:
+        warnings.append("el modelo y su KV cache no caben en la GPU elegida")
+    fits = effective > 0 and not warnings
+    if parallelism_warning:
+        warnings.append(parallelism_warning)
+    if offload is not None and offload.moe_estimate:
+        warnings.append(_MOE_ESTIMATE_WARNING)
+    return _resolved_row(
+        ctx,
+        preset,
+        effective=effective,
+        hardware_max=hardware_max,
+        warnings=warnings,
+        fits=fits,
+        effective_parallelism=effective_parallelism,
+        target_gpus=[chosen_gpu["index"]],
+        footprint_gpus=[chosen_gpu],
+        kv_bytes=kv_bytes,
+        placement=placement,
+        offload=offload,
+    )
+
+
+def _spread_order(preset: Any, gpus: list[dict[str, int]]) -> list[int]:
+    """Every GPU, the preset's preferred ones first (they become main GPU)."""
+    requested = [int(i) for i in (preset.preferred_gpus or [])]
+    known = [int(gpu["index"]) for gpu in gpus]
+    return [i for i in requested if i in known] + [i for i in known if i not in requested]
+
+
+def _split_policy(placement: dict[str, Any]) -> str:
+    raw = placement.get("split_policy")
+    return raw if raw in _SPLIT_POLICIES else "single"
+
+
 async def resolve_profile_runtime_capacities(
     profile: Any,
     state: Any,
@@ -371,8 +777,14 @@ async def resolve_profile_runtime_capacities(
     """Return a no-side-effect capacity snapshot for every profile preset.
 
     Single-GPU placements are resolved exactly with the existing VRAM planner.
-    Explicit multi-GPU presets remain unresolved until the backend-specific
-    sharding planner is available; summing VRAM would advertise unsafe values.
+    Multi-GPU placements (``forced`` over several GPUs, or a preset placement
+    with ``split_policy`` ``always``, or ``when_needed`` when no single GPU
+    fits) sum the GPUs' capacity for backends with a proportional split
+    (llama.cpp family, bitnet, Ollama) and stay unresolved for the others,
+    where summing VRAM would advertise unsafe values.
+
+    A preset ``placement`` with ``gpu_layers`` below the model's layers or
+    with ``n_cpu_moe`` plans only the GPU share and reports ``cpu_mb``.
     """
 
     presets = sorted(
@@ -411,15 +823,6 @@ async def resolve_profile_runtime_capacities(
         (extra.get("vllm") or {}).get("gpu_memory_utilization")
         or settings.vllm_gpu_memory_utilization
     )
-    # Set for self-speculative loads (--spec-type draft-mtp and friends) —
-    # widens the hybrid rs_cache deduction and adds the draft model's own
-    # KV+compute overhead. Same resolution model_manager_helpers.py uses at
-    # actual load time; without it this display path (and the "fits"/
-    # "hardware_max" it reports) would silently drift back to the
-    # pre-2026-10-27 over-optimistic numbers that caused the OOM.
-    rs_rollback_snapshots = _resolve_rs_rollback_snapshots(state)
-    unified_pool = _uses_unified_kv_pool(state)
-    model_max = resolution.arch.context_length or None
     policy = profile.runtime_policy if isinstance(profile.runtime_policy, dict) else {}
     raw_policy_max = policy.get("max_context_tokens")
     try:
@@ -428,266 +831,68 @@ async def resolve_profile_runtime_capacities(
         policy_max = None
     if policy_max is not None and policy_max <= 0:
         policy_max = None
+    ctx = _PlanContext(
+        profile=profile,
+        backend=backend,
+        arch=resolution.arch,
+        weights_mb=resolution.weights_mb,
+        gpus=gpus,
+        gpu_memory_utilization=gpu_memory_utilization,
+        # Set for self-speculative loads (--spec-type draft-mtp and friends) —
+        # widens the hybrid rs_cache deduction and adds the draft model's own
+        # KV+compute overhead. Same resolution model_manager_helpers.py uses at
+        # actual load time; without it this display path (and the "fits"/
+        # "hardware_max" it reports) would silently drift back to the
+        # pre-2026-10-27 over-optimistic numbers that caused the OOM.
+        rs_rollback_snapshots=_resolve_rs_rollback_snapshots(state),
+        unified_pool=_uses_unified_kv_pool(state),
+        model_max=resolution.arch.context_length or None,
+        policy=policy,
+        policy_max=policy_max,
+        # The preset placement is llama.cpp's (--n-gpu-layers, --n-cpu-moe,
+        # --split-mode): other backends ignore it at load, so it must not
+        # change their plan either.
+        placement_aware=is_llama_cpp_family(backend),
+    )
     rows: list[dict[str, Any]] = []
 
     for preset in presets:
         effective_parallelism, parallelism_warning = resolve_effective_parallelism(
             state, preset.parallelism
         )
+        placement = preset_placement(preset) if ctx.placement_aware else {}
+        offload = _resolve_offload(ctx.arch, ctx.weights_mb, placement)
+        split_policy = _split_policy(placement)
+        common = {
+            "effective_parallelism": effective_parallelism,
+            "parallelism_warning": parallelism_warning,
+            "placement": placement,
+            "offload": offload,
+        }
         requested_gpus = list(preset.preferred_gpus or [])
+
+        spread: list[int] | None = None
         if preset.placement_policy == "forced" and len(requested_gpus) > 1:
-            # Multi-GPU spread: solo soportado hoy para backends con reparto
-            # proporcional real (Ollama con un pool ``shared`` que exponga
-            # todas las GPUs + OLLAMA_SCHED_SPREAD=1; llama.cpp/bitnet con su
-            # --split-mode layer por defecto). vLLM/sglang con tensor_parallel
-            # genuino siguen devolviendo unresolved porque su planner de
-            # sharding no está integrado.
-            if backend not in _PROPORTIONAL_MULTI_GPU_BACKENDS:
-                rows.append(
-                    {
-                        "preset_key": preset.preset_key,
-                        "resolved": False,
-                        "requested_context": preset.context_tokens,
-                        "effective_context": None,
-                        "model_max": model_max,
-                        "hardware_max": None,
-                        "requested_parallelism": preset.parallelism,
-                        "effective_parallelism": effective_parallelism,
-                        "target_gpus": requested_gpus,
-                        "fits": False,
-                        "runtime_key": None,
-                        "warnings": [
-                            "la capacidad multi-GPU requiere el planner de sharding del backend"
-                        ],
-                    }
-                )
-                continue
-            by_index = {gpu["index"]: gpu for gpu in gpus}
-            selected_gpus = [by_index[idx] for idx in requested_gpus if idx in by_index]
-            if len(selected_gpus) != len(requested_gpus):
-                rows.append(
-                    {
-                        "preset_key": preset.preset_key,
-                        "resolved": False,
-                        "requested_context": preset.context_tokens,
-                        "effective_context": None,
-                        "model_max": model_max,
-                        "hardware_max": None,
-                        "requested_parallelism": preset.parallelism,
-                        "effective_parallelism": effective_parallelism,
-                        "target_gpus": requested_gpus,
-                        "fits": False,
-                        "runtime_key": None,
-                        "warnings": [f"preferred_gpus={requested_gpus} no están todas presentes"],
-                    }
-                )
-                continue
-            virtual_gpu = {
-                "index": -1,
-                "total_mb": sum(int(gpu["total_mb"]) for gpu in selected_gpus),
-            }
-            kv_bytes = kv_dtype_for(backend, preset.kv_cache_dtype)[0]
-            plan = _plan_preset_capacity(
-                backend,
-                resolution.arch,
-                resolution.weights_mb,
-                gpu_total_mb=virtual_gpu["total_mb"],
-                preset=preset,
-                effective_parallelism=effective_parallelism,
-                gpu_memory_utilization=gpu_memory_utilization,
-                kv_dtype_bytes=kv_bytes,
-                rs_rollback_snapshots=rs_rollback_snapshots,
-                unified_pool=unified_pool,
-            )
-            effective = int(plan["effective_context"] or 0)
-            hardware_max = int(plan["max_context"] or 0)
-            warnings = list(plan["warnings"])
-            effective, hardware_max, warnings = _apply_validated_context_override(
-                preset=preset,
-                policy=policy,
-                effective=effective,
-                hardware_max=hardware_max,
-                warnings=warnings,
-            )
-            if unified_pool and model_max is not None and effective > model_max:
-                if preset.context_mode != "max":
-                    warnings.append(
-                        f"pool {effective} supera el contexto nativo {model_max}; "
-                        f"reducido a {model_max}"
-                    )
-                effective = model_max
-            if policy_max is not None and effective > policy_max:
-                if preset.context_mode != "max":
-                    warnings.append(
-                        f"contexto {effective} supera el límite validado {policy_max}; "
-                        f"reducido a {policy_max}"
-                    )
-                effective = policy_max
-            if effective <= 0 and not warnings:
-                warnings.append("el modelo y su KV cache no caben ni sumando ambas GPUs")
-            fits = effective > 0 and not warnings
-            if parallelism_warning:
-                warnings.append(parallelism_warning)
-            runtime_key = None
-            if effective > 0:
-                runtime_key = build_runtime_key(
-                    model_id=profile.base_model_id,
-                    backend_type=backend,
-                    effective_context=effective,
-                    parallelism=effective_parallelism,
-                    kv_cache_dtype=preset.kv_cache_dtype,
-                    placement_policy=preset.placement_policy,
-                    gpu_indices=tuple(requested_gpus),
-                    load_flags=profile.load_overrides,
-                )
-            rows.append(
-                {
-                    "preset_key": preset.preset_key,
-                    "resolved": True,
-                    "requested_context": preset.context_tokens,
-                    "effective_context": effective,
-                    "model_max": model_max,
-                    "hardware_max": hardware_max,
-                    "policy_max": policy_max,
-                    "requested_parallelism": preset.parallelism,
-                    "effective_parallelism": effective_parallelism,
-                    "target_gpus": list(requested_gpus),
-                    "fits": fits,
-                    "runtime_key": runtime_key,
-                    "warnings": warnings,
-                    **_footprint(
-                        backend,
-                        resolution.arch,
-                        resolution.weights_mb,
-                        effective=effective,
-                        parallelism=effective_parallelism,
-                        kv_bytes=kv_bytes,
-                        unified_pool=unified_pool,
-                        gpus=list(selected_gpus),
-                        gpu_memory_utilization=gpu_memory_utilization,
-                    ),
-                }
-            )
+            spread = requested_gpus
+        elif split_policy == "always" and preset.placement_policy != "forced":
+            order = _spread_order(preset, gpus)
+            spread = order if len(order) > 1 else None
+
+        if spread is not None:
+            rows.append(_resolve_multi_gpu_row(ctx, preset, spread, **common))
             continue
 
-        candidates = _ordered_candidates(preset, state, gpus)
-        kv_bytes = kv_dtype_for(backend, preset.kv_cache_dtype)[0]
-        evaluated: list[tuple[dict[str, int], dict[str, Any]]] = []
-        for gpu in candidates:
-            plan = _plan_preset_capacity(
-                backend,
-                resolution.arch,
-                resolution.weights_mb,
-                gpu_total_mb=gpu["total_mb"],
-                preset=preset,
-                effective_parallelism=effective_parallelism,
-                gpu_memory_utilization=gpu_memory_utilization,
-                kv_dtype_bytes=kv_bytes,
-                rs_rollback_snapshots=rs_rollback_snapshots,
-                unified_pool=unified_pool,
-            )
-            evaluated.append((gpu, plan))
-
-        if not evaluated:
-            rows.append(
-                {
-                    "preset_key": preset.preset_key,
-                    "resolved": False,
-                    "requested_context": preset.context_tokens,
-                    "effective_context": None,
-                    "model_max": model_max,
-                    "hardware_max": None,
-                    "requested_parallelism": preset.parallelism,
-                    "effective_parallelism": effective_parallelism,
-                    "target_gpus": requested_gpus,
-                    "fits": False,
-                    "runtime_key": None,
-                    "warnings": ["no hay una GPU elegible para el preset"],
-                }
-            )
-            continue
-
-        if preset.placement_policy == "preferred":
-            chosen_gpu, plan = next(
-                (
-                    (gpu, candidate_plan)
-                    for gpu, candidate_plan in evaluated
-                    if candidate_plan["effective_context"] > 0
-                ),
-                evaluated[0],
-            )
-        else:
-            chosen_gpu, plan = max(
-                evaluated,
-                key=lambda item: item[1]["effective_context"],
-            )
-        effective = int(plan["effective_context"] or 0)
-        hardware_max = int(plan["max_context"] or 0)
-        warnings = list(plan["warnings"])
-        effective, hardware_max, warnings = _apply_validated_context_override(
-            preset=preset,
-            policy=policy,
-            effective=effective,
-            hardware_max=hardware_max,
-            warnings=warnings,
-        )
-        if unified_pool and model_max is not None and effective > model_max:
-            if preset.context_mode != "max":
-                warnings.append(
-                    f"pool {effective} supera el contexto nativo {model_max}; "
-                    f"reducido a {model_max}"
-                )
-            effective = model_max
-        if policy_max is not None and effective > policy_max:
-            if preset.context_mode != "max":
-                warnings.append(
-                    f"contexto {effective} supera el límite validado {policy_max}; "
-                    f"reducido a {policy_max}"
-                )
-            effective = policy_max
-        if effective <= 0 and not warnings:
-            warnings.append("el modelo y su KV cache no caben en la GPU elegida")
-        fits = effective > 0 and not warnings
-        if parallelism_warning:
-            warnings.append(parallelism_warning)
-        runtime_key = None
-        if effective > 0:
-            runtime_key = build_runtime_key(
-                model_id=profile.base_model_id,
-                backend_type=backend,
-                effective_context=effective,
-                parallelism=effective_parallelism,
-                kv_cache_dtype=preset.kv_cache_dtype,
-                placement_policy=preset.placement_policy,
-                gpu_indices=(chosen_gpu["index"],),
-                load_flags=profile.load_overrides,
-            )
-        rows.append(
-            {
-                "preset_key": preset.preset_key,
-                "resolved": True,
-                "requested_context": preset.context_tokens,
-                "effective_context": effective,
-                "model_max": model_max,
-                "hardware_max": hardware_max,
-                "policy_max": policy_max,
-                "requested_parallelism": preset.parallelism,
-                "effective_parallelism": effective_parallelism,
-                "target_gpus": [chosen_gpu["index"]],
-                "fits": fits,
-                "runtime_key": runtime_key,
-                "warnings": warnings,
-                **_footprint(
-                    backend,
-                    resolution.arch,
-                    resolution.weights_mb,
-                    effective=effective,
-                    parallelism=effective_parallelism,
-                    kv_bytes=kv_bytes,
-                    unified_pool=unified_pool,
-                    gpus=[chosen_gpu],
-                    gpu_memory_utilization=gpu_memory_utilization,
-                ),
-            }
-        )
+        row = _resolve_single_gpu_row(ctx, preset, state, **common)
+        if (
+            split_policy == "when_needed"
+            and preset.placement_policy != "forced"
+            and not row.get("fits")
+            and len(gpus) > 1
+        ):
+            # No single GPU holds it: resolve the same preset over every GPU,
+            # the very path a forced multi-GPU preset takes.
+            multi = _resolve_multi_gpu_row(ctx, preset, _spread_order(preset, gpus), **common)
+            if multi.get("fits"):
+                row = multi
+        rows.append(row)
     return rows

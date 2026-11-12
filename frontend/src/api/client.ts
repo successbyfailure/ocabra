@@ -870,8 +870,34 @@ function toRuntimePreset(raw: unknown): RuntimePreset {
     enabled: Boolean(data.enabled ?? true),
     isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
     priority: Number(data.priority ?? 100),
+    placement: toPresetPlacement(data.placement),
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
+  };
+}
+
+function toPresetPlacement(raw: unknown): import("@/types").PresetPlacement | null {
+  if (!isRecord(raw)) return null;
+  const num = (v: unknown) => (v == null ? null : Number(v));
+  return {
+    splitPolicy: (raw.split_policy ?? raw.splitPolicy ?? null) as import("@/types").PresetPlacement["splitPolicy"],
+    splitMode: (raw.split_mode ?? raw.splitMode ?? null) as import("@/types").PresetPlacement["splitMode"],
+    tensorSplit: Array.isArray(raw.tensor_split ?? raw.tensorSplit)
+      ? ((raw.tensor_split ?? raw.tensorSplit) as unknown[]).map(Number)
+      : null,
+    gpuLayers: num(raw.gpu_layers ?? raw.gpuLayers),
+    nCpuMoe: num(raw.n_cpu_moe ?? raw.nCpuMoe),
+  };
+}
+
+function fromPresetPlacement(p: import("@/types").PresetPlacement | null): Record<string, unknown> | null {
+  if (!p) return null;
+  return {
+    split_policy: p.splitPolicy ?? null,
+    split_mode: p.splitMode ?? null,
+    tensor_split: p.tensorSplit ?? null,
+    gpu_layers: p.gpuLayers ?? null,
+    n_cpu_moe: p.nCpuMoe ?? null,
   };
 }
 
@@ -901,6 +927,7 @@ function fromRuntimePreset(
     ...(data.enabled !== undefined && { enabled: data.enabled }),
     ...(data.isDefault !== undefined && { is_default: data.isDefault }),
     ...(data.priority !== undefined && { priority: data.priority }),
+    ...(data.placement !== undefined && { placement: fromPresetPlacement(data.placement) }),
   };
 }
 
@@ -935,6 +962,7 @@ function toRuntimePresetResolution(raw: unknown): RuntimePresetResolution {
     runtimeKey: (data.runtime_key ?? data.runtimeKey ?? null) as string | null,
     warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
     estimatedVramMb: toNumberOrNull(data, "estimated_vram_mb", "estimatedVramMb"),
+    cpuMb: toNumberOrNull(data, "cpu_mb", "cpuMb"),
     vramByGpu: isRecord(data.vram_by_gpu ?? data.vramByGpu)
       ? Object.fromEntries(
           Object.entries((data.vram_by_gpu ?? data.vramByGpu) as Record<string, unknown>).map(([k, v]) => [k, Number(v)]),

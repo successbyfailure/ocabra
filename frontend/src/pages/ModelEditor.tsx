@@ -328,9 +328,9 @@ export function ModelEditor() {
         )}
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[190px_minmax(0,1fr)_320px]">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[190px_minmax(0,1fr)_320px]">
         {/* Navegación */}
-        <nav className="lg:sticky lg:top-28 lg:self-start" aria-label="Secciones">
+        <nav className="min-w-0 lg:sticky lg:top-28 lg:self-start" aria-label="Secciones">
           <ul className="flex gap-1 overflow-x-auto lg:flex-col">
             {visible.map((s) => {
               const Icon = s.icon

@@ -25,6 +25,10 @@ const api = vi.hoisted(() => ({
 vi.mock("@/api/client", () => ({ api }))
 vi.mock("@/hooks/useWebSocket", () => ({ useWebSocket: vi.fn() }))
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+// Sin socket ni sondeo en los tests: la actividad en vivo llega vacía.
+vi.mock("@/components/dashboard/useLiveActivity", () => ({
+  useLiveActivity: () => ({ data: { activity: {}, contexts: {}, stuckThresholdSeconds: 300 }, live: false, receivedAt: 0 }),
+}))
 // El editor es una página: solo importa a qué despliegue navega.
 const navigate = vi.fn()
 vi.mock("react-router-dom", async (importOriginal) => ({
@@ -115,6 +119,11 @@ const gemma: LogicalModel = {
   registryMetadata: null,
 }
 
+async function openMenu(card: HTMLElement) {
+  fireEvent.keyDown(within(card).getByRole("button", { name: /Más acciones/ }), { key: "Enter" })
+  await screen.findByRole("menu")
+}
+
 async function renderModelView() {
   render(<Models />)
   return await screen.findByTestId("logical-model-gemma4:26b")
@@ -149,11 +158,13 @@ describe("Models · vista por modelo", () => {
     expect(screen.getByRole("button", { name: "Por modelo" }).getAttribute("aria-pressed")).toBe("true")
     expect(within(card).getByLabelText(/llama.cpp mks · por defecto · desplegado/)).toBeTruthy()
     expect(screen.getByText(/1 modelo en chat/)).toBeTruthy()
+    expect(within(card).getByText("Apagado")).toBeTruthy()
   })
 
-  it("changes the default backend with PATCH", async () => {
+  it("changes the default backend from the menu with PATCH", async () => {
     const card = await renderModelView()
-    fireEvent.change(within(card).getByLabelText("Backend por defecto"), { target: { value: "ollama" } })
+    await openMenu(card)
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Servir gemma4:26b con ollama/ }))
     await waitFor(() =>
       expect(api.logicalModels.patch).toHaveBeenCalledWith("gemma4:26b", { defaultBackend: "ollama" }),
     )
@@ -161,12 +172,11 @@ describe("Models · vista por modelo", () => {
 
   it("only offers installed, not-deployed compatible backends to add, and POSTs the choice", async () => {
     const card = await renderModelView()
-    const select = within(card).getByLabelText("Añadir backend") as HTMLSelectElement
-    const values = Array.from(select.options).map((option) => option.value)
-    expect(values).toEqual(["", "llama_cpp"])
+    await openMenu(card)
+    const adds = (await screen.findAllByRole("menuitem")).filter((item) => /Añadir backend/.test(item.textContent ?? ""))
+    expect(adds.map((item) => item.textContent)).toEqual(["Añadir backend llama.cpp"])
 
-    fireEvent.change(select, { target: { value: "llama_cpp" } })
-    fireEvent.click(within(card).getByRole("button", { name: /Añadir$/ }))
+    fireEvent.click(adds[0])
     await waitFor(() =>
       expect(api.logicalModels.addDeployment).toHaveBeenCalledWith("gemma4:26b", { backend: "llama_cpp" }),
     )
@@ -174,7 +184,8 @@ describe("Models · vista por modelo", () => {
 
   it("asks for confirmation before removing a deployment and explains what happens", async () => {
     const card = await renderModelView()
-    fireEvent.click(within(card).getByLabelText("Quitar despliegue llamacpp_mks"))
+    await openMenu(card)
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Quitar despliegue llamacpp_mks" }))
 
     const dialog = await screen.findByRole("dialog")
     expect(dialog.textContent).toContain("los ficheros del modelo se conservan")
@@ -199,10 +210,25 @@ describe("Models · vista por modelo", () => {
     await waitFor(() => expect(screen.getByText(/2 despliegues en chat/)).toBeTruthy())
     expect(screen.queryByTestId("logical-model-gemma4:26b")).toBeNull()
   })
-  it("shows each deployment's preferred GPU (auto when unset)", async () => {
+  it("shows the preferred GPU of the shown deployment, and of each one in the menu", async () => {
     const card = await renderModelView()
-    expect(within(card).getByTestId("preferred-gpu-llamacpp_mks").textContent).toBe("GPU 1")
-    expect(within(card).getByTestId("preferred-gpu-ollama").textContent).toBe("GPU auto")
+    expect(within(card).getByTestId("preferred-gpu").textContent).toBe("GPU 1")
+    await openMenu(card)
+    expect((await screen.findByTestId("preferred-gpu-llamacpp_mks")).textContent).toBe("GPU 1")
+    expect(screen.getByTestId("preferred-gpu-ollama").textContent).toBe("GPU auto")
+  })
+
+  it("opens a deployment's editor from the menu", async () => {
+    const card = await renderModelView()
+    await openMenu(card)
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Editar ollama/ }))
+    expect(navigate).toHaveBeenCalledWith(`/models/edit/${encodeURIComponent("ollama/gemma4:26b")}`)
+  })
+
+  it("Probar opens the Playground on the shown deployment", async () => {
+    const card = await renderModelView()
+    fireEvent.click(within(card).getByRole("button", { name: /Probar/ }))
+    expect(navigate).toHaveBeenCalledWith(`/playground?model=${encodeURIComponent("llamacpp_mks/gemma4:26b")}`)
   })
 
   it("Editar opens the editor on the default deployment", async () => {

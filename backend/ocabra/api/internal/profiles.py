@@ -35,6 +35,7 @@ from ocabra.schemas.profiles import (
     RuntimePresetOut,
     RuntimePresetResolutionOut,
     RuntimePresetUpdate,
+    normalize_placement,
 )
 
 logger = structlog.get_logger(__name__)
@@ -322,6 +323,7 @@ async def preview_runtime_preset(
         kv_cache_dtype=body.kv_cache_dtype,
         placement_policy=body.placement_policy,
         preferred_gpus=body.preferred_gpus,
+        placement=normalize_placement(body.placement),
         priority=0,
     )
     draft_profile = SimpleNamespace(

@@ -29,7 +29,9 @@ from ocabra.core.model_manager_helpers import (
     estimate_vllm_vram_from_config,
     resolve_bitnet_gpu_layers,
     resolve_bitnet_option,
+    resolve_llama_cpp_allowed_gpus,
     resolve_llama_cpp_gpu_layers,
+    resolve_llama_cpp_split_policy,
     resolve_worker_slots,
 )
 from ocabra.core.model_ref import (
@@ -2112,6 +2114,23 @@ class ModelManager:
                                             }
                                     except (TypeError, ValueError):
                                         required_gpu_vram_mb = None
+                            # A llama.cpp model without a preset placement picks
+                            # its GPUs by ``split_policy`` among the GPUs it does
+                            # not exclude (see _llama_cpp_base_placement).
+                            base_allowed_gpus: list[int] | None = None
+                            base_allow_split = True
+                            if (
+                                is_llama_cpp_family(state.backend_type)
+                                and gpu_managed
+                                and not required_gpu_indices
+                            ):
+                                (
+                                    always_gpus,
+                                    base_allowed_gpus,
+                                    base_allow_split,
+                                ) = await self._llama_cpp_base_placement(state)
+                                if always_gpus:
+                                    required_gpu_indices = always_gpus
                             if (
                                 is_llama_cpp_family(state.backend_type)
                                 and required_gpu_indices
@@ -2209,6 +2228,8 @@ class ModelManager:
                                 required_gpu_indices=required_gpu_indices,
                                 required_gpu_vram_mb=required_gpu_vram_mb,
                                 allow_pressure_eviction=allow_pressure_eviction,
+                                allowed_gpus=base_allowed_gpus,
+                                allow_split=base_allow_split,
                             )
 
                             # Use-case resolution stays inside the gate because it
@@ -2769,6 +2790,40 @@ class ModelManager:
             suppress_reload_seconds=suppress_reload_seconds,
         )
 
+    async def _llama_cpp_base_placement(
+        self, state: "ModelState"
+    ) -> tuple[list[int] | None, list[int] | None, bool]:
+        """GPU choice of a llama.cpp load that no preset placed.
+
+        Returns ``(required_gpus, allowed_gpus, allow_split)``:
+
+        * allowed = every GPU minus ``llama_cpp.disabled_gpus``; ``None``
+          when that excludes nothing (the scheduler is not restricted).
+        * ``split_policy`` (see ``resolve_llama_cpp_split_policy``):
+          ``always`` with two or more allowed GPUs loads on all of them
+          (``required_gpus``, the same path as a multi-GPU preset);
+          ``single`` never lets the scheduler fall back to a multi-GPU
+          spread; ``when_needed`` keeps the scheduler's behaviour (spread only
+          when no single GPU can hold the model).
+        """
+        if self._gpu_manager is None:
+            return None, None, True
+        try:
+            all_gpus = sorted(int(gpu.index) for gpu in await self._gpu_manager.get_all_states())
+        except Exception:  # noqa: BLE001 — placement must not break a load
+            return None, None, True
+        if not all_gpus:
+            return None, None, True
+        policy = resolve_llama_cpp_split_policy(state)
+        allowed = resolve_llama_cpp_allowed_gpus(state, all_gpus)
+        if policy == "always" and len(allowed) >= 2:
+            return allowed, None, True
+        return (
+            None,
+            allowed if allowed != all_gpus else None,
+            policy != "single",
+        )
+
     async def _admit_gpu_load(
         self,
         *,
@@ -2781,6 +2836,8 @@ class ModelManager:
         required_gpu_indices: list[int] | None = None,
         required_gpu_vram_mb: dict[int, int] | None = None,
         allow_pressure_eviction: bool = True,
+        allowed_gpus: list[int] | None = None,
+        allow_split: bool = True,
     ) -> list[int]:
         """Assign and validate GPUs immediately before a backend starts.
 
@@ -2806,6 +2863,8 @@ class ModelManager:
                 enforce_vllm_headroom=enforce_vllm_headroom,
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                 allow_pressure_eviction=allow_pressure_eviction,
+                allowed_gpus=allowed_gpus,
+                allow_split=allow_split,
             )
         else:
             gpu_indices = [settings.default_gpu_index]
@@ -3025,11 +3084,21 @@ class ModelManager:
         vllm_gpu_memory_utilization: float | None = None,
         suppress_reload_seconds: int = 0,
         allow_pressure_eviction: bool = True,
+        allowed_gpus: list[int] | None = None,
+        allow_split: bool = True,
     ) -> list[int]:
         from ocabra.core.scheduler import InsufficientVRAMError
 
         if not self._gpu_scheduler:
             return [settings.default_gpu_index]
+
+        # Only passed when they restrict something, so schedulers (and test
+        # doubles) that predate them keep working unchanged.
+        placement_kwargs: dict[str, Any] = {}
+        if allowed_gpus is not None:
+            placement_kwargs["allowed_gpus"] = list(allowed_gpus)
+        if not allow_split:
+            placement_kwargs["allow_split"] = False
 
         try:
             return await self._gpu_scheduler.find_gpu_for_model(
@@ -3037,6 +3106,7 @@ class ModelManager:
                 preferred_gpu,
                 enforce_vllm_headroom=enforce_vllm_headroom,
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                **placement_kwargs,
             )
         except InsufficientVRAMError as initial_exc:
             if not allow_pressure_eviction:
@@ -3086,6 +3156,7 @@ class ModelManager:
                             preferred_gpu,
                             enforce_vllm_headroom=enforce_vllm_headroom,
                             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                            **placement_kwargs,
                         )
                     except InsufficientVRAMError as exc:
                         last_exc = exc
@@ -3124,6 +3195,15 @@ class ModelManager:
                 gpu_pool_order: list[int | None] = [preferred_gpu, *other_gpus]
             else:
                 gpu_pool_order = [None]
+            if allowed_gpus is not None:
+                # Evicting on a GPU the model may not use frees nothing for it.
+                allowed_set = {int(index) for index in allowed_gpus}
+                restricted = [
+                    gpu for gpu in gpu_pool_order if gpu is not None and gpu in allowed_set
+                ]
+                if gpu_pool_order == [None]:
+                    restricted = sorted(allowed_set)
+                gpu_pool_order = list(restricted) or gpu_pool_order
 
             static_drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
             max_drain_timeout_s = max(static_drain_timeout_s, int(settings.max_drain_timeout_s))
@@ -3155,6 +3235,7 @@ class ModelManager:
                             preferred_gpu,
                             enforce_vllm_headroom=enforce_vllm_headroom,
                             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                            **placement_kwargs,
                         )
                     except InsufficientVRAMError:
                         continue
@@ -3172,6 +3253,7 @@ class ModelManager:
                         preferred_gpu,
                         enforce_vllm_headroom=enforce_vllm_headroom,
                         vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                        **placement_kwargs,
                     )
                 except InsufficientVRAMError:
                     continue
@@ -3409,6 +3491,7 @@ class ModelManager:
                             preferred_gpu,
                             enforce_vllm_headroom=enforce_vllm_headroom,
                             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                            **placement_kwargs,
                         )
                     except InsufficientVRAMError as exc:
                         last_exc = exc

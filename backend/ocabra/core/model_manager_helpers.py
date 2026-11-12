@@ -236,6 +236,36 @@ def resolve_llama_cpp_option(state, key: str, default):
         return extra[camel_key]
     return default
 
+LLAMA_CPP_SPLIT_POLICIES = ("single", "when_needed", "always")
+
+
+def resolve_llama_cpp_split_policy(state) -> str:
+    """What a llama.cpp model without presets does when one GPU is not enough.
+
+    ``llama_cpp.split_policy`` when set; otherwise the behaviour every model
+    had before the option existed: ``split_mode: "none"`` never spreads
+    ("single"), anything else spreads only when no single GPU can hold it
+    ("when_needed").
+    """
+    raw = resolve_llama_cpp_option(state, "split_policy", None)
+    if isinstance(raw, str) and raw.strip().lower() in LLAMA_CPP_SPLIT_POLICIES:
+        return raw.strip().lower()
+    split_mode = resolve_llama_cpp_option(state, "split_mode", None)
+    if isinstance(split_mode, str) and split_mode.strip().lower() == "none":
+        return "single"
+    return "when_needed"
+
+
+def resolve_llama_cpp_allowed_gpus(state, gpu_indices: list[int]) -> list[int]:
+    """``gpu_indices`` minus the model's ``llama_cpp.disabled_gpus``."""
+    raw = resolve_llama_cpp_option(state, "disabled_gpus", None) or []
+    try:
+        disabled = {int(index) for index in raw}
+    except (TypeError, ValueError):
+        disabled = set()
+    return [int(index) for index in gpu_indices if int(index) not in disabled]
+
+
 def resolve_worker_slots(state) -> int | None:
     """How many requests this model's worker genuinely serves in parallel.
 

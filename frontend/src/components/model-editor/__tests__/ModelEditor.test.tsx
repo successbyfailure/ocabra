@@ -185,8 +185,20 @@ describe("ModelEditor", () => {
     expect(legend.textContent).toContain("otros modelos")
     // Los controles de memoria están en el mismo banco de trabajo.
     const bench = screen.getByTestId("workbench")
-    expect(bench.contains(screen.getByTestId("gpu-chooser"))).toBe(true)
     expect(bench.contains(bars)).toBe(true)
+    // Dónde corre (GPUs + CPU) va en el mismo panel, encima de los controles.
+    expect(screen.getByTestId("device-placement").textContent).toContain("CPU")
+    expect(screen.getByTestId("rung-tests").textContent).toContain("Probar tal cual")
+  })
+
+  it("marking both GPUs together in the base writes split_policy always", async () => {
+    renderEditor("capacity")
+    const devices = await screen.findByTestId("device-placement")
+    await waitFor(() => expect(devices.querySelectorAll("[data-gpu-card]").length).toBeGreaterThan(2))
+    fireEvent.click(screen.getByRole("button", { name: "Todas a la vez" }))
+    fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
+    await waitFor(() => expect(modelEditorApi.patch).toHaveBeenCalled())
+    expect(modelEditorApi.patch.mock.calls[0][1].extraConfig.llama_cpp.split_policy).toBe("always")
   })
 
   it("an LLM without presets offers to create one to measure its real context", async () => {
@@ -245,7 +257,10 @@ describe("ModelEditor", () => {
     expect(selector.querySelector('[data-rung="largo"]')).toBeTruthy()
     // Entra en el preset por defecto, en su banco de trabajo.
     expect(await screen.findByText("Peldaño «normal»")).toBeTruthy()
-    expect(screen.getByText("¿Cuánto cabe de verdad?")).toBeTruthy()
+    // Dos pruebas: tal cual (cualquier backend) y contexto máximo (solo mks,
+    // y con GPUs declaradas: este peldaño es automático).
+    expect(screen.getByText("¿Carga y responde así?")).toBeTruthy()
+    expect(screen.getByText(/Marca en «Dónde corre» las GPUs del peldaño/)).toBeTruthy()
     fireEvent.click(selector.querySelector('[data-rung="common"]') as HTMLElement)
     const shared = await screen.findByTestId("shared-canvas")
     // Lo que fija cada preset no aparece en lo común.

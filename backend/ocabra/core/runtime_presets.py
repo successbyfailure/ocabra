@@ -83,8 +83,13 @@ def build_runtime_key(
     gpu_indices: Iterable[int] = (),
     load_flags: Mapping[str, Any] | None = None,
     pool_id: str | None = None,
+    placement: Mapping[str, Any] | None = None,
 ) -> str:
-    """Create a stable runner identity, independent of the preset's UI name."""
+    """Create a stable runner identity, independent of the preset's UI name.
+
+    ``placement`` (the preset's own GPU/CPU placement) only enters the identity
+    when set, so presets without one keep the key they always had.
+    """
 
     if effective_context <= 0:
         raise ValueError("effective_context must be positive")
@@ -101,6 +106,8 @@ def build_runtime_key(
         "placement": placement_policy,
         "pool": pool_id,
     }
+    if placement:
+        canonical["preset_placement"] = dict(placement)
     try:
         payload = json.dumps(
             canonical,

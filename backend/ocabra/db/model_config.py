@@ -234,6 +234,10 @@ class ProfileRuntimePreset(Base):
     kv_cache_dtype: Mapped[str] = mapped_column(String(16), nullable=False, default="q8")
     placement_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     preferred_gpus: Mapped[list[int] | None] = mapped_column(JSONB)
+    # GPU/CPU placement owned by this preset (split policy/mode, tensor split,
+    # GPU layers, MoE experts on CPU); see ``schemas.profiles.PresetPlacement``.
+    # NULL = inherit the model's base configuration.
+    placement: Mapped[dict | None] = mapped_column(JSONB)
     execution_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

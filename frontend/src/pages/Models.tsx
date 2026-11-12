@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import * as Dialog from "@radix-ui/react-dialog"
-import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
 import { CompileModal } from "@/components/models/CompileModal"
-import { LogicalModelCard } from "@/components/models/LogicalModelCard"
-import { ModelGridCard } from "@/components/models/ModelGridCard"
+import { ModelCard, type ModelCardActions } from "@/components/models/ModelCard"
+import { useLiveActivity } from "@/components/dashboard/useLiveActivity"
 import { useWebSocket } from "@/hooks/useWebSocket"
 import {
   categorizeModel,
@@ -25,10 +24,8 @@ import { SkeletonList } from "@/components/common/Skeleton"
 import { StyledSelect } from "@/components/common/StyledSelect"
 import type {
   BackendType,
-  LoadPolicy,
   LogicalModel,
   ModelDeployment,
-  ModelProfile,
   ModelState,
   ModelStatus,
   ModelsStorageStats,
@@ -78,7 +75,8 @@ export function Models() {
   const [refreshingMetadata, setRefreshingMetadata] = useState(false)
   const navigate = useNavigate()
   // El editor de modelos es una página: /models/edit/<backend>/<modelo>.
-  const openEditor = (modelId: string) => navigate(`/models/edit/${encodeURIComponent(modelId)}`)
+  const openEditor = (modelId: string, query?: string) =>
+    navigate(`/models/edit/${encodeURIComponent(modelId)}${query ? `?${query}` : ""}`)
   const [deleteModel, setDeleteModel] = useState<ModelState | null>(null)
   const [compileModel, setCompileModel] = useState<ModelState | null>(null)
   const [storage, setStorage] = useState<ModelsStorageStats | null>(null)
@@ -90,9 +88,9 @@ export function Models() {
   // Confirm dialog state
   const [confirmAction, setConfirmAction] = useState<{ modelId: string; action: "load" | "unload" } | null>(null)
 
-  // Profile modal state
-
   useWebSocket()
+  // Estado en vivo de cada despliegue (mismo canal que el dashboard).
+  const { data: live, receivedAt } = useLiveActivity()
 
   const gpus = useGpuStore((state) => state.gpus)
   const setGpus = useGpuStore((state) => state.setGpus)
@@ -343,30 +341,6 @@ export function Models() {
     }
   }
 
-  const togglePin = async (model: ModelState) => {
-    const nextPolicy: LoadPolicy = model.loadPolicy === "pin" ? "on_demand" : "pin"
-    await runAction(model.modelId, async () => {
-      await api.models.patch(model.modelId, { loadPolicy: nextPolicy })
-    })
-  }
-
-
-  // Los perfiles se editan en el editor del modelo (sección Perfiles).
-  const openProfileModal = (model: ModelState, profile: ModelProfile | null) => {
-    const query = new URLSearchParams(profile ? { s: "profiles", p: profile.profileId } : { s: "profiles", new: "1" })
-    navigate(`/models/edit/${encodeURIComponent(model.modelId)}?${query.toString()}`)
-  }
-
-  const handleToggleProfileEnabled = async (profile: ModelProfile) => {
-    try {
-      await api.profiles.update(profile.profileId, { enabled: !profile.enabled })
-      toast.success(profile.enabled ? "Perfil desactivado" : "Perfil activado")
-      await refresh()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error al cambiar estado del perfil")
-    }
-  }
-
   const runLogicalAction = async (modelKey: string, action: () => Promise<string>) => {
     setBusyModelId(modelKey)
     try {
@@ -403,8 +377,24 @@ export function Models() {
         : "Despliegue quitado"
     })
 
-  const openDeploymentConfig = (modelId: string) => openEditor(modelId)
-
+  const cardActions: ModelCardActions = {
+    onLoad: (modelId) => setConfirmAction({ modelId, action: "load" }),
+    onUnload: (modelId) => setConfirmAction({ modelId, action: "unload" }),
+    onCancelLoad: (modelId) =>
+      void runAction(modelId, async () => {
+        await api.models.cancelLoad(modelId)
+      }),
+    onDownsize: (modelId) =>
+      void runAction(modelId, async () => {
+        await api.models.downsize(modelId)
+      }),
+    onEdit: openEditor,
+    onPlayground: (modelId) => navigate(`/playground?model=${encodeURIComponent(modelId)}`),
+    onUpdate: (item) => void handleUpdateModel(item),
+    onCompile: (item) => setCompileModel(item),
+    onDelete: (item) => setDeleteModel(item),
+  }
+  const nowMs = Math.max(receivedAt, Date.now())
 
   const removeDescription = (() => {
     if (!removeTarget) return ""
@@ -633,21 +623,22 @@ export function Models() {
             description="Prueba a ampliar los criterios de búsqueda o elige otra categoría."
           />
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {logicalFiltered.map(({ model, category }) => (
-              <LogicalModelCard
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,320px),1fr))] gap-3">
+            {logicalFiltered.map(({ model }) => (
+              <ModelCard
                 key={model.modelKey}
-                model={model}
-                categoryLabel={MODEL_CATEGORY_LABELS[category]}
-                deploymentStates={models}
-                busy={busyModelId === model.modelKey}
-                onConfigure={(modelId) => openDeploymentConfig(modelId)}
-                onEdit={(item) => openEditor((item.deployments.find((d) => d.isDefault) ?? item.deployments[0])?.modelId ?? `${item.defaultBackend}/${item.modelKey}`)}
-                onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
-                onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
-                onSetDefault={handleSetDefaultBackend}
-                onAddDeployment={handleAddDeployment}
-                onRemoveDeployment={(model, deployment) => setRemoveTarget({ model, deployment })}
+                logical={model}
+                states={models}
+                live={live}
+                gpus={gpus}
+                nowMs={nowMs}
+                busy={busyModelId === model.modelKey || model.deployments.some((dep) => dep.modelId === busyModelId)}
+                actions={{
+                  ...cardActions,
+                  onSetDefault: (backend) => handleSetDefaultBackend(model, backend),
+                  onAddDeployment: (backend) => handleAddDeployment(model, backend),
+                  onRemoveDeployment: (deployment) => setRemoveTarget({ model, deployment }),
+                }}
               />
             ))}
           </div>
@@ -658,37 +649,20 @@ export function Models() {
           description="Prueba a ampliar los criterios de búsqueda o elige otra categoría."
         />
       ) : (
-        <Tooltip.Provider delayDuration={300}>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {filtered.map(({ model, category }) => (
-              <ModelGridCard
-                key={model.modelId}
-                model={model}
-                category={category}
-                busy={busyModelId === model.modelId}
-                onLoad={(modelId) => setConfirmAction({ modelId, action: "load" })}
-                onUnload={(modelId) => setConfirmAction({ modelId, action: "unload" })}
-                onCancelLoad={(modelId) =>
-                  void runAction(modelId, async () => {
-                    await api.models.cancelLoad(modelId)
-                  })
-                }
-                onDownsize={(modelId) =>
-                  void runAction(modelId, async () => {
-                    await api.models.downsize(modelId)
-                  })
-                }
-                onTogglePin={(item) => void togglePin(item)}
-                onConfigure={(item) => openEditor(item.modelId)}
-                onDelete={(item) => setDeleteModel(item)}
-                onCompile={(item) => setCompileModel(item)}
-                onUpdate={(item) => void handleUpdateModel(item)}
-                onEditProfile={openProfileModal}
-                onToggleProfileEnabled={(p) => void handleToggleProfileEnabled(p)}
-              />
-            ))}
-          </div>
-        </Tooltip.Provider>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,320px),1fr))] gap-3">
+          {filtered.map(({ model }) => (
+            <ModelCard
+              key={model.modelId}
+              deploymentId={model.modelId}
+              states={models}
+              live={live}
+              gpus={gpus}
+              nowMs={nowMs}
+              busy={busyModelId === model.modelId}
+              actions={cardActions}
+            />
+          ))}
+        </div>
       )}
 
       {error && (

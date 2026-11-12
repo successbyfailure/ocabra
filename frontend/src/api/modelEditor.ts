@@ -62,6 +62,18 @@ export const modelEditorApi = {
 
   applyOllamaSettings: () => request<{ status: string; detail: string | null }>("POST", "/ocabra/ollama/server/apply-settings"),
 
+  /** Carga el modelo tal y como está configurado y le hace una petición corta. */
+  smokeTest: (modelId: string, cold: boolean) =>
+    request<{
+      loaded: boolean
+      load_ms: number | null
+      request_kind: string | null
+      request_ok: boolean | null
+      request_ms: number | null
+      tokens_per_second: number | null
+      error: string | null
+    }>("POST", `/ocabra/models/${enc(modelId)}/smoke-test`, { cold }),
+
   setMaintenance: (modelId: string, enabled: boolean) =>
     request<unknown>("POST", `/ocabra/models/${enc(modelId)}/maintenance`, { enabled }),
 

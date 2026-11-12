@@ -60,6 +60,55 @@ class RuntimePolicy(BaseModel):
         return value
 
 
+SplitPolicy = Literal["single", "when_needed", "always"]
+
+
+class PresetPlacement(BaseModel):
+    """GPU/CPU placement owned by one runtime preset (llama.cpp family).
+
+    Every field is optional: a missing/``None`` field inherits the model's
+    base configuration. Which GPUs stays in ``placement_policy`` /
+    ``preferred_gpus``; this says how the model spreads over them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # single: one GPU only. when_needed: one GPU if it fits, else spread over
+    # all of them. always: spread over preferred_gpus (or every GPU).
+    split_policy: SplitPolicy | None = None
+    # llama.cpp --split-mode for multi-GPU loads.
+    split_mode: Literal["layer", "row", "tensor"] | None = None
+    # Ratios in the order of preferred_gpus; only applied to multi-GPU loads
+    # whose GPU count matches.
+    tensor_split: list[float] | None = None
+    # Layers offloaded to GPU; None = all of them (999).
+    gpu_layers: int | None = Field(default=None, ge=0)
+    # MoE expert layers kept on CPU (--n-cpu-moe).
+    n_cpu_moe: int | None = Field(default=None, ge=0)
+
+    @field_validator("tensor_split")
+    @classmethod
+    def validate_tensor_split(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("tensor_split must not be empty; use null to clear it")
+        if any(ratio < 0 for ratio in value):
+            raise ValueError("tensor_split ratios must be >= 0")
+        if sum(value) <= 0:
+            raise ValueError("tensor_split needs at least one positive ratio")
+        return value
+
+
+def normalize_placement(value: Any) -> dict[str, Any] | None:
+    """Validated placement dict without null fields; ``None`` when empty."""
+    if value is None:
+        return None
+    model = value if isinstance(value, PresetPlacement) else PresetPlacement.model_validate(value)
+    cleaned = model.model_dump(exclude_none=True)
+    return cleaned or None
+
+
 class RuntimePresetCreate(BaseModel):
     """Create one load-affecting runtime preset for a profile."""
 
@@ -74,6 +123,7 @@ class RuntimePresetCreate(BaseModel):
     placement_policy: Literal["auto", "preferred", "forced"] = "auto"
     preferred_gpus: list[int] | None = None
     execution_policy: Literal["auto", "local", "remote"] = "auto"
+    placement: PresetPlacement | None = None
     enabled: bool = True
     is_default: bool = False
     priority: int = Field(default=100, ge=0)
@@ -115,6 +165,8 @@ class RuntimePresetUpdate(BaseModel):
     placement_policy: Literal["auto", "preferred", "forced"] | None = None
     preferred_gpus: list[int] | None = None
     execution_policy: Literal["auto", "local", "remote"] | None = None
+    # PATCH with ``placement: null`` clears it (back to the base config).
+    placement: PresetPlacement | None = None
     enabled: bool | None = None
     is_default: bool | None = None
     priority: int | None = Field(default=None, ge=0)
@@ -145,6 +197,7 @@ class RuntimePresetOut(BaseModel):
     placement_policy: str
     preferred_gpus: list[int] | None = None
     execution_policy: str
+    placement: PresetPlacement | None = None
     enabled: bool
     is_default: bool
     priority: int
@@ -170,6 +223,9 @@ class RuntimePresetResolutionOut(BaseModel):
     estimated_vram_mb: int | None = None
     vram_by_gpu: dict[int, int] = Field(default_factory=dict)
     vram_breakdown_by_gpu: dict[int, dict[str, int]] = Field(default_factory=dict)
+    # RAM estimate (MB) of what this preset keeps on CPU (gpu_layers below the
+    # model's layers, MoE experts on CPU). Absent/None when everything is on GPU.
+    cpu_mb: int | None = None
 
 
 class ContextProbeRequest(BaseModel):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 
@@ -19,7 +20,7 @@ from ocabra.db.model_config import (
     ModelProfileAlias,
     ProfileRuntimePreset,
 )
-from ocabra.schemas.profiles import RuntimePresetCreate
+from ocabra.schemas.profiles import RuntimePresetCreate, normalize_placement
 
 logger = structlog.get_logger(__name__)
 
@@ -458,6 +459,7 @@ class ProfileRegistry:
                         list(preset.preferred_gpus) if preset.preferred_gpus is not None else None
                     ),
                     execution_policy=preset.execution_policy,
+                    placement=copy.deepcopy(getattr(preset, "placement", None)),
                     enabled=preset.enabled,
                     is_default=preset.is_default,
                     priority=preset.priority,
@@ -508,6 +510,7 @@ class ProfileRegistry:
             )
 
         payload = validated.model_dump()
+        payload["placement"] = normalize_placement(validated.placement)
         # The first preset becomes the default automatically. This keeps the
         # profile valid while making the create flow pleasant in the UI.
         if not existing:
@@ -548,6 +551,7 @@ class ProfileRegistry:
             "placement_policy": preset.placement_policy,
             "preferred_gpus": preset.preferred_gpus,
             "execution_policy": preset.execution_policy,
+            "placement": getattr(preset, "placement", None),
             "enabled": preset.enabled,
             "is_default": preset.is_default,
             "priority": preset.priority,
@@ -563,7 +567,9 @@ class ProfileRegistry:
             await self._clear_runtime_default(session, profile_id)
             await session.flush()
 
-        for key, value in validated.model_dump(exclude={"preset_key"}).items():
+        values = validated.model_dump(exclude={"preset_key"})
+        values["placement"] = normalize_placement(validated.placement)
+        for key, value in values.items():
             setattr(preset, key, value)
         await session.commit()
         await session.refresh(preset)

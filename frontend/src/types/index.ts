@@ -1483,6 +1483,20 @@ export interface ContextProbeJob {
   } | null;
 }
 
+/** Colocación propia de un peldaño (GPU/CPU). null = la de siempre: todo en
+ *  GPU, una sola GPU salvo "forced" con varias, reparto calculado. */
+export interface PresetPlacement {
+  /** single: una GPU · when_needed: repartir si no cabe en ninguna · always: siempre repartido */
+  splitPolicy: "single" | "when_needed" | "always" | null;
+  splitMode: "layer" | "row" | "tensor" | null;
+  /** Proporción por GPU, en el orden de preferredGpus (solo con varias). */
+  tensorSplit: number[] | null;
+  /** Capas en GPU; null = todas. */
+  gpuLayers: number | null;
+  /** Capas MoE cuyos expertos van a la CPU. */
+  nCpuMoe: number | null;
+}
+
 export interface RuntimePreset {
   id: string;
   profileId: string;
@@ -1498,6 +1512,7 @@ export interface RuntimePreset {
   enabled: boolean;
   isDefault: boolean;
   priority: number;
+  placement?: PresetPlacement | null;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -1518,6 +1533,8 @@ export interface RuntimePresetResolution {
   warnings: string[];
   /** VRAM estimada de una carga con este preset, total y por GPU (MB). */
   estimatedVramMb?: number | null;
+  /** RAM del host que ocupa lo que va a la CPU (MB). */
+  cpuMb?: number | null;
   vramByGpu?: Record<string, number>;
   /** Desglose por GPU: pesos, KV, rs_cache, fijo, extra (MB). */
   vramBreakdownByGpu?: Record<string, Record<string, number>>;
@@ -1547,6 +1564,7 @@ export interface RuntimePresetCreate {
   enabled?: boolean;
   isDefault?: boolean;
   priority?: number;
+  placement?: PresetPlacement | null;
 }
 
 export type RuntimePresetUpdate = Partial<

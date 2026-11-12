@@ -41,11 +41,35 @@ class GPUScheduler:
         preferred_gpu: int | None = None,
         enforce_vllm_headroom: bool = False,
         vllm_gpu_memory_utilization: float | None = None,
+        allowed_gpus: list[int] | None = None,
+        allow_split: bool = True,
     ) -> list[int]:
+        """Pick the GPU(s) a model loads on.
+
+        Args:
+            vram_needed_mb: estimated footprint of the load.
+            preferred_gpu: GPU tried first (``settings.default_gpu_index`` if None).
+            enforce_vllm_headroom: also require vLLM's memory fraction to be free.
+            vllm_gpu_memory_utilization: that fraction, when not the global one.
+            allowed_gpus: the only GPUs the model may use (``None`` = all). A
+                GPU the model excludes (llama.cpp ``disabled_gpus``) must never
+                be picked: the backend would hide it and start with no GPU.
+            allow_split: when False, never fall back to spreading the model
+                over several GPUs, even if no single one could hold it.
+
+        Returns:
+            The GPU indices to load on.
+
+        Raises:
+            InsufficientVRAMError: nothing allowed has room.
+        """
         preferred = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
         pressure_threshold_pct = max(0.0, min(100.0, float(settings.vram_pressure_threshold_pct)))
         states = await self._gpu_manager.get_all_states()
         gpu_indices = list(range(len(states)))
+        if allowed_gpus is not None:
+            allowed = {int(index) for index in allowed_gpus}
+            gpu_indices = [index for index in gpu_indices if index in allowed]
         free_per_gpu = {i: await self._gpu_manager.get_free_vram(i) for i in gpu_indices}
         state_by_gpu = {state.index: state for state in states}
         vllm_utilization = _resolve_vllm_gpu_memory_utilization(
@@ -122,7 +146,7 @@ class GPUScheduler:
             fits_single_gpu = any(
                 state_by_gpu[i].total_vram_mb >= vram_needed_mb for i in candidates
             )
-            if not fits_single_gpu:
+            if allow_split and not fits_single_gpu:
                 tp_candidates = [
                     i
                     for i in candidates

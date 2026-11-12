@@ -342,18 +342,22 @@ function RungSelector({
 function BaseCanvas(props: SectionProps & { family: CapacityFamily; hasPresets: boolean; onCreatePreset?: () => void }) {
   const { editor, gpus, liveVramByGpu, family, onCreatePreset } = props
   const quiet = { ...props, presets: [] }
-  if (family === "llama") return <BaseLlamaWorkbench {...quiet} onCreatePreset={onCreatePreset} />
+  // bitnet es de la familia llama pero lee su propia sección (`bitnet.*`):
+  // el banco de trabajo escribe `llama_cpp.*`, así que va por el lienzo genérico.
+  const bitnet = editor.model?.backend_type === "bitnet"
+  if (family === "llama" && !bitnet) return <BaseLlamaWorkbench {...quiet} onCreatePreset={onCreatePreset} />
   const memory = (editor.preview?.gpus ?? []).map((g) => ({ gpu: g.index, parts: Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb } }))
   // El resto de backends: sus controles a la izquierda y la memoria al lado.
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
-      <div className="space-y-4">
+    <div className="flex flex-wrap gap-4">
+      <div className="min-w-0 flex-[2_1_380px] space-y-4">
         {family === "ollama" && <OllamaGlobalCard />}
         {family === "encoder" && <EncoderPanel {...quiet} />}
         <GpuSection {...quiet} />
+        {bitnet && <GpuLayersPanel {...quiet} />}
         {family !== "fixed" && family !== "encoder" && <ContextSection {...quiet} />}
       </div>
-      <div className="xl:sticky xl:top-28 xl:self-start" data-testid="base-memory">
+      <div className="min-w-0 flex-[1_1_280px] lg:sticky lg:top-28 lg:self-start" data-testid="base-memory">
         <MemoryBars
           gpus={gpus}
           memory={memory}
@@ -378,6 +382,8 @@ const PRESET_OWNED = [
   "llama_cpp.main_gpu",
   "llama_cpp.kv_unified",
   "llama_cpp.gpu_layers",
+  "llama_cpp.n_cpu_moe",
+  "llama_cpp.split_policy",
   "bitnet.ctx_size",
   "bitnet.parallel",
   "bitnet.cache_type_k",
@@ -399,10 +405,9 @@ function SharedCanvas(props: SectionProps & { family: CapacityFamily }) {
   return (
     <div className="space-y-4" data-testid="shared-canvas">
       <Callout tone="info">
-        Cada peldaño fija su contexto, sus peticiones simultáneas, la precisión de la KV y sus GPUs. Aquí está lo que comparten todos;
+        Cada peldaño fija su contexto, sus peticiones simultáneas, la precisión de la KV y dónde corre (GPUs, reparto y CPU). Aquí está lo que comparten todos;
         se guarda con el botón Guardar de la página.
       </Callout>
-      {family === "llama" && <GpuLayersPanel {...props} />}
       {kvField && (
         <Panel title="Modo de la KV" subtitle="Cómo usan la memoria de contexto los slots de cualquier peldaño.">
           <Segmented

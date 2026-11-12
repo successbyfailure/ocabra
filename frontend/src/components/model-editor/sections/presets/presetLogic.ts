@@ -67,6 +67,7 @@ export function presetToForm(preset: RuntimePreset): RuntimePresetCreate {
     enabled: preset.enabled,
     isDefault: preset.isDefault,
     priority: preset.priority,
+    placement: preset.placement ?? null,
   }
 }
 

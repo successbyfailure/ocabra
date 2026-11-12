@@ -16,6 +16,53 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.77.0 — 2026-11-12
+
+### Novedades
+
+- **Cada preset de contexto puede llevar su propio reparto entre GPU y CPU**
+  en el campo nuevo `placement` de `…/runtime-presets` (crear, `PATCH`, listar
+  y `…/preview`):
+  `{"split_policy", "split_mode", "tensor_split", "gpu_layers", "n_cpu_moe"}`,
+  todos opcionales. `split_policy` decide qué pasa si no cabe en una GPU:
+  `single` (solo una, lo de siempre), `when_needed` (si no cabe en ninguna, se
+  reparte entre todas) o `always` (se reparte siempre). `split_mode`
+  (`layer`/`row`/`tensor`) y `tensor_split` (proporciones en el orden de
+  `preferred_gpus`) solo se aplican cuando el preset usa varias GPUs;
+  `gpu_layers` deja en GPU solo esas capas (null = todas) y `n_cpu_moe` deja en
+  RAM los expertos de esas capas MoE. Solo modelos llama.cpp. Los presets que
+  ya existían quedan con `placement: null` y cargan exactamente igual.
+  `PATCH` con `"placement": null` lo quita.
+- **`…/runtime-presets/resolved` y `…/preview` informan de la RAM** que un
+  preset deja en CPU en `cpu_mb` (solo cuando hay algo en CPU), y
+  `vram_breakdown_by_gpu` cuenta ya solo lo que queda en GPU. Con `n_cpu_moe`
+  la cifra es aproximada y el preset lleva el aviso
+  "estimación aproximada: expertos MoE en CPU".
+- **`POST /ocabra/models/{model_id}/smoke-test`** (rol `model_manager`): carga
+  el modelo con su configuración actual (o su preset por defecto, como
+  *Cargar*) y le manda una petición mínima según lo que sabe hacer —chat,
+  embeddings, rerank, transcripción de 1 s de silencio o voz—. Body
+  `{"cold": false}`; con `true` lo descarga antes para medir la carga en frío.
+  Devuelve `{"loaded", "load_ms", "request_kind", "request_ok", "request_ms",
+  "tokens_per_second", "error"}` y los fallos van en `error`, nunca como 500.
+- **Opción nueva `llama_cpp.split_policy` en la configuración base** de los
+  modelos llama.cpp (los que cargan sin preset), con los mismos tres valores.
+  Si no la pones, se comporta como hasta ahora: con `split_mode: "none"`
+  nunca se reparte y, si no, solo cuando no cabe en una GPU.
+
+### Errores corregidos
+
+- **Un modelo llama.cpp con `disabled_gpus` podía acabar asignado a la GPU que
+  excluye** cuando la otra estaba llena, y arrancaba sin ninguna GPU visible.
+  Ahora solo se eligen las GPUs que permite, y para hacer sitio se descarga en
+  ellas.
+- **Un modelo con `split_mode: "none"` que no cabía en ninguna GPU se
+  repartía igualmente** y llama.cpp, con `--split-mode none`, usaba solo una:
+  fallaba al cargar por memoria. Ahora se rechaza con el error de VRAM
+  insuficiente de siempre; si quieres que se reparta, pon `split_policy`.
+
+---
+
 ## 0.76.1 — 2026-11-12
 
 ### Novedades

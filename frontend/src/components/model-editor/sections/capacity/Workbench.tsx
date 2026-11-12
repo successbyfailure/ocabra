@@ -1,5 +1,4 @@
 import { useMemo, useRef, type ReactNode } from "react"
-import { Star } from "lucide-react"
 import { gpuColor } from "@/components/dashboard/GpuBadge"
 import { shortGpuName } from "@/components/dashboard/gpuNames"
 import { fmtContext } from "@/components/dashboard/format"
@@ -9,7 +8,6 @@ import { PART_META, fmtMb } from "../../PreviewPanel"
 import type { CapacityInfo } from "../../types"
 import { Callout, Hint, Panel, Segmented } from "../../ui"
 import { ContextSlider } from "../ContextSection"
-import { SplitBar } from "../GpuSection"
 
 export type KvLabel = "fp16" | "bf16" | "fp8" | "q8" | "q4"
 
@@ -22,12 +20,8 @@ export interface WorkbenchState {
   slots: number
   pool: boolean
   kv: KvLabel
-  /** null = el planificador elige la GPU. */
+  /** GPUs que usa a la vez (para el techo de la gráfica); null = la mayor. */
   gpus: number[] | null
-  main: number | null
-  /** Reparto entre las GPUs elegidas (solo la base de llama.cpp). */
-  ratios: number[] | null
-  splitMode?: string
 }
 
 export interface MemoryShare {
@@ -57,11 +51,10 @@ export function Workbench({
   memoryNote,
   cap,
   native,
-  allowRatios,
   allowMax,
   poolEditable,
   measured,
-  extraKnobs,
+  devices,
   header,
   footer,
 }: {
@@ -76,25 +69,26 @@ export function Workbench({
   memoryNote?: ReactNode
   cap: CapacityInfo | null
   native: number | null
-  allowRatios: boolean
   allowMax: boolean
   poolEditable: boolean
   /** Contexto medido de verdad (sondeo), si lo hay. */
   measured?: number | null
-  extraKnobs?: ReactNode
+  /** Dónde corre (GPUs y CPU); ocupa todo el ancho encima de los controles. */
+  devices?: ReactNode
   header?: ReactNode
   footer?: ReactNode
 }) {
   return (
     <Panel title={title} subtitle={subtitle}>
       {header}
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,400px)]" data-testid="workbench">
-        <div className="space-y-5">
-          <GpuChooser value={value} onChange={onChange} gpus={gpus} readOnly={readOnly} allowRatios={allowRatios} liveVramByGpu={liveVramByGpu} memory={memory} />
+      {devices && <div className="mb-5 border-b border-border pb-5">{devices}</div>}
+      {/* Se apilan según el ancho disponible, no el de la ventana: el panel
+          puede ser estrecho con la ventana ancha (lateral abierto). */}
+      <div className="flex flex-wrap gap-5" data-testid="workbench">
+        <div className="min-w-0 flex-[2_1_360px] space-y-5">
           <ContextKnobs value={value} onChange={onChange} readOnly={readOnly} native={native} allowMax={allowMax} poolEditable={poolEditable} />
-          {extraKnobs}
         </div>
-        <div className="space-y-3 xl:sticky xl:top-28 xl:self-start">
+        <div className="min-w-0 flex-[1_1_280px] space-y-3">
           <MemoryBars gpus={gpus} memory={memory} liveVramByGpu={liveVramByGpu} selected={value.gpus} note={memoryNote} />
         </div>
       </div>
@@ -113,134 +107,6 @@ export function Workbench({
       )}
       {footer && <div className="mt-4 border-t border-border pt-4">{footer}</div>}
     </Panel>
-  )
-}
-
-// ── GPUs ────────────────────────────────────────────────────────────────────
-
-function GpuChooser({
-  value,
-  onChange,
-  gpus,
-  readOnly,
-  allowRatios,
-  liveVramByGpu,
-  memory,
-}: {
-  value: WorkbenchState
-  onChange: (patch: Partial<WorkbenchState>) => void
-  gpus: GPUState[]
-  readOnly: boolean
-  allowRatios: boolean
-  liveVramByGpu: Record<string, number>
-  memory: MemoryShare[] | null
-}) {
-  const selected = value.gpus
-  const toggle = (index: number) => {
-    const cur = selected ?? []
-    const next = cur.includes(index) ? cur.filter((g) => g !== index) : [...cur, index].sort((a, b) => a - b)
-    const main = next.includes(value.main ?? -1) ? value.main : (next[0] ?? null)
-    onChange({ gpus: next.length ? next : null, main, ratios: null })
-  }
-  const mine = new Map((memory ?? []).map((m) => [m.gpu, Object.values(m.parts).reduce((a, b) => a + b, 0)]))
-  const multi = (selected?.length ?? 0) > 1
-  const visible = gpus.filter((g) => selected?.includes(g.index))
-  return (
-    <div className="space-y-2" data-testid="gpu-chooser">
-      <div className="flex items-baseline justify-between">
-        <p className="text-xs font-medium">¿En qué GPUs?</p>
-        <span className="text-[11px] text-muted-foreground">
-          {selected == null ? "la elige el planificador" : selected.length === 1 ? "una GPU" : `${selected.length} GPUs, repartido`}
-        </span>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          disabled={readOnly}
-          onClick={() => onChange({ gpus: null, main: null, ratios: null })}
-          aria-pressed={selected == null}
-          className={cn(
-            "rounded-xl border px-3 py-2 text-left text-xs",
-            selected == null ? "border-primary bg-primary/10 ring-1 ring-primary/40" : "border-border hover:bg-muted/30",
-          )}
-        >
-          <span className="block text-sm font-semibold">Automática</span>
-          donde haya sitio
-        </button>
-        {gpus.map((g) => {
-          const color = gpuColor(g.index)
-          const on = selected?.includes(g.index) ?? false
-          const own = liveVramByGpu[String(g.index)] ?? 0
-          const others = Math.max(0, g.usedVramMb - own)
-          const isMain = on && multi && value.main === g.index
-          return (
-            <div
-              key={g.index}
-              data-gpu-card={g.index}
-              className={cn("min-w-[170px] flex-1 rounded-xl border px-3 py-2 text-xs", on ? "ring-1" : "border-border")}
-              style={on ? { borderColor: color, boxShadow: `0 0 0 1px ${color}66`, background: `${color}10` } : undefined}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <button type="button" disabled={readOnly} onClick={() => toggle(g.index)} className="flex items-center gap-1.5 text-sm font-semibold" style={{ color }}>
-                  <input type="checkbox" readOnly checked={on} className="pointer-events-none" aria-label={`Usar GPU ${g.index}`} />#{g.index}{" "}
-                  {shortGpuName(g.name)}
-                </button>
-                {on && multi && (
-                  <button
-                    type="button"
-                    disabled={readOnly}
-                    title={isMain ? "GPU principal" : "Hacer principal"}
-                    onClick={() => onChange({ main: g.index })}
-                    className={isMain ? "text-amber-300" : "text-muted-foreground/50 hover:text-amber-200"}
-                  >
-                    <Star size={13} fill={isMain ? "currentColor" : "none"} />
-                  </button>
-                )}
-              </div>
-              <p className="mt-1 text-[10.5px] text-muted-foreground">
-                {fmtMb(g.totalVramMb)} · otros {fmtMb(others)}
-                {mine.get(g.index) ? ` · este ${fmtMb(mine.get(g.index))}` : ""}
-              </p>
-            </div>
-          )
-        })}
-      </div>
-      {multi && allowRatios && (
-        <div className="space-y-1.5">
-          <Segmented
-            size="sm"
-            disabled={readOnly}
-            value={value.ratios ? "custom" : "vram"}
-            options={[
-              { value: "vram", label: "Proporcional a la VRAM" },
-              { value: "custom", label: "A mano" },
-            ]}
-            onChange={(v) => onChange({ ratios: v === "custom" ? visible.map((g) => Math.round(g.totalVramMb / 1024)) : null })}
-          />
-          <SplitBar
-            gpus={visible}
-            ratios={value.ratios ?? visible.map((g) => g.totalVramMb)}
-            editable={Boolean(value.ratios) && !readOnly}
-            onChange={(r) => onChange({ ratios: r })}
-          />
-          <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-            Modo:
-            <Segmented
-              size="sm"
-              disabled={readOnly}
-              value={value.splitMode ?? "layer"}
-              options={[
-                { value: "layer", label: "Por capas", title: "Cada GPU guarda capas completas; lo habitual" },
-                { value: "row", label: "Por filas", title: "Divide cada capa por filas; más tráfico entre GPUs" },
-                { value: "tensor", label: "Por tensores", title: "Divide tensores; solo con soporte en el binario" },
-              ]}
-              onChange={(v) => onChange({ splitMode: v === "layer" ? undefined : v })}
-            />
-          </div>
-        </div>
-      )}
-      {multi && !allowRatios && <Hint>Se reparte en proporción a la VRAM de cada GPU.</Hint>}
-    </div>
   )
 }
 
