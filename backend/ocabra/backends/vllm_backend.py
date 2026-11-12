@@ -356,6 +356,24 @@ class VLLMBackend(BackendInterface):
             return extra_config[camel_key]
         return default
 
+    async def preview_launch(
+        self, model_id: str, gpu_indices: list[int], extra_config: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Dry run of :meth:`load` for the model editor: the vLLM command line
+        ``extra_config`` produces, without starting anything."""
+        cmd, env, _target = self._build_launch_spec(
+            model_id=model_id, gpu_indices=gpu_indices, port=0, extra_config=extra_config
+        )
+        return {
+            "argv": cmd[1:],
+            "env": {
+                k: v
+                for k, v in env.items()
+                if k == "CUDA_VISIBLE_DEVICES" or k.startswith("VLLM_")
+            },
+            "visibleGpus": list(gpu_indices),
+        }
+
     def _build_launch_spec(
         self,
         *,

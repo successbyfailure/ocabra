@@ -51,6 +51,16 @@ def overrides_enable_diarization(load_overrides: dict | None) -> bool:
     return False
 
 
+def _bitnet_parallel(extra: dict) -> object:
+    """bitnet's slot count: ``bitnet.parallel`` (or top level), what its
+    worker launches with ``--parallel``. Reading llama.cpp's
+    ``parallel_slots`` instead sized the fair gate with a key bitnet ignores."""
+    section = extra.get("bitnet")
+    if isinstance(section, dict) and section.get("parallel") is not None:
+        return section.get("parallel")
+    return extra.get("parallel")
+
+
 def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:
     """Derive the stable worker key for a model profile.
 
@@ -272,7 +282,11 @@ def resolve_worker_slots(state) -> int | None:
 
     backend_type = getattr(state, "backend_type", "")
     if is_llama_cpp_family(backend_type) or backend_type == "bitnet":
-        configured = resolve_llama_cpp_option(state, "parallel_slots", None)
+        configured = (
+            _bitnet_parallel(extra)
+            if backend_type == "bitnet"
+            else resolve_llama_cpp_option(state, "parallel_slots", None)
+        )
         if configured is None:
             use_case = extra.get("use_case")
             if isinstance(use_case, dict):

@@ -473,7 +473,11 @@ async def replace_global_schedules(session, payloads: Sequence[dict[str, object]
         await session.delete(row)
 
     new_rows: list[EvictionSchedule] = []
-    for payload in payloads:
+    for index, payload in enumerate(payloads):
+        missing = [k for k in ("id", "days", "start", "end") if k not in payload]
+        if missing:
+            # A ValueError becomes a 400 in the endpoint; a KeyError was a 500.
+            raise ValueError(f"globalSchedules[{index}] is missing: {', '.join(missing)}")
         new_rows.extend(
             global_schedule_payload_to_rows(
                 schedule_id=str(payload["id"]),
@@ -524,7 +528,11 @@ async def replace_model_schedules(
         await session.delete(row)
 
     new_rows: list[EvictionSchedule] = []
-    for payload in payloads:
+    for index, payload in enumerate(payloads):
+        missing = [k for k in ("id", "days", "start", "end") if k not in payload]
+        if missing:
+            # A ValueError becomes a 400 in the endpoint; a KeyError was a 500.
+            raise ValueError(f"schedules[{index}] is missing: {', '.join(missing)}")
         new_rows.extend(
             model_schedule_payload_to_rows(
                 model_id=model_id,

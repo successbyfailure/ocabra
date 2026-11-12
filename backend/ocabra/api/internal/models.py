@@ -11,7 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
+from ocabra.core import config_schema
 from ocabra.core import vram_planner as vp
+from ocabra.core.config_schema import vram_override_section
 from ocabra.core.model_manager_helpers import resolve_worker_slots as _resolve_worker_slots
 from ocabra.core.model_ref import LLAMA_CPP_FAMILY, is_llama_cpp_family, parse_model_ref
 from ocabra.core.vram_capacity import resolve_arch_and_weights
@@ -960,6 +962,33 @@ async def get_model_capacity(
 
 
 @router.get(
+    "/models/{model_id:path}/config-schema",
+    summary="Editable options of a model's backend",
+    responses={404: {"description": "Model not found"}},
+)
+async def get_model_config_schema(
+    model_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Describe the options the model's backend accepts, for the model editor.
+
+    Response: ``backend``, ``section`` (where its options live in
+    ``extra_config``), ``groups`` (page sections), ``fields`` (key, path, type,
+    label, help, default — global defaults resolved —, limits, options,
+    ``reload``, ``memory``, ``requires``) and ``unknownKeys`` (stored keys the
+    schema does not know: typos or leftovers).
+    """
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    out = config_schema.schema_for(state.backend_type)
+    out["unknownKeys"] = config_schema.unknown_keys(state.backend_type, state.extra_config)
+    return out
+
+
+@router.get(
     "/models/{model_id:path}",
     summary="Get model state",
     description="Return the full runtime state, capabilities, and disk size of a single model.",
@@ -1259,15 +1288,20 @@ async def update_model(
     model_id: str,
     body: ModelPatch,
     request: Request,
-    _user: UserContext = Depends(require_role("user")),
+    # model_manager, like profiles and presets: the config reaches the worker's
+    # command line (vLLM extra_args, chat templates, binaries), so a plain user
+    # must not be able to write it. It was "user" since the auth rollout.
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Update model configuration.
 
     The ``schedules`` field is persisted separately from ``update_config`` since
-    eviction schedules live in their own table. Fields the lower-level
-    ``update_config`` does not accept (``backend_type``, ``vram_estimate_mb``)
-    are silently dropped — they exist in the API schema for forward
-    compatibility but are not yet mutable post-registration.
+    eviction schedules live in their own table. ``vramEstimateMb`` is stored
+    as ``vram_estimate_mb`` in the backend's section (null clears it; 400 for
+    backends without that override). ``backendType`` cannot change (400): a
+    model moves backend through a new deployment. ``extraConfig`` is validated
+    against the backend's config schema (400 with ``errors``) and deep-merged
+    into the stored config; a null removes a key.
     """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
@@ -1277,9 +1311,28 @@ async def update_model(
     patch = body.model_dump(exclude_unset=True)
 
     schedules_payload = patch.pop("schedules", None)
-    # Not yet supported by update_config; ignore for now.
-    patch.pop("backend_type", None)
-    patch.pop("vram_estimate_mb", None)
+    if "backend_type" in patch and patch.pop("backend_type") not in (None, state.backend_type):
+        # Moving a model to another backend is a new deployment (the backend is
+        # part of the id): POST /ocabra/logical-models/{key}/deployments.
+        raise HTTPException(
+            status_code=400,
+            detail="backendType cannot be changed; add a deployment for the other backend",
+        )
+    if "vram_estimate_mb" in patch:
+        # Stored where the backend's estimator reads it. It used to be dropped
+        # silently, so the editor's "VRAM estimate" never took effect.
+        estimate = patch.pop("vram_estimate_mb")
+        section = vram_override_section(state.backend_type)
+        if section is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Backend '{state.backend_type}' does not take a VRAM estimate override",
+            )
+        if estimate is not None and (not isinstance(estimate, int) or estimate <= 0):
+            raise HTTPException(status_code=400, detail="vramEstimateMb must be a positive integer")
+        extra = dict(patch.get("extra_config") or {})
+        extra[section] = {**(extra.get(section) or {}), "vram_estimate_mb": estimate}
+        patch["extra_config"] = extra
 
     if schedules_payload is not None:
         from ocabra.database import AsyncSessionLocal
@@ -1291,6 +1344,20 @@ async def update_model(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if isinstance(patch.get("extra_config"), dict):
+        from ocabra.core.config_keys import normalize_case
+
+        problems = config_schema.validate_extra_config(
+            state.backend_type, normalize_case(patch["extra_config"], prefer="camel")[0]
+        )
+        if problems:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "; ".join(f"{p['label']}: {p['message']}" for p in problems),
+                    "errors": problems,
+                },
+            )
     if patch:
         try:
             updated = await mm.update_config(model_id, patch)
@@ -1301,6 +1368,138 @@ async def update_model(
 
     ollama_sizes = await _get_ollama_sizes_bytes() if updated.backend_type == "ollama" else {}
     return await _serialize_model_state(request, updated, ollama_sizes)
+
+
+class ModelConfigPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    preferred_gpu: int | None = Field(default=None, alias="preferredGpu")
+    extra_config: dict = Field(default_factory=dict, alias="extraConfig")
+
+
+def _preview_gpu_indices(state, extra: dict, preferred_gpu: int | None, gpu_count: int) -> list[int]:
+    """GPUs a load with this draft would most likely get (approximation of the
+    scheduler's choice, for the preview only)."""
+    target = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
+    if not is_llama_cpp_family(state.backend_type):
+        return [target]
+    section = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else {}
+    disabled = {int(g) for g in section.get("disabled_gpus") or [] if isinstance(g, int)}
+    visible = [i for i in range(gpu_count) if i not in disabled]
+    if section.get("split_mode") == "none" or len(visible) <= 1:
+        return [target if target in visible or not visible else visible[0]]
+    return visible
+
+
+def _split_estimate(
+    estimate: dict, extra: dict, gpu_indices: list[int], totals: dict[int, int]
+) -> list[dict[str, Any]]:
+    """Share of the estimated footprint on each GPU (llama.cpp tensor split)."""
+    breakdown = estimate.get("breakdown_mb") or {}
+    total = int(estimate.get("model_loading_memory_mb") or 0)
+    if not gpu_indices or total <= 0:
+        return []
+    if len(gpu_indices) == 1:
+        return [{"index": gpu_indices[0], "mb": total, "breakdown": breakdown}]
+    section = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else {}
+    split = section.get("tensor_split")
+    if isinstance(split, list) and len(split) == len(gpu_indices) and sum(split) > 0:
+        ratios = [float(v) / sum(split) for v in split]
+    elif section.get("split_strategy") == "favor_main":
+        ratios = [1.0 if i == 0 else 0.0 for i in range(len(gpu_indices))]
+    else:
+        vram = [totals.get(i, 1) for i in gpu_indices]
+        ratios = [v / sum(vram) for v in vram]
+    main = int(section.get("main_gpu") or 0)
+    overhead = int(breakdown.get("overhead", 0))
+    shared = {k: v for k, v in breakdown.items() if k != "overhead"}
+    out = []
+    for pos, (gpu, ratio) in enumerate(zip(gpu_indices, ratios, strict=True)):
+        parts = {k: int(v * ratio) for k, v in shared.items()}
+        if pos == min(main, len(gpu_indices) - 1):
+            parts["overhead"] = overhead
+        out.append({"index": gpu, "mb": sum(parts.values()), "breakdown": parts})
+    return out
+
+
+@router.post(
+    "/models/{model_id:path}/preview",
+    summary="Preview a draft configuration without saving or loading",
+    responses={404: {"description": "Model not found"}},
+)
+async def preview_model_config(
+    model_id: str,
+    body: ModelConfigPreviewRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("user")),
+) -> dict:
+    """Everything the model editor shows about a draft, in one call.
+
+    Body: ``preferredGpu`` and ``extraConfig`` (the complete draft, not a
+    patch). Response: ``errors`` (invalid options, same check as the PATCH),
+    ``unknownKeys``, ``estimate`` (as ``/memory-estimate``), ``gpus`` (the
+    estimated share of each GPU the load would use) and ``launch`` (the exact
+    worker command line, for the backends that can produce it; null otherwise).
+    Nothing is saved or started.
+    """
+    from ocabra.core import artifacts as model_artifacts
+
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    from ocabra.core.config_keys import normalize_case
+
+    draft = normalize_case(body.extra_config or {}, prefer="camel")[0]
+    errors = config_schema.validate_extra_config(state.backend_type, draft)
+    preferred = body.preferred_gpu if body.preferred_gpu is not None else state.preferred_gpu
+    try:
+        estimate = await _build_model_memory_estimate(
+            request=request,
+            state=state,
+            extra_config=draft,
+            preferred_gpu=preferred,
+            run_probe=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — the rest of the preview still helps
+        estimate = {"status": "error", "warning": str(exc)}
+
+    gpu_manager = getattr(request.app.state, "gpu_manager", None)
+    totals: dict[int, int] = {}
+    if gpu_manager is not None:
+        try:
+            for gpu in await gpu_manager.get_all_states():
+                totals[int(gpu.index)] = int(gpu.total_vram_mb)
+        except Exception:  # noqa: BLE001
+            totals = {}
+    gpu_indices = _preview_gpu_indices(state, draft, preferred, max(1, len(totals)))
+    gpus = _split_estimate(estimate, draft, gpu_indices, totals) if not errors else []
+
+    launch = None
+    if not errors:
+        try:
+            backend = await request.app.state.worker_pool.get_backend(state.backend_type)
+            preview_launch = getattr(backend, "preview_launch", None)
+            if preview_launch is not None:
+                materialized = (
+                    model_artifacts.materialize(
+                        state.backend_type, state.artifact, draft, model_artifacts.ollama_root()
+                    )
+                    if state.artifact
+                    else draft
+                )
+                launch = await preview_launch(state.backend_model_id, gpu_indices, materialized)
+        except Exception as exc:  # noqa: BLE001
+            launch = {"error": str(exc)}
+
+    return {
+        "errors": errors,
+        "unknownKeys": config_schema.unknown_keys(state.backend_type, draft),
+        "estimate": estimate,
+        "gpuIndices": gpu_indices,
+        "gpus": gpus,
+        "launch": launch,
+    }
 
 
 @router.post(
@@ -2012,6 +2211,18 @@ def _estimate_llama_cpp_memory(
         {
             "estimated_weights_mb": int(weights_mb),
             "estimated_kv_cache_mb": int(kv_mb),
+            "breakdown_mb": {
+                k: int(v)
+                for k, v in {
+                    "weights": weights_mb,
+                    "kv": kv_mb,
+                    "rs_cache": rs_mb,
+                    "fixed": fixed_mb,
+                    "draft": draft_overhead_mb,
+                    "overhead": vp.DEFAULT_OVERHEAD_MB,
+                }.items()
+                if v
+            },
             "estimated_max_context_length": estimated_max_context_length,
             "model_loading_memory_mb": total_mb,
             "fits_current_gpu": (total_mb <= total_vram_mb if total_vram_mb is not None else None),

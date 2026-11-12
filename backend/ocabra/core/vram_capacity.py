@@ -35,6 +35,28 @@ KV_DTYPES: dict[str, tuple[float, str | None, str]] = {
     "q4": (0.5, None, "q4_0"),
 }
 
+
+
+def kv_dtype_for(backend_type: str | None, label: str | None) -> tuple[float, str | None, str]:
+    """``(bytes per KV element, vLLM --kv-cache-dtype, llama.cpp cache type)``
+    for a preset/use-case KV label, as the backend will actually launch it.
+
+    The planner must size the KV with what the worker really gets: vLLM has
+    no integer KV, so ``q8``/``q4`` launch as ``fp8`` (1 byte); before, ``q8``
+    launched no flag at all (fp16, 2 bytes) while the fit check assumed 1, and
+    ``q4`` assumed 0.5. sglang's launch path has no KV dtype flag wired, so it
+    always runs fp16.
+    """
+    key = str(label or "fp16").lower()
+    entry = KV_DTYPES.get(key, KV_DTYPES["fp16"])
+    backend = (backend_type or "").lower()
+    if backend == "vllm":
+        return entry if entry[0] >= 2.0 else (1.0, "fp8", entry[2])
+    if backend == "sglang":
+        return KV_DTYPES["fp16"]
+    return entry
+
+
 # Backends that don't have a context-scaling KV cache (encoders, diffusion, TTS).
 _NON_KV_BACKENDS = {
     "whisper",
@@ -172,7 +194,7 @@ async def resolve_use_case(state, gpu_total_mb: float) -> dict | None:
 
     backend = (state.backend_type or "").lower()
     kv_label = str(uc.get("kv_dtype", "fp16")).lower()
-    kv_bytes, vllm_kv, llama_ct = KV_DTYPES.get(kv_label, (2.0, None, "f16"))
+    kv_bytes, vllm_kv, llama_ct = kv_dtype_for(backend, kv_label)
     slots = max(1, int(uc.get("slots", 1) or 1))
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
     gpu_mem_util = float(
@@ -227,7 +249,18 @@ def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> d
         return extra_config
     merged = copy.deepcopy(extra_config) if isinstance(extra_config, dict) else {}
 
-    if is_llama_cpp_family(backend) or backend == "bitnet":
+    if backend == "bitnet":
+        # bitnet reads its own section and calls the slot count ``parallel``;
+        # writing ``llama_cpp`` here (the old path) never reached the worker.
+        sect = merged.setdefault("bitnet", {})
+        sect["ctx_size"] = ctx if plan.get("context_is_pool") else ctx * slots
+        sect["parallel"] = slots
+        ct = plan.get("llama_cache_type")
+        if ct and ct != "f16":
+            sect["cache_type_k"] = ct
+            sect["cache_type_v"] = ct
+            sect["flash_attn"] = True
+    elif is_llama_cpp_family(backend):
         sect = merged.setdefault("llama_cpp", {})
         # Legacy presets express context per slot and therefore materialize
         # ``ctx * slots``. Unified-KV adaptive presets express the aggregate
@@ -241,16 +274,21 @@ def apply_use_case_flags(extra_config: dict, backend_type: str, plan: dict) -> d
             sect["cache_type_k"] = ct
             sect["cache_type_v"] = ct
             sect["flash_attn"] = True
-    elif backend in ("vllm", "sglang"):
+    elif backend == "vllm":
         sect = merged.setdefault("vllm", {})
         sect["max_model_len"] = ctx
         if plan.get("vllm_kv_cache_dtype"):
             sect["kv_cache_dtype"] = plan["vllm_kv_cache_dtype"]
+    elif backend == "sglang":
+        # sglang reads ``sglang.context_length``; the shared vLLM path wrote
+        # ``vllm.max_model_len``, which sglang never looks at.
+        sect = merged.setdefault("sglang", {})
+        sect["context_length"] = ctx
     elif backend == "ollama":
-        # Ollama takes num_ctx per request, not at load; stash for the request path.
+        # Ollama takes num_ctx at load. Its parallelism is the shared server's
+        # pool (``_runtime.parallelism``), so no per-model slot key is written.
         sect = merged.setdefault("ollama", {})
         sect["num_ctx"] = ctx
-        sect["num_parallel"] = slots
     return merged
 
 

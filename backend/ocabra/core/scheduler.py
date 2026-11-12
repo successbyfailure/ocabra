@@ -205,9 +205,11 @@ class GPUScheduler:
             for state in states:
                 if state is None or state.model_id in scheduled_models:
                     continue
-                if not self._should_evict_state(state, schedule.action):
+                if not self._should_evict_state(state, schedule.action, schedule.model_id):
                     continue
                 scheduled_models.add(state.model_id)
+                if schedule.model_id:
+                    self._hold_pin_reload(state)
                 await self._model_manager.unload(
                     state.model_id,
                     reason=f"schedule:{schedule.action}",
@@ -235,6 +237,10 @@ class GPUScheduler:
             for state in states:
                 if state is None or state.model_id in reloaded_models:
                     continue
+                if schedule.model_id:
+                    # End of a per-model window: lift the hold that kept a PIN
+                    # model's watcher from reloading it during the window.
+                    state.reload_suppressed_until = None
                 if not self._should_reload_state(state):
                     continue
                 reloaded_models.add(state.model_id)
@@ -266,16 +272,35 @@ class GPUScheduler:
             return [state] if state is not None else []
         return await self._model_manager.list_states(include_derived=True)
 
-    def _should_evict_state(self, state, action: str) -> bool:
+    def _should_evict_state(self, state, action: str, schedule_model_id: str | None = None) -> bool:
         from ocabra.core.model_manager import LoadPolicy, ModelStatus
 
         if state.status != ModelStatus.LOADED:
             return False
+        if schedule_model_id:
+            # A per-model window names the model explicitly: it applies whatever
+            # its load policy. Restricting it to WARM (the old behaviour) made
+            # the schedule a silent no-op on pin and on_demand models.
+            return state.model_id == schedule_model_id
         if action == "evict_warm":
             return state.load_policy == LoadPolicy.WARM
         if action == "evict_all":
             return state.load_policy in {LoadPolicy.WARM, LoadPolicy.PIN}
         return False
+
+    @staticmethod
+    def _hold_pin_reload(state) -> None:
+        """Keep a PIN model's reload watcher quiet until the window's end.
+
+        The matching ``reload`` row clears the hold; the week-long ceiling only
+        guards against a window whose end row was deleted meanwhile.
+        """
+        from datetime import timedelta
+
+        from ocabra.core.model_manager import LoadPolicy
+
+        if state.load_policy == LoadPolicy.PIN:
+            state.reload_suppressed_until = datetime.now(UTC) + timedelta(days=7)
 
     def _should_reload_state(self, state) -> bool:
         from ocabra.core.model_manager import LoadPolicy, ModelStatus

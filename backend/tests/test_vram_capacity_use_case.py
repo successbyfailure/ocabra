@@ -69,10 +69,14 @@ async def test_resolve_use_case_accounts_unified_context_as_aggregate(monkeypatc
     assert plan["context_is_pool"] is True
 
 
-def test_bitnet_gets_the_same_multiplication():
+def test_bitnet_gets_the_same_multiplication_in_its_own_section():
+    """bitnet reads ``bitnet.*`` and calls the slots ``parallel``; writing the
+    llama.cpp section never reached its worker."""
     plan = {"applied": True, "effective_context": 4096, "slots": 4}
     merged = apply_use_case_flags({}, "bitnet", plan)
-    assert merged["llama_cpp"]["ctx_size"] == 16384
+    assert merged["bitnet"]["ctx_size"] == 16384
+    assert merged["bitnet"]["parallel"] == 4
+    assert "llama_cpp" not in merged
 
 
 def test_vllm_max_model_len_is_not_multiplied_by_slots():
@@ -90,7 +94,9 @@ def test_ollama_num_ctx_is_not_multiplied_by_slots():
     plan = {"applied": True, "effective_context": 32768, "slots": 2}
     merged = apply_use_case_flags({}, "ollama", plan)
     assert merged["ollama"]["num_ctx"] == 32768
-    assert merged["ollama"]["num_parallel"] == 2
+    # Ollama's parallelism is the shared server's pool; nothing reads a
+    # per-model num_parallel.
+    assert "num_parallel" not in merged["ollama"]
 
 
 def test_returns_extra_config_unchanged_when_not_applied():

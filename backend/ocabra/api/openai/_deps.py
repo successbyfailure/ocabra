@@ -13,6 +13,7 @@ import json
 import time
 from collections.abc import Coroutine
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -546,6 +547,7 @@ async def resolve_profile(
                 # router) that carry no useful information — the request was
                 # served by the router's own base_model_id, no different from
                 # a plain profile call.
+                note_router_resolution(profile, target)
                 if request_state is not None and target.profile_id != profile.profile_id:
                     try:
                         request_state.via_router_profile_id = profile.profile_id
@@ -1157,7 +1159,14 @@ async def _ensure_worker_loaded(
 
     # Without the diarization switch, like the worker key: diarizing is decided
     # per request (see strip_diarization_overrides).
-    merged_extra = {**base_state.extra_config, **strip_diarization_overrides(load_overrides)}
+    # Deep merge: a profile that overrides one option of a backend section
+    # (``{"vllm": {"max_model_len": 8192}}``) keeps the rest of the base
+    # section instead of replacing it wholesale. A null drops the base key.
+    from ocabra.core.model_manager import _deep_merge_dicts
+
+    merged_extra = _deep_merge_dicts(
+        dict(base_state.extra_config or {}), strip_diarization_overrides(load_overrides)
+    )
 
     # Dedicated worker: reuse an existing transient state, but refresh it when
     # no process is running. Mutating a loaded/loading state would make its
@@ -1318,15 +1327,33 @@ def get_federation_manager(request: Request):
     return getattr(request.app.state, "federation_manager", None)
 
 
+# (target profile id, router request_defaults) of the router that resolved this
+# request. Resolution swaps the router for its target profile, so without this
+# the router's own defaults were never applied to anything.
+_ROUTER_DEFAULTS: ContextVar[tuple[str, dict] | None] = ContextVar(
+    "ocabra_router_request_defaults", default=None
+)
+
+
+def note_router_resolution(router: ModelProfile, target: ModelProfile) -> None:
+    """Remember the router's ``request_defaults`` for the target it chose."""
+    defaults = router.request_defaults if isinstance(router.request_defaults, dict) else None
+    if defaults and target.profile_id != router.profile_id:
+        _ROUTER_DEFAULTS.set((target.profile_id, dict(defaults)))
+
+
 def merge_profile_defaults(profile: ModelProfile, body: dict) -> dict:
     """Merge a profile's ``request_defaults`` and ``assets`` into a request body.
 
-    The profile's ``request_defaults`` serve as a base; the client body
-    overrides anything explicitly set. Asset injection (e.g. ``voice_ref``)
-    is applied *after* the merge and cannot be overridden by the client.
+    Precedence, lowest first: the profile's ``request_defaults``, then those of
+    the router the client named (when this profile is the target it chose),
+    then the client body. Asset injection (e.g. ``voice_ref``) is applied
+    *after* the merge and cannot be overridden by the client.
     """
     defaults = profile.request_defaults or {}
-    merged: dict[str, Any] = {**defaults, **body}
+    routed = _ROUTER_DEFAULTS.get()
+    router_defaults = routed[1] if routed and routed[0] == profile.profile_id else {}
+    merged: dict[str, Any] = {**defaults, **router_defaults, **body}
 
     # Asset injection — controlled paths that clients cannot override
     assets = profile.assets or {}

@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer-path", default=None)
     parser.add_argument("--max-batch-size", type=int, default=None)
     parser.add_argument("--max-num-tokens", type=int, default=None)
+    parser.add_argument("--max-seq-len", type=int, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
 
@@ -49,6 +50,8 @@ def _serve_args(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--max_batch_size", str(args.max_batch_size)])
     if args.max_num_tokens:
         cmd.extend(["--max_num_tokens", str(args.max_num_tokens)])
+    if getattr(args, "max_seq_len", None):
+        cmd.extend(["--max_seq_len", str(args.max_seq_len)])
     if args.trust_remote_code:
         cmd.append("--trust_remote_code")
     return cmd

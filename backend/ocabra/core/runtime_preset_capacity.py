@@ -16,7 +16,7 @@ from ocabra.core.model_manager_helpers import (
 )
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.runtime_presets import build_runtime_key
-from ocabra.core.vram_capacity import KV_DTYPES, resolve_arch_and_weights
+from ocabra.core.vram_capacity import kv_dtype_for, resolve_arch_and_weights
 
 # Backends whose multi-GPU placement is a real, proportional spread across
 # the requested GPUs (Ollama's shared-pool mode, llama.cpp/bitnet's default
@@ -429,7 +429,7 @@ async def resolve_profile_runtime_capacities(
                 "index": -1,
                 "total_mb": sum(int(gpu["total_mb"]) for gpu in selected_gpus),
             }
-            kv_bytes = KV_DTYPES.get(str(preset.kv_cache_dtype).lower(), (2.0, None, "f16"))[0]
+            kv_bytes = kv_dtype_for(backend, preset.kv_cache_dtype)[0]
             plan = _plan_preset_capacity(
                 backend,
                 resolution.arch,
@@ -503,7 +503,7 @@ async def resolve_profile_runtime_capacities(
             continue
 
         candidates = _ordered_candidates(preset, state, gpus)
-        kv_bytes = KV_DTYPES.get(str(preset.kv_cache_dtype).lower(), (2.0, None, "f16"))[0]
+        kv_bytes = kv_dtype_for(backend, preset.kv_cache_dtype)[0]
         evaluated: list[tuple[dict[str, int], dict[str, Any]]] = []
         for gpu in candidates:
             plan = _plan_preset_capacity(

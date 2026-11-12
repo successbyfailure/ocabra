@@ -141,7 +141,13 @@ class TensorRTLLMBackend(BackendInterface):
             settings.tensorrt_llm_context_length,
         )
         if context_length:
-            cmd.extend(["--max-num-tokens", str(context_length)])
+            # The context is the max sequence length. It used to be passed as
+            # --max-num-tokens (the per-step batch token budget), so it never
+            # limited the context and could choke batching instead.
+            cmd.extend(["--max-seq-len", str(context_length)])
+        max_num_tokens = self._get_option(extra_config, "max_num_tokens", None)
+        if max_num_tokens:
+            cmd.extend(["--max-num-tokens", str(max_num_tokens)])
         if self._get_option(
             extra_config,
             "trust_remote_code",

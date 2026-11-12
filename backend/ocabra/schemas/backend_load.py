@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # ---------------------------------------------------------------------------
 
 KvCacheType = Literal["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"]
-SplitMode = Literal["layer", "row", "none"]
+SplitMode = Literal["layer", "row", "tensor", "none"]
 SplitStrategy = Literal["evenly", "favor_main"]
 RuntimeType = Literal["cuda", "rocm", "vulkan", "cpu"]
 VisionMode = Literal["enabled", "disabled", "on_demand"]

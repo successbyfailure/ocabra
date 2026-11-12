@@ -39,6 +39,7 @@ from ._deps import (
     keepalive_until_done,
     lookup_profile,
     merge_profile_defaults,
+    note_router_resolution,
     raise_inference_dispatch_error,
     raise_upstream_http_error,
     resolve_profile,
@@ -158,6 +159,7 @@ async def completions(
             resolved = await router_resolver.pick(profile, request_body=body)
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None and target.profile_id != profile.profile_id:
+                note_router_resolution(profile, target)
                 try:
                     request.state.via_router_profile_id = profile.profile_id
                     request.state.resolved_model_id = target.profile_id

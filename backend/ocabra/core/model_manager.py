@@ -3497,7 +3497,10 @@ class ModelManager:
             for state in self._states.values()
             if state.model_id != requested_model_id
             and state.status == ModelStatus.LOADED
-            and not state.pin_permanent
+            # Hard pin only means something for PIN models; on a warm or
+            # on-demand model a leftover ``pin_permanent`` must not make it
+            # untouchable under pressure.
+            and not (state.pin_permanent and state.load_policy == LoadPolicy.PIN)
             # Bloque 20 — a Realtime session's LLM/STT/TTS workers are
             # invisible to pressure eviction. Ripping them out mid-turn
             # kills the WebSocket in a way the client can't recover from.
@@ -5225,11 +5228,16 @@ class ModelManager:
         finally to ``global_default``.
         """
         extra = state.extra_config if isinstance(state.extra_config, dict) else {}
-        section = extra.get(state.backend_type)
-        if isinstance(section, dict):
-            value = section.get("keep_alive_seconds")
-            if isinstance(value, int):
-                return value
+        # llamacpp_mks reads its options from the shared ``llama_cpp`` section
+        # (config_section_for); looking only under the backend name made the
+        # per-model override invisible for every mks model.
+        sections = [state.backend_type, model_artifacts.config_section_for(state.backend_type)]
+        for name in dict.fromkeys(sections):
+            section = extra.get(name)
+            if isinstance(section, dict):
+                value = section.get("keep_alive_seconds")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
         value = extra.get("keep_alive_seconds")
         if isinstance(value, int):
             return value

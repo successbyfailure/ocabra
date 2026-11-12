@@ -225,7 +225,100 @@ class LlamaCppBackend(BackendInterface):
         self._vision_locks.pop(model_id, None)
 
         extra_config = kwargs.get("extra_config") or {}
-        model_file = self._resolve_model_file(model_id, extra_config)
+        cmd, env, options, visible_gpus, _model_file = await self._build_launch(
+            model_id, gpu_indices, port, extra_config
+        )
+        self._model_configs[model_id] = options
+
+        # No LD_LIBRARY_PATH of our own: llama-server is compiled in this image,
+        # against the CUDA toolkit whose runtime the image registers with the
+        # linker. Until v0.67.5 the workers borrowed cuBLAS/cudart from vLLM's
+        # venv, so updating or removing vLLM silently changed llama.cpp.
+
+        logger.info(
+            "llama_cpp_starting",
+            model_id=model_id,
+            port=port,
+            gpu_layers=options["gpu_layers"],
+        )
+        # stdout/stderr go to a real file, NOT asyncio.subprocess.PIPE.
+        # Nothing was ever draining those pipes after startup (only a
+        # one-shot 0.3s stderr peek on a crashed *startup*, never during
+        # normal serving) — llama-server logs per-request/per-slot info by
+        # default, and once the kernel pipe buffer (~64KB) fills up, the
+        # next write() blocks the server process, wedging the entire
+        # continuous-batching loop while /health keeps answering (it's a
+        # separate, cheap code path) — alive, healthy-looking, zero GPU
+        # util, every in-flight generation stuck until the 1500s timeout.
+        # Prime suspect for the long-unconfirmed "Luis gemma4 hang"
+        # (2026-10-25 on, recurred 2026-10-30): reproduced today — a
+        # worker hung mid-serving, SIGTERM timed out, only SIGKILL worked,
+        # exactly the profile of a process blocked in a write() syscall it
+        # can't be interrupted out of. Mirrors the pattern already used in
+        # piper_backend.py.
+        log_path = _worker_log_path(model_id)
+        log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — worker-lifetime handle
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=log_file,
+            stderr=log_file,
+        )
+        self._processes[model_id] = _LlamaCppWorker(process=process, port=port, log_file=log_file)
+
+        try:
+            await self._wait_for_startup(
+                model_id,
+                port,
+                timeout_s=int(options.get("startup_timeout_s") or _DEFAULT_STARTUP_TIMEOUT_S),
+            )
+        except BaseException:
+            # ``CancelledError`` inherits directly from BaseException on
+            # modern Python. A request cancelled while the model is still
+            # health-checking must terminate the subprocess too; otherwise it
+            # finishes loading after its owner disappeared and leaks VRAM.
+            await self._kill_process(model_id)
+            raise
+
+        if options["vision_mode"] == "enabled":
+            self._vision_active.add(model_id)
+
+        vram_used_mb = await self.get_vram_estimate_mb(model_id)
+        return WorkerInfo(
+            backend_type=self.BACKEND_TYPE,
+            model_id=model_id,
+            gpu_indices=visible_gpus or gpu_indices,
+            port=port,
+            pid=process.pid or 0,
+            vram_used_mb=vram_used_mb,
+        )
+
+    @staticmethod
+    def _preview_path(resolver: Any, ref: str) -> Path:
+        try:
+            return resolver(ref)
+        except Exception:
+            return Path(f"<no encontrado: {ref}>")
+
+    async def _build_launch(
+        self,
+        model_id: str,
+        gpu_indices: list[int],
+        port: int,
+        extra_config: dict[str, Any],
+        *,
+        preview: bool = False,
+    ) -> tuple[list[str], dict[str, str], dict[str, Any], list[int], Path]:
+        """Command line, environment and resolved options of a worker launch.
+
+        ``preview=True`` is the editor's dry run: missing files become
+        placeholders instead of errors and nothing is started.
+        """
+        model_file = (
+            self._preview_path(lambda _: self._resolve_model_file(model_id, extra_config), model_id)
+            if preview
+            else self._resolve_model_file(model_id, extra_config)
+        )
         options = self._build_options(extra_config)
         options["model_file"] = str(model_file)
         # A two-GPU preset that keeps a reserve free starts below its maximum
@@ -254,8 +347,6 @@ class LlamaCppBackend(BackendInterface):
             and len(visible_gpus) > 1
         ):
             options["tensor_split"] = await self._compute_evenly_tensor_split(visible_gpus)
-
-        self._model_configs[model_id] = options
 
         cmd = [
             sys.executable,
@@ -336,10 +427,19 @@ class LlamaCppBackend(BackendInterface):
             cmd.extend(["--override-tensor", str(options["override_tensor"])])
 
         # --- Sprint 17.4 — speculative decoding + concurrency ---
-        cmd.extend(await self._speculative_args(model_id, options))
+        try:
+            cmd.extend(await self._speculative_args(model_id, options))
+        except Exception:
+            if not preview:
+                raise
+            cmd.append("--model-draft <no encontrado>")
 
         if options["vision_mode"] in {"enabled", "on_demand"}:
-            mmproj_path = self._resolve_mmproj_path(str(options["mmproj_model_id"]))
+            mmproj_path = (
+                self._preview_path(self._resolve_mmproj_path, str(options["mmproj_model_id"]))
+                if preview
+                else self._resolve_mmproj_path(str(options["mmproj_model_id"]))
+            )
             options["mmproj_path"] = str(mmproj_path)
             if options["vision_mode"] == "enabled":
                 cmd.extend(["--mmproj", str(mmproj_path)])
@@ -372,68 +472,28 @@ class LlamaCppBackend(BackendInterface):
             if options["gpu_layers"] > 0
             else "",
         }
-        # No LD_LIBRARY_PATH of our own: llama-server is compiled in this image,
-        # against the CUDA toolkit whose runtime the image registers with the
-        # linker. Until v0.67.5 the workers borrowed cuBLAS/cudart from vLLM's
-        # venv, so updating or removing vLLM silently changed llama.cpp.
+        env = {
+            **os.environ,
+            "CUDA_DEVICE_ORDER": settings.cuda_device_order,
+            "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in visible_gpus)
+            if options["gpu_layers"] > 0
+            else "",
+        }
+        return cmd, env, options, visible_gpus, model_file
 
-        logger.info(
-            "llama_cpp_starting",
-            model_id=model_id,
-            port=port,
-            gpu_layers=options["gpu_layers"],
+    async def preview_launch(
+        self, model_id: str, gpu_indices: list[int], extra_config: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Dry run of :meth:`load` for the model editor: the exact flags the
+        worker would receive with ``extra_config``, without starting it."""
+        cmd, env, options, visible_gpus, _ = await self._build_launch(
+            model_id, gpu_indices, 0, extra_config, preview=True
         )
-        # stdout/stderr go to a real file, NOT asyncio.subprocess.PIPE.
-        # Nothing was ever draining those pipes after startup (only a
-        # one-shot 0.3s stderr peek on a crashed *startup*, never during
-        # normal serving) — llama-server logs per-request/per-slot info by
-        # default, and once the kernel pipe buffer (~64KB) fills up, the
-        # next write() blocks the server process, wedging the entire
-        # continuous-batching loop while /health keeps answering (it's a
-        # separate, cheap code path) — alive, healthy-looking, zero GPU
-        # util, every in-flight generation stuck until the 1500s timeout.
-        # Prime suspect for the long-unconfirmed "Luis gemma4 hang"
-        # (2026-10-25 on, recurred 2026-10-30): reproduced today — a
-        # worker hung mid-serving, SIGTERM timed out, only SIGKILL worked,
-        # exactly the profile of a process blocked in a write() syscall it
-        # can't be interrupted out of. Mirrors the pattern already used in
-        # piper_backend.py.
-        log_path = _worker_log_path(model_id)
-        log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — worker-lifetime handle
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=env,
-            stdout=log_file,
-            stderr=log_file,
-        )
-        self._processes[model_id] = _LlamaCppWorker(process=process, port=port, log_file=log_file)
-
-        try:
-            await self._wait_for_startup(
-                model_id,
-                port,
-                timeout_s=int(options.get("startup_timeout_s") or _DEFAULT_STARTUP_TIMEOUT_S),
-            )
-        except BaseException:
-            # ``CancelledError`` inherits directly from BaseException on
-            # modern Python. A request cancelled while the model is still
-            # health-checking must terminate the subprocess too; otherwise it
-            # finishes loading after its owner disappeared and leaks VRAM.
-            await self._kill_process(model_id)
-            raise
-
-        if options["vision_mode"] == "enabled":
-            self._vision_active.add(model_id)
-
-        vram_used_mb = await self.get_vram_estimate_mb(model_id)
-        return WorkerInfo(
-            backend_type=self.BACKEND_TYPE,
-            model_id=model_id,
-            gpu_indices=visible_gpus or gpu_indices,
-            port=port,
-            pid=process.pid or 0,
-            vram_used_mb=vram_used_mb,
-        )
+        return {
+            "argv": cmd[2:],
+            "env": {"CUDA_VISIBLE_DEVICES": env.get("CUDA_VISIBLE_DEVICES", "")},
+            "visibleGpus": visible_gpus,
+        }
 
     async def unload(self, model_id: str) -> None:
         await self._kill_process(model_id, graceful=True)
