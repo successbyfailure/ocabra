@@ -404,6 +404,6 @@ no el editor mostraría controles que no hacen nada:
   solo llamacpp_mks y con GPUs declaradas en el peldaño.
 - Layout por ancho disponible (flex-wrap; grid de la página con minmax(0,1fr)).
 - Tarjeta de Models nueva (`components/models/ModelCard.tsx`) para ambas vistas.
-- Deuda: etiquetas «medido» y «techo» se pisan en la gráfica cuando coinciden;
-  admisión no descuenta n_cpu_moe (sobre-reserva); chip de mantenimiento en la
-  tarjeta sin fuente barata; bitnet sin banco de trabajo propio.
+- Deuda cerrada en v0.77.1 (41d0d1d): etiquetas de la gráfica, admisión con
+  n_cpu_moe (vram_planner.moe_cpu_weights_mb), `maintenance` en GET /models +
+  chip en la tarjeta, bitnet en el banco de trabajo (solo ★ y capas en GPU).
