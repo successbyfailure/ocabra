@@ -297,15 +297,17 @@ no el editor mostraría controles que no hacen nada:
 - Tests: backend `tests/core/test_model_editor_backend.py`; frontend
   `components/model-editor/**/__tests__`.
 
-**Deudas.**
-- La vista previa supone las GPUs que elegiría el planificador. Con presets,
-  la memoria por GPU es la de la configuración base; lo real lo dice cada
-  preset (se muestra aparte).
-- El reparto por GPU de la estimación solo es exacto en llama.cpp. Los demás
-  backends dan un total.
-- `runtime_policy.remote_warm_threshold_seconds` sigue sin consumidor (oculto
-  en la UI).
-- `api.profiles.update` no puede mandar null en `load_overrides` y
-  `request_defaults`: vaciarlos manda `{}`.
-- Las rutas de modelo y proyector solo se muestran. Cambiarlas sigue siendo
-  editar el artefacto en Avanzado.
+**Deudas cerradas después** (mismo día, antes de desplegar).
+- Con presets, la vista previa enseña por defecto la huella del preset por
+  defecto, con un selector de preset o "sin preset". El backend da
+  `estimated_vram_mb` y `vram_by_gpu` en `…/resolved`.
+- vLLM/SGLang con tensor parallel reparten la estimación entre sus GPUs.
+- Los perfiles se vacían con null.
+- Las rutas de modelo y mmproj se editan en Avanzado, y un null en mmproj o
+  draft los quita del artefacto.
+- `remote_warm_threshold_seconds` queda documentado como sin efecto. Se acepta
+  porque hay políticas guardadas con él.
+
+**Lo que queda, por diseño.**
+- La memoria por GPU de llama.cpp es una estimación desde el GGUF, no una
+  medida. La medida real está en el dashboard (`vramByGpu`).

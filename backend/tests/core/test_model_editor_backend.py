@@ -107,8 +107,10 @@ def test_llamacpp_mks_shares_the_llama_cpp_section_and_fields():
 
 def test_hidden_fields_are_not_offered():
     keys = {f["key"] for f in config_schema.schema_for("llama_cpp")["fields"]}
-    assert "llama_cpp.model_path" not in keys
+    assert "llama_cpp.total_layers" not in keys
     assert "llama_cpp.keep_alive_seconds" not in keys  # the top-level one is offered
+    # Paths are editable (advanced): the PATCH folds them into the artifact.
+    assert "llama_cpp.model_path" in keys
 
 
 def test_global_defaults_are_resolved(monkeypatch):
@@ -504,3 +506,45 @@ def test_no_model_subroute_is_shadowed_app_wide():
     catch_all = gets.index("/ocabra/models/{model_id:path}")
     late = [p for p in gets[catch_all + 1 :] if p.startswith("/ocabra/models/{model_id:path}/")]
     assert not late, f"shadowed by the catch-all: {late}"
+
+
+def test_preview_vllm_tensor_parallel_uses_tp_gpus_split_evenly():
+    from ocabra.api.internal.models import _preview_gpu_indices, _split_estimate
+
+    state = _state(backend_type="vllm")
+    extra = {"vllm": {"tensor_parallel_size": 2}}
+    assert _preview_gpu_indices(state, extra, 1, 2) == [1, 0]
+    gpus = _split_estimate({"model_loading_memory_mb": 1000}, extra, [1, 0], {})
+    assert [(g["index"], g["mb"]) for g in gpus] == [(1, 500), (0, 500)]
+
+
+def test_preset_footprint_splits_by_gpu_size_and_counts_slots():
+    from ocabra.core import vram_planner as vp
+    from ocabra.core.runtime_preset_capacity import _footprint
+
+    arch = vp.ModelArch(32, 8, 128, 128, 4096, 131072, 2.0)
+    gpus = [{"index": 0, "total_mb": 12288}, {"index": 1, "total_mb": 24576}]
+    pool = _footprint("llamacpp_mks", arch, 10000, effective=32768, parallelism=4, kv_bytes=1.0,
+                      unified_pool=True, gpus=gpus, gpu_memory_utilization=0.9)
+    slots = _footprint("llamacpp_mks", arch, 10000, effective=32768, parallelism=4, kv_bytes=1.0,
+                       unified_pool=False, gpus=gpus, gpu_memory_utilization=0.9)
+    assert slots["estimated_vram_mb"] > pool["estimated_vram_mb"]  # 4 x 32k vs 32k shared
+    assert pool["vram_by_gpu"][1] == 2 * pool["vram_by_gpu"][0] or abs(pool["vram_by_gpu"][1] - 2 * pool["vram_by_gpu"][0]) <= 1
+    vllm = _footprint("vllm", None, 0, effective=8192, parallelism=4, kv_bytes=2.0,
+                      unified_pool=False, gpus=gpus[:1], gpu_memory_utilization=0.5)
+    assert vllm == {"estimated_vram_mb": 6144, "vram_by_gpu": {0: 6144}}
+
+
+def test_null_mmproj_or_draft_clears_it_from_the_artifact():
+    from ocabra.core.artifacts import apply_path_edits
+
+    artifact = {"source": "local", "path": "/m.gguf", "mmproj": {"source": "local", "path": "/p.gguf"},
+                "draft": {"source": "local", "path": "/d.gguf"}}
+    current = {"llama_cpp": {"model_path": "/m.gguf", "mmproj_model_id": "/p.gguf",
+                             "speculative": {"draft_model_id": "/d.gguf"}}}
+    out = apply_path_edits("llamacpp_mks", artifact, {"llama_cpp": {"mmproj_model_id": None}}, current)
+    assert "mmproj" not in out and out["draft"]["path"] == "/d.gguf"
+    out = apply_path_edits("llamacpp_mks", artifact, {"llama_cpp": {"speculative": {"draft_model_id": None}}}, current)
+    assert "draft" not in out and out["mmproj"]["path"] == "/p.gguf"
+    # Omitting the key changes nothing.
+    assert apply_path_edits("llamacpp_mks", artifact, {"llama_cpp": {"ctx_size": 1}}, current) == artifact

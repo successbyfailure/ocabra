@@ -19,6 +19,9 @@ class RuntimePolicy(BaseModel):
     downgrade_grace_seconds: int = Field(default=600, ge=0, le=86400)
     minimum_residency_seconds: int = Field(default=120, ge=0, le=86400)
     small_requests_extend_large_ttl: bool = False
+    # Sin efecto: nunca tuvo consumidor (el reparto local/remoto lo decide
+    # execution_policy). Se sigue aceptando porque hay políticas guardadas con
+    # él y el modelo prohíbe claves extra; el editor no lo ofrece.
     remote_warm_threshold_seconds: int = Field(default=10, ge=0, le=3600)
     max_context_tokens: int | None = Field(default=None, gt=0)
     # Optional enforceable generation ceiling. This is deliberately distinct
@@ -163,6 +166,9 @@ class RuntimePresetResolutionOut(BaseModel):
     fits: bool
     runtime_key: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    # Estimated footprint of a load with this preset (model editor preview).
+    estimated_vram_mb: int | None = None
+    vram_by_gpu: dict[int, int] = Field(default_factory=dict)
 
 
 class ContextProbeRequest(BaseModel):

@@ -184,6 +184,49 @@ def _uses_unified_kv_pool(state: Any) -> bool:
     return bool(raw)
 
 
+
+def _footprint(
+    backend: str,
+    arch: Any,
+    weights_mb: float,
+    *,
+    effective: int,
+    parallelism: int,
+    kv_bytes: float,
+    unified_pool: bool,
+    gpus: list[dict[str, int]],
+    gpu_memory_utilization: float,
+) -> dict[str, Any]:
+    """Estimated VRAM of a resolved preset, total and per target GPU.
+
+    For the model editor: what a load with this preset would occupy, split
+    across its GPUs in proportion to their size (llama.cpp's even split).
+    vLLM/SGLang reserve their memory fraction of each GPU up front.
+    """
+    if effective <= 0 or not gpus:
+        return {}
+    if backend in ("vllm", "sglang"):
+        per_gpu = {
+            int(g["index"]): int(int(g["total_mb"]) * gpu_memory_utilization) for g in gpus
+        }
+        return {"estimated_vram_mb": sum(per_gpu.values()), "vram_by_gpu": per_gpu}
+    if arch is None:
+        return {}
+    tokens = effective if unified_pool else effective * max(1, parallelism)
+    total = (
+        weights_mb
+        + vp.kv_vram_mb(arch, tokens, kv_bytes)
+        + vp.rs_cache_vram_mb(arch, slots=max(1, parallelism))
+        + vp.fixed_overhead_vram_mb(arch)
+        + vp.DEFAULT_OVERHEAD_MB
+    )
+    sizes = [max(1, int(g["total_mb"])) for g in gpus]
+    per_gpu = {
+        int(g["index"]): int(total * size / sum(sizes)) for g, size in zip(gpus, sizes, strict=True)
+    }
+    return {"estimated_vram_mb": int(total), "vram_by_gpu": per_gpu}
+
+
 def _plan_preset_capacity(
     backend: str,
     arch: Any,
@@ -498,6 +541,17 @@ async def resolve_profile_runtime_capacities(
                     "fits": fits,
                     "runtime_key": runtime_key,
                     "warnings": warnings,
+                    **_footprint(
+                        backend,
+                        resolution.arch,
+                        resolution.weights_mb,
+                        effective=effective,
+                        parallelism=effective_parallelism,
+                        kv_bytes=kv_bytes,
+                        unified_pool=unified_pool,
+                        gpus=list(selected_gpus),
+                        gpu_memory_utilization=gpu_memory_utilization,
+                    ),
                 }
             )
             continue
@@ -609,6 +663,17 @@ async def resolve_profile_runtime_capacities(
                 "fits": fits,
                 "runtime_key": runtime_key,
                 "warnings": warnings,
+                **_footprint(
+                    backend,
+                    resolution.arch,
+                    resolution.weights_mb,
+                    effective=effective,
+                    parallelism=effective_parallelism,
+                    kv_bytes=kv_bytes,
+                    unified_pool=unified_pool,
+                    gpus=[chosen_gpu],
+                    gpu_memory_utilization=gpu_memory_utilization,
+                ),
             }
         )
     return rows

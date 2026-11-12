@@ -1509,6 +1509,9 @@ export interface RuntimePresetResolution {
   fits: boolean;
   runtimeKey: string | null;
   warnings: string[];
+  /** VRAM estimada de una carga con este preset, total y por GPU (MB). */
+  estimatedVramMb?: number | null;
+  vramByGpu?: Record<string, number>;
 }
 
 export interface RuntimePresetBenchmark {
@@ -1588,8 +1591,9 @@ export interface ProfileUpdate {
   displayName?: string;
   description?: string;
   category?: string;
-  loadOverrides?: Record<string, unknown>;
-  requestDefaults?: Record<string, unknown>;
+  /** null borra la clave (sin sobrescrituras / sin valores por defecto). */
+  loadOverrides?: Record<string, unknown> | null;
+  requestDefaults?: Record<string, unknown> | null;
   enabled?: boolean;
   isDefault?: boolean;
   routingTargets?: string[] | null;

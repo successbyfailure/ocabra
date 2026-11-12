@@ -338,6 +338,13 @@ def apply_path_edits(
             return spec.get(key)
         return sec.get(key, extra.get(key))
 
+    def _explicit_null(extra: dict, key: str) -> bool:
+        sec = extra.get(section_key) if isinstance(extra.get(section_key), dict) else {}
+        if key == "draft_model_id":
+            spec = sec.get("speculative")
+            return isinstance(spec, dict) and key in spec and spec[key] is None
+        return (key in sec and sec[key] is None) or (key in extra and extra[key] is None)
+
     updated = dict(artifact)
     for key, label in (
         ("model_path", None),
@@ -345,6 +352,11 @@ def apply_path_edits(
         ("draft_model_id", "draft"),
     ):
         new_value = read(incoming_extra, key)
+        if label is not None and new_value is None and _explicit_null(incoming_extra, key):
+            # A null clears the projector / draft (merge-patch semantics);
+            # skipping it left the artifact pointing at the old file.
+            updated.pop(label, None)
+            continue
         if not new_value or new_value == read(current_extra, key):
             continue
         if label is None:

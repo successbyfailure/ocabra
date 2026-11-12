@@ -250,8 +250,12 @@ _LLAMA_FIELDS: list[Field] = [
     _f(_L, "keep_alive_seconds", "int", "Descargar tras inactividad", "load",
        min=0, unit="s", reload=False, hidden=True),
     _f(_L, "total_layers", "int", "Capas totales (estimador)", "advanced", min=1, hidden=True),
-    _f(_L, "mmproj_model_id", "string", "Proyector de visión", "advanced", hidden=True),
-    _f(_L, "model_path", "string", "Fichero del modelo", "advanced", hidden=True),
+    _f(_L, "model_path", "string", "Fichero del modelo", "advanced",
+       help="Ruta del GGUF. Se guarda en el artefacto del despliegue; cambiarla carga otros "
+       "pesos.", nullable=False, memory=True, advanced=True, widget="path"),
+    _f(_L, "mmproj_model_id", "string", "Proyector de visión", "advanced",
+       help="Ruta o id del mmproj. Vacío = sin visión.", memory=True, advanced=True,
+       widget="path"),
 ]
 
 
@@ -286,7 +290,9 @@ _BITNET_FIELDS: list[Field] = [
        unit="MB", memory=True, advanced=True),
     _f(_B, "total_layers", "int", "Capas totales (estimador)", "advanced", min=1,
        advanced=True),
-    _f(_B, "model_path", "string", "Fichero del modelo", "advanced", hidden=True),
+    _f(_B, "model_path", "string", "Fichero del modelo", "advanced",
+       help="Ruta del GGUF. Se guarda en el artefacto del despliegue.", nullable=False,
+       memory=True, advanced=True, widget="path"),
 ]
 
 
@@ -477,7 +483,9 @@ _WHISPERCPP_FIELDS: list[Field] = [
        default="pyannote/speaker-diarization-3.1"),
     _f("whisper_cpp", "startup_timeout_s", "int", "Tiempo máximo de arranque", "runtime",
        default_setting="whispercpp_startup_timeout_s", min=5, unit="s", reload=False),
-    _f("whisper_cpp", "model_path", "string", "Fichero del modelo", "advanced", hidden=True),
+    _f("whisper_cpp", "model_path", "string", "Fichero del modelo", "advanced",
+       help="Ruta del modelo ggml. Se guarda en el artefacto del despliegue.", nullable=False,
+       advanced=True, widget="path"),
 ]
 
 _VIBEASR_FIELDS: list[Field] = [

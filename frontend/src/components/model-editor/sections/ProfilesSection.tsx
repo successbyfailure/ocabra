@@ -386,8 +386,9 @@ function ProfileEditor({
         description,
         category,
         isDefault,
-        requestDefaults: defaults,
-        loadOverrides: overrides,
+        // Vacío = null: el perfil queda sin valores por defecto / sin sobrescrituras.
+        requestDefaults: Object.keys(defaults).length ? defaults : null,
+        loadOverrides: Object.keys(overrides).length ? overrides : null,
       })
       toast.success("Perfil guardado")
       await onChanged()

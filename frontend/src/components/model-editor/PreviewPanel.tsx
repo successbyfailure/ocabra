@@ -21,6 +21,7 @@ export const PART_META: Record<string, { label: string; color: string }> = {
   draft: { label: "draft", color: "#f59e0b" },
   overhead: { label: "extra", color: "#94a3b8" },
   model: { label: "modelo", color: "#6366f1" },
+  preset: { label: "con el preset", color: "#6366f1" },
 }
 
 export function fmtMb(mb: number | null | undefined): string {
@@ -97,12 +98,21 @@ export function PreviewPanel({
 }) {
   const [showCmd, setShowCmd] = useState(false)
   const [showChanges, setShowChanges] = useState(true)
+  // Con presets, lo que de verdad se carga es un preset: por defecto se enseña
+  // la huella del preset por defecto; "base" es la configuración sin preset.
+  const defaultPreset = presets.find((r) => r.preset.isDefault)?.preset.presetKey ?? presets[0]?.preset.presetKey ?? null
+  const [viewChoice, setViewChoice] = useState<string | null>(null)
+  const view = viewChoice ?? defaultPreset ?? "base"
+  const rung = presets.find((r) => r.preset.presetKey === view)
   const p = editor.preview
   const est = p?.estimate
-  const shares = new Map((p?.gpus ?? []).map((g) => [g.index, g]))
+  const presetGpus: PreviewGpu[] | null = rung?.resolution?.vramByGpu && Object.keys(rung.resolution.vramByGpu).length
+    ? Object.entries(rung.resolution.vramByGpu).map(([index, mb]) => ({ index: Number(index), mb, breakdown: { preset: mb } }))
+    : null
+  const shares = new Map((rung ? (presetGpus ?? []) : (p?.gpus ?? [])).map((g) => [g.index, g]))
   const used = gpus.filter((g) => shares.has(g.index))
   const verdict = (() => {
-    if (!p || !est || !used.length) return null
+    if ((!rung && (!p || !est)) || !used.length) return null
     const fitsNow = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= g.totalVramMb - Math.max(0, g.usedVramMb - (liveVramByGpu[String(g.index)] ?? 0)))
     const fitsEmpty = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= g.totalVramMb)
     if (fitsNow) return { tone: "ok" as const, text: "Cabe ahora" }
@@ -126,18 +136,37 @@ export function PreviewPanel({
       <div className="space-y-2.5 rounded-xl border border-border bg-card p-3">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium">Memoria por GPU</span>
-          {est?.model_loading_memory_mb ? <span className="text-xs tabular-nums text-muted-foreground">total {fmtMb(est.model_loading_memory_mb)}</span> : null}
+          {rung ? (
+            rung.resolution?.estimatedVramMb ? <span className="text-xs tabular-nums text-muted-foreground">total {fmtMb(rung.resolution.estimatedVramMb)}</span> : null
+          ) : est?.model_loading_memory_mb ? (
+            <span className="text-xs tabular-nums text-muted-foreground">total {fmtMb(est.model_loading_memory_mb)}</span>
+          ) : null}
         </div>
+        {presets.length > 0 && (
+          <div className="flex flex-wrap gap-1" data-testid="preview-view">
+            {[...presets.map((r) => ({ key: r.preset.presetKey, label: r.preset.label })), { key: "base", label: "sin preset" }].map((o) => (
+              <button
+                key={o.key}
+                type="button"
+                onClick={() => setViewChoice(o.key)}
+                className={cn("rounded px-1.5 py-0.5 text-[10.5px]", view === o.key ? "bg-primary/20 text-foreground" : "text-muted-foreground hover:bg-muted")}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {rung && !presetGpus && <p className="text-[11px] text-muted-foreground">Sin estimación de memoria para este preset.</p>}
         {gpus.length === 0 && <p className="text-xs text-muted-foreground">Sin datos de GPU.</p>}
         {gpus.map((gpu) => (
           <GpuMemoryBar key={gpu.index} gpu={gpu} share={shares.get(gpu.index)} ownLiveMb={liveVramByGpu[String(gpu.index)] ?? 0} />
         ))}
-        {p?.gpus?.[0] && (
+        {shares.size > 0 && (
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
             <span className="flex items-center gap-1">
               <span className="h-2 w-2 rounded-sm bg-slate-600/70" /> otros
             </span>
-            {Object.keys(Object.assign({}, ...p.gpus.map((g) => (Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb })))).map((part) => (
+            {Object.keys(Object.assign({}, ...[...shares.values()].map((g) => (Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb })))).map((part) => (
               <span key={part} className="flex items-center gap-1">
                 <span className="h-2 w-2 rounded-sm" style={{ background: PART_META[part]?.color ?? "#a78bfa" }} />
                 {PART_META[part]?.label ?? part}
@@ -146,8 +175,8 @@ export function PreviewPanel({
           </div>
         )}
         {verdict && <Callout tone={verdict.tone === "ok" ? "ok" : verdict.tone}>{verdict.text}</Callout>}
-        {est?.warning && <p className="text-[11px] text-amber-300">{est.warning}</p>}
-        {est?.source && est.source !== "gguf_header" && (
+        {!rung && est?.warning && <p className="text-[11px] text-amber-300">{est.warning}</p>}
+        {!rung && est?.source && est.source !== "gguf_header" && (
           <p className="text-[10.5px] text-muted-foreground">Estimación {est.source === "heuristic" ? "aproximada" : est.source}.</p>
         )}
       </div>

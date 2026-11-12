@@ -1455,6 +1455,18 @@ def _preview_gpu_indices(state, extra: dict, preferred_gpu: int | None, gpu_coun
     """GPUs a load with this draft would most likely get (approximation of the
     scheduler's choice, for the preview only)."""
     target = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
+    if state.backend_type in ("vllm", "sglang"):
+        # Tensor parallel shards the model over that many GPUs, starting with
+        # the preferred one.
+        section = extra.get(state.backend_type) if isinstance(extra.get(state.backend_type), dict) else {}
+        try:
+            tp = int(section.get("tensor_parallel_size") or 1)
+        except (TypeError, ValueError):
+            tp = 1
+        if tp > 1:
+            order = [target] + [i for i in range(gpu_count) if i != target]
+            return order[: min(tp, gpu_count)]
+        return [target]
     if not is_llama_cpp_family(state.backend_type):
         return [target]
     section = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else {}
@@ -1477,6 +1489,10 @@ def _split_estimate(
         return [{"index": gpu_indices[0], "mb": total, "breakdown": breakdown}]
     section = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else {}
     split = section.get("tensor_split")
+    if not section and not breakdown:
+        # vLLM/SGLang tensor parallel: equal shards.
+        share = total // len(gpu_indices)
+        return [{"index": g, "mb": share, "breakdown": {}} for g in gpu_indices]
     if isinstance(split, list) and len(split) == len(gpu_indices) and sum(split) > 0:
         ratios = [float(v) / sum(split) for v in split]
     elif section.get("split_strategy") == "favor_main":

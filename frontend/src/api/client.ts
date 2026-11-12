@@ -912,6 +912,12 @@ function toRuntimePresetResolution(raw: unknown): RuntimePresetResolution {
     fits: Boolean(data.fits),
     runtimeKey: (data.runtime_key ?? data.runtimeKey ?? null) as string | null,
     warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
+    estimatedVramMb: toNumberOrNull(data, "estimated_vram_mb", "estimatedVramMb"),
+    vramByGpu: isRecord(data.vram_by_gpu ?? data.vramByGpu)
+      ? Object.fromEntries(
+          Object.entries((data.vram_by_gpu ?? data.vramByGpu) as Record<string, unknown>).map(([k, v]) => [k, Number(v)]),
+        )
+      : {},
   };
 }
 

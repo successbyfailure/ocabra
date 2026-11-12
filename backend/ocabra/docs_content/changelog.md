@@ -46,6 +46,10 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 - **Los horarios de un modelo funcionan con cualquier política de carga.**
   Solo actuaban sobre los modelos `warm`; en `pin` y `on_demand` no hacían
   nada. Un modelo fijado ya no se recarga dentro de su franja.
+- **`GET /ocabra/profiles/{id}/runtime-presets/resolved` devuelve la VRAM
+  estimada de cada preset**: `estimated_vram_mb` y `vram_by_gpu`.
+- **Un `null` en `mmproj_model_id` o en `speculative.draft_model_id` quita el
+  proyector o el draft.** Antes se ignoraba y el modelo seguía cargándolos.
 
 ### Correcciones
 
