@@ -300,9 +300,18 @@ _BITNET_FIELDS: list[Field] = [
 
 _OLLAMA_FIELDS: list[Field] = [
     _f("ollama", "num_ctx", "int", "Contexto", "context",
-       help="Se envía a Ollama al cargar el modelo.", min=256, unit="tokens", memory=True,
+       help="Por debajo del máximo global de Ollama (Ajustes > Ollama), que es el valor "
+       "por defecto y el tope.",
+       default_setting="ollama_max_context", min=256, unit="tokens", memory=True,
        widget="context"),
 ]
+
+
+def _dynamic_max(f: Field) -> float | None:
+    """Limits that come from a global setting rather than a constant."""
+    if f.path == ("ollama", "num_ctx"):
+        return float(settings.ollama_max_context)
+    return f.max
 
 
 # ── vLLM ────────────────────────────────────────────────────────────────────
@@ -608,6 +617,8 @@ def schema_for(backend_type: str) -> dict[str, Any]:
         if f.hidden:
             continue
         item = f.to_json()
+        if _dynamic_max(f) is not None:
+            item["max"] = _dynamic_max(f)
         if f.path[-1] == "runtime" and f.path[0] == _L:
             # Only the runtimes with an installed binary are choosable.
             item["options"] = [
@@ -652,8 +663,9 @@ def _type_error(f: Field, value: Any) -> str | None:
             return "debe ser un número entero" if t == "int" else "debe ser un número"
         if f.min is not None and value < f.min:
             return f"mínimo {f.min:g}"
-        if f.max is not None and value > f.max:
-            return f"máximo {f.max:g}"
+        limit = _dynamic_max(f)
+        if limit is not None and value > limit:
+            return f"máximo {limit:g}"
         return None
     if t == "enum":
         allowed = [v for v, _ in f.options]

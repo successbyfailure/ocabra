@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { api } from "@/api/client"
-import type { RuntimePreset, RuntimePresetResolution } from "@/types"
+import type { ModelProfile, RuntimePreset, RuntimePresetResolution } from "@/types"
 
 export interface LadderRung {
   preset: RuntimePreset
@@ -15,28 +15,37 @@ export interface LadderRung {
 export function usePresetLadder(modelId: string | null | undefined) {
   const [rungs, setRungs] = useState<LadderRung[]>([])
   const [profileId, setProfileId] = useState<string | null>(null)
+  const [profile, setProfile] = useState<ModelProfile | null>(null)
+  const [resolutions, setResolutions] = useState<Record<string, RuntimePresetResolution>>({})
 
   const reload = useCallback(async () => {
     if (!modelId) return
     try {
       const profiles = await api.profiles.listByModel(modelId)
-      const candidates = profiles.filter(
-        (p) => p.profileKind !== "router" && p.category === "llm" && p.runtimePresets.some((r) => r.enabled),
-      )
-      const profile = candidates.find((p) => p.isDefault) ?? candidates[0]
+      // El perfil LLM por defecto (con o sin presets): es el que lleva la
+      // escalera de Capacidad.
+      const llm = profiles.filter((p) => p.profileKind !== "router" && p.category === "llm")
+      const profile = llm.find((p) => p.isDefault && p.runtimePresets.length) ??
+        llm.find((p) => p.runtimePresets.length) ??
+        llm.find((p) => p.isDefault) ??
+        llm[0]
       if (!profile) {
         setRungs([])
         setProfileId(null)
+        setProfile(null)
+        setResolutions({})
         return
       }
       let resolved: RuntimePresetResolution[] = []
       try {
-        resolved = await api.profiles.resolveRuntimePresets(profile.profileId)
+        if (profile.runtimePresets.length) resolved = await api.profiles.resolveRuntimePresets(profile.profileId)
       } catch {
         /* sin resolución, se enseñan los presets tal cual */
       }
       const enabled = profile.runtimePresets.filter((r) => r.enabled)
       setProfileId(profile.profileId)
+      setProfile(profile)
+      setResolutions(Object.fromEntries(resolved.map((r) => [r.presetKey, r])))
       setRungs(
         enabled.map((preset) => ({
           preset,
@@ -52,5 +61,5 @@ export function usePresetLadder(modelId: string | null | undefined) {
     void reload()
   }, [reload])
 
-  return { rungs, profileId, reload, active: rungs.length > 0 }
+  return { rungs, profileId, profile, resolutions, reload, active: rungs.length > 0 }
 }

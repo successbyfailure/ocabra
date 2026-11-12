@@ -900,14 +900,27 @@ class ModelManager:
         return sources
 
     async def resolve_ollama_num_ctx_cap(self, model_id: str) -> int | None:
-        """num_ctx cap for an Ollama model with a ``use_case`` block, else None
-        (no clamp). A concrete ``context`` is returned directly; ``max``/unset is
-        resolved to the largest context that fits on the target GPU and cached
-        briefly (the value is stable — it depends on GPU total, not live free)."""
+        """num_ctx cap for an Ollama model.
+
+        Never above the global ``ollama_max_context``: a client ``num_ctx``
+        larger than that would make the shared daemon reload the model with a
+        KV it was never sized for. Below it, the model's own ``ollama.num_ctx``
+        or ``use_case`` context (``max`` resolved to what fits the target GPU,
+        cached briefly) lowers the cap further.
+        """
         state = self._states.get(model_id)
         if not state or state.backend_type != "ollama":
             return None
+        cap = await self._resolve_ollama_num_ctx_cap(model_id, state)
+        global_max = int(settings.ollama_max_context)
+        return min(cap, global_max) if cap else global_max
+
+    async def _resolve_ollama_num_ctx_cap(self, model_id: str, state: "ModelState") -> int | None:
         extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+        own = extra.get("ollama") if isinstance(extra.get("ollama"), dict) else {}
+        num_ctx = own.get("num_ctx")
+        if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) and num_ctx > 0:
+            return num_ctx
         uc = extra.get("use_case")
         if not isinstance(uc, dict):
             return None
@@ -1509,6 +1522,14 @@ class ModelManager:
                 continue
             was_loaded = state.status == ModelStatus.LOADED
             previous_gpus = list(state.current_gpu or [])
+            # The single daemon sees every GPU and places layers itself: keep
+            # what oCabra already attributed, else count it on all of them.
+            gpus = list(item["pool_gpus"]) or previous_gpus
+            if not gpus and self._gpu_manager is not None:
+                try:
+                    gpus = [g.index for g in await self._gpu_manager.get_all_states()]
+                except Exception:  # noqa: BLE001
+                    gpus = []
             event = (
                 "ollama_model_residency_refreshed"
                 if was_loaded
@@ -1518,13 +1539,13 @@ class ModelManager:
                 event,
                 model_id=state.model_id,
                 vram_mb=item["vram_mb"],
-                pool_gpus=item["pool_gpus"],
+                pool_gpus=gpus,
                 previous_gpus=previous_gpus,
             )
             worker_info = WorkerInfo(
                 backend_type="ollama",
                 model_id=state.model_id,
-                gpu_indices=item["pool_gpus"],
+                gpu_indices=gpus,
                 port=0,
                 pid=0,
                 vram_used_mb=item["vram_mb"],
@@ -1534,15 +1555,15 @@ class ModelManager:
             if callable(note_resident) and item["pool_url"]:
                 note_resident(state.backend_model_id, item["pool_url"])
             state.worker_info = worker_info
-            state.current_gpu = item["pool_gpus"]
+            state.current_gpu = gpus
             state.vram_used_mb = item["vram_mb"]
             state.status = ModelStatus.LOADED
             state.loaded_at = datetime.now(UTC)
             state.error_message = None
             self._worker_pool.set_worker(state.model_id, worker_info)
-            if not was_loaded and self._gpu_manager and item["pool_gpus"]:
-                vram_per_gpu = item["vram_mb"] // max(1, len(item["pool_gpus"]))
-                for gpu_idx in item["pool_gpus"]:
+            if not was_loaded and self._gpu_manager and gpus:
+                vram_per_gpu = item["vram_mb"] // max(1, len(gpus))
+                for gpu_idx in gpus:
                     await self._gpu_manager.lock_vram(gpu_idx, vram_per_gpu, state.model_id)
 
     async def warm_template_capabilities(self) -> None:
@@ -2261,70 +2282,9 @@ class ModelManager:
                                 )
                                 effective_extra = state.extra_config
 
+                            # Ollama is one shared daemon now (no per-GPU pools to
+                            # pick): the scheduler's GPUs are only its accounting.
                             backend_gpu_indices = gpu_indices
-                            if state.backend_type == "ollama" and state.preferred_gpu is not None:
-                                # Ollama affinity is enforced by selecting an
-                                # independently CUDA-pinned pool endpoint —
-                                # the generic scheduler's gpu_indices is
-                                # ignored here by design (it doesn't know
-                                # about pool/parallelism constraints). But a
-                                # model statically pinned to one GPU used to
-                                # have zero fallback when that GPU was busy:
-                                # the load would sit through the full
-                                # pressure-eviction cascade and fail minutes
-                                # later even when another, idle single-GPU
-                                # pool had plenty of room (2026-10-26
-                                # incident: gemma4:12b forced onto a busy
-                                # 3090, 3 failed loads, while the 3060 sat
-                                # completely free). Check real free VRAM on
-                                # the preferred GPU first; only fall back to
-                                # an alternate single-GPU pool when it
-                                # genuinely doesn't fit there.
-                                target_gpu = state.preferred_gpu
-                                fallback_candidates = getattr(
-                                    backend, "single_gpu_pool_candidates", None
-                                )
-                                if (
-                                    self._gpu_manager is not None
-                                    and vram_needed
-                                    and callable(fallback_candidates)
-                                ):
-                                    try:
-                                        free_mb = await self._gpu_manager.get_free_vram(target_gpu)
-                                    except Exception:  # noqa: BLE001
-                                        free_mb = None
-                                    if free_mb is not None and free_mb < vram_needed:
-                                        runtime_meta = (
-                                            effective_extra.get("_runtime")
-                                            if isinstance(effective_extra, dict)
-                                            else None
-                                        )
-                                        required_parallelism = max(
-                                            1,
-                                            int((runtime_meta or {}).get("parallelism") or 1),
-                                        )
-                                        for alt_gpu in fallback_candidates(
-                                            exclude_gpu=target_gpu,
-                                            required_parallelism=required_parallelism,
-                                        ):
-                                            try:
-                                                alt_free_mb = await self._gpu_manager.get_free_vram(
-                                                    alt_gpu
-                                                )
-                                            except Exception:  # noqa: BLE001
-                                                continue
-                                            if alt_free_mb >= vram_needed:
-                                                logger.info(
-                                                    "ollama_preferred_gpu_fallback",
-                                                    model_id=model_id,
-                                                    preferred_gpu=target_gpu,
-                                                    fallback_gpu=alt_gpu,
-                                                    vram_needed_mb=vram_needed,
-                                                    free_vram_mb=alt_free_mb,
-                                                )
-                                                target_gpu = alt_gpu
-                                                break
-                                backend_gpu_indices = [target_gpu]
                             monitor_task = (
                                 asyncio.create_task(
                                     self._monitor_load_vram_progress(model_id, backend_gpu_indices)

@@ -98,33 +98,23 @@ export function PreviewPanel({
 }) {
   const [showCmd, setShowCmd] = useState(false)
   const [showChanges, setShowChanges] = useState(true)
-  // Con presets, lo que de verdad se carga es un preset: por defecto se enseña
-  // la huella del preset por defecto; "base" es la configuración sin preset.
-  const defaultPreset = presets.find((r) => r.preset.isDefault)?.preset.presetKey ?? presets[0]?.preset.presetKey ?? null
-  const [viewChoice, setViewChoice] = useState<string | null>(null)
-  const view = viewChoice ?? defaultPreset ?? "base"
-  const rung = presets.find((r) => r.preset.presetKey === view)
   const p = editor.preview
   const est = p?.estimate
-  const presetGpus: PreviewGpu[] | null = rung?.resolution?.vramByGpu && Object.keys(rung.resolution.vramByGpu).length
-    ? Object.entries(rung.resolution.vramByGpu).map(([index, mb]) => ({ index: Number(index), mb, breakdown: { preset: mb } }))
-    : null
-  const shares = new Map((rung ? (presetGpus ?? []) : (p?.gpus ?? [])).map((g) => [g.index, g]))
+  // Encaje de la base (sin preset): lo que el borrador ocuparía en cada GPU
+  // frente a lo que dejan libre los demás. Las barras viven en Capacidad.
+  const shares = new Map((p?.gpus ?? []).map((g) => [g.index, g]))
   const used = gpus.filter((g) => shares.has(g.index))
   const verdict = (() => {
-    if ((!rung && (!p || !est)) || !used.length) return null
+    if (!p || !est || !used.length) return null
     const fitsNow = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= g.totalVramMb - Math.max(0, g.usedVramMb - (liveVramByGpu[String(g.index)] ?? 0)))
     const fitsEmpty = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= g.totalVramMb)
-    if (fitsNow) return { tone: "ok" as const, text: "Cabe ahora" }
-    if (fitsEmpty) return { tone: "warn" as const, text: "Cabe desalojando otros modelos" }
-    return { tone: "error" as const, text: "No cabe en estas GPUs" }
+    if (fitsNow) return { tone: "ok" as const, text: "cabe ahora" }
+    if (fitsEmpty) return { tone: "warn" as const, text: "cabe desalojando otros" }
+    return { tone: "error" as const, text: "no cabe" }
   })()
   const reloads = editor.changes.filter((c) => c.reload).length
   const loaded = editor.model?.status === "loaded"
-  const nativeCtx = Number(editor.model?.capabilities?.native_context_length || 0) || null
   const requested = est?.requested_context_length ?? null
-  const maxCtx = est?.estimated_max_total_context ?? est?.estimated_max_context_length ?? null
-  const scale = Math.max(nativeCtx ?? 0, requested ?? 0, maxCtx ?? 0, 1)
 
   return (
     <aside className="space-y-3 text-sm" data-testid="preview-panel">
@@ -133,94 +123,40 @@ export function PreviewPanel({
         {editor.previewLoading ? <Loader2 size={14} className="animate-spin text-muted-foreground" /> : <RefreshCw size={12} className="text-muted-foreground/50" />}
       </div>
 
-      <div className="space-y-2.5 rounded-xl border border-border bg-card p-3">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium">Memoria por GPU</span>
-          {rung ? (
-            rung.resolution?.estimatedVramMb ? <span className="text-xs tabular-nums text-muted-foreground">total {fmtMb(rung.resolution.estimatedVramMb)}</span> : null
-          ) : est?.model_loading_memory_mb ? (
-            <span className="text-xs tabular-nums text-muted-foreground">total {fmtMb(est.model_loading_memory_mb)}</span>
-          ) : null}
-        </div>
-        {presets.length > 0 && (
-          <div className="flex flex-wrap gap-1" data-testid="preview-view">
-            {[...presets.map((r) => ({ key: r.preset.presetKey, label: r.preset.label })), { key: "base", label: "sin preset" }].map((o) => (
-              <button
-                key={o.key}
-                type="button"
-                onClick={() => setViewChoice(o.key)}
-                className={cn("rounded px-1.5 py-0.5 text-[10.5px]", view === o.key ? "bg-primary/20 text-foreground" : "text-muted-foreground hover:bg-muted")}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        )}
-        {rung && !presetGpus && <p className="text-[11px] text-muted-foreground">Sin estimación de memoria para este preset.</p>}
-        {gpus.length === 0 && <p className="text-xs text-muted-foreground">Sin datos de GPU.</p>}
-        {gpus.map((gpu) => (
-          <GpuMemoryBar key={gpu.index} gpu={gpu} share={shares.get(gpu.index)} ownLiveMb={liveVramByGpu[String(gpu.index)] ?? 0} />
-        ))}
-        {shares.size > 0 && (
-          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <span className="h-2 w-2 rounded-sm bg-slate-600/70" /> otros
+      <div className="space-y-1.5 rounded-xl border border-border bg-card p-3" data-testid="preview-fit">
+        <div className="text-xs font-medium">Encaje</div>
+        {verdict ? (
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]" data-testid="preview-base">
+            <span className={verdict.tone === "ok" ? "text-emerald-300" : verdict.tone === "warn" ? "text-amber-300" : "text-red-300"}>
+              {verdict.tone === "error" ? "✗" : "✓"}
             </span>
-            {Object.keys(Object.assign({}, ...[...shares.values()].map((g) => (Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb })))).map((part) => (
-              <span key={part} className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-sm" style={{ background: PART_META[part]?.color ?? "#a78bfa" }} />
-                {PART_META[part]?.label ?? part}
-              </span>
+            <span className="font-medium">{presets.length ? "Base" : "Esta configuración"}</span>
+            {editor.schema?.isLlm && requested ? <span className="tabular-nums text-muted-foreground">{fmtContext(requested)}</span> : null}
+            {est?.model_loading_memory_mb ? <span className="tabular-nums text-muted-foreground">· {fmtMb(est.model_loading_memory_mb)}</span> : null}
+            <span className="text-muted-foreground">· {verdict.text}</span>
+            {used.map((g) => (
+              <GpuBadge key={g.index} index={g.index} gpus={gpus} />
             ))}
           </div>
+        ) : (
+          <p className="text-[11px] text-muted-foreground">{editor.previewLoading ? "Calculando…" : "Sin estimación de memoria."}</p>
         )}
-        {verdict && <Callout tone={verdict.tone === "ok" ? "ok" : verdict.tone}>{verdict.text}</Callout>}
-        {!rung && est?.warning && <p className="text-[11px] text-amber-300">{est.warning}</p>}
-        {!rung && est?.source && est.source !== "gguf_header" && (
-          <p className="text-[10.5px] text-muted-foreground">Estimación {est.source === "heuristic" ? "aproximada" : est.source}.</p>
-        )}
+        {presets.map(({ preset, resolution }) => (
+          <div key={preset.presetKey} className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span className={resolution?.fits === false ? "text-red-300" : "text-emerald-300"}>{resolution?.fits === false ? "✗" : "✓"}</span>
+            <span className="font-medium">{preset.label}</span>
+            {preset.isDefault && <span className="text-amber-300">★</span>}
+            <span className="tabular-nums text-muted-foreground">{fmtContext(resolution?.effectiveContext ?? preset.contextTokens)}</span>
+            <span className="text-muted-foreground">· p{resolution?.effectiveParallelism ?? preset.parallelism}</span>
+            {resolution?.estimatedVramMb ? <span className="tabular-nums text-muted-foreground">· {fmtMb(resolution.estimatedVramMb)}</span> : null}
+            {(resolution?.targetGpus ?? preset.preferredGpus ?? []).map((g) => (
+              <GpuBadge key={g} index={g} gpus={gpus} />
+            ))}
+          </div>
+        ))}
+        {est?.warning && <p className="text-[11px] text-amber-300">{est.warning}</p>}
+        <p className="text-[10.5px] text-muted-foreground">Las barras por GPU están en Capacidad.</p>
       </div>
-
-      {presets.length > 0 && (
-        <div className="space-y-2 rounded-xl border border-border bg-card p-3" data-testid="preview-presets">
-          <div className="text-xs font-medium">Presets activos</div>
-          <p className="text-[10.5px] text-muted-foreground">Cada carga usa el contexto, los slots, la KV y las GPUs de su preset; la configuración base pone el resto.</p>
-          {presets.map(({ preset, resolution }) => (
-            <div key={preset.presetKey} className="flex flex-wrap items-center gap-1.5 text-[11px]">
-              <span className={resolution?.fits === false ? "text-red-300" : "text-emerald-300"}>{resolution?.fits === false ? "✗" : "✓"}</span>
-              <span className="font-medium">{preset.label}</span>
-              {preset.isDefault && <span className="text-amber-300">★</span>}
-              <span className="tabular-nums text-muted-foreground">{fmtContext(resolution?.effectiveContext ?? preset.contextTokens)}</span>
-              <span className="text-muted-foreground">· p{resolution?.effectiveParallelism ?? preset.parallelism}</span>
-              {(resolution?.targetGpus ?? preset.preferredGpus ?? []).map((g) => (
-                <GpuBadge key={g} index={g} gpus={gpus} />
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {editor.schema?.isLlm && (requested || maxCtx) && presets.length === 0 && (
-        <div className="space-y-2 rounded-xl border border-border bg-card p-3" data-testid="preview-context">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-medium">Contexto</span>
-            <span className="tabular-nums text-muted-foreground">{fmtContext(requested)} configurado</span>
-          </div>
-          <div className="relative h-3 overflow-hidden rounded-md bg-muted/50">
-            {maxCtx && <div className="absolute inset-y-0 left-0 bg-emerald-500/25" style={{ width: `${(maxCtx / scale) * 100}%` }} title={`Máximo que cabe: ${fmtContext(maxCtx)}`} />}
-            {requested && (
-              <div
-                className={cn("absolute inset-y-0 left-0", maxCtx && requested > maxCtx ? "bg-red-500/70" : "bg-sky-500/80")}
-                style={{ width: `${(requested / scale) * 100}%` }}
-              />
-            )}
-          </div>
-          <div className="flex justify-between text-[10.5px] text-muted-foreground">
-            <span>cabe hasta {fmtContext(maxCtx)}{est?.gpu_index != null ? ` en la #${est.gpu_index}` : ""}</span>
-            {nativeCtx ? <span>nativo {fmtContext(nativeCtx)}</span> : null}
-          </div>
-        </div>
-      )}
 
       {p?.errors?.length ? (
         <Callout tone="error">

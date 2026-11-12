@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   Box,
   Cpu,
-  Gauge,
   Hammer,
   Info,
   Layers,
@@ -33,11 +32,9 @@ import { CompileModal } from "@/components/models/CompileModal"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import { MobilePreviewBar, PreviewPanel } from "@/components/model-editor/PreviewPanel"
 import { AccessSection } from "@/components/model-editor/sections/AccessSection"
-import { ContextSection } from "@/components/model-editor/sections/ContextSection"
-import { GpuSection } from "@/components/model-editor/sections/GpuSection"
+import { CapacitySection } from "@/components/model-editor/sections/CapacitySection"
 import { LoadSection } from "@/components/model-editor/sections/LoadSection"
 import { AccelerationSection, AdvancedSection, GroupSection, ResponseSection } from "@/components/model-editor/sections/MiscSections"
-import { PresetsSection } from "@/components/model-editor/sections/PresetsSection"
 import { ProfilesSection } from "@/components/model-editor/sections/ProfilesSection"
 import { SummarySection } from "@/components/model-editor/sections/SummarySection"
 import type { SectionProps } from "@/components/model-editor/sections/types"
@@ -54,9 +51,7 @@ import type { LogicalModel, ModelState } from "@/types"
 type SectionId =
   | "summary"
   | "load"
-  | "gpus"
-  | "context"
-  | "presets"
+  | "capacity"
   | "response"
   | "acceleration"
   | "audio"
@@ -70,9 +65,7 @@ type SectionId =
 const SECTIONS: { id: SectionId; label: string; icon: typeof Info; llmOnly?: boolean; group?: string }[] = [
   { id: "summary", label: "Resumen", icon: Info },
   { id: "load", label: "Carga", icon: Power },
-  { id: "gpus", label: "GPUs", icon: Cpu },
-  { id: "context", label: "Contexto", icon: Layers, llmOnly: true },
-  { id: "presets", label: "Presets", icon: Gauge, llmOnly: true },
+  { id: "capacity", label: "Capacidad", icon: Layers },
   { id: "response", label: "Respuesta", icon: MessageSquare, llmOnly: true },
   { id: "acceleration", label: "Aceleración", icon: Rocket },
   { id: "audio", label: "Audio", icon: Mic, group: "audio" },
@@ -96,7 +89,9 @@ export function ModelEditor() {
   const navigate = useNavigate()
   const location = useLocation()
   const [search, setSearch] = useSearchParams()
-  const section = (search.get("s") as SectionId | null) ?? "summary"
+  // GPUs, Contexto y Presets se fundieron en Capacidad (enlaces viejos incluidos).
+  const rawSection = search.get("s")
+  const section = (["gpus", "context", "presets"].includes(rawSection ?? "") ? "capacity" : rawSection) as SectionId | null ?? "summary"
   const setSection = (s: SectionId) => setSearch((q) => {
     q.set("s", s)
     return q
@@ -197,17 +192,27 @@ export function ModelEditor() {
   const dirtyGroups = new Set(
     editor.changes.map((c) => {
       if (c.key === "loadPolicy" || c.key === "pinPermanent" || c.key === "schedules") return "load"
-      if (c.key === "preferredGpu") return "gpus"
-      return editor.fieldByKey.get(c.key)?.group ?? "advanced"
+      if (c.key === "preferredGpu") return "capacity"
+      const group = editor.fieldByKey.get(c.key)?.group ?? "advanced"
+      return group === "gpus" || group === "context" ? "capacity" : group
     }),
   )
-  const errorGroups = new Set(editor.previewErrors.map((e) => editor.fieldByKey.get(e.key)?.group ?? "advanced"))
+  const errorGroups = new Set(
+    editor.previewErrors.map((e) => {
+      const group = editor.fieldByKey.get(e.key)?.group ?? "advanced"
+      return group === "gpus" || group === "context" ? "capacity" : group
+    }),
+  )
   const status = (m.runtime_phase ?? m.status) as ModelState["status"]
   const loaded = m.status === "loaded"
   const loading = m.status === "loading"
   const needsReload = loaded && editor.changes.some((c) => c.reload)
 
-  const props: SectionProps = { editor, readOnly, isAdmin, logical, refreshLogical, gpus, liveVramByGpu, presets: ladder.rungs, insights, reloadInsights }
+  // Ollama no admite presets: aunque quedasen en la base de datos, se ignoran.
+  const isOllama = m.backend_type === "ollama"
+  const rungs = isOllama ? [] : ladder.rungs
+  const capacityLadder = isOllama ? { ...ladder, rungs: [], profile: null } : ladder
+  const props: SectionProps = { editor, readOnly, isAdmin, logical, refreshLogical, gpus, liveVramByGpu, presets: rungs, insights, reloadInsights }
 
   const run = async (label: string, fn: () => Promise<unknown>, ok: string) => {
     setBusy(label)
@@ -324,7 +329,7 @@ export function ModelEditor() {
           <ul className="flex gap-1 overflow-x-auto lg:flex-col">
             {visible.map((s) => {
               const Icon = s.icon
-              const dirty = dirtyGroups.has(s.id) || (s.id === "context" && dirtyGroups.has("context"))
+              const dirty = dirtyGroups.has(s.id)
               const bad = errorGroups.has(s.id)
               return (
                 <li key={s.id}>
@@ -358,9 +363,7 @@ export function ModelEditor() {
             />
           )}
           {active === "load" && <LoadSection {...props} />}
-          {active === "gpus" && <GpuSection {...props} />}
-          {active === "context" && <ContextSection {...props} />}
-          {active === "presets" && <PresetsSection {...props} />}
+          {active === "capacity" && <CapacitySection {...props} ladder={capacityLadder} />}
           {active === "response" && <ResponseSection {...props} />}
           {active === "acceleration" && <AccelerationSection {...props} />}
           {active === "audio" && <GroupSection {...props} group="audio" title="Audio" />}
@@ -374,10 +377,10 @@ export function ModelEditor() {
 
         {/* Vista previa */}
         <div className="hidden lg:sticky lg:top-28 lg:block lg:max-h-[calc(100vh-8rem)] lg:self-start lg:overflow-y-auto">
-          <PreviewPanel editor={editor} gpus={gpus} liveVramByGpu={liveVramByGpu} presets={ladder.rungs} />
+          <PreviewPanel editor={editor} gpus={gpus} liveVramByGpu={liveVramByGpu} presets={rungs} />
         </div>
       </div>
-      <MobilePreviewBar editor={editor} gpus={gpus} liveVramByGpu={liveVramByGpu} presets={ladder.rungs} />
+      <MobilePreviewBar editor={editor} gpus={gpus} liveVramByGpu={liveVramByGpu} presets={rungs} />
       <div className="h-12 lg:hidden" aria-hidden>
       </div>
 

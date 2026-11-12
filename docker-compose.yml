@@ -16,15 +16,6 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       MODELS_DIR: /data/models
       HF_CACHE_DIR: /data/hf_cache
-      # Un único pool vainilla desde la migración a llama.cpp custom
-      # (2026-11-02): los modelos grandes/multi-GPU que justificaban los 4
-      # pools (3090 dedicada, 3060 dedicada, shared np1/np2 para presets
-      # max/128k) ya corren en llama_cpp, que soporta --parallel y
-      # tensor-split por modelo sin necesitar un pool Ollama por combinación.
-      # Ollama queda para los modelos aún no migrados y como fallback
-      # "-ollama" de los ya migrados — carga ligera, un pool basta.
-      # multi_gpu:true evita que _select_pool falle si algo pide ambas GPUs.
-      OLLAMA_POOLS_JSON: '${OLLAMA_POOLS_JSON:-[{"id":"default","url":"http://ollama:11434","gpus":[0,1],"num_parallel":2,"multi_gpu":true}]}'
       VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       VLLM_ENFORCE_EAGER: ${VLLM_ENFORCE_EAGER:-true}
       VLLM_ATTENTION_BACKEND: ${VLLM_ATTENTION_BACKEND:-}
@@ -96,6 +87,10 @@ services:
       # AND rebuild the ffmpeg layer, and needs the Dockerfile at the same
       # relative path the compose file declares.
       - ./Dockerfile.ollama:/opt/ocabra/Dockerfile.ollama:ro
+      # Global settings of the shared Ollama daemon (parallelism, max
+      # context): oCabra writes this file from Ajustes and recreates the
+      # ollama service, which reads it through env_file (below).
+      - ./data/ollama:/opt/ocabra/data/ollama
       # service_manager runs `docker compose up -d <name>` from inside this
       # container; the compose file references ./services/* as build contexts
       # so they need to resolve at the same relative path. Read-only is fine
@@ -205,18 +200,17 @@ services:
       # Ollama y oCabra hablan de la misma GPU al decir "0" o "1".
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       OLLAMA_HOST: 0.0.0.0:11434
-      # 2 slots concurrentes: compromiso entre concurrencia y contexto,
-      # válido ahora que este pool solo sirve modelos aún no migrados o de
-      # fallback (ningún preset ``max``/multi-GPU grande depende ya de él).
-      OLLAMA_NUM_PARALLEL: "2"
       # KV cache en q8_0 (mitad de VRAM de KV, ~sin pérdida de calidad). La
       # cuantización del KV en llama.cpp REQUIERE flash attention activado.
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: "q8_0"
-      # Default context para modelos SIN num_ctx horneado (antes 32k por
-      # defecto de Ollama). oCabra lo refleja vía settings.ollama_default_num_ctx
-      # para reportar el context_length efectivo correcto en /v1/models.
-      OLLAMA_CONTEXT_LENGTH: "65536"
+    # Paralelismo y contexto máximo (OLLAMA_NUM_PARALLEL y
+    # OLLAMA_CONTEXT_LENGTH): ajustes globales de oCabra (Ajustes > Ollama),
+    # que escribe este fichero y recrea el servicio. Un único daemon para
+    # todos los modelos de Ollama: los pools por GPU se retiraron 2026-11-12.
+    env_file:
+      - path: ./data/ollama/ollama.env
+        required: false
     volumes:
       - /docker/ai-models/ollama:/root/.ollama
     ports:

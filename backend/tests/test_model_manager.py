@@ -2075,9 +2075,8 @@ async def test_canonical_gguf_unload_reaches_loaded_derived_worker() -> None:
 
 
 class _FakeOllamaBackend(BackendInterface):
-    """Minimal ollama-shaped backend exposing single_gpu_pool_candidates,
-    for testing the preferred-GPU-busy fallback without the real
-    OllamaBackend's pool/HTTP machinery."""
+    """Minimal ollama-shaped backend (resident-model discovery) without the
+    real OllamaBackend's HTTP machinery."""
 
     def __init__(self, fallback_gpus: list[int], resident: list[dict] | None = None) -> None:
         self._fallback_gpus = fallback_gpus
@@ -2094,9 +2093,6 @@ class _FakeOllamaBackend(BackendInterface):
             pid=1,
             vram_used_mb=1024,
         )
-
-    def single_gpu_pool_candidates(self, *, exclude_gpu, required_parallelism=1):
-        return [g for g in self._fallback_gpus if g != exclude_gpu]
 
     async def discover_resident_models(self) -> list[dict]:
         return self._resident
@@ -2119,132 +2115,6 @@ class _FakeOllamaBackend(BackendInterface):
     async def forward_stream(self, model_id: str, path: str, body: dict):
         raise NotImplementedError
         yield b""  # pragma: no cover - makes this an async generator
-
-
-@pytest.mark.asyncio
-async def test_ollama_falls_back_to_alternate_gpu_when_preferred_is_busy():
-    """gemma4:12b incident (2026-10-26): a model statically pinned to one
-    GPU used to have zero fallback — a busy preferred GPU meant 5-7 minutes
-    through the pressure-eviction cascade and a hard failure, even when a
-    completely idle single-GPU Ollama pool had plenty of room. The preferred
-    GPU's real free VRAM must be checked first, and only then should it fall
-    back to an alternate single-GPU pool."""
-    from ocabra.core.gpu_manager import GPUState
-    from ocabra.core.model_manager import ModelState
-
-    wp = WorkerPool()
-    backend = _FakeOllamaBackend(fallback_gpus=[0])
-    wp.register_backend("ollama", backend)
-
-    gpu_manager = AsyncMock()
-    gpu_manager.get_all_states = AsyncMock(
-        return_value=[
-            GPUState(
-                index=0,
-                name="RTX 3060",
-                total_vram_mb=12_288,
-                free_vram_mb=12_000,
-                used_vram_mb=288,
-                utilization_pct=0,
-                temperature_c=40,
-                power_draw_w=50,
-                power_limit_w=170,
-                locked_vram_mb=0,
-            ),
-            GPUState(
-                index=1,
-                name="RTX 3090",
-                total_vram_mb=24_576,
-                free_vram_mb=500,
-                used_vram_mb=24_076,
-                utilization_pct=0,
-                temperature_c=40,
-                power_draw_w=50,
-                power_limit_w=350,
-                locked_vram_mb=0,
-            ),
-        ]
-    )
-    # GPU1 (preferred) is nearly full — not enough for the 5_000 MB need.
-    # GPU0 (fallback) has plenty.
-    gpu_manager.get_free_vram = AsyncMock(side_effect=lambda idx: {0: 20_000, 1: 500}[idx])
-    gpu_manager.lock_vram = AsyncMock()
-
-    mm = ModelManager(wp, gpu_manager=gpu_manager)
-    model_id = "ollama/busy-preferred-model"
-
-    with (
-        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
-        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
-        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
-        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[1])),
-    ):
-        mm._states[model_id] = ModelState(
-            model_id=model_id,
-            display_name="busy-preferred-model",
-            backend_type="ollama",
-            load_policy=LoadPolicy.ON_DEMAND,
-            preferred_gpu=1,
-        )
-        mm._load_locks[model_id] = asyncio.Lock()
-
-        state = await mm.load(model_id)
-
-    assert state.status == ModelStatus.LOADED
-    assert backend.load_calls[-1] == [0]
-
-
-@pytest.mark.asyncio
-async def test_ollama_keeps_preferred_gpu_when_it_has_room():
-    from ocabra.core.gpu_manager import GPUState
-    from ocabra.core.model_manager import ModelState
-
-    wp = WorkerPool()
-    backend = _FakeOllamaBackend(fallback_gpus=[0])
-    wp.register_backend("ollama", backend)
-
-    gpu_manager = AsyncMock()
-    gpu_manager.get_all_states = AsyncMock(
-        return_value=[
-            GPUState(
-                index=1,
-                name="RTX 3090",
-                total_vram_mb=24_576,
-                free_vram_mb=20_000,
-                used_vram_mb=4_576,
-                utilization_pct=0,
-                temperature_c=40,
-                power_draw_w=50,
-                power_limit_w=350,
-                locked_vram_mb=0,
-            ),
-        ]
-    )
-    gpu_manager.get_free_vram = AsyncMock(return_value=20_000)
-    gpu_manager.lock_vram = AsyncMock()
-
-    mm = ModelManager(wp, gpu_manager=gpu_manager)
-    model_id = "ollama/happy-model"
-
-    with (
-        patch("ocabra.core.model_manager.publish", new=AsyncMock()),
-        patch("ocabra.core.model_manager.set_key", new=AsyncMock()),
-        patch.object(mm, "_record_model_load_stat", new=AsyncMock()),
-        patch.object(mm, "_admit_gpu_load", new=AsyncMock(return_value=[1])),
-    ):
-        mm._states[model_id] = ModelState(
-            model_id=model_id,
-            display_name="happy-model",
-            backend_type="ollama",
-            load_policy=LoadPolicy.ON_DEMAND,
-            preferred_gpu=1,
-        )
-        mm._load_locks[model_id] = asyncio.Lock()
-
-        state = await mm.load(model_id)
-
-    assert state.status == ModelStatus.LOADED
-    assert backend.load_calls[-1] == [1]
 
 
 @pytest.mark.asyncio

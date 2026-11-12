@@ -14,6 +14,8 @@ const modelEditorApi = vi.hoisted(() => ({
   capacity: vi.fn(),
   patch: vi.fn(),
   setMaintenance: vi.fn(),
+  ollamaSettings: vi.fn(),
+  applyOllamaSettings: vi.fn(),
   createAlias: vi.fn(),
   deleteAlias: vi.fn(),
 }))
@@ -169,13 +171,60 @@ describe("ModelEditor", () => {
 
   afterEach(() => vi.clearAllMocks())
 
-  it("shows the per-GPU preview with this model's live usage subtracted", async () => {
-    renderEditor()
-    const panel = await screen.findByTestId("preview-panel")
-    await waitFor(() => expect(within(panel).getByText(/Cabe ahora/)).toBeTruthy())
+  it("capacity shows the base memory per GPU with this model's live usage subtracted", async () => {
+    renderEditor("capacity")
+    const strip = await screen.findByTestId("base-memory")
     // #1 tiene 20.576 MB usados y 20.000 son de este modelo: le quedan 24.000 MB.
-    const bar = panel.querySelector("[data-gpu-bar=\"1\"]") as HTMLElement
-    expect(bar.textContent).toContain("21 GB / 23 GB libres")
+    await waitFor(() => expect((strip.querySelector('[data-gpu-bar="1"]') as HTMLElement).textContent).toContain("21 GB / 23 GB libres"))
+    const fit = await screen.findByTestId("preview-base")
+    expect(fit.textContent).toContain("cabe ahora")
+  })
+
+  it("old section links (gpus, context, presets) land on Capacidad", async () => {
+    renderEditor("presets")
+    expect(await screen.findByTestId("capacity-section")).toBeTruthy()
+  })
+
+  it("capacity lists the base and each preset as rungs; picking a preset focuses it", async () => {
+    const preset = (key: string, ctx: number, isDefault = false) => ({
+      id: key, profileId: "m", presetKey: key, label: key, contextMode: "fixed", contextTokens: ctx, parallelism: 2,
+      kvCacheDtype: "q8", placementPolicy: "auto", preferredGpus: null, executionPolicy: "auto", enabled: true,
+      isDefault, priority: 100, createdAt: null, updatedAt: null,
+    })
+    api.profiles.listByModel.mockResolvedValue([
+      { profileId: "m", profileKind: "execution", baseModelId: "llamacpp_mks/m", displayName: "m", description: null, category: "llm",
+        loadOverrides: null, requestDefaults: null, assets: null, enabled: true, isDefault: true, routingTargets: null,
+        runtimePolicy: null, runtimePresets: [preset("normal", 32768, true), preset("largo", 131072)], aliases: [], createdAt: null, updatedAt: null },
+    ])
+    api.profiles.resolveRuntimePresets.mockResolvedValue([
+      { presetKey: "normal", resolved: true, requestedContext: 32768, effectiveContext: 32768, modelMax: 262144, hardwareMax: 90000, policyMax: null,
+        requestedParallelism: 2, effectiveParallelism: 2, targetGpus: [1], fits: true, runtimeKey: "x", warnings: [], estimatedVramMb: 21000, vramByGpu: { "1": 21000 } },
+      { presetKey: "largo", resolved: true, requestedContext: 131072, effectiveContext: 0, modelMax: 262144, hardwareMax: 90000, policyMax: null,
+        requestedParallelism: 2, effectiveParallelism: 2, targetGpus: [1], fits: false, runtimeKey: null, warnings: ["no cabe"], estimatedVramMb: null, vramByGpu: {} },
+    ])
+    renderEditor("capacity")
+    const selector = await screen.findByTestId("rung-selector")
+    await waitFor(() => expect(selector.querySelectorAll("[data-rung]")).toHaveLength(3))
+    expect(selector.textContent).toContain("Base (sin preset)")
+    fireEvent.click(selector.querySelector('[data-rung="normal"]') as HTMLElement)
+    expect(await screen.findByTestId("focused-rung")).toBeTruthy()
+    expect(screen.queryByTestId("base-memory")).toBeNull()
+  })
+
+  it("ollama models get the global server card and no preset ladder", async () => {
+    modelEditorApi.get.mockResolvedValue(model({ model_id: "ollama/m", backend_type: "ollama", extra_config: {} }))
+    modelEditorApi.schema.mockResolvedValue({ ...schema, backend: "ollama", section: "ollama", fields: [f("ollama.num_ctx", "context", { label: "Contexto", default: 65536, widget: "context" })] })
+    modelEditorApi.ollamaSettings.mockResolvedValue({ numParallel: 2, maxContext: 65536, running: { numParallel: 2, maxContext: 65536 }, pending: false, applyStatus: "idle", applyDetail: null })
+    render(
+      <MemoryRouter initialEntries={[`/models/edit/${encodeURIComponent("ollama/m")}?s=capacity`]}>
+        <Routes>
+          <Route path="/models/edit/*" element={<ModelEditor />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    const card = await screen.findByTestId("ollama-global")
+    expect(card.textContent).toContain("64k")
+    expect(screen.queryByText("Nuevo peldaño")).toBeNull()
   })
 
   it("editing a field lists it as a pending change and saves a merge patch", async () => {

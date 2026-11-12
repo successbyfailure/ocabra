@@ -889,6 +889,10 @@ async def get_model_capacity(
 
     kv_bytes = _KV_DTYPE_BYTES.get(kv_dtype.lower(), 2.0)
     slot_counts = tuple(int(s) for s in slots.split(",") if s.strip().isdigit()) or (1, 2, 4)
+    if backend == "ollama":
+        # One shared daemon: every model gets the global parallelism and the
+        # server's KV type, whatever the caller asked for.
+        slot_counts = (max(1, int(settings.ollama_num_parallel)),)
 
     report: dict = {
         "model_id": model_id,

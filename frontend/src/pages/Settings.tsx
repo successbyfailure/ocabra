@@ -15,6 +15,7 @@ import { SkeletonList } from "@/components/common/Skeleton"
 import { api } from "@/api/client"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
+import { OllamaServerSettings } from "@/components/settings/OllamaServerSettings"
 import { FederationSettings } from "@/components/settings/FederationSettings"
 import { GenerationServicesSettings } from "@/components/settings/GenerationServicesSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
@@ -236,6 +237,7 @@ export function Settings() {
 
           <Tabs.Content value="backends">
             <div className="grid gap-4">
+              <OllamaServerSettings config={config} onSave={savePatch} />
               <BackendRuntimeSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>

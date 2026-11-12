@@ -659,6 +659,9 @@ export interface ServerConfig {
   globalSchedules: EvictionSchedule[];
   requireApiKeyOpenai: boolean;
   requireApiKeyOllama: boolean;
+  /** Servidor Ollama único: peticiones simultáneas por modelo y contexto máximo. */
+  ollamaNumParallel?: number;
+  ollamaMaxContext?: number;
   newUserGroupNames: string[];
   defaultReasoningEffort: "low" | "medium" | "high" | "off";
   realtimeDefaultSttModel: string;

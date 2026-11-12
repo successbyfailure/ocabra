@@ -1566,14 +1566,18 @@ Selección y observabilidad:
 - Las estadísticas conservan el ``profile_id`` público y atribuyen también el
   preset, runtime key y contexto efectivos cuando existan.
 
-Afinidad Ollama:
+Ollama (desde 2026-11-12):
 
-- Solo se considera forzada cuando hay un daemon independiente fijado a la
-  GPU. ``OLLAMA_POOLS_JSON`` declara una lista de
-  ``{id,url,gpus,num_parallel}``.
-- El endpoint elegido forma parte del worker y se reutiliza para carga,
-  descarga e inferencia. Una GPU o paralelismo sin pool compatible produce un
-  error explícito, no un fallback silencioso al daemon global.
+- Un único daemon (``OLLAMA_BASE_URL``) para todos los modelos de Ollama; los
+  pools por GPU y ``OLLAMA_POOLS_JSON`` se retiraron. Ollama coloca las capas;
+  oCabra no fuerza GPU.
+- Paralelismo y contexto máximo son globales (``settings.ollama_num_parallel``
+  y ``settings.ollama_max_context``, editables en ``PATCH /ocabra/config``).
+  ``POST /ocabra/ollama/server/apply-settings`` los escribe en
+  ``data/ollama/ollama.env`` (``env_file`` del servicio) y recrea el daemon.
+- El ``num_ctx`` de un cliente se recorta al máximo global (o al
+  ``ollama.num_ctx`` del modelo si es menor). Los modelos de Ollama no tienen
+  presets de contexto: la API los rechaza.
 - Para perfiles con contexto dinámico, las rutas OpenAI se traducen dentro del
   worker pool a ``/api/chat`` o ``/api/generate`` y la respuesta vuelve a
   normalizarse como OpenAI. El shim ``/v1`` nativo de Ollama no se usa porque

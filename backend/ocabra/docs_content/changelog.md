@@ -16,6 +16,31 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.75.0 — 2026-11-12
+
+### Cambios
+
+- **Acción: los modelos de Ollama ya no tienen presets de contexto.** Ollama
+  pasa a ser un único servidor para todos sus modelos, con el paralelismo y el
+  contexto máximo globales (por defecto 2 peticiones simultáneas y 65.536
+  tokens). Se han borrado los presets 32K/64K/128K/MAX de los perfiles
+  `-ollama`, y `POST /ocabra/profiles/{id}/runtime-presets` responde `400`
+  para modelos de Ollama. Si mandabas `ocabra.context_preset` a un perfil
+  `-ollama`, ya no hace nada: el modelo carga con el contexto global. Para
+  contextos grandes usa el despliegue de llama.cpp del mismo modelo.
+- **El `num_ctx` que pide un cliente a un modelo de Ollama se recorta al
+  máximo global** (o al contexto propio del modelo, si es menor). Antes, un
+  `options.num_ctx` mayor obligaba a Ollama a recargar el modelo con una KV
+  para la que nadie había reservado memoria.
+- **El paralelismo y el contexto máximo de Ollama** se leen en
+  `GET /ocabra/config` (`ollamaNumParallel` y `ollamaMaxContext`) y se cambian
+  con `PATCH` (solo administradores). Aplicarlos reinicia Ollama
+  (`POST /ocabra/ollama/server/apply-settings`), que descarga todos sus
+  modelos. `GET /ocabra/ollama/server/settings` dice qué tiene el servidor en
+  marcha y si quedan cambios por aplicar.
+
+---
+
 ## 0.74.2 — 2026-11-12
 
 ### Novedades

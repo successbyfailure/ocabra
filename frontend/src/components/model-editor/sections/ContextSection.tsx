@@ -117,15 +117,21 @@ function GenericContext({ editor, readOnly }: SectionProps) {
   const raw = getPath(editor.draft!.extraConfig, field.path)
   const native = cap?.arch?.native_context ?? (Number(editor.model?.capabilities?.native_context_length) || null)
   const value = typeof raw === "number" ? raw : Number(field.default ?? native ?? 8192)
+  // El tope del esquema (en Ollama, el máximo global) manda sobre el nativo.
+  const ceiling = field.max ?? null
+  const sliderMax = ceiling ? Math.min(ceiling, Math.max(native ?? 0, value, 8192)) : Math.max(native ?? 0, value, 131072)
   return (
     <Panel title="Contexto" subtitle={native ? `Contexto nativo del modelo: ${fmtContext(native)}.` : undefined}>
       <FieldRow field={field} editor={editor} readOnly={readOnly} compact>
         <div className="space-y-2">
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-semibold tabular-nums">{raw === undefined ? "auto" : fmtContext(value)}</span>
-            {raw === undefined && <span className="text-xs text-muted-foreground">lo decide el motor</span>}
+            <span className="text-2xl font-semibold tabular-nums">{raw === undefined && field.default == null ? "auto" : fmtContext(value)}</span>
+            {raw === undefined && (
+              <span className="text-xs text-muted-foreground">{field.default == null ? "lo decide el motor" : "el valor por defecto"}</span>
+            )}
           </div>
-          <ContextSlider value={value} max={Math.max(native ?? 0, value, 131072)} native={native} onChange={(n) => editor.setField(field.path, n)} disabled={readOnly} />
+          <ContextSlider value={value} max={sliderMax} native={native} onChange={(n) => editor.setField(field.path, ceiling ? Math.min(n, ceiling) : n)} disabled={readOnly} />
+          {ceiling ? <Hint>Tope: {fmtContext(ceiling)}.</Hint> : null}
         </div>
       </FieldRow>
       {cap?.applicable && <CapacityTable cap={cap} />}

@@ -324,6 +324,31 @@ no el editor mostraría controles que no hacen nada:
 - Transcripciones: las estadísticas guardan el perfil pedido (`-diarized`) y
   `/stats/recent` trae `requestedModel`, que el dashboard muestra.
 
+**Tercera tanda (v0.75.0): Capacidad y Ollama.**
+- GPUs, Contexto y Presets se funden en una sección, **Capacidad**. Arriba
+  están los peldaños: la base ("sin preset", siempre visible: es lo que se
+  carga sin preset) y cada preset, con contexto, paralelismo, memoria, GPUs y
+  si cabe. Elegir uno muestra su lienzo:
+  - la base, con las barras por GPU y los controles del backend (se guarda
+    con Guardar);
+  - un preset, enfocado, con su editor abierto, sus barras de memoria
+    (`vram_by_gpu`), alias, sondeo y medición (se guarda al momento).
+  La política de presets va debajo. Los enlaces viejos `?s=gpus|context|presets`
+  llevan a Capacidad. La vista previa lateral ya no repite las barras: solo
+  resume el encaje de la base y de cada preset.
+- **Familias de backend:** llama (capas, reparto, KV pool/slots, escalera),
+  motor (vLLM/SGLang/TRT: fracción reservada, longitud y secuencias), Ollama
+  y fijo (sin contexto).
+- **Ollama simplificado:**
+  - Un único daemon. Fuera `OLLAMA_POOLS_JSON`, la selección de pool y la
+    alternativa por GPU.
+  - Paralelismo y contexto máximo globales (`ollama_num_parallel` y
+    `ollama_max_context`) en Ajustes > Backends. Aplicarlos escribe
+    `data/ollama/ollama.env` (`env_file` del servicio) y recrea el contenedor.
+  - El `num_ctx` de cliente se recorta al máximo.
+  - Sin presets: la migración 0035 borra los 17 que había y la API rechaza
+    nuevos.
+
 **Lo que queda, por diseño.**
 - La memoria por GPU de llama.cpp es una estimación desde el GGUF, no una
   medida. La medida real está en el dashboard (`vramByGpu`).

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.74.2"
+    app_version: str = "0.75.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -67,9 +67,15 @@ class Settings(BaseSettings):
     ai_models_root: str = "/docker/ai-models"
     hf_token: str = ""
     ollama_base_url: str = "http://ollama:11434"
-    # Optional JSON array of independently pinned Ollama daemons, e.g.
-    # [{"id":"3090","url":"http://ollama-3090:11434","gpus":[1],"num_parallel":2}].
-    ollama_pools_json: str = ""
+    # One shared Ollama daemon (the per-GPU pools were retired 2026-11-12).
+    # Its global parallelism and context live in ``ollama_env_file``, which the
+    # ``ollama`` compose service reads; changing them from the UI rewrites the
+    # file and recreates that container. These are the values oCabra plans
+    # with (KV = num_ctx × parallel) and the cap it puts on client num_ctx.
+    ollama_num_parallel: int = 2
+    ollama_max_context: int = 65536
+    # Path of that env file as seen from this container (compose dir mount).
+    ollama_env_file: str = "/opt/ocabra/data/ollama/ollama.env"
     ollama_keep_alive: str = "30m"
     ollama_inventory_sync_interval_seconds: int = 15
     # Spill-reload monitor: when a WARM/PIN Ollama model has partially spilled to
@@ -178,11 +184,6 @@ class Settings(BaseSettings):
     # marks it LOADED, and clients see ``Model 'ollama/…' is not available
     # (status: unloaded)`` mid-flight (regression: 2026-08-30).
     ollama_inventory_loaded_grace_s: int = 60
-    # Ollama's default context window (OLLAMA_CONTEXT_LENGTH on the ollama
-    # container). Used to report the EFFECTIVE served context for models that
-    # don't bake a ``num_ctx`` PARAMETER in their Modelfile. Keep in sync with
-    # the value set on the ollama service in docker-compose.yml.
-    ollama_default_num_ctx: int = 65536
     # When set, the local scanner reads Ollama's manifest/blob store
     # (typically mounted at /data/ollama_models when ./data/ollama_models
     # maps to the host's Ollama models dir) and surfaces each pulled model

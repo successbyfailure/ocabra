@@ -50,6 +50,18 @@ export const modelEditorApi = {
     },
   ) => request<RawModel>("PATCH", `/ocabra/models/${enc(modelId)}`, body),
 
+  ollamaSettings: () =>
+    request<{
+      numParallel: number
+      maxContext: number
+      running: { numParallel: number | null; maxContext: number | null } | null
+      pending: boolean
+      applyStatus: string
+      applyDetail: string | null
+    }>("GET", "/ocabra/ollama/server/settings"),
+
+  applyOllamaSettings: () => request<{ status: string; detail: string | null }>("POST", "/ocabra/ollama/server/apply-settings"),
+
   setMaintenance: (modelId: string, enabled: boolean) =>
     request<unknown>("POST", `/ocabra/models/${enc(modelId)}/maintenance`, { enabled }),
 

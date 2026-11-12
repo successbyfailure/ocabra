@@ -126,6 +126,12 @@ class ServerConfigPatch(BaseModel):
     )
     require_api_key_openai: bool | None = Field(default=None, alias="requireApiKeyOpenai")
     require_api_key_ollama: bool | None = Field(default=None, alias="requireApiKeyOllama")
+    # Shared Ollama daemon: global parallelism and max context. Saving them
+    # does not restart Ollama; POST /ocabra/ollama/server/apply-settings does.
+    ollama_num_parallel: int | None = Field(default=None, ge=1, le=32, alias="ollamaNumParallel")
+    ollama_max_context: int | None = Field(
+        default=None, ge=2048, le=1_048_576, alias="ollamaMaxContext"
+    )
     new_user_group_names: list[str] | None = Field(default=None, alias="newUserGroupNames")
     default_reasoning_effort: str | None = Field(
         default=None,
@@ -322,6 +328,8 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "globalSchedules": [],
         "requireApiKeyOpenai": settings.require_api_key_openai,
         "requireApiKeyOllama": settings.require_api_key_ollama,
+        "ollamaNumParallel": settings.ollama_num_parallel,
+        "ollamaMaxContext": settings.ollama_max_context,
         "newUserGroupNames": list(settings.new_user_group_names),
         "defaultReasoningEffort": settings.default_reasoning_effort,
         "realtimeDefaultSttModel": settings.realtime_default_stt_model,
@@ -595,6 +603,10 @@ async def patch_config(
     if "require_api_key_ollama" in payload:
         settings.require_api_key_ollama = bool(payload["require_api_key_ollama"])
         await _persist("require_api_key_ollama", settings.require_api_key_ollama)
+    for key in ("ollama_num_parallel", "ollama_max_context"):
+        if payload.get(key) is not None:
+            setattr(settings, key, int(payload[key]))
+            await _persist(key, getattr(settings, key))
     if "new_user_group_names" in payload:
         names = list(dict.fromkeys(str(name).strip() for name in payload["new_user_group_names"]))
         names = [name for name in names if name]

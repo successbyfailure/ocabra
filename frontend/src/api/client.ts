@@ -1526,6 +1526,8 @@ function toServerConfig(raw: unknown): ServerConfig {
     requireApiKeyOllama: Boolean(
       data.requireApiKeyOllama ?? data.require_api_key_ollama ?? true,
     ),
+    ollamaNumParallel: Number(data.ollamaNumParallel ?? data.ollama_num_parallel ?? 2),
+    ollamaMaxContext: Number(data.ollamaMaxContext ?? data.ollama_max_context ?? 65536),
     newUserGroupNames: Array.isArray(
       data.newUserGroupNames ?? data.new_user_group_names,
     )

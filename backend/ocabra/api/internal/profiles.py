@@ -595,6 +595,24 @@ async def benchmark_runtime_preset(
     ).model_dump(mode="json")
 
 
+
+async def _reject_ollama_presets(request: Request, profile_id: str) -> None:
+    """Ollama models share one daemon with a global context and parallelism;
+    a per-profile preset ladder has nothing to switch between."""
+    profile = await _get_registry(request).get(profile_id)
+    base = getattr(profile, "base_model_id", None) if profile is not None else None
+    if not base:
+        return
+    state = await request.app.state.model_manager.get_state(base)
+    if getattr(state, "backend_type", None) == "ollama":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Ollama models do not take runtime presets: context and parallelism "
+                "are global settings of the shared Ollama server."
+            ),
+        )
+
 @router.post(
     "/profiles/{profile_id}/runtime-presets",
     summary="Create profile runtime preset",
@@ -614,8 +632,13 @@ async def create_runtime_preset(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
-    """Create one runtime preset under ``profile_id``."""
+    """Create one runtime preset under ``profile_id``.
+
+    Ollama models do not take presets (400): they share one daemon whose
+    context and parallelism are global (``PATCH /ocabra/config``).
+    """
     registry = _get_registry(request)
+    await _reject_ollama_presets(request, profile_id)
     async with AsyncSessionLocal() as session:
         try:
             preset = await registry.create_runtime_preset(

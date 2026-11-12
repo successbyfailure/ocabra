@@ -8,6 +8,7 @@ import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import { fmtContext } from "@/components/dashboard/format"
 import { ContextProbe } from "@/components/models/ContextProbe"
+import { GpuMemoryBar } from "../PreviewPanel"
 import { cn } from "@/lib/cn"
 import type {
   GPUState,
@@ -128,24 +129,43 @@ export function PresetsSection(props: SectionProps) {
   )
 }
 
-function ProfileLadder({
+export function ProfileLadder({
   profile,
   gpus,
   readOnly,
   nativeContext,
   onChanged,
+  focusKey,
+  onFocusDone,
+  liveVramByGpu,
 }: {
   profile: ModelProfile
   gpus: GPUState[]
   readOnly: boolean
   nativeContext: number | null
   onChanged: () => Promise<void>
+  /** Capacidad: solo el peldaño elegido, con su editor abierto ("new" = crear). */
+  focusKey?: string
+  /** Tras crear o borrar el peldaño enfocado: a qué peldaño pasar. */
+  onFocusDone?: (key: string | null) => void
+  liveVramByGpu?: Record<string, number>
 }) {
   const presets = profile.runtimePresets
   const [resolutions, setResolutions] = useState<Record<string, RuntimePresetResolution>>({})
   const [resolving, setResolving] = useState(false)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<{ key: string | null; form: RuntimePresetCreate } | null>(null)
+  // En modo enfocado el editor del peldaño elegido está siempre abierto.
+  useEffect(() => {
+    if (focusKey === undefined) return
+    if (focusKey === "new") {
+      setEditing({ key: null, form: { ...EMPTY_PRESET, isDefault: presets.length === 0 } })
+      return
+    }
+    const target = presets.find((p) => p.presetKey === focusKey)
+    setEditing(target ? { key: target.presetKey, form: presetToForm(target) } : null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusKey, profile.profileId])
   const [benchmarks, setBenchmarks] = useState<Record<string, RuntimePresetBenchmark>>({})
   const [benchmarking, setBenchmarking] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{ kind: "bench" | "delete"; preset: RuntimePreset } | null>(null)
@@ -225,6 +245,75 @@ function ProfileLadder({
     }
   }
 
+  if (focusKey !== undefined) {
+    const focused = presets.find((p) => p.presetKey === focusKey)
+    return (
+      <div className="space-y-3" data-testid="focused-rung">
+        {focused && (
+          <ol>
+            <Rung
+              preset={focused}
+              resolution={resolutions[focused.presetKey]}
+              benchmark={benchmarks[focused.presetKey]}
+              axisMax={axisMax}
+              gpus={gpus}
+              profile={profile}
+              readOnly={readOnly}
+              busy={busy || benchmarking !== null}
+              benchmarking={benchmarking === focused.presetKey}
+              canDelete={!(focused.isDefault && presets.length > 1)}
+              onEdit={() => setEditing({ key: focused.presetKey, form: presetToForm(focused) })}
+              onToggle={() => void patchPreset(focused, { enabled: !focused.enabled })}
+              onDefault={() => void patchPreset(focused, { isDefault: true })}
+              onDelete={() => setConfirm({ kind: "delete", preset: focused })}
+              onBenchmark={() => setConfirm({ kind: "bench", preset: focused })}
+              onChanged={onChanged}
+            />
+          </ol>
+        )}
+        {editing && !readOnly && (
+          <PresetEditor
+            key={`${focusKey}-${editing.key ?? "new"}`}
+            profile={profile}
+            editingKey={editing.key}
+            initial={editing.form}
+            gpus={gpus}
+            resolutions={resolutions}
+            liveVramByGpu={liveVramByGpu}
+            onCancel={() => (focusKey === "new" ? onFocusDone?.(null) : setEditing({ ...editing }))}
+            onSaved={async (key) => {
+              await onChanged()
+              if (focusKey === "new") onFocusDone?.(key)
+            }}
+          />
+        )}
+        <ConfirmDialog
+          open={confirm !== null}
+          onOpenChange={(open) => !open && setConfirm(null)}
+          title={confirm?.kind === "bench" ? "Medir en frío" : "Eliminar preset"}
+          description={
+            confirm?.kind === "bench"
+              ? `Se descargará el modelo si está cargado y se medirá la carga en frío y una generación con «${confirm.preset.label}». Las peticiones en curso pueden fallar.`
+              : `Se elimina el preset «${confirm?.preset.label ?? ""}» y sus alias dejarán de resolver.`
+          }
+          confirmLabel={confirm?.kind === "bench" ? "Medir" : "Eliminar"}
+          variant={confirm?.kind === "bench" ? "default" : "danger"}
+          onConfirm={() => {
+            const c = confirm
+            setConfirm(null)
+            if (!c) return
+            if (c.kind === "bench") void benchmark(c.preset)
+            else
+              void run(
+                () => api.profiles.deleteRuntimePreset(profile.profileId, c.preset.presetKey),
+                "Preset eliminado",
+                "No se pudo eliminar el preset",
+              ).then(() => onFocusDone?.(null))
+          }}
+        />
+      </div>
+    )
+  }
   return (
     <>
       <Panel
@@ -665,6 +754,7 @@ function PresetEditor({
   resolutions,
   onCancel,
   onSaved,
+  liveVramByGpu,
 }: {
   profile: ModelProfile
   editingKey: string | null
@@ -672,7 +762,8 @@ function PresetEditor({
   gpus: GPUState[]
   resolutions: Record<string, RuntimePresetResolution>
   onCancel: () => void
-  onSaved: () => Promise<void>
+  onSaved: (presetKey: string) => Promise<void>
+  liveVramByGpu?: Record<string, number>
 }) {
   const [form, setForm] = useState<RuntimePresetCreate>(initial)
   const [preview, setPreview] = useState<RuntimePresetResolution | null>(null)
@@ -733,7 +824,7 @@ function PresetEditor({
         await api.profiles.updateRuntimePreset(profile.profileId, editingKey, update)
       }
       toast.success("Preset guardado; se aplica en la siguiente carga")
-      await onSaved()
+      await onSaved(form.presetKey)
     } catch (e) {
       toast.error(errMsg(e, "No se pudo guardar el preset"))
     } finally {
@@ -922,13 +1013,27 @@ function PresetEditor({
                     style={{ width: `${Math.max(4, frac * 100)}%` }}
                   />
                 </div>
-                {preview.targetGpus.length > 0 && (
+                {preview.vramByGpu && Object.keys(preview.vramByGpu).length > 0 ? (
+                  <div className="mt-2 space-y-1.5" data-testid="preset-memory">
+                    {gpus
+                      .filter((g) => preview.vramByGpu?.[String(g.index)] != null)
+                      .map((g) => (
+                        <GpuMemoryBar
+                          key={g.index}
+                          gpu={g}
+                          compact
+                          ownLiveMb={liveVramByGpu?.[String(g.index)] ?? 0}
+                          share={{ index: g.index, mb: preview.vramByGpu![String(g.index)], breakdown: { preset: preview.vramByGpu![String(g.index)] } }}
+                        />
+                      ))}
+                  </div>
+                ) : preview.targetGpus.length > 0 ? (
                   <div className="mt-2 flex flex-wrap gap-1">
                     {preview.targetGpus.map((g) => (
                       <GpuBadge key={g} index={g} gpus={gpus} />
                     ))}
                   </div>
-                )}
+                ) : null}
                 {preview.warnings.map((w) => (
                   <p key={w} className="mt-1 text-[10.5px] text-amber-300">{w}</p>
                 ))}
@@ -990,7 +1095,7 @@ function NumberField({
   )
 }
 
-function PolicyPanel({ profile, readOnly, onChanged }: { profile: ModelProfile; readOnly: boolean; onChanged: () => Promise<void> }) {
+export function PolicyPanel({ profile, readOnly, onChanged }: { profile: ModelProfile; readOnly: boolean; onChanged: () => Promise<void> }) {
   const stored = profile.runtimePolicy ?? DEFAULT_POLICY
   const [policy, setPolicy] = useState<RuntimePolicy>(stored)
   const [saving, setSaving] = useState(false)

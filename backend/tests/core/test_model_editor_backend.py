@@ -612,3 +612,51 @@ def test_recent_rows_carry_the_requested_name():
     from ocabra.stats import aggregator
 
     assert '"requestedModel"' in inspect.getsource(aggregator)
+
+
+@pytest.mark.asyncio
+async def test_ollama_models_do_not_take_presets():
+    from fastapi import HTTPException
+
+    from ocabra.api.internal import profiles as api
+
+    registry = MagicMock()
+    registry.get = AsyncMock(return_value=SimpleNamespace(base_model_id="ollama/gemma4:12b"))
+    mm = MagicMock()
+    mm.get_state = AsyncMock(return_value=SimpleNamespace(backend_type="ollama"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(profile_registry=registry, model_manager=mm)))
+    import ocabra.api.internal.profiles as mod
+
+    original = mod._get_registry
+    mod._get_registry = lambda _r: registry
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await api._reject_ollama_presets(request, "gemma4:12b-ollama")
+        assert exc.value.status_code == 400
+        mm.get_state = AsyncMock(return_value=SimpleNamespace(backend_type="llamacpp_mks"))
+        await api._reject_ollama_presets(request, "x")  # no error
+    finally:
+        mod._get_registry = original
+
+
+@pytest.mark.asyncio
+async def test_ollama_num_ctx_cap_is_the_global_max_unless_the_model_asks_less(monkeypatch):
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "ollama_max_context", 65536)
+    mm = ModelManager(MagicMock())
+    mm._states["ollama/a"] = _state(model_id="ollama/a", backend_type="ollama", extra_config={})
+    mm._states["ollama/b"] = _state(model_id="ollama/b", backend_type="ollama", extra_config={"ollama": {"num_ctx": 16384}})
+    mm._states["ollama/c"] = _state(model_id="ollama/c", backend_type="ollama", extra_config={"ollama": {"num_ctx": 262144}})
+    assert await mm.resolve_ollama_num_ctx_cap("ollama/a") == 65536
+    assert await mm.resolve_ollama_num_ctx_cap("ollama/b") == 16384
+    assert await mm.resolve_ollama_num_ctx_cap("ollama/c") == 65536
+
+
+def test_ollama_env_file_round_trip(tmp_path):
+    from ocabra.api.internal.ollama_admin import parse_ollama_env, write_ollama_env_file
+
+    path = tmp_path / "ollama.env"
+    write_ollama_env_file(4, 32768, str(path))
+    lines = [line for line in path.read_text().splitlines() if not line.startswith("#")]
+    assert parse_ollama_env(lines) == {"numParallel": 4, "maxContext": 32768}

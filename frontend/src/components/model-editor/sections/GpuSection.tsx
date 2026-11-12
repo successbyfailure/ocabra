@@ -11,7 +11,6 @@ import type { Json } from "../types"
 import { Hint, Panel, Segmented } from "../ui"
 import type { SectionProps } from "./types"
 import { useCapacity } from "./useCapacity"
-import { PresetsOverrideNotice } from "./ContextSection"
 
 const LLAMA = "llama_cpp"
 
@@ -34,10 +33,8 @@ export function GpuSection(props: SectionProps) {
   ]
   return (
     <div className="space-y-4">
-      {(props.presets ?? []).some((r) => r.preset.placementPolicy !== "auto") && (
-        <PresetsOverrideNotice count={(props.presets ?? []).length} what="las GPUs en las que carga" />
-      )}
-      <PreferredGpuPanel {...props} />
+      {/* Ollama coloca las capas él solo: la GPU preferida no decide nada. */}
+      {editor.schema.backend !== "ollama" && <PreferredGpuPanel {...props} />}
       {editor.schema.section === LLAMA && <LlamaPlacementPanel {...props} />}
       {isLlama && <GpuLayersPanel {...props} />}
       <FractionPanel {...props} />

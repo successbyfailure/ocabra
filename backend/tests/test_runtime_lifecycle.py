@@ -83,49 +83,13 @@ async def test_idle_high_context_schedules_downgrade() -> None:
     assert scheduled == [f"runtime-downgrade:{state.model_id}"]
 
 
-def test_ollama_pool_enforces_gpu_and_parallelism(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ocabra.backends.ollama_backend.settings.ollama_pools_json",
-        '[{"id":"3060","url":"http://o0:11434","gpus":[0],"num_parallel":1},'
-        '{"id":"3090","url":"http://o1:11434","gpus":[1],"num_parallel":2}]',
-    )
+def test_ollama_uses_the_single_daemon_and_caps_num_ctx(monkeypatch) -> None:
+    """One shared daemon since 2026-11-12: no pool selection, and a model's
+    num_ctx never above the global maximum."""
+    monkeypatch.setattr("ocabra.backends.ollama_backend.settings.ollama_base_url", "http://ollama:11434/")
+    monkeypatch.setattr("ocabra.backends.ollama_backend.settings.ollama_max_context", 65536)
     backend = OllamaBackend()
-    endpoint, gpus = backend._select_pool(
-        [1], {"_runtime": {"parallelism": 2}}
-    )
-    assert endpoint == "http://o1:11434"
-    assert gpus == [1]
-
-    with pytest.raises(RuntimeError, match="no Ollama pool"):
-        backend._select_pool([0], {"_runtime": {"parallelism": 2}})
-
-
-def test_single_gpu_pool_candidates_excludes_the_given_gpu_and_multi_gpu_pools(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        "ocabra.backends.ollama_backend.settings.ollama_pools_json",
-        '[{"id":"3060","url":"http://o0:11434","gpus":[0],"num_parallel":1},'
-        '{"id":"3090","url":"http://o1:11434","gpus":[1],"num_parallel":2},'
-        '{"id":"shared","url":"http://os:11434","gpus":[0,1],"num_parallel":1,'
-        '"multi_gpu":true}]',
-    )
-    backend = OllamaBackend()
-
-    assert backend.single_gpu_pool_candidates(exclude_gpu=1) == [0]
-    assert backend.single_gpu_pool_candidates(exclude_gpu=0) == [1]
-    # Excluding nothing still never offers the multi_gpu shared pool as a
-    # same-size single-GPU fallback.
-    assert sorted(backend.single_gpu_pool_candidates()) == [0, 1]
-
-
-def test_single_gpu_pool_candidates_respects_required_parallelism(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ocabra.backends.ollama_backend.settings.ollama_pools_json",
-        '[{"id":"3060","url":"http://o0:11434","gpus":[0],"num_parallel":1},'
-        '{"id":"3090","url":"http://o1:11434","gpus":[1],"num_parallel":2}]',
-    )
-    backend = OllamaBackend()
-
-    assert backend.single_gpu_pool_candidates(exclude_gpu=1, required_parallelism=2) == []
-    assert backend.single_gpu_pool_candidates(exclude_gpu=1, required_parallelism=1) == [0]
+    assert backend._endpoint() == "http://ollama:11434"
+    assert backend.context_cap(None) == 65536
+    assert backend.context_cap(8192) == 8192
+    assert backend.context_cap(262144) == 65536

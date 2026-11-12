@@ -253,3 +253,163 @@ async def _run_compose(*args: str) -> tuple[int, str, str]:
         stdout.decode("utf-8", errors="ignore").strip(),
         stderr.decode("utf-8", errors="ignore").strip(),
     )
+
+
+# ── Global server settings (one shared daemon) ──────────────────────────────
+#
+# Ollama runs as a single daemon for every Ollama model (the per-GPU pools
+# were retired on 2026-11-12). Its parallelism and default context are
+# process-wide environment variables, so they are global settings of oCabra:
+# ``settings.ollama_num_parallel`` / ``settings.ollama_max_context``, persisted
+# like any other config override. Applying them writes ``ollama_env_file``
+# (read by the ``ollama`` compose service through ``env_file``) and recreates
+# the container, which drops every model Ollama has loaded.
+
+
+class _ApplyState:
+    def __init__(self) -> None:
+        self.status: Literal["idle", "applying", "done", "error"] = "idle"
+        self.detail: str | None = None
+        self.finished_at: datetime | None = None
+        self._lock = asyncio.Lock()
+
+
+_apply_state = _ApplyState()
+
+
+def render_ollama_env(num_parallel: int, max_context: int) -> str:
+    return (
+        "# Escrito por oCabra (Ajustes > Ollama). Lo lee el servicio ollama de\n"
+        "# docker-compose.yml; cambiarlo a mano requiere recrear el contenedor.\n"
+        f"OLLAMA_NUM_PARALLEL={int(num_parallel)}\n"
+        f"OLLAMA_CONTEXT_LENGTH={int(max_context)}\n"
+    )
+
+
+def write_ollama_env_file(num_parallel: int, max_context: int, path: str | None = None) -> None:
+    from pathlib import Path
+
+    target = Path(path or settings.ollama_env_file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_ollama_env(num_parallel, max_context), encoding="utf-8")
+
+
+def parse_ollama_env(env: list[str]) -> dict[str, int | None]:
+    """``{"numParallel", "maxContext"}`` from a container's ``KEY=value`` list."""
+    values = dict(item.split("=", 1) for item in env if "=" in item)
+
+    def as_int(key: str) -> int | None:
+        try:
+            return int(values[key])
+        except (KeyError, ValueError):
+            return None
+
+    return {
+        "numParallel": as_int("OLLAMA_NUM_PARALLEL"),
+        "maxContext": as_int("OLLAMA_CONTEXT_LENGTH"),
+    }
+
+
+async def _running_ollama_env() -> dict[str, int | None] | None:
+    """What the live ollama container was started with (docker inspect)."""
+    compose_dir = settings.compose_project_dir
+    code, out, _err = await _run_compose(
+        "-f", f"{compose_dir}/docker-compose.yml", "--env-file", f"{compose_dir}/.env",
+        "ps", "-q", "ollama",
+    )
+    container = out.splitlines()[0].strip() if code == 0 and out else ""
+    if not container:
+        return None
+    process = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "-f", "{{json .Config.Env}}", container,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate()
+    if process.returncode:
+        return None
+    try:
+        return parse_ollama_env(json.loads(stdout.decode() or "[]"))
+    except ValueError:
+        return None
+
+
+class OllamaServerSettings(BaseModel):
+    numParallel: int
+    maxContext: int
+    running: dict[str, int | None] | None = None
+    pending: bool = False
+    applyStatus: str = "idle"
+    applyDetail: str | None = None
+
+
+@router.get(
+    "/ollama/server/settings",
+    response_model=OllamaServerSettings,
+    summary="Global settings of the shared Ollama server",
+)
+async def get_server_settings(
+    _user: UserContext = Depends(require_role("user")),
+) -> OllamaServerSettings:
+    """Configured parallelism and maximum context of the Ollama daemon, what
+    the running container actually has (``running``; null when it cannot be
+    inspected) and whether they differ (``pending``: apply to take effect)."""
+    running = await _running_ollama_env()
+    want = {"numParallel": settings.ollama_num_parallel, "maxContext": settings.ollama_max_context}
+    return OllamaServerSettings(
+        **want,
+        running=running,
+        pending=bool(running) and any(running.get(k) != v for k, v in want.items()),
+        applyStatus=_apply_state.status,
+        applyDetail=_apply_state.detail,
+    )
+
+
+@router.post(
+    "/ollama/server/apply-settings",
+    response_model=UpdateStartResponse,
+    summary="Apply the global Ollama settings (recreates the daemon)",
+)
+async def apply_server_settings(
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> UpdateStartResponse:
+    """Write the env file with the configured values and recreate the ollama
+    container. Every model Ollama has loaded is dropped. Runs in the
+    background; poll ``GET /ollama/server/settings``."""
+    if _apply_state.status == "applying" or _update_state.status in {"pulling", "restarting"}:
+        raise HTTPException(status_code=409, detail="The Ollama container is already being recreated")
+    spawn(_run_apply_settings(), name="ollama-apply-settings")
+    return UpdateStartResponse(status="restarting", detail="recreating the Ollama container")
+
+
+async def _run_apply_settings() -> None:
+    async with _apply_state._lock:
+        _apply_state.status = "applying"
+        _apply_state.detail = "writing settings and recreating the container"
+        try:
+            write_ollama_env_file(settings.ollama_num_parallel, settings.ollama_max_context)
+            compose_dir = settings.compose_project_dir
+            code, stdout, stderr = await _run_compose(
+                "-f", f"{compose_dir}/docker-compose.yml", "--env-file", f"{compose_dir}/.env",
+                "up", "-d", "--no-deps", "--force-recreate", "ollama",
+            )
+            if code != 0:
+                _apply_state.status = "error"
+                _apply_state.detail = (stderr or stdout or f"exit_code={code}")[:1000]
+                return
+            for _ in range(30):
+                await asyncio.sleep(2.0)
+                if await _registry.get_version():
+                    break
+            _apply_state.status = "done"
+            _apply_state.detail = "applied"
+            logger.info(
+                "ollama_settings_applied",
+                num_parallel=settings.ollama_num_parallel,
+                max_context=settings.ollama_max_context,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _apply_state.status = "error"
+            _apply_state.detail = str(exc)[:1000]
+        finally:
+            _apply_state.finished_at = datetime.now(UTC)
