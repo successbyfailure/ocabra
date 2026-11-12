@@ -392,3 +392,18 @@ no el editor mostraría controles que no hacen nada:
 **Lo que queda, por diseño.**
 - La memoria por GPU de llama.cpp es una estimación desde el GGUF, no una
   medida. La medida real está en el dashboard (`vramByGpu`).
+
+## Sexta tanda — v0.77.0 (2026-11-12, c9d1652)
+
+- Dónde corre por peldaño: presets con `placement` (0037: split_policy, split_mode,
+  tensor_split, gpu_layers, n_cpu_moe); base con `llama_cpp.split_policy`. UI
+  `capacity/DevicePlacement.tsx` + `placementMapping.ts` (solo escribe las claves
+  que toca el cambio; round-trip de configs heredadas probado).
+- Scheduler respeta disabled_gpus; split_mode none = nunca reparte.
+- POST /ocabra/models/{id}/smoke-test («Probar tal cual»); «Medir contexto máximo»
+  solo llamacpp_mks y con GPUs declaradas en el peldaño.
+- Layout por ancho disponible (flex-wrap; grid de la página con minmax(0,1fr)).
+- Tarjeta de Models nueva (`components/models/ModelCard.tsx`) para ambas vistas.
+- Deuda: etiquetas «medido» y «techo» se pisan en la gráfica cuando coinciden;
+  admisión no descuenta n_cpu_moe (sobre-reserva); chip de mantenimiento en la
+  tarjeta sin fuente barata; bitnet sin banco de trabajo propio.
