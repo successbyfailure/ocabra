@@ -288,6 +288,16 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
 
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {loadPolicy && <LoadPolicyBadge policy={loadPolicy} />}
+          {model?.maintenance && (
+            <span
+              className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-amber-200"
+              title="En mantenimiento: las peticiones nuevas reciben 503. Se quita desde el editor (Resumen)."
+              data-testid="maintenance-chip"
+            >
+              <Wrench size={11} />
+              Mantenimiento
+            </span>
+          )}
           {model?.federation?.remote && (
             <span className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 px-1.5 py-0.5 text-sky-200" title="Modelo federado">
               <Globe size={11} />

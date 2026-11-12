@@ -125,6 +125,8 @@ export interface ModelCapabilities {
 
 export interface ModelState {
   modelId: string;
+  /** Modo mantenimiento: las peticiones nuevas reciben 503. */
+  maintenance?: boolean;
   displayName: string;
   backendType: BackendType;
   status: ModelStatus;

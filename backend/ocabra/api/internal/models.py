@@ -168,6 +168,8 @@ async def list_models(
             ollama_sizes,
             schedules=schedules_by_model.get(state.model_id, []),
         )
+        # Modo mantenimiento (en memoria): la tarjeta de Models lo muestra.
+        item["maintenance"] = bool(mm.is_in_maintenance(state.model_id))
         local_model_ids.add(state.model_id)
 
         # Add federation metadata if enabled
@@ -2491,7 +2493,8 @@ def _estimate_llama_cpp_memory(
     total_layers = max(1, arch.layers)
     offloaded = max(0, min(gpu_layers, total_layers))
     frac = offloaded / total_layers
-    weights_mb = file_size_mb * frac
+    moe_cpu_mb = vp.moe_cpu_weights_mb(file_size_mb, total_layers, offloaded, load_config.n_cpu_moe)
+    weights_mb = max(0.0, file_size_mb * frac - moe_cpu_mb)
     kv_arch = (
         arch
         if offloaded == total_layers
@@ -2545,6 +2548,11 @@ def _estimate_llama_cpp_memory(
         + (f" · overhead MTP: {int(draft_overhead_mb)}" if draft_overhead_mb else "")
         + f" · overhead base: {vp.DEFAULT_OVERHEAD_MB} · total: {total_mb}.",
     ]
+    if moe_cpu_mb:
+        notes.append(
+            f"Expertos MoE de {load_config.n_cpu_moe} capas en RAM (~{int(moe_cpu_mb)} MB fuera "
+            "de la GPU): estimación aproximada."
+        )
     if load_config.cache_type_k or load_config.cache_type_v:
         notes.append(
             "KV cache cuantizado: K="

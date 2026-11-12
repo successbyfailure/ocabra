@@ -11,7 +11,7 @@ import type { Json } from "../types"
 import { Callout, Hint, Panel, Segmented } from "../ui"
 import type { LadderRung } from "../usePresetLadder"
 import { ContextSection } from "./ContextSection"
-import { FractionPanel, GpuLayersPanel, GpuSection } from "./GpuSection"
+import { FractionPanel, GpuSection } from "./GpuSection"
 import { SchemaFields } from "../SchemaField"
 import { PolicyPanel } from "./presets/PresetParts"
 import { BaseLlamaWorkbench, PresetWorkbench } from "./capacity/adapters"
@@ -342,10 +342,7 @@ function RungSelector({
 function BaseCanvas(props: SectionProps & { family: CapacityFamily; hasPresets: boolean; onCreatePreset?: () => void }) {
   const { editor, gpus, liveVramByGpu, family, onCreatePreset } = props
   const quiet = { ...props, presets: [] }
-  // bitnet es de la familia llama pero lee su propia sección (`bitnet.*`):
-  // el banco de trabajo escribe `llama_cpp.*`, así que va por el lienzo genérico.
-  const bitnet = editor.model?.backend_type === "bitnet"
-  if (family === "llama" && !bitnet) return <BaseLlamaWorkbench {...quiet} onCreatePreset={onCreatePreset} />
+  if (family === "llama") return <BaseLlamaWorkbench {...quiet} onCreatePreset={onCreatePreset} />
   const memory = (editor.preview?.gpus ?? []).map((g) => ({ gpu: g.index, parts: Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb } }))
   // El resto de backends: sus controles a la izquierda y la memoria al lado.
   return (
@@ -354,7 +351,6 @@ function BaseCanvas(props: SectionProps & { family: CapacityFamily; hasPresets: 
         {family === "ollama" && <OllamaGlobalCard />}
         {family === "encoder" && <EncoderPanel {...quiet} />}
         <GpuSection {...quiet} />
-        {bitnet && <GpuLayersPanel {...quiet} />}
         {family !== "fixed" && family !== "encoder" && <ContextSection {...quiet} />}
       </div>
       <div className="min-w-0 flex-[1_1_280px] lg:sticky lg:top-28 lg:self-start" data-testid="base-memory">

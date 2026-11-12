@@ -449,9 +449,24 @@ export function SlotsChart({
         {measured ? (
           <g>
             <line x1={lx(measured)} x2={lx(measured)} y1={P.t} y2={H - P.b} stroke="#c084fc" strokeDasharray="3 3" />
-            <text x={lx(measured) + 3} y={P.t + 9} className="fill-violet-300 text-[9.5px]">
-              medido {fmtContext(measured)}
-            </text>
+            {(() => {
+              // Cerca del borde derecho la etiqueta va a la izquierda de la línea
+              // (a la derecha está la del techo), y si coincide en altura con el
+              // techo baja por debajo de él.
+              const nearRight = lx(measured) > W - P.r - 90
+              const y = Math.abs(ly(limit) - (P.t + 9)) < 14 ? Math.min(H - P.b - 4, ly(limit) + 14) : P.t + 9
+              return (
+                <text
+                  x={nearRight ? lx(measured) - 4 : lx(measured) + 3}
+                  y={y}
+                  textAnchor={nearRight ? "end" : "start"}
+                  className="fill-violet-300 text-[9.5px]"
+                  data-testid="measured-label"
+                >
+                  medido {fmtContext(measured)}
+                </text>
+              )
+            })()}
           </g>
         ) : null}
         {paths.map(({ s, d }, i) => {

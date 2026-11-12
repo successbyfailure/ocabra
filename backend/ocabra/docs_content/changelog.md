@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.77.1 — 2026-11-13
+
+### Novedades
+
+- **`GET /ocabra/models` incluye `maintenance`** (booleano) en cada modelo
+  local: `true` cuando el modelo está en modo mantenimiento y las peticiones
+  nuevas reciben 503. Antes solo se sabía mirando `…/insights` modelo a modelo.
+
+### Corregido
+
+- **Los modelos llama.cpp con `n_cpu_moe` reservaban VRAM de más al cargar.**
+  La admisión contaba los expertos MoE que se quedan en RAM como si fueran a la
+  GPU, así que un modelo que cabía podía esperar o desalojar a otros sin
+  necesidad. Ahora la estimación de carga y `…/preview` descuentan esa parte
+  (aproximada, ~85 % de los pesos de cada capa MoE) y la vista previa lo avisa.
+
+---
+
 ## 0.77.0 — 2026-11-12
 
 ### Novedades

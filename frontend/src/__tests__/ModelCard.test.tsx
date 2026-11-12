@@ -183,6 +183,11 @@ describe("ModelCard", () => {
     expect(acts.onEdit).toHaveBeenCalledWith("llama_cpp/chaos", "s=summary")
   })
 
+  it("shows the maintenance chip only when the model is in maintenance", () => {
+    renderCard(model({ status: "configured", runtimePhase: "configured", canCancelLoad: false, currentGpu: [], maintenance: true }))
+    expect(screen.getByTestId("maintenance-chip").textContent).toContain("Mantenimiento")
+  })
+
   it("off: Cargar asks the page to load it", () => {
     const acts = renderCard(model({ status: "configured", runtimePhase: "configured", canCancelLoad: false, currentGpu: [] }))
     fireEvent.click(screen.getByRole("button", { name: /Cargar/ }))

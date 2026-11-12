@@ -670,6 +670,29 @@ def plan_ollama_vram_mb(
     )
 
 
+# Share of a MoE layer's weights that are experts (``--n-cpu-moe`` moves only
+# those to RAM; attention, norms and the shared expert stay on GPU). Rough, but
+# the same figure the preset planner, the editor preview and admission use.
+MOE_EXPERT_WEIGHT_SHARE = 0.85
+
+
+def moe_cpu_weights_mb(
+    file_size_mb: float, total_layers: int, gpu_layers: int | None, n_cpu_moe: int | None
+) -> float:
+    """MB of expert weights that ``--n-cpu-moe N`` keeps in RAM.
+
+    llama.cpp offloads the LAST ``gpu_layers`` layers and ``n_cpu_moe`` counts
+    from the first layer, so only the expert layers that would otherwise be on
+    GPU leave it.
+    """
+    if not n_cpu_moe or n_cpu_moe <= 0:
+        return 0.0
+    layers = max(1, int(total_layers))
+    on_gpu = layers if gpu_layers is None else max(0, min(int(gpu_layers), layers))
+    moe_on_gpu = max(0, min(int(n_cpu_moe), layers) - (layers - on_gpu))
+    return file_size_mb * moe_on_gpu / layers * MOE_EXPERT_WEIGHT_SHARE
+
+
 def plan_llama_cpp_vram_mb(
     arch: ModelArch,
     file_size_mb: float,
@@ -680,6 +703,7 @@ def plan_llama_cpp_vram_mb(
     overhead_mb: float = DEFAULT_OVERHEAD_MB,
     parallel_slots: int = 1,
     rs_rollback_snapshots: int = 0,
+    n_cpu_moe: int | None = None,
 ) -> int:
     """llama.cpp: --ctx-size is the TOTAL KV budget (shared across --parallel), and
     only the ``gpu_layers`` offloaded layers hold weights + KV on the GPU.
@@ -699,7 +723,8 @@ def plan_llama_cpp_vram_mb(
     if offloaded <= 0:
         return 0
     frac = offloaded / total_layers
-    weights_mb = file_size_mb * frac
+    moe_cpu_mb = moe_cpu_weights_mb(file_size_mb, total_layers, offloaded, n_cpu_moe)
+    weights_mb = max(0.0, file_size_mb * frac - moe_cpu_mb)
     kv_arch = (
         arch
         if offloaded == total_layers

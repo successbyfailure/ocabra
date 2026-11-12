@@ -59,6 +59,7 @@ export function DevicePlacement({
   memory,
   layers,
   cpuEditable = true,
+  preferOnly = false,
 }: {
   value: Placement
   onChange: (patch: Partial<Placement>) => void
@@ -69,8 +70,11 @@ export function DevicePlacement({
   /** Capas del modelo (para la parte en CPU). */
   layers: number | null
   cpuEditable?: boolean
+  /** Backends que no reparten entre GPUs ni excluyen ninguna (bitnet): solo
+   *  la ★ (GPU preferida) y la parte en CPU por capas. */
+  preferOnly?: boolean
 }) {
-  const multi = value.marked.length > 1
+  const multi = value.marked.length > 1 && !preferOnly
   const mine = new Map((memory ?? []).map((m) => [m.gpu, Object.values(m.parts).reduce((a, b) => a + b, 0)]))
   const toggle = (index: number) => {
     const marked = value.marked.includes(index) ? value.marked.filter((g) => g !== index) : [...value.marked, index].sort((a, b) => a - b)
@@ -112,7 +116,7 @@ export function DevicePlacement({
     <div className="space-y-3" data-testid="device-placement">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="text-xs font-medium">Dónde corre</p>
-        <span className="text-[11px] text-muted-foreground">casilla: puede usarla · ★: la que prueba primero</span>
+        <span className="text-[11px] text-muted-foreground">{preferOnly ? "★: la GPU preferida (si no cabe, otra)" : "casilla: puede usarla · ★: la que prueba primero"}</span>
       </div>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-2">
         {gpus.map((g) => {
@@ -129,8 +133,14 @@ export function DevicePlacement({
               style={on ? { borderColor: `${color}aa`, background: `${color}10` } : undefined}
             >
               <div className="flex items-center justify-between gap-1">
-                <button type="button" disabled={readOnly} onClick={() => toggle(g.index)} className="flex min-w-0 items-center gap-1.5 font-semibold" style={{ color }}>
-                  <input type="checkbox" readOnly checked={on} className="pointer-events-none" aria-label={`Usar GPU ${g.index}`} />
+                <button
+                  type="button"
+                  disabled={readOnly}
+                  onClick={() => (preferOnly ? onChange({ star: isStar ? null : g.index }) : toggle(g.index))}
+                  className="flex min-w-0 items-center gap-1.5 font-semibold"
+                  style={{ color }}
+                >
+                  {!preferOnly && <input type="checkbox" readOnly checked={on} className="pointer-events-none" aria-label={`Usar GPU ${g.index}`} />}
                   <span className="truncate">
                     #{g.index} {shortGpuName(g.name)}
                   </span>
@@ -220,7 +230,7 @@ export function DevicePlacement({
                 />
               </>
             )}
-            {value.cpu && (
+            {value.cpu && !preferOnly && (
               <>
                 a la CPU:
                 <Segmented

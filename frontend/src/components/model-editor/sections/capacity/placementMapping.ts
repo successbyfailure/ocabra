@@ -162,3 +162,24 @@ export function writePresetPlacement(form: RuntimePresetCreate, next: Placement,
   const empty = Object.values(placement).every((v) => v == null)
   return { ...form, placementPolicy, preferredGpus, placement: empty ? null : placement }
 }
+
+// ── bitnet ──────────────────────────────────────────────────────────────────
+
+/** bitnet no excluye GPUs ni reparte: GPU preferida del modelo + capas en GPU. */
+export function readBitnetPlacement(sec: Record<string, Json>, preferredGpu: number | null, gpuIndices: number[], layers: number | null, gpuLayersDefault: number | null): Placement {
+  const gpuLayers = typeof sec.gpu_layers === "number" ? sec.gpu_layers : gpuLayersDefault
+  return {
+    marked: gpuLayers === 0 ? [] : gpuIndices,
+    star: preferredGpu != null && gpuIndices.includes(preferredGpu) ? preferredGpu : null,
+    together: false,
+    splitWhenNeeded: false,
+    ratios: null,
+    splitMode: null,
+    ...cpuFrom(gpuLayers, null, layers),
+  }
+}
+
+export function writeBitnetPlacement(setKey: (k: string, v: Json | undefined) => void, setPreferred: (g: number | null) => void, next: Placement, patch: Partial<Placement>) {
+  if ("star" in patch) setPreferred(next.star)
+  if (touches(patch, CPU_KEYS)) setKey("gpu_layers", next.cpu && next.gpuLayers != null ? next.gpuLayers : undefined)
+}

@@ -374,6 +374,15 @@ def _resolve_rs_rollback_snapshots(state) -> int:
         return _LLAMA_CPP_DEFAULT_DRAFT_N_MAX
 
 
+def _resolve_n_cpu_moe(state) -> int | None:
+    """``llama_cpp.n_cpu_moe`` (MoE experts kept in RAM), or None."""
+    try:
+        raw = resolve_llama_cpp_option(state, "n_cpu_moe", None)
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def estimate_llama_cpp_vram_from_config(
     state,
     *,
@@ -452,6 +461,7 @@ def estimate_llama_cpp_vram_from_config(
             kv_dtype_bytes=kv_dtype_bytes,
             parallel_slots=parallel_slots,
             rs_rollback_snapshots=rs_rollback_snapshots,
+            n_cpu_moe=_resolve_n_cpu_moe(state),
         )
         if est > 0:
             return est

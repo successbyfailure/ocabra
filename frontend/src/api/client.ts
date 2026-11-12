@@ -1073,6 +1073,7 @@ function toModelState(raw: unknown): ModelState {
     : undefined;
   return {
     modelId: String(data.model_id ?? data.modelId ?? ""),
+    maintenance: Boolean(data.maintenance),
     displayName: String(
       data.display_name ??
         data.displayName ??

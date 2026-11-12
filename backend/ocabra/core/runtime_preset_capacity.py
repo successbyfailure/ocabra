@@ -190,7 +190,7 @@ def _uses_unified_kv_pool(state: Any) -> bool:
 # Share of an MoE layer's weights that are expert tensors (what --n-cpu-moe
 # moves to RAM). An approximation: the real share depends on the model, and the
 # GGUF metadata the planner reads does not say which tensors are experts.
-_MOE_EXPERT_WEIGHT_SHARE = 0.85
+_MOE_EXPERT_WEIGHT_SHARE = vp.MOE_EXPERT_WEIGHT_SHARE
 _MOE_ESTIMATE_WARNING = "estimación aproximada: expertos MoE en CPU"
 _SPLIT_POLICIES = {"single", "when_needed", "always"}
 

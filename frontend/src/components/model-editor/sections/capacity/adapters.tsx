@@ -16,7 +16,15 @@ import { EMPTY_PRESET, PRESET_KEY_RE, presetToForm } from "../presets/presetLogi
 import type { SectionProps } from "../types"
 import { useCapacity } from "../useCapacity"
 import { DevicePlacement, type Placement } from "./DevicePlacement"
-import { activeGpus, readBasePlacement, readPresetPlacement, writeBasePlacement, writePresetPlacement } from "./placementMapping"
+import {
+  activeGpus,
+  readBasePlacement,
+  readBitnetPlacement,
+  readPresetPlacement,
+  writeBasePlacement,
+  writeBitnetPlacement,
+  writePresetPlacement,
+} from "./placementMapping"
 import { Workbench, type KvLabel, type MemoryShare, type WorkbenchState } from "./Workbench"
 
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
@@ -31,13 +39,20 @@ const CACHE_TYPE: Record<KvLabel, string | undefined> = { fp16: undefined, bf16:
 
 // ── Base de llama.cpp (modelos sin presets) ─────────────────────────────────
 
+/** bitnet comparte el banco de trabajo pero lee su propia sección y llama
+ *  `parallel` a los slots. */
+const isBitnet = (editor: ModelEditorState) => editor.model?.backend_type === "bitnet"
+const secName = (editor: ModelEditorState) => (isBitnet(editor) ? "bitnet" : "llama_cpp")
+const slotsKey = (editor: ModelEditorState) => (isBitnet(editor) ? "parallel" : "parallel_slots")
+
 function baseSection(editor: ModelEditorState) {
-  return (getPath(editor.draft!.extraConfig, ["llama_cpp"]) ?? {}) as Record<string, Json>
+  return (getPath(editor.draft!.extraConfig, [secName(editor)]) ?? {}) as Record<string, Json>
 }
 
 function readBasePlacementOf(editor: ModelEditorState, gpuIndices: number[], layers: number | null): Placement {
-  const f = editor.fieldByKey.get("llama_cpp.gpu_layers")?.default
-  return readBasePlacement(baseSection(editor), editor.draft!.preferredGpu ?? null, gpuIndices, layers, typeof f === "number" ? f : null)
+  const f = editor.fieldByKey.get(`${secName(editor)}.gpu_layers`)?.default
+  const read = isBitnet(editor) ? readBitnetPlacement : readBasePlacement
+  return read(baseSection(editor), editor.draft!.preferredGpu ?? null, gpuIndices, layers, typeof f === "number" ? f : null)
 }
 
 function readBase(editor: ModelEditorState, placement: Placement): WorkbenchState {
@@ -45,10 +60,10 @@ function readBase(editor: ModelEditorState, placement: Placement): WorkbenchStat
   const def = (k: string, fb: number) => {
     const v = sec[k]
     if (typeof v === "number") return v
-    const f = editor.fieldByKey.get(`llama_cpp.${k}`)?.default
+    const f = editor.fieldByKey.get(`${secName(editor)}.${k}`)?.default
     return typeof f === "number" ? f : fb
   }
-  const slots = Math.max(1, def("parallel_slots", 1))
+  const slots = Math.max(1, def(slotsKey(editor), 1))
   const pool = sec.kv_unified === true
   const total = def("ctx_size", 4096)
   return {
@@ -61,9 +76,9 @@ function readBase(editor: ModelEditorState, placement: Placement): WorkbenchStat
 }
 
 function writeBase(editor: ModelEditorState, next: WorkbenchState) {
-  const set = (k: string, v: Json | undefined) => editor.setField(["llama_cpp", k], v)
+  const set = (k: string, v: Json | undefined) => editor.setField([secName(editor), k], v)
   set("ctx_size", next.pool ? next.context : next.context * next.slots)
-  set("parallel_slots", next.slots)
+  set(slotsKey(editor), next.slots)
   set("kv_unified", next.pool ? true : undefined)
   const ct = CACHE_TYPE[next.kv]
   set("cache_type_k", ct)
@@ -182,15 +197,13 @@ export function BaseLlamaWorkbench(props: SectionProps & { onCreatePreset?: () =
       devices={
         <DevicePlacement
           value={placement}
-          onChange={(patch) =>
-            writeBasePlacement(
-              (k, v) => editor.setField(["llama_cpp", k], v),
-              (g) => editor.update({ preferredGpu: g }),
-              gpuIndices,
-              { ...placement, ...patch },
-              patch,
-            )
-          }
+          onChange={(patch) => {
+            const setKey = (k: string, v: Json | undefined) => editor.setField([secName(editor), k], v)
+            const setPreferred = (g: number | null) => editor.update({ preferredGpu: g })
+            if (isBitnet(editor)) writeBitnetPlacement(setKey, setPreferred, { ...placement, ...patch }, patch)
+            else writeBasePlacement(setKey, setPreferred, gpuIndices, { ...placement, ...patch }, patch)
+          }}
+          preferOnly={isBitnet(editor)}
           gpus={gpus}
           readOnly={readOnly}
           liveVramByGpu={liveVramByGpu}
@@ -274,7 +287,8 @@ export function PresetWorkbench({
   const [saving, setSaving] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<"bench" | "delete" | null>(null)
-  const pool = (getPath(editor.draft?.extraConfig, ["llama_cpp", "kv_unified"]) ?? getPath(editor.base?.extraConfig, ["llama_cpp", "kv_unified"])) === true
+  const sec = editor.model?.backend_type === "bitnet" ? "bitnet" : "llama_cpp"
+  const pool = (getPath(editor.draft?.extraConfig, [sec, "kv_unified"]) ?? getPath(editor.base?.extraConfig, [sec, "kv_unified"])) === true
   const dirty = JSON.stringify(form) !== JSON.stringify(initial)
   const isNew = preset == null
   const keyValid = PRESET_KEY_RE.test(form.presetKey) && !(isNew && profile.runtimePresets.some((p) => p.presetKey === form.presetKey))
@@ -483,6 +497,9 @@ export function PresetWorkbench({
             liveVramByGpu={liveVramByGpu}
             memory={memory.length ? memory : null}
             layers={layers}
+            // bitnet: el peldaño solo elige GPU; el reparto y la CPU son de llama.cpp.
+            preferOnly={sec === "bitnet"}
+            cpuEditable={sec !== "bitnet"}
           />
         }
         footer={footer}

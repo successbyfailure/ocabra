@@ -845,3 +845,26 @@ async def test_preview_endpoint_honours_placement(monkeypatch):
     out = await api.preview_runtime_preset("m", body, request, _user=None)
     assert out["cpu_mb"] > 0
     assert out["vram_breakdown_by_gpu"]["1"]["weights"] == 5_000
+
+
+# ── n_cpu_moe en la estimación de carga (admisión) y en la vista previa ──────
+
+
+def test_moe_cpu_weights_only_counts_expert_layers_still_on_gpu() -> None:
+    from ocabra.core import vram_planner as vp
+
+    assert vp.moe_cpu_weights_mb(1000, 10, None, None) == 0
+    # 4 de 10 capas MoE en CPU, todas en GPU: 4/10 × 0.85 de los pesos.
+    assert vp.moe_cpu_weights_mb(1000, 10, None, 4) == pytest.approx(340)
+    # Con 6 capas en GPU las 4 primeras ya están en CPU enteras: nada que mover.
+    assert vp.moe_cpu_weights_mb(1000, 10, 6, 4) == 0
+    assert vp.moe_cpu_weights_mb(1000, 10, 8, 4) == pytest.approx(170)
+
+
+def test_admission_estimate_subtracts_moe_experts_on_cpu() -> None:
+    from ocabra.core import vram_planner as vp
+
+    arch = vp.ModelArch(40, 8, 128, 128, 4096, 131072, 2.0)
+    full = vp.plan_llama_cpp_vram_mb(arch, 20000, 32768)
+    moe = vp.plan_llama_cpp_vram_mb(arch, 20000, 32768, n_cpu_moe=20)
+    assert full - moe == pytest.approx(20000 * 20 / 40 * vp.MOE_EXPERT_WEIGHT_SHARE, abs=2)

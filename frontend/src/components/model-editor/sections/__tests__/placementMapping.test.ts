@@ -103,3 +103,18 @@ describe("preset placement", () => {
     expect(again).toMatchObject({ placementPolicy: "forced", preferredGpus: [1], placement: null })
   })
 })
+
+describe("bitnet placement", () => {
+  it("only the preferred GPU and the GPU layers", async () => {
+    const { readBitnetPlacement, writeBitnetPlacement } = await import("../capacity/placementMapping")
+    const p = readBitnetPlacement({ gpu_layers: 20 }, 1, GPUS, 30, 99)
+    expect(p).toMatchObject({ marked: [0, 1], star: 1, cpu: true, gpuLayers: 20, together: false })
+    const out: Record<string, Json> = { gpu_layers: 20 }
+    let pref: number | null = 1
+    writeBitnetPlacement((k, v) => (v === undefined ? delete out[k] : (out[k] = v)), (g) => (pref = g), { ...p, star: 0 }, { star: 0 })
+    expect(pref).toBe(0)
+    expect(out).toEqual({ gpu_layers: 20 })
+    writeBitnetPlacement((k, v) => (v === undefined ? delete out[k] : (out[k] = v)), (g) => (pref = g), { ...p, cpu: false, gpuLayers: null }, { cpu: false, gpuLayers: null })
+    expect(out).toEqual({})
+  })
+})
