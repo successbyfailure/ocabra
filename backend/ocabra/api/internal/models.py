@@ -1543,11 +1543,26 @@ async def preview_model_config(
     draft = normalize_case(body.extra_config or {}, prefer="camel")[0]
     errors = config_schema.validate_extra_config(state.backend_type, draft)
     preferred = body.preferred_gpu if body.preferred_gpu is not None else state.preferred_gpu
+    # Paths come from the artifact, as at load time: a draft without
+    # model_path (edited raw JSON, API client) still gets the real estimate.
+    # The draft's own values win (a path being edited is previewed as edited).
+    from ocabra.core.model_manager import _deep_merge_dicts
+
+    materialized = (
+        _deep_merge_dicts(
+            model_artifacts.materialize(
+                state.backend_type, state.artifact, {}, model_artifacts.ollama_root()
+            ),
+            draft,
+        )
+        if state.artifact
+        else draft
+    )
     try:
         estimate = await _build_model_memory_estimate(
             request=request,
             state=state,
-            extra_config=draft,
+            extra_config=materialized,
             preferred_gpu=preferred,
             run_probe=False,
         )
@@ -1571,13 +1586,6 @@ async def preview_model_config(
             backend = await request.app.state.worker_pool.get_backend(state.backend_type)
             preview_launch = getattr(backend, "preview_launch", None)
             if preview_launch is not None:
-                materialized = (
-                    model_artifacts.materialize(
-                        state.backend_type, state.artifact, draft, model_artifacts.ollama_root()
-                    )
-                    if state.artifact
-                    else draft
-                )
                 launch = await preview_launch(state.backend_model_id, gpu_indices, materialized)
         except Exception as exc:  # noqa: BLE001
             launch = {"error": str(exc)}

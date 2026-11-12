@@ -548,3 +548,28 @@ def test_null_mmproj_or_draft_clears_it_from_the_artifact():
     assert "draft" not in out and out["mmproj"]["path"] == "/p.gguf"
     # Omitting the key changes nothing.
     assert apply_path_edits("llamacpp_mks", artifact, {"llama_cpp": {"ctx_size": 1}}, current) == artifact
+
+
+@pytest.mark.asyncio
+async def test_preview_fills_missing_paths_from_the_artifact(monkeypatch):
+    from ocabra.api.internal import models as api
+
+    seen = {}
+
+    async def fake_estimate(*, request, state, extra_config, preferred_gpu, run_probe):
+        seen["extra"] = extra_config
+        return {"model_loading_memory_mb": 0}
+
+    monkeypatch.setattr(api, "_build_model_memory_estimate", fake_estimate)
+    state = _state(backend_type="llamacpp_mks")
+    state.artifact = {"source": "local", "path": "/data/m.gguf"}
+    mm = MagicMock()
+    mm.get_state = AsyncMock(return_value=state)
+    backend = MagicMock(spec=[])
+    pool = MagicMock()
+    pool.get_backend = AsyncMock(return_value=backend)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm, gpu_manager=None, worker_pool=pool)))
+    body = api.ModelConfigPreviewRequest(extraConfig={"llama_cpp": {"ctx_size": 8192}})
+    await api.preview_model_config("m", body, request, _user=None)
+    assert seen["extra"]["llama_cpp"]["model_path"] == "/data/m.gguf"
+    assert seen["extra"]["llama_cpp"]["ctx_size"] == 8192

@@ -1423,6 +1423,8 @@ export interface RuntimePolicy {
   /** Detail of the last applied context probe, by preset (snake_case, as the API stores it). */
   contextProbe: Record<string, Record<string, unknown>>;
   defaultOutputReservationTokens: number | null;
+  /** Claves que la UI no edita (p. ej. reserve_mb_by_preset), devueltas tal cual al guardar. */
+  passthrough?: Record<string, unknown>;
 }
 
 export interface ContextProbeStep {

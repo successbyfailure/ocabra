@@ -673,9 +673,30 @@ function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
   };
 }
 
+// Claves de runtime_policy que este cliente mapea; el resto viaja tal cual en
+// `passthrough` para que guardar la política no borre lo que la UI no edita
+// (reserve_mb_by_preset, campos futuros).
+const RUNTIME_POLICY_KEYS = new Set([
+  "selection",
+  "restore_default_when_idle",
+  "downgrade_grace_seconds",
+  "minimum_residency_seconds",
+  "small_requests_extend_large_ttl",
+  "remote_warm_threshold_seconds",
+  "max_context_tokens",
+  "max_output_tokens",
+  "validated_context_tokens",
+  "validated_vram_mb",
+  "context_probe",
+  "default_output_reservation_tokens",
+]);
+
 function toRuntimePolicy(raw: unknown): RuntimePolicy | null {
   if (!isRecord(raw)) return null;
   return {
+    passthrough: Object.fromEntries(
+      Object.entries(raw).filter(([key]) => !RUNTIME_POLICY_KEYS.has(key) && !/[A-Z]/.test(key)),
+    ),
     selection: String(
       raw.selection ?? "prefer_loaded",
     ) as RuntimePolicy["selection"],
@@ -738,6 +759,7 @@ function fromRuntimePolicy(
 ): Record<string, unknown> | null {
   if (policy === null) return null;
   return {
+    ...(policy.passthrough ?? {}),
     selection: policy.selection,
     restore_default_when_idle: policy.restoreDefaultWhenIdle,
     downgrade_grace_seconds: policy.downgradeGraceSeconds,
