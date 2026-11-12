@@ -161,6 +161,7 @@ export function PreviewPanel({
       {p?.errors?.length ? (
         <Callout tone="error">
           <p className="mb-1 font-medium">Hay opciones no válidas</p>
+          <p className="mb-1 text-[10.5px] opacity-80">Solo impiden guardar si las cambias; si ya estaban guardadas, el backend las ignora.</p>
           <ul className="list-disc pl-4">
             {p.errors.map((e) => (
               <li key={e.key}>

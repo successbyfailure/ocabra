@@ -229,8 +229,13 @@ export function ModelEditor() {
   }
 
   const save = async (andReload: boolean) => {
-    if (editor.previewErrors.length) {
-      toast.error("Corrige las opciones no válidas antes de guardar")
+    // Solo bloquea lo que se está cambiando: un valor guardado que el backend
+    // ignora (p. ej. un resto del editor viejo) no impide guardar lo demás.
+    const blocking = editor.previewErrors.filter((e) =>
+      editor.changes.some((c) => c.key === e.key || e.key.startsWith(`${c.key}.`) || c.key.startsWith(`${e.key}.`)),
+    )
+    if (blocking.length) {
+      toast.error(`Corrige antes de guardar: ${blocking.map((e) => e.label).join(", ")}`)
       return
     }
     setBusy(andReload ? "save-reload" : "save")

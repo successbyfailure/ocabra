@@ -270,6 +270,23 @@ describe("ModelEditor", () => {
     )
   })
 
+  it("an invalid stored value does not block saving an unrelated change", async () => {
+    modelEditorApi.preview.mockResolvedValue({
+      errors: [{ key: "llama_cpp.split_mode", label: "Modo de reparto", message: "valor no válido" }],
+      unknownKeys: [],
+      estimate: {},
+      gpuIndices: [1],
+      gpus: [],
+      launch: null,
+    })
+    renderEditor("load")
+    await screen.findByTestId("load-policy")
+    await waitFor(() => expect(modelEditorApi.preview).toHaveBeenCalled())
+    fireEvent.click(screen.getByRole("button", { name: /Caliente/ }))
+    fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
+    await waitFor(() => expect(modelEditorApi.patch).toHaveBeenCalledWith("llamacpp_mks/m", { loadPolicy: "warm" }))
+  })
+
   it("a plain user sees everything read-only", async () => {
     setRole("user")
     renderEditor("load")

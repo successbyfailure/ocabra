@@ -1663,17 +1663,21 @@ async def preview_model_config(
         except Exception:  # noqa: BLE001
             totals = {}
     gpu_indices = _preview_gpu_indices(state, draft, preferred, max(1, len(totals)))
-    gpus = _split_estimate(estimate, draft, gpu_indices, totals) if not errors else []
+    # Computed even with invalid options: a stored value the backend ignores
+    # must not hide the preview of an otherwise valid draft.
+    try:
+        gpus = _split_estimate(estimate, draft, gpu_indices, totals)
+    except Exception:  # noqa: BLE001
+        gpus = []
 
     launch = None
-    if not errors:
-        try:
-            backend = await request.app.state.worker_pool.get_backend(state.backend_type)
-            preview_launch = getattr(backend, "preview_launch", None)
-            if preview_launch is not None:
-                launch = await preview_launch(state.backend_model_id, gpu_indices, materialized)
-        except Exception as exc:  # noqa: BLE001
-            launch = {"error": str(exc)}
+    try:
+        backend = await request.app.state.worker_pool.get_backend(state.backend_type)
+        preview_launch = getattr(backend, "preview_launch", None)
+        if preview_launch is not None:
+            launch = await preview_launch(state.backend_model_id, gpu_indices, materialized)
+    except Exception as exc:  # noqa: BLE001
+        launch = {"error": str(exc)}
 
     return {
         "errors": errors,
