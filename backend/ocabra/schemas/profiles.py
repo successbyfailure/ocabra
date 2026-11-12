@@ -169,6 +169,7 @@ class RuntimePresetResolutionOut(BaseModel):
     # Estimated footprint of a load with this preset (model editor preview).
     estimated_vram_mb: int | None = None
     vram_by_gpu: dict[int, int] = Field(default_factory=dict)
+    vram_breakdown_by_gpu: dict[int, dict[str, int]] = Field(default_factory=dict)
 
 
 class ContextProbeRequest(BaseModel):

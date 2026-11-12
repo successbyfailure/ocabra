@@ -940,6 +940,14 @@ function toRuntimePresetResolution(raw: unknown): RuntimePresetResolution {
           Object.entries((data.vram_by_gpu ?? data.vramByGpu) as Record<string, unknown>).map(([k, v]) => [k, Number(v)]),
         )
       : {},
+    vramBreakdownByGpu: isRecord(data.vram_breakdown_by_gpu ?? data.vramBreakdownByGpu)
+      ? Object.fromEntries(
+          Object.entries((data.vram_breakdown_by_gpu ?? data.vramBreakdownByGpu) as Record<string, unknown>).map(([gpu, parts]) => [
+            gpu,
+            Object.fromEntries(Object.entries(isRecord(parts) ? parts : {}).map(([k, v]) => [k, Number(v)])),
+          ]),
+        )
+      : {},
   };
 }
 

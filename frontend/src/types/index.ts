@@ -1519,6 +1519,8 @@ export interface RuntimePresetResolution {
   /** VRAM estimada de una carga con este preset, total y por GPU (MB). */
   estimatedVramMb?: number | null;
   vramByGpu?: Record<string, number>;
+  /** Desglose por GPU: pesos, KV, rs_cache, fijo, extra (MB). */
+  vramBreakdownByGpu?: Record<string, Record<string, number>>;
 }
 
 export interface RuntimePresetBenchmark {

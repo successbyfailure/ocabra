@@ -529,10 +529,15 @@ def test_preset_footprint_splits_by_gpu_size_and_counts_slots():
     slots = _footprint("llamacpp_mks", arch, 10000, effective=32768, parallelism=4, kv_bytes=1.0,
                        unified_pool=False, gpus=gpus, gpu_memory_utilization=0.9)
     assert slots["estimated_vram_mb"] > pool["estimated_vram_mb"]  # 4 x 32k vs 32k shared
-    assert pool["vram_by_gpu"][1] == 2 * pool["vram_by_gpu"][0] or abs(pool["vram_by_gpu"][1] - 2 * pool["vram_by_gpu"][0]) <= 1
+    b = pool["vram_breakdown_by_gpu"]
+    # Weights and KV split by GPU size; the base overhead sits on the first GPU.
+    assert abs(b[1]["weights"] - 2 * b[0]["weights"]) <= 1
+    assert "overhead" in b[0] and "overhead" not in b[1]
+    assert pool["vram_by_gpu"] == {g: sum(p.values()) for g, p in b.items()}
     vllm = _footprint("vllm", None, 0, effective=8192, parallelism=4, kv_bytes=2.0,
                       unified_pool=False, gpus=gpus[:1], gpu_memory_utilization=0.5)
-    assert vllm == {"estimated_vram_mb": 6144, "vram_by_gpu": {0: 6144}}
+    assert vllm == {"estimated_vram_mb": 6144, "vram_by_gpu": {0: 6144},
+                    "vram_breakdown_by_gpu": {0: {"engine": 6144}}}
 
 
 def test_null_mmproj_or_draft_clears_it_from_the_artifact():

@@ -44,3 +44,8 @@ export function useCapacity(
   }, [key])
   return { data, loading }
 }
+
+/** Solo para tests: la caché es de módulo y sobrevive entre casos. */
+export function resetCapacityCache(): void {
+  cache.clear()
+}

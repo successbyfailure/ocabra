@@ -6,14 +6,18 @@ import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import { fmtContext } from "@/components/dashboard/format"
 import { cn } from "@/lib/cn"
 import { getPath } from "../draft"
-import { GpuMemoryBar, fmtMb } from "../PreviewPanel"
+import { fmtMb } from "../PreviewPanel"
 import type { Json } from "../types"
 import { Callout, Hint, Panel, Segmented } from "../ui"
 import type { LadderRung } from "../usePresetLadder"
 import { ContextSection } from "./ContextSection"
 import { FractionPanel, GpuLayersPanel, GpuSection } from "./GpuSection"
 import { SchemaFields } from "../SchemaField"
-import { PolicyPanel, ProfileLadder } from "./PresetsSection"
+import { PolicyPanel } from "./presets/PresetParts"
+import { BaseLlamaWorkbench, PresetWorkbench } from "./capacity/adapters"
+import { MemoryBars } from "./capacity/Workbench"
+import { api } from "@/api/client"
+import { toast } from "sonner"
 import type { SectionProps } from "./types"
 
 /** Familias de backend por cómo gestionan la memoria. */
@@ -96,6 +100,35 @@ export function CapacitySection(props: SectionProps & { ladder: { rungs: LadderR
       { replace: true },
     )
 
+  // Un LLM sin presets (el planificador no aceptó su "normal" fijo): se crea
+  // uno en modo "lo que quepa", que siempre resuelve, para poder sondearlo.
+  const createAndProbe = async () => {
+    if (!ladder.profile || !editor.draft) return
+    const sec = (getPath(editor.draft.extraConfig, ["llama_cpp"]) ?? {}) as Record<string, Json>
+    const slots = typeof sec.parallel_slots === "number" ? sec.parallel_slots : 1
+    const ct = String(sec.cache_type_k ?? "")
+    try {
+      await api.profiles.createRuntimePreset(ladder.profile.profileId, {
+        presetKey: "normal",
+        label: "normal",
+        contextMode: "max",
+        contextTokens: null,
+        parallelism: slots,
+        kvCacheDtype: ct.startsWith("q4") ? "q4" : ct ? "q8" : "fp16",
+        placementPolicy: editor.draft.preferredGpu != null ? "forced" : "auto",
+        preferredGpus: editor.draft.preferredGpu != null ? [editor.draft.preferredGpu] : null,
+        executionPolicy: "auto",
+        enabled: true,
+        isDefault: true,
+      })
+      toast.success("Peldaño «normal» creado en modo «lo que quepa»: ya puedes medirlo")
+      await ladder.reload()
+      select("normal")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   if (!editor.draft || !schema) return null
   return (
     <div className="space-y-4" data-testid="capacity-section">
@@ -103,23 +136,29 @@ export function CapacitySection(props: SectionProps & { ladder: { rungs: LadderR
       <RungSelector {...props} family={family} selected={selected} onSelect={select} canPreset={canPreset && !readOnly} hasPresets={hasPresets} />
 
       {selected === "base" ? (
-        <BaseCanvas {...props} family={family} hasPresets={false} />
+        <BaseCanvas
+          {...props}
+          family={family}
+          hasPresets={false}
+          onCreatePreset={canPreset && allPresets.length === 0 && !readOnly ? () => void createAndProbe() : undefined}
+        />
       ) : selected === "common" ? (
         <SharedCanvas {...props} family={family} />
       ) : ladder.profile ? (
-        <ProfileLadder
+        <PresetWorkbench
           key={`${ladder.profile.profileId}-${selected}`}
-          profile={ladder.profile}
-          gpus={gpus}
+          editor={editor}
           readOnly={readOnly}
-          nativeContext={Number(editor.model?.capabilities?.native_context_length || 0) || null}
+          gpus={gpus}
           liveVramByGpu={liveVramByGpu}
-          focusKey={selected}
+          profile={ladder.profile}
+          presetKey={selected === "new" ? null : selected}
+          resolutions={Object.fromEntries(ladder.rungs.map((r) => [r.preset.presetKey, r.resolution]).filter(([, r]) => r)) as Record<string, import("@/types").RuntimePresetResolution>}
           onChanged={async () => {
             await ladder.reload()
             await editor.refreshLive()
           }}
-          onFocusDone={(key) => select(key ?? "")}
+          onDone={(key) => select(key ?? "")}
         />
       ) : null}
 
@@ -300,33 +339,28 @@ function RungSelector({
 }
 
 /** Lo que se carga sin preset: memoria por GPU y los controles del backend. */
-function BaseCanvas(props: SectionProps & { family: CapacityFamily; hasPresets: boolean }) {
-  const { editor, gpus, liveVramByGpu, family, hasPresets } = props
-  const shares = new Map((editor.preview?.gpus ?? []).map((g) => [g.index, g]))
+function BaseCanvas(props: SectionProps & { family: CapacityFamily; hasPresets: boolean; onCreatePreset?: () => void }) {
+  const { editor, gpus, liveVramByGpu, family, onCreatePreset } = props
   const quiet = { ...props, presets: [] }
+  if (family === "llama") return <BaseLlamaWorkbench {...quiet} onCreatePreset={onCreatePreset} />
+  const memory = (editor.preview?.gpus ?? []).map((g) => ({ gpu: g.index, parts: Object.keys(g.breakdown).length ? g.breakdown : { model: g.mb } }))
+  // El resto de backends: sus controles a la izquierda y la memoria al lado.
   return (
-    <div className="space-y-4">
-      <Panel
-        title="Memoria por GPU"
-        subtitle={
-          family === "ollama"
-            ? "Estimación: Ollama decide en qué GPU va cada capa."
-            : hasPresets
-              ? "De la base. La de cada preset se ve al elegirlo."
-              : undefined
-        }
-      >
-        <div className="space-y-2" data-testid="base-memory">
-          {gpus.map((g) => (
-            <GpuMemoryBar key={g.index} gpu={g} share={shares.get(g.index)} ownLiveMb={liveVramByGpu[String(g.index)] ?? 0} />
-          ))}
-          {!gpus.length && <Hint>Sin datos de GPU.</Hint>}
-        </div>
-      </Panel>
-      {family === "ollama" && <OllamaGlobalCard />}
-      {family === "encoder" && <EncoderPanel {...quiet} />}
-      <GpuSection {...quiet} />
-      {family !== "fixed" && family !== "encoder" && <ContextSection {...quiet} />}
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+      <div className="space-y-4">
+        {family === "ollama" && <OllamaGlobalCard />}
+        {family === "encoder" && <EncoderPanel {...quiet} />}
+        <GpuSection {...quiet} />
+        {family !== "fixed" && family !== "encoder" && <ContextSection {...quiet} />}
+      </div>
+      <div className="xl:sticky xl:top-28 xl:self-start" data-testid="base-memory">
+        <MemoryBars
+          gpus={gpus}
+          memory={memory}
+          liveVramByGpu={liveVramByGpu}
+          note={family === "ollama" ? <Hint>Estimación: Ollama decide en qué GPU va cada capa.</Hint> : null}
+        />
+      </div>
     </div>
   )
 }

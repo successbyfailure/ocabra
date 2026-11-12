@@ -366,6 +366,29 @@ no el editor mostraría controles que no hacen nada:
   139.584 como máximo con 4 slots en la 3090, frente a los 262.144 de su
   base. Midiendo su contexto real se fijaría un valor validado.
 
+**Quinta tanda (v0.76.1): banco de trabajo.**
+- Cada peldaño (la base sin presets, o un preset) es un banco de trabajo. A la
+  izquierda, los controles que cambian la memoria: GPUs (automática o las
+  elegidas, con principal y reparto; "Dónde corre" y "Reparto" unificados),
+  contexto, peticiones simultáneas, precisión y modo de la KV, capas. A la
+  derecha, pegadas a ellos, las barras de memoria por GPU con leyenda
+  (otros modelos, pesos, KV, estado recurrente, draft, fijos, buffers, libre)
+  y el veredicto.
+- Debajo, una gráfica que sustituye a la tabla de slots: VRAM según el
+  contexto por petición, una curva por número de peticiones simultáneas, el
+  techo de las GPUs elegidas y el contexto máximo de cada curva. Pulsar una
+  curva elige las simultáneas; pulsar la gráfica, el contexto. Cuenta lo mismo
+  que las barras (toma de la estimación todo lo que no es KV) y marca lo
+  medido por el sondeo.
+- "Medir contexto máximo" (sondeo) va junto a la gráfica en cada preset, con
+  los alias. En un LLM sin presets (gemma4:26b), "Crear peldaño y medir" crea
+  "normal" en modo "lo que quepa" para poder sondearlo.
+- La escalera vieja (PresetsSection) se retiró. La política y los alias viven
+  en `presets/PresetParts.tsx`. El backend desglosa la VRAM de cada preset por
+  GPU (`vram_breakdown_by_gpu`).
+- Se perdió el botón "Crear escalera 32k/64k/128k/MAX" de un clic: los
+  peldaños se crean uno a uno con "Nuevo peldaño".
+
 **Lo que queda, por diseño.**
 - La memoria por GPU de llama.cpp es una estimación desde el GGUF, no una
   medida. La medida real está en el dashboard (`vramByGpu`).

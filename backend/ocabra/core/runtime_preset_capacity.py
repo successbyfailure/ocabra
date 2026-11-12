@@ -209,22 +209,36 @@ def _footprint(
         per_gpu = {
             int(g["index"]): int(int(g["total_mb"]) * gpu_memory_utilization) for g in gpus
         }
-        return {"estimated_vram_mb": sum(per_gpu.values()), "vram_by_gpu": per_gpu}
+        return {
+            "estimated_vram_mb": sum(per_gpu.values()),
+            "vram_by_gpu": per_gpu,
+            "vram_breakdown_by_gpu": {g: {"engine": mb} for g, mb in per_gpu.items()},
+        }
     if arch is None:
         return {}
     tokens = effective if unified_pool else effective * max(1, parallelism)
-    total = (
-        weights_mb
-        + vp.kv_vram_mb(arch, tokens, kv_bytes)
-        + vp.rs_cache_vram_mb(arch, slots=max(1, parallelism))
-        + vp.fixed_overhead_vram_mb(arch)
-        + vp.DEFAULT_OVERHEAD_MB
-    )
-    sizes = [max(1, int(g["total_mb"])) for g in gpus]
-    per_gpu = {
-        int(g["index"]): int(total * size / sum(sizes)) for g, size in zip(gpus, sizes, strict=True)
+    parts = {
+        "weights": weights_mb,
+        "kv": vp.kv_vram_mb(arch, tokens, kv_bytes),
+        "rs_cache": vp.rs_cache_vram_mb(arch, slots=max(1, parallelism)),
+        "fixed": vp.fixed_overhead_vram_mb(arch),
     }
-    return {"estimated_vram_mb": int(total), "vram_by_gpu": per_gpu}
+    total = sum(parts.values()) + vp.DEFAULT_OVERHEAD_MB
+    sizes = [max(1, int(g["total_mb"])) for g in gpus]
+    breakdown: dict[int, dict[str, int]] = {}
+    for pos, (g, size) in enumerate(zip(gpus, sizes, strict=True)):
+        share = size / sum(sizes)
+        gpu_parts = {k: int(v * share) for k, v in parts.items() if v}
+        if pos == 0:
+            # The base overhead (CUDA context, buffers) sits on the main GPU.
+            gpu_parts["overhead"] = vp.DEFAULT_OVERHEAD_MB
+        breakdown[int(g["index"])] = gpu_parts
+    per_gpu = {g: sum(p.values()) for g, p in breakdown.items()}
+    return {
+        "estimated_vram_mb": int(total),
+        "vram_by_gpu": per_gpu,
+        "vram_breakdown_by_gpu": breakdown,
+    }
 
 
 def _plan_preset_capacity(

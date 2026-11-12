@@ -5,6 +5,7 @@ import { ModelEditor } from "@/pages/ModelEditor"
 import { useAuthStore } from "@/stores/authStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import type { ConfigSchema, RawModel, SchemaField } from "../types"
+import { resetCapacityCache } from "../sections/useCapacity"
 
 const modelEditorApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -118,6 +119,7 @@ function setRole(role: "user" | "model_manager" | "system_admin") {
 
 describe("ModelEditor", () => {
   beforeEach(() => {
+    resetCapacityCache()
     setRole("model_manager")
     useGpuStore.setState({
       gpus: [
@@ -173,11 +175,44 @@ describe("ModelEditor", () => {
 
   it("capacity shows the base memory per GPU with this model's live usage subtracted", async () => {
     renderEditor("capacity")
-    const strip = await screen.findByTestId("base-memory")
+    const bars = await screen.findByTestId("memory-bars")
     // #1 tiene 20.576 MB usados y 20.000 son de este modelo: le quedan 24.000 MB.
-    await waitFor(() => expect((strip.querySelector('[data-gpu-bar="1"]') as HTMLElement).textContent).toContain("21 GB / 23 GB libres"))
-    const fit = await screen.findByTestId("preview-base")
-    expect(fit.textContent).toContain("cabe ahora")
+    await waitFor(() => expect((bars.querySelector('[data-gpu-bar="1"]') as HTMLElement).textContent).toContain("21 GB de 23 GB libres"))
+    // La leyenda está junto a las barras y nombra cada parte.
+    const legend = screen.getByTestId("memory-legend")
+    expect(legend.textContent).toContain("pesos del modelo")
+    expect(legend.textContent).toContain("KV (contexto)")
+    expect(legend.textContent).toContain("otros modelos")
+    // Los controles de memoria están en el mismo banco de trabajo.
+    const bench = screen.getByTestId("workbench")
+    expect(bench.contains(screen.getByTestId("gpu-chooser"))).toBe(true)
+    expect(bench.contains(bars)).toBe(true)
+  })
+
+  it("an LLM without presets offers to create one to measure its real context", async () => {
+    api.profiles.listByModel.mockResolvedValue([
+      { profileId: "m", profileKind: "execution", baseModelId: "llamacpp_mks/m", displayName: "m", description: null, category: "llm",
+        loadOverrides: null, requestDefaults: null, assets: null, enabled: true, isDefault: true, routingTargets: null,
+        runtimePolicy: null, runtimePresets: [], aliases: [], createdAt: null, updatedAt: null },
+    ])
+    renderEditor("capacity")
+    expect(await screen.findByTestId("probe-needs-preset")).toBeTruthy()
+  })
+
+  it("the slots chart sets the number of simultaneous requests and the context", async () => {
+    modelEditorApi.capacity.mockResolvedValue({
+      applicable: true, weights_mb: 10000, overhead_mb: 400, kv_dtype: "fp16",
+      arch: { layers: 40, n_kv_heads: 8, native_context: 131072, kv_mb_per_1k_tokens: 100 },
+      capacity: [], vram_curve: [],
+    })
+    renderEditor("capacity")
+    const chart = await screen.findByTestId("slots-chart")
+    const series = chart.querySelectorAll("path[stroke='transparent']")
+    expect(series.length).toBe(5)
+    fireEvent.click(series[2]) // 4 a la vez
+    fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
+    await waitFor(() => expect(modelEditorApi.patch).toHaveBeenCalled())
+    expect(modelEditorApi.patch.mock.calls[0][1].extraConfig.llama_cpp.parallel_slots).toBe(4)
   })
 
   it("old section links (gpus, context, presets) land on Capacidad", async () => {
@@ -208,9 +243,9 @@ describe("ModelEditor", () => {
     await waitFor(() => expect(selector.querySelector('[data-rung="normal"]')).toBeTruthy())
     expect(selector.querySelector('[data-rung="base"]')).toBeNull()
     expect(selector.querySelector('[data-rung="largo"]')).toBeTruthy()
-    // Entra en el preset por defecto, enfocado.
-    expect(await screen.findByTestId("focused-rung")).toBeTruthy()
-    expect(screen.queryByTestId("base-memory")).toBeNull()
+    // Entra en el preset por defecto, en su banco de trabajo.
+    expect(await screen.findByText("Peldaño «normal»")).toBeTruthy()
+    expect(screen.getByText("¿Cuánto cabe de verdad?")).toBeTruthy()
     fireEvent.click(selector.querySelector('[data-rung="common"]') as HTMLElement)
     const shared = await screen.findByTestId("shared-canvas")
     // Lo que fija cada preset no aparece en lo común.

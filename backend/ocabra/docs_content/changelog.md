@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.76.1 — 2026-11-12
+
+### Novedades
+
+- **`…/runtime-presets/resolved` y `…/runtime-presets/preview` desglosan la
+  VRAM de cada preset por GPU** en `vram_breakdown_by_gpu` (pesos, KV,
+  estado recurrente, fijos y buffers), además del total por GPU que ya daban.
+
+---
+
 ## 0.76.0 — 2026-11-12
 
 ### Cambios
