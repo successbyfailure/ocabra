@@ -1026,10 +1026,22 @@ def test_tree_rss_counts_children_once(monkeypatch):
     assert la._tree_rss_mb([1, 1]) == 26_100
 
 
-def test_only_host_ram_backends_are_measured():
-    assert "strata" in la.HOST_RAM_BACKENDS
-    # En llama.cpp el RSS incluye los pesos mapeados ya copiados a la GPU.
-    assert "llamacpp_mks" not in la.HOST_RAM_BACKENDS
+def test_host_ram_is_measured_for_strata_and_llama_cpp():
+    """2026-11-13: el coder qwen4exp en llamacpp_mks deja la tabla PLE y los
+    expertos del borrador en RAM y la tarjeta no lo mostraba. llama.cpp
+    desmapea lo que sube a la GPU, asi que su RSS es RAM real."""
+    assert la.wants_host_ram("strata")
+    assert la.wants_host_ram("llamacpp_mks")
+    assert la.wants_host_ram("llama_cpp")
+    assert not la.wants_host_ram("vllm")
+    assert not la.wants_host_ram("whisper")
+
+
+def test_llama_cpp_baseline_ram_is_not_shown():
+    """El contexto CUDA y los buffers (~1,4 GB con todo en GPU) serian ruido."""
+    assert not la.keep_host_ram("llamacpp_mks", 1400)
+    assert la.keep_host_ram("llamacpp_mks", 4600)
+    assert la.keep_host_ram("strata", 500)
 
 
 # ── 2026-11-11: velocidad de whisper en vivo ────────────────────────────────

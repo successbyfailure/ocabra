@@ -701,13 +701,18 @@ async def build_models_activity(request: Any) -> dict:
         vram_by_gpu = {}
     backend_by_model = {state.model_id: state.backend_type for state in states}
     try:
-        ram_by_model = await live_activity.ram_by_model(
+        measured_ram = await live_activity.ram_by_model(
             {
                 model: pids
                 for model, pids in worker_pids.items()
-                if backend_by_model.get(model) in live_activity.HOST_RAM_BACKENDS
+                if live_activity.wants_host_ram(backend_by_model.get(model))
             }
         )
+        ram_by_model = {
+            model: mb
+            for model, mb in measured_ram.items()
+            if live_activity.keep_host_ram(backend_by_model.get(model), mb)
+        }
     except Exception:  # noqa: BLE001
         ram_by_model = {}
     return {

@@ -1150,10 +1150,17 @@ def model_phase(
 # ── RAM del host de los modelos que la usan a propósito ─────────────────────
 
 # Backends que mantienen pesos en la RAM del host aunque corran en GPU (Strata
-# carga en RAM lo que no cabe en VRAM y lo trae bajo demanda). Para el resto
-# no se mide: en llama.cpp el RSS incluye los pesos mapeados con mmap que ya
-# están copiados en la GPU, y la cifra engañaría.
+# carga en RAM lo que no cabe en VRAM y lo trae bajo demanda).
 HOST_RAM_BACKENDS = frozenset({"strata"})
+# llama.cpp también: tensores que se quedan en CPU (la tabla PLE de qwen4exp,
+# expertos con n_cpu_moe, los del borrador con --cpu-moe-draft). Se temía que
+# el RSS contase los pesos mapeados que ya se copiaron a la GPU, pero llama.cpp
+# desmapea lo que sube: medido el 2026-11-13, el coder de 55 GB con 31 GB en
+# GPU tenía 3,2 GB de RSS recién cargado (0,5 anónimos + 2,3 del borrador) y
+# 4,5 GB tras un prompt de 9.700 tokens. Por debajo de este umbral solo hay el
+# contexto CUDA y los buffers del servidor (~1,4 GB en gemma4:26b todo en GPU),
+# que en la tarjeta serían ruido.
+LLAMA_CPP_HOST_RAM_MIN_MB = 2048
 _RAM_TTL_S = 5.0
 _ram_cache: dict[str, tuple[float, int]] = {}
 
@@ -1173,6 +1180,21 @@ def _tree_rss_mb(pids: list[int]) -> int:
             except Exception:  # noqa: BLE001 — proceso muerto o sin permiso
                 continue
     return int(total / (1024 * 1024))
+
+
+def wants_host_ram(backend_type: str | None) -> bool:
+    """Si se mide la RAM del host de un modelo de este backend."""
+    from ocabra.core.model_ref import is_llama_cpp_family
+
+    backend = str(backend_type or "")
+    return backend in HOST_RAM_BACKENDS or is_llama_cpp_family(backend)
+
+
+def keep_host_ram(backend_type: str | None, ram_mb: int) -> bool:
+    """Si una lectura merece salir en la tarjeta (ver ``LLAMA_CPP_HOST_RAM_MIN_MB``)."""
+    if str(backend_type or "") in HOST_RAM_BACKENDS:
+        return ram_mb > 0
+    return ram_mb >= LLAMA_CPP_HOST_RAM_MIN_MB
 
 
 async def ram_by_model(worker_pids: dict[str, list[int]]) -> dict[str, int]:
