@@ -616,6 +616,38 @@ async def test_load_passes_speculative_flags(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_passes_draft_placement_flags(tmp_path: Path) -> None:
+    """Expertos del borrador en RAM o en un dispositivo concreto (2026-11-13)."""
+    target = tmp_path / "target.gguf"
+    target.write_bytes(b"GGUF" * 1024)
+    draft = tmp_path / "mtp.gguf"
+    draft.write_bytes(b"GGUF" * 256)
+    proc = _fake_proc()
+    backend = LlamaCppBackend()
+    extra_config = {
+        "llama_cpp": {
+            "speculative": {
+                "spec_type": "draft-mtp",
+                "draft_model_id": str(draft),
+                "draft_cpu_moe": True,
+                "draft_device": "CUDA1",
+            }
+        }
+    }
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        _patch_settings(mock_settings, str(tmp_path))
+        await backend.load("target", [1], port=18046, extra_config=extra_config)
+
+    args = list(create_proc.await_args.args)
+    assert "--cpu-moe-draft" in args
+    assert args[args.index("--device-draft") + 1] == "CUDA1"
+
+
+@pytest.mark.asyncio
 async def test_load_passes_self_contained_mtp_spec_type(tmp_path: Path) -> None:
     """spec_type alone (no draft_model_id) self-speculates from a nextn block
     baked into the main GGUF — no --model-draft should be added."""

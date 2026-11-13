@@ -132,3 +132,25 @@ def test_split_mode_tensor_is_passed_through():
     cmd = build_command(_args("--split-mode", "tensor"))
     idx = cmd.index("--split-mode")
     assert cmd[idx + 1] == "tensor"
+
+
+def test_draft_placement_flags_reach_llama_server():
+    """2026-11-13: el MTP de 512 expertos de Qwen3.8-Flash-Next no cabia en la
+    3090 junto al modelo; con sus expertos en RAM si."""
+    cmd = build_command(
+        _args(
+            "--model-draft", "/m/mtp.gguf",
+            "--spec-type", "draft-mtp",
+            "--cpu-moe-draft",
+            "--n-cpu-moe-draft", "1",
+            "--device-draft", "CUDA1",
+        )
+    )
+    assert "--cpu-moe-draft" in cmd
+    assert cmd[cmd.index("--n-cpu-moe-draft") + 1] == "1"
+    assert cmd[cmd.index("--device-draft") + 1] == "CUDA1"
+
+
+def test_no_draft_placement_flags_by_default():
+    cmd = build_command(_args("--model-draft", "/m/mtp.gguf", "--spec-type", "draft-mtp"))
+    assert "--cpu-moe-draft" not in cmd and "--device-draft" not in cmd

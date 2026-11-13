@@ -77,6 +77,18 @@ class SpeculativeConfig(BaseModel):
         default=None,
         description="Minimum acceptance probability for drafts (--draft-p-min).",
     )
+    draft_cpu_moe: bool | None = Field(
+        default=None,
+        description="Keep the external draft's MoE experts in RAM (--cpu-moe-draft).",
+    )
+    draft_n_cpu_moe: int | None = Field(
+        default=None,
+        description="Keep the draft's experts of its first N layers in RAM (--n-cpu-moe-draft).",
+    )
+    draft_device: str | None = Field(
+        default=None,
+        description="Device(s) for the external draft, e.g. 'CUDA0' (--device-draft).",
+    )
 
     @model_validator(mode="after")
     def _validate_has_a_draft_source(self) -> SpeculativeConfig:

@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spec-draft-n-max", type=int, default=None)
     parser.add_argument("--spec-draft-n-min", type=int, default=None)
     parser.add_argument("--spec-draft-p-min", type=float, default=None)
+    # Where the draft model lives: its MoE experts in RAM (a 512-expert MTP
+    # sidecar does not fit next to a model that fills both cards) or on one
+    # device.
+    parser.add_argument("--cpu-moe-draft", action="store_true")
+    parser.add_argument("--n-cpu-moe-draft", type=int, default=None)
+    parser.add_argument("--device-draft", default=None)
     parser.add_argument("--parallel", type=int, default=None)
     parser.add_argument("--cont-batching", action="store_true")
     # Multimodal projector (vision). See backend_load.py's
@@ -165,6 +171,12 @@ def build_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--spec-draft-n-min", str(args.spec_draft_n_min)])
     if args.spec_draft_p_min is not None:
         cmd.extend(["--spec-draft-p-min", str(args.spec_draft_p_min)])
+    if args.cpu_moe_draft:
+        cmd.append("--cpu-moe-draft")
+    if args.n_cpu_moe_draft is not None:
+        cmd.extend(["--n-cpu-moe-draft", str(args.n_cpu_moe_draft)])
+    if args.device_draft:
+        cmd.extend(["--device-draft", args.device_draft])
     if args.parallel is not None:
         cmd.extend(["--parallel", str(args.parallel)])
     if args.cont_batching:

@@ -1475,6 +1475,19 @@ class LlamaCppBackend(BackendInterface):
         draft_p_min = speculative.get("draft_p_min")
         if draft_p_min is not None:
             args.extend(["--spec-draft-p-min", str(float(draft_p_min))])
+        # Placement of a separate draft model. Seen 2026-11-13: the 512-expert
+        # MTP sidecar of Qwen3.8-Flash-Next (2.2 GB at Q4_0) did not fit on
+        # the 3090 next to the main model and the worker died allocating the
+        # draft's KV; with its experts in RAM it does.
+        if draft_path is not None:
+            if speculative.get("draft_cpu_moe"):
+                args.append("--cpu-moe-draft")
+            draft_n_cpu_moe = speculative.get("draft_n_cpu_moe")
+            if draft_n_cpu_moe is not None:
+                args.extend(["--n-cpu-moe-draft", str(int(draft_n_cpu_moe))])
+            draft_device = speculative.get("draft_device")
+            if draft_device:
+                args.extend(["--device-draft", str(draft_device)])
         return args
 
     def _resolve_draft_model_path(self, draft_model_id: str) -> Path:
