@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
@@ -284,7 +284,7 @@ async def _resolve_and_forward(
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+    except (InferenceTimeoutError, WorkerDegradedError, WorkerGoneError) as exc:
         raise_inference_dispatch_error(exc)
 
     resp_headers = await ocabra_response_headers(

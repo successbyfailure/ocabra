@@ -367,6 +367,24 @@ class InferenceTimeoutError(TimeoutError):
         super().__init__(f"Inference for model '{model_id}' timed out after {timeout_s}s")
 
 
+class WorkerGoneError(KeyError):
+    """The worker a request was sent to no longer exists.
+
+    Usually it was there when the request was routed and went away while the
+    request waited for a fair-share slot (manual unload, a crash, a service
+    claiming the GPU). A ``KeyError`` subclass so existing ``except KeyError``
+    callers keep working; endpoints answer 503 (``worker_unloaded``) and
+    router requests are re-routed once instead (2026-11-13).
+    """
+
+    def __init__(self, model_id: str) -> None:
+        super().__init__(f"No worker found for model '{model_id}'")
+        self.model_id = model_id
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
 class WorkerDegradedError(RuntimeError):
     """A worker has failed repeatedly in a way that indicates its backend
     process died (not a one-off error) — raised instead of forwarding another
@@ -819,7 +837,7 @@ class WorkerPool:
     async def _forward_request_unfair(self, model_id: str, path: str, body: dict) -> Any:
         worker = self._workers.get(model_id)
         if not worker:
-            raise KeyError(f"No worker found for model '{model_id}'")
+            raise WorkerGoneError(model_id)
         self._check_circuit_breaker(model_id)
         backend = self._backends.get(worker.backend_type)
         request_headers: dict[str, str] = {}
@@ -950,7 +968,7 @@ class WorkerPool:
     ) -> AsyncIterator[bytes]:
         worker = self._workers.get(model_id)
         if not worker:
-            raise KeyError(f"No worker found for model '{model_id}'")
+            raise WorkerGoneError(model_id)
         self._check_circuit_breaker(model_id)
         backend = self._backends.get(worker.backend_type)
         request_headers: dict[str, str] = {}

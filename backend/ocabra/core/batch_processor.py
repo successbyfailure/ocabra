@@ -40,7 +40,9 @@ _TRANSIENT_BATCH_ERROR_CODES = frozenset({"insufficient_vram"})
 # 503s from whisper when its card had no memory at that moment: the endpoint
 # already evicted and retried once; a requeued line gets another go once the
 # card frees up (2026-11-12: a diarized batch failed line after line).
-_TRANSIENT_BATCH_503_CODES = frozenset({"diarization_out_of_memory", "transcription_out_of_memory"})
+_TRANSIENT_BATCH_503_CODES = frozenset(
+    {"diarization_out_of_memory", "transcription_out_of_memory", "worker_unloaded"}
+)
 
 
 def _read_input_lines(path: Path) -> list[str]:
@@ -66,6 +68,27 @@ def _is_transient_batch_error(status_code: int, error_payload: dict[str, Any]) -
     if status_code == 503 and code in _TRANSIENT_BATCH_503_CODES:
         return True
     return status_code == 409 and code in _TRANSIENT_BATCH_ERROR_CODES
+
+
+class RequeueDeadline:
+    """How long a batch keeps retrying lines it could not run yet.
+
+    ``window_s`` from now, pushed forward by :meth:`extend` on every
+    preemption or cooldown skip, so a line preempted late in the window still
+    gets the whole cooldown plus margin (2026-11-13). ``clock`` is injectable
+    for tests.
+    """
+
+    def __init__(self, window_s: float, clock=time.monotonic) -> None:
+        self._window_s = float(window_s)
+        self._clock = clock
+        self._at = clock() + self._window_s
+
+    def extend(self) -> None:
+        self._at = max(self._at, self._clock() + self._window_s)
+
+    def passed(self) -> bool:
+        return self._clock() >= self._at
 
 
 class BatchProcessor:
@@ -411,6 +434,22 @@ class BatchProcessor:
             _model_key_cache[raw_model] = resolved
             return resolved
 
+        # A preemption starts a cooldown (up to batch_resume_cooldown_eviction_s)
+        # during which the line cannot run. The deadline used to count from
+        # the start of the batch only: preempted 72 s in, a line still had 13 s
+        # of cooldown left when the deadline ran out, and the batch failed 4 of
+        # 5 lines as "batch_priority_preempted" (2026-11-13). Every preemption
+        # or cooldown skip now leaves the full window ahead; completion_window
+        # (expires_at) still bounds it.
+        requeue_deadline = RequeueDeadline(
+            max(
+                settings.batch_resume_cooldown_slots_s,
+                settings.batch_resume_cooldown_eviction_s,
+            )
+            + 60.0
+        )
+        _extend_requeue_deadline = requeue_deadline.extend
+
         async def _process_line(idx: int, line: str) -> bool:
             """Returns True once the line is fully resolved (success or a
             permanent error written to the output file). Returns False when
@@ -455,6 +494,7 @@ class BatchProcessor:
                 target_model = await _coordinator_key(str(body.get("model") or ""), body)
 
                 if coordinator is not None and target_model and coordinator.in_cooldown(target_model):
+                    _extend_requeue_deadline()
                     return False
 
                 handle = None
@@ -482,6 +522,7 @@ class BatchProcessor:
                     # here (the task itself tolerates being cancelled; see
                     # BatchPriorityCoordinator.preempt_now) and let the
                     # caller retry the line once the cooldown lifts.
+                    _extend_requeue_deadline()
                     return False
                 finally:
                     if handle is not None:
@@ -547,10 +588,6 @@ class BatchProcessor:
         # this). Give comfortable headroom above whichever cooldown is
         # configured longest, since both are user-configurable settings.
         _REQUEUE_BACKOFF_S = 5.0
-        requeue_deadline = time.monotonic() + max(
-            settings.batch_resume_cooldown_slots_s,
-            settings.batch_resume_cooldown_eviction_s,
-        ) + 60.0
 
         expired_mid_run = False
         try:
@@ -558,7 +595,7 @@ class BatchProcessor:
                 idx for idx, line in enumerate(lines)
                 if _custom_id_for(idx, line) not in done_custom_ids
             ]
-            while pending_indices and not cancelled and time.monotonic() < requeue_deadline:
+            while pending_indices and not cancelled and not requeue_deadline.passed():
                 if expires_at is not None and datetime.now(UTC) > expires_at:
                     expired_mid_run = True
                     break
@@ -851,6 +888,14 @@ class BatchProcessor:
                     response = await client.post(
                         endpoint, json=json_kw, headers={**headers, "Content-Type": "application/json"}
                     )
+        except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            # The worker went away under the line (evicted for interactive
+            # traffic, or restarted): "All connection attempts failed" was
+            # recorded as a permanent failure (2026-11-13). Requeue it.
+            return None, 503, {
+                "code": "worker_unloaded",
+                "message": f"The model's worker went away during the request: {exc}",
+            }
         except Exception as exc:
             return None, 500, {
                 "code": "internal_error",

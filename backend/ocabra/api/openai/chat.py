@@ -35,7 +35,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.output_limits import apply_declared_output_limit
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 from ocabra.database import AsyncSessionLocal
 
 from ._deps import (
@@ -256,11 +256,13 @@ async def chat_completions(
         # streaming code path (99% of real traffic — chat SDKs default to
         # stream=true), which is why bench/manual tests looked fine.
         router_resolver = getattr(request.app.state, "router_resolver", None)
+        router_profile = None
         if (
             profile is not None
             and router_resolver is not None
             and router_resolver.is_router(profile)
         ):
+            router_profile = profile
             resolved = await router_resolver.pick(profile, request_body=body)
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None and target.profile_id != profile.profile_id:
@@ -310,6 +312,23 @@ async def chat_completions(
                     content_kinds=_content_kinds,
                     user_key=fairness_user_key(user),
                     telemetry=runtime_telemetry,
+                    reroute=(
+                        _router_reroute(
+                            request=request,
+                            router_profile=router_profile,
+                            router_resolver=router_resolver,
+                            profile_registry=profile_registry,
+                            model_manager=model_manager,
+                            worker_pool=worker_pool,
+                            body=body,
+                            content_kinds=_content_kinds,
+                            user_key=fairness_user_key(user),
+                            telemetry=runtime_telemetry,
+                        )
+                        if router_profile is not None
+                        and profile.profile_id != router_profile.profile_id
+                        else None
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers=headers,
@@ -406,7 +425,7 @@ async def chat_completions(
         if first_exc is not None:
             if isinstance(first_exc, httpx.HTTPStatusError):
                 raise_upstream_http_error(first_exc)
-            if isinstance(first_exc, KVCapacityError):
+            if isinstance(first_exc, (KVCapacityError, WorkerGoneError)):
                 raise_inference_dispatch_error(first_exc)
             message, code = stream_error_details(first_exc)
             raise HTTPException(
@@ -457,6 +476,18 @@ async def chat_completions(
         ) from None
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
+    except WorkerGoneError as exc:
+        # The router chose this target when the request arrived and it was
+        # unloaded while the request waited for its slot. Nothing has been
+        # sent yet: resolve the router again, once (it prefers what is loaded
+        # now). A request for a plain profile gets a retryable 503.
+        if getattr(request.state, "via_router_profile_id", None) and not getattr(
+            request.state, "router_rerouted", False
+        ):
+            request.state.router_rerouted = True
+            logger.info("router_reroute_after_worker_gone", worker_key=worker_key)
+            return await chat_completions(request, user)
+        raise_inference_dispatch_error(exc)
     except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:
         raise_inference_dispatch_error(exc)
     from fastapi.responses import JSONResponse
@@ -601,6 +632,70 @@ async def _stream_chat_from(
         yield b"data: [DONE]\n\n"
 
 
+def _router_reroute(
+    *,
+    request: Request,
+    router_profile,
+    router_resolver,
+    profile_registry,
+    model_manager,
+    worker_pool,
+    body: dict,
+    content_kinds: set[str],
+    user_key: str | None,
+    telemetry,
+):
+    """Build the ``reroute`` callable of ``_stream_chat_with_load`` for a
+    router request: pick a target again (the router prefers what is loaded
+    now) and stream from it, with no further reroute."""
+
+    async def _again():
+        resolved = await router_resolver.pick(router_profile, request_body=body)
+        target = await profile_registry.get(resolved.target_profile_id)
+        if target is None or target.profile_id == router_profile.profile_id:
+            yield _sse_error(
+                f"Router '{router_profile.profile_id}' has no target available right now.",
+                "worker_unloaded",
+            )
+            return
+        note_router_resolution(router_profile, target)
+        try:
+            request.state.resolved_model_id = target.profile_id
+        except Exception:  # noqa: BLE001 — telemetry only
+            pass
+        try:
+            plan = await resolve_profile_runtime_plan(
+                target, model_manager, body, request_state=request.state
+            )
+        except HTTPException as exc:
+            detail = exc.detail.get("error", {}) if isinstance(exc.detail, dict) else {}
+            yield _sse_error(
+                detail.get("message") or str(exc.detail),
+                detail.get("code") or "router_reroute_failed",
+            )
+            return
+        async for chunk in _stream_chat_with_load(
+            model_manager=model_manager,
+            worker_pool=worker_pool,
+            profile=target,
+            worker_key=plan.worker_key,
+            load_overrides=plan.load_overrides,
+            preferred_gpu=plan.preferred_gpu,
+            load_policy=plan.load_policy,
+            required_tokens=plan.required_tokens,
+            kv_reservation_tokens=plan.kv_reservation_tokens,
+            effective_context=plan.effective_context,
+            body=body,
+            content_kinds=content_kinds,
+            user_key=user_key,
+            telemetry=telemetry,
+            reroute=None,
+        ):
+            yield chunk
+
+    return _again
+
+
 async def _stream_chat_with_load(
     *,
     model_manager,
@@ -617,8 +712,14 @@ async def _stream_chat_with_load(
     content_kinds: set[str],
     user_key: str | None = None,
     telemetry=None,
+    reroute=None,
 ):
     """SSE generator that triggers the model load lazily.
+
+    ``reroute``: for a request that came through a router, a zero-argument
+    callable returning another of these generators for a freshly picked
+    target. Used once, when the chosen worker disappeared while the request
+    waited for its slot (see ``WorkerGoneError``).
 
     The fair-share slot (see ``fair_slot_gate.py``) is only acquired once the
     model is actually loaded and generation is about to start — the cold load
@@ -762,6 +863,19 @@ async def _stream_chat_with_load(
             **({"telemetry": telemetry} if telemetry is not None else {}),
             **kv_admission,
         ):
+            yield chunk
+    except WorkerGoneError as exc:
+        # Raised before the first byte from the backend: nothing of the
+        # answer has gone out, so a router request can still go to another
+        # target. The router picked this one when the request arrived; it
+        # was unloaded while the request waited for its turn.
+        if reroute is None:
+            message, code = stream_error_details(exc)
+            yield _sse_error(message, code)
+            return
+        logger.info("router_reroute_after_worker_gone", worker_key=worker_key)
+        yield sse_ocabra_event("rerouted", from_worker_key=worker_key)
+        async for chunk in reroute():
             yield chunk
     except Exception as exc:
         message, code = stream_error_details(exc)

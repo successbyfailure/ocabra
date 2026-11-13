@@ -19,7 +19,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.output_limits import apply_declared_output_limit
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
@@ -284,7 +284,7 @@ async def completions(
         if first_exc is not None:
             if isinstance(first_exc, httpx.HTTPStatusError):
                 raise_upstream_http_error(first_exc)
-            if isinstance(first_exc, KVCapacityError):
+            if isinstance(first_exc, (KVCapacityError, WorkerGoneError)):
                 raise_inference_dispatch_error(first_exc)
             message, code = stream_error_details(first_exc)
             raise HTTPException(
@@ -335,7 +335,7 @@ async def completions(
         ) from None
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:
+    except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError, WorkerGoneError) as exc:
         raise_inference_dispatch_error(exc)
     from fastapi.responses import JSONResponse
 

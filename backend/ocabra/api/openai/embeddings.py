@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.core.request_telemetry import mark_prefill_since
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
@@ -143,7 +143,7 @@ async def embeddings(
         )
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, WorkerDegradedError) as exc:
+    except (InferenceTimeoutError, WorkerDegradedError, WorkerGoneError) as exc:
         raise_inference_dispatch_error(exc)
     # Un embedding es todo prefill: con este tiempo el middleware de stats
     # calcula los tokens/s que el worker no devuelve.

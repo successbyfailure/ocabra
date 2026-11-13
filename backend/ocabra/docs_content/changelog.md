@@ -16,6 +16,32 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.77.2 — 2026-11-13
+
+### Correcciones
+
+- **Una petición a un router ya no falla si su modelo se descarga mientras
+  espera turno.** El router elige destino al entrar la petición. Si ese
+  modelo se descargaba mientras la petición esperaba en la cola (descarga
+  manual, caída del proceso, un servicio que reclama la GPU), la petición
+  fallaba con `500` sin streaming o con `502` con streaming. Ahora vuelve a
+  elegir destino una vez y se sirve con el modelo que haya cargado. Con
+  streaming llega antes de la respuesta un comentario SSE con
+  `"event": "ocabra.rerouted"`.
+  Las peticiones a un perfil concreto reciben `503` con
+  `code: "worker_unloaded"` y `Retry-After`, en vez del 500 o el 502.
+- **Batches: menos líneas perdidas cuando el tráfico interactivo les quita
+  el modelo.** Cuando una línea se expulsaba para dejar paso a peticiones
+  interactivas, el plazo de reintento contaba desde el inicio del lote y
+  podía vencer antes de que terminase la pausa de esa expulsión. Las líneas
+  acababan en `batch_priority_preempted` sin haber vuelto a intentarlo. Ahora
+  cada expulsión deja por delante el plazo completo, con la ventana del lote
+  (`completion_window`) como límite. Además, una línea a la que se le va el
+  worker a mitad de envío ("All connection attempts failed") se reintenta en
+  vez de fallar con `internal_error`.
+
+---
+
 ## 0.77.1 — 2026-11-13
 
 ### Novedades

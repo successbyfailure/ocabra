@@ -2155,7 +2155,11 @@ def raise_inference_dispatch_error(exc: Exception) -> None:
     transient and should look like it).
     """
     from ocabra.core.fair_slot_gate import KVCapacityError
-    from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+    from ocabra.core.worker_pool import (
+        InferenceTimeoutError,
+        WorkerDegradedError,
+        WorkerGoneError,
+    )
 
     if isinstance(exc, KVCapacityError):
         raise _openai_error(
@@ -2171,6 +2175,14 @@ def raise_inference_dispatch_error(exc: Exception) -> None:
             "server_error",
             code="generation_timeout",
             status_code=504,
+            headers={"Retry-After": "5"},
+        ) from exc
+    if isinstance(exc, WorkerGoneError):
+        raise _openai_error(
+            f"{exc}: it was unloaded while the request waited. Retry.",
+            "server_error",
+            code="worker_unloaded",
+            status_code=503,
             headers={"Retry-After": "5"},
         ) from exc
     if isinstance(exc, WorkerDegradedError):
@@ -2195,7 +2207,11 @@ def stream_error_details(exc: Exception) -> tuple[str, str]:
     class in a stable oCabra code for request statistics.
     """
     from ocabra.core.fair_slot_gate import KVCapacityError
-    from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
+    from ocabra.core.worker_pool import (
+        InferenceTimeoutError,
+        WorkerDegradedError,
+        WorkerGoneError,
+    )
 
     if isinstance(exc, KVCapacityError):
         return str(exc), "context_length_exceeded"
@@ -2205,6 +2221,9 @@ def stream_error_details(exc: Exception) -> tuple[str, str]:
 
     if isinstance(exc, WorkerDegradedError):
         return str(exc), "worker_degraded"
+
+    if isinstance(exc, WorkerGoneError):
+        return str(exc), "worker_unloaded"
 
     if not isinstance(exc, httpx.HTTPStatusError):
         return str(exc), "stream_error"
