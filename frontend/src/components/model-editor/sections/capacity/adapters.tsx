@@ -111,10 +111,10 @@ function RungTests({
   probeBlocked: string | null
 }) {
   return (
-    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))] gap-4" data-testid="rung-tests">
+    <div className="space-y-2" data-testid="rung-tests">
       <div className="space-y-2 rounded-xl border border-border p-3">
         <p className="text-xs font-medium">¿Carga y responde así?</p>
-        <Hint>Carga el modelo en frío con esta configuración y le manda una petición mínima. Si estaba cargado se descarga antes.</Hint>
+        <Hint>Carga en frío con esta configuración y manda una petición mínima (si estaba cargado, se descarga antes).</Hint>
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -133,10 +133,7 @@ function RungTests({
       {probe !== null && (
         <div className="space-y-2 rounded-xl border border-border p-3">
           <p className="text-xs font-medium">¿Cuánto contexto cabe de verdad?</p>
-          <Hint>
-            La gráfica es una estimación. El sondeo carga el modelo y amplía el contexto en caliente hasta el límite de sus GPUs; lo medido queda
-            como valor validado y aparece en la gráfica.
-          </Hint>
+          <Hint>Lo de arriba es una estimación: el sondeo carga el modelo y amplía el contexto en caliente hasta el límite real; lo medido sale en violeta.</Hint>
           {probeBlocked ? <Hint tone="warn">{probeBlocked}</Hint> : probe}
         </div>
       )}
@@ -194,6 +191,9 @@ export function BaseLlamaWorkbench(props: SectionProps & { onCreatePreset?: () =
       native={cap?.arch?.native_context ?? (Number(editor.model?.capabilities?.native_context_length) || null)}
       allowMax={false}
       poolEditable
+      planned={
+        (value.pool ? editor.preview?.estimate?.estimated_max_total_context : editor.preview?.estimate?.estimated_max_context_length) ?? null
+      }
       devices={
         <DevicePlacement
           value={placement}
@@ -211,7 +211,7 @@ export function BaseLlamaWorkbench(props: SectionProps & { onCreatePreset?: () =
           layers={layers}
         />
       }
-      footer={
+      actions={
         <RungTests
           readOnly={readOnly}
           testLabel="Probar tal cual"
@@ -441,8 +441,7 @@ export function PresetWorkbench({
   )
 
   const probeGpus = form.placementPolicy !== "auto" && (form.preferredGpus?.length ?? 0) > 0
-  const footer = (
-    <div className="space-y-4">
+  const actions = (
       <RungTests
         readOnly={readOnly}
         testLabel={isNew ? "Crear y probar" : dirty ? "Guardar y probar" : "Probar tal cual"}
@@ -461,6 +460,10 @@ export function PresetWorkbench({
                 : null
         }
       />
+  )
+
+  const footer = (
+    <div className="space-y-4">
       {preset && !isNew && (
         <div className="space-y-2">
           <p className="text-xs font-medium">Alias</p>
@@ -488,6 +491,8 @@ export function PresetWorkbench({
         allowMax
         poolEditable={false}
         measured={measured}
+        planned={shown?.hardwareMax ? Math.min(shown.hardwareMax, shown.modelMax ?? shown.hardwareMax) : null}
+        actions={actions}
         devices={
           <DevicePlacement
             value={placement}

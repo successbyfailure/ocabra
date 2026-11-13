@@ -219,12 +219,27 @@ describe("ModelEditor", () => {
     })
     renderEditor("capacity")
     const chart = await screen.findByTestId("slots-chart")
-    const series = chart.querySelectorAll("path[stroke='transparent']")
-    expect(series.length).toBe(5)
-    fireEvent.click(series[2]) // 4 a la vez
+    // Una fila por número de peticiones a la vez, con el contexto que cabe.
+    await waitFor(() => expect(chart.querySelectorAll("[data-slots]").length).toBeGreaterThanOrEqual(5))
+    expect(chart.querySelector('[data-slots="1"]')!.textContent).toMatch(/hasta/)
+    fireEvent.click(chart.querySelector('[data-slots="4"]') as HTMLElement)
     fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
     await waitFor(() => expect(modelEditorApi.patch).toHaveBeenCalled())
     expect(modelEditorApi.patch.mock.calls[0][1].extraConfig.llama_cpp.parallel_slots).toBe(4)
+  })
+
+  it("with a shared KV pool the chart is a single pool bar, not one row per slots", async () => {
+    modelEditorApi.capacity.mockResolvedValue({
+      applicable: true, weights_mb: 10000, overhead_mb: 400, kv_dtype: "fp16",
+      arch: { layers: 40, n_kv_heads: 8, native_context: 131072, kv_mb_per_1k_tokens: 100 },
+      capacity: [], vram_curve: [],
+    })
+    modelEditorApi.get.mockResolvedValue(model({ extra_config: { llama_cpp: { ctx_size: 65536, parallel_slots: 4, kv_unified: true } } }))
+    renderEditor("capacity")
+    const chart = await screen.findByTestId("slots-chart")
+    await waitFor(() => expect(chart.querySelectorAll("[data-slots]").length).toBe(1))
+    expect(chart.textContent).toContain("¿Qué tamaño de pool cabe?")
+    expect(chart.textContent).toContain("en total")
   })
 
   it("old section links (gpus, context, presets) land on Capacidad", async () => {

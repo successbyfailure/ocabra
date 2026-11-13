@@ -1,4 +1,4 @@
-import { useMemo, useRef, type ReactNode } from "react"
+import type { ReactNode } from "react"
 import { gpuColor } from "@/components/dashboard/GpuBadge"
 import { shortGpuName } from "@/components/dashboard/gpuNames"
 import { fmtContext } from "@/components/dashboard/format"
@@ -37,8 +37,8 @@ const KV_OPTIONS: { value: KvLabel; label: string; hint: string }[] = [
 const KV_BYTES: Record<KvLabel, number> = { fp16: 2, bf16: 2, fp8: 1, q8: 1, q4: 0.5 }
 
 /** Banco de trabajo de Capacidad: a la izquierda los controles que cambian la
- *  memoria, a la derecha la memoria por GPU con su leyenda, y debajo la
- *  gráfica de contexto × peticiones simultáneas. */
+ *  memoria y debajo cuánto contexto cabe según las peticiones a la vez; a la
+ *  derecha la memoria por GPU con su leyenda y, debajo, las pruebas. */
 export function Workbench({
   title,
   subtitle,
@@ -55,6 +55,8 @@ export function Workbench({
   poolEditable,
   measured,
   devices,
+  actions,
+  planned,
   header,
   footer,
 }: {
@@ -75,6 +77,11 @@ export function Workbench({
   measured?: number | null
   /** Dónde corre (GPUs y CPU); ocupa todo el ancho encima de los controles. */
   devices?: ReactNode
+  /** Pruebas del peldaño: van debajo de la memoria, junto a lo que miden. */
+  actions?: ReactNode
+  /** Máximo que da el planificador con lo elegido (con margen y medidas):
+   *  manda sobre la estimación simple en la fila elegida. */
+  planned?: number | null
   header?: ReactNode
   footer?: ReactNode
 }) {
@@ -87,24 +94,25 @@ export function Workbench({
       <div className="flex flex-wrap gap-5" data-testid="workbench">
         <div className="min-w-0 flex-[2_1_360px] space-y-5">
           <ContextKnobs value={value} onChange={onChange} readOnly={readOnly} native={native} allowMax={allowMax} poolEditable={poolEditable} />
+          {cap?.applicable && cap.arch && (
+            <SlotsChart
+              cap={cap}
+              gpus={gpus}
+              value={value}
+              onChange={onChange}
+              readOnly={readOnly}
+              measured={measured ?? null}
+              planned={planned ?? null}
+              estimateMb={memory?.length ? memory.reduce((a, m) => a + Object.values(m.parts).reduce((x, v) => x + v, 0), 0) : null}
+              staticMb={memory?.length ? memory.reduce((a, m) => a + Object.entries(m.parts).filter(([k]) => k !== "kv").reduce((x, [, v]) => x + v, 0), 0) : null}
+            />
+          )}
         </div>
         <div className="min-w-0 flex-[1_1_280px] space-y-3">
           <MemoryBars gpus={gpus} memory={memory} liveVramByGpu={liveVramByGpu} selected={value.gpus} note={memoryNote} />
+          {actions}
         </div>
       </div>
-      {cap?.applicable && cap.arch && (
-        <div className="mt-5 border-t border-border pt-4">
-          <SlotsChart
-            cap={cap}
-            gpus={gpus}
-            value={value}
-            onChange={onChange}
-            readOnly={readOnly}
-            measured={measured ?? null}
-            staticMb={memory?.length ? memory.reduce((a, m) => a + Object.entries(m.parts).filter(([k]) => k !== "kv").reduce((x, [, v]) => x + v, 0), 0) : null}
-          />
-        </div>
-      )}
       {footer && <div className="mt-4 border-t border-border pt-4">{footer}</div>}
     </Panel>
   )
@@ -332,16 +340,16 @@ const PART_LABEL: Record<string, string> = {
   model: "modelo",
 }
 
-// ── Gráfica: contexto × peticiones simultáneas ──────────────────────────────
+// ── ¿Cuánto contexto cabe? ──────────────────────────────────────────────────
 
 const SLOT_SERIES = [1, 2, 4, 8, 16]
-const SERIES_COLORS = ["#38bdf8", "#22c55e", "#a78bfa", "#f59e0b", "#f472b6"]
 const MARKS = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
 
-/** VRAM según el contexto por petición, una curva por número de peticiones
- *  simultáneas, con el techo de las GPUs elegidas: donde se cruzan está el
- *  contexto máximo. Pulsar una curva elige ese número de peticiones; pulsar
- *  la gráfica, el contexto. */
+/** Responde a una pregunta: con N peticiones a la vez, ¿hasta cuánto contexto
+ *  puede tener cada una en estas GPUs? Una fila por N, con una barra de
+ *  contexto (escala logarítmica) que se llena hasta lo que cabe y una marca
+ *  donde está lo elegido. Pulsar una fila elige N; pulsar en su barra, también
+ *  el contexto. Con pool compartido el contexto es el total de todas. */
 export function SlotsChart({
   cap,
   gpus,
@@ -349,6 +357,8 @@ export function SlotsChart({
   onChange,
   readOnly,
   measured,
+  planned,
+  estimateMb,
   staticMb,
 }: {
   cap: CapacityInfo
@@ -357,166 +367,140 @@ export function SlotsChart({
   onChange: (patch: Partial<WorkbenchState>) => void
   readOnly: boolean
   measured: number | null
+  planned?: number | null
+  /** Memoria total de lo elegido según la vista previa (lo mismo que las barras). */
+  estimateMb?: number | null
   /** Lo que no es KV según la estimación (pesos, draft, fijos…): así la
-   *  gráfica y las barras cuentan lo mismo. */
+   *  tabla y las barras de memoria cuentan lo mismo. */
   staticMb?: number | null
 }) {
-  const ref = useRef<SVGSVGElement>(null)
-  const W = 760
-  const H = 230
-  const P = { l: 52, r: 120, t: 12, b: 26 }
   const arch = cap.arch!
   const kvPer1k = (arch.kv_mb_per_1k_tokens / KV_BYTES[(cap.kv_dtype as KvLabel) ?? "fp16"] || arch.kv_mb_per_1k_tokens) * KV_BYTES[value.kv]
   const base = staticMb && staticMb > 0 ? staticMb : (cap.weights_mb ?? 0) + (cap.overhead_mb ?? 0)
-  const vram = (ctx: number, slots: number) => base + (kvPer1k * ctx * (value.pool ? 1 : slots)) / 1000
   const chosen = gpus.filter((g) => (value.gpus ?? []).includes(g.index))
-  const singleBig = gpus.reduce((a, g) => Math.max(a, g.totalVramMb), 0)
-  const limit = chosen.length ? chosen.reduce((a, g) => a + g.totalVramMb, 0) : singleBig
-  const limitLabel = chosen.length
-    ? chosen.map((g) => `#${g.index}`).join(" + ")
-    : `${gpus.length > 1 ? "la mayor GPU" : "la GPU"}`
-  const both = gpus.reduce((a, g) => a + g.totalVramMb, 0)
-  const xMax = Math.max(arch.native_context || 0, value.context, 32768)
-  const series = value.pool ? [value.slots] : SLOT_SERIES
-  const yMax = Math.max(both, vram(Math.min(xMax, 262144), value.pool ? 1 : 4)) * 1.02
+  const limit = chosen.length ? chosen.reduce((a, g) => a + g.totalVramMb, 0) : gpus.reduce((a, g) => Math.max(a, g.totalVramMb), 0)
+  const limitLabel = chosen.length ? chosen.map((g) => `#${g.index} ${shortGpuName(g.name)}`).join(" + ") : "la mayor GPU"
+  const native = arch.native_context || null
+  const xMax = Math.max(native ?? 0, value.context, 32768)
   const lo = Math.log2(2048)
   const hi = Math.log2(xMax)
-  const lx = (c: number) => P.l + ((Math.log2(Math.max(c, 2048)) - lo) / (hi - lo)) * (W - P.l - P.r)
-  const ly = (mb: number) => H - P.b - (Math.min(mb, yMax) / yMax) * (H - P.t - P.b)
+  const pos = (c: number) => Math.min(1, Math.max(0, (Math.log2(Math.max(c, 2048)) - lo) / (hi - lo)))
+  /** Contexto por petición (o total, con pool) que cabe con N a la vez. */
   const maxFor = (slots: number) => {
     const room = limit - base
-    if (room <= 0) return 0
-    return Math.floor((room * 1000) / (kvPer1k * (value.pool ? 1 : slots)))
+    if (room <= 0 || kvPer1k <= 0) return 0
+    const fit = Math.floor((room * 1000) / (kvPer1k * (value.pool ? 1 : slots)))
+    return native ? Math.min(fit, native * (value.pool ? slots : 1)) : fit
   }
-  const paths = useMemo(
-    () =>
-      series.map((s) => {
-        const pts: string[] = []
-        for (let e = lo; e <= hi + 0.001; e += 0.1) {
-          const c = 2 ** e
-          pts.push(`${pts.length ? "L" : "M"}${lx(c).toFixed(1)},${ly(vram(c, s)).toFixed(1)}`)
-        }
-        return { s, d: pts.join(" ") }
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [cap, value.pool, value.kv, value.slots, xMax, yMax],
-  )
-  const clickChart = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (readOnly || value.maxMode || !ref.current) return
-    const rect = ref.current.getBoundingClientRect()
-    const x = ((e.clientX - rect.left) / rect.width) * W
-    if (x < P.l || x > W - P.r) return
-    const ctx = 2 ** (lo + ((x - P.l) / (W - P.l - P.r)) * (hi - lo))
-    const snap = MARKS.find((m) => Math.abs(Math.log2(m) - Math.log2(ctx)) < 0.12)
-    onChange({ context: snap ?? Math.round(ctx / 1024) * 1024 })
+  // La memoria de lo elegido: la de la vista previa (igual que las barras)
+  // cuando la hay; si no, la estimación simple.
+  const usedMb = estimateMb && estimateMb > 0 ? estimateMb : base + (kvPer1k * value.context * (value.pool ? 1 : value.slots)) / 1000
+  const fits = planned ? value.context <= planned : usedMb <= limit
+  const rows = value.pool ? [value.slots] : Array.from(new Set([...SLOT_SERIES, value.slots])).sort((a, b) => a - b)
+  const pick = (slots: number, e?: React.MouseEvent<HTMLDivElement>) => {
+    if (readOnly) return
+    const patch: Partial<WorkbenchState> = value.pool ? {} : { slots }
+    if (e && !value.maxMode) {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const ctx = 2 ** (lo + ((e.clientX - rect.left) / rect.width) * (hi - lo))
+      const snap = MARKS.find((m) => Math.abs(Math.log2(m) - Math.log2(ctx)) < 0.15)
+      patch.context = snap ?? Math.max(2048, Math.round(ctx / 1024) * 1024)
+    }
+    onChange(patch)
   }
-  const cur = vram(value.context, value.slots)
   return (
-    <div className="space-y-1" data-testid="slots-chart">
+    <div className="space-y-2" data-testid="slots-chart">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <p className="text-xs font-medium">Contexto y peticiones simultáneas</p>
-        <p className="text-[11px] text-muted-foreground">
-          {fmtMb(base)} fijos (pesos y demás) · {kvPer1k.toFixed(1)} MB de KV por 1k tokens ({value.kv}) · pulsa una curva o un punto para elegir
+        <p className="text-xs font-medium">
+          {value.pool ? "¿Qué tamaño de pool cabe?" : "¿Cuánto contexto cabe para cada petición?"}
         </p>
+        <p className="text-[11px] text-muted-foreground">en {limitLabel} · KV {value.kv} · estimación</p>
       </div>
-      <svg ref={ref} viewBox={`0 0 ${W} ${H}`} className={cn("w-full", !readOnly && "cursor-crosshair")} onClick={clickChart} role="img" aria-label="VRAM según el contexto y las peticiones simultáneas">
-        {[0.25, 0.5, 0.75, 1].map((f) => (
-          <g key={f}>
-            <line x1={P.l} x2={W - P.r} y1={ly(yMax * f)} y2={ly(yMax * f)} className="stroke-border" strokeDasharray="2 3" />
-            <text x={P.l - 5} y={ly(yMax * f) + 3} textAnchor="end" className="fill-muted-foreground text-[9px]">
-              {fmtMb(yMax * f)}
-            </text>
-          </g>
-        ))}
-        {MARKS.filter((m) => m <= xMax && m >= 4096).map((m) => (
-          <text key={m} x={lx(m)} y={H - 8} textAnchor="middle" className="fill-muted-foreground text-[9px]">
-            {fmtContext(m)}
-          </text>
-        ))}
-        <rect x={P.l} y={P.t} width={W - P.l - P.r} height={Math.max(0, ly(limit) - P.t)} className="fill-red-500/5" />
-        <line x1={P.l} x2={W - P.r} y1={ly(limit)} y2={ly(limit)} stroke="#f87171" strokeWidth={1.5} />
-        <text x={W - P.r + 4} y={ly(limit) + 3} className="fill-red-300 text-[9.5px]">
-          techo {limitLabel}
-        </text>
-        {chosen.length === 0 && gpus.length > 1 && (
-          <g>
-            <line x1={P.l} x2={W - P.r} y1={ly(both)} y2={ly(both)} stroke="#a3a3a3" strokeDasharray="5 3" />
-            <text x={W - P.r + 4} y={ly(both) + 3} className="fill-muted-foreground text-[9.5px]">
-              las {gpus.length} GPUs
-            </text>
-          </g>
-        )}
-        {measured ? (
-          <g>
-            <line x1={lx(measured)} x2={lx(measured)} y1={P.t} y2={H - P.b} stroke="#c084fc" strokeDasharray="3 3" />
-            {(() => {
-              // Cerca del borde derecho la etiqueta va a la izquierda de la línea
-              // (a la derecha está la del techo), y si coincide en altura con el
-              // techo baja por debajo de él.
-              const nearRight = lx(measured) > W - P.r - 90
-              const y = Math.abs(ly(limit) - (P.t + 9)) < 14 ? Math.min(H - P.b - 4, ly(limit) + 14) : P.t + 9
-              return (
-                <text
-                  x={nearRight ? lx(measured) - 4 : lx(measured) + 3}
-                  y={y}
-                  textAnchor={nearRight ? "end" : "start"}
-                  className="fill-violet-300 text-[9.5px]"
-                  data-testid="measured-label"
-                >
-                  medido {fmtContext(measured)}
-                </text>
-              )
-            })()}
-          </g>
-        ) : null}
-        {paths.map(({ s, d }, i) => {
+      {!value.maxMode && (
+        <p className={cn("text-[11.5px]", fits ? "text-emerald-300" : "text-red-300")} data-testid="slots-verdict">
+          {value.pool
+            ? `Lo elegido: pool de ${fmtContext(value.context)} para ${value.slots} a la vez → ${fmtMb(usedMb)} de ${fmtMb(limit)}`
+            : `Lo elegido: ${value.slots} a la vez × ${fmtContext(value.context)} cada una → ${fmtMb(usedMb)} de ${fmtMb(limit)}`}
+          {fits ? " · cabe" : " · no cabe"}
+        </p>
+      )}
+      {value.maxMode && planned ? (
+        <p className="text-[11.5px] text-emerald-300" data-testid="slots-verdict">
+          Lo que quepa: el planificador le da {fmtContext(planned)}
+          {value.pool ? " de pool" : " por petición"} con {value.slots} a la vez.
+        </p>
+      ) : null}
+      <div className="space-y-1.5">
+        {rows.map((s) => {
           const active = s === value.slots
-          const color = value.pool ? SERIES_COLORS[0] : SERIES_COLORS[i % SERIES_COLORS.length]
-          const m = maxFor(s)
+          // En la fila elegida manda el planificador (margen de seguridad y
+          // contexto medido); las demás son la estimación simple.
+          const max = active && planned ? planned : maxFor(s)
           return (
-            <g key={s} className={cn(!readOnly && !value.pool && "cursor-pointer")}>
-              <path
-                d={d}
-                fill="none"
-                stroke={color}
-                strokeWidth={active ? 3 : 1.5}
-                opacity={active ? 1 : 0.55}
+            <div
+              key={s}
+              data-slots={s}
+              style={{ gridTemplateColumns: value.pool ? "40px minmax(0,1fr) 120px" : "76px minmax(0,1fr) 104px" }}
+              className={cn("grid items-center gap-2 rounded-md px-1.5 py-1 text-[11.5px]", active && "bg-primary/10 ring-1 ring-primary/40", !readOnly && !value.pool && "cursor-pointer hover:bg-muted/30")}
+              onClick={() => !value.pool && pick(s)}
+            >
+              <span className={cn("tabular-nums", active ? "font-semibold" : "text-muted-foreground")}>
+                {value.pool ? "pool" : `${s} a la vez`}
+              </span>
+              <div
+                className="relative h-4 overflow-hidden rounded bg-red-500/10"
                 onClick={(e) => {
                   e.stopPropagation()
-                  if (!readOnly && !value.pool) onChange({ slots: s })
+                  pick(s, e)
                 }}
-              />
-              <path d={d} fill="none" stroke="transparent" strokeWidth={10} onClick={(e) => {
-                e.stopPropagation()
-                if (!readOnly && !value.pool) onChange({ slots: s })
-              }} />
-              {m > 0 && m <= xMax * 1.01 && (
-                <circle cx={lx(m)} cy={ly(limit)} r={3} fill={color} />
-              )}
-              <text x={W - P.r + 4} y={H - P.b - (series.length - 1 - i) * 13} className="text-[10px]" fill={color} fontWeight={active ? 700 : 400}>
-                {value.pool ? `pool · ${s} a la vez` : `${s} a la vez`} → {m > 0 ? fmtContext(Math.min(m, arch.native_context || m)) : "no cabe"}
-              </text>
-            </g>
+                title="Pulsa para elegir ese contexto"
+              >
+                <div className="absolute inset-y-0 left-0 bg-emerald-500/35" style={{ width: `${pos(max) * 100}%` }} />
+                {native && !value.pool && <div className="absolute inset-y-0 w-px bg-white/40" style={{ left: `${pos(native) * 100}%` }} title="Contexto nativo del modelo" />}
+                {measured && active && <div className="absolute inset-y-0 w-0.5 bg-violet-400" style={{ left: `${pos(measured) * 100}%` }} title={`Medido: ${fmtContext(measured)}`} />}
+                {active && !value.maxMode && (
+                  <div
+                    className={cn("absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white", fits ? "bg-emerald-400" : "bg-red-400")}
+                    style={{ left: `${pos(value.context) * 100}%` }}
+                    data-testid="slots-choice"
+                  />
+                )}
+              </div>
+              <span className={cn("text-right tabular-nums", max > 0 ? "" : "text-red-300")}>
+                {max > 0 ? `hasta ${fmtContext(max)}${value.pool ? " en total" : ""}` : "no cabe"}
+                {active && planned ? <span className="block text-[9.5px] text-muted-foreground">planificador</span> : null}
+              </span>
+            </div>
           )
         })}
-        {!value.maxMode && (
-          <g>
-            <circle cx={lx(value.context)} cy={ly(cur)} r={6} className={cur > limit ? "fill-red-400" : "fill-emerald-400"} stroke="white" strokeWidth={1.5} />
-            <text
-              x={lx(value.context) > (W - P.r) * 0.75 ? lx(value.context) - 9 : lx(value.context) + 9}
-              textAnchor={lx(value.context) > (W - P.r) * 0.75 ? "end" : "start"}
-              y={ly(cur) + 16}
-              className="fill-foreground text-[10px] font-medium"
-            >
-              {fmtContext(value.context)} × {value.pool ? "pool" : value.slots} · {fmtMb(cur)}
-            </text>
-          </g>
-        )}
-      </svg>
-      <Hint>
-        Cada curva es la memoria que pide ese número de peticiones simultáneas según el contexto de cada una; el punto donde cruza el techo
-        rojo es el contexto máximo que cabe. Estimación del planificador.
-      </Hint>
+        <div className="grid gap-2 px-1.5" style={{ gridTemplateColumns: value.pool ? "40px minmax(0,1fr) 120px" : "76px minmax(0,1fr) 104px" }}>
+          <span />
+          <div className="relative h-3 text-[9.5px] text-muted-foreground">
+            {MARKS.filter((m) => m <= xMax && m >= 4096).map((m) => (
+              <span key={m} className="absolute -translate-x-1/2" style={{ left: `${pos(m) * 100}%` }}>
+                {fmtContext(m)}
+              </span>
+            ))}
+          </div>
+          <span />
+        </div>
+      </div>
+      {value.pool ? (
+        <Hint>
+          Con KV compartida no hay contexto por petición: todas tiran de un mismo depósito y una sola puede usarlo entero si las demás no lo
+          ocupan. Por eso aquí solo importa el tamaño del pool; cuántas van a la vez apenas cambia la memoria (solo el estado por slot de los
+          modelos híbridos y el borrador). Verde: el pool que cabe en {limitLabel}
+          {planned ? ", según el planificador (con su margen de seguridad y lo medido)" : ""}.
+          {measured ? " La raya violeta es lo medido con el sondeo." : ""} Pulsa la barra para elegir el tamaño del pool.
+        </Hint>
+      ) : (
+        <Hint>
+          Verde: el contexto que cabe con ese número de peticiones a la vez; rojo: no cabe.
+          {native ? " La raya blanca es el contexto nativo del modelo (más allá degrada)." : ""}
+          {measured ? " La violeta, lo medido de verdad con el sondeo." : ""} Pulsa una fila para elegir cuántas a la vez, o su barra para elegir
+          también el contexto. {fmtMb(base)} son fijos (pesos y demás) y cada 1k tokens de contexto ocupa {kvPer1k.toFixed(1)} MB.
+        </Hint>
+      )}
     </div>
   )
 }
