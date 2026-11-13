@@ -10,6 +10,9 @@
 #   LLAMA_CUDA_ARCHITECTURES  "75;80;86;89"  (RTX 2060/Turing → RTX 4090 + L4/L40S)
 #   ENABLE_CUDA               "ON" | "OFF"   (default ON)
 #   BUILD_JOBS                int            (default nproc/2 capped at 8)
+#   LLAMA_CUDA_NCCL           "ON" | "OFF"   (default ON with CUDA): NCCL for the
+#                             cross-GPU AllReduce of --split-mode tensor
+#   NCCL_VERSION              pip version of nvidia-nccl-cu<major> (default pinned)
 #
 # Output: ${BIN_DIR}/llama-server, plus any libggml*.so/libllama*.so referenced
 # by the binary, copied next to it for LD_LIBRARY_PATH-free loading.
@@ -34,7 +37,10 @@ BUILD_JOBS="${BUILD_JOBS:-$(( $(nproc 2>/dev/null || echo 4) / 2 ))}"
 [[ "${BUILD_JOBS}" -lt 1 ]] && BUILD_JOBS=1
 [[ "${BUILD_JOBS}" -gt 8 ]] && BUILD_JOBS=8
 
-echo "[install_llama_cpp] cmake build (CUDA=${ENABLE_CUDA}, archs=${LLAMA_CUDA_ARCHITECTURES}, jobs=${BUILD_JOBS})"
+LLAMA_CUDA_NCCL="${LLAMA_CUDA_NCCL:-ON}"
+NCCL_VERSION="${NCCL_VERSION:-2.31.2}"
+
+echo "[install_llama_cpp] cmake build (CUDA=${ENABLE_CUDA}, archs=${LLAMA_CUDA_ARCHITECTURES}, jobs=${BUILD_JOBS}, nccl=${LLAMA_CUDA_NCCL})"
 
 # CUDA driver stub — the build links against libcuda for symbol resolution but
 # the real driver is provided at runtime by the host via /usr/lib/.../libcuda.so.1.
@@ -52,13 +58,48 @@ if [[ "${ENABLE_CUDA}" == "ON" ]]; then
     fi
 fi
 
+# NCCL. Without it, --split-mode tensor sums each layer's partial results
+# across GPUs through pinned host memory, by design, even when the GPUs can
+# reach each other peer-to-peer. With it and P2P (3060 + 3090, 2026-11-13):
+# prefill +9% at 35k tokens and +6% at 122k, decode unchanged, +160-200 MB of
+# VRAM per GPU from load. Layer split and single-GPU models do not use it.
+# NCCL is not in the image: NVIDIA's wheel for this CUDA major provides the
+# header and the library, kept in ${BACKEND_DIR}/nccl (the build links it by
+# absolute path). If it cannot be fetched the build goes on without it.
+# Explicit OFF otherwise: CMake's cache would keep an earlier ON.
+NCCL_FLAGS=(-DGGML_CUDA_NCCL=OFF)
+if [[ "${ENABLE_CUDA}" == "ON" && "${LLAMA_CUDA_NCCL}" == "ON" ]]; then
+    CUDA_MAJOR="$(nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9]*\)\..*/\1/p' | head -1)"
+    NCCL_DIR="${BACKEND_DIR}/nccl"
+    if [[ ! -f "${NCCL_DIR}/include/nccl.h" || ! -f "${NCCL_DIR}/lib/libnccl.so.2" ]] \
+        && [[ -n "${CUDA_MAJOR}" ]]; then
+        WHEEL_DIR="$(mktemp -d)"
+        if python3 -m pip download --no-deps --only-binary=:all: --quiet \
+                "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" -d "${WHEEL_DIR}" \
+            && python3 -I -m zipfile -e "${WHEEL_DIR}"/nvidia_nccl_*.whl "${WHEEL_DIR}/x"; then
+            rm -rf "${NCCL_DIR}.new"
+            mkdir -p "${NCCL_DIR}.new"
+            cp -r "${WHEEL_DIR}/x/nvidia/nccl/include" "${WHEEL_DIR}/x/nvidia/nccl/lib" "${NCCL_DIR}.new/"
+            ln -sf libnccl.so.2 "${NCCL_DIR}.new/lib/libnccl.so"
+            rm -rf "${NCCL_DIR}" && mv "${NCCL_DIR}.new" "${NCCL_DIR}"
+        else
+            echo "[install_llama_cpp] WARNING: could not fetch nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}; building without NCCL."
+        fi
+        rm -rf "${WHEEL_DIR}"
+    fi
+    if [[ -f "${NCCL_DIR}/include/nccl.h" ]]; then
+        NCCL_FLAGS=(-DGGML_CUDA_NCCL=ON "-DNCCL_ROOT=${NCCL_DIR}")
+    fi
+fi
+
 cd "${SRC_DIR}"
 
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA="${ENABLE_CUDA}" \
     -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES}" \
-    -DLLAMA_CURL=OFF
+    -DLLAMA_CURL=OFF \
+    "${NCCL_FLAGS[@]}"
 cmake --build build --target llama-server -j"${BUILD_JOBS}"
 
 mkdir -p "${BIN_DIR}"

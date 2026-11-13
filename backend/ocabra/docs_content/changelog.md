@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.78.2 — 2026-11-13
+
+### Rendimiento
+
+- **Una conversación larga ya no frena a las demás del mismo modelo.** En
+  los modelos de llama.cpp, el contexto de una conversación terminada se
+  quedaba en la caché que comparten los 4 huecos del modelo, y las otras
+  peticiones lo recorrían en cada token. Con 122.000 tokens de una
+  conversación ociosa, `qwen3.8:27b` generaba a 72 t/s en vez de 91 (un 25 %
+  menos). Ahora esa conversación se guarda en la RAM del servidor y sale de
+  la caché compartida; si vuelve, se recupera de RAM en un par de segundos
+  en vez de reprocesar el prompt entero. Aplicado a los 13 modelos de chat
+  de llama.cpp; cada uno lo coge en su siguiente carga.
+- **Prefill algo más rápido en los presets que reparten el modelo entre las
+  dos GPU** (`qwen3.8:27b` con `context_preset: "extended"`): un 9 % con
+  35.000 tokens y un 6 % con 122.000, cuando el prompt no está en caché. La
+  velocidad de generación no cambia.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.78.0 — 2026-11-13
 
 ### Novedades
