@@ -1234,3 +1234,39 @@ async def test_the_worker_wrapper_accepts_and_forwards_what_the_backend_emits(
     finally:
         sys.argv = old
     assert cmd[cmd.index("--mmproj-device") + 1] == "CUDA1"
+
+
+@pytest.mark.asyncio
+async def test_the_worker_wrapper_forwards_the_draft_placement_flags(tmp_path: Path) -> None:
+    """Mismo invariante para --cpu-moe-draft/--n-cpu-moe-draft/--device-draft
+    (2026-11-13): si el wrapper no los declara, la carga muere con rc=2."""
+    import sys
+
+    from ocabra.workers.llama_cpp_worker import build_command, parse_args
+
+    draft = tmp_path / "mtp.gguf"
+    draft.write_bytes(b"GGUF" * 256)
+    argv, _ = await _capture_two_gpu_load(
+        tmp_path,
+        {
+            "llama_cpp": {
+                "speculative": {
+                    "spec_type": "draft-mtp,ngram-mod",
+                    "draft_model_id": str(draft),
+                    "draft_cpu_moe": True,
+                    "draft_n_cpu_moe": 1,
+                    "draft_device": "CUDA1",
+                }
+            }
+        },
+    )
+    old = sys.argv
+    sys.argv = ["llama_cpp_worker.py", *argv[2:]]
+    try:
+        cmd = build_command(parse_args())
+    finally:
+        sys.argv = old
+    assert "--cpu-moe-draft" in cmd
+    assert cmd[cmd.index("--n-cpu-moe-draft") + 1] == "1"
+    assert cmd[cmd.index("--device-draft") + 1] == "CUDA1"
+    assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp,ngram-mod"
