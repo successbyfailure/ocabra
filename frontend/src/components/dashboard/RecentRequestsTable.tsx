@@ -7,7 +7,7 @@ import { fmtClock, fmtContext, fmtDuration, fmtRealtime, fmtTokens, fmtTps } fro
 import { useGpuStore } from "@/stores/gpuStore"
 import { GpuBadge } from "./GpuBadge"
 import { RequestKindBadge } from "./RequestKindBadge"
-import { CacheCell, PhaseLegend, TimingBreakdown } from "./RequestBreakdown"
+import { CacheCell, PhaseLegend, prefillSpeedText, TimingBreakdown } from "./RequestBreakdown"
 
 const TH = "px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
 
@@ -16,8 +16,8 @@ const TH = "px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-mut
  * cola, carga, prefill y generación; t/s de prefill y de generación; tokens y
  * cuánto de la entrada salió de la cache de prompt; preset y GPU. Las que siguen en curso no salen aquí: viven en la card de su modelo.
  *
- * La IP y el user agent solo llegan rellenos para admins; el backend los manda
- * a null al resto, así que aquí basta con no pintarlos si no hay dato.
+ * La IP y el user agent no se muestran aquí: están en el detalle de cada
+ * petición en Logs (y solo para admins).
  */
 export function RecentRequestsTable() {
   const [rows, setRows] = useState<RecentRequest[]>([])
@@ -132,12 +132,6 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
               🔑 {r.apiKeyName}
             </div>
           )}
-          {(r.clientAddr || r.userAgent) && (
-            <div className="max-w-[14rem] truncate font-mono text-[10.5px] text-muted-foreground/60" title={r.userAgent ?? undefined}>
-              {r.clientAddr ?? "?"}
-              {r.userAgent ? ` · ${r.userAgent}` : ""}
-            </div>
-          )}
         </td>
         <td className="px-3 py-2 text-right align-top text-xs text-muted-foreground">
           <TimingBreakdown r={r} />
@@ -156,9 +150,9 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
           ) : (
             <>
               {r.predictedTokensPerSecond ? <span className="block" title="Generación">{fmtTps(r.predictedTokensPerSecond)}</span> : null}
-              {r.promptTokensPerSecond ? (
-                <span className="block text-[10.5px] text-sky-300/80" title="Prefill">
-                  prefill {fmtTps(r.promptTokensPerSecond)}
+              {prefillSpeedText(r, fmtTps) ? (
+                <span className="block text-[10.5px] text-sky-300/80" title="Prefill (solo los tokens que no estaban en cache)">
+                  prefill {prefillSpeedText(r, fmtTps)}
                 </span>
               ) : null}
               {!r.predictedTokensPerSecond && !r.promptTokensPerSecond && "—"}

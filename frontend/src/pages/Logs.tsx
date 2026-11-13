@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react"
-import { ChevronDown, ChevronRight, Search, X } from "lucide-react"
+import { ChevronDown, ChevronRight, Loader2, Search, X } from "lucide-react"
 import { api } from "@/api/client"
 import { useIsModelManager } from "@/hooks/useAuth"
 import type { RecentRequest } from "@/types"
-import { CacheCell, cacheInfo, fmtSpan, requestPhases, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
-import { fmtTps } from "@/components/dashboard/format"
+import { CacheCell, cacheInfo, fmtSpan, prefillSpeedText, requestPhases, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
+import { fmtClock, fmtContext, fmtRealtime, fmtTps } from "@/components/dashboard/format"
 
 function formatDate(iso: string): string {
   try {
@@ -37,89 +37,102 @@ function StatusBadge({ code, error }: { code: number | null; error: string | nul
   )
 }
 
+function Field({ label, children, mono = false, wide = false }: { label: string; children: React.ReactNode; mono?: boolean; wide?: boolean }) {
+  return (
+    <div className={wide ? "sm:col-span-2 lg:col-span-3" : undefined}>
+      <span className="text-muted-foreground">{label}: </span>
+      <span className={mono ? "break-all font-mono" : undefined}>{children}</span>
+    </div>
+  )
+}
+
+function Group({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground/80">{title}</p>
+      <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
+    </div>
+  )
+}
+
+/** Detalle de una petición: qué se pidió y dónde corrió, quién la hizo (con IP
+ *  y user agent, que el backend solo rellena para admins), cómo rindió y cómo
+ *  acabó. Es el sitio para lo que no cabe en la tabla del dashboard. */
 function ExpandedRow({ request, isManager }: { request: RecentRequest; isManager: boolean }) {
+  const r = request
+  const split = requestPhases(r)
+  const cache = cacheInfo(r)
+  const asked = r.requestedModel && r.requestedModel !== r.modelId ? r.requestedModel : null
   return (
     <tr className="bg-muted/10">
       <td colSpan={isManager ? 10 : 9} className="px-5 py-3">
-        <div className="space-y-2 text-xs">
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            <div>
-              <span className="text-muted-foreground">Modelo: </span>
-              <span className="font-mono">{request.modelId}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Endpoint: </span>
-              <span className="font-mono">{request.endpointPath ?? "—"}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Tipo: </span>
-              <span>{request.requestKind ?? request.backendType ?? "—"}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Duración: </span>
-              <span>{fmtSpan(request.durationMs)}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Tokens: </span>
-              <span>
-                {request.inputTokens != null || request.outputTokens != null
-                  ? `${request.inputTokens ?? 0} entrada → ${request.outputTokens ?? 0} salida`
-                  : "—"}
-              </span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Cache de prompt: </span>
-              <span>
-                {(() => {
-                  const c = cacheInfo(request)
-                  if (!c) return "el backend no lo informa"
-                  return c.cached ? `${c.cached} de ${c.input} tokens (${c.pct} %)` : "ningún token de la entrada"
-                })()}
-              </span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Velocidad: </span>
-              <span>
-                prefill {fmtTps(request.promptTokensPerSecond)} · generación {fmtTps(request.predictedTokensPerSecond)}
-              </span>
-            </div>
-            {isManager && (
-              <div>
-                <span className="text-muted-foreground">Usuario: </span>
-                <span>{request.username ?? "—"}</span>
-              </div>
+        <div className="space-y-3 text-xs" data-testid="log-detail">
+          <Group title="Petición">
+            <Field label="Modelo" mono>{r.modelId}</Field>
+            {asked && <Field label="Pedido como" mono>{asked}</Field>}
+            {r.backendType && <Field label="Backend">{r.backendType}</Field>}
+            {r.requestKind && <Field label="Tipo">{r.requestKind}</Field>}
+            {r.endpointPath && <Field label="Endpoint" mono>{r.endpointPath}</Field>}
+            {r.runtimePreset && <Field label="Peldaño">{r.runtimePreset}</Field>}
+            {r.effectiveContext ? <Field label="Contexto cargado">{fmtContext(r.effectiveContext)}</Field> : null}
+            {r.gpuIndex != null && <Field label="GPU">#{r.gpuIndex}</Field>}
+          </Group>
+          <Group title="Origen">
+            {isManager && <Field label="Usuario">{r.username ?? "anónimo"}</Field>}
+            {r.groupName && <Field label="Grupo">{r.groupName}</Field>}
+            {r.apiKeyName && <Field label="API key" mono>{r.apiKeyName}</Field>}
+            {r.clientAddr && <Field label="IP" mono>{r.clientAddr}</Field>}
+            {r.userAgent && <Field label="User agent" mono wide>{r.userAgent}</Field>}
+          </Group>
+          {r.inFlight ? (
+            <Group title="En curso">
+              <Field label="Lleva">{fmtSpan(r.elapsedMs ?? null)}</Field>
+              {r.queued ? <Field label="En cola">posición {r.queuePosition ?? "?"}{r.queueWaitEstimateMs ? ` · ~${fmtSpan(r.queueWaitEstimateMs)} de espera` : ""}</Field> : null}
+              {r.estimatedRemainingMs != null && <Field label="Le queda">~{fmtSpan(r.estimatedRemainingMs)}</Field>}
+            </Group>
+          ) : (
+          <Group title="Rendimiento">
+            <Field label="Duración">{fmtSpan(r.durationMs)}</Field>
+            <Field label="Tokens">
+              {r.inputTokens != null || r.outputTokens != null ? `${r.inputTokens ?? 0} entrada → ${r.outputTokens ?? 0} salida` : "—"}
+            </Field>
+            <Field label="Cache de prompt">
+              {!cache ? "el backend no lo informa" : cache.cached ? `${cache.cached} de ${cache.input} tokens (${cache.pct} %)` : "ningún token de la entrada"}
+            </Field>
+            {(r.promptTokensPerSecond || r.predictedTokensPerSecond) && (
+              <Field label="Velocidad">
+                prefill {prefillSpeedText(r, fmtTps) ?? "—"} · generación {fmtTps(r.predictedTokensPerSecond)}
+              </Field>
             )}
-            <div>
-              <span className="text-muted-foreground">API Key: </span>
-              <span>{request.apiKeyName ?? "—"}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Status: </span>
-              <span>{request.statusCode ?? "—"}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Inicio: </span>
-              <span className="font-mono">{request.startedAt}</span>
-            </div>
-          </div>
-          {requestPhases(request) && (
+            {r.audioSeconds && r.durationMs ? (
+              <Field label="Audio">
+                {fmtClock(r.audioSeconds)} transcritos a {fmtRealtime(r.audioSeconds / (r.durationMs / 1000))} tiempo real
+              </Field>
+            ) : null}
+          </Group>
+          )}
+          {split && (
             <div className="space-y-1" data-testid="timing-detail">
-              <span className="text-muted-foreground">Tiempo por fases:</span>
               <div className="max-w-md">
-                <TimingBreakdown r={request} />
+                <TimingBreakdown r={r} />
               </div>
               <p className="text-muted-foreground">
-                {requestPhases(request)!
-                  .phases.map((p) => `${p.label} ${fmtSpan(p.ms)}`)
-                  .join(" · ")}
-                {request.runtimeTelemetry?.ttft_ms != null && ` · primer token a los ${fmtSpan(request.runtimeTelemetry.ttft_ms)}`}
+                {split.phases.map((p) => `${p.label} ${fmtSpan(p.ms)}`).join(" · ")}
+                {r.runtimeTelemetry?.ttft_ms != null && ` · primer token a los ${fmtSpan(r.runtimeTelemetry.ttft_ms)}`}
               </p>
             </div>
           )}
-          {request.error && (
+          <Group title="Resultado">
+            <Field label="Estado">{r.inFlight ? "en curso" : (r.statusCode ?? "—")}</Field>
+            <Field label="Inicio">
+              <span title={r.startedAt}>{formatDate(r.startedAt)}</span>
+            </Field>
+            <Field label="ID" mono>{r.id}</Field>
+          </Group>
+          {r.error && (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-200">
               <span className="font-medium">Error: </span>
-              {request.error}
+              <span className="break-words">{r.error}</span>
             </div>
           )}
         </div>
@@ -170,7 +183,12 @@ export function Logs() {
         r.error?.toLowerCase().includes(q) ||
         r.username?.toLowerCase().includes(q) ||
         r.requestKind?.toLowerCase().includes(q) ||
-        r.apiKeyName?.toLowerCase().includes(q),
+        r.apiKeyName?.toLowerCase().includes(q) ||
+        r.requestedModel?.toLowerCase().includes(q) ||
+        r.groupName?.toLowerCase().includes(q) ||
+        r.runtimePreset?.toLowerCase().includes(q) ||
+        r.clientAddr?.toLowerCase().includes(q) ||
+        r.userAgent?.toLowerCase().includes(q),
     )
   }, [requests, searchQuery])
 
@@ -189,7 +207,7 @@ export function Logs() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Buscar por modelo, endpoint, error, usuario..."
+            placeholder="Buscar por modelo, endpoint, error, usuario, API key, IP…"
             className="w-full rounded-md border border-border bg-background pl-9 pr-8 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
           {searchQuery && (
@@ -274,8 +292,13 @@ export function Logs() {
                     <td className="whitespace-nowrap px-3 py-1.5 text-xs text-muted-foreground" title={r.startedAt}>
                       {formatDate(r.startedAt)}
                     </td>
-                    <td className="max-w-[180px] truncate px-3 py-1.5 font-mono text-xs" title={r.modelId}>
-                      {r.modelId}
+                    <td className="max-w-[200px] px-3 py-1.5 font-mono text-xs" title={r.modelId}>
+                      <div className="truncate">{r.modelId}</div>
+                      {r.requestedModel && r.requestedModel !== r.modelId && (
+                        <div className="truncate text-[10.5px] text-sky-300/80" title="Nombre con el que lo pidió el cliente">
+                          como {r.requestedModel}
+                        </div>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-3 py-1.5 text-xs text-muted-foreground hidden sm:table-cell">
                       {r.endpointPath ?? "—"}
@@ -284,7 +307,14 @@ export function Logs() {
                       {r.requestKind ?? r.backendType ?? "—"}
                     </td>
                     <td className="px-3 py-1.5 text-right text-xs text-muted-foreground">
-                      <TimingBreakdown r={r} compact />
+                      {r.inFlight ? (
+                        <span className="inline-flex items-center gap-1 text-sky-300" data-testid="log-inflight">
+                          <Loader2 size={11} className="animate-spin" />
+                          {r.queued ? "en cola" : "en curso"} · {fmtSpan(r.elapsedMs ?? null)}
+                        </span>
+                      ) : (
+                        <TimingBreakdown r={r} compact />
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs text-muted-foreground hidden lg:table-cell">
                       {r.inputTokens != null || r.outputTokens != null
@@ -295,11 +325,15 @@ export function Logs() {
                     </td>
                     {isManager && (
                       <td className="whitespace-nowrap px-3 py-1.5 text-xs hidden lg:table-cell">
-                        {r.username ?? "—"}
+                        {r.username ?? <span className="italic text-muted-foreground/60">anónimo</span>}
                       </td>
                     )}
                     <td className="px-3 py-1.5 text-center">
-                      <StatusBadge code={r.statusCode} error={r.error} />
+                      {r.inFlight ? (
+                        <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">en curso</span>
+                      ) : (
+                        <StatusBadge code={r.statusCode} error={r.error} />
+                      )}
                     </td>
                   </tr>
                   {isExpanded && <ExpandedRow request={r} isManager={isManager} />}

@@ -199,7 +199,9 @@ async def recent_requests(
                 "modelId": req.profile_id or req.model_id,
                 "workerKey": req.model_id,
                 "backendType": None,
-                "requestKind": None,
+                # El tipo (chat, embedding, transcripción…) ya se conoce al
+                # admitir la petición: sin él, Logs no sabía qué estaba en curso.
+                "requestKind": getattr(req, "request_kind", None),
                 "endpointPath": None,
                 "statusCode": None,
                 "startedAt": datetime.fromtimestamp(req.started_at, tz=UTC).isoformat(),

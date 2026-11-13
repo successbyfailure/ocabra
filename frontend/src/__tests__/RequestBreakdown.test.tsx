@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import type { RecentRequest } from "@/types"
-import { CacheCell, cacheInfo, requestPhases, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
+import { CacheCell, cacheInfo, prefillSpeedText, requestPhases, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
 
 const req = (over: Partial<RecentRequest> = {}): RecentRequest =>
   ({
@@ -46,5 +46,11 @@ describe("request breakdown", () => {
     expect(cacheInfo(req({ cachedTokens: null }))).toBeNull()
     render(<CacheCell r={req({ inputTokens: 71256, cachedTokens: 35000 })} />)
     expect(screen.getByTestId("cache-cell").textContent).toContain("49%")
+  })
+  it("prefill speed with almost everything cached says how many tokens were new", () => {
+    const fmt = (t: number | null | undefined) => `${t} t/s`
+    expect(prefillSpeedText(req({ inputTokens: 3003, cachedTokens: 3002, promptTokensPerSecond: 2.1 }), fmt)).toBe("1 token nuevo")
+    expect(prefillSpeedText(req({ inputTokens: 3003, cachedTokens: 3003, promptTokensPerSecond: 0 }), fmt)).toBe("todo en cache")
+    expect(prefillSpeedText(req({ inputTokens: 51107, cachedTokens: 0, promptTokensPerSecond: 2089 }), fmt)).toBe("2089 t/s")
   })
 })

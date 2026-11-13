@@ -145,3 +145,12 @@ export function PhaseLegend() {
     </span>
   )
 }
+
+/** Velocidad de prefill con sentido: el motor la mide solo sobre los tokens
+ *  que no estaban en cache, así que con casi todo en cache (p. ej. 1 token
+ *  nuevo) da cifras absurdas como 2 t/s. Entonces se dice cuántos eran. */
+export function prefillSpeedText(r: RecentRequest, fmt: (tps: number | null | undefined) => string): string | null {
+  const fresh = r.inputTokens != null && r.cachedTokens != null ? Math.max(0, r.inputTokens - r.cachedTokens) : null
+  if (fresh != null && r.cachedTokens && fresh < 256) return fresh === 0 ? "todo en cache" : `${fresh} ${fresh === 1 ? "token nuevo" : "tokens nuevos"}`
+  return r.promptTokensPerSecond ? fmt(r.promptTokensPerSecond) : null
+}
