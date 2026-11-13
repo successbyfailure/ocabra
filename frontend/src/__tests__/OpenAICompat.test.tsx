@@ -32,7 +32,6 @@ function profile(profileId: string): ModelProfile {
     enabled: true,
     isDefault: false,
     routingTargets: null,
-    voiceTargets: null,
     runtimePolicy: null,
     runtimePresets: [],
     aliases: [],
