@@ -1147,6 +1147,31 @@ async def _ensure_worker_loaded(
     # memory after unload, while the base configuration remains mutable. Always
     # resolve the base first so an unloaded derived worker cannot restart with a
     # stale option such as vision_mode or mmproj_model_id.
+    state = await prepare_worker_state(
+        model_manager,
+        base_model_id,
+        worker_key,
+        load_overrides,
+        preferred_gpu=preferred_gpu,
+        load_policy=load_policy,
+    )
+    state = await _do_ensure_loaded(model_manager, worker_key)
+    await _mark_runtime(state)
+    return state
+
+
+async def prepare_worker_state(
+    model_manager: ModelManager,
+    base_model_id: str,
+    worker_key: str,
+    load_overrides: dict | None,
+    *,
+    preferred_gpu: int | None = None,
+    load_policy: str | None = None,
+) -> ModelState | None:
+    """Create (or refresh, when not running) the derived state of
+    ``worker_key`` without loading it. Shared by :func:`_ensure_worker_loaded`
+    and the PIN autoload, which loads it through its own polite path."""
     base_state = await model_manager.get_state(base_model_id)
     if base_state is None:
         raise _openai_error(
@@ -1182,8 +1207,6 @@ async def _ensure_worker_loaded(
             )
             state.load_policy = LoadPolicy(load_policy or base_state.load_policy.value)
             state.pin_permanent = base_state.pin_permanent
-        state = await _do_ensure_loaded(model_manager, worker_key)
-        await _mark_runtime(state)
         return state
 
     try:
@@ -1209,10 +1232,7 @@ async def _ensure_worker_loaded(
     except Exception:
         # May already exist from concurrent request
         pass
-
-    state = await _do_ensure_loaded(model_manager, worker_key)
-    await _mark_runtime(state)
-    return state
+    return await model_manager.get_state(worker_key)
 
 
 async def _do_ensure_loaded(

@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.78.6 — 2026-11-13
+
+### Correcciones
+
+- **Tras un reinicio, gemma4:26b ya no se corta unos 20 s con la primera
+  petición.** Los modelos fijados (PIN) se autocargaban con su configuración
+  base, pero las peticiones de un modelo con presets usan el worker de su
+  preset por defecto. La primera petición tenía que cargar ese worker y
+  desalojar el del PIN, los mismos pesos dos veces en la tarjeta, y mientras
+  tanto esperaba. Ahora la autocarga (y la recarga de un PIN desalojado) carga
+  directamente el worker del preset, como ya hacía el botón «Cargar».
+
+---
+
 ## 0.78.5 — 2026-11-13
 
 ### Correcciones

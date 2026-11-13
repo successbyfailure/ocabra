@@ -211,3 +211,53 @@ async def test_el_pin_que_no_cabe_espera_sin_desalojar_ni_quedar_en_error(monkey
     load.assert_not_awaited()
     assert pin.status == ModelStatus.CONFIGURED
     assert scheduler.find_gpu_for_model.await_count >= 2  # sigue vigilando
+
+
+# ── Un PIN con presets se autocarga en el worker de su preset (2026-11-13) ────
+#
+# Cargar el modelo pelado arrancaba un worker que ninguna petición usa: la
+# primera petición cargaba el del preset y desalojaba al del PIN (los mismos
+# pesos dos veces en la tarjeta), ~20 s de corte tras cada reinicio en
+# gemma4:26b.
+
+
+@pytest.mark.asyncio
+async def test_the_pin_autoload_loads_the_default_preset_worker(monkeypatch):
+    monkeypatch.setattr(settings, "pin_autoload_delay_s", 0)
+    pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
+    scheduler = SimpleNamespace(find_gpu_for_model=AsyncMock(return_value=[1]))
+    mm = _mm_con_scheduler(scheduler, pin)
+    mm.pin_worker_resolver = AsyncMock(return_value="llamacpp_mks/gemma4:26b::abc")
+
+    async def carga(model_id, **kwargs):
+        mm._states[model_id] = _state(model_id, LoadPolicy.PIN, ModelStatus.LOADED)
+        return mm._states[model_id]
+
+    load = AsyncMock(side_effect=carga)
+    await _arranca(mm, load)
+
+    load.assert_awaited_once_with("llamacpp_mks/gemma4:26b::abc", allow_pressure_eviction=False)
+
+
+def test_a_loaded_preset_worker_satisfies_the_pin():
+    pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
+    derived = _state("llamacpp_mks/gemma4:26b::abc", LoadPolicy.PIN, ModelStatus.LOADED)
+    mm = _mm(pin, derived)
+    assert mm._pinned_needing_load() == []
+
+
+def test_derived_states_are_never_autoloaded_on_their_own():
+    stale = _state("llamacpp_mks/gemma4:26b::old", LoadPolicy.PIN, ModelStatus.UNLOADED)
+    pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
+    mm = _mm(pin, stale)
+    assert mm._pinned_needing_load() == ["llamacpp_mks/gemma4:26b"]
+
+
+@pytest.mark.asyncio
+async def test_if_the_preset_cannot_be_resolved_the_model_itself_loads():
+    mm = _mm(_state("a/pin", LoadPolicy.PIN, ModelStatus.CONFIGURED))
+    mm.pin_worker_resolver = AsyncMock(side_effect=RuntimeError("sin perfil"))
+    assert await mm._pin_load_target("a/pin") == "a/pin"
+    mm.pin_worker_resolver = AsyncMock(return_value="a/pin::x")
+    assert await mm._pin_load_target("a/pin") == "a/pin::x"
+    assert await mm._pin_load_target("a/pin::x") == "a/pin::x"  # un derivado se carga tal cual

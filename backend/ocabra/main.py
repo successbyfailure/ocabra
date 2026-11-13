@@ -677,6 +677,29 @@ async def lifespan(app: FastAPI):
     trtllm_compile_manager.set_profile_registry(profile_registry)
     logger.info("profile_registry_ready")
 
+    # The PIN autoload (and its reload watcher) must load the worker requests
+    # use: the default preset's ``model::hash``, like a manual "Load" does.
+    async def _pin_worker_resolver(model_id: str) -> str:
+        from ocabra.api.openai._deps import prepare_worker_state
+        from ocabra.api.openai.realtime import resolve_realtime_llm_runtime_plan
+
+        worker_key, overrides, preferred_gpu, load_policy = await resolve_realtime_llm_runtime_plan(
+            model_id, profile_registry=profile_registry, model_manager=model_manager
+        )
+        if worker_key == model_id:
+            return model_id
+        await prepare_worker_state(
+            model_manager,
+            model_id,
+            worker_key,
+            overrides,
+            preferred_gpu=preferred_gpu,
+            load_policy=load_policy,
+        )
+        return worker_key
+
+    model_manager.pin_worker_resolver = _pin_worker_resolver
+
     # OpenAI TTS voice-name compatibility shim — independent of routers on
     # purpose (see ocabra/core/openai_tts_compat.py).
     from ocabra.core.openai_tts_compat import OpenAITTSCompatRegistry

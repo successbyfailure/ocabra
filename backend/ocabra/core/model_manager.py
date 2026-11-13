@@ -406,6 +406,11 @@ class ModelManager:
         self._timeout_counts: dict[str, int] = {}  # model_id -> timeout count
         self._busy_watchdog_task: asyncio.Task | None = None
         self._pin_autoload_task: asyncio.Task | None = None
+        # Resolves a PIN model to the worker its requests actually use (the
+        # default runtime preset's ``model::hash``), preparing that derived
+        # state. Set at startup once the profile registry exists (main.py);
+        # None means "load the model itself".
+        self.pin_worker_resolver: Callable[[str], Awaitable[str]] | None = None
         self._vram_watchdog_task: asyncio.Task | None = None
         self._stopped: bool = False
         # Cache of expected load times (seconds) keyed by model_id.
@@ -1624,9 +1629,38 @@ class ModelManager:
             model_id
             for model_id, state in self._states.items()
             if state.load_policy == LoadPolicy.PIN
+            and "::" not in model_id
             and state.status not in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}
             and model_id not in self._load_in_progress
+            and not self._pin_held_by_derived(model_id)
         ]
+
+    def _pin_held_by_derived(self, model_id: str) -> bool:
+        """A PIN with presets is served by a derived worker (``model::hash``):
+        with one loaded (or loading) the PIN is satisfied."""
+        prefix = f"{model_id}::"
+        return any(
+            mid.startswith(prefix) and st.status in (ModelStatus.LOADED, ModelStatus.LOADING)
+            for mid, st in self._states.items()
+        )
+
+    async def _pin_load_target(self, model_id: str) -> str:
+        """What to load for a PIN: the worker its requests use.
+
+        Loading the bare model for a PIN with presets started a worker no
+        request uses; the first request then loaded the preset's worker and
+        evicted the PIN's (same weights twice on the card), ~20 s of outage
+        after every restart (gemma4:26b, 2026-11-13).
+        """
+        resolver = self.pin_worker_resolver
+        if resolver is None or "::" in model_id:
+            return model_id
+        try:
+            target = await resolver(model_id)
+        except Exception as exc:  # noqa: BLE001 - fall back to the model itself
+            logger.warning("pin_worker_resolve_failed", model_id=model_id, error=str(exc))
+            return model_id
+        return target or model_id
 
     async def _autoload_pinned(self) -> None:
         """Load the PIN models some time after startup.
@@ -1682,10 +1716,11 @@ class ModelManager:
             if self._gpu_scheduler is None:
                 # No scheduler means no eviction either: nothing to be polite
                 # about (and the watcher needs the scheduler to probe room).
+                target = await self._pin_load_target(model_id)
                 self._create_background_task(
-                    self._load_model(model_id),
-                    task_name=f"load:{model_id}",
-                    model_id=model_id,
+                    self._load_model(target),
+                    task_name=f"load:{target}",
+                    model_id=target,
                 )
                 continue
             self._create_background_task(
@@ -5013,7 +5048,7 @@ class ModelManager:
             state = self._states.get(model_id)
             if not state or state.load_policy != LoadPolicy.PIN:
                 return
-            if state.status not in waiting:
+            if state.status not in waiting or self._pin_held_by_derived(model_id):
                 return
             # A caller (e.g. ModelManager.ensure_vram_free, on behalf of a
             # service like Hunyuan/TRELLIS.2) may have asked to hold off
@@ -5049,7 +5084,8 @@ class ModelManager:
                     # neighbour that beat us to it. A real client request
                     # for this model uses the default (evicting) path and
                     # can still take the GPU back at any time.
-                    await self._load_model(model_id, allow_pressure_eviction=False)
+                    target = await self._pin_load_target(model_id)
+                    await self._load_model(target, allow_pressure_eviction=False)
                     break
             except Exception:
                 continue
