@@ -53,4 +53,32 @@ describe("request breakdown", () => {
     expect(prefillSpeedText(req({ inputTokens: 3003, cachedTokens: 3003, promptTokensPerSecond: 0 }), fmt)).toBe("todo en cache")
     expect(prefillSpeedText(req({ inputTokens: 51107, cachedTokens: 0, promptTokensPerSecond: 2089 }), fmt)).toBe("2089 t/s")
   })
+
+  // 2026-11-13, ornith con 141k tokens de cache: 1,1 s antes del prefill
+  // (tokenizar el prompt entero) salía como «resto» y el prefill de 332 tokens
+  // nuevos a 793 t/s parecía lento.
+  const ornith = req({
+    modelId: "ornith-1.5:35b", durationMs: 8070, inputTokens: 141422, cachedTokens: 141090,
+    promptTokensPerSecond: 793.4, generationMs: 6520,
+    runtimeTelemetry: { queue_ms: 0, load_ms: 0, prefill_ms: 418, ttft_ms: 1545 },
+  })
+
+  it("the time before prefill is preparation, not rest", () => {
+    const split = requestPhases(ornith)!
+    expect(split.phases.map((p) => [p.key, Math.round(p.ms)])).toEqual([
+      ["prep", 1127],
+      ["prefill", 418],
+      ["generation", 6520],
+    ])
+  })
+
+  it("prefill speed on a cached request says over how many new tokens", () => {
+    const fmt = (t: number | null | undefined) => `${Math.round(t ?? 0)} t/s`
+    expect(prefillSpeedText(ornith, fmt)).toBe("793 t/s · 332 nuevos")
+  })
+
+  it("names the preparation under the bar when it weighs", () => {
+    render(<TimingBreakdown r={ornith} />)
+    expect(screen.getByTestId("timing-breakdown").textContent).toContain("preparación 1.1 s")
+  })
 })

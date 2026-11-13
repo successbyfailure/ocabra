@@ -9,12 +9,18 @@ import { fmtTokens } from "./format"
  *
  * Fuentes: ``generationMs`` lo informa el motor (llama.cpp ``predicted_ms``,
  * Ollama ``eval_duration``); prefill, cola y carga vienen de la telemetría de
- * la petición. Lo que no cuadra con la duración total (red, streaming al
- * cliente, espera de slot) sale como «resto».
+ * la petición.
+ *
+ * «preparación» es lo que pasa entre la admisión y el prefill: el motor
+ * tokeniza el prompt ENTERO y aplica la plantilla de chat en cada petición,
+ * aunque casi todo salga de la cache. Medido el 2026-11-13: 236 ms para 70k
+ * tokens en gemma4:26b, ~1,1 s con 141k en ornith. Con mucha cache el prefill
+ * se queda en nada y este tramo es lo que se ve. Sale de ``ttft_ms``. Lo que
+ * queda tras la generación (red, streaming al cliente) es «resto».
  */
 
 export interface RequestPhase {
-  key: "queue" | "load" | "prefill" | "generation" | "other"
+  key: "queue" | "load" | "prep" | "prefill" | "generation" | "other"
   label: string
   ms: number
   color: string
@@ -23,6 +29,7 @@ export interface RequestPhase {
 const PHASE_META: Record<RequestPhase["key"], { label: string; color: string }> = {
   queue: { label: "cola", color: "#64748b" },
   load: { label: "carga", color: "#f59e0b" },
+  prep: { label: "preparación", color: "#0e7490" },
   prefill: { label: "prefill", color: "#38bdf8" },
   generation: { label: "generación", color: "#a78bfa" },
   other: { label: "resto", color: "#334155" },
@@ -47,9 +54,17 @@ export function requestPhases(r: RecentRequest): { phases: RequestPhase[]; total
   const prefill = num(t.prefill_ms)
   const generation = num(r.generationMs)
   if (prefill == null && generation == null) return null
+  const queue = num(r.queueMs ?? t.queue_ms)
+  const load = num(t.load_ms)
+  const ttft = num(t.ttft_ms)
+  // Del inicio al primer token: cola + carga + preparación + prefill.
+  const prep = ttft != null && prefill != null ? ttft - (queue ?? 0) - (load ?? 0) - prefill : null
+  const total0 = num(r.durationMs)
+  const noise = Math.max(50, (total0 ?? 0) * 0.03)
   const parts: [RequestPhase["key"], number | null][] = [
-    ["queue", num(r.queueMs ?? t.queue_ms)],
-    ["load", num(t.load_ms)],
+    ["queue", queue],
+    ["load", load],
+    ["prep", prep != null && prep > noise ? prep : null],
     ["prefill", prefill],
     ["generation", generation],
   ]
@@ -57,7 +72,7 @@ export function requestPhases(r: RecentRequest): { phases: RequestPhase[]; total
     .filter(([, ms]) => ms != null && ms > 0)
     .map(([key, ms]) => ({ key, ms: ms!, ...PHASE_META[key] }))
   const known = phases.reduce((a, p) => a + p.ms, 0)
-  const total = Math.max(num(r.durationMs) ?? known, known)
+  const total = Math.max(total0 ?? known, known)
   const rest = total - known
   // Lo que queda por debajo del 3 % es ruido de medida: no merece segmento.
   if (rest > Math.max(50, total * 0.03)) phases.push({ key: "other", ms: rest, ...PHASE_META.other })
@@ -78,8 +93,8 @@ export function TimingBreakdown({ r, compact = false }: { r: RecentRequest; comp
     .filter(Boolean)
     .join("\n")
   const main = phases.filter((p) => p.key === "prefill" || p.key === "generation")
-  // Cola y carga solo se nombran cuando pesan (la barra ya las muestra).
-  const extra = phases.filter((p) => (p.key === "queue" || p.key === "load") && p.ms >= 100)
+  // Cola, carga y preparación solo se nombran cuando pesan (la barra ya las muestra).
+  const extra = phases.filter((p) => (p.key === "queue" || p.key === "load" || p.key === "prep") && p.ms >= 100)
   return (
     <div className={compact ? "min-w-[110px]" : "min-w-[150px]"} title={title} data-testid="timing-breakdown">
       <div className="flex items-baseline justify-end gap-1.5 tabular-nums">
@@ -136,7 +151,7 @@ export function CacheCell({ r }: { r: RecentRequest }) {
 export function PhaseLegend() {
   return (
     <span className="inline-flex flex-wrap items-center gap-x-2 text-[10.5px] text-muted-foreground">
-      {(["queue", "load", "prefill", "generation", "other"] as const).map((k) => (
+      {(["queue", "load", "prep", "prefill", "generation", "other"] as const).map((k) => (
         <span key={k} className="inline-flex items-center gap-1">
           <span className="inline-block h-1.5 w-2.5 rounded-sm" style={{ background: PHASE_META[k].color }} />
           {PHASE_META[k].label}
@@ -152,5 +167,10 @@ export function PhaseLegend() {
 export function prefillSpeedText(r: RecentRequest, fmt: (tps: number | null | undefined) => string): string | null {
   const fresh = r.inputTokens != null && r.cachedTokens != null ? Math.max(0, r.inputTokens - r.cachedTokens) : null
   if (fresh != null && r.cachedTokens && fresh < 256) return fresh === 0 ? "todo en cache" : `${fresh} ${fresh === 1 ? "token nuevo" : "tokens nuevos"}`
-  return r.promptTokensPerSecond ? fmt(r.promptTokensPerSecond) : null
+  if (!r.promptTokensPerSecond) return null
+  // Con parte en cache la velocidad es la de los tokens nuevos, y unos pocos
+  // cientos no llenan la GPU: 332 nuevos sobre 141k salen a ~800 t/s en un
+  // modelo que hace miles con un prompt entero. Se dice sobre cuántos es.
+  if (fresh != null && r.cachedTokens) return `${fmt(r.promptTokensPerSecond)} · ${fmtTokens(fresh)} nuevos`
+  return fmt(r.promptTokensPerSecond)
 }
