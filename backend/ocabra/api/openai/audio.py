@@ -7,6 +7,7 @@ POST /v1/audio/generate      — ACE-Step music generation
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Annotated, Any
 
 import httpx
@@ -367,9 +368,9 @@ async def transcriptions(
                         # las estadísticas calculan el factor de tiempo real
                         # aunque el formato de respuesta no la traiga.
                         try:
-                            request.state.audio_seconds = float(
-                                resp.headers.get("x-audio-duration") or 0
-                            ) or None
+                            request.state.audio_seconds = (
+                                float(resp.headers.get("x-audio-duration") or 0) or None
+                            )
                         except (TypeError, ValueError, AttributeError):
                             pass
                 break
@@ -490,6 +491,35 @@ def _resolve_openai_tts_compat(request: Request, model_id: str, voice: str | Non
     return target or model_id
 
 
+def _authorize_openai_tts_compat(
+    user: UserContext,
+    requested_model: str,
+    resolved_model: str,
+) -> UserContext:
+    """Authorize an OpenAI TTS alias like a virtual router.
+
+    Access is checked against the public alias the caller actually sent. Once
+    granted, only its configured target is added to the request-local context,
+    allowing normal profile resolution without granting that private target
+    globally. This mirrors router ACL semantics while preserving least
+    privilege for every unrelated profile.
+    """
+    if resolved_model == requested_model:
+        return user
+    if not user.can_access_model(requested_model):
+        raise _openai_error(
+            f"The model '{requested_model}' does not exist.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+    return replace(
+        user,
+        accessible_model_ids={*user.accessible_model_ids, resolved_model},
+    )
+
+
 @router.get("/audio/voices", summary="List TTS voices for a model")
 async def list_voices(
     request: Request,
@@ -519,12 +549,13 @@ async def list_voices(
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
     resolved_model = _resolve_openai_tts_compat(request, model, voice)
+    resolution_user = _authorize_openai_tts_compat(user, model, resolved_model)
 
     profile, state = await resolve_profile(
         resolved_model,
         model_manager,
         profile_registry,
-        user=user,
+        user=resolution_user,
         router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
     )
@@ -588,8 +619,32 @@ async def speech(
     looked up literally.
     """
     body = await request.json()
-    model_id: str = body.get("model", "")
-    model_id = _resolve_openai_tts_compat(request, model_id, body.get("voice"))
+    if not isinstance(body, dict):
+        raise _openai_error(
+            "The request body must be a JSON object.",
+            "invalid_request_error",
+            code="invalid_request_body",
+        )
+
+    # ``input`` is the OpenAI field.  A few otherwise OpenAI-compatible TTS
+    # clients still send the older/generic ``text`` spelling, so accept it as
+    # a compatibility alias.  Crucially, reject a missing/empty value here,
+    # before returning a StreamingResponse: if the worker rejects it after
+    # response headers have gone out, the caller sees a misleading 200 with
+    # an empty audio body instead of the worker's 400.
+    raw_input = body.get("input") or body.get("text")
+    if not isinstance(raw_input, str) or not raw_input.strip():
+        raise _openai_error(
+            "The 'input' field is required and must be a non-empty string.",
+            "invalid_request_error",
+            param="input",
+            code="invalid_input",
+        )
+    body["input"] = raw_input
+
+    requested_model_id: str = body.get("model", "")
+    model_id = _resolve_openai_tts_compat(request, requested_model_id, body.get("voice"))
+    resolution_user = _authorize_openai_tts_compat(user, requested_model_id, model_id)
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
@@ -628,7 +683,7 @@ async def speech(
         model_id,
         model_manager,
         profile_registry,
-        user=user,
+        user=resolution_user,
         router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
     )
@@ -701,18 +756,37 @@ async def speech(
                 headers=tts_headers,
             )
 
+    # Establish the upstream response before returning our StreamingResponse.
+    # Starlette sends our 200 headers as soon as the response object starts;
+    # opening the worker stream inside the body iterator meant an immediate
+    # worker 4xx/5xx arrived too late to change that status and became a
+    # truncated, apparently successful audio file.
+    client = httpx.AsyncClient(timeout=300.0)
+    try:
+        upstream_request = client.build_request("POST", url, json=payload)
+        resp = await client.send(upstream_request, stream=True)
+    except BaseException:
+        await client.aclose()
+        raise
+
+    if resp.status_code >= 400:
+        upstream_body = await resp.aread()
+        await resp.aclose()
+        await client.aclose()
+        raise _openai_error(
+            upstream_body.decode(errors="replace")[:300],
+            "invalid_request_error" if resp.status_code < 500 else "server_error",
+            status_code=resp.status_code,
+        )
+
     async def _stream_audio():
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", url, json=payload) as resp:
-                if resp.status_code >= 400:
-                    body = await resp.aread()
-                    raise _openai_error(
-                        body.decode(errors="replace")[:300],
-                        "server_error",
-                        status_code=resp.status_code,
-                    )
-                async for chunk in resp.aiter_bytes():
+        try:
+            async for chunk in resp.aiter_bytes():
+                if chunk:
                     yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
 
     return StreamingResponse(
         _stream_audio(),

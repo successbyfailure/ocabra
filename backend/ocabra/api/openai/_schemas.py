@@ -152,6 +152,10 @@ class EmbeddingRequest(BaseModel):
 class SpeechRequest(BaseModel):
     model: str = Field(..., description="Profile ID del modelo TTS", examples=["kokoro-82m"])
     input: str = Field(..., description="Texto a sintetizar", examples=["Hola desde oCabra"])
+    text: str | None = Field(
+        None,
+        description="Alias de compatibilidad de input para clientes TTS no estrictos",
+    )
     voice: str = Field("alloy", description="Voz (depende del modelo). Consulta /v1/audio/voices")
     response_format: str = Field(
         "mp3", description="Formato de audio: mp3, wav, opus, flac, pcm, aac"
@@ -258,7 +262,9 @@ class MusicGenerationRequest(BaseModel):
         None, description="Duracion en segundos (10-600, default segun el modelo)"
     )
     bpm: int | None = Field(None, description="Tempo en BPM (30-300)")
-    key_scale: str | None = Field(None, description="Tonalidad, p.ej. 'C Major'", examples=["C Major"])
+    key_scale: str | None = Field(
+        None, description="Tonalidad, p.ej. 'C Major'", examples=["C Major"]
+    )
     time_signature: str | None = Field(None, description="Compas, p.ej. '4'", examples=["4"])
     inference_steps: int | None = Field(
         None, description="Pasos de difusion (default 8 en el modelo turbo)"

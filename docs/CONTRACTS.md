@@ -1621,6 +1621,12 @@ Resolución, en ``POST /v1/audio/speech`` y ``GET /v1/audio/voices``:
 - Con fila: ``model`` se sustituye por ``target_profile_id`` antes de
   cualquier otra resolución (incluida la federación), como si el cliente
   hubiera mandado ese nombre desde el principio.
+- ACL: el permiso se comprueba contra ``openai_model`` (por ejemplo,
+  ``tts-1``), no contra cada ``target_profile_id``. Tras autorizar el nombre
+  virtual, el destino se ejecuta con la misma semántica que el target interno
+  de un router: no necesita un grant adicional y no se filtra su identidad en
+  errores de acceso. Los aliases OpenAI se conceden mediante ``group_models``
+  como cualquier otro model id virtual.
 - ``target_profile_id`` debe existir y estar ``enabled`` en el momento de
   guardar el pin; no se revalida en cada petición.
 - Renombrar o borrar el perfil destino recarga la tabla entera desde BD

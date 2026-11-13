@@ -16,6 +16,33 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.78.4 — 2026-11-13
+
+### Correcciones
+
+- **Los nombres TTS oficiales de OpenAI respetan permisos como routers
+  virtuales.** Conceder acceso a `tts-1`, `tts-1-hd` o
+  `gpt-4o-mini-tts` permite usar los perfiles asociados a sus voces sin
+  conceder por separado cada perfil interno. Antes, la comprobación se hacía
+  después de traducir el alias y una clave autorizada recibía `404` para los
+  destinos configurados. Un error de acceso sigue ocultando qué perfil había
+  detrás del alias.
+- **TTS ya no devuelve un `200` vacío cuando la petición o el worker la
+  rechazan.** `/v1/audio/speech` valida que el texto no esté vacío y abre la
+  respuesta del worker antes de enviar las cabeceras al cliente. Los errores
+  `4xx`/`5xx` conservan ahora su estado en vez de aparecer como un fichero de
+  audio vacío con estado exitoso.
+- **Los clientes TTS que envían `text` también funcionan.** El nombre OpenAI
+  estándar sigue siendo `input`, pero `text` se acepta como alias de
+  compatibilidad y se normaliza antes de llamar al modelo.
+
+**Acción:** concede al grupo cliente los nombres OpenAI que deba poder usar;
+los perfiles internos no necesitan grants adicionales. Si tu cliente dependía
+de interpretar una respuesta vacía como error, comprueba ahora el estado HTTP
+y el cuerpo de error.
+
+---
+
 ## 0.78.2 — 2026-11-13
 
 ### Rendimiento

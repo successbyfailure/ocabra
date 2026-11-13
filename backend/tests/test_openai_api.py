@@ -34,6 +34,7 @@ def _sin_agentes(monkeypatch):
         AsyncMock(return_value=[]),
     )
 
+
 # ---------------------------------------------------------------------------
 # Profile helpers
 # ---------------------------------------------------------------------------
@@ -336,6 +337,106 @@ def _llama_cpp_state():
         load_policy=LoadPolicy.WARM,
         capabilities=BackendCapabilities(chat=True, streaming=True, reasoning=True),
     )
+
+
+def _tts_state():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id="piper/test-voice",
+        backend_model_id="test-voice",
+        display_name="Test TTS voice",
+        backend_type="piper",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.WARM,
+        capabilities=BackendCapabilities(tts=True, streaming=True),
+    )
+
+
+def _make_tts_app():
+    state = _tts_state()
+    app = _make_app(model_state=state)
+    app.state.profile_registry = FakeProfileRegistry(
+        [
+            _make_test_profile(
+                profile_id=state.model_id,
+                base_model_id=state.model_id,
+                category="tts",
+            )
+        ]
+    )
+    return app
+
+
+class TestOpenAITTSStreamingErrors:
+    def test_missing_input_is_a_real_400_before_stream_starts(self):
+        app = _make_tts_app()
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={"model": "piper/test-voice", "voice": "alloy"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == {
+            "message": "The 'input' field is required and must be a non-empty string.",
+            "type": "invalid_request_error",
+            "param": "input",
+            "code": "invalid_input",
+        }
+
+    def test_worker_error_is_propagated_before_stream_starts(self):
+        app = _make_tts_app()
+        client = TestClient(app)
+        upstream = httpx.Response(
+            400,
+            json={"detail": "invalid voice"},
+            request=httpx.Request("POST", "http://worker/synthesize/stream"),
+        )
+
+        with patch.object(httpx.AsyncClient, "send", new=AsyncMock(return_value=upstream)):
+            response = client.post(
+                "/v1/audio/speech",
+                json={
+                    "model": "piper/test-voice",
+                    "input": "Hello",
+                    "voice": "missing",
+                    "response_format": "mp3",
+                },
+            )
+
+        assert response.status_code == 400
+        assert "invalid voice" in response.json()["detail"]["error"]["message"]
+        assert response.content
+
+    def test_text_alias_produces_audio_and_is_forwarded_as_input(self):
+        app = _make_tts_app()
+        client = TestClient(app)
+        upstream = httpx.Response(
+            200,
+            content=b"fake-mp3-bytes",
+            headers={"content-type": "audio/mpeg"},
+            request=httpx.Request("POST", "http://worker/synthesize/stream"),
+        )
+        send = AsyncMock(return_value=upstream)
+
+        with patch.object(httpx.AsyncClient, "send", new=send):
+            response = client.post(
+                "/v1/audio/speech",
+                json={
+                    "model": "piper/test-voice",
+                    "text": "Hello through alias",
+                    "voice": "alloy",
+                    "response_format": "mp3",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.content == b"fake-mp3-bytes"
+        sent_request = send.await_args.args[0]
+        assert b'"input":"Hello through alias"' in sent_request.content
 
 
 def test_to_backend_body_ollama_never_injects_reasoning_knobs() -> None:

@@ -10,8 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
-from ocabra.api.openai.audio import _resolve_openai_tts_compat
+from ocabra.api._deps_auth import UserContext
+from ocabra.api.openai.audio import (
+    _authorize_openai_tts_compat,
+    _resolve_openai_tts_compat,
+)
 from ocabra.core.openai_tts_compat import OpenAITTSCompatRegistry
 from ocabra.db.model_config import OpenAITTSVoiceMap
 
@@ -222,3 +227,47 @@ class TestAudioCompatGlue:
         request = _fake_request(None)
 
         assert _resolve_openai_tts_compat(request, "tts-1", "alloy") == "tts-1"
+
+
+class TestAuthorizeOpenAITTSCompat:
+    @staticmethod
+    def _user(*models: str, role: str = "user") -> UserContext:
+        return UserContext(
+            user_id="user-1",
+            username="client",
+            role=role,
+            accessible_model_ids=set(models),
+        )
+
+    def test_alias_grant_authorizes_only_its_resolved_target(self):
+        resolved = _authorize_openai_tts_compat(
+            self._user("tts-1"),
+            "tts-1",
+            "piper-es-mx-claude-high",
+        )
+
+        assert resolved.can_access_model("tts-1")
+        assert resolved.can_access_model("piper-es-mx-claude-high")
+        assert not resolved.can_access_model("glados-es-fine-tuned")
+
+    def test_missing_alias_grant_hides_the_target(self):
+        with pytest.raises(HTTPException) as raised:
+            _authorize_openai_tts_compat(
+                self._user("recomendado-tts"),
+                "tts-1",
+                "piper-es-mx-claude-high",
+            )
+
+        assert raised.value.status_code == 404
+        error = raised.value.detail["error"]
+        assert error["message"] == "The model 'tts-1' does not exist."
+        assert "piper-es-mx-claude-high" not in error["message"]
+
+    def test_admin_can_use_alias_without_explicit_grant(self):
+        resolved = _authorize_openai_tts_compat(
+            self._user(role="system_admin"),
+            "tts-1",
+            "piper-es-mx-claude-high",
+        )
+
+        assert resolved.can_access_model("piper-es-mx-claude-high")
