@@ -2416,6 +2416,10 @@ class ModelManager:
                                         fingerprint=observed_fingerprint,
                                         per_gpu_mb=real_per_gpu_mb,
                                     )
+                                if measured_everywhere:
+                                    await self._record_vram_curve_point(
+                                        model_id, state, real_per_gpu_mb, list(actual_gpu_indices)
+                                    )
                                 # The single-GPU lock keeps the estimate, as before;
                                 # the reading reaches it through the next admission.
                                 use_real = len(actual_gpu_indices) > 1 and measured_everywhere
@@ -4114,6 +4118,44 @@ class ModelManager:
         held = sum(int(mb) for mb in self._gpu_manager.get_process_vram_mb(gpu).values())
         return max(0, int(ceiling) - held - int(settings.vram_buffer_mb))
 
+    async def _record_vram_curve_point(
+        self,
+        model_id: str,
+        state: "ModelState",
+        per_gpu_mb: dict[int, int],
+        gpus: list[int],
+        *,
+        live: dict | None = None,
+    ) -> None:
+        """One (context, measured VRAM) reading for the preset planner's curve
+        (see ``observed_vram.lookup_curve``). Best effort; never raises."""
+        try:
+            if not is_llama_cpp_family(state.backend_type) or not per_gpu_mb:
+                return
+            extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+            llama = dict(extra.get("llama_cpp") or {})
+            if live:
+                if live.get("n_parallel"):
+                    llama["parallel_slots"] = int(live["n_parallel"])
+                if live.get("n_ubatch"):
+                    llama["ubatch_size"] = int(live["n_ubatch"])
+                if live.get("n_batch"):
+                    llama["batch_size"] = int(live["n_batch"])
+                context = int(live.get("n_ctx") or 0)
+            else:
+                started = (state.live_context or {}).get("n_ctx")
+                context = int(started or llama.get("ctx_size") or 0)
+            if context <= 0:
+                return
+            await observed_vram.record_curve_point(
+                self._canonical_runtime_model_id(model_id),
+                key=observed_vram.curve_key(llama, gpus),
+                context_tokens=context,
+                total_mb=int(sum(per_gpu_mb.values())),
+            )
+        except Exception as exc:  # noqa: BLE001 - learning is best effort
+            logger.debug("vram_curve_point_skipped", model_id=model_id, error=str(exc))
+
     async def make_room_for_whisper(self, model_id: str, *, diarize: bool) -> None:
         """Before a transcription that will grow whisper past its estimate, shrink
         a llama.cpp model's context on its GPU if the card lacks the room.
@@ -4622,6 +4664,9 @@ class ModelManager:
                         await self._gpu_manager.lock_vram(gpu_idx, used, model_id)
                     state.vram_used_mb = sum(measured.values())
                     state.worker_info.vram_used_mb = state.vram_used_mb
+                    await self._record_vram_curve_point(
+                        model_id, state, measured, list(state.current_gpu or []), live=live
+                    )
 
             logger.info(
                 "llama_cpp_live_context_changed",

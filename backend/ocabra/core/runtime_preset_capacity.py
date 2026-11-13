@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import math
 import time
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ocabra.config import settings
+from ocabra.core import observed_vram
 from ocabra.core import vram_planner as vp
 from ocabra.core.model_manager_helpers import (
     _resolve_rs_rollback_snapshots,
@@ -472,6 +474,73 @@ def _ordered_candidates(
     )
 
 
+def _preset_llama_section(
+    state: Any,
+    profile: Any,
+    preset: Any,
+    *,
+    effective_parallelism: int,
+    backend: str,
+    placement: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``llama_cpp`` section a single-GPU worker of this preset runs with,
+    as far as the measured curve cares (see ``observed_vram.curve_key``)."""
+    extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    section = copy.deepcopy(extra.get("llama_cpp") or {})
+    overrides = getattr(profile, "load_overrides", None)
+    if isinstance(overrides, dict) and isinstance(overrides.get("llama_cpp"), dict):
+        section.update(copy.deepcopy(overrides["llama_cpp"]))
+    section["parallel_slots"] = effective_parallelism
+    cache_type = kv_dtype_for(backend, preset.kv_cache_dtype)[2]
+    if cache_type:
+        section["cache_type_k"] = cache_type
+        section["cache_type_v"] = cache_type
+    section.update({"split_mode": "none", "tensor_split": None})
+    for key in ("gpu_layers", "n_cpu_moe"):
+        if placement.get(key) is not None:
+            section[key] = placement[key]
+    return section
+
+
+def _apply_measured_curve(
+    plan: dict[str, Any],
+    curve: observed_vram.VramCurve | None,
+    *,
+    capacity_mb: int,
+    preset: Any,
+) -> dict[str, Any]:
+    """Let the measured curve raise what the formula says fits, never lower it.
+
+    Pool tokens (unified KV) on both sides: the curve is keyed by llama.cpp's
+    total ``--ctx-size``. Only within the measured range: past the largest
+    measured context the formula keeps deciding.
+    """
+    if curve is None:
+        return plan
+    measured_max = curve.max_context_within(int(capacity_mb))
+    formula_max = int(plan.get("max_context") or 0)
+    if measured_max <= formula_max:
+        return plan
+    out = dict(plan)
+    out["max_context"] = measured_max
+    out["measured_curve"] = curve
+    if preset.context_mode == "max" or preset.context_tokens is None:
+        out["effective_context"] = measured_max
+        out["warnings"] = []
+        return out
+    requested = int(preset.context_tokens)
+    out["effective_context"] = min(requested, measured_max)
+    out["warnings"] = (
+        []
+        if requested <= measured_max
+        else [
+            f"contexto {requested} no cabe con {plan.get('slots')} slots "
+            f"(máx medido {measured_max}); reducido a {measured_max}"
+        ]
+    )
+    return out
+
+
 @dataclass
 class _PlanContext:
     """Everything shared by every preset of one profile resolution."""
@@ -561,6 +630,7 @@ def _resolved_row(
     kv_bytes: float,
     placement: dict[str, Any],
     offload: _Offload | None,
+    curve: observed_vram.VramCurve | None = None,
 ) -> dict[str, Any]:
     runtime_key = None
     if effective > 0:
@@ -576,6 +646,28 @@ def _resolved_row(
             placement=placement or None,
         )
     ratios = placement.get("tensor_split") if len(footprint_gpus) > 1 else None
+    footprint = _footprint(
+        ctx.backend,
+        ctx.arch,
+        ctx.weights_mb,
+        effective=effective,
+        parallelism=effective_parallelism,
+        kv_bytes=kv_bytes,
+        unified_pool=ctx.unified_pool,
+        gpus=list(footprint_gpus),
+        gpu_memory_utilization=ctx.gpu_memory_utilization,
+        offload=offload,
+        ratios=ratios if isinstance(ratios, list) else None,
+    )
+    if curve is not None and effective > 0 and len(footprint_gpus) == 1:
+        measured_mb = curve.predict_mb(effective)
+        gpu_index = int(footprint_gpus[0]["index"])
+        footprint = {
+            "estimated_vram_mb": measured_mb,
+            "vram_by_gpu": {gpu_index: measured_mb},
+            "vram_breakdown_by_gpu": {gpu_index: {"measured": measured_mb}},
+            "vram_source": "measured",
+        }
     return {
         "preset_key": preset.preset_key,
         "resolved": True,
@@ -590,19 +682,7 @@ def _resolved_row(
         "fits": fits,
         "runtime_key": runtime_key,
         "warnings": warnings,
-        **_footprint(
-            ctx.backend,
-            ctx.arch,
-            ctx.weights_mb,
-            effective=effective,
-            parallelism=effective_parallelism,
-            kv_bytes=kv_bytes,
-            unified_pool=ctx.unified_pool,
-            gpus=list(footprint_gpus),
-            gpu_memory_utilization=ctx.gpu_memory_utilization,
-            offload=offload,
-            ratios=ratios if isinstance(ratios, list) else None,
-        ),
+        **footprint,
     }
 
 
@@ -689,6 +769,7 @@ def _resolve_single_gpu_row(
     parallelism_warning: str | None,
     placement: dict[str, Any],
     offload: _Offload | None,
+    curves: dict[int, observed_vram.VramCurve | None] | None = None,
 ) -> dict[str, Any]:
     """A preset on the one GPU of its candidates where it fits best."""
     candidates = _ordered_candidates(preset, state, ctx.gpus)
@@ -707,6 +788,12 @@ def _resolve_single_gpu_row(
             rs_rollback_snapshots=ctx.rs_rollback_snapshots,
             unified_pool=ctx.unified_pool,
             offload=offload,
+        )
+        plan = _apply_measured_curve(
+            plan,
+            (curves or {}).get(int(gpu["index"])),
+            capacity_mb=int(gpu["total_mb"]),
+            preset=preset,
         )
         evaluated.append((gpu, plan))
 
@@ -754,7 +841,45 @@ def _resolve_single_gpu_row(
         kv_bytes=kv_bytes,
         placement=placement,
         offload=offload,
+        curve=plan.get("measured_curve"),
     )
+
+
+async def _measured_curves(
+    ctx: _PlanContext,
+    state: Any,
+    preset: Any,
+    *,
+    effective_parallelism: int,
+    placement: dict[str, Any],
+    offload: _Offload | None,
+    **_unused: Any,
+) -> dict[int, observed_vram.VramCurve | None]:
+    """Measured VRAM curve of this preset's configuration on each candidate GPU.
+
+    llama.cpp with a unified KV pool and every layer on GPU only: that is what
+    the readings are recorded for, in the same pool units.
+    """
+    model_id = getattr(state, "model_id", None)
+    if not model_id or not ctx.placement_aware or not ctx.unified_pool:
+        return {}
+    if offload is not None and offload.active:
+        return {}
+    section = _preset_llama_section(
+        state,
+        ctx.profile,
+        preset,
+        effective_parallelism=effective_parallelism,
+        backend=ctx.backend,
+        placement=placement,
+    )
+    curves: dict[int, observed_vram.VramCurve | None] = {}
+    for gpu in _ordered_candidates(preset, state, ctx.gpus):
+        index = int(gpu["index"])
+        curves[index] = await observed_vram.lookup_curve(
+            str(model_id), key=observed_vram.curve_key(section, [index])
+        )
+    return curves
 
 
 def _spread_order(preset: Any, gpus: list[dict[str, int]]) -> list[int]:
@@ -882,7 +1007,8 @@ async def resolve_profile_runtime_capacities(
             rows.append(_resolve_multi_gpu_row(ctx, preset, spread, **common))
             continue
 
-        row = _resolve_single_gpu_row(ctx, preset, state, **common)
+        curves = await _measured_curves(ctx, state, preset, **common)
+        row = _resolve_single_gpu_row(ctx, preset, state, curves=curves, **common)
         if (
             split_policy == "when_needed"
             and preset.placement_policy != "forced"

@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.77.4 — 2026-11-13
+
+### Correcciones
+
+- **El planificador de presets usa la VRAM medida de cada modelo.** Para
+  decidir hasta qué contexto cabe un preset, oCabra estimaba la memoria con
+  una fórmula y constantes calibradas en otros modelos o configuraciones.
+  Apiladas, se pasaban mucho: gemma4:26b corre a 262.144 tokens en la 3090
+  con 2 GB libres, y la estimación decía que solo cabía hasta 129.564. Al
+  crear un preset por encima de esa cifra, la API lo rechazaba con "Ningún
+  preset habilitado cabe". Ahora cada carga y cada cambio de contexto en
+  vivo apuntan lo que ocupa el modelo de verdad. Con dos o más medidas de la
+  misma configuración, el planificador usa esa curva medida, con margen y sin
+  pasar del mayor contexto medido. Nunca la usa para bajar lo que la fórmula
+  ya admitía. Afecta a los presets de una GPU con la KV unificada (los de
+  llama.cpp en oCabra). En el editor, la huella estimada de esos presets sale
+  como `vram_source: "measured"`.
+
+---
+
 ## 0.77.2 — 2026-11-13
 
 ### Correcciones

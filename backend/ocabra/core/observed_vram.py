@@ -146,3 +146,156 @@ def raise_to_observed(
         else:
             per_gpu[gpu] = int(mb)
     return total, per_gpu
+
+
+# ── Curva medida: VRAM frente a contexto (2026-11-13) ────────────────────────
+#
+# El planificador de presets estima la VRAM con una fórmula (pesos + KV por
+# token + sobrecargas) y varias constantes calibradas a mano con otro modelo u
+# otra configuración: el coste del borrador MTP medido en qwen3.8, el de gemma4
+# medido con 1 slot y el proyector residente... Apiladas, decían que
+# gemma4:26b solo cabía hasta 129.564 tokens en la 3090 mientras el modelo
+# corría a 262.144 con 2 GB libres, y la guarda rechazaba presets que caben.
+#
+# Cada carga y cada cambio de contexto en vivo miden lo que el worker ocupa de
+# verdad. Aquí se guardan esos puntos por configuración (todo lo que cambia la
+# huella salvo el contexto) y se ajusta una recta, que el planificador usa en
+# lugar de la fórmula. Solo dentro de lo medido: más allá del mayor contexto
+# medido no se extrapola.
+
+_CURVE_PREFIX = "llama_cpp:vram_curve:"
+_CURVE_MAX_POINTS = 16
+#: Separación mínima entre el menor y el mayor contexto medidos para ajustar una
+#: pendiente con sentido.
+CURVE_MIN_SPAN_TOKENS = 16384
+_CURVE_KEY_OPTIONS = (
+    "parallel_slots",
+    "cache_type_k",
+    "cache_type_v",
+    "ubatch_size",
+    "batch_size",
+    "kv_unified",
+    "flash_attn",
+    "gpu_layers",
+    "n_cpu_moe",
+    "split_mode",
+    "tensor_split",
+)
+
+
+def _norm_cache_type(value: Any) -> str:
+    text = str(value or "f16").lower()
+    return {"q8": "q8_0", "q4": "q4_0", "fp16": "f16"}.get(text, text)
+
+
+def curve_key(llama: dict[str, Any] | None, gpus: list[int] | None) -> str:
+    """Identity of a configuration for the curve: everything that changes the
+    footprint except the context. ``llama`` is the effective ``llama_cpp``
+    section (with the live ``parallel_slots``/``ubatch_size`` if they were
+    changed in place); ``gpus`` the GPUs the worker occupies."""
+    section = llama if isinstance(llama, dict) else {}
+    payload: dict[str, Any] = {k: section.get(k) for k in _CURVE_KEY_OPTIONS}
+    payload["cache_type_k"] = _norm_cache_type(section.get("cache_type_k"))
+    payload["cache_type_v"] = _norm_cache_type(section.get("cache_type_v"))
+    payload["ubatch_size"] = int(section.get("ubatch_size") or 512)
+    payload["parallel_slots"] = int(section.get("parallel_slots") or 1)
+    spec = section.get("speculative")
+    payload["spec_type"] = str(spec.get("spec_type") or "") if isinstance(spec, dict) else ""
+    # Resident projector or not: on_demand and disabled start without it.
+    payload["vision_resident"] = str(section.get("vision_mode") or "") == "enabled"
+    payload["gpus"] = sorted(int(g) for g in (gpus or []))
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+async def record_curve_point(
+    model_id: str, *, key: str, context_tokens: int, total_mb: int
+) -> None:
+    """Add one (context, measured VRAM) reading. Per context the largest reading
+    is kept: a sample taken before a buffer grew must not lower it."""
+    if context_tokens <= 0 or total_mb <= 0:
+        return
+    redis_key = f"{_CURVE_PREFIX}{model_id}:{key}"
+    try:
+        data = await get_key(redis_key)
+        points = dict(data.get("points") or {}) if isinstance(data, dict) else {}
+        ctx = str(int(context_tokens))
+        points[ctx] = max(int(points.get(ctx) or 0), int(total_mb))
+        if len(points) > _CURVE_MAX_POINTS:
+            # Keep the extremes (they fix the slope) and the most recent rest.
+            ordered = sorted(points, key=int)
+            keep = {ordered[0], ordered[-1], ctx}
+            for c in reversed(ordered):
+                if len(keep) >= _CURVE_MAX_POINTS:
+                    break
+                keep.add(c)
+            points = {c: points[c] for c in keep}
+        await set_key(redis_key, {"points": points, "updated_at": time.time()}, ttl=_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - learning is best effort
+        logger.warning("vram_curve_record_failed", model_id=model_id, error=str(exc))
+
+
+class VramCurve:
+    """Recta ajustada a las medidas de una configuración."""
+
+    def __init__(self, points: dict[int, int]) -> None:
+        self.points = dict(sorted(points.items()))
+        xs = list(self.points)
+        ys = [self.points[x] for x in xs]
+        n = len(xs)
+        mean_x = sum(xs) / n
+        mean_y = sum(ys) / n
+        var = sum((x - mean_x) ** 2 for x in xs)
+        self.slope_mb_per_token = (
+            sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True)) / var
+            if var > 0
+            else 0.0
+        )
+        self.intercept_mb = mean_y - self.slope_mb_per_token * mean_x
+        self.min_context = xs[0]
+        self.max_context = xs[-1]
+
+    def predict_mb(self, context_tokens: int) -> int:
+        """VRAM at ``context_tokens``, plus the margin. Never below a reading
+        already taken at that context or a smaller one."""
+        fitted = self.intercept_mb + self.slope_mb_per_token * context_tokens
+        floor = max((mb for c, mb in self.points.items() if c <= context_tokens), default=0)
+        return int(max(fitted, floor)) + OBSERVED_VRAM_MARGIN_MB
+
+    def max_context_within(self, capacity_mb: int) -> int:
+        """Largest measured-range context whose prediction fits ``capacity_mb``
+        (0 when not even the smallest measured one does)."""
+        if self.predict_mb(self.max_context) <= capacity_mb:
+            return self.max_context
+        if self.slope_mb_per_token <= 0 or self.predict_mb(self.min_context) > capacity_mb:
+            return 0
+        lo, hi = self.min_context, self.max_context
+        while hi - lo > 256:
+            mid = (lo + hi) // 2
+            if self.predict_mb(mid) <= capacity_mb:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
+
+async def lookup_curve(model_id: str, *, key: str) -> VramCurve | None:
+    """The measured curve for this configuration, or ``None`` with fewer than
+    two readings spread over at least ``CURVE_MIN_SPAN_TOKENS``."""
+    try:
+        data = await get_key(f"{_CURVE_PREFIX}{model_id}:{key}")
+    except Exception:  # noqa: BLE001
+        return None
+    raw = data.get("points") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        points = {int(c): int(mb) for c, mb in raw.items() if int(c) > 0 and int(mb) > 0}
+    except (TypeError, ValueError):
+        return None
+    if len(points) < 2 or max(points) - min(points) < CURVE_MIN_SPAN_TOKENS:
+        return None
+    curve = VramCurve(points)
+    if curve.slope_mb_per_token < 0:
+        return None
+    return curve
