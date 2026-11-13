@@ -1,3 +1,4 @@
+import { CacheCell, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { FlaskConical, Gauge, MessageSquareText } from "lucide-react"
@@ -112,9 +113,14 @@ export function RecentForModel({ editor, insights, logical }: SectionProps) {
                   </td>
                   <td className="py-1 pr-2">{r.requestedModel && r.requestedModel !== r.modelId ? r.requestedModel : r.modelId}</td>
                   <td className="py-1 pr-2 text-muted-foreground">{r.username ?? r.apiKeyName ?? "anónimo"}</td>
-                  <td className="py-1 pr-2 text-right tabular-nums">{fmtDuration(r.durationMs)}</td>
+                  <td className="py-1 pr-2 text-right text-muted-foreground">
+                    <TimingBreakdown r={r} compact />
+                  </td>
                   <td className="py-1 pr-2 text-right tabular-nums text-muted-foreground">
                     {r.inputTokens != null ? `${fmtTokens(r.inputTokens)} → ${fmtTokens(r.outputTokens ?? 0)}` : "—"}
+                  </td>
+                  <td className="py-1 pr-2 text-right">
+                    <CacheCell r={r} />
                   </td>
                   <td className="py-1 pr-2 text-right tabular-nums text-muted-foreground">{fmtTps(r.predictedTokensPerSecond)}</td>
                   <td className="py-1 text-right">

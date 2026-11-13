@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight, Search, X } from "lucide-react"
 import { api } from "@/api/client"
 import { useIsModelManager } from "@/hooks/useAuth"
 import type { RecentRequest } from "@/types"
+import { CacheCell, cacheInfo, fmtSpan, requestPhases, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
+import { fmtTps } from "@/components/dashboard/format"
 
 function formatDate(iso: string): string {
   try {
@@ -38,7 +40,7 @@ function StatusBadge({ code, error }: { code: number | null; error: string | nul
 function ExpandedRow({ request, isManager }: { request: RecentRequest; isManager: boolean }) {
   return (
     <tr className="bg-muted/10">
-      <td colSpan={isManager ? 9 : 8} className="px-5 py-3">
+      <td colSpan={isManager ? 10 : 9} className="px-5 py-3">
         <div className="space-y-2 text-xs">
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             <div>
@@ -54,15 +56,31 @@ function ExpandedRow({ request, isManager }: { request: RecentRequest; isManager
               <span>{request.requestKind ?? request.backendType ?? "—"}</span>
             </div>
             <div>
-              <span className="text-muted-foreground">Duracion: </span>
-              <span>{request.durationMs != null ? `${request.durationMs} ms` : "—"}</span>
+              <span className="text-muted-foreground">Duración: </span>
+              <span>{fmtSpan(request.durationMs)}</span>
             </div>
             <div>
               <span className="text-muted-foreground">Tokens: </span>
               <span>
                 {request.inputTokens != null || request.outputTokens != null
-                  ? `${request.inputTokens ?? 0} in / ${request.outputTokens ?? 0} out`
+                  ? `${request.inputTokens ?? 0} entrada → ${request.outputTokens ?? 0} salida`
                   : "—"}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Cache de prompt: </span>
+              <span>
+                {(() => {
+                  const c = cacheInfo(request)
+                  if (!c) return "el backend no lo informa"
+                  return c.cached ? `${c.cached} de ${c.input} tokens (${c.pct} %)` : "ningún token de la entrada"
+                })()}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Velocidad: </span>
+              <span>
+                prefill {fmtTps(request.promptTokensPerSecond)} · generación {fmtTps(request.predictedTokensPerSecond)}
               </span>
             </div>
             {isManager && (
@@ -84,6 +102,20 @@ function ExpandedRow({ request, isManager }: { request: RecentRequest; isManager
               <span className="font-mono">{request.startedAt}</span>
             </div>
           </div>
+          {requestPhases(request) && (
+            <div className="space-y-1" data-testid="timing-detail">
+              <span className="text-muted-foreground">Tiempo por fases:</span>
+              <div className="max-w-md">
+                <TimingBreakdown r={request} />
+              </div>
+              <p className="text-muted-foreground">
+                {requestPhases(request)!
+                  .phases.map((p) => `${p.label} ${fmtSpan(p.ms)}`)
+                  .join(" · ")}
+                {request.runtimeTelemetry?.ttft_ms != null && ` · primer token a los ${fmtSpan(request.runtimeTelemetry.ttft_ms)}`}
+              </p>
+            </div>
+          )}
           {request.error && (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-200">
               <span className="font-medium">Error: </span>
@@ -202,8 +234,9 @@ export function Logs() {
               <th className="px-3 py-2 text-left font-medium">Modelo</th>
               <th className="px-3 py-2 text-left font-medium hidden sm:table-cell">Endpoint</th>
               <th className="px-3 py-2 text-left font-medium hidden md:table-cell">Tipo</th>
-              <th className="px-3 py-2 text-right font-medium">Duracion</th>
+              <th className="px-3 py-2 text-right font-medium" title="Duración total con su desglose en prefill y generación">Tiempo</th>
               <th className="px-3 py-2 text-right font-medium hidden lg:table-cell">Tokens</th>
+              <th className="px-3 py-2 text-right font-medium hidden md:table-cell" title="Tokens de entrada servidos desde la cache de prompt">Cache</th>
               {isManager && <th className="px-3 py-2 text-left font-medium hidden lg:table-cell">Usuario</th>}
               <th className="px-3 py-2 text-center font-medium">Estado</th>
             </tr>
@@ -211,7 +244,7 @@ export function Logs() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={isManager ? 9 : 8} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={isManager ? 10 : 9} className="px-3 py-8 text-center text-muted-foreground">
                   <div className="inline-flex items-center gap-2">
                     <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                     Cargando...
@@ -221,7 +254,7 @@ export function Logs() {
             )}
             {!loading && filtered.length === 0 && (
               <tr>
-                <td colSpan={isManager ? 9 : 8} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={isManager ? 10 : 9} className="px-3 py-8 text-center text-muted-foreground">
                   {searchQuery ? "Sin resultados para la busqueda" : "Sin peticiones recientes"}
                 </td>
               </tr>
@@ -250,12 +283,15 @@ export function Logs() {
                     <td className="whitespace-nowrap px-3 py-1.5 text-xs text-muted-foreground hidden md:table-cell">
                       {r.requestKind ?? r.backendType ?? "—"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs">
-                      {r.durationMs != null ? `${r.durationMs} ms` : "—"}
+                    <td className="px-3 py-1.5 text-right text-xs text-muted-foreground">
+                      <TimingBreakdown r={r} compact />
                     </td>
                     <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs text-muted-foreground hidden lg:table-cell">
                       {r.inputTokens != null || r.outputTokens != null
-                        ? `${r.inputTokens ?? 0} / ${r.outputTokens ?? 0}` : "—"}
+                        ? `${r.inputTokens ?? 0} → ${r.outputTokens ?? 0}` : "—"}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs hidden md:table-cell">
+                      <CacheCell r={r} />
                     </td>
                     {isManager && (
                       <td className="whitespace-nowrap px-3 py-1.5 text-xs hidden lg:table-cell">

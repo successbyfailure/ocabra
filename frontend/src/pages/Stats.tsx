@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { CacheCell, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
 import { Loader2 } from "lucide-react"
 import * as Tabs from "@radix-ui/react-tabs"
 import { toast } from "sonner"
@@ -335,8 +336,9 @@ function RequestLogPanel({ data }: { data: RecentRequestsData }) {
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Hora</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Modelo</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Tipo</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Duracion</th>
-                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens in/out</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground" title="Duración total con su desglose en prefill y generación">Tiempo</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tokens</th>
+                <th className="px-3 py-2 text-right font-medium text-muted-foreground" title="Tokens de entrada servidos desde la cache de prompt">Cache</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Usuario</th>
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">Estado</th>
               </tr>
@@ -361,6 +363,7 @@ function RequestLogPanel({ data }: { data: RecentRequestsData }) {
                       <td className="px-3 py-2 text-muted-foreground">en curso</td>
                       <td className="px-3 py-2 text-right text-sky-300">{elapsed}</td>
                       <td className="px-3 py-2 text-right text-muted-foreground">{remaining}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">—</td>
                       <td className="px-3 py-2 text-muted-foreground">—</td>
                       <td className="px-3 py-2 text-xs font-medium text-sky-300">
                         <span className="inline-flex items-center gap-1">
@@ -393,11 +396,16 @@ function RequestLogPanel({ data }: { data: RecentRequestsData }) {
                     <td className="px-3 py-2 font-mono text-xs">{hora}</td>
                     <td className="px-3 py-2 max-w-[12rem] truncate" title={req.modelId}>{req.modelId}</td>
                     <td className="px-3 py-2 text-muted-foreground">{req.requestKind ?? req.backendType ?? "—"}</td>
-                    <td className="px-3 py-2 text-right">{req.durationMs != null ? `${req.durationMs} ms` : "—"}</td>
+                    <td className="px-3 py-2 text-right text-xs text-muted-foreground">
+                      <TimingBreakdown r={req} compact />
+                    </td>
                     <td className="px-3 py-2 text-right">
                       {req.inputTokens != null || req.outputTokens != null
-                        ? `${req.inputTokens ?? 0} / ${req.outputTokens ?? 0}`
+                        ? `${req.inputTokens ?? 0} → ${req.outputTokens ?? 0}`
                         : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-xs">
+                      <CacheCell r={req} />
                     </td>
                     <td className="px-3 py-2 text-muted-foreground">{req.username ?? "—"}</td>
                     <td className={`px-3 py-2 text-xs font-medium ${statusColor}`} title={req.error ?? undefined}>

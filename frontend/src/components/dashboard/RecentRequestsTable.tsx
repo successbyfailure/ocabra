@@ -7,13 +7,14 @@ import { fmtClock, fmtContext, fmtDuration, fmtRealtime, fmtTokens, fmtTps } fro
 import { useGpuStore } from "@/stores/gpuStore"
 import { GpuBadge } from "./GpuBadge"
 import { RequestKindBadge } from "./RequestKindBadge"
+import { CacheCell, PhaseLegend, TimingBreakdown } from "./RequestBreakdown"
 
 const TH = "px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
 
 /**
- * Peticiones terminadas con su rendimiento por fase: espera en cola, t/s de
- * prefill y de generación, TTFT, tokens (entrada · cache · salida), preset y
- * GPU. Las que siguen en curso no salen aquí: viven en la card de su modelo.
+ * Peticiones terminadas con su rendimiento por fase: duración desglosada en
+ * cola, carga, prefill y generación; t/s de prefill y de generación; tokens y
+ * cuánto de la entrada salió de la cache de prompt; preset y GPU. Las que siguen en curso no salen aquí: viven en la card de su modelo.
  *
  * La IP y el user agent solo llegan rellenos para admins; el backend los manda
  * a null al resto, así que aquí basta con no pintarlos si no hay dato.
@@ -52,10 +53,13 @@ export function RecentRequestsTable() {
 
   return (
     <div className="space-y-2">
-      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-        <input type="checkbox" checked={onlyErrors} onChange={(e) => setOnlyErrors(e.target.checked)} />
-        Solo errores ({rows.filter(isError).length})
-      </label>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input type="checkbox" checked={onlyErrors} onChange={(e) => setOnlyErrors(e.target.checked)} />
+          Solo errores ({rows.filter(isError).length})
+        </label>
+        <PhaseLegend />
+      </div>
       <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
         <div className="overflow-auto">
           <table className="min-w-full text-sm">
@@ -65,14 +69,14 @@ export function RecentRequestsTable() {
                 <th className={`${TH} text-left`}>Modelo</th>
                 <th className={`${TH} text-left`}>Tipo</th>
                 <th className={`${TH} text-left`}>Usuario / API key</th>
-                <th className={`${TH} text-right`} title="Espera en la cola de admisión">Cola</th>
-                <th className={`${TH} text-right`} title="Tiempo hasta el primer token">TTFT</th>
-                <th className={`${TH} text-right`}>Prefill</th>
-                <th className={`${TH} text-right`} title="Tokens por segundo generando; en transcripciones, velocidad respecto al tiempo real del audio">
-                  Generación
+                <th className={`${TH} text-right`} title="Duración total y en qué se fue: cola, carga del modelo, prefill y generación">
+                  Tiempo
                 </th>
-                <th className={`${TH} text-right`}>Duración</th>
-                <th className={`${TH} text-right`} title="Entrada · de cache · salida">Tokens</th>
+                <th className={`${TH} text-right`} title="Tokens por segundo en prefill y generando; en transcripciones, velocidad respecto al tiempo real del audio">
+                  Velocidad
+                </th>
+                <th className={`${TH} text-right`} title="Entrada → salida">Tokens</th>
+                <th className={`${TH} text-right`} title="Tokens de entrada servidos desde la cache de prompt">Cache</th>
                 <th className={`${TH} text-left`}>Estado</th>
               </tr>
             </thead>
@@ -91,8 +95,6 @@ export function RecentRequestsTable() {
 function Row({ r, error }: { r: RecentRequest; error: boolean }) {
   const gpus = useGpuStore((s) => s.gpus)
   const hora = new Date(r.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-  const queueMs = r.queueMs ?? r.runtimeTelemetry?.queue_ms ?? null
-  const ttft = r.runtimeTelemetry?.ttft_ms ?? null
   const meta = [r.runtimePreset ? `preset ${r.runtimePreset}` : null, r.effectiveContext ? `ctx ${fmtContext(r.effectiveContext)}` : null]
     .filter(Boolean)
     .join(" · ")
@@ -137,10 +139,10 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
             </div>
           )}
         </td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{queueMs ? fmtDuration(queueMs) : "—"}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{ttft != null ? fmtDuration(ttft) : "—"}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtTps(r.promptTokensPerSecond)}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+        <td className="px-3 py-2 text-right align-top text-xs text-muted-foreground">
+          <TimingBreakdown r={r} />
+        </td>
+        <td className="px-3 py-2 text-right align-top tabular-nums text-muted-foreground">
           {r.audioSeconds && r.durationMs ? (
             // Transcripción: velocidad respecto al tiempo real del audio.
             <span
@@ -152,20 +154,22 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
               <span className="block text-[10.5px] text-muted-foreground">{fmtClock(r.audioSeconds)} de audio</span>
             </span>
           ) : (
-            fmtTps(r.predictedTokensPerSecond)
+            <>
+              {r.predictedTokensPerSecond ? <span className="block" title="Generación">{fmtTps(r.predictedTokensPerSecond)}</span> : null}
+              {r.promptTokensPerSecond ? (
+                <span className="block text-[10.5px] text-sky-300/80" title="Prefill">
+                  prefill {fmtTps(r.promptTokensPerSecond)}
+                </span>
+              ) : null}
+              {!r.predictedTokensPerSecond && !r.promptTokensPerSecond && "—"}
+            </>
           )}
         </td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtDuration(r.durationMs)}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-          {r.inputTokens != null || r.outputTokens != null ? (
-            <>
-              {fmtTokens(r.inputTokens ?? 0)}
-              {r.cachedTokens ? <span className="text-muted-foreground/60"> ·{fmtTokens(r.cachedTokens)}c</span> : null} ·{" "}
-              {fmtTokens(r.outputTokens ?? 0)}
-            </>
-          ) : (
-            "—"
-          )}
+        <td className="px-3 py-2 text-right align-top tabular-nums text-muted-foreground">
+          {r.inputTokens != null || r.outputTokens != null ? `${fmtTokens(r.inputTokens ?? 0)} → ${fmtTokens(r.outputTokens ?? 0)}` : "—"}
+        </td>
+        <td className="px-3 py-2 text-right align-top text-xs">
+          <CacheCell r={r} />
         </td>
         <td className="px-3 py-2">
           <span
@@ -183,7 +187,7 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
       </tr>
       {r.error && (
         <tr className="bg-red-500/5">
-          <td colSpan={11} className="px-3 pb-2 pt-0 font-mono text-[11px] text-red-300/90">
+          <td colSpan={9} className="px-3 pb-2 pt-0 font-mono text-[11px] text-red-300/90">
             {r.error}
           </td>
         </tr>
