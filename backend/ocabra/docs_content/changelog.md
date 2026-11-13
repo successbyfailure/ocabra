@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.78.5 — 2026-11-13
+
+### Correcciones
+
+- **gemma4:26b y gemma4:12b responden antes en conversaciones largas de
+  agente.** La plantilla de chat de gemma4 recorría la conversación entera
+  por cada mensaje con llamadas a herramientas, así que su coste crecía con
+  el cuadrado del número de mensajes: con ~110k tokens de un agente, cada
+  turno pasaba 4–6 s antes de empezar a procesar el prompt, aunque casi todo
+  saliera de la cache. Ahora se usa una versión corregida que produce
+  exactamente el mismo prompt: con 782 mensajes la plantilla pasa de 10,9 s a
+  0,9 s.
+- **Descargar un modelo con presets (`POST /ocabra/models/{id}/unload`)
+  descarga también su worker.** Antes paraba el proceso pero dejaba el
+  worker del preset marcado como cargado, y a los pocos segundos se
+  reiniciaba solo con la configuración anterior a cualquier cambio.
+
+---
+
 ## 0.78.4 — 2026-11-13
 
 ### Correcciones
@@ -40,6 +59,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 los perfiles internos no necesitan grants adicionales. Si tu cliente dependía
 de interpretar una respuesta vacía como error, comprueba ahora el estado HTTP
 y el cuerpo de error.
+
+---
+
+## 0.78.3 — 2026-11-13
+
+### Novedades
+
+- **`GET /ocabra/stats/recent` dice qué tipo de petición está en curso.**
+  Las filas con `inFlight: true` traen ahora `requestKind` (`chat`,
+  `embedding`, `audio_transcription`…), que antes venía siempre a `null`
+  aunque el servidor ya lo sabía al admitirlas. El resto de campos de las
+  peticiones en curso no cambia.
+- Si calculas la velocidad de prefill a partir de esa respuesta, ten en
+  cuenta lo mismo que en la 0.60.1: `promptTokensPerSecond` lo mide el motor
+  solo sobre los tokens que no estaban en caché. Con casi todo el prompt en
+  caché (p. ej. 1 token nuevo de 3.003) la cifra no representa la velocidad
+  real; compárala con `inputTokens - cachedTokens`.
+
+**Acción:** ninguna.
 
 ---
 
