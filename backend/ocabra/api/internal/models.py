@@ -1527,11 +1527,31 @@ async def unload_model(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Unload a model from GPU."""
+    """Unload a model from GPU.
+
+    A model with runtime presets runs as a derived worker (``model::hash``).
+    Unloading the bare id used to stop that process through the base state,
+    leaving the derived state LOADED with a dead pid: the process monitor took
+    it as a crash and auto-restarted it 5 s later with whatever config it was
+    created with. Seen 2026-11-13 on gemma4:26b: a config change applied with
+    unload + load was undone by the resurrected old worker, which also evicted
+    the new one. The derived workers are unloaded by their own ids.
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    from ocabra.core.model_manager import ModelStatus
+
+    if "::" not in model_id:
+        derived = [
+            s.model_id
+            for s in await mm.list_states(include_derived=True)
+            if s.model_id.startswith(f"{model_id}::")
+            and s.status in (ModelStatus.LOADED, ModelStatus.LOADING)
+        ]
+        for worker_id in derived:
+            await mm.unload(worker_id, reason="manual")
     await mm.unload(model_id, reason="manual")
     updated = await mm.get_state(model_id)
     return updated.to_dict()
