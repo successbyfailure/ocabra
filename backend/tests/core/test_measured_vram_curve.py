@@ -182,3 +182,34 @@ async def test_a_live_context_change_is_recorded_under_the_planner_key(monkeypat
     await mm._record_vram_curve_point(state.model_id, state, {1: 19960}, [1], live=live)
 
     assert recorded == [("llamacpp_mks/gemma4:26b", curve_key(GEMMA_LLAMA, [1]), 131072, 19960)]
+
+
+@pytest.mark.asyncio
+async def test_no_point_while_an_on_demand_projector_is_loaded(monkeypatch):
+    """Con el proyector cargado en caliente la lectura lleva ~1,1 GB mas: en la
+    misma curva aplanaria la pendiente y sobrestimaria lo que cabe."""
+    from ocabra.core.model_manager import ModelManager, ModelState
+
+    recorded = []
+
+    async def fake_record(model_id, **kw):
+        recorded.append(model_id)
+
+    monkeypatch.setattr(observed_vram, "record_curve_point", fake_record)
+    mm = ModelManager(worker_pool=None)
+    backend = SimpleNamespace(vision_is_active=lambda model_id: True)
+    monkeypatch.setattr(mm, "_registered_backend", lambda backend_type: backend)
+    state = ModelState(
+        model_id="llamacpp_mks/gemma4:26b",
+        display_name="g",
+        backend_type="llamacpp_mks",
+        backend_model_id="gemma4:26b",
+        extra_config={"llama_cpp": copy.deepcopy(GEMMA_LLAMA)},
+    )
+    mm._states[state.model_id] = state
+
+    await mm._record_vram_curve_point(
+        state.model_id, state, {1: 21100}, [1], live={"n_ctx": 250000, "n_parallel": 4}
+    )
+
+    assert recorded == []

@@ -4134,6 +4134,14 @@ class ModelManager:
                 return
             extra = state.extra_config if isinstance(state.extra_config, dict) else {}
             llama = dict(extra.get("llama_cpp") or {})
+            if str(llama.get("vision_mode") or "") != "enabled":
+                # An on-demand projector loaded in place (~1.1 GB on qwen3.8)
+                # would mix readings with and without it in one curve and
+                # flatten its slope, which overestimates what fits.
+                backend = self._registered_backend(state.backend_type)
+                active = getattr(backend, "vision_is_active", None)
+                if callable(active) and active(state.backend_model_id):
+                    return
             if live:
                 if live.get("n_parallel"):
                     llama["parallel_slots"] = int(live["n_parallel"])
