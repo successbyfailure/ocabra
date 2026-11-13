@@ -659,15 +659,22 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
         if runtime.family == "kokoro":
             voices_list = list(KOKORO_VOICES)
             languages = ["English", "British English", "Japanese", "Korean", "Chinese"]
+            openai_voice_map: dict[str, str] | None = dict(OPENAI_TO_KOKORO)
         elif runtime.family == "bark":
             voices_list = list(BARK_SPEAKERS)
             languages = ["English"]
+            openai_voice_map = dict(OPENAI_TO_BARK)
         elif runtime.family == "qwen" and runtime.qwen_type == "custom_voice":
             voices_list = runtime.speakers or list(CUSTOMVOICE_SPEAKERS)
             languages = list(SUPPORTED_LANGUAGES)
+            openai_voice_map = dict(OPENAI_TO_CUSTOMVOICE)
         else:
+            # qwen "base" is voice-cloning only (``voice`` is ignored unless
+            # no ``reference_audio`` is given, in which case it 400s) — no
+            # OpenAI name maps to anything real here.
             voices_list = list(OPENAI_VOICES)
             languages = list(SUPPORTED_LANGUAGES)
+            openai_voice_map = None
 
         return JSONResponse({
             "voices": voices_list,
@@ -675,6 +682,7 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
             "speakers": runtime.speakers,
             "languages": languages,
             "supports_voice_clone": runtime.family == "qwen" and runtime.qwen_type == "base",
+            "openai_voice_map": openai_voice_map,
         })
 
     @app.post("/synthesize")

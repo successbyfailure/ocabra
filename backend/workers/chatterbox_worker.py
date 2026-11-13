@@ -540,6 +540,11 @@ def create_app(model_id: str, gpu_indices: list[int]) -> FastAPI:
                 "speakers": [],
                 "languages": list(CHATTERBOX_LANGUAGES),
                 "supports_voice_clone": True,
+                # ``SynthesizeRequest.voice`` is never read by this worker
+                # (see ``synthesize``/``_synthesize`` below) — OpenAI voice
+                # names (alloy, echo...) have no effect, every request gets
+                # the single "default" voice or the configured voice clone.
+                "openai_voice_map": None,
             }
         )
 

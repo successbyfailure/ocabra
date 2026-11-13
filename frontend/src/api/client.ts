@@ -14,6 +14,7 @@ import type {
   ProfileCreate,
   ProfileUpdate,
   RouterCreate,
+  OpenAITTSVoiceMapEntry,
   DownloadJob,
   DownloadSource,
   HFModelCard,
@@ -1049,6 +1050,17 @@ function toModelProfile(raw: unknown): ModelProfile {
           };
         })
       : [],
+    createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
+    updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
+  };
+}
+
+function toOpenAITTSVoiceMapEntry(raw: unknown): OpenAITTSVoiceMapEntry {
+  const data = isRecord(raw) ? raw : {};
+  return {
+    openaiModel: String(data.openai_model ?? data.openaiModel ?? ""),
+    voiceName: String(data.voice_name ?? data.voiceName ?? ""),
+    targetProfileId: String(data.target_profile_id ?? data.targetProfileId ?? ""),
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
   };
@@ -2690,6 +2702,36 @@ export const api = {
         `/ocabra/profiles/${encodeURIComponent(profileId)}/assets/${encodeURIComponent(assetKey)}`,
       );
       return toModelProfile(raw.profile);
+    },
+  },
+
+  // Compatibilidad de voces OpenAI (independiente de los routers): fija a
+  // qué perfil propio responde cada (modelo oficial de OpenAI, voz) para
+  // un cliente que solo sabe mandar esos nombres.
+  openaiTtsCompat: {
+    list: async (): Promise<OpenAITTSVoiceMapEntry[]> =>
+      (await request<unknown[]>("GET", "/ocabra/openai-tts-voice-map")).map(
+        toOpenAITTSVoiceMapEntry,
+      ),
+
+    upsert: async (
+      openaiModel: string,
+      voiceName: string,
+      targetProfileId: string,
+    ): Promise<OpenAITTSVoiceMapEntry> =>
+      toOpenAITTSVoiceMapEntry(
+        await request<unknown>(
+          "PUT",
+          `/ocabra/openai-tts-voice-map/${encodeURIComponent(openaiModel)}/${encodeURIComponent(voiceName)}`,
+          { target_profile_id: targetProfileId },
+        ),
+      ),
+
+    delete: async (openaiModel: string, voiceName: string): Promise<void> => {
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/openai-tts-voice-map/${encodeURIComponent(openaiModel)}/${encodeURIComponent(voiceName)}`,
+      );
     },
   },
 

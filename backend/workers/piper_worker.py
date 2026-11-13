@@ -430,6 +430,14 @@ def create_app(
                 "speakers": list(runtime.speaker_id_map.keys()),
                 "languages": runtime.languages,
                 "supports_voice_clone": False,
+                # Piper voices are (almost always) mono-speaker: the
+                # ``voice`` field in /synthesize is only consulted as a
+                # ``speaker_id_map`` key (see ``_synthesis_config`` below),
+                # which is empty here, so no OpenAI voice name (alloy,
+                # echo...) selects anything — every name serves this same
+                # single voice. ``None`` signals "no real per-name mapping",
+                # distinct from an empty dict.
+                "openai_voice_map": None,
             }
         )
 

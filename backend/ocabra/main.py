@@ -677,6 +677,16 @@ async def lifespan(app: FastAPI):
     trtllm_compile_manager.set_profile_registry(profile_registry)
     logger.info("profile_registry_ready")
 
+    # OpenAI TTS voice-name compatibility shim — independent of routers on
+    # purpose (see ocabra/core/openai_tts_compat.py).
+    from ocabra.core.openai_tts_compat import OpenAITTSCompatRegistry
+
+    openai_tts_compat = OpenAITTSCompatRegistry()
+    async with _ASL() as _session:
+        await openai_tts_compat.load_all(_session)
+    app.state.openai_tts_compat = openai_tts_compat
+    logger.info("openai_tts_compat_ready")
+
     # Bloque 20 — DurationEstimator (Nivel 1). Runs a background refresh loop
     # that recomputes per-model calibrations from request_stats every
     # ``estimator_refresh_interval_s``. Kicked off eagerly here so /estimate
@@ -1311,6 +1321,9 @@ app.include_router(video_router, prefix="/ocabra", include_in_schema=False)
 from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
 
 app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
+from ocabra.api.internal.openai_tts_compat import router as openai_tts_compat_router  # noqa: E402
+
+app.include_router(openai_tts_compat_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(logical_models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)

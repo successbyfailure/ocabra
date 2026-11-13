@@ -473,17 +473,42 @@ async def transcriptions(
     return JSONResponse(content=resp.json(), headers=stt_headers)
 
 
+def _resolve_openai_tts_compat(request: Request, model_id: str, voice: str | None) -> str:
+    """Translate an OpenAI official TTS model name to an oCabra profile_id.
+
+    Independent of routers on purpose (see ocabra/core/openai_tts_compat.py):
+    a client that only knows OpenAI's own names (``tts-1``, ``tts-1-hd``,
+    ``gpt-4o-mini-tts`` + ``alloy``, ``echo``...) can't be pointed at any
+    oCabra-specific ``model`` at all. Without a matching pin, ``model_id``
+    passes through unchanged — every existing client that already sends an
+    oCabra profile/model id is completely unaffected.
+    """
+    compat = getattr(request.app.state, "openai_tts_compat", None)
+    if compat is None:
+        return model_id
+    target = compat.resolve(model_id, voice)
+    return target or model_id
+
+
 @router.get("/audio/voices", summary="List TTS voices for a model")
 async def list_voices(
     request: Request,
     model: str,
     user: Annotated[UserContext, Depends(get_openai_user)],
+    voice: str | None = None,
 ) -> Any:
     """
     Return available voices, speakers, and model_type for a loaded TTS model.
 
     Query params:
-        model — profile_id (or legacy canonical model ID)
+        model — profile_id (or legacy canonical model ID), or one of
+            OpenAI's official TTS model names (``tts-1``, ``tts-1-hd``,
+            ``gpt-4o-mini-tts``) if an admin has pinned a (model, voice)
+            pair via the openai_tts_voice_map compatibility shim.
+        voice — optional; with an OpenAI ``model`` name above, resolves
+            through the pin exactly like ``POST /v1/audio/speech`` would.
+            Lets an admin verify a configured pin end-to-end without
+            actually synthesising audio.
 
     Response:
         voices       — list of voice/speaker names
@@ -493,9 +518,10 @@ async def list_voices(
     """
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
+    resolved_model = _resolve_openai_tts_compat(request, model, voice)
 
     profile, state = await resolve_profile(
-        model,
+        resolved_model,
         model_manager,
         profile_registry,
         user=user,
@@ -507,12 +533,19 @@ async def list_voices(
 
     worker_pool = request.app.state.worker_pool
     worker = worker_pool.get_worker(worker_key)
+    # ``model_type: "placeholder"`` below is an UNVERIFIED guess, not a
+    # real mapping: it only lists the 6 classic OpenAI names so clients
+    # that enumerate voices don't see an empty list, it says nothing about
+    # what the worker will actually do with any of them. Callers that need
+    # a confirmed mapping (e.g. the admin UI's "compatibilidad OpenAI"
+    # panel) must treat ``model_type == "placeholder"`` as "not checked".
     if not worker:
         return {
             "voices": ["alloy", "echo", "fable", "nova", "onyx", "shimmer"],
             "model_type": "placeholder",
             "languages": ["Auto"],
             "supports_voice_clone": False,
+            "openai_voice_map": None,
         }
 
     try:
@@ -526,6 +559,7 @@ async def list_voices(
             "model_type": "placeholder",
             "languages": ["Auto"],
             "supports_voice_clone": False,
+            "openai_voice_map": None,
         }
 
 
@@ -546,9 +580,16 @@ async def speech(
       - wav               : streaming RIFF header + raw PCM frames.
       - pcm               : raw PCM16LE frames, no header.
     Supported voices: alloy, echo, fable, onyx, nova, shimmer (mapped per model).
+
+    If ``model`` is one of OpenAI's official TTS names (``tts-1``,
+    ``tts-1-hd``, ``gpt-4o-mini-tts``) and an admin has pinned that exact
+    (model, voice) pair via the openai_tts_voice_map compatibility shim,
+    it resolves straight to the pinned oCabra profile instead of being
+    looked up literally.
     """
     body = await request.json()
     model_id: str = body.get("model", "")
+    model_id = _resolve_openai_tts_compat(request, model_id, body.get("voice"))
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)

@@ -1583,6 +1583,49 @@ Ollama (desde 2026-11-12):
   normalizarse como OpenAI. El shim ``/v1`` nativo de Ollama no se usa porque
   ignora ``options.num_ctx`` y recargaría el contexto global del daemon.
 
+### 8.10 Compatibilidad de voces OpenAI (TTS) — independiente de routers
+
+Un cliente que solo sabe los nombres oficiales de TTS de OpenAI (modelo:
+``tts-1``, ``tts-1-hd``, ``gpt-4o-mini-tts``; voz: ``alloy``, ``echo``...) no
+puede mandar ningún nombre propio de oCabra, ni siquiera un router. Esta tabla
+traduce cada par ``(openai_model, voice_name)`` directamente a un
+``profile_id`` propio — ejecución o router, sin restricción — **sin tocar**
+``routing_targets``/``RouterResolver``: un router sigue decidiendo por su
+propia lógica de caliente/prioridad, ajeno del todo a esta traducción.
+
+```python
+class OpenAITTSVoiceMap(Base):
+    __tablename__ = "openai_tts_voice_map"
+
+    openai_model: str        # PK; "tts-1", "tts-1-hd", "gpt-4o-mini-tts"...
+    voice_name: str          # PK; "alloy", "echo"... (sin validar contra una
+                              # lista cerrada — OpenAI puede añadir nombres)
+    target_profile_id: str   # FK model_profiles.profile_id, ON DELETE CASCADE
+    created_at: datetime
+    updated_at: datetime
+```
+
+Endpoints (``/ocabra/``, rol ``model_manager``):
+
+```
+GET    /ocabra/openai-tts-voice-map                              → list[OpenAITTSVoiceMap]
+PUT    /ocabra/openai-tts-voice-map/{openai_model}/{voice_name}   → OpenAITTSVoiceMap
+  body: { target_profile_id: str }
+DELETE /ocabra/openai-tts-voice-map/{openai_model}/{voice_name}   → {"ok": true}
+```
+
+Resolución, en ``POST /v1/audio/speech`` y ``GET /v1/audio/voices``:
+
+- Sin fila para ``(model, voice)``: ``model`` se resuelve literal, igual que
+  hoy — un cliente que ya manda un nombre propio de oCabra no nota nada.
+- Con fila: ``model`` se sustituye por ``target_profile_id`` antes de
+  cualquier otra resolución (incluida la federación), como si el cliente
+  hubiera mandado ese nombre desde el principio.
+- ``target_profile_id`` debe existir y estar ``enabled`` en el momento de
+  guardar el pin; no se revalida en cada petición.
+- Renombrar o borrar el perfil destino recarga la tabla entera desde BD
+  (barato, no hay lógica de reescritura cruzada entre registries).
+
 ---
 
 ## 9. Variables de entorno (contratos de configuración)

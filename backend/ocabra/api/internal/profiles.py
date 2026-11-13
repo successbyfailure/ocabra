@@ -71,6 +71,20 @@ def _profile_to_dict(profile) -> dict[str, Any]:
     return ProfileOut.model_validate(profile).model_dump(mode="json")
 
 
+async def _reload_openai_tts_compat(request: Request) -> None:
+    """Keep ``openai_tts_voice_map``'s in-memory cache in sync after a
+    rename/delete that can shift or cascade-drop its ``target_profile_id``
+    FK at the DB level — a full reload of this tiny table is cheap and
+    avoids threading per-rename/delete rewrite logic into an otherwise
+    unrelated registry (``OpenAITTSCompatRegistry`` has no hooks into
+    ``ProfileRegistry`` on purpose, see docs/CONTRACTS.md)."""
+    compat = getattr(request.app.state, "openai_tts_compat", None)
+    if compat is None:
+        return
+    async with AsyncSessionLocal() as session:
+        await compat.load_all(session)
+
+
 def _preset_to_dict(preset) -> dict[str, Any]:
     return RuntimePresetOut.model_validate(preset).model_dump(mode="json")
 
@@ -935,6 +949,7 @@ async def rename_profile(
             if "not found" in msg.lower():
                 raise HTTPException(status_code=404, detail=msg) from exc
             raise HTTPException(status_code=400, detail=msg) from exc
+    await _reload_openai_tts_compat(request)
     return _profile_to_dict(profile)
 
 
@@ -997,6 +1012,7 @@ async def delete_profile(
     if asset_dir.exists() and _is_path_within_base(asset_dir, PROFILES_ASSET_BASE):
         await asyncio.to_thread(shutil.rmtree, asset_dir)
 
+    await _reload_openai_tts_compat(request)
     return {"ok": True, "profile_id": profile_id}
 
 

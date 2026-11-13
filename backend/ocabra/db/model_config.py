@@ -197,6 +197,35 @@ class ModelProfileAlias(Base):
     )
 
 
+class OpenAITTSVoiceMap(Base):
+    """Compatibility shim for TTS clients that only know OpenAI's official
+    names: a fixed model name (``tts-1``, ``tts-1-hd``, ``gpt-4o-mini-tts``)
+    and a fixed voice name (``alloy``, ``echo``...), with no way to send
+    anything oCabra-specific.
+
+    Deliberately independent of routers/``routing_targets``: each row maps
+    straight to any profile_id (execution or router) oCabra already knows
+    about. Consulted in ``api/openai/audio.py`` before the normal profile
+    resolution, only when the incoming ``model`` matches one of these rows'
+    ``openai_model`` — everything else (clients that already know our own
+    model/profile names) is completely unaffected.
+    """
+
+    __tablename__ = "openai_tts_voice_map"
+
+    openai_model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    voice_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    target_profile_id: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey("model_profiles.profile_id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ProfileRuntimePreset(Base):
     """One load-affecting runtime configuration exposed by a public profile."""
 

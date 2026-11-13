@@ -16,6 +16,36 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.78.0 — 2026-11-13
+
+### Novedades
+
+- **Compatibilidad de voces OpenAI para clientes que solo saben sus
+  nombres oficiales.** Un cliente de TTS que solo sabe mandar los nombres
+  de OpenAI (modelo `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`; voz `alloy`,
+  `echo`...) no puede apuntar a ningún nombre propio de oCabra. Ahora un
+  admin puede fijar, por cada par `(modelo, voz)`, a qué perfil propio
+  responde: `PUT /ocabra/openai-tts-voice-map/{openai_model}/{voice_name}`
+  con `{"target_profile_id": "..."}` (p. ej. `tts-1` + `alloy` →
+  `piper-es-mx-claude-high`). `GET /ocabra/openai-tts-voice-map` lista las
+  asignaciones; `DELETE .../{openai_model}/{voice_name}` las quita. Sin
+  asignación, esos nombres se resuelven literal — un cliente que ya manda
+  un nombre propio de oCabra no nota nada. Independiente de los routers:
+  no toca `routing_targets` ni `RouterResolver` en absoluto.
+
+- **`GET /v1/audio/voices` acepta un `voice` opcional para verificar una
+  asignación sin sintetizar audio.** `GET /v1/audio/voices?model=tts-1&voice=alloy`
+  resuelve exactamente como lo haría `POST /v1/audio/speech` con esa
+  misma voz, y devuelve a qué perfil real resolvió. La respuesta también
+  trae un campo nuevo, `openai_voice_map`: un objeto `{"alloy": "...",
+  ...}` cuando el backend que responda distingue por sí mismo los nombres
+  clásicos de OpenAI (familias kokoro, bark y qwen3-tts CustomVoice), o
+  `null` cuando los ignora por completo y sirve siempre la misma voz
+  (piper, chatterbox, y qwen3-tts Base en modo clon) — en ese caso usa la
+  tabla de compatibilidad si necesitas que cada nombre suene distinto.
+
+---
+
 ## 0.77.4 — 2026-11-13
 
 ### Correcciones

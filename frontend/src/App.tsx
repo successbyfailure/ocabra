@@ -20,6 +20,7 @@ import { Agents } from "@/pages/Agents"
 import { MCPServers } from "@/pages/MCPServers"
 import { Sessions } from "@/pages/Sessions"
 import { Routers } from "@/pages/Routers"
+import { OpenAICompat } from "@/pages/OpenAICompat"
 import { Profiles } from "@/pages/Profiles"
 import { Services } from "@/pages/Services"
 import { Batches } from "@/pages/Batches"
@@ -123,6 +124,14 @@ export default function App() {
                   element={
                     <ProtectedRoute minRole="model_manager">
                       <Routers />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/openai-compat"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <OpenAICompat />
                     </ProtectedRoute>
                   }
                 />

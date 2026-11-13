@@ -1639,6 +1639,19 @@ export interface RouterCreate {
   routingTargets: string[];
 }
 
+/**
+ * Compatibilidad de voces OpenAI (independiente de los routers): fija a
+ * qué perfil propio responde cada par (modelo oficial de OpenAI, nombre
+ * de voz) para un cliente que solo sabe mandar esos nombres.
+ */
+export interface OpenAITTSVoiceMapEntry {
+  openaiModel: string;
+  voiceName: string;
+  targetProfileId: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 // Federation types
 export interface FederationPeerGpu {
   index: number;
