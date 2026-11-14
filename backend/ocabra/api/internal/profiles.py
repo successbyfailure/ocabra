@@ -864,6 +864,7 @@ async def create_router_profile(
                 request_defaults=body.request_defaults,
                 enabled=body.enabled,
                 routing_targets=body.routing_targets,
+                router_context=(body.router_context.model_dump() if body.router_context else None),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

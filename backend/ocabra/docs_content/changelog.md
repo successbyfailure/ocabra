@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.79.0 — 2026-11-14
+
+### Cambios
+
+- **`recomendado-sota` anuncia 262.144 tokens de contexto, no 1.048.576.**
+  Un router anunciaba el mayor contexto de todos sus destinos. En
+  `recomendado-sota` ese millón lo pone un único destino
+  (`nemotron-3-nano:30b`); los otros ocho llegan a 262k como mucho. Un agente
+  que compactaba según `context_length` o `recommended_input_tokens` dejaba
+  crecer la conversación hasta el millón y, pasados los 262k, el router la
+  mandaba siempre al modelo más flojo de la lista sin avisar. Ahora anuncia lo
+  que alcanzan la mayoría de sus destinos. El enrutado no cambia: una petición
+  más grande sigue funcionando y va al destino donde quepa.
+  **Acción:** si tu agente compacta según el contexto anunciado, lo hará antes,
+  a 262k. Si de verdad necesitas más de 262k, pide `nemotron-3-nano:30b`
+  directamente.
+- **Cada router elige qué contexto anuncia** en `/v1/models` y `/api/tags`: el
+  mayor de sus destinos (`max`, el de siempre), el que alcanzan la mayoría
+  (`common`) o uno fijo (`fixed`, nunca por encima del mayor). Se configura en
+  `router_context` del perfil (`PATCH /ocabra/profiles/{id}`) o en la página
+  de routers. `ocabra.context.router_policy` dice cuál usa cada uno.
+
+---
+
 ## 0.78.6 — 2026-11-13
 
 ### Correcciones

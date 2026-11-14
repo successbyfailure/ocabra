@@ -142,6 +142,10 @@ class ModelProfile(Base):
     # context/runtime presets. Presets themselves live in their own table so
     # they can be addressed and mutated independently from the public profile.
     runtime_policy: Mapped[dict | None] = mapped_column(JSONB)
+    # Router profiles only: which context the router advertises in
+    # /v1/models and /api/tags — ``{"mode": "max" | "common" | "fixed",
+    # "tokens": int}``. NULL = ``max``. See ``router_advertised_context``.
+    router_context: Mapped[dict | None] = mapped_column(JSONB)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

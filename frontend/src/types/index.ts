@@ -1589,11 +1589,26 @@ export interface ModelProfile {
   // walks these profile IDs in order and returns the first available
   // one. An empty/null array means "regular profile".
   routingTargets: string[] | null;
+  /** Solo routers: qué contexto anuncia (null = "max"). */
+  routerContext?: RouterContextPolicy | null;
   runtimePolicy: RuntimePolicy | null;
   runtimePresets: RuntimePreset[];
   aliases: ProfileAlias[];
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+/**
+ * Contexto que anuncia un router en /v1/models y /api/tags. El enrutado no
+ * cambia (una petición que solo cabe en un destino sigue yendo a él); cambia
+ * el número que leen los clientes para decidir cuándo compactar.
+ * - max: el mayor de sus destinos.
+ * - common: el que alcanza más de la mitad de sus destinos.
+ * - fixed: `tokens`, nunca por encima del mayor de sus destinos.
+ */
+export interface RouterContextPolicy {
+  mode: "max" | "common" | "fixed";
+  tokens?: number | null;
 }
 
 export interface ProfileAlias {
@@ -1627,6 +1642,8 @@ export interface ProfileUpdate {
   isDefault?: boolean;
   routingTargets?: string[] | null;
   runtimePolicy?: RuntimePolicy | null;
+  /** Solo routers; null vuelve al valor por defecto ("max"). */
+  routerContext?: RouterContextPolicy | null;
 }
 
 export interface RouterCreate {

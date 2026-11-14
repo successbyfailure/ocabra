@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Request
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.core.output_limits import resolve_max_output_tokens
+from ocabra.core.router_resolver import router_advertised_context
 
 from ._deps import (
     _openai_error,
@@ -393,15 +394,23 @@ async def list_models(
         }
         if contexts:
             best = max(contexts, key=lambda item: int(item.get("effective_max") or 0))
+            policy = getattr(profile, "router_context", None)
+            advertised = router_advertised_context(
+                policy, [int(item.get("effective_max") or 0) for item in contexts]
+            )
+
+            def _capped(value: int, cap: int = advertised) -> int | None:
+                return (min(value, cap) if cap else value) or None
+
             context = {
                 **best,
-                "effective_max": max(int(item.get("effective_max") or 0) for item in contexts),
+                "effective_max": advertised,
                 "model_max": max(int(item.get("model_max") or 0) for item in contexts) or None,
-                "active": max(
-                    (int(item.get("active") or 0) for item in contexts),
-                    default=0,
-                )
-                or None,
+                "default": _capped(int(best.get("default") or 0)),
+                "active": _capped(
+                    max((int(item.get("active") or 0) for item in contexts), default=0)
+                ),
+                "router_policy": (policy or {}).get("mode") or "max",
             }
             _apply_context_metadata(
                 entry,

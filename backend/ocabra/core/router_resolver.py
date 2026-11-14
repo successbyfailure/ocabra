@@ -405,3 +405,36 @@ __all__ = [
     "RoutingLoopError",
     "NoRoutableTargetError",
 ]
+
+
+def router_advertised_context(policy: dict | None, target_contexts: list[int]) -> int:
+    """Context a router advertises, given what each of its targets can serve.
+
+    The router itself routes by fit (a request that only fits one target still
+    goes there); this only decides the number clients read as
+    ``context_length``. 2026-11-14: ``recomendado-sota`` advertised 1M because
+    one of its nine targets (``nemotron-3-nano:30b``) has a 1M preset, while
+    the other eight top out at 262k — agents compacted against 1M and, past
+    262k, silently ended up on the weakest model of the list.
+
+    Modes (``policy["mode"]``, default ``max``):
+
+    - ``max``: the largest target context.
+    - ``common``: the largest context that more than half of the targets can
+      serve.
+    - ``fixed``: ``policy["tokens"]``, capped at the largest target context.
+
+    Targets that report no context (0) are ignored. Returns 0 when none does.
+    """
+    values = sorted((int(v) for v in target_contexts if int(v or 0) > 0), reverse=True)
+    if not values:
+        return 0
+    mode = (policy or {}).get("mode") or "max"
+    if mode == "common":
+        # values[k] is reached by the k+1 largest targets; the first index
+        # holding a strict majority is len // 2.
+        return values[len(values) // 2]
+    if mode == "fixed":
+        tokens = int((policy or {}).get("tokens") or 0)
+        return min(tokens, values[0]) if tokens > 0 else values[0]
+    return values[0]

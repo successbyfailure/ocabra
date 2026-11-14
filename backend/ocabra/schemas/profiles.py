@@ -9,6 +9,31 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+class RouterContextPolicy(BaseModel):
+    """Which context a router advertises to clients.
+
+    The router routes by fit: a request that only fits one target still goes
+    there. What changes is the number clients see (``context_length``,
+    ``recommended_input_tokens``) and therefore when an agent compacts.
+
+    - ``max``: the largest context any target can serve (historical default).
+    - ``common``: the largest context that most targets (more than half) can
+      serve, so one outlier with a huge window does not set the number.
+    - ``fixed``: ``tokens``, never above what some target can actually serve.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["max", "common", "fixed"] = "max"
+    tokens: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _fixed_needs_tokens(self) -> RouterContextPolicy:
+        if self.mode == "fixed" and self.tokens is None:
+            raise ValueError("router_context mode 'fixed' requires 'tokens'")
+        return self
+
+
 class RuntimePolicy(BaseModel):
     """How a profile selects and retires context runtimes."""
 
@@ -292,6 +317,7 @@ class RouterCreate(BaseModel):
     request_defaults: dict[str, Any] | None = None
     enabled: bool = True
     routing_targets: list[str] = Field(..., min_length=1)
+    router_context: RouterContextPolicy | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -306,6 +332,8 @@ class ProfileUpdate(BaseModel):
     is_default: bool | None = None
     runtime_policy: RuntimePolicy | None = None
     routing_targets: list[str] | None = None
+    # Routers only; ``null`` returns to the default (``max``).
+    router_context: RouterContextPolicy | None = None
 
 
 class ProfileRename(BaseModel):
@@ -354,6 +382,7 @@ class ProfileOut(BaseModel):
     enabled: bool
     is_default: bool
     routing_targets: list[str] | None = None
+    router_context: RouterContextPolicy | None = None
     runtime_policy: RuntimePolicy | None = None
     runtime_presets: list[RuntimePresetOut] = Field(default_factory=list)
     aliases: list[ProfileAliasOut] = Field(default_factory=list)

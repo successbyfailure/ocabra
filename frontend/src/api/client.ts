@@ -65,6 +65,7 @@ import type {
   LogicalModel,
   ModelDeployment,
   RemoveDeploymentResult,
+  RouterContextPolicy,
   RuntimePolicy,
   RuntimePreset,
   RuntimePresetCreate,
@@ -692,6 +693,13 @@ const RUNTIME_POLICY_KEYS = new Set([
   "default_output_reservation_tokens",
 ]);
 
+function toRouterContext(raw: unknown): RouterContextPolicy | null {
+  if (!isRecord(raw)) return null;
+  const mode = raw.mode === "common" || raw.mode === "fixed" ? raw.mode : "max";
+  const tokens = Number(raw.tokens);
+  return { mode, tokens: Number.isFinite(tokens) && tokens > 0 ? tokens : null };
+}
+
 function toRuntimePolicy(raw: unknown): RuntimePolicy | null {
   if (!isRecord(raw)) return null;
   return {
@@ -1032,6 +1040,7 @@ function toModelProfile(raw: unknown): ModelProfile {
     routingTargets: Array.isArray(data.routing_targets ?? data.routingTargets)
       ? ((data.routing_targets ?? data.routingTargets) as unknown[]).map(String)
       : null,
+    routerContext: toRouterContext(data.router_context ?? data.routerContext),
     runtimePolicy: toRuntimePolicy(data.runtime_policy ?? data.runtimePolicy),
     runtimePresets: Array.isArray(data.runtime_presets ?? data.runtimePresets)
       ? ((data.runtime_presets ?? data.runtimePresets) as unknown[]).map(
@@ -2520,6 +2529,9 @@ export const api = {
             }),
             ...(data.runtimePolicy !== undefined && {
               runtime_policy: fromRuntimePolicy(data.runtimePolicy),
+            }),
+            ...(data.routerContext !== undefined && {
+              router_context: data.routerContext,
             }),
           },
         ),

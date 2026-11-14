@@ -196,6 +196,7 @@ class ProfileRegistry:
         routing_targets: list[str] | None = None,
         runtime_policy: dict | None = None,
         backend: str | None = None,
+        router_context: dict | None = None,
     ) -> ModelProfile:
         """Create a new profile, validate constraints, persist, and update cache.
 
@@ -222,6 +223,8 @@ class ProfileRegistry:
                 raise ValueError("Execution profiles require a base_model_id.")
             if routing_targets:
                 raise ValueError("Execution profiles cannot declare routing_targets.")
+            if router_context:
+                raise ValueError("Execution profiles cannot declare router_context.")
             result = await session.execute(
                 select(ModelConfig).where(ModelConfig.model_id == base_model_id)
             )
@@ -259,6 +262,7 @@ class ProfileRegistry:
             is_default=is_default,
             routing_targets=routing_targets,
             runtime_policy=runtime_policy,
+            router_context=router_context,
         )
         session.add(profile)
         await session.commit()
@@ -297,6 +301,7 @@ class ProfileRegistry:
             "is_default",
             "routing_targets",
             "runtime_policy",
+            "router_context",
         }
         if db_profile.profile_kind == "router":
             forbidden = {"load_overrides", "runtime_policy", "is_default"} & patch.keys()
@@ -308,6 +313,8 @@ class ProfileRegistry:
                 await self._validate_router_targets(profile_id, patch["routing_targets"])
         elif patch.get("routing_targets"):
             raise ValueError("Execution profiles cannot declare routing_targets.")
+        elif patch.get("router_context"):
+            raise ValueError("Execution profiles cannot declare router_context.")
         for key, value in patch.items():
             if key not in allowed_keys:
                 continue
@@ -440,6 +447,9 @@ class ProfileRegistry:
             is_default=False,
             routing_targets=(
                 list(source.routing_targets) if source.routing_targets is not None else None
+            ),
+            router_context=(
+                dict(source.router_context) if source.router_context is not None else None
             ),
         )
         session.add(clone)

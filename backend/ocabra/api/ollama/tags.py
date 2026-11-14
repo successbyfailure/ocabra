@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Request
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.model_ref import build_model_ref
+from ocabra.core.router_resolver import router_advertised_context
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 from ._mapper import OllamaNameMapper
@@ -174,9 +175,10 @@ async def _list_tags_from_profiles(
                 "routing_targets": list(profile.routing_targets or []),
             },
         }
-        if max(contexts, default=0) > 0:
-            entry["details"]["context_length"] = max(contexts)
-            entry["ocabra"]["context"] = {"effective_max": max(contexts)}
+        advertised = router_advertised_context(getattr(profile, "router_context", None), contexts)
+        if advertised > 0:
+            entry["details"]["context_length"] = advertised
+            entry["ocabra"]["context"] = {"effective_max": advertised}
         local_profile_ids.add(profile.profile_id)
         entries_by_profile_id[profile.profile_id] = entry
         models.append(entry)

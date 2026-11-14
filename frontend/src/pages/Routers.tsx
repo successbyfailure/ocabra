@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, ArrowDown, ArrowUp, Copy, GitBranch, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, type RoutingDecisionsResponse } from "@/api/client"
-import type { ModelProfile, ProfileCategory } from "@/types"
+import type { ModelProfile, ProfileCategory, RouterContextPolicy } from "@/types"
 
 const ROUTER_CATEGORIES: { value: ProfileCategory; label: string }[] = [
   { value: "llm", label: "LLM" },
@@ -729,6 +729,10 @@ function EditRouterModal({ router: r, existingIds, onClose, onSaved }: EditRoute
   const [profileId, setProfileId] = useState(r.profileId)
   const [displayName, setDisplayName] = useState(r.displayName ?? "")
   const [description, setDescription] = useState(r.description ?? "")
+  const [ctxMode, setCtxMode] = useState<RouterContextPolicy["mode"]>(r.routerContext?.mode ?? "max")
+  const [ctxTokens, setCtxTokens] = useState(
+    r.routerContext?.tokens ? String(r.routerContext.tokens) : "",
+  )
   const [submitting, setSubmitting] = useState(false)
 
   const idChanged = profileId.trim() !== r.profileId
@@ -745,6 +749,16 @@ function EditRouterModal({ router: r, existingIds, onClose, onSaved }: EditRoute
       toast.error("Ya existe un perfil con ese profile_id")
       return
     }
+    const tokens = Number(ctxTokens)
+    if (ctxMode === "fixed" && !(Number.isInteger(tokens) && tokens > 0)) {
+      toast.error("El contexto fijo necesita un número de tokens mayor que 0")
+      return
+    }
+    const newContext: RouterContextPolicy | null =
+      ctxMode === "max" ? null : ctxMode === "fixed" ? { mode: "fixed", tokens } : { mode: "common" }
+    const contextChanged =
+      (newContext?.mode ?? "max") !== (r.routerContext?.mode ?? "max") ||
+      (newContext?.mode === "fixed" && newContext.tokens !== (r.routerContext?.tokens ?? null))
     setSubmitting(true)
     try {
       if (idChanged) {
@@ -753,10 +767,13 @@ function EditRouterModal({ router: r, existingIds, onClose, onSaved }: EditRoute
       const patchChanged =
         displayName.trim() !== (r.displayName ?? "") ||
         description.trim() !== (r.description ?? "")
-      if (patchChanged) {
+      if (patchChanged || contextChanged) {
         await api.profiles.update(idChanged ? newId : r.profileId, {
-          displayName: displayName.trim(),
-          description: description.trim(),
+          ...(patchChanged && {
+            displayName: displayName.trim(),
+            description: description.trim(),
+          }),
+          ...(contextChanged && { routerContext: newContext }),
         })
       }
       toast.success(idChanged ? `Router renombrado a ${newId}` : "Router actualizado")
@@ -822,6 +839,40 @@ function EditRouterModal({ router: r, existingIds, onClose, onSaved }: EditRoute
               onChange={(e) => setDescription(e.target.value)}
               className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
             />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium">Contexto anunciado</label>
+            <div className="flex gap-2">
+              <select
+                aria-label="Contexto anunciado"
+                value={ctxMode}
+                onChange={(e) => setCtxMode(e.target.value as RouterContextPolicy["mode"])}
+                className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              >
+                <option value="max">El mayor de sus destinos</option>
+                <option value="common">El que alcanzan la mayoría de sus destinos</option>
+                <option value="fixed">Fijo</option>
+              </select>
+              {ctxMode === "fixed" && (
+                <input
+                  type="number"
+                  min={1}
+                  step={1024}
+                  aria-label="Tokens de contexto anunciado"
+                  placeholder="262144"
+                  value={ctxTokens}
+                  onChange={(e) => setCtxTokens(e.target.value)}
+                  className="w-32 rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+                />
+              )}
+            </div>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Es el <code>context_length</code> que ven los clientes en /v1/models y con el
+              que deciden cuándo compactar. No cambia el enrutado: una petición más grande
+              sigue yendo al destino donde quepa. Un valor fijo nunca supera al del mayor
+              destino.
+            </p>
           </div>
         </div>
 
