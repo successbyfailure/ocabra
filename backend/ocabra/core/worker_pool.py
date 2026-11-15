@@ -385,6 +385,16 @@ class WorkerGoneError(KeyError):
         return str(self.args[0])
 
 
+class VisionNoRoomError(RuntimeError):
+    """An image reached a llama.cpp worker whose card has no room for the
+    vision projector, and shrinking its context cannot free enough.
+
+    2026-11-15: ``qwen3.8:27b-abliterated`` (preset ``normal``, 16k context,
+    weights filling the 3090) escaped as a bare 500. Endpoints answer 503
+    ``vision_no_room`` with a message that says what to do.
+    """
+
+
 class WorkerDegradedError(RuntimeError):
     """A worker has failed repeatedly in a way that indicates its backend
     process died (not a one-off error) — raised instead of forwarding another

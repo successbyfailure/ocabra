@@ -1319,6 +1319,31 @@ app.add_middleware(
 # "Internal Server Error" with no traceback in the logs, which makes
 # diagnosing federation/proxy issues painful. Log the full traceback for
 # every uncaught exception so it's never silent.
+from ocabra.core.worker_pool import VisionNoRoomError  # noqa: E402
+
+
+@app.exception_handler(VisionNoRoomError)
+async def _vision_no_room_handler(request, exc):  # noqa: ANN001
+    """An image a model cannot take right now (no room for its vision
+    projector): 503 ``vision_no_room`` instead of a bare 500."""
+    from fastapi.responses import JSONResponse
+
+    logger.info("vision_no_room", path=request.url.path, error=str(exc))
+    # Same envelope as every other oCabra error (``HTTPException`` detail).
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "error": {
+                    "message": str(exc),
+                    "type": "server_error",
+                    "code": "vision_no_room",
+                }
+            }
+        },
+    )
+
+
 @app.exception_handler(Exception)
 async def _log_unhandled_exception(request, exc):
     import traceback as _tb

@@ -4425,6 +4425,8 @@ class ModelManager:
         if even the smallest context leaves no room, the request fails with a
         clear error instead of the worker crashing.
         """
+        from ocabra.core.worker_pool import VisionNoRoomError
+
         state = self._states.get(model_id)
         if state is None or state.status != ModelStatus.LOADED:
             return
@@ -4443,7 +4445,7 @@ class ModelManager:
             if free >= needed:
                 continue
             if not self._can_change_context_live(model_id):
-                raise RuntimeError(
+                raise VisionNoRoomError(
                     f"The vision projector needs ~{needed} MB on GPU {gpu} and only "
                     f"{free} MB are free; this model cannot shrink its context to make room."
                 )
@@ -4454,7 +4456,7 @@ class ModelManager:
                     model_id, gpu, needed - free, tolerate_in_flight=1
                 )
             if not freed:
-                raise RuntimeError(
+                raise VisionNoRoomError(
                     f"The vision projector needs ~{needed} MB on GPU {gpu} and shrinking the "
                     f"context of '{model_id}' cannot free them; try again with the card freer."
                 )

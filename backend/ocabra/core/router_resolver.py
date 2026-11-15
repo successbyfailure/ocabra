@@ -146,6 +146,7 @@ class RouterResolver:
         request_body: dict | None = None,
         exclude_session_id: str | None = None,
         required_capability: str | tuple[str, ...] | None = None,
+        exclude_targets: set[str] | frozenset[str] | None = None,
     ) -> ResolvedTarget:
         """Walk the router's ``routing_targets`` and pick the best one now.
 
@@ -156,6 +157,10 @@ class RouterResolver:
         to a text-to-image model because it was warm (2026-11-15). A tuple
         requires all of them: a chat with an image and tools needs a target
         with ``vision`` and ``tools``.
+
+        ``exclude_targets``: target profile ids already tried for this request
+        that could not serve it (a warm target with no room for its vision
+        projector). Without it the retry would pick the same warm target.
 
         Two-pass rule (2026-10-29 — previously a single pass only asked "would
         loading THIS target disrupt a busy neighbour", never "is a lower-
@@ -209,6 +214,9 @@ class RouterResolver:
                 continue
             visited.add(target_id)
 
+            if exclude_targets and target_id in exclude_targets:
+                audit.append(CandidateAudit(target_id, "excluded"))
+                continue
             target = await self._profile_registry.get(target_id)
             if target is None:
                 audit.append(CandidateAudit(target_id, "not_found"))
@@ -236,6 +244,7 @@ class RouterResolver:
                         request_body=request_body,
                         exclude_session_id=exclude_session_id,
                         required_capability=required_capability,
+                        exclude_targets=exclude_targets,
                     )
                 except RoutingLoopError:
                     audit.append(CandidateAudit(target_id, "loop"))

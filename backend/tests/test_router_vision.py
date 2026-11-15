@@ -263,3 +263,97 @@ async def test_un_base_cargado_conserva_sus_capacidades(monkeypatch):
     mm._states = {base.model_id: base, derivado.model_id: derivado}
     await mm._share_capabilities_with_base(derivado)
     assert base.capabilities.vision is True
+
+
+@pytest.mark.asyncio
+async def test_exclude_targets_salta_el_destino_caliente_que_ya_fallo():
+    router = _Perfil("r", None, routing_targets=["a", "b"], profile_kind="router")
+    estados = {
+        "m/a": _estado("m/a", vision=True, status=ModelStatus.LOADED),
+        "m/b": _estado("m/b", vision=True),
+    }
+    reg = _Registro(router, _Perfil("a", "m/a"), _Perfil("b", "m/b"))
+    resolver = RouterResolver(profile_registry=reg, model_manager=_Gestor(estados))
+    assert (await resolver.pick(router, required_capability="vision")).target_profile_id == "a"
+    otro = await resolver.pick(router, required_capability="vision", exclude_targets={"a"})
+    assert otro.target_profile_id == "b"
+
+
+def test_vision_no_room_sin_router_es_503_claro():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import ocabra.main as main_mod
+    from ocabra.core.worker_pool import VisionNoRoomError
+
+    app = FastAPI()
+    app.add_exception_handler(VisionNoRoomError, main_mod._vision_no_room_handler)
+
+    @app.get("/x")
+    async def _x():
+        raise VisionNoRoomError("The vision projector needs ~1232 MB on GPU 1")
+
+    resp = TestClient(app).get("/x")
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"]["code"] == "vision_no_room"
+
+
+def test_stream_error_details_vision_no_room():
+    from ocabra.api.openai._deps import stream_error_details
+    from ocabra.core.worker_pool import VisionNoRoomError
+
+    assert stream_error_details(VisionNoRoomError("x"))[1] == "vision_no_room"
+
+
+def test_chat_router_reintenta_en_otro_destino_tras_vision_no_room():
+    from fastapi.testclient import TestClient
+
+    import ocabra.main as main_mod
+    from ocabra.core.worker_pool import VisionNoRoomError
+    from tests.test_openai_api import FakeProfileRegistry, _make_app, _make_test_profile
+
+    estados = {
+        "a": _estado("a", vision=True, status=ModelStatus.LOADED),
+        "b": _estado("b", vision=True, status=ModelStatus.LOADED),
+    }
+    app = _make_app()
+    app.add_exception_handler(VisionNoRoomError, main_mod._vision_no_room_handler)
+    mm = app.state.model_manager
+    mm.get_state = AsyncMock(side_effect=lambda mid: estados.get(mid))
+    mm.list_states = AsyncMock(return_value=list(estados.values()))
+    router = SimpleNamespace(
+        profile_id="r",
+        profile_kind="router",
+        base_model_id=None,
+        display_name="r",
+        description=None,
+        category="llm",
+        enabled=True,
+        is_default=False,
+        routing_targets=["a", "b"],
+        router_context=None,
+        request_defaults={},
+        load_overrides=None,
+    )
+    registro = FakeProfileRegistry([_make_test_profile("a", "a"), _make_test_profile("b", "b"), router])
+    app.state.profile_registry = registro
+    app.state.router_resolver = RouterResolver(profile_registry=registro, model_manager=mm)
+
+    llamadas = []
+
+    async def _forward(worker_key, path, body, **kw):
+        llamadas.append(worker_key)
+        if worker_key == "a":
+            raise VisionNoRoomError("no room on GPU 1")
+        return {"choices": [{"message": {"role": "assistant", "content": "Rojo"}}]}
+
+    app.state.worker_pool.forward_request = AsyncMock(side_effect=_forward)
+    resp = TestClient(app).post(
+        "/v1/chat/completions",
+        json={
+            "model": "r",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}, IMG]}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert llamadas == ["a", "b"]

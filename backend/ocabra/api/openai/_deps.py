@@ -511,6 +511,7 @@ async def resolve_profile(
                     profile,
                     request_body=request_body,
                     required_capability=required_capability,
+                    exclude_targets=getattr(request_state, "router_excluded_targets", None),
                 )
             except NoRoutableTargetError as exc:
                 raise router_pick_error(exc) from exc
@@ -2301,6 +2302,11 @@ def stream_error_details(exc: Exception) -> tuple[str, str]:
 
     if isinstance(exc, WorkerGoneError):
         return str(exc), "worker_unloaded"
+
+    from ocabra.core.worker_pool import VisionNoRoomError
+
+    if isinstance(exc, VisionNoRoomError):
+        return str(exc), "vision_no_room"
 
     if not isinstance(exc, httpx.HTTPStatusError):
         return str(exc), "stream_error"

@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.81.2 — 2026-11-15
+
+### Correcciones
+
+- **Una imagen que el modelo no puede atender ya no da 500.** Un modelo con
+  visión necesita sitio en la GPU para su proyector de imágenes. Cuando la
+  tarjeta está llena y encoger el contexto no lo libera, la petición se
+  escapaba como `500 Internal Server Error`. Pasaba con
+  `qwen3.8:27b-abliterated`, cuyo preset por defecto llena la tarjeta. Ahora
+  responde `503` con código `vision_no_room` y un mensaje que lo explica.
+- **Por un router, esa imagen va a otro destino con visión.** Si el destino
+  elegido no tiene sitio para el proyector, el router reintenta una vez sin
+  él (con streaming o sin él) en vez de devolver el error.
+
+---
+
 ## 0.81.1 — 2026-11-15
 
 ### Correcciones

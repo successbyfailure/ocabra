@@ -36,7 +36,12 @@ from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.router_resolver import NoRoutableTargetError
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
+from ocabra.core.worker_pool import (
+    InferenceTimeoutError,
+    VisionNoRoomError,
+    WorkerDegradedError,
+    WorkerGoneError,
+)
 from ocabra.database import AsyncSessionLocal
 
 from ._deps import (
@@ -271,6 +276,7 @@ async def chat_completions(
                     profile,
                     request_body=body,
                     required_capability=chat_required_capabilities(body, _content_kinds) or None,
+                    exclude_targets=getattr(request.state, "router_excluded_targets", None),
                 )
             except NoRoutableTargetError as exc:
                 # Antes se escapaba como 500 en el camino de streaming.
@@ -500,6 +506,20 @@ async def chat_completions(
             logger.info("router_reroute_after_worker_gone", worker_key=worker_key)
             return await chat_completions(request, user)
         raise_inference_dispatch_error(exc)
+    except VisionNoRoomError:
+        # The router's warm target has vision but no room for its projector
+        # (2026-11-15, qwen3.8:27b-abliterated): try once more without it.
+        target_id = getattr(request.state, "resolved_model_id", None)
+        if (
+            getattr(request.state, "via_router_profile_id", None)
+            and target_id
+            and not getattr(request.state, "router_rerouted", False)
+        ):
+            request.state.router_rerouted = True
+            request.state.router_excluded_targets = {target_id}
+            logger.info("router_reroute_after_vision_no_room", target=target_id)
+            return await chat_completions(request, user)
+        raise
     except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:
         raise_inference_dispatch_error(exc)
     from fastapi.responses import JSONResponse
@@ -661,12 +681,21 @@ def _router_reroute(
     router request: pick a target again (the router prefers what is loaded
     now) and stream from it, with no further reroute."""
 
-    async def _again():
+    async def _again(exclude_current: bool = False):
+        # ``exclude_current``: the target that just failed could not serve
+        # this request (no room for its vision projector) and would win again
+        # by being warm. A target that vanished (worker gone) needs no
+        # exclusion: it is no longer loaded.
+        excluded = None
+        current = getattr(request.state, "resolved_model_id", None)
+        if exclude_current and current:
+            excluded = {current}
         try:
             resolved = await router_resolver.pick(
                 router_profile,
                 request_body=body,
                 required_capability=chat_required_capabilities(body, content_kinds) or None,
+                exclude_targets=excluded,
             )
         except NoRoutableTargetError:
             yield _sse_error(
@@ -899,6 +928,17 @@ async def _stream_chat_with_load(
         logger.info("router_reroute_after_worker_gone", worker_key=worker_key)
         yield sse_ocabra_event("rerouted", from_worker_key=worker_key)
         async for chunk in reroute():
+            yield chunk
+    except VisionNoRoomError as exc:
+        # Also before the first byte: a router request goes to another target
+        # with vision (the retry excludes this one).
+        if reroute is None:
+            message, code = stream_error_details(exc)
+            yield _sse_error(message, code)
+            return
+        logger.info("router_reroute_after_vision_no_room", worker_key=worker_key)
+        yield sse_ocabra_event("rerouted", from_worker_key=worker_key)
+        async for chunk in reroute(exclude_current=True):
             yield chunk
     except Exception as exc:
         message, code = stream_error_details(exc)
