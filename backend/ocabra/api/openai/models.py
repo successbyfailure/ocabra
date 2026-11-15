@@ -30,6 +30,10 @@ from ._deps import (
 
 router = APIRouter()
 
+# Capabilities the router resolver checks per endpoint (``required_capability``
+# in the image endpoints): a router has them if any of its targets has them.
+_ENDPOINT_ROUTED_CAPABILITIES = ("image_generation", "image_editing")
+
 
 async def _context_metadata(
     profile: Any, model_manager: Any, base_state: Any
@@ -367,6 +371,16 @@ async def list_models(
             continue
         primary = target_entries[0]
         primary_meta = dict(primary.get("ocabra") or {})
+        # Capabilities come from the first target, except the ones the router
+        # itself filters by endpoint (``required_capability``): those are
+        # available if ANY target has them. ``recomendado-imagen`` generates
+        # with its first target and edits with its second; copying the first
+        # one alone advertised ``image_editing: false`` (2026-11-15).
+        router_caps = dict(primary_meta.get("capabilities") or {})
+        for cap in _ENDPOINT_ROUTED_CAPABILITIES:
+            if any(e.get("ocabra", {}).get("capabilities", {}).get(cap) for e in target_entries):
+                router_caps[cap] = True
+        primary_meta["capabilities"] = router_caps
         contexts = [
             entry.get("ocabra", {}).get("context")
             for entry in target_entries

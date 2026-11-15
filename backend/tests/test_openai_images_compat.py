@@ -253,3 +253,38 @@ def test_edicion_sin_imagen_es_400(monkeypatch):
         "/v1/images/edits", data={"model": "test-model", "prompt": "x"}
     )
     assert resp.status_code == 400
+
+
+def test_v1_models_el_router_de_imagen_anuncia_generar_y_editar(monkeypatch):
+    """Antes copiaba las capacidades de su primer destino (solo genera)."""
+    from fastapi.testclient import TestClient
+
+    from tests.test_openai_api import FakeProfileRegistry, _make_app, _make_test_profile
+
+    estados = {
+        "gen": _estado("gen", gen=True, edit=False),
+        "edit": _estado("edit", gen=False, edit=True),
+    }
+    app = _make_app()
+    app.state.model_manager.get_state = AsyncMock(side_effect=lambda mid: estados.get(mid))
+    router = SimpleNamespace(
+        profile_id="recomendado-imagen",
+        profile_kind="router",
+        base_model_id=None,
+        display_name="Imagen",
+        description=None,
+        category="image",
+        enabled=True,
+        is_default=False,
+        routing_targets=["gen", "edit"],
+        router_context=None,
+    )
+    app.state.profile_registry = FakeProfileRegistry(
+        [_make_test_profile("gen", "gen", "image"), _make_test_profile("edit", "edit", "image"), router]
+    )
+    data = TestClient(app).get("/v1/models").json()["data"]
+    caps = next(m for m in data if m["id"] == "recomendado-imagen")["ocabra"]["capabilities"]
+    assert caps["image_generation"] is True
+    assert caps["image_editing"] is True
+    # Lo que el router no filtra por endpoint sigue siendo el del primer destino.
+    assert caps["chat"] is False

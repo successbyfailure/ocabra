@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.80.1 — 2026-11-15
+
+### Correcciones
+
+- **`recomendado-imagen` anuncia en `/v1/models` que también edita.** Un
+  router copiaba las capacidades de su primer destino, que solo genera, así
+  que publicaba `image_editing: false` aunque `/v1/images/edits` funcionaba.
+  Ahora un router tiene `image_generation` o `image_editing` si alguno de sus
+  destinos la tiene, porque son las que elige según el endpoint.
+
+---
+
 ## 0.80.0 — 2026-11-15
 
 ### Novedades
