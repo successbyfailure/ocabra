@@ -148,7 +148,7 @@ otro nodo** (lado B: URL, estado de la solicitud, estado del túnel) y **Nube**
 | 1 | Túnel simétrico: protocolo, transporte httpx, dialer con reconexión | ✅ 0.82.0 |
 | 2 | Solicitudes de unión + invitaciones + identidad de servicio + anti-bucles | ✅ 0.82.0 |
 | 3 | Página de Federación propia (sale de Settings) | ✅ 0.82.0 |
-| 4 | Prueba real con `mapache` (el usuario actualiza su oCabra desde git) | ⬜ |
+| 4 | Prueba real con `mapache` | ✅ 0.82.1 — solicitud → aceptar → túnel en <1 s; embedding enrutado por el túnel en 133 ms |
 | 5 | Imagen `ocabra-node` | ⬜ |
 | 6 | RunPod: cliente, `cloud_nodes`, salvaguardas, UI | ⬜ |
 | 7 | Prueba real con un pod (3090 Community ≈ $0.22/h) | ⬜ |
@@ -180,4 +180,4 @@ otro nodo** (lado B: URL, estado de la solicitud, estado del túnel) y **Nube**
 
 ## Pendiente de confirmar
 
-- Registro para `ocabra-node` (GHCR / Docker Hub, público o privado).
+- Registro para `ocabra-node`: **GHCR** (decidido 2026-11-15).
