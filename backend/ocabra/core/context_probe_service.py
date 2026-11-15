@@ -222,9 +222,20 @@ class ContextProbeService:
         section["ctx_size"] = start
         use_case = overrides.setdefault("use_case", {})
         use_case["context"] = start if pool else max(1, start // parallel)
+        # The preset's measured VRAM is a safe ceiling for the first load: the
+        # probe starts at a context no larger than the preset's, and grows it
+        # live afterwards (no reload). Without it the GGUF estimator decides,
+        # and it can exceed the card: qwen3.8:27b-abliterated asked for 25848
+        # MB on a 24 GB 3090 where it runs in 22760 (2026-11-15).
+        validated_mb = (
+            int(runtime.get("capacity_vram_mb") or 0)
+            if runtime.get("capacity_validated")
+            and start <= int(plan.effective_context or 0)
+            else 0
+        )
         runtime["effective_context"] = start
-        runtime["capacity_validated"] = False
-        runtime["capacity_vram_mb"] = None
+        runtime["capacity_validated"] = validated_mb > 0
+        runtime["capacity_vram_mb"] = validated_mb or None
         runtime["context_probe"] = True
         runtime.pop("default_worker_key", None)
         runtime.pop("default_load_overrides", None)

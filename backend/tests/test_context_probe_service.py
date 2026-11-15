@@ -203,3 +203,36 @@ async def test_the_probe_waits_for_its_worker_to_be_really_gone(monkeypatch):
 
     assert job.status == "done", job.error
     assert fake.waited_for_release and fake.waited_for_release[0] > 20000
+
+
+@pytest.mark.asyncio
+async def test_la_primera_carga_usa_la_vram_validada_del_preset(monkeypatch):
+    """qwen3.8:27b-abliterated (2026-11-15): sin la VRAM validada del preset,
+    el estimador pedía 25.848 MB en una 3090 de 24 GB y la sonda no arrancaba."""
+    import tests.test_context_probe_service as mod
+
+    original = mod._plan
+
+    def _plan_pequeno():
+        plan = original()
+        plan.effective_context = 16384
+        plan.load_overrides["llama_cpp"]["ctx_size"] = 16384
+        plan.load_overrides["_runtime"]["capacity_vram_mb"] = 23972
+        return plan
+
+    monkeypatch.setattr(mod, "_plan", _plan_pequeno)
+    fake = FakeManager()
+    await _run(fake, _service(fake))
+    runtime = fake.probe_overrides["_runtime"]
+    assert fake.probe_overrides["llama_cpp"]["ctx_size"] == 16384
+    assert runtime["capacity_validated"] is True
+    assert runtime["capacity_vram_mb"] == 23972
+
+
+@pytest.mark.asyncio
+async def test_sin_vram_validada_decide_el_estimador():
+    fake = FakeManager()
+    await _run(fake, _service(fake))
+    runtime = fake.probe_overrides["_runtime"]
+    assert runtime["capacity_validated"] is False
+    assert runtime["capacity_vram_mb"] is None
