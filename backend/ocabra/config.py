@@ -3,6 +3,9 @@ import secrets
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Single source of truth for the backend version (also in frontend/package.json).
+APP_VERSION = "0.82.1"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -14,7 +17,11 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.82.0"
+    # The version lives here only (plus frontend/package.json). It used to be
+    # overridable with APP_VERSION in .env, and old .env files kept serving a
+    # stale number (a node on 0.82 code reported 0.74.0). Any APP_VERSION in
+    # the environment is now ignored — see _app_version_is_the_code_s.
+    app_version: str = APP_VERSION
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -993,6 +1000,12 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("app_version", mode="before")
+    @classmethod
+    def _app_version_is_the_code_s(cls, _value: object) -> str:
+        """Ignore APP_VERSION from the environment: the version is the code's."""
+        return APP_VERSION
 
     @field_validator("diffusers_offload_mode")
     @classmethod

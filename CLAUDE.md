@@ -48,14 +48,17 @@ cd frontend && npm run lint
 
 ## Versionado
 
-El número de versión vive en **tres** sitios y **deben coincidir siempre**:
+El número de versión vive en **dos** sitios y **deben coincidir siempre**:
 
-- `backend/ocabra/config.py` → `Settings.app_version` (default; se expone en `/health` y en `app.version`).
-- `.env` (y `.env.example`) → `APP_VERSION` — **esto sobreescribe el default de `config.py`** (`pydantic-settings` lee env vars por encima del default), así que si solo tocas `config.py` el valor servido en producción no cambia. Súbelo siempre a la vez.
-- `frontend/package.json` → `"version"` — el footer del sidebar (`src/components/layout/Sidebar.tsx`) lo lee en build-time vía `__APP_VERSION__` (inyectado por `vite.config.ts`), así que basta con subir `package.json`; no hay un cuarto sitio que tocar a mano (antes era un string `"v0.5.0"` hardcodeado y por eso se desincronizaba).
+- `backend/ocabra/config.py` → la constante `APP_VERSION` (se expone en `/health`
+  y en `app.version`). **No se puede sobreescribir desde `.env`**: antes había un
+  `APP_VERSION` en `.env` que pisaba el código y dejaba nodos sirviendo un número
+  viejo (mapache, con código 0.82, decía 0.74.0); ahora un validador lo ignora.
+  No lo vuelvas a añadir al `.env`.
+- `frontend/package.json` → `"version"` — el footer del sidebar (`src/components/layout/Sidebar.tsx`) lo lee en build-time vía `__APP_VERSION__` (inyectado por `vite.config.ts`), así que basta con subir `package.json`; no hay un tercer sitio que tocar a mano (antes era un string `"v0.5.0"` hardcodeado y por eso se desincronizaba).
 
 Tras cualquier cambio con entidad (feature, fix no trivial, cambio de
-comportamiento visible), sube **los tres** a la vez, al mismo valor, y
+comportamiento visible), sube **los dos** a la vez, al mismo valor, y
 regenera el lockfile para que no quede desincronizado: `cd frontend && npm
 install --package-lock-only`. Sigue semver (`MAJOR.MINOR.PATCH`): `PATCH`
 para fixes aislados, `MINOR` para features/cambios de comportamiento,

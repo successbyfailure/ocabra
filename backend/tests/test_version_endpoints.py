@@ -53,3 +53,11 @@ def test_health_sigue_trayendo_la_version(cliente):
 
 def test_las_dos_rutas_dicen_lo_mismo(cliente):
     assert cliente.get("/version").json() == cliente.get("/api/version").json()
+
+
+def test_app_version_ignores_the_environment(monkeypatch) -> None:
+    """Old .env files carry APP_VERSION; it must not override the code's version."""
+    from ocabra.config import APP_VERSION, Settings
+
+    monkeypatch.setenv("APP_VERSION", "0.74.0")
+    assert Settings().app_version == APP_VERSION

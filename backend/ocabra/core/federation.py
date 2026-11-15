@@ -133,7 +133,6 @@ class FederationManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._fernet = Fernet(_derive_fernet_key(settings.jwt_secret))
         self._node_id = settings.federation_node_id or str(uuid.uuid4())
-        self._node_name = settings.federation_node_name or f"node-{self._node_id[:8]}"
         self._started_at: float = 0.0
         self._http_client: httpx.AsyncClient | None = None
         # Our own API, used to serve peers' requests arriving over a tunnel.
@@ -181,7 +180,7 @@ class FederationManager:
         logger.info(
             "federation_manager_started",
             node_id=self._node_id,
-            node_name=self._node_name,
+            node_name=self.node_name,
             peer_count=len(self._peers),
             online_after_initial_poll=len(self.get_online_peers()),
         )
@@ -216,7 +215,10 @@ class FederationManager:
 
     @property
     def node_name(self) -> str:
-        return self._node_name
+        # Read live: the name is editable at runtime (PATCH /ocabra/config). It
+        # used to be copied at start-up, so a renamed node kept announcing (and
+        # showing in the UI) the old name until the API restarted.
+        return self._settings.federation_node_name or f"node-{self._node_id[:8]}"
 
     @property
     def uptime_seconds(self) -> float:
@@ -756,7 +758,7 @@ class FederationManager:
                     return None
                 return peer, {
                     "node_id": self._node_id,
-                    "node_name": self._node_name,
+                    "node_name": self.node_name,
                     "version": getattr(self._settings, "app_version", None),
                     "peer_name": peer.name,
                 }
@@ -812,7 +814,7 @@ class FederationManager:
         return {
             "token": peer.api_key,
             "node_id": self._node_id,
-            "node_name": self._node_name,
+            "node_name": self.node_name,
             "version": getattr(self._settings, "app_version", None),
         }
 

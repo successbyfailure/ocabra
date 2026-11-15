@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.82.1 — 2026-11-15
+
+### Correcciones
+
+- **`GET /health` devuelve la versión real del servidor.** Un `APP_VERSION`
+  olvidado en la configuración de un despliegue pisaba la versión del código,
+  así que un nodo podía anunciar una versión vieja (y lo mismo veían los nodos
+  federados con él). Ahora esa variable se ignora.
+- **Cambiar el nombre del nodo de federación surte efecto al momento.** Se
+  guardaba, pero el nodo seguía anunciándose (y mostrándose) con el nombre
+  anterior hasta reiniciar la API.
+
+---
+
 ## 0.82.0 — 2026-11-15
 
 ### Novedades

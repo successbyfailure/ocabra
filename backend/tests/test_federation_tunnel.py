@@ -706,3 +706,20 @@ async def test_real_websocket_stack_end_to_end():
         await fm.stop()
         server.should_exit = True
         await server_task
+
+
+async def test_node_name_is_read_live():
+    """Renaming the node in config must show up without restarting the API."""
+    settings = _make_settings(federation_node_name="viejo")
+    fm = FederationManager(settings, _make_session_factory())
+    assert fm.node_name == "viejo"
+    settings.federation_node_name = "nuevo"
+    assert fm.node_name == "nuevo"
+    assert (
+        fm.tunnel_hello(PeerState(peer_id="p", name="x", url="", api_key="t", access_level="full"))[
+            "node_name"
+        ]
+        == "nuevo"
+    )
+    settings.federation_node_name = ""
+    assert fm.node_name == "node-test-nod"
