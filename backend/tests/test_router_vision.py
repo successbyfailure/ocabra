@@ -222,3 +222,44 @@ def test_chat_streaming_con_imagen_a_router_sin_vision_es_400(monkeypatch):
     )
     assert resp.status_code == 400, resp.text
     assert "model_not_capable" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_el_worker_derivado_comparte_sus_capacidades_con_el_base(monkeypatch):
+    """ornith-1.5:35b solo lo sirve su worker de preset (``::hash``): el base
+    nunca carga y se quedaba con ``vision: false`` deducido por el nombre."""
+    from ocabra.core import model_manager as mm_mod
+    from ocabra.core.model_manager import ModelManager, resolve_display_capabilities
+
+    guardados = []
+    monkeypatch.setattr(mm_mod, "set_key", AsyncMock(side_effect=lambda k, v: guardados.append(k)))
+    mm = ModelManager(worker_pool=None)
+    base = _estado("llamacpp_mks/ornith", vision=False, tools=False)
+    base.capabilities = BackendCapabilities()  # nunca cargado: sin señal
+    derivado = _estado("llamacpp_mks/ornith::abc", vision=True, status=ModelStatus.LOADED)
+    derivado.capabilities = BackendCapabilities(
+        chat=True, tools=True, vision=True, reasoning=True, context_length=65536
+    )
+    mm._states = {base.model_id: base, derivado.model_id: derivado}
+
+    await mm._share_capabilities_with_base(derivado)
+
+    caps, fuente = resolve_display_capabilities(base)
+    assert fuente == "cached"
+    assert caps["vision"] is True and caps["tools"] is True and caps["reasoning"] is True
+    assert base.capabilities.context_length == 0  # lo numérico es del preset
+    assert guardados == ["model:state:llamacpp_mks/ornith"]
+
+
+@pytest.mark.asyncio
+async def test_un_base_cargado_conserva_sus_capacidades(monkeypatch):
+    from ocabra.core import model_manager as mm_mod
+    from ocabra.core.model_manager import ModelManager
+
+    monkeypatch.setattr(mm_mod, "set_key", AsyncMock())
+    mm = ModelManager(worker_pool=None)
+    base = _estado("m/x", vision=True, status=ModelStatus.LOADED)
+    derivado = _estado("m/x::abc", vision=False, status=ModelStatus.LOADED)
+    mm._states = {base.model_id: base, derivado.model_id: derivado}
+    await mm._share_capabilities_with_base(derivado)
+    assert base.capabilities.vision is True

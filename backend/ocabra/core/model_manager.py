@@ -1900,6 +1900,32 @@ class ModelManager:
                 if capabilities_populated(restored):
                     state.capabilities = restored
 
+    async def _share_capabilities_with_base(self, state: ModelState) -> None:
+        """Copy a derived worker's live capability flags to its base model.
+
+        Models with presets are only ever served by derived workers
+        (``<base>::<hash>``); the base state, which ``/v1/models`` and the
+        routers read, never loads, so it kept the name heuristic forever.
+        2026-11-15: ``ornith-1.5:35b`` loads its vision projector and answers
+        images, yet was listed (and routed) as ``vision: false``.
+
+        Only the boolean flags are shared: numeric fields (context, slots) are
+        the preset's own, and the public context comes from the presets.
+        A loaded base keeps its own live capabilities.
+        """
+        if "::" not in state.model_id:
+            return
+        base = self._states.get(state.model_id.split("::", 1)[0])
+        if base is None or base.status == ModelStatus.LOADED:
+            return
+        merged = base.capabilities.to_dict()
+        for key, value in state.capabilities.to_dict().items():
+            if isinstance(value, bool):
+                merged[key] = value
+        base.capabilities = BackendCapabilities.from_dict(merged)
+        # Persisted so the base keeps them ("cached") across restarts.
+        await self._persist_state(base.model_id)
+
     @staticmethod
     def _parse_datetime(value: object) -> datetime | None:
         if not isinstance(value, str) or not value.strip():
@@ -2389,6 +2415,7 @@ class ModelManager:
                                 else 0
                             )
                             state.capabilities = capabilities
+                            await self._share_capabilities_with_base(state)
                             state.status = ModelStatus.LOADED
                             state.live_context = self._initial_live_context(state, backend)
                             self._live_context_unsupported.discard(state.model_id)

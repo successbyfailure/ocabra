@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.81.1 — 2026-11-15
+
+### Correcciones
+
+- **Los modelos con presets anuncian lo que de verdad saben hacer.** Un
+  modelo con presets lo sirve siempre el worker de su preset, nunca el modelo
+  base, y `/v1/models` lee el base: si nunca se había cargado tal cual, sus
+  capacidades salían deducidas del nombre. `ornith-1.5:35b` aparecía sin
+  visión aunque responde a imágenes, y por eso `recomendado-sota` no lo usaba
+  para ellas. Ahora, al cargar el worker de un preset, sus capacidades pasan
+  al modelo y se conservan tras un reinicio.
+
+---
+
 ## 0.81.0 — 2026-11-15
 
 ### Correcciones
