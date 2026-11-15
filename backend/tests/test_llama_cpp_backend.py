@@ -1270,3 +1270,53 @@ async def test_the_worker_wrapper_forwards_the_draft_placement_flags(tmp_path: P
     assert cmd[cmd.index("--n-cpu-moe-draft") + 1] == "1"
     assert cmd[cmd.index("--device-draft") + 1] == "CUDA1"
     assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp,ngram-mod"
+
+
+async def _capture_mks_load_cmd(tmp_path: Path, extra_config: dict, *, live: bool) -> list[str]:
+    from ocabra.backends.llamacpp_mks_backend import LlamaCppMksBackend
+
+    gguf = tmp_path / "demo.gguf"
+    if not gguf.exists():
+        gguf.write_bytes(b"GGUF" * 1024)
+    proc = _fake_proc()
+    backend = LlamaCppMksBackend()
+    with (
+        patch("ocabra.backends.llama_cpp_backend.settings") as mock_settings,
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as create_proc,
+        patch.object(LlamaCppMksBackend, "_wait_for_startup", new=AsyncMock()),
+        patch.object(LlamaCppMksBackend, "_resolve_server_bin", return_value="/bin/llama-server"),
+    ):
+        _stub_settings(mock_settings, str(tmp_path))
+        mock_settings.llama_cpp_live_context_enabled = live
+        await backend.load("demo", [1], port=18099, extra_config=extra_config)
+    return list(create_proc.await_args.args)
+
+
+@pytest.mark.asyncio
+async def test_fork_sin_vision_arranca_con_props_para_el_contexto_en_caliente(tmp_path: Path):
+    """flint:40b (2026-11-15): sin visión no se pasaba --props y el contexto
+    en caliente (sonda, encoger antes de desalojar) daba 501."""
+    args = await _capture_mks_load_cmd(
+        tmp_path, {"llama_cpp": {"vision_mode": "disabled"}}, live=True
+    )
+    assert args.count("--props") == 1
+
+
+@pytest.mark.asyncio
+async def test_fork_con_vision_bajo_demanda_no_duplica_props(tmp_path: Path):
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF" * 512)
+    args = await _capture_mks_load_cmd(
+        tmp_path,
+        {"llama_cpp": {"mmproj_model_id": str(mmproj), "vision_mode": "on_demand"}},
+        live=True,
+    )
+    assert args.count("--props") == 1
+
+
+@pytest.mark.asyncio
+async def test_fork_con_contexto_en_caliente_apagado_no_pasa_props(tmp_path: Path):
+    args = await _capture_mks_load_cmd(
+        tmp_path, {"llama_cpp": {"vision_mode": "disabled"}}, live=False
+    )
+    assert "--props" not in args

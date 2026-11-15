@@ -454,6 +454,17 @@ class LlamaCppBackend(BackendInterface):
             if mmproj_gpu is not None and options["gpu_layers"] > 0:
                 options["mmproj_gpu"] = mmproj_gpu
                 cmd.extend(["--mmproj-device", f"CUDA{visible_gpus.index(mmproj_gpu)}"])
+        if (
+            self.SUPPORTS_LIVE_CONTEXT
+            and settings.llama_cpp_live_context_enabled
+            and "--props" not in cmd
+        ):
+            # Live context (POST /props {"context"}) needs it too, not only the
+            # on-demand projector. Models without vision were launched without
+            # it: the context probe failed on flint:40b with 501 "Start it with
+            # --props", and shrink-before-evict could never shrink them, so
+            # pressure evicted them whole (2026-11-15).
+            cmd.append("--props")
 
         if options.get("parallel_slots") is not None:
             cmd.extend(["--parallel", str(int(options["parallel_slots"]))])

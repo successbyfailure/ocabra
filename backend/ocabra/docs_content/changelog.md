@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.81.5 — 2026-11-15
+
+### Correcciones
+
+- **Menos recargas en frío de `flint:40b`, `ravenx`, los `nemotron`,
+  `qwen3-coder:30b`, `qwen3:8b` y `qwen3:32b`.** Cuando falta memoria en una
+  GPU, oCabra primero encoge el contexto de un modelo cargado en vez de
+  sacarlo entero. En los modelos sin visión eso nunca funcionaba: el motor
+  arrancaba sin la opción que permite cambiar el contexto en caliente, así
+  que se desalojaban enteros y la siguiente petición pagaba la recarga.
+
+---
+
 ## 0.81.2 — 2026-11-15
 
 ### Correcciones
