@@ -10,6 +10,11 @@ const api = vi.hoisted(() => ({
     upsert: vi.fn(),
     delete: vi.fn(),
   },
+  openaiImageCompat: {
+    list: vi.fn(() => Promise.resolve([])),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+  },
   profiles: {
     listAll: vi.fn(),
   },
@@ -114,5 +119,27 @@ describe("OpenAICompat", () => {
 
     await waitFor(() => expect(screen.getByText("→ es_MX-claude-high")).toBeTruthy())
     expect(fetch).toHaveBeenCalledWith("/v1/audio/voices?model=tts-1&voice=alloy")
+  })
+
+  it("pins an OpenAI image model name to an image router", async () => {
+    api.openaiTtsCompat.list.mockResolvedValue([])
+    const router = { ...profile("recomendado-imagen"), category: "image" as const, profileKind: "router" as const }
+    api.profiles.listAll.mockResolvedValue([profile("piper-es-mx-claude-high"), router])
+    api.openaiImageCompat.list.mockResolvedValue([])
+    api.openaiImageCompat.upsert.mockResolvedValue({
+      openaiModel: "gpt-image-1",
+      targetProfileId: "recomendado-imagen",
+      createdAt: null,
+      updatedAt: null,
+    })
+
+    render(<OpenAICompat />)
+    const select = (await screen.findByLabelText("Perfil para gpt-image-1")) as HTMLSelectElement
+    await waitFor(() => expect(select.options.length).toBe(2)) // sin asignar + solo el de imagen
+    fireEvent.change(select, { target: { value: "recomendado-imagen" } })
+
+    await waitFor(() =>
+      expect(api.openaiImageCompat.upsert).toHaveBeenCalledWith("gpt-image-1", "recomendado-imagen"),
+    )
   })
 })

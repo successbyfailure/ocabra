@@ -78,11 +78,12 @@ async def _reload_openai_tts_compat(request: Request) -> None:
     avoids threading per-rename/delete rewrite logic into an otherwise
     unrelated registry (``OpenAITTSCompatRegistry`` has no hooks into
     ``ProfileRegistry`` on purpose, see docs/CONTRACTS.md)."""
-    compat = getattr(request.app.state, "openai_tts_compat", None)
-    if compat is None:
-        return
-    async with AsyncSessionLocal() as session:
-        await compat.load_all(session)
+    for attr in ("openai_tts_compat", "openai_image_compat"):
+        compat = getattr(request.app.state, attr, None)
+        if compat is None:
+            continue
+        async with AsyncSessionLocal() as session:
+            await compat.load_all(session)
 
 
 def _preset_to_dict(preset) -> dict[str, Any]:

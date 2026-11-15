@@ -428,6 +428,7 @@ async def resolve_profile(
     request_body: dict | None = None,
     router_resolver: object | None = None,
     request_state: object | None = None,
+    required_capability: str | None = None,
 ) -> tuple[ModelProfile, ModelState]:
     """Resolve a *profile_id* to its ``(ModelProfile, ModelState)`` pair.
 
@@ -506,7 +507,11 @@ async def resolve_profile(
             from ocabra.core.router_resolver import NoRoutableTargetError
 
             try:
-                resolved = await router_resolver.pick(profile, request_body=request_body)
+                resolved = await router_resolver.pick(
+                    profile,
+                    request_body=request_body,
+                    required_capability=required_capability,
+                )
             except NoRoutableTargetError as exc:
                 raise _openai_error(
                     str(exc),

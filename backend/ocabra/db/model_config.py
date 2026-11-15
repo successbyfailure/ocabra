@@ -592,3 +592,28 @@ def model_schedule_rows_to_payload(
         start_action=MODEL_SCHEDULE_START_ACTION,
         end_action=MODEL_SCHEDULE_END_ACTION,
     )
+
+
+class OpenAIImageModelMap(Base):
+    """Compatibility shim for image clients that only know OpenAI's official
+    model names (``gpt-image-1``, ``gpt-image-1-mini``, ``dall-e-3``,
+    ``dall-e-2``).
+
+    Same idea as :class:`OpenAITTSVoiceMap`, keyed by model name alone: each
+    row maps the OpenAI name straight to one of oCabra's profiles (execution
+    or router). Consulted in ``api/openai/images.py`` before the normal
+    profile resolution; any other ``model`` is unaffected.
+    """
+
+    __tablename__ = "openai_image_model_map"
+
+    openai_model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    target_profile_id: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey("model_profiles.profile_id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

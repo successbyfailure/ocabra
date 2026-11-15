@@ -15,6 +15,7 @@ import type {
   ProfileUpdate,
   RouterCreate,
   OpenAITTSVoiceMapEntry,
+  OpenAIImageModelMapEntry,
   DownloadJob,
   DownloadSource,
   HFModelCard,
@@ -1059,6 +1060,16 @@ function toModelProfile(raw: unknown): ModelProfile {
           };
         })
       : [],
+    createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
+    updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
+  };
+}
+
+function toOpenAIImageModelMapEntry(raw: unknown): OpenAIImageModelMapEntry {
+  const data = isRecord(raw) ? raw : {};
+  return {
+    openaiModel: String(data.openai_model ?? data.openaiModel ?? ""),
+    targetProfileId: String(data.target_profile_id ?? data.targetProfileId ?? ""),
     createdAt: (data.created_at ?? data.createdAt ?? null) as string | null,
     updatedAt: (data.updated_at ?? data.updatedAt ?? null) as string | null,
   };
@@ -2743,6 +2754,32 @@ export const api = {
       await request<unknown>(
         "DELETE",
         `/ocabra/openai-tts-voice-map/${encodeURIComponent(openaiModel)}/${encodeURIComponent(voiceName)}`,
+      );
+    },
+  },
+
+  openaiImageCompat: {
+    list: async (): Promise<OpenAIImageModelMapEntry[]> =>
+      (await request<unknown[]>("GET", "/ocabra/openai-image-model-map")).map(
+        toOpenAIImageModelMapEntry,
+      ),
+
+    upsert: async (
+      openaiModel: string,
+      targetProfileId: string,
+    ): Promise<OpenAIImageModelMapEntry> =>
+      toOpenAIImageModelMapEntry(
+        await request<unknown>(
+          "PUT",
+          `/ocabra/openai-image-model-map/${encodeURIComponent(openaiModel)}`,
+          { target_profile_id: targetProfileId },
+        ),
+      ),
+
+    delete: async (openaiModel: string): Promise<void> => {
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/openai-image-model-map/${encodeURIComponent(openaiModel)}`,
       );
     },
   },

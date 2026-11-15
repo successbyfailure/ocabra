@@ -1669,6 +1669,17 @@ export interface OpenAITTSVoiceMapEntry {
   updatedAt: string | null;
 }
 
+/**
+ * Compatibilidad de imagen OpenAI: a qué perfil propio responde cada nombre
+ * oficial de modelo de imagen (gpt-image-1, dall-e-3...).
+ */
+export interface OpenAIImageModelMapEntry {
+  openaiModel: string;
+  targetProfileId: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 // Federation types
 export interface FederationPeerGpu {
   index: number;

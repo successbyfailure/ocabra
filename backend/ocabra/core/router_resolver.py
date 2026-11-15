@@ -60,7 +60,7 @@ class CandidateAudit:
 
     target_profile_id: str
     outcome: str  # "loaded" | "loadable" | "session_veto" | "estimator_slow" |
-    # "load_would_disrupt" | "not_found" | "disabled" | "loop"
+    # "load_would_disrupt" | "not_found" | "disabled" | "loop" | "not_capable"
 
 
 @dataclass
@@ -132,8 +132,15 @@ class RouterResolver:
         *,
         request_body: dict | None = None,
         exclude_session_id: str | None = None,
+        required_capability: str | None = None,
     ) -> ResolvedTarget:
         """Walk the router's ``routing_targets`` and pick the best one now.
+
+        ``required_capability`` (e.g. ``"image_editing"``) skips targets that
+        cannot serve the endpoint asking. One router can then front models
+        that each do one job — ``recomendado-imagen`` generates with one and
+        edits with another, the endpoint decides — instead of sending an edit
+        to a text-to-image model because it was warm (2026-11-15).
 
         Two-pass rule (2026-10-29 — previously a single pass only asked "would
         loading THIS target disrupt a busy neighbour", never "is a lower-
@@ -194,6 +201,13 @@ class RouterResolver:
             if not target.enabled:
                 audit.append(CandidateAudit(target_id, "disabled"))
                 continue
+            if (
+                required_capability
+                and not self.is_router(target)
+                and not await self._target_has_capability(target, required_capability)
+            ):
+                audit.append(CandidateAudit(target_id, "not_capable"))
+                continue
 
             # Nested router? Resolve it recursively — the visited set
             # carries the cycle guard across levels. A nested router commits
@@ -203,7 +217,10 @@ class RouterResolver:
             if self.is_router(target):
                 try:
                     nested = await self.pick(
-                        target, request_body=request_body, exclude_session_id=exclude_session_id
+                        target,
+                        request_body=request_body,
+                        exclude_session_id=exclude_session_id,
+                        required_capability=required_capability,
                     )
                 except RoutingLoopError:
                     audit.append(CandidateAudit(target_id, "loop"))
@@ -386,6 +403,25 @@ class RouterResolver:
         raise NoRoutableTargetError(
             f"router '{router.profile_id}' has no enabled target capable of serving the request"
         )
+
+    async def _target_has_capability(self, target: ModelProfile, capability: str) -> bool:
+        """Whether ``target``'s model can serve ``capability``.
+
+        Uses the same capabilities ``/v1/models`` publishes (live when loaded,
+        last-known otherwise), not the raw state: a diffusers model that was
+        never probed reports generation AND editing until its worker says
+        which pipeline it is. A target whose state is unknown is kept — the
+        endpoint's own capability check still rejects it if it was wrong.
+        """
+        from ocabra.core.model_manager import resolve_display_capabilities
+
+        if not target.base_model_id:
+            return True
+        state = await self._model_manager.get_state(target.base_model_id)
+        if state is None:
+            return True
+        caps, _source = resolve_display_capabilities(state)
+        return bool(caps.get(capability))
 
     # Note: the previous ``_should_skip_for_busy`` helper (estimator-based
     # tie-break for loaded-but-busy targets) was removed on 2026-09-15.

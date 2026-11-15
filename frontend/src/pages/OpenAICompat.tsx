@@ -2,9 +2,12 @@ import { useEffect, useState } from "react"
 import { AlertCircle, Loader2, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import type { ModelProfile, OpenAITTSVoiceMapEntry } from "@/types"
+import type { ModelProfile, OpenAIImageModelMapEntry, OpenAITTSVoiceMapEntry } from "@/types"
 
 const OPENAI_TTS_MODELS = ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"]
+// Nombres de modelo de imagen de OpenAI. dall-e-2 es también lo que
+// OpenAI usa cuando el cliente no manda ``model``.
+const OPENAI_IMAGE_MODELS = ["gpt-image-1", "gpt-image-1-mini", "dall-e-3", "dall-e-2"]
 const OPENAI_VOICE_NAMES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 
 interface ProbeResult {
@@ -105,7 +108,7 @@ export function OpenAICompat() {
     <div className="space-y-4 p-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Compatibilidad OpenAI (TTS)</h1>
+          <h1 className="text-xl font-semibold">Compatibilidad OpenAI</h1>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
             Un cliente que solo sabe los nombres oficiales de OpenAI (modelo{" "}
             <code>tts-1</code>/<code>tts-1-hd</code>/<code>gpt-4o-mini-tts</code>, voz{" "}
@@ -194,6 +197,110 @@ export function OpenAICompat() {
                 )
               }),
             )}
+          </tbody>
+        </table>
+      </div>
+
+      <OpenAIImageCompatSection profiles={enabledProfiles} />
+    </div>
+  )
+}
+
+/**
+ * Modelos de imagen: un cliente de OpenAI manda ``gpt-image-1`` o
+ * ``dall-e-*`` a /v1/images/generations y /v1/images/edits. Lo normal es
+ * apuntarlos a un router (recomendado-imagen) que genera con un modelo y
+ * edita con otro según el endpoint.
+ */
+function OpenAIImageCompatSection({ profiles }: { profiles: ModelProfile[] }) {
+  const [entries, setEntries] = useState<OpenAIImageModelMapEntry[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+
+  const refresh = async () => {
+    try {
+      setEntries(await api.openaiImageCompat.list())
+      setError(null)
+    } catch (err) {
+      setError(errMsg(err))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const setPin = async (model: string, targetProfileId: string) => {
+    setSaving(model)
+    try {
+      if (!targetProfileId) {
+        await api.openaiImageCompat.delete(model)
+        toast.success(`${model} desasignado`)
+      } else {
+        await api.openaiImageCompat.upsert(model, targetProfileId)
+        toast.success(`${model} → ${targetProfileId}`)
+      }
+      await refresh()
+    } catch (err) {
+      toast.error(errMsg(err))
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  const imageProfiles = profiles.filter((p) => p.category === "image")
+
+  return (
+    <div className="space-y-2">
+      <div>
+        <h2 className="text-lg font-semibold">Imagen</h2>
+        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
+          Nombres que manda un cliente de OpenAI a <code>/v1/images/generations</code> y{" "}
+          <code>/v1/images/edits</code>. Apúntalos a un router de imagen para que cada endpoint
+          vaya al modelo que sabe hacerlo. <code>dall-e-2</code> también recoge las peticiones
+          sin <code>model</code>, y con <code>dall-e-*</code> la respuesta es una URL por
+          defecto, como en OpenAI. Los permisos se dan sobre el nombre de OpenAI.
+        </p>
+      </div>
+      {error && (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <AlertCircle size={16} className="mt-0.5" />
+          {error}
+        </div>
+      )}
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/30 text-left text-xs text-muted-foreground">
+              <th className="px-3 py-2 font-medium">Modelo OpenAI</th>
+              <th className="px-3 py-2 font-medium">Perfil propio</th>
+            </tr>
+          </thead>
+          <tbody>
+            {OPENAI_IMAGE_MODELS.map((model) => {
+              const entry = entries.find((e) => e.openaiModel === model)
+              return (
+                <tr key={model} className="border-b border-border/50 last:border-0">
+                  <td className="px-3 py-1.5 font-mono text-xs">{model}</td>
+                  <td className="px-3 py-1.5">
+                    <select
+                      aria-label={`Perfil para ${model}`}
+                      value={entry?.targetProfileId ?? ""}
+                      disabled={saving === model}
+                      onChange={(e) => void setPin(model, e.target.value)}
+                      className="w-full max-w-xs rounded-md border border-input bg-background px-2 py-1 text-xs disabled:opacity-50"
+                    >
+                      <option value="">Sin asignar (404)</option>
+                      {imageProfiles.map((p) => (
+                        <option key={p.profileId} value={p.profileId}>
+                          {p.profileId}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

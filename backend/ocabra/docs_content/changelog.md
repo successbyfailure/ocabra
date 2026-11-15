@@ -16,6 +16,41 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.80.0 — 2026-11-15
+
+### Novedades
+
+- **Router `recomendado-imagen` para generar y editar.** Un solo nombre para
+  los dos endpoints: `/v1/images/generations` va a `qwen-image-2.1` y
+  `/v1/images/edits` a `qwen-image-edit-plus`. Un router ahora solo elige
+  entre los destinos que saben hacer lo que pide el endpoint; antes elegía el
+  primero que estuviera cargado, y con modelos que hacen una sola cosa una
+  edición podía acabar en el que solo genera.
+- **Los nombres de imagen de OpenAI funcionan.** `gpt-image-1`,
+  `gpt-image-1-mini`, `dall-e-3` y `dall-e-2` responden con
+  `recomendado-imagen`, así que un cliente escrito para OpenAI solo tiene que
+  cambiar la URL base y la clave. Sin `model` se trata como `dall-e-2`, igual
+  que OpenAI. Se configura en el modo compatibilidad, junto a las voces TTS.
+- **`quality` hace algo.** `low` usa la mitad de pasos de inferencia que el
+  perfil y `high`/`hd` la vez y media. Antes se ignoraba. Si mandas
+  `num_inference_steps`, gana ese.
+
+### Correcciones
+
+- **Las ediciones aceptan `image[]`**, que es como manda las imágenes el SDK
+  de OpenAI (y su ejemplo con `curl`). Antes la petición daba 422 por falta de
+  `image`. La primera imagen es la base y el resto, referencias.
+
+### Cambios
+
+- **Con `dall-e-*` (o sin `model`) la respuesta es `url` por defecto**, como
+  en OpenAI. Con los nombres propios de oCabra y con `gpt-image-*` sigue
+  siendo `b64_json`.
+  **Acción:** solo si llamabas a oCabra con un nombre `dall-e-*` sin
+  `response_format` y leías `b64_json`; pide `response_format: "b64_json"`.
+
+---
+
 ## 0.79.0 — 2026-11-14
 
 ### Cambios

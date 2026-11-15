@@ -710,6 +710,14 @@ async def lifespan(app: FastAPI):
     app.state.openai_tts_compat = openai_tts_compat
     logger.info("openai_tts_compat_ready")
 
+    # Same shim for OpenAI image model names (gpt-image-1, dall-e-3...).
+    from ocabra.core.openai_image_compat import OpenAIImageCompatRegistry
+
+    openai_image_compat = OpenAIImageCompatRegistry()
+    async with _ASL() as _session:
+        await openai_image_compat.load_all(_session)
+    app.state.openai_image_compat = openai_image_compat
+
     # Bloque 20 — DurationEstimator (Nivel 1). Runs a background refresh loop
     # that recomputes per-model calibrations from request_stats every
     # ``estimator_refresh_interval_s``. Kicked off eagerly here so /estimate
@@ -928,6 +936,7 @@ Consulta `GET /v1/models` para ver los modelos disponibles.
 | **Text-to-Speech** | `/v1/audio/speech` | tts (Kokoro, Bark, Qwen3-TTS), chatterbox, voxtral, piper |
 | **Speech-to-Text** | `/v1/audio/transcriptions` | whisper (faster-whisper, Whisper) |
 | **Generacion de imagenes** | `/v1/images/generations` | diffusers |
+| **Edicion de imagenes** | `/v1/images/edits` | diffusers |
 | **Generacion de musica** | `/v1/audio/generate` | acestep |
 | **Reranking** | `/v1/rerank` | vllm |
 | **Scoring de pares** | `/v1/score` | vllm |
@@ -1001,6 +1010,32 @@ sin pagar un cold-start. Consulta `GET /v1/models` para ver los disponibles y
 sus `routing_targets` actuales. Las cabeceras `X-Ocabra-Router` /
 `X-Ocabra-Router-Target` indican a que perfil apuntaste y cual respondio
 realmente.
+
+Un router solo elige entre los destinos que saben hacer lo que pide el
+endpoint. `recomendado-imagen` sirve para los dos endpoints de imagen: genera
+con un modelo en `/v1/images/generations` y edita con otro en
+`/v1/images/edits`.
+
+## Imagen al estilo OpenAI
+
+Un cliente escrito para la API de imagenes de OpenAI funciona sin cambios
+salvo la URL base y la clave:
+
+- `model`: `gpt-image-1`, `gpt-image-1-mini`, `dall-e-3` o `dall-e-2` se
+  resuelven al perfil que el administrador haya fijado en el modo
+  compatibilidad (normalmente `recomendado-imagen`). Sin `model` se trata
+  como `dall-e-2`, igual que OpenAI. Un nombre sin fijar da 404.
+- Ediciones: las imagenes pueden ir en `image` o en `image[]` (como las manda
+  el SDK); la primera es la base y el resto, referencias. `mask` es opcional.
+- `size`: cualquier `AnchoxAlto` (`1024x1024`, `1536x1024`, `1024x1536`...);
+  `auto` o un valor no reconocido es 1024x1024.
+- `quality`: `low` usa la mitad de pasos de inferencia que el perfil, `high` y
+  `hd` la vez y media; `medium`, `standard` y `auto` los del perfil. Si mandas
+  `num_inference_steps`, gana ese.
+- `response_format`: `url` por defecto con `dall-e-*` (o sin `model`),
+  `b64_json` con el resto, como OpenAI. Se acepta siempre el que pidas.
+- `background`, `output_format`, `output_compression`, `moderation` y
+  `style` se aceptan y se ignoran: la imagen sale siempre en PNG.
 
 ## Formatos de audio (TTS)
 
@@ -1176,16 +1211,18 @@ def _custom_openapi():
                     "multipart/form-data": {
                         "schema": {
                             "type": "object",
-                            "required": ["image", "model", "prompt"],
+                            "required": ["prompt"],
                             "properties": {
-                                "image": {"type": "string", "format": "binary", "description": "Imagen base PNG a editar."},
+                                "image": {"type": "string", "format": "binary", "description": "Imagen base PNG a editar. Obligatoria, aquí o en image[]."},
+                                "image[]": {"type": "array", "items": {"type": "string", "format": "binary"}, "description": "Como la manda el SDK de OpenAI: una o varias imágenes; la primera es la base y el resto, referencias."},
                                 "mask": {"type": "string", "format": "binary", "description": "PNG opcional; pixeles transparentes marcan el area a repintar. Sin mask, edicion img2img sobre la imagen completa."},
                                 "image_ref_1": {"type": "string", "format": "binary", "description": "Imagen de referencia extra opcional (pipelines multi-imagen, hasta 3)."},
                                 "image_ref_2": {"type": "string", "format": "binary"},
                                 "image_ref_3": {"type": "string", "format": "binary"},
-                                "model": {"type": "string", "description": "Profile ID del modelo de edicion."},
+                                "model": {"type": "string", "description": "Profile ID, router (recomendado-imagen) o nombre de OpenAI fijado en el modo compatibilidad (gpt-image-1, dall-e-2...)."},
+                                "quality": {"type": "string", "enum": ["low", "medium", "high", "auto", "standard", "hd"], "description": "Se traduce a pasos de inferencia sobre los del perfil: low x0,5, high/hd x1,5. Si mandas num_inference_steps, gana ese."},
                                 "prompt": {"type": "string", "description": "Descripcion de la edicion."},
-                                "response_format": {"type": "string", "enum": ["b64_json", "url"], "default": "b64_json"},
+                                "response_format": {"type": "string", "enum": ["b64_json", "url"], "description": "Por defecto b64_json; url si el modelo pedido es dall-e-* o no se manda, como OpenAI."},
                                 "n": {"type": "integer", "default": 1},
                                 "size": {"type": "string"},
                                 "negative_prompt": {"type": "string"},
@@ -1344,9 +1381,13 @@ app.include_router(video_router, prefix="/ocabra", include_in_schema=False)
 from ocabra.api.internal.profiles import router as profiles_router  # noqa: E402
 
 app.include_router(profiles_router, prefix="/ocabra", include_in_schema=False)
+from ocabra.api.internal.openai_image_compat import (  # noqa: E402
+    router as openai_image_compat_router,
+)
 from ocabra.api.internal.openai_tts_compat import router as openai_tts_compat_router  # noqa: E402
 
 app.include_router(openai_tts_compat_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(openai_image_compat_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(logical_models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)

@@ -21,3 +21,18 @@ class OpenAITTSVoiceMapOut(BaseModel):
     target_profile_id: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class OpenAIImageModelMapUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_profile_id: str = Field(..., min_length=1, max_length=512)
+
+
+class OpenAIImageModelMapOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    openai_model: str
+    target_profile_id: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

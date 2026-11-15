@@ -11,6 +11,7 @@ import json
 import re
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -45,6 +46,75 @@ logger = structlog.get_logger(__name__)
 
 # Allowed values for the OpenAI `response_format` field.
 _RESPONSE_FORMATS = {"b64_json", "url"}
+
+# OpenAI ``quality`` → factor over the profile's own number of inference
+# steps. gpt-image-* sends low/medium/high/auto, dall-e-3 standard/hd. A
+# client that sends ``num_inference_steps`` itself keeps its value.
+_QUALITY_STEP_FACTOR = {
+    "low": 0.5,
+    "medium": 1.0,
+    "standard": 1.0,
+    "auto": 1.0,
+    "high": 1.5,
+    "hd": 1.5,
+}
+
+
+def _resolve_openai_image_compat(
+    request: Request, user: UserContext, model_id: str
+) -> tuple[str, UserContext]:
+    """Translate an OpenAI image model name (``gpt-image-1``, ``dall-e-3``…)
+    to the oCabra profile pinned for it, authorised like a virtual router.
+
+    Without a pin the name passes through unchanged, so every client that
+    already sends an oCabra profile id is unaffected. With one, access is
+    checked against the OpenAI name the caller sent and only its target is
+    added to this request's context (same semantics as the TTS shim).
+    """
+    compat = getattr(request.app.state, "openai_image_compat", None)
+    target = compat.resolve(model_id) if compat is not None else None
+    if not target:
+        return model_id, user
+    from ocabra.core.openai_image_compat import OPENAI_DEFAULT_IMAGE_MODEL
+
+    requested = model_id or OPENAI_DEFAULT_IMAGE_MODEL
+    if not user.can_access_model(requested):
+        raise _openai_error(
+            f"The model '{requested}' does not exist.",
+            "invalid_request_error",
+            param="model",
+            code="model_not_found",
+            status_code=404,
+        )
+    return target, replace(user, accessible_model_ids={*user.accessible_model_ids, target})
+
+
+def _default_response_format(requested_model: str, explicit: Any) -> str:
+    """``response_format`` when the client sends none.
+
+    OpenAI answers ``url`` by default for dall-e-2/dall-e-3 (and ``model``
+    omitted, which means dall-e-2); gpt-image-* only ever returns
+    ``b64_json``. oCabra's own names keep ``b64_json``.
+    """
+    if explicit:
+        return str(explicit)
+    if not requested_model or requested_model.startswith("dall-e"):
+        return "url"
+    return "b64_json"
+
+
+def _apply_quality(merged_body: dict[str, Any], client_body: dict[str, Any]) -> None:
+    """Turn OpenAI ``quality`` into inference steps, relative to the profile."""
+    if "num_inference_steps" in client_body:
+        return
+    factor = _QUALITY_STEP_FACTOR.get(str(client_body.get("quality") or "").lower())
+    if factor is None or factor == 1.0:
+        return
+    try:
+        base = int(merged_body.get("num_inference_steps") or 20)
+    except (TypeError, ValueError):
+        base = 20
+    merged_body["num_inference_steps"] = max(1, round(base * factor))
 
 # Generated filenames are <uuid>.png — restrict the public route to that shape
 # so the file server can never be coerced into reading arbitrary paths.
@@ -101,9 +171,12 @@ async def image_generations(
     or ``url`` (image is persisted to disk and a temporary URL is returned).
     """
     body = await request.json()
-    model_id: str = body.get("model", "")
+    requested_model: str = body.get("model", "") or ""
+    model_id, user = _resolve_openai_image_compat(request, user, requested_model)
+    if model_id != requested_model:
+        body = {**body, "model": model_id}
 
-    response_format = body.get("response_format", "b64_json")
+    response_format = _default_response_format(requested_model, body.get("response_format"))
     if response_format not in _RESPONSE_FORMATS:
         raise HTTPException(
             status_code=400,
@@ -137,10 +210,15 @@ async def image_generations(
         model_manager,
         profile_registry,
         user=user,
+        request_body=body,
+        router_resolver=getattr(request.app.state, "router_resolver", None),
+        request_state=request.state,
+        required_capability="image_generation",
     )
     check_capability(state, "image_generation", "image generation")
 
     merged_body = merge_profile_defaults(profile, body)
+    _apply_quality(merged_body, body)
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
 
     # Capture load state up front so we can surface it as headers on the
@@ -209,18 +287,21 @@ async def image_generations(
 @router.post("/images/edits", summary="Edit image", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def image_edits(
     request: Request,
-    image: UploadFile,
     user: Annotated[UserContext, Depends(get_openai_user)],
+    image: UploadFile | None = None,
 ) -> Any:
     """
     Edit an image from a text prompt (OpenAI ``/v1/images/edits`` compatible).
 
     Accepts ``multipart/form-data`` with:
 
-    * ``image`` — base PNG to edit (required).
+    * ``image`` — base PNG to edit (required). OpenAI's SDK sends one or
+      several as ``image[]`` (gpt-image-1 takes up to 16); both spellings
+      work, the first image is the base and the rest are references.
     * ``mask`` — optional PNG; transparent pixels mark the area to repaint.
       When omitted the edit is performed as img2img over the full image.
-    * ``model`` — profile_id (required).
+    * ``model`` — profile_id, router, or an OpenAI name pinned in the
+      compatibility mode (``gpt-image-1``, ``dall-e-2``…).
     * ``prompt`` — edit description (required).
     * ``n``, ``size``, ``response_format``, ``user`` — same semantics as
       ``/v1/images/generations``.
@@ -233,9 +314,12 @@ async def image_edits(
     form = await request.form(
         max_part_size=max(1, int(settings.openai_image_max_part_size_mb)) * 1024 * 1024
     )
-    model_id: str = form.get("model", "")
+    requested_model: str = str(form.get("model", "") or "")
+    model_id, user = _resolve_openai_image_compat(request, user, requested_model)
     prompt: str = form.get("prompt", "")
-    response_format: str = form.get("response_format", "b64_json")
+    response_format: str = _default_response_format(
+        requested_model, form.get("response_format")
+    )
 
     if response_format not in _RESPONSE_FORMATS:
         raise HTTPException(
@@ -256,19 +340,36 @@ async def image_edits(
             param="prompt",
         )
 
+    # Every uploaded image, in order: ``image`` (repeated or not) and OpenAI's
+    # ``image[]``. The first one is the base, the rest are references.
+    uploads = [
+        part
+        for key in ("image", "image[]")
+        for part in form.getlist(key)
+        if hasattr(part, "read")
+    ]
+    if image is None and uploads:
+        image = uploads[0]
+    if image is None:
+        raise _openai_error(
+            "The 'image' field is required.",
+            "invalid_request_error",
+            param="image",
+        )
     image_bytes = await image.read()
     # Optional extra reference images for native multi-image edit pipelines
     # (Qwen-Image-Edit-Plus takes up to 3). Accepts either repeated ``image``
-    # form fields or explicit ``image_ref_1``/``image_ref_2`` slots — the UI
-    # uses the latter so the primary image stays under ``image``.
+    # / ``image[]`` form fields or explicit ``image_ref_1``/``image_ref_2``
+    # slots — the UI uses the latter so the primary image stays under
+    # ``image``.
     extra_image_bytes: list[bytes] = []
     for extra_key in ("image_ref_1", "image_ref_2", "image_ref_3"):
         extra_upload = form.get(extra_key)
         if extra_upload is not None and hasattr(extra_upload, "read"):
             extra_image_bytes.append(await extra_upload.read())
     if not extra_image_bytes:
-        for extra_upload in form.getlist("image"):
-            if extra_upload is image or not hasattr(extra_upload, "read"):
+        for extra_upload in uploads:
+            if extra_upload is image:
                 continue
             extra_image_bytes.append(await extra_upload.read())
     mask_upload = form.get("mask")
@@ -338,6 +439,10 @@ async def image_edits(
         model_manager,
         profile_registry,
         user=user,
+        request_body={"model": model_id, "prompt": prompt},
+        router_resolver=getattr(request.app.state, "router_resolver", None),
+        request_state=request.state,
+        required_capability="image_editing",
     )
     check_capability(state, "image_editing", "image editing")
 
@@ -347,7 +452,7 @@ async def image_edits(
 
     request_body: dict[str, Any] = {"prompt": prompt}
     for field in ("negative_prompt", "num_inference_steps", "guidance_scale",
-                  "strength", "seed"):
+                  "strength", "seed", "quality"):
         val = form.get(field)
         if val is not None and not hasattr(val, "read"):
             request_body[field] = val
@@ -363,6 +468,7 @@ async def image_edits(
             ) from exc
 
     merged_body = merge_profile_defaults(profile, request_body)
+    _apply_quality(merged_body, request_body)
     worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
 
     size_raw = form.get("size")
