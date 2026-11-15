@@ -428,7 +428,7 @@ async def resolve_profile(
     request_body: dict | None = None,
     router_resolver: object | None = None,
     request_state: object | None = None,
-    required_capability: str | None = None,
+    required_capability: str | tuple[str, ...] | None = None,
 ) -> tuple[ModelProfile, ModelState]:
     """Resolve a *profile_id* to its ``(ModelProfile, ModelState)`` pair.
 
@@ -513,13 +513,7 @@ async def resolve_profile(
                     required_capability=required_capability,
                 )
             except NoRoutableTargetError as exc:
-                raise _openai_error(
-                    str(exc),
-                    "server_error",
-                    param="model",
-                    code="router_no_target",
-                    status_code=503,
-                ) from exc
+                raise router_pick_error(exc) from exc
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None and target.base_model_id is not None:
                 runtime_plan = await resolve_profile_runtime_plan(
@@ -1624,6 +1618,64 @@ def fairness_kv_budget(
     if capacity <= 0:
         return None, 0
     return capacity, reservation
+
+
+def router_pick_error(exc: Exception) -> HTTPException:
+    """HTTP answer for a router that found no target.
+
+    No target with the capability the request needs → 400
+    ``model_not_capable``, the same a plain model without it answers. Any
+    other reason (all disabled, all missing) → 503 ``router_no_target``.
+    """
+    from ocabra.core.router_resolver import NoCapableTargetError
+
+    if isinstance(exc, NoCapableTargetError):
+        return _openai_error(
+            str(exc),
+            "invalid_request_error",
+            param="model",
+            code="model_not_capable",
+        )
+    return _openai_error(
+        str(exc),
+        "server_error",
+        param="model",
+        code="router_no_target",
+        status_code=503,
+    )
+
+
+def chat_required_capabilities(body: dict, content_kinds: set[str]) -> tuple[str, ...]:
+    """What a chat request needs from the model, for a router to choose by.
+
+    The same checks ``check_capability`` makes after resolution, but known
+    before it: a router can then skip a warm target that would only answer
+    400 (2026-11-15: ``recomendado-sota`` sent images to whichever target
+    was loaded, with or without vision).
+    """
+    wanted: list[str] = []
+    if body.get("tools"):
+        wanted.append("tools")
+    if "image_url" in content_kinds:
+        wanted.append("vision")
+    if "input_audio" in content_kinds:
+        wanted.append("audio_input")
+    if "video_url" in content_kinds:
+        wanted.append("video_input")
+    return tuple(wanted)
+
+
+def ollama_required_capabilities(body: dict) -> tuple[str, ...]:
+    """``chat_required_capabilities`` for Ollama-native bodies: images travel
+    as base64 lists in ``images`` (per message in /api/chat, top-level in
+    /api/generate)."""
+    wanted: list[str] = []
+    if body.get("tools"):
+        wanted.append("tools")
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    if body.get("images") or any(isinstance(m, dict) and m.get("images") for m in messages):
+        wanted.append("vision")
+    return tuple(wanted)
 
 
 def check_capability(state: ModelState, capability: str, endpoint: str) -> None:

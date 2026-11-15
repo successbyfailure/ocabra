@@ -35,6 +35,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.output_limits import apply_declared_output_limit
+from ocabra.core.router_resolver import NoRoutableTargetError
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 from ocabra.database import AsyncSessionLocal
 
@@ -43,6 +44,7 @@ from ._deps import (
     ClientGoneError,
     await_unless_client_gone,
     build_model_status_headers,
+    chat_required_capabilities,
     check_capability,
     ensure_worker_loaded,
     fairness_kv_budget,
@@ -61,6 +63,7 @@ from ._deps import (
     raise_upstream_http_error,
     resolve_profile,
     resolve_profile_runtime_plan,
+    router_pick_error,
     sse_ocabra_event,
     stream_error_details,
     to_backend_body,
@@ -263,7 +266,15 @@ async def chat_completions(
             and router_resolver.is_router(profile)
         ):
             router_profile = profile
-            resolved = await router_resolver.pick(profile, request_body=body)
+            try:
+                resolved = await router_resolver.pick(
+                    profile,
+                    request_body=body,
+                    required_capability=chat_required_capabilities(body, _content_kinds) or None,
+                )
+            except NoRoutableTargetError as exc:
+                # Antes se escapaba como 500 en el camino de streaming.
+                raise router_pick_error(exc) from exc
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None and target.profile_id != profile.profile_id:
                 note_router_resolution(profile, target)
@@ -342,6 +353,7 @@ async def chat_completions(
         request_body=body,
         router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
+        required_capability=chat_required_capabilities(body, _content_kinds) or None,
     )
     check_capability(state, "chat", "chat completions")
     if body.get("tools"):
@@ -650,7 +662,18 @@ def _router_reroute(
     now) and stream from it, with no further reroute."""
 
     async def _again():
-        resolved = await router_resolver.pick(router_profile, request_body=body)
+        try:
+            resolved = await router_resolver.pick(
+                router_profile,
+                request_body=body,
+                required_capability=chat_required_capabilities(body, content_kinds) or None,
+            )
+        except NoRoutableTargetError:
+            yield _sse_error(
+                f"Router '{router_profile.profile_id}' has no target available right now.",
+                "worker_unloaded",
+            )
+            return
         target = await profile_registry.get(resolved.target_profile_id)
         if target is None or target.profile_id == router_profile.profile_id:
             yield _sse_error(

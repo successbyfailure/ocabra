@@ -26,6 +26,7 @@ from ocabra.api.openai._deps import (
     get_model_manager,
     get_profile_registry,
     merge_profile_defaults,
+    ollama_required_capabilities,
     resolve_profile,
 )
 from ocabra.config import settings
@@ -145,6 +146,7 @@ async def generate(
             request_body=body,
             router_resolver=getattr(request.app.state, "router_resolver", None),
             request_state=request.state,
+            required_capability=ollama_required_capabilities(body) or None,
         )
         merged_body = merge_profile_defaults(profile, body)
         # El tope de salida declarado del perfil no se enviaba al backend: una

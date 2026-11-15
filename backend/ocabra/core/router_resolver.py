@@ -93,6 +93,19 @@ class NoRoutableTargetError(RuntimeError):
     """Raised when no enabled router target can serve the request."""
 
 
+class NoCapableTargetError(NoRoutableTargetError):
+    """No target of the router has what the request needs (``vision`` for an
+    image, ``image_editing`` for an edit...). Not transient: the caller should
+    answer like a plain model without the capability (400), not 503."""
+
+    def __init__(self, router_id: str, capabilities: tuple[str, ...]) -> None:
+        self.router_id = router_id
+        self.capabilities = capabilities
+        super().__init__(
+            f"No model behind router '{router_id}' supports {', '.join(capabilities)}."
+        )
+
+
 class RouterResolver:
     """Stateless router — one instance per app, injected everywhere."""
 
@@ -132,7 +145,7 @@ class RouterResolver:
         *,
         request_body: dict | None = None,
         exclude_session_id: str | None = None,
-        required_capability: str | None = None,
+        required_capability: str | tuple[str, ...] | None = None,
     ) -> ResolvedTarget:
         """Walk the router's ``routing_targets`` and pick the best one now.
 
@@ -140,7 +153,9 @@ class RouterResolver:
         cannot serve the endpoint asking. One router can then front models
         that each do one job — ``recomendado-imagen`` generates with one and
         edits with another, the endpoint decides — instead of sending an edit
-        to a text-to-image model because it was warm (2026-11-15).
+        to a text-to-image model because it was warm (2026-11-15). A tuple
+        requires all of them: a chat with an image and tools needs a target
+        with ``vision`` and ``tools``.
 
         Two-pass rule (2026-10-29 — previously a single pass only asked "would
         loading THIS target disrupt a busy neighbour", never "is a lower-
@@ -204,7 +219,7 @@ class RouterResolver:
             if (
                 required_capability
                 and not self.is_router(target)
-                and not await self._target_has_capability(target, required_capability)
+                and not await self._target_has_capabilities(target, required_capability)
             ):
                 audit.append(CandidateAudit(target_id, "not_capable"))
                 continue
@@ -400,12 +415,21 @@ class RouterResolver:
             last_resort.reason = "forced_fallback"
             last_resort.considered = audit
             return last_resort
+        if required_capability and any(a.outcome == "not_capable" for a in audit):
+            wanted = (
+                (required_capability,)
+                if isinstance(required_capability, str)
+                else tuple(required_capability)
+            )
+            raise NoCapableTargetError(router.profile_id, wanted)
         raise NoRoutableTargetError(
             f"router '{router.profile_id}' has no enabled target capable of serving the request"
         )
 
-    async def _target_has_capability(self, target: ModelProfile, capability: str) -> bool:
-        """Whether ``target``'s model can serve ``capability``.
+    async def _target_has_capabilities(
+        self, target: ModelProfile, capabilities: str | tuple[str, ...]
+    ) -> bool:
+        """Whether ``target``'s model can serve every one of ``capabilities``.
 
         Uses the same capabilities ``/v1/models`` publishes (live when loaded,
         last-known otherwise), not the raw state: a diffusers model that was
@@ -421,7 +445,8 @@ class RouterResolver:
         if state is None:
             return True
         caps, _source = resolve_display_capabilities(state)
-        return bool(caps.get(capability))
+        wanted = (capabilities,) if isinstance(capabilities, str) else capabilities
+        return all(caps.get(cap) for cap in wanted)
 
     # Note: the previous ``_should_skip_for_busy`` helper (estimator-based
     # tie-break for loaded-but-busy targets) was removed on 2026-09-15.

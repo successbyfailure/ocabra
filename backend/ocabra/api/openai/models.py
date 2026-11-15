@@ -30,9 +30,17 @@ from ._deps import (
 
 router = APIRouter()
 
-# Capabilities the router resolver checks per endpoint (``required_capability``
-# in the image endpoints): a router has them if any of its targets has them.
-_ENDPOINT_ROUTED_CAPABILITIES = ("image_generation", "image_editing")
+# Capabilities the router resolver chooses by (``required_capability``): the
+# image endpoints ask for generation/editing, chat for tools/vision/audio/video
+# according to what the request carries. A router has them if any target has.
+_ENDPOINT_ROUTED_CAPABILITIES = (
+    "image_generation",
+    "image_editing",
+    "tools",
+    "vision",
+    "audio_input",
+    "video_input",
+)
 
 
 async def _context_metadata(
@@ -391,7 +399,7 @@ async def list_models(
             "object": "model",
             "created": now_ts,
             "owned_by": "ocabra",
-            "capabilities": list(primary.get("capabilities") or []),
+            "capabilities": _ollama_cap_list(router_caps),
             "ocabra": {
                 **primary_meta,
                 "kind": "router",

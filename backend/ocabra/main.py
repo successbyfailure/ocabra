@@ -1011,10 +1011,16 @@ sus `routing_targets` actuales. Las cabeceras `X-Ocabra-Router` /
 `X-Ocabra-Router-Target` indican a que perfil apuntaste y cual respondio
 realmente.
 
-Un router solo elige entre los destinos que saben hacer lo que pide el
-endpoint. `recomendado-imagen` sirve para los dos endpoints de imagen: genera
-con un modelo en `/v1/images/generations` y edita con otro en
-`/v1/images/edits`.
+Un router solo elige entre los destinos que saben hacer lo que pide la
+peticion. En chat (`/v1/chat/completions`, `/api/chat`, `/api/generate`): si
+lleva imagenes, solo destinos con vision; si lleva `tools`, solo con
+herramientas; lo mismo con audio y video. Un destino cargado que no sirve no
+gana por estar cargado. Si ningun destino del router puede, la respuesta es
+400 `model_not_capable`, igual que con un modelo concreto. En `/v1/models` un
+router anuncia `vision`, `tools`, `audio_input`, `video_input`,
+`image_generation` e `image_editing` si alguno de sus destinos la tiene.
+`recomendado-imagen` sirve para los dos endpoints de imagen: genera con un
+modelo en `/v1/images/generations` y edita con otro en `/v1/images/edits`.
 
 ## Imagen al estilo OpenAI
 

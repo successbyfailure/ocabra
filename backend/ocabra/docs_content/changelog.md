@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.81.0 — 2026-11-15
+
+### Correcciones
+
+- **Las imágenes a `recomendado-sota` van a un modelo con visión.** El router
+  elegía destino sin mirar si la petición llevaba imágenes: si el modelo
+  cargado en ese momento no tenía visión (`ornith-1.5:35b`, `flint:40b`, los
+  `nemotron`…), respondía 400 aunque `gemma4:26b` o `qwen3.8:27b`, en la
+  misma lista, sí podían. Ahora un router solo elige entre los destinos que
+  tienen lo que pide la petición: visión con imágenes, herramientas con
+  `tools`, audio y vídeo. Vale para `/v1/chat/completions` y para
+  `/api/chat` y `/api/generate` de Ollama.
+- **`recomendado-sota` anuncia visión en `/v1/models`.** Antes copiaba las
+  capacidades de su primer destino, que no la tiene, y un cliente como
+  OpenWebUI no ofrecía adjuntar imágenes. Un router anuncia `vision`,
+  `tools`, `audio_input` y `video_input` si alguno de sus destinos la tiene.
+- **Router sin ningún destino capaz: 400, no 500.** Con streaming, una
+  petición a un router que no podía servirla se escapaba como error 500.
+  Ahora responde 400 `model_not_capable`, como un modelo concreto sin esa
+  capacidad. Si el motivo es otro (todos los destinos deshabilitados), sigue
+  siendo 503 `router_no_target`.
+
+---
+
 ## 0.80.1 — 2026-11-15
 
 ### Correcciones
