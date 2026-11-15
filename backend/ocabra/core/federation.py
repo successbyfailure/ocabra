@@ -95,6 +95,14 @@ class PeerState:
     tunnel_session: Any = None  # TunnelConnection | None
     tunnel_client: httpx.AsyncClient | None = None
     dialer: Any = None  # TunnelDialer | None (tunnel_out only)
+    # Real traffic we sent it (heartbeats excluded): used to shut idle cloud
+    # nodes down and shown in the UI.
+    requests_proxied: int = 0
+    last_proxied_at: float | None = None
+
+    def mark_proxied(self) -> None:
+        self.requests_proxied += 1
+        self.last_proxied_at = time.time()
 
     @property
     def is_tunnel(self) -> bool:
@@ -139,6 +147,8 @@ class FederationManager:
         self._local_client: httpx.AsyncClient | None = None
         self.join_service: Any = None  # FederationJoinService, set in start()
         self.gpu_manager: Any = None  # set by main; used to describe us when joining
+        self.cloud: Any = None  # CloudNodeManager (nodes we rent), set in start()
+        self._self_destruct: Any = None  # NodeSelfDestruct when *we* are a cloud pod
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -167,6 +177,14 @@ class FederationManager:
         for peer in self._peers.values():
             self._start_dialer_if_ready(peer)
         self.join_service.start()
+        from ocabra.core.cloud.manager import CloudNodeManager
+        from ocabra.core.cloud.node_watchdog import NodeSelfDestruct
+
+        self.cloud = CloudNodeManager(self)
+        self.cloud.start()
+        self._self_destruct = NodeSelfDestruct.from_env(self)
+        if self._self_destruct is not None:
+            self._self_destruct.start()
         # Initial poll — block startup briefly so the first request sees fresh
         # peer state. Don't fail startup if a peer is unreachable.
         try:
@@ -194,6 +212,10 @@ class FederationManager:
             except asyncio.CancelledError:
                 pass
             self._heartbeat_task = None
+        if self.cloud is not None:
+            await self.cloud.stop()
+        if self._self_destruct is not None:
+            await self._self_destruct.stop()
         if self.join_service is not None:
             await self.join_service.stop()
         for peer in self._peers.values():
@@ -1012,6 +1034,7 @@ class FederationManager:
             The httpx.Response from the peer.
         """
         client = self._require_client(peer)
+        peer.mark_proxied()
         proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
         proxy_headers = self._build_proxy_headers(peer, headers)
         url = f"{peer.base_url}{path}"
@@ -1041,6 +1064,7 @@ class FederationManager:
             Raw bytes from the SSE stream.
         """
         client = self._require_client(peer)
+        peer.mark_proxied()
         proxy_headers = self._build_proxy_headers(peer, headers)
         url = f"{peer.base_url}{path}"
         async with client.stream(
@@ -1082,6 +1106,7 @@ class FederationManager:
             The httpx.Response from the peer.
         """
         client = self._require_client(peer)
+        peer.mark_proxied()
         proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
         proxy_headers = self._build_proxy_headers(peer, headers, drop_content_type=True)
         url = f"{peer.base_url}{path}"

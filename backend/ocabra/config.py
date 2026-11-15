@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.82.2"
+APP_VERSION = "0.83.0"
 
 
 class Settings(BaseSettings):
@@ -933,6 +933,9 @@ class Settings(BaseSettings):
     # on startup if not already joined. Implies federation_enabled.
     federation_join_url: str = Field(default="", description="Hub to join on startup (https://...)")
     federation_join_invite: str = Field(default="", description="Invite code for federation_join_url")
+    # Cloud node (set on the pod by the hub when it launches it): terminate this
+    # pod if no hub tunnel has been up for this many minutes. 0 = off.
+    ocabra_cloud_self_destruct_minutes: int = Field(default=0, ge=0)
 
     # Agents + MCP (plan: docs/tasks/agents-mcp-plan.md)
     mcp_tools_cache_ttl_seconds: int = Field(

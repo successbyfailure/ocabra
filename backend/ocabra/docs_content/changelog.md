@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.83.0 — 2026-11-15
+
+### Novedades
+
+- **Nodos temporales en RunPod.** Desde la página Federación (o con
+  `POST /ocabra/cloud/nodes`) se alquila una GPU en RunPod que arranca oCabra,
+  se une sola a la federación con una invitación de un uso y empieza a atender
+  peticiones como un nodo más. No necesita puertos abiertos.
+- **Límites de gasto que se cumplen solos:** cada nodo tiene tiempo máximo y
+  apagado por inactividad, hay un tope de gasto mensual, y un nodo que no
+  consigue unirse en 30 minutos se termina. Si el servidor que lo lanzó
+  desaparece, el propio nodo se apaga tras 20 minutos sin conexión. Los pods
+  `ocabra-…` que RunPod tenga y oCabra no conozca se muestran para poder
+  terminarlos.
+
+---
+
 ## 0.82.2 — 2026-11-15
 
 ### Correcciones

@@ -1738,6 +1738,7 @@ export interface FederationPeer {
   last_error: string | null;
   tunnel_connected: boolean;
   tunnel: FederationTunnelInfo | null;
+  requests_proxied: number;
 }
 
 export interface FederationNodeInfo {
@@ -1781,6 +1782,82 @@ export interface FederationInvite {
   /** Only in the create response. */
   code?: string;
   join_url?: string | null;
+}
+
+export interface CloudSettings {
+  image: string;
+  cloud_type: "COMMUNITY" | "SECURE";
+  default_ttl_minutes: number;
+  default_idle_minutes: number;
+  monthly_budget_usd: number;
+  container_disk_gb: number;
+  pass_hf_token: boolean;
+  hub_url: string;
+}
+
+export interface CloudOrphan {
+  pod_id: string;
+  name: string;
+  status: string;
+  cost_per_hr: number | null;
+}
+
+export interface CloudProviderInfo {
+  provider: string;
+  has_api_key: boolean;
+  settings: CloudSettings;
+  month_spend_usd?: number;
+  orphans?: CloudOrphan[];
+  last_reconcile_at?: number | null;
+  last_error?: string | null;
+}
+
+export interface CloudGpuType {
+  id: string;
+  name: string;
+  memory_gb: number | null;
+  community: boolean;
+  secure: boolean;
+  price_community: number | null;
+  price_secure: number | null;
+  max_count: { community?: number; secure?: number };
+  availability: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+}
+
+export interface CloudNode {
+  id: string;
+  provider: string;
+  provider_pod_id: string | null;
+  name: string;
+  status: "creating" | "starting" | "running" | "stopping" | "terminated" | "error";
+  gpu_type_id: string;
+  gpu_count: number;
+  cloud_type: string;
+  image: string;
+  cost_per_hr: number | null;
+  cost_so_far: number;
+  max_runtime_minutes: number | null;
+  idle_shutdown_minutes: number | null;
+  terminates_at: string | null;
+  peer_id: string | null;
+  peer_name: string | null;
+  peer_online: boolean;
+  requests_proxied: number;
+  error: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  last_active_at: string | null;
+  terminated_at: string | null;
+  terminate_reason: string | null;
+}
+
+export interface CloudNodeLaunch {
+  gpu_type_id: string;
+  gpu_count?: number;
+  cloud_type?: "COMMUNITY" | "SECURE";
+  max_runtime_minutes?: number;
+  idle_shutdown_minutes?: number;
+  name?: string;
 }
 
 export interface FederationJoinOutgoing {

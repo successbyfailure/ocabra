@@ -1445,6 +1445,9 @@ app.include_router(backends_router, prefix="/ocabra", include_in_schema=False)
 from ocabra.api.internal.federation import router as federation_router  # noqa: E402
 
 app.include_router(federation_router, prefix="/ocabra", include_in_schema=False)
+from ocabra.api.internal.cloud import router as cloud_router  # noqa: E402
+
+app.include_router(cloud_router, prefix="/ocabra", include_in_schema=False)
 
 # Stream 3-A: OpenAI API
 from ocabra.api.openai import router as openai_router  # noqa: E402

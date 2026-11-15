@@ -1,0 +1,49 @@
+"""Pydantic schemas for cloud GPU nodes."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CloudSettingsUpdate(BaseModel):
+    """Provider defaults. Unset fields keep their value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str | None = Field(default=None, min_length=3, max_length=512)
+    cloud_type: str | None = Field(default=None, pattern=r"^(COMMUNITY|SECURE)$")
+    default_ttl_minutes: int | None = Field(default=None, ge=0, le=7 * 24 * 60)
+    default_idle_minutes: int | None = Field(default=None, ge=0, le=24 * 60)
+    monthly_budget_usd: float | None = Field(default=None, ge=0, le=100_000)
+    container_disk_gb: int | None = Field(default=None, ge=20, le=2000)
+    pass_hf_token: bool | None = None
+    hub_url: str | None = Field(default=None, max_length=1024)
+
+
+class CloudProviderUpdate(BaseModel):
+    """Set the API key (validated against the provider) and/or defaults.
+
+    ``api_key=""`` deletes the stored key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str | None = Field(default=None, max_length=512)
+    settings: CloudSettingsUpdate | None = None
+
+
+class CloudNodeLaunch(BaseModel):
+    """Launch a pod that joins this node's federation as a swarm peer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gpu_type_id: str = Field(..., min_length=1, max_length=128)
+    gpu_count: int = Field(default=1, ge=1, le=8)
+    cloud_type: str | None = Field(default=None, pattern=r"^(COMMUNITY|SECURE)$")
+    max_runtime_minutes: int | None = Field(
+        default=None, ge=0, le=7 * 24 * 60, description="0 = no limit; None = provider default"
+    )
+    idle_shutdown_minutes: int | None = Field(
+        default=None, ge=0, le=24 * 60, description="0 = never; None = provider default"
+    )
+    name: str | None = Field(default=None, max_length=40, pattern=r"^[A-Za-z0-9 _.-]*$")

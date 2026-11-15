@@ -1,0 +1,197 @@
+"""Cloud GPU nodes: rent a pod, it joins the federation, kill it when done.
+
+- GET    /cloud/runpod                 — key configured?, defaults, month spend, orphans
+- PUT    /cloud/runpod                 — set API key / defaults
+- GET    /cloud/runpod/gpu-types       — GPU catalog with price and stock
+- GET    /cloud/nodes                  — nodes (live and recent)
+- POST   /cloud/nodes                  — launch one
+- DELETE /cloud/nodes/{id}             — terminate it
+- POST   /cloud/orphans/{pod_id}/terminate — kill an untracked ocabra- pod
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from ocabra.api._deps_auth import UserContext, require_role
+from ocabra.schemas.cloud import CloudNodeLaunch, CloudProviderUpdate
+
+router = APIRouter(tags=["cloud"])
+
+
+def _cloud(request: Request):
+    fm = getattr(request.app.state, "federation_manager", None)
+    if fm is None or fm.cloud is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Activa la federación: los nodos en la nube se unen a ella",
+        )
+    return fm.cloud
+
+
+def _err(exc: Exception) -> HTTPException:
+    from ocabra.core.cloud.manager import CloudError
+
+    if isinstance(exc, CloudError):
+        return HTTPException(status_code=exc.status, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get(
+    "/cloud/runpod",
+    summary="RunPod configuration",
+    description="Whether an API key is stored, the launch defaults, this month's spend and orphan pods.",
+)
+async def get_runpod(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> dict:
+    """Return RunPod config and spend.
+
+    Returns:
+        ``{provider, has_api_key, settings, month_spend_usd, orphans, last_reconcile_at, last_error}``.
+    """
+    cloud = _cloud(request)
+    out = await cloud.get_provider("runpod")
+    out["month_spend_usd"] = await cloud.month_spend()
+    out["orphans"] = cloud.orphans
+    out["last_reconcile_at"] = cloud.last_reconcile_at
+    out["last_error"] = cloud.last_error
+    return out
+
+
+@router.put(
+    "/cloud/runpod",
+    summary="Update RunPod configuration",
+    description="Store the API key (checked against RunPod first; empty string deletes it) and/or defaults.",
+    responses={401: {"description": "Invalid API key"}},
+)
+async def put_runpod(
+    body: CloudProviderUpdate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Update RunPod configuration.
+
+    Returns:
+        The same shape as ``GET /cloud/runpod`` minus spend/orphans.
+    """
+    cloud = _cloud(request)
+    try:
+        return await cloud.update_provider(
+            "runpod",
+            api_key=body.api_key,
+            settings=body.settings.model_dump(exclude_none=True) if body.settings else None,
+        )
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.get(
+    "/cloud/runpod/gpu-types",
+    summary="RunPod GPU catalog",
+    description="GPU types with community/secure hourly price per GPU and stock. Cached 5 minutes.",
+)
+async def runpod_gpu_types(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> list[dict]:
+    """List RunPod GPU types, cheapest first.
+
+    Returns:
+        ``[{id, name, memory_gb, community, secure, price_community, price_secure,
+        max_count, availability}]``.
+    """
+    try:
+        return await _cloud(request).gpu_types("runpod")
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.get(
+    "/cloud/nodes",
+    summary="Cloud nodes",
+    description="Nodes we launched (live and the last terminated ones) with cost so far and deadlines.",
+)
+async def list_nodes(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> list[dict]:
+    """List cloud nodes.
+
+    Returns:
+        Nodes with status, cost_per_hr, cost_so_far, terminates_at, peer link and
+        terminate_reason.
+    """
+    return await _cloud(request).list_nodes()
+
+
+@router.post(
+    "/cloud/nodes",
+    summary="Launch a cloud node",
+    description=(
+        "Create a pod running the ocabra-node image with a single-use invite: it "
+        "joins this federation as a swarm peer on its own. Refused when the "
+        "monthly budget is spent or there is no public https URL."
+    ),
+    responses={
+        402: {"description": "Insufficient RunPod balance"},
+        409: {"description": "No API key / budget spent / no capacity / no public URL"},
+    },
+)
+async def launch_node(
+    body: CloudNodeLaunch,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Launch a cloud node.
+
+    Returns:
+        The new node (status ``starting``).
+    """
+    try:
+        return await _cloud(request).launch(**body.model_dump())
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.delete(
+    "/cloud/nodes/{node_id}",
+    summary="Terminate a cloud node",
+    description="Terminate the pod (stops billing), remove its peer and revoke its invite.",
+    responses={404: {"description": "Not found"}},
+)
+async def terminate_node(
+    node_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Terminate a cloud node.
+
+    Returns:
+        The node, now ``terminated``.
+    """
+    try:
+        return await _cloud(request).terminate(node_id, reason="manual")
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.post(
+    "/cloud/orphans/{pod_id}/terminate",
+    summary="Terminate an orphan pod",
+    description="Terminate a pod named ocabra-… that RunPod has but this node does not track.",
+    responses={404: {"description": "Not an orphan"}},
+)
+async def terminate_orphan(
+    pod_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Terminate an orphan pod.
+
+    Returns:
+        ``{"ok": True}``.
+    """
+    try:
+        await _cloud(request).terminate_orphan(pod_id)
+    except Exception as exc:
+        raise _err(exc) from exc
+    return {"ok": True}

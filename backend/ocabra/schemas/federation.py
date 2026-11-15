@@ -80,6 +80,10 @@ class PeerOut(BaseModel):
         description="tunnel_out: connecting | connected | backoff | rejected | stopped",
     )
     last_error: str | None = None
+    requests_proxied: int = Field(
+        default=0, description="Requests we routed to this peer since start (heartbeats excluded)"
+    )
+    last_proxied_at: float | None = None
     tunnel_connected: bool = False
     tunnel: dict[str, Any] | None = Field(
         default=None,

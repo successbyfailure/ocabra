@@ -84,6 +84,8 @@ def _peer_out(p: PeerState, cls: type[PeerOut] = PeerOut, **extra) -> PeerOut:
         join_verification_code=p.join_verification_code,
         dial_state=dialer.state if dialer is not None else None,
         last_error=dialer.last_error if dialer is not None else None,
+        requests_proxied=p.requests_proxied,
+        last_proxied_at=p.last_proxied_at,
         tunnel_connected=p.tunnel_connected,
         tunnel=tunnel,
         **extra,

@@ -1,0 +1,594 @@
+"""Temporary federation nodes on rented GPUs (RunPod first).
+
+Launching a node = create a single-use federation **invite**, then create a pod
+running the ``ocabra-node`` image with ``FEDERATION_JOIN_URL`` (us) and
+``FEDERATION_JOIN_INVITE`` in its environment. The pod boots, dials us through
+the reverse tunnel and appears as a swarm peer — it needs no open port.
+
+Money is the risk, so a reconcile loop runs every ``RECONCILE_INTERVAL_S``:
+
+* syncs every live node with the provider (status, real cost/hour, gone pods);
+* links a node to the peer it became (via its invite's join request);
+* terminates on **TTL**, **idle** (no real traffic routed to it), **join
+  timeout** (never managed to join) and **monthly budget**;
+* lists **orphans**: pods named ``ocabra-…`` the provider has but we don't
+  track (e.g. the DB row was lost) so the UI can kill them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import secrets
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Protocol
+
+import structlog
+
+if TYPE_CHECKING:
+    from ocabra.core.federation import FederationManager
+
+logger = structlog.get_logger(__name__)
+
+RECONCILE_INTERVAL_S = 30
+STARTUP_DELAY_S = 15
+POD_NAME_PREFIX = "ocabra-"
+# A pod that has been running this long without joining us is broken (bad
+# image, can't reach us): stop paying for it.
+JOIN_TIMEOUT = timedelta(minutes=30)
+INVITE_TTL_HOURS = 2
+LIVE_STATUSES = ("creating", "starting", "running", "stopping")
+
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "image": "ghcr.io/successbyfailure/ocabra-node:latest",
+    "cloud_type": "COMMUNITY",
+    "default_ttl_minutes": 240,
+    "default_idle_minutes": 30,
+    "monthly_budget_usd": 20.0,
+    "container_disk_gb": 80,
+    "pass_hf_token": False,
+    "hub_url": "",  # empty = PUBLIC_URL
+}
+
+
+class CloudError(Exception):
+    """A cloud operation failed; ``status`` is the HTTP status to report."""
+
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+@dataclass
+class PodSpec:
+    name: str
+    image: str
+    gpu_type_id: str
+    gpu_count: int
+    cloud_type: str
+    container_disk_gb: int
+    env: dict[str, str]
+
+
+@dataclass
+class PodInfo:
+    pod_id: str
+    name: str
+    status: str  # our vocabulary: starting | running | stopping | terminated | error
+    cost_per_hr: float | None
+    gpu_type_id: str | None = None
+    raw: dict[str, Any] | None = None
+
+
+class CloudProviderClient(Protocol):
+    """What the manager needs from a provider."""
+
+    async def validate(self) -> None: ...
+
+    async def gpu_types(self) -> list[dict[str, Any]]: ...
+
+    async def create_pod(self, spec: PodSpec) -> PodInfo: ...
+
+    async def list_pods(self) -> list[PodInfo]: ...
+
+    async def terminate_pod(self, pod_id: str) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def node_cost(row: Any, *, since: datetime | None = None, now: datetime | None = None) -> float:
+    """Approximate spend of a node (cost/hour × billed time), optionally from *since*."""
+    if not row.cost_per_hr or row.started_at is None and row.created_at is None:
+        return 0.0
+    start = row.started_at or row.created_at
+    end = row.terminated_at or now or _now()
+    if since is not None and start < since:
+        start = since
+    if end <= start:
+        return 0.0
+    return float(row.cost_per_hr) * (end - start).total_seconds() / 3600.0
+
+
+def _month_start(now: datetime) -> datetime:
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+class CloudNodeManager:
+    """Launches, watches and kills cloud nodes for one FederationManager."""
+
+    def __init__(
+        self,
+        fm: FederationManager,
+        *,
+        client_factory: Any = None,
+    ) -> None:
+        self.fm = fm
+        self._client_factory = client_factory or self._default_client_factory
+        self._task: asyncio.Task | None = None
+        self.orphans: list[dict[str, Any]] = []
+        self.last_reconcile_at: float | None = None
+        self.last_error: str | None = None
+        self._gpu_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _default_client_factory(provider: str, api_key: str) -> CloudProviderClient:
+        if provider == "runpod":
+            from ocabra.core.cloud.runpod import RunPodClient
+
+            return RunPodClient(api_key)
+        raise CloudError(f"Proveedor no soportado: {provider}", 400)
+
+    # ── lifecycle ────────────────────────────────────────────────
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop(), name="cloud-node-reconcile")
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._task
+            self._task = None
+
+    async def _loop(self) -> None:
+        # Let the API finish booting (and the tunnels reconnect) first.
+        await asyncio.sleep(STARTUP_DELAY_S)
+        while True:
+            try:
+                await self.reconcile()
+                self.last_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — keep the watchdog alive
+                self.last_error = str(exc) or type(exc).__name__
+                logger.warning("cloud_reconcile_error", error=self.last_error)
+            await asyncio.sleep(RECONCILE_INTERVAL_S)
+
+    # ── provider config ──────────────────────────────────────────
+
+    async def get_provider(self, provider: str = "runpod") -> dict[str, Any]:
+        """Settings (merged with defaults) and whether an API key is stored."""
+        from ocabra.db.cloud import CloudProvider
+
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudProvider, provider)
+        settings = {**DEFAULT_SETTINGS, **((row.settings or {}) if row else {})}
+        return {
+            "provider": provider,
+            "has_api_key": bool(row and row.api_key_encrypted),
+            "settings": settings,
+        }
+
+    async def update_provider(
+        self,
+        provider: str,
+        *,
+        api_key: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Store the API key (validated against the provider first) and/or settings."""
+        from ocabra.db.cloud import CloudProvider
+
+        if api_key:
+            client = self._client_factory(provider, api_key)
+            try:
+                await client.validate()
+            finally:
+                await client.aclose()
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudProvider, provider)
+            if row is None:
+                row = CloudProvider(provider=provider, settings={})
+                session.add(row)
+            if api_key is not None:
+                row.api_key_encrypted = self.fm.encrypt_api_key(api_key) if api_key else None
+            if settings:
+                clean = {k: v for k, v in settings.items() if k in DEFAULT_SETTINGS}
+                row.settings = {**(row.settings or {}), **clean}
+            await session.commit()
+        self._gpu_cache = None
+        return await self.get_provider(provider)
+
+    async def _client(self, provider: str = "runpod") -> CloudProviderClient:
+        from ocabra.db.cloud import CloudProvider
+
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudProvider, provider)
+        if row is None or not row.api_key_encrypted:
+            raise CloudError("Configura primero la API key de RunPod", 409)
+        return self._client_factory(provider, self.fm.decrypt_api_key(row.api_key_encrypted))
+
+    async def gpu_types(self, provider: str = "runpod") -> list[dict[str, Any]]:
+        """GPU types with prices/availability (cached 5 min)."""
+        if self._gpu_cache is not None and time.monotonic() - self._gpu_cache[0] < 300:
+            return self._gpu_cache[1]
+        client = await self._client(provider)
+        try:
+            types = await client.gpu_types()
+        finally:
+            await client.aclose()
+        self._gpu_cache = (time.monotonic(), types)
+        return types
+
+    # ── spend ────────────────────────────────────────────────────
+
+    async def month_spend(self) -> float:
+        import sqlalchemy as sa
+
+        from ocabra.db.cloud import CloudNode
+
+        now = _now()
+        start = _month_start(now)
+        async with self.fm.session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        sa.select(CloudNode).where(
+                            sa.or_(
+                                CloudNode.terminated_at.is_(None), CloudNode.terminated_at >= start
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return round(sum(node_cost(r, since=start, now=now) for r in rows), 4)
+
+    # ── nodes ────────────────────────────────────────────────────
+
+    def _node_out(self, row: Any) -> dict[str, Any]:
+        peer = None
+        if row.peer_id is not None:
+            peer = next((p for p in self.fm.get_all_peers() if p.peer_id == str(row.peer_id)), None)
+        now = _now()
+        deadline = None
+        if row.max_runtime_minutes and row.status in LIVE_STATUSES:
+            deadline = (row.started_at or row.created_at) + timedelta(
+                minutes=row.max_runtime_minutes
+            )
+        return {
+            "id": str(row.id),
+            "provider": row.provider,
+            "provider_pod_id": row.provider_pod_id,
+            "name": row.name,
+            "status": row.status,
+            "gpu_type_id": row.gpu_type_id,
+            "gpu_count": row.gpu_count,
+            "cloud_type": row.cloud_type,
+            "image": row.image,
+            "cost_per_hr": row.cost_per_hr,
+            "cost_so_far": round(node_cost(row, now=now), 4),
+            "max_runtime_minutes": row.max_runtime_minutes,
+            "idle_shutdown_minutes": row.idle_shutdown_minutes,
+            "terminates_at": deadline,
+            "peer_id": str(row.peer_id) if row.peer_id else None,
+            "peer_name": peer.name if peer else None,
+            "peer_online": bool(peer and peer.online),
+            "requests_proxied": peer.requests_proxied if peer else 0,
+            "error": row.error,
+            "created_at": row.created_at,
+            "started_at": row.started_at,
+            "last_active_at": row.last_active_at,
+            "terminated_at": row.terminated_at,
+            "terminate_reason": row.terminate_reason,
+        }
+
+    async def list_nodes(self, *, include_terminated: bool = True) -> list[dict[str, Any]]:
+        import sqlalchemy as sa
+
+        from ocabra.db.cloud import CloudNode
+
+        async with self.fm.session_factory() as session:
+            q = sa.select(CloudNode).order_by(CloudNode.created_at.desc()).limit(50)
+            if not include_terminated:
+                q = q.where(CloudNode.status.in_(LIVE_STATUSES))
+            rows = (await session.execute(q)).scalars().all()
+        return [self._node_out(r) for r in rows]
+
+    async def launch(
+        self,
+        *,
+        gpu_type_id: str,
+        gpu_count: int = 1,
+        cloud_type: str | None = None,
+        max_runtime_minutes: int | None = None,
+        idle_shutdown_minutes: int | None = None,
+        name: str | None = None,
+        provider: str = "runpod",
+    ) -> dict[str, Any]:
+        """Create a pod that joins us as a swarm peer. Returns the node."""
+        from ocabra.db.cloud import CloudNode
+
+        cfg = (await self.get_provider(provider))["settings"]
+        hub_url = (cfg.get("hub_url") or getattr(self.fm.settings, "public_url", "") or "").rstrip(
+            "/"
+        )
+        if not hub_url.startswith("https://"):
+            raise CloudError(
+                "Hace falta una URL pública https para que el nodo se conecte "
+                "(PUBLIC_URL o hub_url en la configuración de la nube)",
+                409,
+            )
+        budget = float(cfg.get("monthly_budget_usd") or 0)
+        if budget > 0 and await self.month_spend() >= budget:
+            raise CloudError(f"Presupuesto del mes agotado (${budget:.2f})", 409)
+
+        ttl = max_runtime_minutes if max_runtime_minutes is not None else cfg["default_ttl_minutes"]
+        idle = (
+            idle_shutdown_minutes
+            if idle_shutdown_minutes is not None
+            else cfg["default_idle_minutes"]
+        )
+        node_id = uuid.uuid4()
+        pod_name = f"{POD_NAME_PREFIX}{(name or gpu_type_id).lower().replace(' ', '-')[:40]}-{node_id.hex[:6]}"
+        invite = await self.fm.join_service.create_invite(
+            label=f"cloud:{pod_name}", max_uses=1, expires_in_hours=INVITE_TTL_HOURS
+        )
+        env = {
+            "FEDERATION_JOIN_URL": hub_url,
+            "FEDERATION_JOIN_INVITE": invite["code"],
+            "FEDERATION_NODE_NAME": pod_name,
+            "FEDERATION_ENABLED": "true",
+            "OCABRA_CLOUD_NODE_ID": str(node_id),
+            # Fresh secrets per pod: nothing from this node is reused there.
+            "JWT_SECRET": secrets.token_urlsafe(48),
+            "OCABRA_ADMIN_PASS": secrets.token_urlsafe(24),
+            # The pod kills itself if it can't keep its tunnel (see node watchdog).
+            "OCABRA_CLOUD_SELF_DESTRUCT_MINUTES": "20",
+        }
+        if cfg.get("pass_hf_token"):
+            hf = getattr(self.fm.settings, "hf_token", "") or ""
+            if hf:
+                env["HF_TOKEN"] = hf
+
+        spec = PodSpec(
+            name=pod_name,
+            image=str(cfg["image"]),
+            gpu_type_id=gpu_type_id,
+            gpu_count=max(1, int(gpu_count)),
+            cloud_type=(cloud_type or cfg["cloud_type"]).upper(),
+            container_disk_gb=int(cfg["container_disk_gb"]),
+            env=env,
+        )
+        client = await self._client(provider)
+        try:
+            pod = await client.create_pod(spec)
+        except Exception:
+            await self.fm.join_service.revoke_invite(invite["id"])
+            raise
+        finally:
+            await client.aclose()
+
+        async with self.fm.session_factory() as session:
+            row = CloudNode(
+                id=node_id,
+                provider=provider,
+                provider_pod_id=pod.pod_id,
+                name=pod_name,
+                status=pod.status if pod.status in LIVE_STATUSES else "starting",
+                gpu_type_id=gpu_type_id,
+                gpu_count=spec.gpu_count,
+                cloud_type=spec.cloud_type,
+                image=spec.image,
+                cost_per_hr=pod.cost_per_hr,
+                max_runtime_minutes=ttl or None,
+                idle_shutdown_minutes=idle or None,
+                invite_id=uuid.UUID(invite["id"]),
+                started_at=_now(),
+            )
+            session.add(row)
+            await session.commit()
+            out = self._node_out(row)
+        logger.info(
+            "cloud_node_launched",
+            name=pod_name,
+            pod_id=pod.pod_id,
+            gpu=gpu_type_id,
+            cost_per_hr=pod.cost_per_hr,
+        )
+        return out
+
+    async def terminate(self, node_id: str, *, reason: str = "manual") -> dict[str, Any]:
+        """Terminate the pod, remove its peer and revoke its invite."""
+        from ocabra.db.cloud import CloudNode
+
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudNode, uuid.UUID(node_id))
+            if row is None:
+                raise CloudError("Nodo no encontrado", 404)
+            pod_id, provider = row.provider_pod_id, row.provider
+            peer_id, invite_id = row.peer_id, row.invite_id
+            already = row.status == "terminated"
+        if not already and pod_id:
+            client = await self._client(provider)
+            try:
+                await client.terminate_pod(pod_id)
+            finally:
+                await client.aclose()
+        if peer_id is not None:
+            with contextlib.suppress(Exception):
+                await self.fm.remove_peer(str(peer_id))
+        if invite_id is not None:
+            with contextlib.suppress(Exception):
+                await self.fm.join_service.revoke_invite(str(invite_id))
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudNode, uuid.UUID(node_id))
+            if row is not None and row.status != "terminated":
+                row.status = "terminated"
+                row.terminated_at = _now()
+                row.terminate_reason = reason
+            await session.commit()
+            out = self._node_out(row)
+        logger.info("cloud_node_terminated", node=out["name"], reason=reason)
+        return out
+
+    async def terminate_orphan(self, pod_id: str, provider: str = "runpod") -> None:
+        if not any(o["pod_id"] == pod_id for o in self.orphans):
+            raise CloudError("Ese pod no figura como huérfano", 404)
+        client = await self._client(provider)
+        try:
+            await client.terminate_pod(pod_id)
+        finally:
+            await client.aclose()
+        self.orphans = [o for o in self.orphans if o["pod_id"] != pod_id]
+
+    # ── watchdog ─────────────────────────────────────────────────
+
+    async def reconcile(self, provider: str = "runpod") -> None:
+        """One pass of the watchdog (see module docstring)."""
+        import sqlalchemy as sa
+
+        from ocabra.db.cloud import CloudNode
+        from ocabra.db.federation import FederationJoinRequest
+
+        async with self._lock:
+            async with self.fm.session_factory() as session:
+                live = (
+                    (
+                        await session.execute(
+                            sa.select(CloudNode).where(CloudNode.status.in_(LIVE_STATUSES))
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            cfg = await self.get_provider(provider)
+            if not cfg["has_api_key"]:
+                self.orphans = []
+                return
+
+            client = await self._client(provider)
+            try:
+                pods = await client.list_pods()
+            finally:
+                await client.aclose()
+            self.last_reconcile_at = time.time()
+            by_id = {p.pod_id: p for p in pods}
+            tracked = {r.provider_pod_id for r in live}
+            # Orphans: ours by name, unknown to the DB (live rows only: a
+            # terminated row whose pod still exists is also an orphan).
+            self.orphans = [
+                {
+                    "pod_id": p.pod_id,
+                    "name": p.name,
+                    "status": p.status,
+                    "cost_per_hr": p.cost_per_hr,
+                }
+                for p in pods
+                if p.name.startswith(POD_NAME_PREFIX)
+                and p.pod_id not in tracked
+                and p.status != "terminated"
+            ]
+
+            now = _now()
+            to_kill: list[tuple[str, str]] = []
+            budget = float(cfg["settings"].get("monthly_budget_usd") or 0)
+            over_budget = budget > 0 and await self.month_spend() >= budget
+
+            async with self.fm.session_factory() as session:
+                for row in live:
+                    row = await session.get(CloudNode, row.id)
+                    if row is None:
+                        continue
+                    pod = by_id.get(row.provider_pod_id or "")
+                    if pod is None:
+                        if row.status != "creating":
+                            row.status = "terminated"
+                            row.terminated_at = row.terminated_at or now
+                            row.terminate_reason = row.terminate_reason or "gone"
+                        continue
+                    if pod.status == "terminated":
+                        row.status = "terminated"
+                        row.terminated_at = row.terminated_at or now
+                        row.terminate_reason = row.terminate_reason or "provider"
+                    elif pod.status in LIVE_STATUSES:
+                        row.status = pod.status
+                    elif pod.status in ("exited", "error"):
+                        # We never stop pods on purpose, and a stopped one still
+                        # bills its disk: an exited/errored node is finished.
+                        row.error = row.error or f"El pod pasó a {pod.status} en el proveedor"
+                        to_kill.append((str(row.id), pod.status))
+                        continue
+                    if pod.cost_per_hr:
+                        row.cost_per_hr = pod.cost_per_hr
+                    if row.status == "terminated":
+                        continue
+
+                    # Link to the peer it became.
+                    if row.peer_id is None and row.invite_id is not None:
+                        req = (
+                            await session.execute(
+                                sa.select(FederationJoinRequest).where(
+                                    FederationJoinRequest.invite_id == row.invite_id,
+                                    FederationJoinRequest.peer_id.is_not(None),
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if req is not None:
+                            row.peer_id = req.peer_id
+                    peer = None
+                    if row.peer_id is not None:
+                        peer = next(
+                            (p for p in self.fm.get_all_peers() if p.peer_id == str(row.peer_id)),
+                            None,
+                        )
+                    if peer is not None and peer.last_proxied_at:
+                        active = datetime.fromtimestamp(peer.last_proxied_at, UTC)
+                        if row.last_active_at is None or active > row.last_active_at:
+                            row.last_active_at = active
+
+                    started = row.started_at or row.created_at
+                    if over_budget:
+                        to_kill.append((str(row.id), "budget"))
+                    elif row.max_runtime_minutes and now - started >= timedelta(
+                        minutes=row.max_runtime_minutes
+                    ):
+                        to_kill.append((str(row.id), "ttl"))
+                    elif row.peer_id is None and now - started >= JOIN_TIMEOUT:
+                        row.error = "No llegó a unirse a la federación (¿imagen o red?)"
+                        to_kill.append((str(row.id), "join_timeout"))
+                    elif (
+                        row.idle_shutdown_minutes
+                        and peer is not None
+                        and peer.online
+                        and now - (row.last_active_at or started)
+                        >= timedelta(minutes=row.idle_shutdown_minutes)
+                    ):
+                        to_kill.append((str(row.id), "idle"))
+                await session.commit()
+
+        for node_id, reason in to_kill:
+            try:
+                await self.terminate(node_id, reason=reason)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cloud_auto_terminate_failed", node=node_id, error=str(exc))

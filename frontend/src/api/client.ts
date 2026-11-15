@@ -63,6 +63,11 @@ import type {
   FederationJoinRequest,
   FederationInvite,
   FederationJoinOutgoing,
+  CloudProviderInfo,
+  CloudSettings,
+  CloudGpuType,
+  CloudNode,
+  CloudNodeLaunch,
   FederationPeerCreate,
   FederationPeerUpdate,
   FederationTestResult,
@@ -1812,6 +1817,7 @@ export function toFederationPeer(raw: unknown): FederationPeer {
     dial_state: (d.dial_state ?? null) as string | null,
     last_error: (d.last_error ?? null) as string | null,
     tunnel_connected: Boolean(d.tunnel_connected ?? false),
+    requests_proxied: Number(d.requests_proxied ?? 0),
     tunnel: isRecord(d.tunnel)
       ? {
           remote_node_id: (d.tunnel.remote_node_id ?? null) as string | null,
@@ -3713,6 +3719,30 @@ export const api = {
           ...data,
         }),
       ),
+
+    cloud: {
+      getRunpod: async (): Promise<CloudProviderInfo> =>
+        request<CloudProviderInfo>("GET", "/ocabra/cloud/runpod"),
+      updateRunpod: async (data: {
+        api_key?: string;
+        settings?: Partial<CloudSettings>;
+      }): Promise<CloudProviderInfo> =>
+        request<CloudProviderInfo>("PUT", "/ocabra/cloud/runpod", data),
+      gpuTypes: async (): Promise<CloudGpuType[]> =>
+        request<CloudGpuType[]>("GET", "/ocabra/cloud/runpod/gpu-types"),
+      nodes: async (): Promise<CloudNode[]> =>
+        request<CloudNode[]>("GET", "/ocabra/cloud/nodes"),
+      launch: async (data: CloudNodeLaunch): Promise<CloudNode> =>
+        request<CloudNode>("POST", "/ocabra/cloud/nodes", data),
+      terminate: async (id: string): Promise<CloudNode> =>
+        request<CloudNode>("DELETE", `/ocabra/cloud/nodes/${encodeURIComponent(id)}`),
+      terminateOrphan: async (podId: string): Promise<void> => {
+        await request<unknown>(
+          "POST",
+          `/ocabra/cloud/orphans/${encodeURIComponent(podId)}/terminate`,
+        );
+      },
+    },
 
     joinCheck: async (id: string): Promise<FederationPeer> =>
       toFederationPeer(

@@ -23,6 +23,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { CloudSection } from "@/components/federation/CloudSection"
 import type {
   FederationInvite,
   FederationJoinRequest,
@@ -1064,6 +1065,8 @@ export function Federation() {
               </div>
             )}
           </section>
+
+          <CloudSection />
 
           {usableInvites.length > 0 && (
             <section className="space-y-2">
