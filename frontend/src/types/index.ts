@@ -670,6 +670,7 @@ export interface ServerConfig {
   realtimeDefaultTtsModel: string;
   federationEnabled: boolean;
   federationNodeName: string;
+  federationAcceptJoinRequests: boolean;
   batchPriorityEnabled: boolean;
   batchPreemptMode: "never" | "instant" | "conditional";
   batchPreemptMinElapsedS: number;
@@ -1699,6 +1700,21 @@ export interface FederationPeerLoad {
   gpu_utilization_avg_pct: number;
 }
 
+/** http: we call its URL · tunnel_in: it dials us · tunnel_out: we dial it */
+export type FederationConnectionMode = "http" | "tunnel_in" | "tunnel_out";
+/** manual: legacy one-way peer · swarm: "Soy parte del enjambre" · rules: "Mi server mis reglas" */
+export type FederationMode = "manual" | "swarm" | "rules";
+
+export interface FederationTunnelInfo {
+  remote_node_id: string | null;
+  remote_node_name: string | null;
+  remote_version: string | null;
+  connected_at: number | null;
+  active_streams: number;
+  requests_sent: number;
+  requests_served: number;
+}
+
 export interface FederationPeer {
   peer_id: string;
   name: string;
@@ -1711,6 +1727,68 @@ export interface FederationPeer {
   gpus: FederationPeerGpu[];
   models: FederationPeerModel[];
   load: FederationPeerLoad;
+  connection_mode: FederationConnectionMode;
+  mode: FederationMode;
+  notes: string | null;
+  remote_node_id: string | null;
+  local_access_level: "inference" | "full" | null;
+  join_state: "pending" | "denied" | "expired" | null;
+  join_verification_code: string | null;
+  dial_state: string | null;
+  last_error: string | null;
+  tunnel_connected: boolean;
+  tunnel: FederationTunnelInfo | null;
+}
+
+export interface FederationNodeInfo {
+  enabled: boolean;
+  node_id: string | null;
+  node_name: string | null;
+  public_url: string | null;
+  accept_join_requests: boolean;
+  version: string;
+  pending_join_requests: number;
+}
+
+export interface FederationJoinRequest {
+  id: string;
+  status: "pending" | "accepted" | "denied" | "expired";
+  mode: FederationMode;
+  remote_node_id: string;
+  remote_node_name: string;
+  remote_version: string | null;
+  message: string | null;
+  source_ip: string | null;
+  gpus: { name?: string; total_vram_mb?: number }[];
+  verification_code: string;
+  via_invite: boolean;
+  peer_id: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  decided_at: string | null;
+}
+
+export interface FederationInvite {
+  id: string;
+  label: string;
+  mode: FederationMode;
+  max_uses: number;
+  uses: number;
+  expires_at: string | null;
+  revoked: boolean;
+  usable: boolean;
+  created_at: string | null;
+  /** Only in the create response. */
+  code?: string;
+  join_url?: string | null;
+}
+
+export interface FederationJoinOutgoing {
+  hub_url: string;
+  message?: string;
+  invite_code?: string;
+  name?: string;
+  mode?: FederationMode;
 }
 
 export interface FederationPeerCreate {
@@ -1726,6 +1804,7 @@ export interface FederationPeerUpdate {
   api_key?: string;
   access_level?: "inference" | "full";
   enabled?: boolean;
+  notes?: string | null;
 }
 
 export interface FederationTestResult {

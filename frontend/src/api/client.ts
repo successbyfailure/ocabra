@@ -57,6 +57,12 @@ import type {
   BatchPriorityStatus,
   ServerPower,
   FederationPeer,
+  FederationConnectionMode,
+  FederationMode,
+  FederationNodeInfo,
+  FederationJoinRequest,
+  FederationInvite,
+  FederationJoinOutgoing,
   FederationPeerCreate,
   FederationPeerUpdate,
   FederationTestResult,
@@ -1614,6 +1620,9 @@ function toServerConfig(raw: unknown): ServerConfig {
     federationEnabled: Boolean(
       data.federationEnabled ?? data.federation_enabled ?? false,
     ),
+    federationAcceptJoinRequests: Boolean(
+      data.federationAcceptJoinRequests ?? data.federation_accept_join_requests ?? false,
+    ),
     federationNodeName: String(
       data.federationNodeName ?? data.federation_node_name ?? "",
     ),
@@ -1739,10 +1748,12 @@ function toServerConfig(raw: unknown): ServerConfig {
   };
 }
 
-function toFederationPeer(raw: unknown): FederationPeer {
+export function toFederationPeer(raw: unknown): FederationPeer {
   const d = isRecord(raw) ? raw : {};
   return {
-    peer_id: String(d.peer_id ?? d.peerId ?? ""),
+    // The API returns ``id``; reading only peer_id/peerId left every peer with
+    // an empty id, so edit/delete/test from the UI hit /peers/ and failed.
+    peer_id: String(d.id ?? d.peer_id ?? d.peerId ?? ""),
     name: String(d.name ?? ""),
     url: String(d.url ?? ""),
     access_level: String(d.access_level ?? d.accessLevel ?? "inference") as
@@ -1791,6 +1802,27 @@ function toFederationPeer(raw: unknown): FederationPeer {
         ),
       };
     })(),
+    connection_mode: String(d.connection_mode ?? "http") as FederationConnectionMode,
+    mode: String(d.mode ?? "manual") as FederationMode,
+    notes: (d.notes ?? null) as string | null,
+    remote_node_id: (d.remote_node_id ?? null) as string | null,
+    local_access_level: (d.local_access_level ?? null) as "inference" | "full" | null,
+    join_state: (d.join_state ?? null) as FederationPeer["join_state"],
+    join_verification_code: (d.join_verification_code ?? null) as string | null,
+    dial_state: (d.dial_state ?? null) as string | null,
+    last_error: (d.last_error ?? null) as string | null,
+    tunnel_connected: Boolean(d.tunnel_connected ?? false),
+    tunnel: isRecord(d.tunnel)
+      ? {
+          remote_node_id: (d.tunnel.remote_node_id ?? null) as string | null,
+          remote_node_name: (d.tunnel.remote_node_name ?? null) as string | null,
+          remote_version: (d.tunnel.remote_version ?? null) as string | null,
+          connected_at: d.tunnel.connected_at != null ? Number(d.tunnel.connected_at) : null,
+          active_streams: Number(d.tunnel.active_streams ?? 0),
+          requests_sent: Number(d.tunnel.requests_sent ?? 0),
+          requests_served: Number(d.tunnel.requests_served ?? 0),
+        }
+      : null,
   };
 }
 
@@ -3606,6 +3638,7 @@ export const api = {
               access_level: data.access_level,
             }),
             ...(data.enabled !== undefined && { enabled: data.enabled }),
+            ...(data.notes !== undefined && { notes: data.notes }),
           },
         ),
       ),
@@ -3622,6 +3655,70 @@ export const api = {
         await request<unknown>(
           "POST",
           `/ocabra/federation/peers/${encodeURIComponent(id)}/test`,
+        ),
+      ),
+
+    getNode: async (): Promise<FederationNodeInfo> =>
+      request<FederationNodeInfo>("GET", "/ocabra/federation/node"),
+
+    getJoinRequests: async (includeDecided = false): Promise<FederationJoinRequest[]> =>
+      request<FederationJoinRequest[]>(
+        "GET",
+        `/ocabra/federation/join-requests${includeDecided ? "?include_decided=true" : ""}`,
+      ),
+
+    acceptJoinRequest: async (
+      id: string,
+      data: { name?: string; notes?: string } = {},
+    ): Promise<FederationPeer> =>
+      toFederationPeer(
+        await request<unknown>(
+          "POST",
+          `/ocabra/federation/join-requests/${encodeURIComponent(id)}/accept`,
+          data,
+        ),
+      ),
+
+    denyJoinRequest: async (id: string): Promise<void> => {
+      await request<unknown>(
+        "POST",
+        `/ocabra/federation/join-requests/${encodeURIComponent(id)}/deny`,
+      );
+    },
+
+    getInvites: async (): Promise<FederationInvite[]> =>
+      request<FederationInvite[]>("GET", "/ocabra/federation/invites"),
+
+    createInvite: async (data: {
+      label: string;
+      max_uses?: number;
+      expires_in_hours?: number | null;
+    }): Promise<FederationInvite> =>
+      request<FederationInvite>("POST", "/ocabra/federation/invites", {
+        mode: "swarm",
+        ...data,
+      }),
+
+    revokeInvite: async (id: string): Promise<void> => {
+      await request<unknown>(
+        "DELETE",
+        `/ocabra/federation/invites/${encodeURIComponent(id)}`,
+      );
+    },
+
+    join: async (data: FederationJoinOutgoing): Promise<FederationPeer> =>
+      toFederationPeer(
+        await request<unknown>("POST", "/ocabra/federation/join", {
+          mode: "swarm",
+          ...data,
+        }),
+      ),
+
+    joinCheck: async (id: string): Promise<FederationPeer> =>
+      toFederationPeer(
+        await request<unknown>(
+          "POST",
+          `/ocabra/federation/peers/${encodeURIComponent(id)}/join-check`,
         ),
       ),
   },

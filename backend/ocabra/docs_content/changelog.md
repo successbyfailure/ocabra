@@ -16,6 +16,40 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.82.0 — 2026-11-15
+
+### Novedades
+
+- **Federación sin URL pública en uno de los lados.** Un oCabra puede unirse
+  al de otra persona (o a uno en la nube) aunque no tenga puertos abiertos:
+  abre él una conexión saliente `wss://…/ocabra/federation/tunnel` y por ella
+  viajan las peticiones en los dos sentidos, streaming y subidas de audio
+  incluidos. Solo el nodo al que se une necesita URL alcanzable.
+- **Unirse se pide.** `POST /ocabra/federation/join` (admin) envía la
+  solicitud al otro nodo; allí aparece en
+  `GET /ocabra/federation/join-requests` para aceptarla o denegarla, con un
+  código de verificación que ambos lados ven. Con una invitación
+  (`POST /ocabra/federation/invites`) se entra sin esperar aprobación. Los
+  endpoints públicos que usa el nodo que pide
+  (`POST /ocabra/federation/join-requests` y su `…/status`) están
+  desactivados salvo invitación o `federationAcceptJoinRequests: true`.
+- **Modo "Soy parte del enjambre":** federación mutua con control completo.
+  Cada lado crea un usuario de servicio `federation:<nodo>` con el que ejecuta
+  lo que le pide el otro, así que sus peticiones aparecen en tus estadísticas
+  con ese usuario.
+
+### Cambios de comportamiento
+
+- **Una petición que llega desde otro nodo de la federación ya no se reenvía
+  a un tercero.** Los nodos marcan lo que se mandan con la cabecera
+  `x-ocabra-federation-hop`; una petición con ella se atiende en local o no se
+  atiende, para que no pueda rebotar entre nodos cuyos heartbeats no
+  coinciden. Si tu cliente la envía (no debería), fuerzas el mismo efecto.
+- **El identificador del nodo es estable.** Si `FEDERATION_NODE_ID` está vacío
+  se genera uno la primera vez y se guarda; antes cambiaba en cada reinicio.
+
+---
+
 ## 0.81.6 — 2026-11-15
 
 ### Correcciones

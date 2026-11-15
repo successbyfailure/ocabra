@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
+import hmac
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -29,6 +32,21 @@ if TYPE_CHECKING:
     from ocabra.core.model_manager import ModelManager
 
 logger = structlog.get_logger(__name__)
+
+# Peers in tunnel mode have no URL: their httpx client talks to a
+# TunnelTransport, which ignores the host. This placeholder keeps the
+# ``f"{base}{path}"`` call sites identical for both modes.
+_TUNNEL_BASE_URL = "http://federation-tunnel.invalid"
+
+TUNNEL_MODES = frozenset({"tunnel_in", "tunnel_out"})
+
+# Set (by middleware in main.py) for requests that arrived *from* a peer. Such
+# a request is served here or not at all: forwarding it to yet another peer
+# could bounce it between nodes whose heartbeats disagree. ``get_remote_models``
+# returns nothing while it is set, which disables every remote path at once.
+federation_hop: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "federation_hop", default=None
+)
 
 # Maximum consecutive heartbeat failures before marking a peer offline.
 _MAX_FAILURES = 3
@@ -59,6 +77,46 @@ class PeerState:
     load: dict[str, Any] = field(default_factory=dict)
     consecutive_failures: int = 0
     _next_retry_at: float = 0.0
+    # "http" (we call url) | "tunnel_in" (peer dials us) | "tunnel_out" (we dial it)
+    connection_mode: str = "http"
+    mode: str = "manual"  # manual | swarm | rules
+    notes: str | None = None
+    remote_node_id: str | None = None
+    tunnel_token_hash: str | None = None
+    # How we serve the peer's requests over the tunnel (None = we don't).
+    local_api_key: str | None = None
+    local_user_id: str | None = None
+    local_access_level: str | None = None
+    # Outgoing join request awaiting the other side's decision.
+    join_state: str | None = None  # pending | denied | expired | None
+    join_request_id: str | None = None
+    join_poll_secret: str | None = None
+    join_verification_code: str | None = None
+    tunnel_session: Any = None  # TunnelConnection | None
+    tunnel_client: httpx.AsyncClient | None = None
+    dialer: Any = None  # TunnelDialer | None (tunnel_out only)
+
+    @property
+    def is_tunnel(self) -> bool:
+        return self.connection_mode in TUNNEL_MODES
+
+    @property
+    def tunnel_connected(self) -> bool:
+        return self.tunnel_session is not None and not self.tunnel_session.closed
+
+    @property
+    def base_url(self) -> str:
+        return _TUNNEL_BASE_URL if self.is_tunnel else self.url
+
+
+def hash_tunnel_token(token: str) -> str:
+    """SHA-256 hex of a tunnel token (only the hash is stored)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def new_tunnel_token() -> str:
+    """Fresh random tunnel token, prefixed so it is recognisable in configs."""
+    return "oct_" + secrets.token_urlsafe(32)
 
 
 class FederationManager:
@@ -78,6 +136,10 @@ class FederationManager:
         self._node_name = settings.federation_node_name or f"node-{self._node_id[:8]}"
         self._started_at: float = 0.0
         self._http_client: httpx.AsyncClient | None = None
+        # Our own API, used to serve peers' requests arriving over a tunnel.
+        self._local_client: httpx.AsyncClient | None = None
+        self.join_service: Any = None  # FederationJoinService, set in start()
+        self.gpu_manager: Any = None  # set by main; used to describe us when joining
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -94,7 +156,18 @@ class FederationManager:
             verify=self._settings.federation_verify_ssl,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
+        self._local_client = httpx.AsyncClient(
+            base_url=str(getattr(self._settings, "federation_local_url", "") or "http://127.0.0.1:8000"),
+            timeout=httpx.Timeout(None, connect=10.0),
+        )
+        await self._ensure_persistent_node_id()
         await self._load_peers_from_db()
+        from ocabra.core.federation_join import FederationJoinService
+
+        self.join_service = FederationJoinService(self)
+        for peer in self._peers.values():
+            self._start_dialer_if_ready(peer)
+        self.join_service.start()
         # Initial poll — block startup briefly so the first request sees fresh
         # peer state. Don't fail startup if a peer is unreachable.
         try:
@@ -122,6 +195,14 @@ class FederationManager:
             except asyncio.CancelledError:
                 pass
             self._heartbeat_task = None
+        if self.join_service is not None:
+            await self.join_service.stop()
+        for peer in self._peers.values():
+            await self._stop_dialer(peer)
+            await self._close_tunnel(peer)
+        if self._local_client is not None:
+            await self._local_client.aclose()
+            self._local_client = None
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
@@ -142,6 +223,38 @@ class FederationManager:
         if self._started_at == 0.0:
             return 0.0
         return time.monotonic() - self._started_at
+
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return self._session_factory
+
+    @property
+    def http_client(self) -> httpx.AsyncClient | None:
+        return self._http_client
+
+    async def _ensure_persistent_node_id(self) -> None:
+        """Keep ``node_id`` stable across restarts (peers know us by it).
+
+        Before join requests existed an empty ``FEDERATION_NODE_ID`` meant a new
+        random id per restart, which was harmless. Now it identifies us to the
+        nodes we joined, so the generated id is persisted as a config override.
+        """
+        if self._settings.federation_node_id:
+            return
+        try:
+            from ocabra.db.server_config import save_override
+
+            async with self._session_factory() as session:
+                await save_override(session, "federation_node_id", self._node_id)
+                await session.commit()
+            self._settings.federation_node_id = self._node_id
+            logger.info("federation_node_id_persisted", node_id=self._node_id)
+        except Exception as exc:  # noqa: BLE001 — not fatal: we just keep the ephemeral id
+            logger.warning("federation_node_id_persist_failed", error=str(exc))
 
     # ── Encryption helpers ───────────────────────────────────────
 
@@ -183,8 +296,36 @@ class FederationManager:
                 api_key=api_key,
                 access_level=row.access_level,
                 enabled=row.enabled,
+                **self._row_extras(row),
             )
         logger.info("federation_peers_loaded", count=len(self._peers))
+
+    def _row_extras(self, row: Any) -> dict[str, Any]:
+        """Tunnel/join fields of a FederationPeer row as PeerState kwargs."""
+
+        def _dec(value: str | None) -> str | None:
+            if not value:
+                return None
+            try:
+                return self.decrypt_api_key(value)
+            except Exception:  # noqa: BLE001
+                logger.warning("federation_peer_secret_decrypt_failed", peer=row.name)
+                return None
+
+        local_user_id = getattr(row, "local_user_id", None)
+        return {
+            "connection_mode": getattr(row, "connection_mode", None) or "http",
+            "mode": getattr(row, "mode", None) or "manual",
+            "notes": getattr(row, "notes", None),
+            "remote_node_id": getattr(row, "remote_node_id", None),
+            "tunnel_token_hash": getattr(row, "tunnel_token_hash", None),
+            "local_api_key": _dec(getattr(row, "local_api_key_encrypted", None)),
+            "local_user_id": str(local_user_id) if local_user_id else None,
+            "local_access_level": getattr(row, "local_access_level", None),
+            "join_state": getattr(row, "join_state", None),
+            "join_request_id": getattr(row, "join_request_id", None),
+            "join_poll_secret": _dec(getattr(row, "join_poll_secret_encrypted", None)),
+        }
 
     async def add_peer(
         self,
@@ -192,18 +333,39 @@ class FederationManager:
         url: str,
         api_key: str,
         access_level: str = "inference",
+        *,
+        connection_mode: str = "http",
+        notes: str | None = None,
+        tunnel_token: str | None = None,
+        mode: str = "manual",
+        remote_node_id: str | None = None,
+        local_api_key: str | None = None,
+        local_user_id: str | None = None,
+        local_access_level: str | None = None,
+        join_state: str | None = None,
+        join_request_id: str | None = None,
+        join_poll_secret: str | None = None,
+        enabled: bool = True,
     ) -> PeerState:
         """Add a new peer to the DB and runtime state.
 
         Args:
             name: Human-readable peer name (unique).
-            url: Base URL of the peer node.
-            api_key: API key for authenticating with the peer.
+            url: Base URL of the peer node (empty for tunnel peers).
+            api_key: API key for authenticating with the peer (empty for
+                tunnel peers: the peer authenticates *us* nothing, it dials in).
             access_level: Access level ('inference' or 'full').
+            connection_mode: ``"http"``, ``"tunnel_in"`` or ``"tunnel_out"``.
+            notes: Free text shown in the UI.
+            tunnel_token: For ``tunnel_in`` peers, the token the peer will
+                present (only its hash is stored). For ``tunnel_out`` pass the
+                token we present as ``api_key``.
+            mode, remote_node_id, local_*, join_*: see :class:`PeerState`.
 
         Returns:
             The newly created PeerState.
         """
+        token_hash = hash_tunnel_token(tunnel_token) if tunnel_token else None
         from ocabra.db.federation import FederationPeer
 
         peer_id = uuid.uuid4()
@@ -216,7 +378,22 @@ class FederationManager:
                 url=url.rstrip("/"),
                 api_key_encrypted=encrypted_key,
                 access_level=access_level,
-                enabled=True,
+                enabled=enabled,
+                connection_mode=connection_mode,
+                tunnel_token_hash=token_hash,
+                notes=notes,
+                mode=mode,
+                remote_node_id=remote_node_id,
+                local_api_key_encrypted=(
+                    self.encrypt_api_key(local_api_key) if local_api_key else None
+                ),
+                local_user_id=uuid.UUID(local_user_id) if local_user_id else None,
+                local_access_level=local_access_level,
+                join_state=join_state,
+                join_request_id=join_request_id,
+                join_poll_secret_encrypted=(
+                    self.encrypt_api_key(join_poll_secret) if join_poll_secret else None
+                ),
             )
             session.add(row)
             await session.commit()
@@ -227,7 +404,18 @@ class FederationManager:
             url=url.rstrip("/"),
             api_key=api_key,
             access_level=access_level,
-            enabled=True,
+            enabled=enabled,
+            connection_mode=connection_mode,
+            mode=mode,
+            notes=notes,
+            remote_node_id=remote_node_id,
+            tunnel_token_hash=token_hash,
+            local_api_key=local_api_key,
+            local_user_id=local_user_id,
+            local_access_level=local_access_level,
+            join_state=join_state,
+            join_request_id=join_request_id,
+            join_poll_secret=join_poll_secret,
         )
         self._peers[str(peer_id)] = state
         logger.info("federation_peer_added", peer_id=str(peer_id), name=name)
@@ -255,6 +443,11 @@ class FederationManager:
             deleted = result.rowcount > 0
 
         removed = self._peers.pop(peer_id, None)
+        if removed is not None:
+            await self._stop_dialer(removed)
+            await self._close_tunnel(removed, reason="peer removed")
+            if self.join_service is not None:
+                await self.join_service.on_peer_removed(removed)
         if deleted or removed:
             logger.info("federation_peer_removed", peer_id=peer_id)
             return True
@@ -289,6 +482,28 @@ class FederationManager:
             db_updates["access_level"] = kwargs["access_level"]
         if "enabled" in kwargs and kwargs["enabled"] is not None:
             db_updates["enabled"] = kwargs["enabled"]
+        if "notes" in kwargs:
+            db_updates["notes"] = kwargs["notes"] or None
+        if kwargs.get("tunnel_token"):
+            db_updates["tunnel_token_hash"] = hash_tunnel_token(kwargs["tunnel_token"])
+        # Internal fields (join / tunnel bookkeeping), set by the join service.
+        for plain in ("mode", "remote_node_id", "local_access_level", "join_state", "join_request_id"):
+            if plain in kwargs:
+                db_updates[plain] = kwargs[plain]
+        if "local_api_key" in kwargs:
+            db_updates["local_api_key_encrypted"] = (
+                self.encrypt_api_key(kwargs["local_api_key"]) if kwargs["local_api_key"] else None
+            )
+        if "local_user_id" in kwargs:
+            db_updates["local_user_id"] = (
+                uuid.UUID(kwargs["local_user_id"]) if kwargs["local_user_id"] else None
+            )
+        if "join_poll_secret" in kwargs:
+            db_updates["join_poll_secret_encrypted"] = (
+                self.encrypt_api_key(kwargs["join_poll_secret"])
+                if kwargs["join_poll_secret"]
+                else None
+            )
 
         if not db_updates:
             return self._peers.get(peer_id)
@@ -317,6 +532,31 @@ class FederationManager:
             peer.access_level = db_updates["access_level"]
         if "enabled" in db_updates:
             peer.enabled = db_updates["enabled"]
+            if not peer.enabled:
+                await self._close_tunnel(peer, reason="peer disabled")
+        if "notes" in db_updates:
+            peer.notes = db_updates["notes"]
+        if "tunnel_token_hash" in db_updates:
+            peer.tunnel_token_hash = db_updates["tunnel_token_hash"]
+            # A rotated token invalidates the live session too.
+            await self._close_tunnel(peer, reason="token rotated")
+        for plain in (
+            "mode",
+            "remote_node_id",
+            "local_access_level",
+            "join_state",
+            "join_request_id",
+            "local_api_key",
+            "local_user_id",
+            "join_poll_secret",
+        ):
+            if plain in kwargs:
+                setattr(peer, plain, kwargs[plain])
+        if peer.connection_mode == "tunnel_out":
+            # url / token / enabled / join_state changes: (re)start or stop dialing.
+            if any(k in kwargs for k in ("url", "api_key", "enabled", "join_state")):
+                await self._stop_dialer(peer)
+                self._start_dialer_if_ready(peer)
 
         logger.info("federation_peer_updated", peer_id=peer_id)
         return peer
@@ -342,6 +582,11 @@ class FederationManager:
         for peer in self._peers.values():
             if not peer.enabled:
                 continue
+            if peer.is_tunnel and not peer.tunnel_connected:
+                # Nothing to poll: the peer has to dial us. Offline right away,
+                # no failure counting/backoff (that is for flaky HTTP peers).
+                peer.online = False
+                continue
             # Skip offline peers until their backoff expires.
             if not peer.online and peer._next_retry_at > now:
                 logger.debug(
@@ -361,11 +606,12 @@ class FederationManager:
 
     async def _poll_peer(self, peer: PeerState) -> None:
         """Send a single heartbeat request to a peer."""
-        if self._http_client is None:
+        client = self._client_for(peer)
+        if client is None:
             return
-        url = f"{peer.url}/ocabra/federation/heartbeat"
+        url = f"{peer.base_url}/ocabra/federation/heartbeat"
         try:
-            resp = await self._http_client.get(
+            resp = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {peer.api_key}"},
             )
@@ -428,13 +674,22 @@ class FederationManager:
         if peer is None:
             return {"success": False, "error": "Peer not found"}
 
-        if self._http_client is None:
+        client = self._client_for(peer)
+        if client is None:
             return {"success": False, "error": "HTTP client not initialized"}
+        if peer.is_tunnel and not peer.tunnel_connected:
+            return {
+                "success": False,
+                "node_id": None,
+                "node_name": None,
+                "latency_ms": None,
+                "error": "El nodo no tiene el túnel abierto (no se ha conectado a este oCabra)",
+            }
 
-        url = f"{peer.url}/ocabra/federation/heartbeat"
+        url = f"{peer.base_url}/ocabra/federation/heartbeat"
         start = time.monotonic()
         try:
-            resp = await self._http_client.get(
+            resp = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {peer.api_key}"},
             )
@@ -458,6 +713,155 @@ class FederationManager:
                 "error": str(exc),
             }
 
+    # ── Transport / tunnel ───────────────────────────────────────
+
+    def _client_for(self, peer: PeerState) -> httpx.AsyncClient | None:
+        """httpx client for *peer*: the shared one, or the peer's tunnel client."""
+        if self._http_client is None:
+            return None
+        if not peer.is_tunnel:
+            return self._http_client
+        if peer.tunnel_client is None:
+            from ocabra.core.federation_tunnel import TunnelTransport
+
+            peer.tunnel_client = httpx.AsyncClient(
+                transport=TunnelTransport(lambda: peer.tunnel_session),
+                timeout=httpx.Timeout(30.0, connect=10.0),
+            )
+        return peer.tunnel_client
+
+    def _require_client(self, peer: PeerState) -> httpx.AsyncClient:
+        client = self._client_for(peer)
+        if client is None:
+            raise RuntimeError("FederationManager not started")
+        return client
+
+    async def authenticate_tunnel(
+        self, hello: dict[str, Any]
+    ) -> tuple[PeerState, dict[str, Any]] | None:
+        """Match the token in a tunnel HELLO against tunnel peers.
+
+        Returns ``(peer, welcome_payload)`` or ``None`` (unknown token, or the
+        peer is disabled).
+        """
+        token = hello.get("token")
+        if not isinstance(token, str) or not token:
+            return None
+        presented = hash_tunnel_token(token)
+        for peer in self._peers.values():
+            if peer.connection_mode != "tunnel_in" or not peer.tunnel_token_hash:
+                continue
+            if hmac.compare_digest(peer.tunnel_token_hash, presented):
+                if not peer.enabled:
+                    return None
+                return peer, {
+                    "node_id": self._node_id,
+                    "node_name": self._node_name,
+                    "version": getattr(self._settings, "app_version", None),
+                    "peer_name": peer.name,
+                }
+        return None
+
+    async def attach_tunnel(self, peer: PeerState, session: Any) -> None:
+        """Make *session* the live tunnel for *peer* and refresh its state now."""
+        old = peer.tunnel_session
+        peer.tunnel_session = session
+        if old is not None and old is not session:
+            await old.close(code=4000, reason="replaced by a new connection")
+        peer.consecutive_failures = 0
+        peer._next_retry_at = 0.0
+        logger.info(
+            "federation_tunnel_attached",
+            peer=peer.name,
+            remote_node=session.remote_info.get("node_name"),
+            remote_version=session.remote_info.get("version"),
+        )
+        remote_id = session.remote_info.get("node_id")
+        if remote_id and remote_id != peer.remote_node_id:
+            try:
+                await self.update_peer(peer.peer_id, remote_node_id=str(remote_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("federation_remote_node_id_update_failed", error=str(exc))
+        if peer.connection_mode == "tunnel_in" and self.join_service is not None:
+            await self.join_service.on_tunnel_in_connected(peer)
+        # Don't wait up to a heartbeat interval to start routing to it.
+        asyncio.create_task(self._poll_peer(peer), name=f"federation-tunnel-poll-{peer.name}")
+
+    def detach_tunnel(self, peer: PeerState, session: Any) -> None:
+        """Forget *session* if it is still the peer's live tunnel."""
+        if peer.tunnel_session is session:
+            peer.tunnel_session = None
+            peer.online = False
+            logger.info("federation_tunnel_detached", peer=peer.name)
+
+    def local_server_for(self, peer: PeerState) -> Any:
+        """How we serve *peer*'s requests arriving over its tunnel."""
+        from ocabra.core.federation_tunnel import LocalServer
+
+        if self._local_client is None:
+            return None
+        return LocalServer(
+            client=self._local_client,
+            api_key=lambda: peer.local_api_key if peer.enabled else None,
+            access_level=lambda: peer.local_access_level or "inference",
+            node_id=self._node_id,
+        )
+
+    def tunnel_hello(self, peer: PeerState) -> dict[str, Any]:
+        """HELLO we send when dialing *peer* (token = stored api_key)."""
+        return {
+            "token": peer.api_key,
+            "node_id": self._node_id,
+            "node_name": self._node_name,
+            "version": getattr(self._settings, "app_version", None),
+        }
+
+    def _start_dialer_if_ready(self, peer: PeerState) -> None:
+        """Start dialing a ``tunnel_out`` peer once it has a token and is enabled."""
+        if (
+            peer.connection_mode != "tunnel_out"
+            or not peer.enabled
+            or peer.join_state is not None
+            or not peer.api_key
+            or not peer.url
+            or (peer.dialer is not None and peer.dialer.state not in ("stopped", "idle"))
+        ):
+            return
+        from ocabra.core.federation_tunnel import TunnelDialer
+
+        async def _connected(conn: Any) -> None:
+            await self.attach_tunnel(peer, conn)
+
+        def _disconnected(conn: Any) -> None:
+            self.detach_tunnel(peer, conn)
+
+        peer.dialer = TunnelDialer(
+            url=peer.url,
+            hello=lambda: self.tunnel_hello(peer),
+            server=lambda: self.local_server_for(peer),
+            on_connected=_connected,
+            on_disconnected=_disconnected,
+            verify_ssl=self._settings.federation_verify_ssl,
+            name=f"federation-dialer-{peer.name}",
+        )
+        peer.dialer.start()
+
+    async def _stop_dialer(self, peer: PeerState) -> None:
+        if peer.dialer is not None:
+            await peer.dialer.stop()
+            peer.dialer = None
+
+    async def _close_tunnel(self, peer: PeerState, reason: str = "") -> None:
+        session = peer.tunnel_session
+        peer.tunnel_session = None
+        if session is not None:
+            await session.close(code=4001, reason=reason[:100])
+        if peer.tunnel_client is not None:
+            await peer.tunnel_client.aclose()
+            peer.tunnel_client = None
+        if peer.is_tunnel:
+            peer.online = False
+
     # ── Query methods ────────────────────────────────────────────
 
     def get_all_peers(self) -> list[PeerState]:
@@ -476,6 +880,8 @@ class FederationManager:
         is lowercase (``"loaded"``) but the federation plan and the inventory
         tests use uppercase. Accept either.
         """
+        if federation_hop.get() is not None:
+            return {}
         model_map: dict[str, list[PeerState]] = {}
         for peer in self.get_online_peers():
             for model in peer.models:
@@ -577,6 +983,9 @@ class FederationManager:
                     continue
                 out[k] = v
         out["Authorization"] = f"Bearer {peer.api_key}"
+        from ocabra.core.federation_tunnel import FEDERATION_HOP_HEADER
+
+        out[FEDERATION_HOP_HEADER] = self._node_id
         return out
 
     async def proxy_request(
@@ -600,12 +1009,11 @@ class FederationManager:
         Returns:
             The httpx.Response from the peer.
         """
-        if self._http_client is None:
-            raise RuntimeError("FederationManager not started")
+        client = self._require_client(peer)
         proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
         proxy_headers = self._build_proxy_headers(peer, headers)
-        url = f"{peer.url}{path}"
-        return await self._http_client.post(
+        url = f"{peer.base_url}{path}"
+        return await client.post(
             url,
             json=body,
             headers=proxy_headers,
@@ -630,11 +1038,10 @@ class FederationManager:
         Yields:
             Raw bytes from the SSE stream.
         """
-        if self._http_client is None:
-            raise RuntimeError("FederationManager not started")
+        client = self._require_client(peer)
         proxy_headers = self._build_proxy_headers(peer, headers)
-        url = f"{peer.url}{path}"
-        async with self._http_client.stream(
+        url = f"{peer.base_url}{path}"
+        async with client.stream(
             "POST",
             url,
             json=body,
@@ -672,12 +1079,11 @@ class FederationManager:
         Returns:
             The httpx.Response from the peer.
         """
-        if self._http_client is None:
-            raise RuntimeError("FederationManager not started")
+        client = self._require_client(peer)
         proxy_timeout = timeout or self._settings.federation_proxy_timeout_s
         proxy_headers = self._build_proxy_headers(peer, headers, drop_content_type=True)
-        url = f"{peer.url}{path}"
-        return await self._http_client.post(
+        url = f"{peer.base_url}{path}"
+        return await client.post(
             url,
             files=files,
             data=data,
@@ -892,3 +1298,30 @@ async def resolve_federated(
             }
         },
     )
+
+
+class FederationHopMiddleware:
+    """Pure ASGI middleware: mark requests that came from a federation peer.
+
+    Peers add ``x-ocabra-federation-hop`` (their node id) to every request they
+    send us, over HTTP or tunnel. While handling such a request
+    :data:`federation_hop` is set, so it is never forwarded to another peer. A
+    client spoofing the header only forces local handling — harmless.
+    """
+
+    _HEADER = b"x-ocabra-federation-hop"
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            for key, value in scope.get("headers") or ():
+                if key == self._HEADER:
+                    token = federation_hop.set(value.decode("latin-1") or "peer")
+                    try:
+                        await self.app(scope, receive, send)
+                    finally:
+                        federation_hop.reset(token)
+                    return
+        await self.app(scope, receive, send)

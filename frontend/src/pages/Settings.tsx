@@ -6,7 +6,6 @@ import {
   Server,
   HardDrive,
   Link,
-  Network,
   Sparkles,
   GitBranch,
 } from "lucide-react"
@@ -16,7 +15,6 @@ import { api } from "@/api/client"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
 import { OllamaServerSettings } from "@/components/settings/OllamaServerSettings"
-import { FederationSettings } from "@/components/settings/FederationSettings"
 import { GenerationServicesSettings } from "@/components/settings/GenerationServicesSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
@@ -82,6 +80,7 @@ const EMPTY_CONFIG: ServerConfig = {
   realtimeDefaultTtsModel: "",
   federationEnabled: false,
   federationNodeName: "",
+  federationAcceptJoinRequests: false,
   batchPriorityEnabled: true,
   batchPreemptMode: "conditional",
   batchPreemptMinElapsedS: 300,
@@ -216,10 +215,6 @@ export function Settings() {
               <GitBranch size={14} />
               Routing & Sessions
             </Tabs.Trigger>
-            <Tabs.Trigger value="federation" className={TAB_TRIGGER}>
-              <Network size={14} />
-              Federation
-            </Tabs.Trigger>
           </Tabs.List>
 
           <Tabs.Content value="general">
@@ -265,12 +260,6 @@ export function Settings() {
             <div className="grid gap-4">
               <RoutingSettings config={config} onSave={savePatch} />
               <PrioritySettings config={config} onSave={savePatch} />
-            </div>
-          </Tabs.Content>
-
-          <Tabs.Content value="federation">
-            <div className="grid gap-4">
-              <FederationSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
         </Tabs.Root>

@@ -24,6 +24,7 @@ import { OpenAICompat } from "@/pages/OpenAICompat"
 import { Profiles } from "@/pages/Profiles"
 import { Services } from "@/pages/Services"
 import { Batches } from "@/pages/Batches"
+import { Federation } from "@/pages/Federation"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
 export default function App() {
@@ -137,6 +138,14 @@ export default function App() {
                 />
 
                 {/* system_admin only */}
+                <Route
+                  path="/federation"
+                  element={
+                    <ProtectedRoute minRole="system_admin">
+                      <Federation />
+                    </ProtectedRoute>
+                  }
+                />
                 <Route
                   path="/users"
                   element={

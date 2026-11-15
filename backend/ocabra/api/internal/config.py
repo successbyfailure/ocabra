@@ -167,6 +167,11 @@ class ServerConfigPatch(BaseModel):
         alias="federationNodeName",
         description="Human-readable name for this node in the federation",
     )
+    federation_accept_join_requests: bool | None = Field(
+        default=None,
+        alias="federationAcceptJoinRequests",
+        description="Accept join requests from unknown nodes (still need manual approval)",
+    )
 
     # ── Batch-vs-interactive priority (2026-10-30) ──────────────────────
     batch_priority_enabled: bool | None = Field(default=None, alias="batchPriorityEnabled")
@@ -336,6 +341,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "realtimeDefaultTtsModel": settings.realtime_default_tts_model,
         "federationEnabled": settings.federation_enabled,
         "federationNodeName": settings.federation_node_name,
+        "federationAcceptJoinRequests": settings.federation_accept_join_requests,
         "batchPriorityEnabled": settings.batch_priority_enabled,
         "batchPreemptMode": settings.batch_preempt_mode,
         "batchPreemptMinElapsedS": settings.batch_preempt_min_elapsed_s,
@@ -656,6 +662,10 @@ async def patch_config(
         settings.federation_node_name = str(payload["federation_node_name"] or "")
         await _persist("federation_node_name", settings.federation_node_name)
 
+    if "federation_accept_join_requests" in payload:
+        settings.federation_accept_join_requests = bool(payload["federation_accept_join_requests"])
+        await _persist("federation_accept_join_requests", settings.federation_accept_join_requests)
+
     if "federation_enabled" in payload:
         new_val = bool(payload["federation_enabled"])
         old_val = settings.federation_enabled
@@ -670,6 +680,7 @@ async def patch_config(
                 from ocabra.database import AsyncSessionLocal as _ASL
 
                 fm = FederationManager(settings, _ASL)
+                fm.gpu_manager = getattr(request.app.state, "gpu_manager", None)
                 await fm.start()
                 request.app.state.federation_manager = fm
         elif not new_val and old_val:

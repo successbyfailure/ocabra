@@ -27,6 +27,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/settings": "Settings",
   "/users": "Usuarios",
   "/groups": "Grupos",
+  "/federation": "Federación",
 }
 
 export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps) {

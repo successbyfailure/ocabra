@@ -24,6 +24,12 @@ def _make_settings(**overrides):
         "federation_verify_ssl": False,
         "jwt_secret": "test-secret-key-for-federation-tests",
         "app_version": "0.5.0-test",
+        "federation_local_url": "http://127.0.0.1:8000",
+        "federation_accept_join_requests": False,
+        "federation_join_poll_interval_s": 2,
+        "federation_join_url": "",
+        "federation_join_invite": "",
+        "public_url": "",
     }
     defaults.update(overrides)
     return MagicMock(**defaults)

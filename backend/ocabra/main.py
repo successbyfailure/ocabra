@@ -786,11 +786,15 @@ async def lifespan(app: FastAPI):
     set_registry(mcp_registry)
     logger.info("mcp_registry_ready")
 
-    # Federation manager (optional, only if enabled)
+    # Federation manager (optional, only if enabled). An unattended node told to
+    # join a hub on startup (cloud pod) needs it regardless of the toggle.
+    if settings.federation_join_url and settings.federation_join_invite:
+        settings.federation_enabled = True
     if settings.federation_enabled:
         from ocabra.core.federation import FederationManager
 
         federation_manager = FederationManager(settings, _ASL)
+        federation_manager.gpu_manager = gpu_manager
         await federation_manager.start()
         app.state.federation_manager = federation_manager
         logger.info("federation_manager_ready")
@@ -1375,6 +1379,11 @@ async def _log_unhandled_exception(request, exc):
 from ocabra.stats.collector import StatsMiddleware  # noqa: E402
 
 app.add_middleware(StatsMiddleware)
+# Outermost: marks requests that came from a federation peer before anything
+# else runs, so they are never forwarded to yet another peer.
+from ocabra.core.federation import FederationHopMiddleware  # noqa: E402
+
+app.add_middleware(FederationHopMiddleware)
 
 # ── ROUTERS ──────────────────────────────────────────────────
 # Each stream adds its router here. Do not remove this comment.

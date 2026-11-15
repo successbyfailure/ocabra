@@ -7,23 +7,38 @@ Provides:
 - PATCH /federation/peers/{id}    — update a peer
 - DELETE /federation/peers/{id}   — remove a peer
 - POST /federation/peers/{id}/test — test connection to a peer
+- POST /federation/peers/{id}/rotate-token — new tunnel token for a tunnel peer
+- WS   /federation/tunnel           — reverse tunnel opened by a tunnel peer
+- GET  /federation/node             — this node's identity and federation switches
+- POST /federation/join-requests    — (public) a node asks to join us
+- GET  /federation/join-requests/{id}/status — (public) the asker polls its request
+- GET  /federation/join-requests    — pending requests (admin)
+- POST /federation/join-requests/{id}/accept|deny
+- GET/POST /federation/invites, DELETE /federation/invites/{id}
+- POST /federation/join             — ask another node to let us join
+- POST /federation/peers/{id}/join-check — re-check a pending outgoing request
 """
 
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
-from ocabra.core.federation import PeerState
+from ocabra.core.federation import PeerState, new_tunnel_token
 from ocabra.schemas.federation import (
     HeartbeatGpu,
     HeartbeatLoad,
     HeartbeatModel,
     HeartbeatResponse,
+    InviteCreate,
+    JoinOutgoing,
+    JoinRequestCreate,
+    JoinRequestDecision,
     PeerCreate,
+    PeerCreated,
     PeerOut,
     PeerTestResult,
     PeerUpdate,
@@ -33,6 +48,46 @@ from ocabra.schemas.federation import (
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["federation"])
+
+
+def _peer_out(p: PeerState, cls: type[PeerOut] = PeerOut, **extra) -> PeerOut:
+    tunnel = None
+    if p.tunnel_connected:
+        session = p.tunnel_session
+        tunnel = {
+            "remote_node_id": session.remote_info.get("node_id"),
+            "remote_node_name": session.remote_info.get("node_name"),
+            "remote_version": session.remote_info.get("version"),
+            "connected_at": session.connected_at,
+            "active_streams": session.active_streams,
+            "requests_sent": session.requests_sent,
+            "requests_served": session.requests_served,
+        }
+    dialer = p.dialer
+    return cls(
+        id=p.peer_id,
+        name=p.name,
+        url=p.url,
+        access_level=p.access_level,
+        enabled=p.enabled,
+        online=p.online,
+        last_heartbeat=p.last_heartbeat,
+        models=p.models,
+        gpus=p.gpus,
+        load=p.load,
+        connection_mode=p.connection_mode,
+        mode=p.mode,
+        notes=p.notes,
+        remote_node_id=p.remote_node_id,
+        local_access_level=p.local_access_level,
+        join_state=p.join_state,
+        join_verification_code=p.join_verification_code,
+        dial_state=dialer.state if dialer is not None else None,
+        last_error=dialer.last_error if dialer is not None else None,
+        tunnel_connected=p.tunnel_connected,
+        tunnel=tunnel,
+        **extra,
+    )
 
 
 def _get_federation_manager(request: Request):
@@ -165,65 +220,49 @@ async def list_peers(
 ) -> list[PeerOut]:
     """List all federation peers with their current runtime state."""
     fm = _get_federation_manager(request)
-    peers = fm.get_all_peers()
-    return [
-        PeerOut(
-            id=p.peer_id,
-            name=p.name,
-            url=p.url,
-            access_level=p.access_level,
-            enabled=p.enabled,
-            online=p.online,
-            last_heartbeat=p.last_heartbeat,
-            models=p.models,
-            gpus=p.gpus,
-            load=p.load,
-        )
-        for p in peers
-    ]
+    return [_peer_out(p) for p in fm.get_all_peers()]
 
 
 @router.post(
     "/federation/peers",
     summary="Add federation peer",
-    description="Register a new federation peer. The API key is encrypted before storage.",
+    description=(
+        "Register a new federation peer. In 'http' mode the API key is encrypted "
+        "before storage. In 'tunnel' mode the response includes a one-time "
+        "tunnel_token the remote node uses to dial this node."
+    ),
     responses={400: {"description": "Invalid peer configuration"}},
 )
 async def add_peer(
     body: PeerCreate,
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),
-) -> PeerOut:
+) -> PeerCreated:
     """Add a new federation peer.
 
     Args:
-        body: Peer creation request with name, url, api_key, and access_level.
+        body: name, connection_mode, access_level, notes; url and api_key for
+            'http' peers.
 
     Returns:
-        The newly created peer with its initial state.
+        The newly created peer. ``tunnel_token`` is set (and only ever shown
+        here) for tunnel peers.
     """
     fm = _get_federation_manager(request)
+    token = new_tunnel_token() if body.connection_mode == "tunnel_in" else None
     try:
         state = await fm.add_peer(
             name=body.name,
-            url=body.url,
-            api_key=body.api_key,
+            url=body.url if body.connection_mode == "http" else "",
+            api_key=body.api_key if body.connection_mode == "http" else "",
             access_level=body.access_level,
+            connection_mode=body.connection_mode,
+            notes=body.notes,
+            tunnel_token=token,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return PeerOut(
-        id=state.peer_id,
-        name=state.name,
-        url=state.url,
-        access_level=state.access_level,
-        enabled=state.enabled,
-        online=state.online,
-        last_heartbeat=state.last_heartbeat,
-        models=state.models,
-        gpus=state.gpus,
-        load=state.load,
-    )
+    return _peer_out(state, PeerCreated, tunnel_token=token)
 
 
 @router.patch(
@@ -252,18 +291,72 @@ async def update_peer(
     state = await fm.update_peer(peer_id, **patch)
     if state is None:
         raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
-    return PeerOut(
-        id=state.peer_id,
-        name=state.name,
-        url=state.url,
-        access_level=state.access_level,
-        enabled=state.enabled,
-        online=state.online,
-        last_heartbeat=state.last_heartbeat,
-        models=state.models,
-        gpus=state.gpus,
-        load=state.load,
+    return _peer_out(state)
+
+
+@router.post(
+    "/federation/peers/{peer_id}/rotate-token",
+    summary="Rotate tunnel token",
+    description=(
+        "Issue a new tunnel token for a tunnel-mode peer. The old token stops "
+        "working immediately and the live tunnel, if any, is closed."
+    ),
+    responses={400: {"description": "Peer is not in tunnel mode"}, 404: {"description": "Peer not found"}},
+)
+async def rotate_tunnel_token(
+    peer_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> PeerCreated:
+    """Rotate the tunnel token of a tunnel peer.
+
+    Returns:
+        The peer with the new ``tunnel_token`` (shown only here).
+    """
+    fm = _get_federation_manager(request)
+    peer = next((p for p in fm.get_all_peers() if p.peer_id == peer_id), None)
+    if peer is None:
+        raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
+    if peer.connection_mode != "tunnel_in":
+        raise HTTPException(status_code=400, detail="Peer is not an incoming tunnel peer")
+    token = new_tunnel_token()
+    state = await fm.update_peer(peer_id, tunnel_token=token)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
+    return _peer_out(state, PeerCreated, tunnel_token=token)
+
+
+@router.websocket("/federation/tunnel")
+async def federation_tunnel(websocket: WebSocket) -> None:
+    """Reverse tunnel endpoint: a tunnel-mode peer dials in and serves our requests.
+
+    The peer authenticates with the token in its first (HELLO) frame — not with
+    a user session or API key. Once accepted, requests this node routes to that
+    peer travel over this socket until it closes. Protocol in
+    ``ocabra/core/federation_tunnel.py``.
+    """
+    from ocabra.core.federation_tunnel import StarletteChannel, TunnelConnection, accept_tunnel
+
+    fm = getattr(websocket.app.state, "federation_manager", None)
+    if fm is None:
+        await websocket.close(code=1013, reason="federation disabled")
+        return
+    await websocket.accept()
+    channel = StarletteChannel(websocket)
+    accepted = await accept_tunnel(channel, authenticate=fm.authenticate_tunnel)
+    if accepted is None:
+        client = websocket.client.host if websocket.client else None
+        logger.warning("federation_tunnel_auth_failed", client=client)
+        return
+    peer, remote_info = accepted
+    session = TunnelConnection(
+        channel, dialer=False, remote_info=remote_info, server=fm.local_server_for(peer)
     )
+    await fm.attach_tunnel(peer, session)
+    try:
+        await session.run()
+    finally:
+        fm.detach_tunnel(peer, session)
 
 
 @router.delete(
@@ -566,3 +659,364 @@ async def remote_gpus(
             status_code=502,
             detail=f"Failed to get GPUs from peer '{peer.name}': {exc}",
         ) from exc
+
+
+# ── Node identity ───────────────────────────────────────────────
+
+
+@router.get(
+    "/federation/node",
+    summary="This node's federation identity",
+    description=(
+        "Node id/name, public URL, and the federation switches. Works with "
+        "federation disabled (the UI uses it to offer turning it on)."
+    ),
+)
+async def node_info(
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Return this node's identity and federation settings.
+
+    Returns:
+        ``{enabled, node_id, node_name, public_url, accept_join_requests, version,
+        pending_join_requests}``.
+    """
+    fm = getattr(request.app.state, "federation_manager", None)
+    pending = 0
+    if fm is not None and fm.join_service is not None:
+        try:
+            pending = len(await fm.join_service.list_requests())
+        except Exception:  # noqa: BLE001
+            pending = 0
+    return {
+        "enabled": fm is not None,
+        "node_id": fm.node_id if fm is not None else (settings.federation_node_id or None),
+        "node_name": fm.node_name if fm is not None else (settings.federation_node_name or None),
+        "public_url": getattr(settings, "public_url", None) or None,
+        "accept_join_requests": settings.federation_accept_join_requests,
+        "version": settings.app_version,
+        "pending_join_requests": pending,
+    }
+
+
+# ── Join requests (hub side) ────────────────────────────────────
+
+
+def _join_service(request: Request):
+    fm = _get_federation_manager(request)
+    if fm.join_service is None:
+        raise HTTPException(status_code=503, detail="Federation is starting")
+    return fm.join_service
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64] or None
+    return request.client.host if request.client else None
+
+
+def _join_http_error(exc: Exception) -> HTTPException:
+    from ocabra.core.federation_join import JoinError
+
+    if isinstance(exc, JoinError):
+        return HTTPException(status_code=exc.status, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post(
+    "/federation/join-requests",
+    summary="Ask to join this node's federation",
+    description=(
+        "Public: a node asks to join. Without a valid invite_code this node must "
+        "have join requests enabled and an admin must accept it; with one it is "
+        "accepted on the spot and the response carries the tunnel token. Rate "
+        "limited per IP."
+    ),
+    responses={
+        403: {"description": "Join requests disabled or invalid invite"},
+        409: {"description": "Node already federated"},
+        429: {"description": "Too many requests"},
+    },
+)
+async def create_join_request(body: JoinRequestCreate, request: Request) -> dict:
+    """Register a join request from another node.
+
+    Returns:
+        ``{request_id, poll_secret, verification_code, status, mode, hub}`` and,
+        when accepted by invite, ``tunnel_token`` and ``peer_name``.
+    """
+    svc = _join_service(request)
+    try:
+        return await svc.create_request(body.model_dump(), source_ip=_client_ip(request))
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+
+
+@router.get(
+    "/federation/join-requests/{request_id}/status",
+    summary="Join request status (for the requesting node)",
+    description=(
+        "Public, authenticated by the X-Join-Secret header returned when the "
+        "request was made. Once accepted the response includes tunnel_token "
+        "until the node first connects."
+    ),
+    responses={404: {"description": "Unknown request or wrong secret"}},
+)
+async def join_request_status(request_id: str, request: Request) -> dict:
+    """Return the status of a join request to the node that made it.
+
+    Returns:
+        ``{request_id, status, mode, verification_code, hub[, tunnel_token]}``.
+    """
+    svc = _join_service(request)
+    secret = request.headers.get("x-join-secret", "")
+    if not secret:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    try:
+        return await svc.request_status(request_id, secret)
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+
+
+@router.get(
+    "/federation/join-requests",
+    summary="List join requests",
+    description="Pending join requests (all recent ones with include_decided=true).",
+)
+async def list_join_requests(
+    request: Request,
+    include_decided: bool = False,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> list[dict]:
+    """List join requests.
+
+    Args:
+        include_decided: Also return accepted/denied/expired ones.
+
+    Returns:
+        Requests with remote node info, message, source IP and verification code.
+    """
+    return await _join_service(request).list_requests(include_decided=include_decided)
+
+
+@router.post(
+    "/federation/join-requests/{request_id}/accept",
+    summary="Accept a join request",
+    description=(
+        "Accept a pending request: creates the peer (incoming tunnel) and a local "
+        "service user federation:<name> that runs its requests here."
+    ),
+    responses={404: {"description": "Not found"}, 409: {"description": "Not pending"}},
+)
+async def accept_join_request(
+    request_id: str,
+    request: Request,
+    body: JoinRequestDecision | None = None,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> PeerOut:
+    """Accept a join request.
+
+    Args:
+        body: Optional peer ``name`` (defaults to the node's name) and ``notes``.
+
+    Returns:
+        The new peer (offline until the node picks up its token and dials in).
+    """
+    svc = _join_service(request)
+    try:
+        peer = await svc.accept(
+            request_id,
+            name=body.name if body else None,
+            notes=body.notes if body else None,
+        )
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+    return _peer_out(peer)
+
+
+@router.post(
+    "/federation/join-requests/{request_id}/deny",
+    summary="Deny a join request",
+    description="Deny a pending join request. The node sees 'denied' on its next check.",
+    responses={404: {"description": "Not found"}, 409: {"description": "Not pending"}},
+)
+async def deny_join_request(
+    request_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Deny a join request.
+
+    Returns:
+        ``{"ok": True}``.
+    """
+    try:
+        await _join_service(request).deny(request_id)
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+    return {"ok": True}
+
+
+# ── Invites ─────────────────────────────────────────────────────
+
+
+@router.get(
+    "/federation/invites",
+    summary="List invites",
+    description="Recent invites with their uses and whether they are still usable.",
+)
+async def list_invites(
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> list[dict]:
+    """List invites (codes are never shown again).
+
+    Returns:
+        ``[{id, label, mode, max_uses, uses, expires_at, revoked, usable, created_at}]``.
+    """
+    return await _join_service(request).list_invites()
+
+
+@router.post(
+    "/federation/invites",
+    summary="Create invite",
+    description=(
+        "Create a pre-approved join code: a node joining with it is accepted "
+        "without manual approval. The code is shown only in this response."
+    ),
+)
+async def create_invite(
+    body: InviteCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Create an invite.
+
+    Returns:
+        The invite plus ``code`` (shown once) and ``join_url`` (this node's public URL).
+    """
+    try:
+        out = await _join_service(request).create_invite(
+            label=body.label,
+            mode=body.mode,
+            max_uses=body.max_uses,
+            expires_in_hours=body.expires_in_hours,
+        )
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+    out["join_url"] = getattr(settings, "public_url", None) or None
+    return out
+
+
+@router.delete(
+    "/federation/invites/{invite_id}",
+    summary="Revoke invite",
+    description="Revoke an invite so it can no longer be used.",
+    responses={404: {"description": "Not found"}},
+)
+async def revoke_invite(
+    invite_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Revoke an invite.
+
+    Returns:
+        ``{"ok": True}``.
+    """
+    try:
+        await _join_service(request).revoke_invite(invite_id)
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+    return {"ok": True}
+
+
+# ── Joining another node (requester side) ───────────────────────
+
+
+async def _ensure_federation_started(request: Request):
+    """Turn federation on (persisted) if it is off; return the manager."""
+    fm = getattr(request.app.state, "federation_manager", None)
+    if fm is not None:
+        return fm
+    from ocabra.core.federation import FederationManager
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.server_config import save_override
+
+    settings.federation_enabled = True
+    async with AsyncSessionLocal() as session:
+        await save_override(session, "federation_enabled", True)
+        await session.commit()
+    fm = FederationManager(settings, AsyncSessionLocal)
+    fm.gpu_manager = getattr(request.app.state, "gpu_manager", None)
+    await fm.start()
+    request.app.state.federation_manager = fm
+    logger.info("federation_enabled_by_join")
+    return fm
+
+
+@router.post(
+    "/federation/join",
+    summary="Join another node's federation",
+    description=(
+        "Ask the node at hub_url to let this node join (turns federation on here "
+        "if it was off). Only the other node needs a reachable URL: once accepted "
+        "this node dials it and both use each other's models over that tunnel. "
+        "With an invite_code it connects right away; otherwise it stays pending "
+        "until the other admin accepts."
+    ),
+    responses={
+        409: {"description": "Already linked to that node"},
+        502: {"description": "The other node could not be reached or refused"},
+    },
+)
+async def join_federation(
+    body: JoinOutgoing,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> PeerOut:
+    """Send a join request to another node.
+
+    Returns:
+        The new peer: ``join_state='pending'`` with ``join_verification_code``, or
+        connecting already when accepted by invite.
+    """
+    fm = await _ensure_federation_started(request)
+    try:
+        peer = await fm.join_service.join(
+            body.hub_url,
+            message=body.message,
+            invite_code=body.invite_code,
+            name=body.name,
+            mode=body.mode,
+        )
+    except Exception as exc:
+        raise _join_http_error(exc) from exc
+    return _peer_out(peer)
+
+
+@router.post(
+    "/federation/peers/{peer_id}/join-check",
+    summary="Re-check a pending join request",
+    description="Ask the other node now whether our pending join request was decided.",
+    responses={404: {"description": "Peer not found"}},
+)
+async def join_check(
+    peer_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> PeerOut:
+    """Poll the hub once for a pending outgoing join request.
+
+    Returns:
+        The peer with its updated ``join_state``.
+    """
+    fm = _get_federation_manager(request)
+    peer = next((p for p in fm.get_all_peers() if p.peer_id == peer_id), None)
+    if peer is None:
+        raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
+    if peer.join_state == "pending" and fm.join_service is not None:
+        await fm.join_service.check_outgoing(peer)
+    return _peer_out(peer)

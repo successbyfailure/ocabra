@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_version: str = "0.81.6"
+    app_version: str = "0.82.0"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -907,6 +907,25 @@ class Settings(BaseSettings):
     federation_verify_ssl: bool = Field(
         default=True, description="Verify TLS certificates for peer connections"
     )
+    # Join requests / reverse tunnel (core/federation_join.py, federation_tunnel.py)
+    federation_accept_join_requests: bool = Field(
+        default=False,
+        description=(
+            "Accept join requests from unknown nodes (they still need manual approval). "
+            "Invites work regardless."
+        ),
+    )
+    federation_local_url: str = Field(
+        default="http://127.0.0.1:8000",
+        description="This node's own API as seen from itself (serves peers' tunnelled requests)",
+    )
+    federation_join_poll_interval_s: int = Field(
+        default=10, ge=2, description="How often a pending outgoing join request is checked"
+    )
+    # Bootstrap for unattended nodes (cloud pods): join this hub with this invite
+    # on startup if not already joined. Implies federation_enabled.
+    federation_join_url: str = Field(default="", description="Hub to join on startup (https://...)")
+    federation_join_invite: str = Field(default="", description="Invite code for federation_join_url")
 
     # Agents + MCP (plan: docs/tasks/agents-mcp-plan.md)
     mcp_tools_cache_ttl_seconds: int = Field(
