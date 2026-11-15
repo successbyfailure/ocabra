@@ -6,6 +6,43 @@ import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { AdminUser, Group, GroupMember, ModelState } from "@/types"
 
+/**
+ * Lo que se puede dar a un grupo: un modelo, un router (``recomendado-*``) o
+ * un nombre de OpenAI del modo compatibilidad (``tts-1``, ``gpt-image-1``...).
+ * Antes la lista salía solo de los modelos, así que los routers y los nombres
+ * de OpenAI no se podían añadir desde aquí (2026-11-15).
+ */
+interface GrantableModel {
+  modelId: string
+  displayName: string
+  backendType: string
+}
+
+const best = <T,>(p: Promise<T[]>): Promise<T[]> => p.catch(() => [] as T[])
+
+export async function listGrantableModels(): Promise<GrantableModel[]> {
+  const [models, profiles, ttsPins, imagePins] = await Promise.all([
+    api.models.list(),
+    best(api.profiles.listAll()),
+    best(api.openaiTtsCompat.list()),
+    best(api.openaiImageCompat.list()),
+  ])
+  const out: GrantableModel[] = models.map((m: ModelState) => ({
+    modelId: m.modelId,
+    displayName: m.displayName,
+    backendType: m.backendType,
+  }))
+  for (const p of profiles) {
+    if (p.profileKind !== "router") continue
+    out.push({ modelId: p.profileId, displayName: p.displayName || p.profileId, backendType: "router" })
+  }
+  const openaiNames = new Set([...ttsPins, ...imagePins].map((e) => e.openaiModel))
+  for (const name of Array.from(openaiNames).sort()) {
+    out.push({ modelId: name, displayName: name, backendType: "openai" })
+  }
+  return out
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string) {
@@ -173,7 +210,7 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
   const [models, setModels] = useState<string[]>([])
   const [members, setMembers] = useState<GroupMember[]>([])
   const [allUsers, setAllUsers] = useState<AdminUser[]>([])
-  const [allModels, setAllModels] = useState<ModelState[]>([])
+  const [allModels, setAllModels] = useState<GrantableModel[]>([])
   const [loadingModels, setLoadingModels] = useState(true)
   const [loadingMembers, setLoadingMembers] = useState(true)
   const [modelSearch, setModelSearch] = useState("")
@@ -188,7 +225,7 @@ function GroupDetailPanel({ group, onClose, onGroupUpdated }: GroupDetailPanelPr
     setLoadingModels(true)
     Promise.all([
       api.groups.listModels(group.id),
-      api.models.list(),
+      listGrantableModels(),
     ])
       .then(([groupModels, available]) => {
         setModels(groupModels)
