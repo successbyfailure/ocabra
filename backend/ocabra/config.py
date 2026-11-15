@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.83.1"
+APP_VERSION = "0.84.0"
 
 
 class Settings(BaseSettings):

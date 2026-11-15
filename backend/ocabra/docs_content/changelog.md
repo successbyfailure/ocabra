@@ -16,6 +16,49 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.84.0 — 2026-11-16
+
+### Novedades
+
+- **`/v1/realtime` entiende el dialecto GA de la Realtime API.** Además del
+  `session.update` beta (ajustes de audio en la raíz), acepta el GA:
+  `session.type: "realtime"`, `session.audio.input.{format, transcription,
+  turn_detection}`, `session.audio.output.{format, voice}` y
+  `output_modalities`. Antes esa parte se ignoraba en silencio: la voz, el
+  idioma y los parámetros de turno no tenían efecto. Con GA,
+  `session.updated` devuelve también la forma GA y los eventos de audio usan
+  los nombres GA (`response.output_audio.delta`,
+  `response.output_audio_transcript.delta`…).
+- **G.711 µ-law y A-law** de entrada y salida (`audio/pcmu`, `audio/pcma`,
+  `g711_ulaw`, `g711_alaw`, 8 kHz), para telefonía.
+- **La voz se elige con los nombres de OpenAI.** `alloy`, `echo`… usan la voz
+  fijada para cada uno en la compatibilidad de TTS (la misma que
+  `/v1/audio/speech` con `tts-1`).
+- **`create_response` e `interrupt_response`** de `turn_detection` se
+  respetan: con `create_response: false` el turno se confirma sin contestar;
+  con `interrupt_response: false` hablar no corta la respuesta en curso.
+
+### Correcciones
+
+- **La entrada se trata a la frecuencia que declara el cliente.** Todo el
+  audio se leía como 16 kHz: a 24 kHz llegaba a VAD y transcripción a 0,67×
+  de velocidad, con los tiempos de `speech_started`/`speech_stopped`
+  desplazados. Ahora se remuestrea a 16 kHz y los tiempos son de audio real.
+- **Las respuestas habladas ya no suenan un 9 % rápidas y agudas.** El TTS
+  produce 22.050 Hz y se enviaba como si fuera 24 kHz.
+- **El umbral de `turn_detection` usa la escala de OpenAI** (0–1, 0,5 por
+  defecto). Se aplicaba tal cual a un detector de energía, y 0,5 exigía 25
+  veces el volumen normal: con `threshold` el VAD de servidor casi nunca
+  detectaba la voz.
+- Un `transcription.model` que oCabra no tiene (`gpt-4o-transcribe`) se
+  ignora en vez de dejar la sesión sin transcripción.
+
+**Acción:** si usas el dialecto beta, nada cambia: `pcm16` sigue siendo
+16 kHz. Si mandabas 24 kHz con `pcm16`, declara `input_audio_sample_rate:
+24000` o usa el formato GA `{"type": "audio/pcm", "rate": 24000}`.
+
+---
+
 ## 0.83.1 — 2026-11-16
 
 ### Correcciones

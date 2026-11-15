@@ -43,7 +43,33 @@ if TYPE_CHECKING:
     from ocabra.core.model_manager import ModelManager
     from ocabra.core.worker_pool import WorkerPool
 
+from ocabra.core.realtime_audio import (
+    PCM16,
+    InputAudioDecoder,
+    OutputAudioEncoder,
+    bytes_per_second,
+    ga_format,
+    openai_vad_threshold_to_rms,
+    parse_audio_format,
+    split_wav,
+)
+
 logger = structlog.get_logger(__name__)
+
+# GA Realtime API event names, sent instead of the beta ones once the client
+# has spoken the GA dialect (``session.type`` or ``session.audio``).
+_GA_EVENT_NAMES = {
+    "response.audio.delta": "response.output_audio.delta",
+    "response.audio.done": "response.output_audio.done",
+    "response.audio_transcript.delta": "response.output_audio_transcript.delta",
+    "response.audio_transcript.done": "response.output_audio_transcript.done",
+    "response.text.delta": "response.output_text.delta",
+    "response.text.done": "response.output_text.done",
+}
+
+# OpenAI voice names; a voice in this set is looked up in the TTS
+# compatibility map (``openai_tts_voice_map``) to pick the oCabra voice.
+_OPENAI_TTS_MODELS_FOR_VOICES = ("gpt-4o-mini-tts", "tts-1", "tts-1-hd")
 
 # Sentence-splitting regex: split on period, exclamation, question mark, or newline
 # followed by whitespace or end-of-string.
@@ -336,6 +362,21 @@ class RealtimeSession:
         self.modalities: list[str] = ["text", "audio"]
         self.input_audio_format = "pcm16"
         self.output_audio_format = "pcm16"
+        # Client audio rates (2026-11-16). Input is decoded/resampled at
+        # append time to the internal 16 kHz buffer; TTS audio is encoded to
+        # the output format/rate. Beta pcm16 keeps oCabra's documented
+        # 16 kHz input; the GA dialect defaults to 24 kHz (see realtime_audio).
+        self.input_audio_rate = _INPUT_SAMPLE_RATE
+        self.output_audio_rate = _SAMPLE_RATE
+        self._input_decoder = InputAudioDecoder(PCM16, _INPUT_SAMPLE_RATE)
+        # True once the client used the GA dialect: events and session
+        # snapshots then use GA names/shapes.
+        self._dialect_ga = False
+        # server_vad options: answer automatically when speech stops, and cut
+        # the current answer off when the user starts talking (barge-in).
+        self._create_response = True
+        self._interrupt_response = True
+        self._stt_language_explicit = False
 
         # Generation params (2026-10-30) — session.update/response.create can
         # set these; previously the LLM call was a bare {model, messages,
@@ -852,9 +893,103 @@ class RealtimeSession:
 
     # ── Client event handlers ───────────────────────────────────────────
 
+    def _normalize_ga_session(self, session_cfg: dict[str, Any]) -> dict[str, Any]:
+        """Map a GA ``session.update`` onto the beta keys handled below.
+
+        GA nests audio settings under ``session.audio.input``/``.output`` and
+        renames a few fields; the beta dialect keeps them at the root. Both
+        are accepted (2026-11-16, OpenClaw speaks GA): the GA ones win when
+        both are present.
+        """
+        cfg = dict(session_cfg)
+        audio = cfg.get("audio")
+        if isinstance(audio, dict) or cfg.get("type") in ("realtime", "transcription"):
+            self._dialect_ga = True
+        if isinstance(audio, dict):
+            inp = audio.get("input") if isinstance(audio.get("input"), dict) else {}
+            out = audio.get("output") if isinstance(audio.get("output"), dict) else {}
+            if "format" in inp:
+                cfg["input_audio_format"] = inp["format"]
+            if "transcription" in inp:
+                cfg["input_audio_transcription"] = inp["transcription"]
+            if "turn_detection" in inp:
+                cfg["turn_detection"] = inp["turn_detection"]
+            if "format" in out:
+                cfg["output_audio_format"] = out["format"]
+            if "voice" in out:
+                cfg["voice"] = out["voice"]
+        if "output_modalities" in cfg and isinstance(cfg["output_modalities"], list):
+            # GA "audio" means audio plus its transcript; beta spells it out.
+            om = [str(m) for m in cfg["output_modalities"]]
+            cfg["modalities"] = ["text", "audio"] if "audio" in om else om
+        if "max_output_tokens" in cfg and "max_response_output_tokens" not in cfg:
+            cfg["max_response_output_tokens"] = cfg["max_output_tokens"]
+        return cfg
+
+    def _apply_audio_formats(self, session_cfg: dict[str, Any]) -> None:
+        """Input/output format and rate, in either dialect."""
+        if "input_audio_format" in session_cfg or "input_audio_sample_rate" in session_cfg:
+            parsed = parse_audio_format(
+                session_cfg.get("input_audio_format", self.input_audio_format),
+                ga=self._dialect_ga,
+                rate=session_cfg.get("input_audio_sample_rate"),
+            )
+            if parsed is not None:
+                kind, rate = parsed
+                if (kind, rate) != (self.input_audio_format, self.input_audio_rate):
+                    self.input_audio_format, self.input_audio_rate = kind, rate
+                    self._input_decoder = InputAudioDecoder(kind, rate)
+            else:
+                logger.info(
+                    "realtime_unknown_input_format",
+                    value=str(session_cfg.get("input_audio_format"))[:80],
+                )
+        if "output_audio_format" in session_cfg or "output_audio_sample_rate" in session_cfg:
+            parsed = parse_audio_format(
+                session_cfg.get("output_audio_format", self.output_audio_format),
+                ga=True,  # oCabra always sent 24 kHz PCM16 out: same default
+                rate=session_cfg.get("output_audio_sample_rate"),
+            )
+            if parsed is not None:
+                self.output_audio_format, self.output_audio_rate = parsed
+
+    def _voice_tts_target(self, voice: str) -> str | None:
+        """oCabra TTS profile pinned for an OpenAI voice name, if any."""
+        app = getattr(self.ws, "app", None)
+        compat = getattr(getattr(app, "state", None), "openai_tts_compat", None)
+        if compat is None:
+            return None
+        for openai_model in _OPENAI_TTS_MODELS_FOR_VOICES:
+            target = compat.resolve(openai_model, voice)
+            if target:
+                return target
+        return None
+
+    async def _known_model_or_none(self, raw: str) -> str | None:
+        """Resolve a client model id and keep it only if oCabra knows it.
+
+        GA clients send OpenAI's own names (``gpt-4o-transcribe``); switching
+        the session's STT to a model that does not exist here broke every
+        transcription after the update.
+        """
+        resolved = await self._resolve_model_id_or_keep(raw)
+        try:
+            state = await self._model_manager.get_state(resolved)
+        except Exception:  # noqa: BLE001
+            state = None
+        if state is None:
+            logger.info("realtime_unknown_model_ignored", model=str(raw)[:80])
+            return None
+        return resolved
+
     async def _handle_session_update(self, message: dict[str, Any]) -> None:
-        """Handle session.update — configure VAD, voice, instructions, models."""
-        session_cfg = message.get("session", {})
+        """Handle session.update — configure VAD, voice, instructions, models.
+
+        Accepts the beta dialect (audio settings at the root) and the GA one
+        (``session.audio.input``/``.output``).
+        """
+        session_cfg = self._normalize_ga_session(message.get("session", {}) or {})
+        voice_changed = "voice" in session_cfg and session_cfg["voice"] != self.voice
 
         if "instructions" in session_cfg:
             self.instructions = session_cfg["instructions"]
@@ -862,10 +997,7 @@ class RealtimeSession:
             self.voice = session_cfg["voice"]
         if "modalities" in session_cfg:
             self.modalities = session_cfg["modalities"]
-        if "input_audio_format" in session_cfg:
-            self.input_audio_format = session_cfg["input_audio_format"]
-        if "output_audio_format" in session_cfg:
-            self.output_audio_format = session_cfg["output_audio_format"]
+        self._apply_audio_formats(session_cfg)
 
         # Generation params (2026-10-30). ``tools``/``tool_choice`` are
         # standard OpenAI Realtime fields; ``reasoning_effort``/
@@ -892,10 +1024,13 @@ class RealtimeSession:
         # STT model / language / prompt from input_audio_transcription (OpenAI standard)
         iat = session_cfg.get("input_audio_transcription")
         if isinstance(iat, dict):
-            if "model" in iat:
-                self.stt_model_id = await self._resolve_model_id_or_keep(iat["model"])
+            if iat.get("model"):
+                known = await self._known_model_or_none(str(iat["model"]))
+                if known:
+                    self.stt_model_id = known
             if iat.get("language"):
                 self._stt_language = str(iat["language"])
+                self._stt_language_explicit = True
             if iat.get("prompt"):
                 self._stt_prompt = str(iat["prompt"])
             if "diarize" in iat:
@@ -913,8 +1048,21 @@ class RealtimeSession:
                 self._load_registry()
 
         # TTS model (extension: not in official API, but useful for oCabra)
+        tts_switched = False
         if "tts_model" in session_cfg:
             self.tts_model_id = await self._resolve_model_id_or_keep(session_cfg["tts_model"])
+            tts_switched = True
+        elif voice_changed and not self.transcription_only:
+            # An OpenAI voice name ("alloy", "echo"…) picks the oCabra voice
+            # pinned for it in the TTS compatibility map; the single-voice
+            # TTS workers ignore the ``voice`` field, so without this every
+            # voice sounded the same (2026-11-16).
+            target = self._voice_tts_target(str(session_cfg["voice"]))
+            if target:
+                resolved = await self._known_model_or_none(target)
+                if resolved and resolved != self.tts_model_id:
+                    self.tts_model_id = resolved
+                    tts_switched = True
 
         # oCabra extension: explicit input-audio routing override. Auto by
         # default — picks native when the LLM advertises ``audio_input``.
@@ -949,7 +1097,7 @@ class RealtimeSession:
                     self._load_model_with_progress("stt", self.stt_model_id),
                     name="realtime-session-update-stt",
                 )
-        if "tts_model" in session_cfg and self.tts_model_id:
+        if tts_switched and self.tts_model_id:
             self._tts_ready.clear()
             spawn(self._load_remaining_models())
 
@@ -962,12 +1110,20 @@ class RealtimeSession:
                 self.vad_enabled = False
                 self._vad.reset()
             elif isinstance(turn_detection, dict):
+                # server_vad and GA's semantic_vad both run oCabra's energy
+                # VAD; OpenAI's probability threshold is mapped to its scale.
                 self.vad_enabled = True
                 self._vad = SimpleVAD(
-                    threshold=turn_detection.get("threshold"),
+                    threshold=openai_vad_threshold_to_rms(
+                        turn_detection.get("threshold"), SimpleVAD.SPEECH_THRESHOLD
+                    ),
                     silence_duration_ms=turn_detection.get("silence_duration_ms"),
                     prefix_padding_ms=turn_detection.get("prefix_padding_ms"),
                 )
+                if "create_response" in turn_detection:
+                    self._create_response = bool(turn_detection["create_response"])
+                if "interrupt_response" in turn_detection:
+                    self._interrupt_response = bool(turn_detection["interrupt_response"])
 
         await self._send_event(
             "session.updated",
@@ -981,11 +1137,18 @@ class RealtimeSession:
             return
 
         try:
-            pcm_bytes = base64.b64decode(audio_b64)
+            raw = base64.b64decode(audio_b64)
         except Exception:
             await self._send_error("Invalid base64 audio data", "invalid_audio")
             return
 
+        # Whatever the client sends (24 kHz PCM, µ-law 8 kHz…) is turned into
+        # the internal 16 kHz PCM16 here, so VAD, STT, durations and offsets
+        # all see real time. 24 kHz read as 16 kHz played 0.67× slow
+        # (2026-11-16, OpenClaw).
+        pcm_bytes = self._input_decoder.feed(raw)
+        if not pcm_bytes:
+            return
         self.audio_buffer.extend(pcm_bytes)
 
         # Run VAD if enabled
@@ -998,7 +1161,11 @@ class RealtimeSession:
                 # OpenAI's default server_vad behavior. Previously this only
                 # emitted the event; the in-progress response kept running
                 # to completion regardless of the user already talking.
-                if self._response_task and not self._response_task.done():
+                if (
+                    self._interrupt_response
+                    and self._response_task
+                    and not self._response_task.done()
+                ):
                     await self._cancel_current_response()
                 await self._send_event(
                     "input_audio_buffer.speech_started",
@@ -1011,8 +1178,12 @@ class RealtimeSession:
                     "input_audio_buffer.speech_stopped",
                     audio_end_ms=self._buffer_duration_ms(),
                 )
-                # Auto-commit on speech stop
-                await self._commit_and_respond()
+                # Auto-commit on speech stop; answer unless the client asked
+                # to trigger responses itself (turn_detection.create_response).
+                if self._create_response or self.transcription_only:
+                    await self._commit_and_respond()
+                else:
+                    await self._commit_audio_only()
 
     async def _handle_audio_commit(self, message: dict[str, Any]) -> None:
         """Handle input_audio_buffer.commit — process the buffered audio."""
@@ -2272,10 +2443,13 @@ class RealtimeSession:
 
             url = f"http://127.0.0.1:{worker.port}/synthesize"
 
+            # WAV, not raw PCM: the header carries the TTS's real rate. Raw
+            # "pcm" from piper is 22.05 kHz and was sent as if it were 24 kHz,
+            # so every answer played ~9 % fast and high (2026-11-16).
             payload = {
                 "input": text,
                 "voice": self.voice,
-                "response_format": "pcm",
+                "response_format": "wav",
                 "speed": 1.0,
             }
 
@@ -2286,9 +2460,21 @@ class RealtimeSession:
 
             if not audio_bytes:
                 return
+            parsed = split_wav(audio_bytes)
+            if parsed is None:
+                # A worker that ignored the format: raw PCM at the default rate.
+                pcm, src_rate = audio_bytes, _SAMPLE_RATE
+            else:
+                pcm, src_rate = parsed
+            encoder = OutputAudioEncoder(
+                self.output_audio_format, self.output_audio_rate, src_rate
+            )
+            audio_bytes = encoder.feed(pcm)
 
-            # Send audio in chunks to avoid oversized WebSocket frames
-            chunk_size = 16384  # ~0.5s at 16kHz 16-bit mono
+            # Send audio in chunks to avoid oversized WebSocket frames (~0.5 s)
+            chunk_size = max(
+                160, bytes_per_second(self.output_audio_format, self.output_audio_rate) // 2
+            )
             for i in range(0, len(audio_bytes), chunk_size):
                 if self._cancel_event.is_set():
                     break
@@ -2372,7 +2558,37 @@ class RealtimeSession:
         return int((num_samples / _INPUT_SAMPLE_RATE) * 1000)
 
     def _session_snapshot(self) -> dict[str, Any]:
-        """Return the current session configuration as a dict."""
+        """Return the effective session configuration.
+
+        Beta fields at the root plus, for GA clients, the GA shape
+        (``type``, ``output_modalities`` and ``audio.input``/``.output``),
+        so either dialect reads back what is really in force.
+        """
+        snapshot = self._session_snapshot_beta()
+        if self._dialect_ga:
+            snapshot["type"] = "transcription" if self.transcription_only else "realtime"
+            snapshot["output_modalities"] = ["audio"] if "audio" in self.modalities else ["text"]
+            snapshot["audio"] = {
+                "input": {
+                    "format": ga_format(self.input_audio_format, self.input_audio_rate),
+                    "transcription": snapshot["input_audio_transcription"],
+                    "turn_detection": snapshot["turn_detection"],
+                },
+                "output": {
+                    "format": ga_format(self.output_audio_format, self.output_audio_rate),
+                    "voice": self.voice,
+                },
+            }
+        return snapshot
+
+    def _session_snapshot_beta(self) -> dict[str, Any]:
+        transcription: dict[str, Any] | None = None
+        if self.stt_model_id:
+            transcription = {"model": self.stt_model_id}
+            if self._stt_language:
+                transcription["language"] = self._stt_language
+            if self._stt_prompt:
+                transcription["prompt"] = self._stt_prompt
         return {
             "id": self._session_id,
             "model": self.llm_model_id,
@@ -2381,15 +2597,18 @@ class RealtimeSession:
             "voice": self.voice,
             "input_audio_format": self.input_audio_format,
             "output_audio_format": self.output_audio_format,
-            "input_audio_transcription": (
-                {"model": self.stt_model_id} if self.stt_model_id else None
-            ),
+            # oCabra extensions: the real rates in force.
+            "input_audio_sample_rate": self.input_audio_rate,
+            "output_audio_sample_rate": self.output_audio_rate,
+            "input_audio_transcription": transcription,
             "turn_detection": (
                 {
                     "type": "server_vad",
                     "threshold": self._vad.SPEECH_THRESHOLD,
                     "silence_duration_ms": self._vad.SILENCE_DURATION_MS,
                     "prefix_padding_ms": self._vad._prefix_padding_ms,
+                    "create_response": self._create_response,
+                    "interrupt_response": self._interrupt_response,
                 }
                 if self.vad_enabled
                 else None
@@ -2409,6 +2628,8 @@ class RealtimeSession:
 
     async def _send_event(self, event_type: str, **kwargs: Any) -> None:
         """Send a server event to the client."""
+        if self._dialect_ga:
+            event_type = _GA_EVENT_NAMES.get(event_type, event_type)
         event: dict[str, Any] = {
             "type": event_type,
             "event_id": _new_event_id(),
