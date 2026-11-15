@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.83.1 — 2026-11-16
+
+### Correcciones
+
+- **Cargar y descargar un modelo en otro nodo de la federación funciona.**
+  `POST /ocabra/federation/peers/{id}/models/{model_id}/load` (y `…/unload`)
+  respondían 404 con cualquier modelo, porque todos los identificadores llevan
+  una `/` (`llamacpp_mks/…`) y la ruta no la admitía.
+- **Descarga remota.** `POST /ocabra/federation/peers/{id}/downloads` devuelve
+  ya el trabajo de descarga en JSON (antes lo envolvía como un stream de
+  eventos que nunca llegaba, y quien reintentaba lanzaba la descarga dos
+  veces). Su progreso se consulta con el nuevo
+  `GET /ocabra/federation/peers/{id}/downloads/{job_id}`. **Acción:** si leías
+  líneas `data:` de ese endpoint, lee el JSON.
+- **`GET /ocabra/federation/peers/{id}/gpus` funciona** (preguntaba al otro
+  nodo con el método equivocado y siempre fallaba).
+- **Un servidor sin la herramienta `docker` arranca.** Antes la API no llegaba
+  a arrancar en un sistema sin ella.
+- **Los nodos en la nube solo se crean en máquinas con CUDA 12.8 o superior**,
+  las únicas en las que su imagen puede usar la GPU.
+
+---
+
 ## 0.83.0 — 2026-11-15
 
 ### Novedades

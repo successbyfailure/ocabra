@@ -1,0 +1,9 @@
+# Build context for Dockerfile.node only (the main Dockerfiles don't read this).
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tests
+*.egg-info

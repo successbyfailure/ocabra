@@ -1045,6 +1045,21 @@ class FederationManager:
             timeout=proxy_timeout,
         )
 
+    async def proxy_get(
+        self,
+        peer: PeerState,
+        path: str,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 — delegated to httpx
+    ) -> httpx.Response:
+        """GET *path* on a peer (status endpoints for remote operations)."""
+        client = self._require_client(peer)
+        return await client.get(
+            f"{peer.base_url}{path}",
+            headers=self._build_proxy_headers(peer, headers),
+            timeout=timeout or 30.0,
+        )
+
     async def proxy_stream(
         self,
         peer: PeerState,

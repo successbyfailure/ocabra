@@ -196,16 +196,17 @@ async def test_remote_unload_proxies_to_peer(peer_full):
 
 @pytest.mark.asyncio
 async def test_remote_download_proxies_to_peer(peer_full):
-    """Remote download should proxy POST /ocabra/downloads and return SSE stream."""
+    """Remote download proxies POST /ocabra/downloads and returns the peer's job.
+
+    The peer answers with the job as JSON at once (it used to be relayed as an
+    SSE stream that carried no ``data:`` lines).
+    """
     fm = _make_fm_with_peers(peer_full)
 
-    chunks = [b"data: {\"progress\": 50}\n\n", b"data: {\"progress\": 100}\n\n"]
-
-    async def _fake_stream(*args, **kwargs):
-        for c in chunks:
-            yield c
-
-    fm.proxy_stream = _fake_stream
+    job = {"job_id": "j1", "status": "queued", "progress_pct": 0.0}
+    mock_response = MagicMock(status_code=200)
+    mock_response.json.return_value = job
+    fm.proxy_request = AsyncMock(return_value=mock_response)
 
     app = _mock_app(fm)
     request = _mock_request(app)
@@ -232,13 +233,9 @@ async def test_remote_download_proxies_to_peer(peer_full):
             _user=MagicMock(),
         )
 
-    assert response.media_type == "text/event-stream"
-    # Collect the streamed chunks
-    collected = []
-    async for chunk in response.body_iterator:
-        collected.append(chunk)
-    assert len(collected) == 2
-    assert b"progress" in collected[0]
+    assert response == job
+    assert fm.proxy_request.call_args.kwargs["path"] == "/ocabra/downloads"
+    assert fm.proxy_request.call_args.kwargs["body"]["model_ref"] == "org/test-model"
 
 
 # ── Tests: remote GPUs ──────────────────────────────────────────
@@ -255,7 +252,7 @@ async def test_remote_gpus_proxies_to_peer(peer_full):
     ]
     mock_response = MagicMock()
     mock_response.json.return_value = gpu_data
-    fm.proxy_request = AsyncMock(return_value=mock_response)
+    fm.proxy_get = AsyncMock(return_value=mock_response)
 
     app = _mock_app(fm)
     request = _mock_request(app)
@@ -275,9 +272,9 @@ async def test_remote_gpus_proxies_to_peer(peer_full):
             _user=MagicMock(),
         )
 
-    fm.proxy_request.assert_awaited_once()
-    call_kwargs = fm.proxy_request.call_args
-    assert call_kwargs.kwargs["path"] == "/ocabra/gpus"
+    # GET, not POST: the peer's /ocabra/gpus is GET-only (POST got 405).
+    fm.proxy_get.assert_awaited_once()
+    assert fm.proxy_get.call_args.args[1] == "/ocabra/gpus"
     assert result == gpu_data
 
 

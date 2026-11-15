@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
-from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
@@ -452,7 +451,7 @@ async def _get_full_access_peer(
 
 
 @router.post(
-    "/federation/peers/{peer_id}/models/{model_id}/load",
+    "/federation/peers/{peer_id}/models/{model_id:path}/load",
     summary="Remote model load",
     description=(
         "Proxy a model load request to a remote peer. "
@@ -506,7 +505,7 @@ async def remote_load_model(
 
 
 @router.post(
-    "/federation/peers/{peer_id}/models/{model_id}/unload",
+    "/federation/peers/{peer_id}/models/{model_id:path}/unload",
     summary="Remote model unload",
     description=(
         "Proxy a model unload request to a remote peer. "
@@ -560,8 +559,9 @@ async def remote_unload_model(
     "/federation/peers/{peer_id}/downloads",
     summary="Remote model download",
     description=(
-        "Trigger a model download on a remote peer and stream back SSE progress. "
-        "Requires the peer to have access_level='full'."
+        "Start a model download on a remote peer (same body as POST /ocabra/downloads "
+        "there). Returns the peer's download job; follow it with "
+        "GET /federation/peers/{peer_id}/downloads/{job_id}. Requires access_level='full'."
     ),
     responses={
         403: {"description": "Peer does not have full access"},
@@ -574,45 +574,67 @@ async def remote_download(
     body: RemoteDownloadRequest,
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),
-) -> StreamingResponse:
-    """Trigger a model download on a remote peer and stream progress via SSE.
+) -> dict:
+    """Start a download on a remote peer.
 
-    Args:
-        peer_id: UUID of the target peer.
-        body: Download request (source, model_ref, artifact, register_config).
+    It used to relay the response as an SSE stream, but the peer's
+    ``POST /ocabra/downloads`` answers with the job as JSON at once: callers
+    reading ``data:`` lines saw nothing (and retried, starting it twice).
 
     Returns:
-        StreamingResponse with SSE events relaying the peer's download progress.
+        The peer's download job (``job_id``, ``status``, ``progress_pct``…).
     """
     peer = await _get_full_access_peer(peer_id, request)
     fm = _get_federation_manager(request)
-    payload = body.model_dump(exclude_none=True)
+    try:
+        resp = await fm.proxy_request(
+            peer=peer,
+            path="/ocabra/downloads",
+            body=body.model_dump(exclude_none=True),
+            headers=dict(request.headers),
+        )
+    except Exception as exc:
+        logger.warning("remote_download_failed", peer=peer.name, error=str(exc))
+        raise HTTPException(
+            status_code=502, detail=f"Failed to start download on peer '{peer.name}': {exc}"
+        ) from exc
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Peer '{peer.name}': {resp.text[:300]}")
+    return resp.json()
 
-    async def _stream():
-        try:
-            async for chunk in fm.proxy_stream(
-                peer=peer,
-                path="/ocabra/downloads",
-                body=payload,
-                headers=dict(request.headers),
-            ):
-                yield chunk
-        except Exception as exc:
-            logger.warning(
-                "remote_download_stream_error",
-                peer=peer.name,
-                error=str(exc),
-            )
-            yield f"data: {{\"error\": \"{exc}\"}}\n\n".encode()
 
-    return StreamingResponse(
-        _stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+@router.get(
+    "/federation/peers/{peer_id}/downloads/{job_id}",
+    summary="Remote download status",
+    description="Status of a download job on a remote peer. Requires access_level='full'.",
+    responses={
+        403: {"description": "Peer does not have full access"},
+        404: {"description": "Peer or job not found"},
+        502: {"description": "Peer is offline or returned an error"},
+    },
+)
+async def remote_download_status(
+    peer_id: str,
+    job_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Return a remote download job.
+
+    Returns:
+        The peer's download job.
+    """
+    peer = await _get_full_access_peer(peer_id, request)
+    fm = _get_federation_manager(request)
+    try:
+        resp = await fm.proxy_get(peer, f"/ocabra/downloads/{job_id}", dict(request.headers))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Peer '{peer.name}': {exc}") from exc
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Download job not found on the peer")
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Peer '{peer.name}': {resp.text[:300]}")
+    return resp.json()
 
 
 @router.get(
@@ -644,12 +666,9 @@ async def remote_gpus(
     peer = await _get_full_access_peer(peer_id, request)
     fm = _get_federation_manager(request)
     try:
-        resp = await fm.proxy_request(
-            peer=peer,
-            path="/ocabra/gpus",
-            body={},
-            headers=dict(request.headers),
-        )
+        # GET: it used to POST here, which the peer's GET-only route answers 405.
+        resp = await fm.proxy_get(peer, "/ocabra/gpus", dict(request.headers))
+        resp.raise_for_status()
         return resp.json()
     except Exception as exc:
         logger.warning(

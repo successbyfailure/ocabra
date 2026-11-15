@@ -745,3 +745,31 @@ def test_join_client_ip_prefers_x_real_ip_and_ignores_forged_xff():
     )
     # Without Caddy's header, a forged X-Forwarded-For must not win.
     assert _client_ip(_req({"x-forwarded-for": "6.6.6.6"})) == "172.22.0.5"
+
+
+async def test_service_manager_survives_missing_docker_cli(monkeypatch):
+    """The ocabra-node image has no docker CLI: startup used to crash on it."""
+    import asyncio as _asyncio
+
+    from ocabra.core.service_manager import ServiceManager
+
+    async def _no_docker(*a, **kw):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", _no_docker)
+    sm = ServiceManager.__new__(ServiceManager)
+    assert await sm._run_docker_command("inspect", "x") == (127, "", "docker CLI not available")
+
+
+def test_remote_load_and_unload_accept_canonical_ids_with_slash():
+    """Canonical ids are ``backend/name``: without ``:path`` the routes 404'd on all of them."""
+    from starlette.routing import Match
+
+    from ocabra.api.internal.federation import router
+
+    for action in ("load", "unload"):
+        path = f"/federation/peers/p1/models/llamacpp_mks/qwen2.5-0.5b/{action}"
+        scope = {"type": "http", "path": path, "method": "POST"}
+        matches = [r for r in router.routes if r.matches(scope)[0] == Match.FULL]
+        assert matches, path
+        assert matches[0].matches(scope)[1]["path_params"]["model_id"] == "llamacpp_mks/qwen2.5-0.5b"

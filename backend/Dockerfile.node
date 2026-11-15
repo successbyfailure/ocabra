@@ -1,0 +1,121 @@
+# oCabra "node" — one self-contained container for a rented GPU (RunPod, …).
+#
+# Runs the API with its own Postgres and Redis inside, plus a prebuilt
+# llama.cpp (Makespace fork). It is not meant to be reached: on start it joins
+# a hub with FEDERATION_JOIN_URL + FEDERATION_JOIN_INVITE through the outbound
+# reverse tunnel, and the hub routes requests to it. No frontend, no Caddy, no
+# docker socket.
+#
+# CUDA 12.8 on purpose (our main image uses 13): rented machines often have
+# drivers older than CUDA 13's R580 minimum, and 12.8 already covers Blackwell.
+#
+#   docker build -f Dockerfile.node -t ghcr.io/<owner>/ocabra-node:<tag> backend/
+
+ARG CUDA_VERSION=12.8.1
+
+# ── 1. Build llama.cpp (fork) ────────────────────────────────────────────────
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS llama-build
+ARG LLAMA_REPO=https://github.com/makespacemadrid/llama.cpp-mks
+# Same commit as production (backend llamacpp_mks).
+ARG LLAMA_REF=96fff6cab237f60dd2e46606a6aeaf0de7abe15b
+# A100, A40/3090/A6000, 4090/L40S/L4, H100/H200, B200, 5090/PRO 6000. No 75
+# (T4/2080: little VRAM, barely offered for pods). Each entry also ships PTX,
+# so a newer GPU still runs via JIT (slower first load).
+ARG CUDA_ARCHS="80;86;89;90;100;120"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential patchelf ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /src && cd /src \
+    && git remote add origin "${LLAMA_REPO}" \
+    && git fetch --depth 1 origin "${LLAMA_REF}" \
+    && git checkout --quiet FETCH_HEAD \
+    && git log --oneline -1
+COPY scripts/install_llama_cpp.sh /tmp/install_llama_cpp.sh
+RUN BACKEND_DIR=/out SRC_DIR=/src BIN_DIR=/out/bin \
+    ENABLE_CUDA=ON LLAMA_CUDA_NCCL=OFF \
+    LLAMA_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+    bash /tmp/install_llama_cpp.sh \
+    # Self-contained bin/: look for the sibling .so files, not the build tree.
+    && for f in /out/bin/llama-server /out/bin/*.so*; do \
+           patchelf --set-rpath '$ORIGIN' "$f"; \
+       done \
+    && rm -rf /out/bin/llama-bench
+# The script copies regular files only; the binary also needs the SONAME links
+# (libllama.so.0 -> libllama.so.0.9.0). Production never noticed: its binary
+# looks in the build tree, where the links exist. Separate step so the
+# (long) compile above stays cached.
+RUN cp -a /src/build/bin/*.so* /out/bin/ \
+    && find /out/bin -maxdepth 1 -type f \( -name 'llama-server' -o -name '*.so*' \) \
+           -exec patchelf --set-rpath '$ORIGIN' {} \; \
+    && ls -la /out/bin
+
+# ── 2. Runtime ───────────────────────────────────────────────────────────────
+FROM python:3.11-slim-bookworm AS node
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Postgres + Redis live inside this container; CUDA runtime libs only (the
+# driver comes from the host through the NVIDIA container runtime).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg ffmpeg libsndfile1 libgomp1 \
+        postgresql redis-server \
+    && curl -fsSL -o /tmp/cuda-keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        cuda-cudart-12-8 libcublas-12-8 \
+    && rm -rf /var/lib/apt/lists/* /tmp/cuda-keyring.deb \
+    && echo /usr/local/cuda-12.8/targets/x86_64-linux/lib > /etc/ld.so.conf.d/cuda-12-8.conf \
+    && ldconfig
+
+WORKDIR /app
+COPY pyproject.toml .
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && pip install --upgrade pip setuptools wheel \
+    && pip install -e "." \
+    && apt-get purge -y build-essential && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+
+# llama.cpp registered as an installed backend, exactly where the installer
+# would have put it (so the node never tries to build it).
+COPY --from=llama-build /out/bin /data/backends/llamacpp_mks/bin
+RUN python3 - <<'PY'
+import json, datetime
+meta = {
+    "schema_version": 1,
+    "backend_type": "llamacpp_mks",
+    "install_source": "source",
+    "version": "source",
+    "git_repo": "https://github.com/makespacemadrid/llama.cpp-mks",
+    "git_ref": "96fff6cab237f60dd2e46606a6aeaf0de7abe15b",
+    "bin_dir": "/data/backends/llamacpp_mks/bin",
+    "src_dir": None,
+    "extra_bins": {"server": "/data/backends/llamacpp_mks/bin/llama-server"},
+    "apt_packages": [],
+    "pip_packages": [],
+    "pip_extra_index_urls": [],
+    "python_bin": None,
+    "include_core_runtime": False,
+    "installed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    "size_mb": 0,
+}
+open("/data/backends/llamacpp_mks/metadata.json", "w").write(json.dumps(meta, indent=2))
+PY
+# Every library must resolve except libcuda (the driver, injected at run time).
+RUN chmod +x /app/docker-entrypoint.sh /app/node-entrypoint.sh \
+    && missing="$(ldd /data/backends/llamacpp_mks/bin/llama-server | grep 'not found' | grep -v libcuda.so.1 || true)" \
+    && if [ -n "$missing" ]; then echo "unresolved libraries:"; echo "$missing"; exit 1; fi
+
+ENV DATABASE_URL=postgresql+asyncpg://ocabra:ocabra@127.0.0.1:5432/ocabra \
+    REDIS_URL=redis://127.0.0.1:6379/0 \
+    DEFAULT_GPU_INDEX=0 \
+    FEDERATION_ENABLED=true \
+    FEDERATION_LOCAL_URL=http://127.0.0.1:8000 \
+    BACKENDS_FAT_IMAGE=false
+
+ENTRYPOINT ["/app/node-entrypoint.sh"]
+CMD ["uvicorn", "ocabra.main:app", "--host", "127.0.0.1", "--port", "8000", "--workers", "1"]

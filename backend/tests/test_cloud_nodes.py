@@ -62,7 +62,7 @@ async def test_create_pod_sends_v2_shape():
     assert seen["body"] == {
         "name": "ocabra-x",
         "image": "ghcr.io/a/ocabra-node:latest",
-        "gpu": {"id": "NVIDIA GeForce RTX 3090", "count": 1},
+        "gpu": {"id": "NVIDIA GeForce RTX 3090", "count": 1, "minCudaVersion": "12.8"},
         "cloud": "COMMUNITY",
         "disk": 80,
         "env": {"FEDERATION_JOIN_URL": "https://hub"},

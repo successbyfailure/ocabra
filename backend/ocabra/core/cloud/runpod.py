@@ -19,6 +19,8 @@ from ocabra.core.cloud.manager import CloudError, PodInfo, PodSpec
 logger = structlog.get_logger(__name__)
 
 BASE_URL = "https://api.runpod.io/v2"
+# Must match the CUDA the ocabra-node image is built with (Dockerfile.node).
+MIN_CUDA_VERSION = "12.8"
 
 _STATUS_MAP = {
     "PROVISIONING": "starting",
@@ -131,7 +133,14 @@ class RunPodClient:
         body: dict[str, Any] = {
             "name": spec.name,
             "image": spec.image,
-            "gpu": {"id": spec.gpu_type_id, "count": spec.gpu_count},
+            # The ocabra-node image is built with CUDA 12.8: only machines whose
+            # driver supports it (otherwise llama.cpp can't use the GPU and the
+            # pod bills while useless).
+            "gpu": {
+                "id": spec.gpu_type_id,
+                "count": spec.gpu_count,
+                "minCudaVersion": MIN_CUDA_VERSION,
+            },
             "cloud": spec.cloud_type,
             "disk": spec.container_disk_gb,
             "env": spec.env,

@@ -1065,12 +1065,29 @@ class ServiceManager:
     # ── Docker helpers ────────────────────────────────────────────────────
 
     async def _run_docker_command(self, *args: str) -> tuple[int, str, str]:
-        process = await asyncio.create_subprocess_exec(
-            "docker",
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        """Run the docker CLI; exit 127 (never raises) when it isn't installed.
+
+        A node without the CLI (the ``ocabra-node`` image on a rented GPU has
+        no docker socket by design) used to crash the whole API on startup:
+        ``start()`` checks every service's container and the FileNotFoundError
+        escaped. Callers already treat a non-zero code as "not running" /
+        "couldn't do it", which is exactly right without docker.
+        """
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            if not getattr(self, "_docker_missing_logged", False):
+                self._docker_missing_logged = True
+                logger.warning(
+                    "docker_cli_not_available",
+                    hint="services that run in containers are disabled",
+                )
+            return 127, "", "docker CLI not available"
         stdout, stderr = await process.communicate()
         return (
             process.returncode or 0,
