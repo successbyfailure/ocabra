@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.84.1 — 2026-11-16
+
+### Correcciones
+
+- **`/v1/realtime` envía la transcripción de lo que dice el usuario.** Con
+  un modelo sin entrada de audio nativa (Whisper → texto → LLM), el texto
+  solo iba dentro de `conversation.item.created` y nunca llegaba
+  `conversation.item.input_audio_transcription.completed`, que es el evento
+  que escuchan los clientes de OpenAI para mostrarlo.
+
+---
+
 ## 0.84.0 — 2026-11-16
 
 ### Novedades

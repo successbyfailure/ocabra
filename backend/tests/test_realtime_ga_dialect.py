@@ -340,3 +340,17 @@ async def test_salida_pcmu_para_telefonia(monkeypatch):
         await s._synthesize_and_send("Hola", "resp_1", "item_1")
     deltas = [e for e in _events(s) if e["type"] == "response.output_audio.delta"]
     assert abs(sum(len(base64.b64decode(e["delta"])) for e in deltas) - 8000) <= 5
+
+
+@pytest.mark.asyncio
+async def test_el_flujo_clasico_emite_la_transcripcion_del_usuario(monkeypatch):
+    """OpenClaw no mostraba lo que dijo el usuario: el flujo Whisper → texto
+    → LLM solo lo metía dentro de conversation.item.created."""
+    s = _session(monkeypatch)
+    s.audio_buffer.extend(b"\x00\x01" * 16000)
+    s._transcribe = AsyncMock(return_value="¿Cuál es la capital de Francia?")
+    await s._commit_audio_only()
+    ev = [e for e in _events(s) if e["type"] == "conversation.item.input_audio_transcription.completed"]
+    assert ev and ev[0]["transcript"] == "¿Cuál es la capital de Francia?"
+    creado = next(e for e in _events(s) if e["type"] == "conversation.item.created")
+    assert ev[0]["item_id"] == creado["item"]["id"]

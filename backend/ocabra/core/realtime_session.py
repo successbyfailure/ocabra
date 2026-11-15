@@ -1535,6 +1535,16 @@ class RealtimeSession:
                     ],
                 },
             )
+            # The standard event OpenAI clients listen to for the user's
+            # words. Only the native-audio and transcription-only paths sent
+            # it; this classic STT path left it inside conversation.item.created
+            # (2026-11-16, OpenClaw showed no user transcript).
+            await self._send_event(
+                "conversation.item.input_audio_transcription.completed",
+                item_id=item_id,
+                content_index=0,
+                transcript=transcript,
+            )
 
     async def _cancel_current_response(self) -> None:
         """Cancel the in-progress response task, if any. Shared by the
