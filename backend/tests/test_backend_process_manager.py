@@ -81,6 +81,7 @@ async def test_detects_dead_pid():
     bpm, model_manager, worker_pool, _ = make_fixtures()
 
     worker = FakeWorkerInfo(pid=99999)
+    worker_pool._workers["vllm/test-model"] = worker
     state = FakeModelState()
     model_manager.get_state.return_value = state
 
@@ -104,6 +105,7 @@ async def test_detects_health_failure():
     bpm, model_manager, worker_pool, _ = make_fixtures()
 
     worker = FakeWorkerInfo(pid=99999)
+    worker_pool._workers["vllm/test-model"] = worker
     state = FakeModelState()
     model_manager.get_state.return_value = state
 
@@ -200,6 +202,7 @@ async def test_healthy_worker_resets_failure_count():
     bpm, model_manager, worker_pool, _ = make_fixtures()
 
     worker = FakeWorkerInfo(pid=99999)
+    worker_pool._workers["vllm/test-model"] = worker
     state = FakeModelState()
     model_manager.get_state.return_value = state
 
@@ -286,3 +289,40 @@ async def test_auto_restart_waits_for_vram_release_before_reloading():
     )
     model_manager.load.assert_awaited_once_with("vllm/test-model")
     assert call_order == ["wait", "load"]
+
+
+@pytest.mark.asyncio
+async def test_un_worker_descargado_a_proposito_no_se_reinicia():
+    """2026-11-15: gemma4:26b, desalojado para una sonda, seguía en la foto del
+    bucle de salud; su proceso ya no existía, se dio por muerto y el
+    auto-reinicio lo volvió a cargar, echando a la sonda."""
+    bpm, model_manager, worker_pool, _ = make_fixtures()
+    worker = FakeWorkerInfo(pid=99999)  # ya fuera del pool: se descargó
+    with (
+        patch.object(BackendProcessManager, "_is_pid_alive", return_value=False),
+        patch("ocabra.redis_client.publish_system_alert", new=AsyncMock()),
+    ):
+        await bpm._check_worker("vllm/test-model", worker)
+    worker_pool.remove_worker.assert_not_called()
+    model_manager.load.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_un_worker_reemplazado_por_otro_pid_no_es_una_muerte():
+    bpm, model_manager, worker_pool, _ = make_fixtures()
+    viejo = FakeWorkerInfo(pid=11111)
+    worker_pool._workers["vllm/test-model"] = FakeWorkerInfo(pid=22222)  # recargado
+    with patch.object(BackendProcessManager, "_is_pid_alive", return_value=False):
+        await bpm._check_worker("vllm/test-model", viejo)
+    worker_pool.remove_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_un_modelo_que_ya_no_esta_cargado_no_es_una_muerte():
+    bpm, model_manager, worker_pool, _ = make_fixtures()
+    worker = FakeWorkerInfo(pid=99999)
+    worker_pool._workers["vllm/test-model"] = worker
+    model_manager._states = {"vllm/test-model": FakeModelState(status=ModelStatus.UNLOADED)}
+    with patch.object(BackendProcessManager, "_is_pid_alive", return_value=False):
+        await bpm._check_worker("vllm/test-model", worker)
+    worker_pool.remove_worker.assert_not_called()

@@ -236,3 +236,52 @@ async def test_sin_vram_validada_decide_el_estimador():
     runtime = fake.probe_overrides["_runtime"]
     assert runtime["capacity_validated"] is False
     assert runtime["capacity_vram_mb"] is None
+
+
+@pytest.mark.asyncio
+async def test_los_pin_no_se_recargan_mientras_mide_y_vuelven_al_terminar():
+    """2026-11-15: gemma4:26b (PIN) se recargaba entre sondas y en mitad de
+    una, y acababa echando al worker de la sonda."""
+    fake = FakeManager()
+    pin = SimpleNamespace(
+        model_id="llamacpp_mks/gemma4:26b",
+        status=ModelStatus.UNLOADED,
+        current_gpu=[],
+        load_policy=LoadPolicy.PIN,
+        reload_suppressed_until=None,
+    )
+    fake._states[pin.model_id] = pin
+    vistos = []
+    original_resize = fake.resize_context
+
+    async def _resize(model_id, *, context):
+        vistos.append(pin.reload_suppressed_until)
+        await original_resize(model_id, context=context)
+
+    fake.resize_context = _resize
+    job = await _run(fake, _service(fake))
+    assert job.status == "done", job.error
+    assert vistos and all(v is not None for v in vistos)  # en espera durante la sonda
+    assert pin.reload_suppressed_until is None  # y libre al acabar
+
+
+@pytest.mark.asyncio
+async def test_espera_a_que_termine_una_carga_en_curso_antes_de_vaciar():
+    fake = FakeManager()
+    cargando = SimpleNamespace(
+        model_id="llamacpp_mks/gemma4:26b",
+        status=ModelStatus.LOADING,
+        current_gpu=[],
+        load_policy=LoadPolicy.PIN,
+        reload_suppressed_until=None,
+    )
+    fake._states[cargando.model_id] = cargando
+    service = _service(fake)
+
+    async def _termina():
+        await asyncio.sleep(0.05)
+        cargando.status = ModelStatus.LOADED
+
+    asyncio.get_running_loop().create_task(_termina())
+    await service._wait_for_loads([1], timeout_s=2)
+    assert cargando.status == ModelStatus.LOADED

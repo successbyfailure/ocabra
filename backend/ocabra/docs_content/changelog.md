@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.81.6 — 2026-11-15
+
+### Correcciones
+
+- **Un modelo desalojado ya no vuelve a cargarse solo al instante.** Cuando
+  oCabra sacaba un modelo de la GPU para hacer sitio a otro, la vigilancia
+  de workers podía confundir ese cierre con una caída y "reiniciar" el
+  modelo recién sacado, que a su vez echaba al que acababa de entrar. Desde
+  fuera se veía como dos modelos quitándose la tarjeta y peticiones que
+  esperaban una recarga tras otra.
+
+---
+
 ## 0.81.5 — 2026-11-15
 
 ### Correcciones

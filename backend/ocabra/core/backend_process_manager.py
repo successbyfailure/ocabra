@@ -91,13 +91,41 @@ class BackendProcessManager:
             except Exception as exc:
                 logger.warning("health_loop_error", error=str(exc))
 
+    def _still_current(self, model_id: str, worker_info) -> bool:
+        """Whether ``worker_info`` is still the live worker of a loaded model.
+
+        The health loop checks a snapshot of the pool. A worker unloaded on
+        purpose while the loop runs (an eviction, a manual unload) is still in
+        that snapshot, its process is gone, and it used to be reported dead,
+        marked ERROR and *restarted*: 2026-11-15, gemma4:26b was evicted to
+        make room for a context probe, came back 0.5 s later through this
+        auto-restart and evicted the probe in turn. An eviction must not turn
+        into a reload of what was evicted.
+        """
+        from ocabra.core.model_manager import ModelStatus
+
+        current = self._worker_pool._workers.get(model_id)
+        if current is None or getattr(current, "pid", None) != worker_info.pid:
+            return False
+        states = getattr(self._model_manager, "_states", None)
+        state = states.get(model_id) if isinstance(states, dict) else None
+        return state is None or state.status == ModelStatus.LOADED
+
     async def _check_worker(self, model_id: str, worker_info) -> None:
         """Check a single worker: PID alive then HTTP health."""
         pid = worker_info.pid
         port = worker_info.port
 
+        if not self._still_current(model_id, worker_info):
+            self._health_fail_counts.pop(model_id, None)
+            return
+
         # Step 1: Check if PID is alive
         if not self._is_pid_alive(pid):
+            # Re-check: the unload may have finished between the two checks.
+            if not self._still_current(model_id, worker_info):
+                self._health_fail_counts.pop(model_id, None)
+                return
             logger.error(
                 "worker_pid_dead",
                 model_id=model_id,
@@ -123,7 +151,7 @@ class BackendProcessManager:
         except Exception:
             count = self._health_fail_counts.get(model_id, 0) + 1
             self._health_fail_counts[model_id] = count
-            if count >= HEALTH_FAIL_THRESHOLD:
+            if count >= HEALTH_FAIL_THRESHOLD and self._still_current(model_id, worker_info):
                 logger.error(
                     "worker_health_failed",
                     model_id=model_id,

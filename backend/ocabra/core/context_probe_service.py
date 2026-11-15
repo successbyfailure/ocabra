@@ -23,6 +23,7 @@ import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -111,6 +112,7 @@ class ContextProbeService:
             base_id: str | None = None
             probe_key: str | None = None
             pinned_evicted: list[str] = []
+            held_pins: dict[str, Any] = {}
             try:
                 job.status = "preparing"
                 profile, overrides, gpus, start = await self._prepare_load(job)
@@ -119,6 +121,8 @@ class ContextProbeService:
                 job.gpu_indices = gpus
 
                 self._mm.set_maintenance(base_id, True)
+                held_pins = self._hold_pin_reloads()
+                await self._wait_for_loads(gpus)
                 pinned_evicted = await self._clear_gpus(job, gpus, keep=probe_key)
 
                 job.status = "loading"
@@ -174,6 +178,7 @@ class ContextProbeService:
                 restoring_from = job.status
                 job.status = "restoring" if restoring_from == "done" else job.status
                 await self._restore(base_id, probe_key, pinned_evicted)
+                self._release_pin_reloads(held_pins)
                 if restoring_from == "done":
                     job.status = "done"
                 job.finished_at = time.time()
@@ -229,8 +234,7 @@ class ContextProbeService:
         # MB on a 24 GB 3090 where it runs in 22760 (2026-11-15).
         validated_mb = (
             int(runtime.get("capacity_vram_mb") or 0)
-            if runtime.get("capacity_validated")
-            and start <= int(plan.effective_context or 0)
+            if runtime.get("capacity_validated") and start <= int(plan.effective_context or 0)
             else 0
         )
         runtime["effective_context"] = start
@@ -242,6 +246,54 @@ class ContextProbeService:
         job.context_is_pool = pool
         job.parallelism = parallel
         return profile, overrides, gpus, start
+
+    def _hold_pin_reloads(self) -> dict[str, Any]:
+        """Keep pinned models from reloading while the probe owns the GPUs.
+
+        A pinned model the probe evicts has a reload watcher that loads it
+        back as soon as it sees room: in the gap between two probes, or in the
+        middle of one. 2026-11-15: gemma4:26b started reloading between two
+        probes, the next probe had to evict it again as a last resort, and the
+        churn ended with the probe's own worker evicted mid-measurement.
+        Returns the previous holds so ``_release_pin_reloads`` restores them.
+        """
+        from ocabra.core.model_manager import LoadPolicy
+
+        until = datetime.now(UTC) + timedelta(hours=1)
+        held: dict[str, Any] = {}
+        for model_id, state in list(self._mm._states.items()):
+            if getattr(state, "load_policy", None) != LoadPolicy.PIN:
+                continue
+            held[model_id] = state.reload_suppressed_until
+            state.reload_suppressed_until = until
+        return held
+
+    def _release_pin_reloads(self, held: dict[str, Any]) -> None:
+        for model_id, previous in held.items():
+            state = self._mm._states.get(model_id)
+            if state is not None:
+                state.reload_suppressed_until = previous
+
+    async def _wait_for_loads(self, gpus: list[int], timeout_s: float = 300.0) -> None:
+        """Let loads already under way finish before clearing the GPUs.
+
+        ``_clear_gpus`` only unloads LOADED models: one still loading was
+        skipped and then had to be evicted as a last resort by the probe's
+        own load. Waiting here puts it in the list like any other.
+        """
+        from ocabra.core.model_manager import ModelStatus
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            loading = [
+                s.model_id
+                for s in list(self._mm._states.values())
+                if getattr(s, "status", None) == ModelStatus.LOADING
+            ]
+            if not loading:
+                return
+            await asyncio.sleep(1.0)
+        raise ProbeError(f"loads still under way on GPU {gpus}: {loading}")
 
     async def _clear_gpus(self, job: ProbeJob, gpus: list[int], *, keep: str) -> list[str]:
         """Unload everything on the probed GPUs; returns the pinned ones."""
