@@ -1,28 +1,44 @@
 {
     admin off
+    # openresty (10.0.8.5) sits in front of Caddy and appends the real client
+    # address to X-Forwarded-For. Trusting it lets Caddy work out the client IP
+    # ({client_ip}, read right to left so a forged leading entry is ignored);
+    # without this every request looked like it came from 10.0.8.5.
+    servers {
+        trusted_proxies static 10.0.8.5/32
+        trusted_proxies_strict
+    }
+}
+
+# Every API route: hand the backend the client IP Caddy resolved, overwriting
+# whatever X-Real-IP the request carried (so it can't be forged from outside).
+(api) {
+    reverse_proxy api:8000 {
+        header_up X-Real-IP {client_ip}
+    }
 }
 
 :80 {
     # API routes → backend
     handle /v1/* {
-        reverse_proxy api:8000
+        import api
     }
     handle /api/* {
-        reverse_proxy api:8000
+        import api
     }
     handle /ocabra/* {
-        reverse_proxy api:8000
+        import api
     }
     handle /health {
-        reverse_proxy api:8000
+        import api
     }
     handle /ready {
-        reverse_proxy api:8000
+        import api
     }
     # Sin esta regla /version se caia al SPA del frontend, que responde con su
     # propio 404 de nginx: el mismo patron que las subrutas de /docs.
     handle /version {
-        reverse_proxy api:8000
+        import api
     }
     # /docs y todo lo que cuelga: ademas del Swagger estan las paginas en prosa
     # (/docs/changelog, /docs/models, y sus variantes .md) y el
@@ -30,19 +46,19 @@
     # la ruta exacta y las subrutas se caian al SPA del frontend, que devolvia
     # 404.
     handle /docs {
-        reverse_proxy api:8000
+        import api
     }
     handle /docs/* {
-        reverse_proxy api:8000
+        import api
     }
     handle /redoc {
-        reverse_proxy api:8000
+        import api
     }
     handle /openapi.json {
-        reverse_proxy api:8000
+        import api
     }
     handle /metrics {
-        reverse_proxy api:8000
+        import api
     }
 
     # Frontend (React SPA) — everything else

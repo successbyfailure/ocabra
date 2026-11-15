@@ -711,9 +711,16 @@ def _join_service(request: Request):
 
 
 def _client_ip(request: Request) -> str | None:
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64] or None
+    """Client address for join requests (shown to the admin, rate limits).
+
+    Caddy resolves it from the proxy chain and sets ``X-Real-IP`` (overwriting
+    any value the client sent). The first ``X-Forwarded-For`` entry is NOT
+    used: nginx-style proxies append to whatever the client sent, so that entry
+    is forgeable and would let anyone dodge the per-IP limits.
+    """
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real[:64]
     return request.client.host if request.client else None
 
 

@@ -723,3 +723,25 @@ async def test_node_name_is_read_live():
     )
     settings.federation_node_name = ""
     assert fm.node_name == "node-test-nod"
+
+
+def test_join_client_ip_prefers_x_real_ip_and_ignores_forged_xff():
+    from starlette.requests import Request
+
+    from ocabra.api.internal.federation import _client_ip
+
+    def _req(headers):
+        return Request(
+            {
+                "type": "http",
+                "headers": [(k.encode(), v.encode()) for k, v in headers.items()],
+                "client": ("172.22.0.5", 1234),
+            }
+        )
+
+    assert (
+        _client_ip(_req({"x-real-ip": "85.1.2.3", "x-forwarded-for": "6.6.6.6, 85.1.2.3"}))
+        == "85.1.2.3"
+    )
+    # Without Caddy's header, a forged X-Forwarded-For must not win.
+    assert _client_ip(_req({"x-forwarded-for": "6.6.6.6"})) == "172.22.0.5"

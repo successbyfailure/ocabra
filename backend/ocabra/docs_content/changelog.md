@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.82.2 — 2026-11-15
+
+### Correcciones
+
+- **Las solicitudes de unión a la federación muestran la IP real de quien
+  las envía**, no la del proxy que hay delante del servidor, y el límite de
+  solicitudes por IP ya no se puede esquivar falseando `X-Forwarded-For`.
+
+---
+
 ## 0.82.1 — 2026-11-15
 
 ### Correcciones
