@@ -691,6 +691,8 @@ export interface ServerConfig {
   federationAcceptJoinRequests: boolean;
   /** functional: as private as possible without getting in the way; zero_data: nothing kept. */
   privacyMode: "functional" | "zero_data";
+  /** Where temporary files go (RAM in zero data) and how much room is left. */
+  privacyTempDir?: { dir: string; in_memory: boolean; free_mb: number | null } | null;
   /** Batch/upload files are deleted this long after their batch ends (0 = keep). */
   openaiFilesRetentionHours: number;
   batchPriorityEnabled: boolean;

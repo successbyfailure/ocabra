@@ -1644,6 +1644,8 @@ function toServerConfig(raw: unknown): ServerConfig {
     ),
     privacyMode:
       (data.privacyMode ?? data.privacy_mode) === "zero_data" ? "zero_data" : "functional",
+    privacyTempDir: (isRecord(data.privacyTempDir) ? data.privacyTempDir : null) as
+      ServerConfig["privacyTempDir"],
     openaiFilesRetentionHours: Number(
       data.openaiFilesRetentionHours ?? data.openai_files_retention_hours ?? 168,
     ),

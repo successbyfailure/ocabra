@@ -447,6 +447,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("config_overrides_none")
 
+    # Privacy: in zero data, temporary files (uploads, media the workers
+    # process) go to RAM from the start — before any worker is spawned.
+    from ocabra.core.privacy import apply_temp_dir
+
+    apply_temp_dir()
+
     # Stream 1-A: GPU Manager + Scheduler
     from ocabra.core.gpu_manager import GPUManager
     from ocabra.core.scheduler import GPUScheduler

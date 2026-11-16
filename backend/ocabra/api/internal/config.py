@@ -360,6 +360,7 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "federationNodeName": settings.federation_node_name,
         "federationAcceptJoinRequests": settings.federation_accept_join_requests,
         "privacyMode": settings.privacy_mode,
+        "privacyTempDir": _privacy_temp_status(),
         "openaiFilesRetentionHours": settings.openai_files_retention_hours,
         "batchPriorityEnabled": settings.batch_priority_enabled,
         "batchPreemptMode": settings.batch_preempt_mode,
@@ -688,6 +689,9 @@ async def patch_config(
     if payload.get("privacy_mode"):
         settings.privacy_mode = str(payload["privacy_mode"])
         await _persist("privacy_mode", settings.privacy_mode)
+        from ocabra.core.privacy import apply_temp_dir
+
+        apply_temp_dir()  # temporary files to RAM (zero data) or back
 
     if payload.get("openai_files_retention_hours") is not None:
         settings.openai_files_retention_hours = int(payload["openai_files_retention_hours"])
@@ -853,3 +857,9 @@ async def sync_litellm(
             "errors": result.errors,
         }
     )
+
+
+def _privacy_temp_status() -> dict:
+    from ocabra.core.privacy import temp_dir_status
+
+    return temp_dir_status()

@@ -255,3 +255,38 @@ def test_in_flight_rows_drop_who_asked_in_zero_data(zero_data):
     active = mm._active_requests[rid]
     assert active.username is None and active.api_key_name is None
     assert active.user_id == "u1"  # fair share between users still needs it
+
+
+def test_zero_data_temp_files_go_to_memory(monkeypatch):
+    """Uploads above 1 MB and the media workers process use ``tempfile``:
+    in zero data they must land in RAM, never on the node's disk."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    if not os.path.isdir("/dev/shm"):
+        pytest.skip("no /dev/shm here")
+    monkeypatch.setattr(settings, "privacy_mode", "zero_data")
+    try:
+        status = privacy.apply_temp_dir()
+        assert status["in_memory"] and tempfile.gettempdir() == privacy.MEMORY_TEMP_DIR
+        # A spooled upload that rolls over to a real file (what FastAPI does
+        # past 1 MB) lands in memory too.
+        spool = tempfile.SpooledTemporaryFile(max_size=10)
+        spool.write(b"x" * 100)
+        spool.rollover()
+        assert os.readlink(f"/proc/self/fd/{spool.fileno()}").startswith("/dev/shm/")
+        spool.close()
+        # Workers are subprocesses: they inherit it.
+        out = subprocess.run(
+            [sys.executable, "-c", "import tempfile; print(tempfile.gettempdir())"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert out == privacy.MEMORY_TEMP_DIR
+    finally:
+        monkeypatch.setattr(settings, "privacy_mode", "functional")
+        status = privacy.apply_temp_dir()
+    assert not status["in_memory"]

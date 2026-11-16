@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.95.4 — 2026-11-16
+
+### Cambios
+
+- **En un nodo `zero_data` los ficheros temporales van a memoria**
+  (`/dev/shm`): las subidas de más de 1 MB, y el audio y el vídeo que procesan
+  los workers, ya no tocan el disco del nodo. Si `/dev/shm` se queda corto,
+  una subida grande falla en vez de escribirse a disco. `GET /ocabra/config`
+  informa de dónde van y cuánto sitio queda (`privacyTempDir`).
+
+---
+
 ## 0.95.3 — 2026-11-16
 
 ### Corregido

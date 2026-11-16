@@ -18,9 +18,15 @@ See docs/tasks/cloud-storage-privacy-plan.md for the full inventory.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Any
 
+import structlog
+
 from ocabra.config import settings
+
+logger = structlog.get_logger(__name__)
 
 FUNCTIONAL = "functional"
 ZERO_DATA = "zero_data"
@@ -86,3 +92,54 @@ async def require_storage_allowed() -> None:
                 }
             },
         )
+
+
+# ── temporary files in memory (zero data) ───────────────────────
+
+MEMORY_TEMP_DIR = "/dev/shm/ocabra-tmp"
+_ORIGINAL_TMPDIR = os.environ.get("TMPDIR")
+
+
+def temp_dir_status() -> dict[str, Any]:
+    """Where temporary files go now, and how much room there is."""
+    current = tempfile.gettempdir()
+    try:
+        st = os.statvfs(current)
+        free_mb = st.f_bavail * st.f_frsize // (1024 * 1024)
+    except OSError:
+        free_mb = None
+    return {
+        "dir": current,
+        "in_memory": current.startswith("/dev/shm"),
+        "free_mb": free_mb,
+    }
+
+
+def apply_temp_dir() -> dict[str, Any]:
+    """Point temporary files at RAM in zero data, back to the default otherwise.
+
+    Uploads above 1 MB (FastAPI spools them), audio and video the workers
+    process (VibeASR, FlashVSR, the upscaler) and anything else using
+    ``tempfile`` go through ``TMPDIR``: on a zero-data node that is
+    ``/dev/shm`` so request media never touches the disk. Workers are
+    subprocesses and inherit it. If ``/dev/shm`` is small, a large upload
+    fails instead of falling back to the disk — on purpose.
+    """
+    if zero_data() and os.path.isdir("/dev/shm"):
+        try:
+            os.makedirs(MEMORY_TEMP_DIR, mode=0o700, exist_ok=True)
+            os.environ["TMPDIR"] = MEMORY_TEMP_DIR
+            tempfile.tempdir = MEMORY_TEMP_DIR
+        except OSError as exc:
+            logger.warning("privacy_memory_tempdir_failed", error=str(exc))
+    else:
+        if _ORIGINAL_TMPDIR is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = _ORIGINAL_TMPDIR
+        tempfile.tempdir = None
+    status = temp_dir_status()
+    logger.info("privacy_temp_dir", mode=mode(), **status)
+    if zero_data() and not status["in_memory"]:
+        logger.warning("privacy_zero_data_temp_on_disk", **status)
+    return status

@@ -72,6 +72,22 @@ export function PrivacySettings({ config, onSave }: PrivacySettingsProps) {
           </label>
         ))}
       </div>
+      {config.privacyMode === "zero_data" && config.privacyTempDir && (
+        <p
+          className={`text-xs ${
+            !config.privacyTempDir.in_memory || (config.privacyTempDir.free_mb ?? 0) < 1024
+              ? "text-amber-700 dark:text-amber-300"
+              : "text-muted-foreground"
+          }`}
+        >
+          {config.privacyTempDir.in_memory
+            ? `Los ficheros temporales (subidas, audio y vídeo en proceso) van a memoria: ${config.privacyTempDir.dir}, ${config.privacyTempDir.free_mb ?? "?"} MB libres.`
+            : `Los ficheros temporales van a disco (${config.privacyTempDir.dir}): este nodo no tiene /dev/shm.`}
+          {config.privacyTempDir.in_memory && (config.privacyTempDir.free_mb ?? 0) < 1024
+            ? " Es poco: una subida más grande fallará en vez de escribirse a disco."
+            : ""}
+        </p>
+      )}
       {mode === "functional" && (
         <label className="flex flex-wrap items-center gap-2 text-sm">
           <span>Borrar ficheros de batches y subidas</span>
