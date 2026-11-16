@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.86.1 — 2026-11-16
+
+### Novedades
+
+- **Llevar modelos a un nodo en la nube que ya está en marcha:**
+  `POST /ocabra/cloud/nodes/{id}/models` con `{"models": [...]}`.
+- `GET /ocabra/cloud/replicable-models` lista los modelos que un nodo puede
+  llevar, con su tamaño, si están cargados aquí y, si no se pueden replicar,
+  por qué (p. ej. ficheros que solo existen en este servidor).
+
+### Correcciones
+
+- **`GET /ocabra/models` volvía error 500 para todos los modelos** en cuanto
+  uno había cambiado de despliegue por defecto (p. ej. al borrar el despliegue
+  de llama.cpp de `qwen3:32b`): su perfil guardaba la capacidad validada del
+  despliegue anterior, para recuperarla si se vuelve a él, en un campo que la
+  respuesta no admitía.
+- **`GET /ocabra/models/storage` ya no falla en un servidor recién
+  instalado** ("No such file or directory: '/data/models'"): mide el disco
+  donde se crearán los modelos aunque la carpeta aún no exista.
+
+---
+
 ## 0.86.0 — 2026-11-16
 
 ### Novedades

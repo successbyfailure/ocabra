@@ -6,6 +6,10 @@
 # with a pod that stays broken.
 set -euo pipefail
 
+# Data dirs the API expects (models, HF cache, Ollama store) exist from the
+# start, not only after the first download.
+mkdir -p /data/models /data/hf_cache /data/ollama_models
+
 PG_BIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
 PGDATA=/var/lib/postgresql/data
 

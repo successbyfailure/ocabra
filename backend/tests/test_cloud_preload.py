@@ -219,3 +219,81 @@ async def test_preload_failure_is_reported_not_fatal(hub, our_model):  # noqa: F
     assert after["status"] != "terminated"
     assert after["preload_models"][0]["status"] == "error"
     assert "disk full" in after["preload_models"][0]["error"]
+
+
+async def test_models_storage_works_before_the_models_dir_exists(monkeypatch, tmp_path):
+    """A fresh node has no /data/models yet: the panel showed an error."""
+    from ocabra.api.internal import models as api
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "models_dir", str(tmp_path / "not" / "yet"))
+    out = await api.get_models_storage(_user=None)
+    assert out["path"].endswith("not/yet") and out["total_bytes"] > 0
+
+
+@requires_db
+async def test_replicable_models_marks_local_only_files(our_model):
+    from ocabra.core.cloud.preload import replicable_models
+    from ocabra.db.model_config import LogicalModel, ModelConfig
+
+    local_key = "zz-test-preload-local:1b"
+    async with AsyncSessionLocal() as s:
+        s.add(LogicalModel(model_key=local_key, default_backend="llamacpp_mks"))
+        await s.flush()
+        s.add(
+            ModelConfig(
+                model_id=f"llamacpp_mks/{local_key}",
+                model_key=local_key,
+                backend_type="llamacpp_mks",
+                artifact={"ref": "x", "kind": "gguf", "path": "/data/models/only-here.gguf"},
+            )
+        )
+        await s.commit()
+    try:
+        listed = {m["model_id"]: m for m in await replicable_models(AsyncSessionLocal)}
+        assert listed[MID]["replicable"] is True and listed[MID]["reason"] is None
+        local = listed[f"llamacpp_mks/{local_key}"]
+        assert local["replicable"] is False and "solo existen en este servidor" in local["reason"]
+        ids = [m for m in listed]
+        assert ids.index(MID) < ids.index(f"llamacpp_mks/{local_key}")  # replicable first
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(sa.delete(ModelConfig).where(ModelConfig.model_key == local_key))
+            await s.execute(sa.delete(LogicalModel).where(LogicalModel.model_key == local_key))
+            await s.commit()
+
+
+@requires_db
+async def test_models_can_be_added_to_a_running_node(hub, our_model):  # noqa: F811
+    fm, fake = hub
+    node = await fm.cloud.launch(gpu_type_id="3090")
+    assert node["preload_models"] == []
+    out = await fm.cloud.add_models(node["id"], [MID])
+    assert out["preload_models"] == [{"model_id": MID, "status": "pending"}]
+    again = await fm.cloud.add_models(node["id"], [MID])  # no duplicates
+    assert len(again["preload_models"]) == 1
+    with pytest.raises(CloudError):
+        await fm.cloud.add_models(node["id"], ["llamacpp_mks/nope"])
+    await fm.cloud.terminate(node["id"])
+    with pytest.raises(CloudError) as exc:
+        await fm.cloud.add_models(node["id"], [MID])
+    assert exc.value.status == 409
+
+
+def test_profile_with_parked_backend_capacity_serializes():
+    """Deleting a model's llama.cpp deployment parks its validated capacity
+    under runtime_policy.validated_by_backend; the schema rejected that key and
+    GET /ocabra/models answered 500 for every model."""
+    from ocabra.core.model_deployments import swap_validated_capacity
+    from ocabra.schemas.profiles import RuntimePolicy
+
+    policy = swap_validated_capacity(
+        {"validated_context_tokens": {"normal": 131072, "dual-gpu": 40960}},
+        "llamacpp_mks",
+        "ollama",
+    )
+    parsed = RuntimePolicy.model_validate(policy)
+    assert parsed.validated_by_backend["llamacpp_mks"]["validated_context_tokens"]["normal"] == 131072
+    # Round-trip keeps it, so switching back can restore it.
+    back = swap_validated_capacity(parsed.model_dump(), "ollama", "llamacpp_mks")
+    assert back["validated_context_tokens"] == {"normal": 131072, "dual-gpu": 40960}

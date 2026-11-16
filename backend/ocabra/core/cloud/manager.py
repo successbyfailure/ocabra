@@ -431,6 +431,30 @@ class CloudNodeManager:
         )
         return out
 
+    async def add_models(self, node_id: str, models: list[str]) -> dict[str, Any]:
+        """Queue more of our models for a node that is already running."""
+        from ocabra.core.cloud import preload
+        from ocabra.db.cloud import CloudNode
+
+        models = list(dict.fromkeys(models))
+        await preload.validate_models(self.fm.session_factory, models)
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudNode, uuid.UUID(node_id))
+            if row is None:
+                raise CloudError("Nodo no encontrado", 404)
+            if row.status not in LIVE_STATUSES:
+                raise CloudError("El nodo ya no está en marcha", 409)
+            items = list(row.preload_models or [])
+            present = {i["model_id"] for i in items if i.get("status") != "error"}
+            # A model that failed before can be retried by adding it again.
+            items = [i for i in items if not (i["model_id"] in models and i.get("status") == "error")]
+            items += [{"model_id": m, "status": "pending"} for m in models if m not in present]
+            row.preload_models = items
+            await session.commit()
+            out = self._node_out(row)
+        logger.info("cloud_node_models_added", node=out["name"], models=models)
+        return out
+
     async def terminate(self, node_id: str, *, reason: str = "manual") -> dict[str, Any]:
         """Terminate the pod, remove its peer and revoke its invite."""
         from ocabra.db.cloud import CloudNode

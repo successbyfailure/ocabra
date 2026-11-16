@@ -69,6 +69,7 @@ import type {
   CloudGpuType,
   CloudNode,
   CloudNodeLaunch,
+  CloudReplicableModel,
   FederationPeerCreate,
   FederationPeerUpdate,
   FederationTestResult,
@@ -3737,6 +3738,10 @@ export const api = {
         request<CloudNode>("POST", "/ocabra/cloud/nodes", data),
       terminate: async (id: string): Promise<CloudNode> =>
         request<CloudNode>("DELETE", `/ocabra/cloud/nodes/${encodeURIComponent(id)}`),
+      replicableModels: async (): Promise<CloudReplicableModel[]> =>
+        request<CloudReplicableModel[]>("GET", "/ocabra/cloud/replicable-models"),
+      addModels: async (id: string, models: string[]): Promise<CloudNode> =>
+        request<CloudNode>("POST", `/ocabra/cloud/nodes/${encodeURIComponent(id)}/models`, { models }),
       terminateOrphan: async (podId: string): Promise<void> => {
         await request<unknown>(
           "POST",

@@ -1,11 +1,179 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { AlertTriangle, Cloud, Cpu, KeyRound, Loader2, Power, Rocket, Settings2, Trash2 } from "lucide-react"
+import { AlertTriangle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import type { CloudGpuType, CloudNode, CloudPreloadItem, CloudProviderInfo, CloudSettings, ModelState } from "@/types"
+import type {
+  CloudGpuType,
+  CloudNode,
+  CloudPreloadItem,
+  CloudProviderInfo,
+  CloudReplicableModel,
+  CloudSettings,
+} from "@/types"
 
-const LLAMA_FAMILY = new Set(["llama_cpp", "llamacpp_mks"])
+const gb = (bytes: number | null | undefined) =>
+  bytes ? `${(bytes / 1024 ** 3).toFixed(bytes > 10 * 1024 ** 3 ? 0 : 1)} GB` : "—"
+
+/**
+ * Our models a cloud node can carry. Loaded-here first; the ones that can't
+ * be replicated (files that only exist on this server) are shown greyed out
+ * with the reason, so nothing offered can be rejected at launch.
+ */
+function ModelPicker({
+  picked,
+  onChange,
+  exclude = [],
+  gpuMemoryGb,
+}: {
+  picked: string[]
+  onChange: (ids: string[]) => void
+  exclude?: string[]
+  gpuMemoryGb?: number | null
+}) {
+  const [models, setModels] = useState<CloudReplicableModel[] | null>(null)
+  const [filter, setFilter] = useState("")
+  useEffect(() => {
+    api.federation.cloud
+      .replicableModels()
+      .then(setModels)
+      .catch(() => setModels([]))
+  }, [])
+  const shown = (models ?? []).filter(
+    (m) =>
+      !exclude.includes(m.model_id) &&
+      (!filter || `${m.display_name} ${m.model_id}`.toLowerCase().includes(filter.toLowerCase())),
+  )
+  const totalBytes = (models ?? [])
+    .filter((m) => picked.includes(m.model_id))
+    .reduce((acc, m) => acc + (m.size_bytes ?? 0), 0)
+  const tooBig = gpuMemoryGb != null && totalBytes / 1024 ** 3 > gpuMemoryGb
+
+  return (
+    <div className="rounded-md border border-border">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+        <span className="text-sm font-medium">Modelos a llevar</span>
+        <span className="text-xs text-muted-foreground">
+          {picked.length === 0
+            ? "ninguno: el nodo arranca vacío"
+            : `${picked.length} elegidos · ${gb(totalBytes)} en disco`}
+        </span>
+        <input
+          className="ml-auto w-40 rounded-md border border-border bg-background px-2 py-1 text-xs"
+          placeholder="Filtrar…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+      </div>
+      {tooBig && (
+        <div className="border-b border-border bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+          Juntos ocupan más que la memoria de la GPU elegida: se cargarán de uno en uno y el nodo
+          irá sacando el anterior para meter el siguiente.
+        </div>
+      )}
+      <div className="max-h-56 overflow-y-auto">
+        {models == null ? (
+          <div className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" /> Cargando modelos…
+          </div>
+        ) : shown.length === 0 ? (
+          <div className="px-3 py-3 text-sm text-muted-foreground">No hay modelos que llevar.</div>
+        ) : (
+          shown.map((m) => {
+            const on = picked.includes(m.model_id)
+            return (
+              <label
+                key={m.model_id}
+                title={m.reason ?? m.model_id}
+                className={`flex items-center gap-2 border-b border-border/50 px-3 py-1.5 text-sm last:border-b-0 ${
+                  m.replicable ? "cursor-pointer hover:bg-muted" : "cursor-not-allowed opacity-50"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  disabled={!m.replicable}
+                  checked={on}
+                  onChange={() =>
+                    onChange(on ? picked.filter((x) => x !== m.model_id) : [...picked, m.model_id])
+                  }
+                />
+                <span className="truncate">{m.display_name}</span>
+                {m.loaded && (
+                  <span className="rounded-full border border-emerald-500/40 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-300">
+                    cargado aquí
+                  </span>
+                )}
+                <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {m.replicable ? gb(m.size_bytes) : "solo en este servidor"}
+                </span>
+              </label>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AddModelsDialog({
+  node,
+  onOpenChange,
+  onDone,
+}: {
+  node: CloudNode | null
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const [picked, setPicked] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (node) setPicked([])
+  }, [node])
+  return (
+    <Dialog.Root open={node !== null} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
+          <Dialog.Title className="text-lg font-semibold">Llevar modelos a {node?.name}</Dialog.Title>
+          <Dialog.Description className="mt-1 text-sm text-muted-foreground">
+            Se descargan en el nodo y se cargan, con la misma configuración que aquí.
+          </Dialog.Description>
+          <div className="mt-4">
+            <ModelPicker
+              picked={picked}
+              onChange={setPicked}
+              exclude={(node?.preload_models ?? []).filter((p) => p.status !== "error").map((p) => p.model_id)}
+            />
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Dialog.Close className={btnCls}>Cancelar</Dialog.Close>
+            <button
+              type="button"
+              className={primaryBtnCls}
+              disabled={busy || picked.length === 0 || !node}
+              onClick={async () => {
+                if (!node) return
+                setBusy(true)
+                try {
+                  await api.federation.cloud.addModels(node.id, picked)
+                  toast.success("Modelos en cola: se descargarán y cargarán en el nodo")
+                  onOpenChange(false)
+                  onDone()
+                } catch (err) {
+                  toast.error(errMsg(err))
+                } finally {
+                  setBusy(false)
+                }
+              }}
+            >
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <PackagePlus size={14} />} Llevar
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
 
 /**
  * Nube · RunPod. Un nodo en la nube es un pod con la imagen ocabra-node que se
@@ -237,16 +405,11 @@ function LaunchDialog({
   const [idle, setIdle] = useState(info.settings.default_idle_minutes)
   const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
-  const [ourModels, setOurModels] = useState<ModelState[]>([])
   const [picked, setPicked] = useState<string[]>([])
 
   useEffect(() => {
     if (!open) return
     setPicked([])
-    api.models
-      .list()
-      .then((all) => setOurModels(all.filter((m) => LLAMA_FAMILY.has(String(m.backendType)))))
-      .catch(() => setOurModels([]))
     setCloudType(info.settings.cloud_type)
     setTtl(info.settings.default_ttl_minutes)
     setIdle(info.settings.default_idle_minutes)
@@ -360,28 +523,11 @@ function LaunchDialog({
           </div>
 
           <div className="mt-3">
-            <div className="text-sm text-muted-foreground">
-              Modelos a llevar <span className="text-xs">(se descargan y cargan al unirse; llegan con tu misma configuración)</span>
-            </div>
-            <div className="mt-1 flex max-h-28 flex-wrap gap-1.5 overflow-y-auto">
-              {ourModels.length === 0 ? (
-                <span className="text-xs text-muted-foreground">No hay modelos de llama.cpp que replicar.</span>
-              ) : (
-                ourModels.map((m) => {
-                  const on = picked.includes(m.modelId)
-                  return (
-                    <button
-                      key={m.modelId}
-                      type="button"
-                      className={`rounded-full border px-2 py-0.5 text-xs ${on ? "border-primary bg-primary/15" : "border-border hover:bg-muted"}`}
-                      onClick={() => setPicked(on ? picked.filter((x) => x !== m.modelId) : [...picked, m.modelId])}
-                    >
-                      {m.displayName || m.modelId}
-                    </button>
-                  )
-                })
-              )}
-            </div>
+            <ModelPicker
+              picked={picked}
+              onChange={setPicked}
+              gpuMemoryGb={chosen?.memory_gb != null ? chosen.memory_gb * count : null}
+            />
           </div>
 
           <div className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
@@ -459,7 +605,15 @@ function PreloadChip({ item }: { item: CloudPreloadItem }) {
   )
 }
 
-function NodeRow({ node, onChanged }: { node: CloudNode; onChanged: () => void }) {
+function NodeRow({
+  node,
+  onChanged,
+  onAddModels,
+}: {
+  node: CloudNode
+  onChanged: () => void
+  onAddModels?: (node: CloudNode) => void
+}) {
   const [busy, setBusy] = useState(false)
   const st = STATUS[node.status] ?? STATUS.error
   const live = node.status !== "terminated"
@@ -489,10 +643,15 @@ function NodeRow({ node, onChanged }: { node: CloudNode; onChanged: () => void }
         </div>
       )}
       {node.error && <span className="w-full text-xs text-red-600 dark:text-red-300">{node.error}</span>}
+      {live && onAddModels && (
+        <button type="button" className={`${btnCls} ml-auto`} onClick={() => onAddModels(node)}>
+          <PackagePlus size={12} /> Llevar modelos
+        </button>
+      )}
       {live && (
         <button
           type="button"
-          className={`${btnCls} ml-auto text-red-600 dark:text-red-300`}
+          className={`${btnCls} ${onAddModels ? "" : "ml-auto"} text-red-600 dark:text-red-300`}
           disabled={busy}
           onClick={async () => {
             if (!window.confirm(`¿Terminar ${node.name}? Deja de cobrarse y sale de la federación.`)) return
@@ -521,6 +680,7 @@ export function CloudSection() {
   const [launchOpen, setLaunchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showOld, setShowOld] = useState(false)
+  const [addingTo, setAddingTo] = useState<CloudNode | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -633,7 +793,9 @@ export function CloudSection() {
               {live.length === 0 ? (
                 <div className="px-4 py-4 text-sm text-muted-foreground">No hay nodos en la nube en marcha.</div>
               ) : (
-                live.map((n) => <NodeRow key={n.id} node={n} onChanged={() => void load()} />)
+                live.map((n) => (
+                  <NodeRow key={n.id} node={n} onChanged={() => void load()} onAddModels={setAddingTo} />
+                ))
               )}
               {old.length > 0 && (
                 <button
@@ -654,6 +816,7 @@ export function CloudSection() {
         <>
           <LaunchDialog open={launchOpen} onOpenChange={setLaunchOpen} info={info} onLaunched={() => void load()} />
           <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} info={info} onSaved={() => void load()} />
+          <AddModelsDialog node={addingTo} onOpenChange={(v) => !v && setAddingTo(null)} onDone={() => void load()} />
         </>
       )}
     </section>

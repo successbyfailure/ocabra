@@ -60,6 +60,12 @@ class RuntimePolicy(BaseModel):
     # from the context proof because GGUF/graph estimators can exceed the
     # physical card even when that concrete runtime has loaded successfully.
     validated_vram_mb: dict[str, int] = Field(default_factory=dict)
+    # Validated capacity of the backends this profile is NOT on right now,
+    # parked by core/model_deployments.swap_validated_capacity when the model's
+    # default deployment changes, so switching back restores it. Missing from
+    # this schema, it made GET /ocabra/models answer 500 for every model as
+    # soon as one profile had it (deleting qwen3:32b's llama.cpp deployment).
+    validated_by_backend: dict[str, dict[str, dict[str, int]]] = Field(default_factory=dict)
     # Detail of the last applied context probe, by preset: VRAM per GPU at the
     # maximum, KV cost per 1k tokens per GPU, projector cost, when and how it
     # was measured. Informative, and the input to sizing a reserve (whisper)

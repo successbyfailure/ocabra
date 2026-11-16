@@ -1852,6 +1852,15 @@ export interface CloudNode {
   terminate_reason: string | null;
 }
 
+export interface CloudReplicableModel {
+  model_id: string;
+  display_name: string;
+  size_bytes: number | null;
+  loaded: boolean;
+  replicable: boolean;
+  reason: string | null;
+}
+
 export interface CloudPreloadItem {
   model_id: string;
   status: "pending" | "downloading" | "loading" | "loaded" | "error";

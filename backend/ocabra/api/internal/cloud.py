@@ -7,6 +7,8 @@
 - POST   /cloud/nodes                  — launch one
 - DELETE /cloud/nodes/{id}             — terminate it
 - POST   /cloud/orphans/{pod_id}/terminate — kill an untracked ocabra- pod
+- GET    /cloud/replicable-models      — our models a node can carry (and why not)
+- POST   /cloud/nodes/{id}/models      — add models to a running node
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
-from ocabra.schemas.cloud import CloudNodeLaunch, CloudProviderUpdate
+from ocabra.schemas.cloud import CloudNodeLaunch, CloudNodeModels, CloudProviderUpdate
 
 router = APIRouter(tags=["cloud"])
 
@@ -195,3 +197,53 @@ async def terminate_orphan(
     except Exception as exc:
         raise _err(exc) from exc
     return {"ok": True}
+
+
+@router.get(
+    "/cloud/replicable-models",
+    summary="Models a cloud node can carry",
+    description=(
+        "Our llama.cpp models with size, whether they are loaded here, and whether "
+        "they can be replicated on a node (with the reason when not: e.g. files "
+        "that only exist on this server). Loaded ones first."
+    ),
+)
+async def replicable_models(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> list[dict]:
+    """List our models for the cloud launch picker.
+
+    Returns:
+        ``[{model_id, display_name, size_bytes, loaded, replicable, reason}]``.
+    """
+    from ocabra.core.cloud.preload import replicable_models as _list
+
+    cloud = _cloud(request)
+    return await _list(cloud.fm.session_factory, getattr(request.app.state, "model_manager", None))
+
+
+@router.post(
+    "/cloud/nodes/{node_id}/models",
+    summary="Add models to a running cloud node",
+    description="Queue more of our models to download and load on a node that is already running.",
+    responses={
+        400: {"description": "Unknown or non-replicable model"},
+        404: {"description": "Not found"},
+        409: {"description": "Node not running"},
+    },
+)
+async def add_node_models(
+    node_id: str,
+    body: CloudNodeModels,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Add models to a running node.
+
+    Returns:
+        The node with its updated ``preload_models``.
+    """
+    try:
+        return await _cloud(request).add_models(node_id, body.models)
+    except Exception as exc:
+        raise _err(exc) from exc

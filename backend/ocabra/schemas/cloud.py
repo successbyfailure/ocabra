@@ -52,3 +52,11 @@ class CloudNodeLaunch(BaseModel):
         max_length=10,
         description="Our model ids to download and load on the node once it joins",
     )
+
+
+class CloudNodeModels(BaseModel):
+    """Models to add to a running cloud node."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    models: list[str] = Field(..., min_length=1, max_length=10)

@@ -192,3 +192,59 @@ async def drive(
         tasks.pop(key, None)
         active.update(status="error", error=str(exc)[:300])
     return items
+
+
+async def replicable_models(
+    session_factory: Any, model_manager: Any = None
+) -> list[dict[str, Any]]:
+    """Our models that a cloud node could carry, with why not when it can't.
+
+    Loaded ones first (what is in use here is what you'd want more of), then
+    by name. Uses the same rule as the preload itself, so the UI never offers
+    something the launch would reject.
+    """
+    import sqlalchemy as sa
+
+    from ocabra.core.model_ref import LLAMA_CPP_FAMILY
+    from ocabra.db.model_config import ModelConfig
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    sa.select(ModelConfig).where(ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    states: dict[str, Any] = {}
+    if model_manager is not None:
+        try:
+            for st in await model_manager.list_states():
+                states[st.model_id] = st
+        except Exception:  # noqa: BLE001 — sizes/status are a nicety
+            states = {}
+    out = []
+    for row in rows:
+        st = states.get(row.model_id)
+        try:
+            replication_request(row, None)
+            replicable, reason = True, None
+        except CloudError as exc:
+            replicable, reason = False, str(exc)
+        status = getattr(getattr(st, "status", None), "value", None)
+        out.append(
+            {
+                "model_id": row.model_id,
+                "display_name": getattr(st, "display_name", None)
+                or row.display_name
+                or row.model_id,
+                "size_bytes": getattr(st, "disk_size_bytes", None),
+                "loaded": status == "loaded",
+                "replicable": replicable,
+                "reason": reason,
+            }
+        )
+    out.sort(key=lambda m: (not m["replicable"], not m["loaded"], m["display_name"].lower()))
+    return out

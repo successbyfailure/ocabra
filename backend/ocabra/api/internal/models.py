@@ -240,8 +240,14 @@ async def get_models_storage(
 ) -> dict:
     """Return storage usage for the models directory filesystem."""
     models_dir = Path(settings.models_dir or "/data/models")
+    # A fresh node (the ocabra-node image) has no models dir until its first
+    # download: measure the filesystem it will be created on instead of
+    # failing ("No such file or directory: '/data/models'").
+    measured = models_dir
+    while not measured.exists() and measured.parent != measured:
+        measured = measured.parent
     try:
-        stats = await asyncio.to_thread(os.statvfs, models_dir)
+        stats = await asyncio.to_thread(os.statvfs, measured)
     except OSError as exc:
         raise HTTPException(
             status_code=500, detail=f"Unable to read models storage stats: {exc}"
