@@ -3790,6 +3790,25 @@ export const api = {
         request<CloudReplicableModel[]>("GET", "/ocabra/cloud/replicable-models"),
       addModels: async (id: string, models: string[]): Promise<CloudNode> =>
         request<CloudNode>("POST", `/ocabra/cloud/nodes/${encodeURIComponent(id)}/models`, { models }),
+      volumes: async (): Promise<import("@/types").CloudVolume[]> =>
+        request<import("@/types").CloudVolume[]>("GET", "/ocabra/cloud/volumes"),
+      dataCenters: async (): Promise<import("@/types").CloudDataCenter[]> =>
+        request<import("@/types").CloudDataCenter[]>("GET", "/ocabra/cloud/datacenters"),
+      createVolume: async (data: {
+        name: string;
+        size_gb: number;
+        data_center: string;
+      }): Promise<import("@/types").CloudVolume> =>
+        request<import("@/types").CloudVolume>("POST", "/ocabra/cloud/volumes", data),
+      resizeVolume: async (id: string, sizeGb: number): Promise<import("@/types").CloudVolume> =>
+        request<import("@/types").CloudVolume>(
+          "PATCH",
+          `/ocabra/cloud/volumes/${encodeURIComponent(id)}`,
+          { size_gb: sizeGb },
+        ),
+      deleteVolume: async (id: string): Promise<void> => {
+        await request<unknown>("DELETE", `/ocabra/cloud/volumes/${encodeURIComponent(id)}`);
+      },
       terminateOrphan: async (podId: string): Promise<void> => {
         await request<unknown>(
           "POST",

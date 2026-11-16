@@ -3,8 +3,11 @@ import * as Dialog from "@radix-ui/react-dialog"
 import { AlertTriangle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { VolumesPanel } from "./VolumesPanel"
 import type {
+  CloudDataCenter,
   CloudGpuType,
+  CloudVolume,
   CloudNode,
   CloudPreloadItem,
   CloudProviderInfo,
@@ -414,10 +417,16 @@ function LaunchDialog({
   const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
   const [picked, setPicked] = useState<string[]>([])
+  const [volumes, setVolumes] = useState<CloudVolume[]>([])
+  const [dataCenters, setDataCenters] = useState<CloudDataCenter[]>([])
+  const [volumeId, setVolumeId] = useState("")
 
   useEffect(() => {
     if (!open) return
     setPicked([])
+    setVolumeId("")
+    api.federation.cloud.volumes().then(setVolumes).catch(() => setVolumes([]))
+    api.federation.cloud.dataCenters().then(setDataCenters).catch(() => setDataCenters([]))
     setCloudType(info.settings.cloud_type)
     setTtl(info.settings.default_ttl_minutes)
     setIdle(info.settings.default_idle_minutes)
@@ -436,16 +445,30 @@ function LaunchDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
+  // A volume forces Secure Cloud (the only one with network volumes).
   const priceOf = useCallback(
-    (g: CloudGpuType) => (cloudType === "COMMUNITY" ? g.price_community : g.price_secure),
-    [cloudType],
+    (g: CloudGpuType) =>
+      !volumeId && cloudType === "COMMUNITY" ? g.price_community : g.price_secure,
+    [cloudType, volumeId],
   )
+  const volume = volumes.find((v) => v.id === volumeId)
+  // A volume pins the pod to its data center: offer only what is in stock there.
+  const dcGpus = useMemo(() => {
+    if (!volume) return null
+    const dc = dataCenters.find((d) => d.id === volume.data_center)
+    return new Set((dc?.gpus ?? []).map((g) => g.id))
+  }, [volume, dataCenters])
+  const effectiveCloud = volume ? "SECURE" : cloudType
   const offered = useMemo(
     () =>
       (gpus ?? []).filter(
-        (g) => (cloudType === "COMMUNITY" ? g.community : g.secure) && priceOf(g) != null && g.availability !== "NONE",
+        (g) =>
+          (effectiveCloud === "COMMUNITY" ? g.community : g.secure) &&
+          (effectiveCloud === "COMMUNITY" ? g.price_community : g.price_secure) != null &&
+          g.availability !== "NONE" &&
+          (!dcGpus || dcGpus.has(g.id)),
       ),
-    [gpus, cloudType, priceOf],
+    [gpus, effectiveCloud, dcGpus],
   )
   const chosen = offered.find((g) => g.id === gpuId)
   const hourly = chosen ? (priceOf(chosen) ?? 0) * count : 0
@@ -461,18 +484,46 @@ function LaunchDialog({
             Se une solo a esta federación en modo enjambre y descarga y carga los modelos que elijas.
           </Dialog.Description>
 
+          {volumes.length > 0 && (
+            <label className="mt-4 block text-sm">
+              <span className="text-xs text-muted-foreground">Disco de modelos</span>
+              <select
+                className="mt-0.5 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+                value={volumeId}
+                onChange={(e) => {
+                  setVolumeId(e.target.value)
+                  setGpuId("")
+                }}
+              >
+                <option value="">Ninguno: el nodo descarga todo en su disco temporal</option>
+                {volumes.map((v) => (
+                  <option key={v.id} value={v.id} disabled={Boolean(v.in_use_by)}>
+                    {v.name} · {v.size_gb} GB · {v.data_center}
+                    {v.in_use_by ? ` (en uso por ${v.in_use_by})` : ""}
+                  </option>
+                ))}
+              </select>
+              {volume && (
+                <span className="text-xs text-muted-foreground">
+                  El pod irá a {volume.data_center} en Secure Cloud; solo se ofrecen las GPUs con stock allí.
+                </span>
+              )}
+            </label>
+          )}
+
           <div className="mt-4 flex gap-2">
             {(["COMMUNITY", "SECURE"] as const).map((t) => (
               <button
                 key={t}
                 type="button"
-                className={`${btnCls} ${cloudType === t ? "border-primary bg-primary/10" : ""}`}
+                className={`${btnCls} ${effectiveCloud === t ? "border-primary bg-primary/10" : ""}`}
+                disabled={Boolean(volume) && t === "COMMUNITY"}
                 onClick={() => setCloudType(t)}
               >
                 {t === "COMMUNITY" ? "Community" : "Secure"}
               </button>
             ))}
-            {cloudType === "COMMUNITY" && (
+            {effectiveCloud === "COMMUNITY" && (
               <span className="self-center text-xs text-muted-foreground">
                 Hosts de particulares: tus peticiones pasan por máquinas de terceros.
               </span>
@@ -568,7 +619,8 @@ function LaunchDialog({
                   const node = await api.federation.cloud.launch({
                     gpu_type_id: gpuId,
                     gpu_count: count,
-                    cloud_type: cloudType,
+                    cloud_type: effectiveCloud,
+                    volume_id: volumeId || undefined,
                     max_runtime_minutes: ttl,
                     idle_shutdown_minutes: idle,
                     name: name.trim() || undefined,
@@ -828,6 +880,8 @@ export function CloudSection() {
           </>
         )}
       </div>
+
+      {info.has_api_key && <VolumesPanel />}
 
       {info.has_api_key && (
         <>

@@ -16,7 +16,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
-from ocabra.schemas.cloud import CloudNodeLaunch, CloudNodeModels, CloudProviderUpdate
+from ocabra.schemas.cloud import (
+    CloudNodeLaunch,
+    CloudNodeModels,
+    CloudProviderUpdate,
+    CloudVolumeCreate,
+    CloudVolumeResize,
+)
 
 router = APIRouter(tags=["cloud"])
 
@@ -247,3 +253,118 @@ async def add_node_models(
         return await _cloud(request).add_models(node_id, body.models)
     except Exception as exc:
         raise _err(exc) from exc
+
+
+# ── network volumes ──────────────────────────────────────────────
+
+
+@router.get(
+    "/cloud/volumes",
+    summary="Network volumes",
+    description=(
+        "RunPod network volumes on the account (model/backend cache for cloud nodes): "
+        "size, data center, monthly price and the live node using each, if any."
+    ),
+)
+async def list_volumes(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> list[dict]:
+    """List network volumes.
+
+    Returns:
+        ``[{id, name, size_gb, data_center, type, usd_per_month, in_use_by}]``.
+    """
+    try:
+        return await _cloud(request).volumes()
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.get(
+    "/cloud/datacenters",
+    summary="Data centers for volumes",
+    description=(
+        "Data centers that take network volumes, with the GPUs in stock in each — "
+        "a node using a volume can only run in the volume's data center."
+    ),
+)
+async def list_data_centers(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> list[dict]:
+    """List data centers.
+
+    Returns:
+        ``[{id, name, region, gpus: [{id, name, availability}]}]``, most GPUs first.
+    """
+    try:
+        return await _cloud(request).data_centers()
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.post(
+    "/cloud/volumes",
+    summary="Create a network volume",
+    description="Create a network volume (10–4096 GB). It is billed until deleted.",
+    responses={400: {"description": "Invalid size or data center"}},
+)
+async def create_volume(
+    body: CloudVolumeCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Create a network volume.
+
+    Returns:
+        The new volume.
+    """
+    try:
+        return await _cloud(request).create_volume(body.name, body.size_gb, body.data_center)
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.patch(
+    "/cloud/volumes/{volume_id}",
+    summary="Grow a network volume",
+    description="Network volumes can only grow.",
+    responses={400: {"description": "Smaller than the current size"}},
+)
+async def resize_volume(
+    volume_id: str,
+    body: CloudVolumeResize,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Grow a network volume.
+
+    Returns:
+        The volume with its new size.
+    """
+    try:
+        return await _cloud(request).resize_volume(volume_id, body.size_gb)
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.delete(
+    "/cloud/volumes/{volume_id}",
+    summary="Delete a network volume",
+    description="Delete a network volume and everything on it. Refused while a node uses it.",
+    responses={409: {"description": "A live node is using it"}},
+)
+async def delete_volume(
+    volume_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Delete a network volume.
+
+    Returns:
+        ``{"deleted": volume_id}``.
+    """
+    try:
+        await _cloud(request).delete_volume(volume_id)
+    except Exception as exc:
+        raise _err(exc) from exc
+    return {"deleted": volume_id}

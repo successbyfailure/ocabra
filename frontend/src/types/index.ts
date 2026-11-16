@@ -1888,6 +1888,8 @@ export interface CloudNode {
   peer_online: boolean;
   requests_proxied: number;
   preload_models: CloudPreloadItem[];
+  network_volume_id?: string | null;
+  data_center_id?: string | null;
   error: string | null;
   created_at: string | null;
   started_at: string | null;
@@ -1927,6 +1929,26 @@ export interface CloudNodeLaunch {
   idle_shutdown_minutes?: number;
   name?: string;
   models?: string[];
+  /** Network volume to mount as the node's model/backend cache. */
+  volume_id?: string;
+}
+
+export interface CloudVolume {
+  id: string;
+  name: string;
+  size_gb: number;
+  data_center: string;
+  type?: string | null;
+  usd_per_month: number;
+  /** Name of the live node using it, if any. */
+  in_use_by?: string | null;
+}
+
+export interface CloudDataCenter {
+  id: string;
+  name: string;
+  region?: string | null;
+  gpus: { id: string; name: string; availability: string }[];
 }
 
 export interface FederationJoinOutgoing {

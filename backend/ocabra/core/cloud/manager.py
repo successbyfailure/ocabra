@@ -73,6 +73,9 @@ class PodSpec:
     env: dict[str, str]
     # Newest CUDA the backends to install need (None = the node image's own).
     min_cuda_version: str | None = None
+    # Network volume holding models/backends (forces its data center + Secure).
+    network_volume_id: str | None = None
+    data_center_id: str | None = None
 
 
 @dataclass
@@ -95,6 +98,16 @@ class CloudProviderClient(Protocol):
     async def create_pod(self, spec: PodSpec) -> PodInfo: ...
 
     async def list_pods(self) -> list[PodInfo]: ...
+
+    async def list_volumes(self) -> list[dict[str, Any]]: ...
+
+    async def create_volume(self, name: str, size_gb: int, data_center: str) -> dict[str, Any]: ...
+
+    async def resize_volume(self, volume_id: str, size_gb: int) -> dict[str, Any]: ...
+
+    async def delete_volume(self, volume_id: str) -> None: ...
+
+    async def data_centers(self) -> list[dict[str, Any]]: ...
 
     async def terminate_pod(self, pod_id: str) -> None: ...
 
@@ -138,6 +151,8 @@ class CloudNodeManager:
         self.last_reconcile_at: float | None = None
         self.last_error: str | None = None
         self._gpu_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._volume_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._dc_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._lock = asyncio.Lock()
         # Background model loads started by the preload driver.
         self._preload_tasks: dict = {}
@@ -243,6 +258,102 @@ class CloudNodeManager:
         self._gpu_cache = (time.monotonic(), types)
         return types
 
+    # ── network volumes (model/backend cache) ─────────────────────
+
+    async def _volume_users(self) -> dict[str, str]:
+        """volume id -> name of the live node using it."""
+        import sqlalchemy as sa
+
+        from ocabra.db.cloud import CloudNode
+
+        async with self.fm.session_factory() as session:
+            rows = (
+                await session.execute(
+                    sa.select(CloudNode.network_volume_id, CloudNode.name).where(
+                        CloudNode.network_volume_id.is_not(None),
+                        CloudNode.status.in_(LIVE_STATUSES),
+                    )
+                )
+            ).all()
+        return {vid: name for vid, name in rows}
+
+    async def volumes(self, provider: str = "runpod") -> list[dict[str, Any]]:
+        """Network volumes on the account, with the live node using each."""
+        client = await self._client(provider)
+        try:
+            vols = await client.list_volumes()
+        finally:
+            await client.aclose()
+        users = await self._volume_users()
+        for v in vols:
+            v["in_use_by"] = users.get(v["id"])
+        self._volume_cache = (time.monotonic(), vols)
+        return vols
+
+    async def data_centers(self, provider: str = "runpod") -> list[dict[str, Any]]:
+        """Data centers that take volumes, with GPU stock (cached 5 min)."""
+        if self._dc_cache is not None and time.monotonic() - self._dc_cache[0] < 300:
+            return self._dc_cache[1]
+        client = await self._client(provider)
+        try:
+            dcs = await client.data_centers()
+        finally:
+            await client.aclose()
+        self._dc_cache = (time.monotonic(), dcs)
+        return dcs
+
+    async def create_volume(
+        self, name: str, size_gb: int, data_center: str, provider: str = "runpod"
+    ) -> dict[str, Any]:
+        if not 10 <= int(size_gb) <= 4096:
+            raise CloudError("El tamaño de un disco va de 10 a 4096 GB", 400)
+        client = await self._client(provider)
+        try:
+            vol = await client.create_volume(name.strip() or "ocabra-models", size_gb, data_center)
+        finally:
+            await client.aclose()
+        self._volume_cache = None
+        logger.info("cloud_volume_created", id=vol["id"], size_gb=size_gb, dc=data_center)
+        return vol
+
+    async def resize_volume(
+        self, volume_id: str, size_gb: int, provider: str = "runpod"
+    ) -> dict[str, Any]:
+        client = await self._client(provider)
+        try:
+            vol = await client.resize_volume(volume_id, size_gb)
+        finally:
+            await client.aclose()
+        self._volume_cache = None
+        return vol
+
+    async def delete_volume(self, volume_id: str, provider: str = "runpod") -> None:
+        user = (await self._volume_users()).get(volume_id)
+        if user:
+            raise CloudError(f"El disco lo está usando {user}: termínalo antes de borrarlo", 409)
+        client = await self._client(provider)
+        try:
+            await client.delete_volume(volume_id)
+        finally:
+            await client.aclose()
+        self._volume_cache = None
+        logger.info("cloud_volume_deleted", id=volume_id)
+
+    def volumes_month_cost(self, now: datetime | None = None) -> float:
+        """This month's share of the known volumes' monthly price (estimate).
+
+        RunPod bills volumes until they are deleted; we only know them from
+        the last listing, and not their creation date, so this prorates the
+        whole month so far for every volume seen.
+        """
+        if self._volume_cache is None:
+            return 0.0
+        now = now or _now()
+        start = _month_start(now)
+        next_month = (start + timedelta(days=32)).replace(day=1)
+        fraction = (now - start) / (next_month - start)
+        return round(sum(v.get("usd_per_month") or 0 for v in self._volume_cache[1]) * fraction, 4)
+
     # ── spend ────────────────────────────────────────────────────
 
     async def month_spend(self) -> float:
@@ -266,7 +377,8 @@ class CloudNodeManager:
                 .scalars()
                 .all()
             )
-        return round(sum(node_cost(r, since=start, now=now) for r in rows), 4)
+        pods = sum(node_cost(r, since=start, now=now) for r in rows)
+        return round(pods + self.volumes_month_cost(now), 4)
 
     # ── nodes ────────────────────────────────────────────────────
 
@@ -300,6 +412,8 @@ class CloudNodeManager:
             "peer_online": bool(peer and peer.online),
             "requests_proxied": peer.requests_proxied if peer else 0,
             "preload_models": row.preload_models or [],
+            "network_volume_id": row.network_volume_id,
+            "data_center_id": row.data_center_id,
             "error": row.error,
             "created_at": row.created_at,
             "started_at": row.started_at,
@@ -331,6 +445,7 @@ class CloudNodeManager:
         name: str | None = None,
         models: list[str] | None = None,
         provider: str = "runpod",
+        volume_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
 
@@ -385,6 +500,16 @@ class CloudNodeManager:
             if hf:
                 env["HF_TOKEN"] = hf
 
+        data_center = None
+        if volume_id:
+            vol = next((v for v in await self.volumes(provider) if v["id"] == volume_id), None)
+            if vol is None:
+                raise CloudError("Ese disco no existe en la cuenta de RunPod", 404)
+            if vol.get("in_use_by"):
+                raise CloudError(f"El disco ya lo está usando {vol['in_use_by']}", 409)
+            data_center = vol["data_center"]
+            cloud_type = "SECURE"  # network volumes only exist in Secure Cloud
+
         spec = PodSpec(
             name=pod_name,
             image=str(cfg["image"]),
@@ -394,6 +519,8 @@ class CloudNodeManager:
             container_disk_gb=int(cfg["container_disk_gb"]),
             env=env,
             min_cuda_version=await preload.required_cuda(self.fm.session_factory, models),
+            network_volume_id=volume_id,
+            data_center_id=data_center,
         )
         client = await self._client(provider)
         try:
@@ -421,6 +548,8 @@ class CloudNodeManager:
                 invite_id=uuid.UUID(invite["id"]),
                 started_at=_now(),
                 preload_models=[{"model_id": m, "status": "pending"} for m in models] or None,
+                network_volume_id=volume_id,
+                data_center_id=data_center,
             )
             session.add(row)
             await session.commit()

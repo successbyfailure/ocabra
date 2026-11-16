@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.92.0 — 2026-11-16
+
+### Novedades
+
+- **Discos de modelos para los nodos en la nube (RunPod network volumes).**
+  `GET/POST /ocabra/cloud/volumes`, `PATCH /ocabra/cloud/volumes/{id}` (solo
+  crecer), `DELETE /ocabra/cloud/volumes/{id}` y
+  `GET /ocabra/cloud/datacenters` (centros que admiten discos, con las GPUs en
+  stock). Un nodo lanzado con `volume_id` guarda allí modelos, caché de
+  Hugging Face y backends, y el siguiente arranca con ellos ya descargados.
+  Nunca guarda datos ni peticiones. El nodo queda en el centro de datos del
+  disco y en Secure Cloud; un disco lo usa un solo nodo a la vez y no se
+  puede borrar mientras lo usa. Su precio mensual cuenta en el gasto del mes.
+
+---
+
 ## 0.91.2 — 2026-11-16
 
 ### Correcciones

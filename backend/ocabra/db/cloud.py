@@ -51,6 +51,9 @@ class CloudNode(Base):
         UUID(as_uuid=True), ForeignKey("federation_peers.id", ondelete="SET NULL"), nullable=True
     )
     preload_models: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Network volume (model/backend cache) and the data center it pins the pod to.
+    network_volume_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_center_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

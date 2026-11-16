@@ -207,6 +207,7 @@ class FakeProvider:
         self.pods: dict[str, PodInfo] = {}
         self.created: list[PodSpec] = []
         self.terminated: list[str] = []
+        self.volumes: dict[str, dict] = {}
 
     def factory(self, provider, api_key):
         return self
@@ -232,6 +233,30 @@ class FakeProvider:
         self.terminated.append(pod_id)
         if pod_id in self.pods:
             self.pods[pod_id].status = "terminated"
+
+    async def list_volumes(self):
+        return list(self.volumes.values())
+
+    async def create_volume(self, name, size_gb, data_center):
+        vid = f"vol-{len(self.volumes)}"
+        self.volumes[vid] = {
+            "id": vid,
+            "name": name,
+            "size_gb": size_gb,
+            "data_center": data_center,
+            "usd_per_month": round(size_gb * 0.07, 2),
+        }
+        return self.volumes[vid]
+
+    async def resize_volume(self, volume_id, size_gb):
+        self.volumes[volume_id]["size_gb"] = size_gb
+        return self.volumes[volume_id]
+
+    async def delete_volume(self, volume_id):
+        self.volumes.pop(volume_id, None)
+
+    async def data_centers(self):
+        return [{"id": "EU-RO-1", "name": "EU-RO-1", "region": "EUROPE", "gpus": []}]
 
     async def aclose(self):
         pass
@@ -537,3 +562,141 @@ async def test_no_free_machine_is_a_clear_409():
     await client.aclose()
     assert exc.value.status == 409
     assert "ninguna máquina libre" in str(exc.value) and "Community" in str(exc.value)
+
+
+# ── network volumes ──────────────────────────────────────────────
+
+
+async def test_pod_with_a_volume_is_pinned_to_its_data_center():
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "p", "name": "n", "status": "PROVISIONING"})
+
+    client = _rp(handler)
+    await client.create_pod(
+        PodSpec(
+            name="n",
+            image="img",
+            gpu_type_id="g",
+            gpu_count=1,
+            cloud_type="COMMUNITY",
+            container_disk_gb=40,
+            env={"A": "1"},
+            network_volume_id="vol1",
+            data_center_id="EU-RO-1",
+        )
+    )
+    await client.aclose()
+    body = seen["body"]
+    assert body["mounts"] == {"network": [{"volumeId": "vol1", "path": "/persist"}]}
+    assert body["dataCenterIds"] == ["EU-RO-1"]
+    assert body["cloud"] == "SECURE"  # network volumes only exist in Secure Cloud
+    assert body["env"] == {"A": "1", "OCABRA_PERSIST_DIR": "/persist"}
+
+
+async def test_volume_api_shapes():
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(
+            (request.method, request.url.path, request.content and json.loads(request.content))
+        )
+        if request.url.path.endswith("/catalog/datacenters"):
+            return httpx.Response(
+                200,
+                json={
+                    "dataCenters": [
+                        {
+                            "id": "US-KS-2",
+                            "networkVolumeTypes": ["STANDARD"],
+                            "gpuAvailability": [
+                                {"id": "4090", "name": "RTX 4090", "availability": "HIGH"},
+                                {"id": "h100", "availability": "NONE"},
+                            ],
+                        },
+                        {"id": "XX-NO-1", "networkVolumeTypes": [], "gpuAvailability": []},
+                    ]
+                },
+            )
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "networkVolumes": [
+                        {"id": "v1", "name": "m", "size": 100, "dataCenter": "US-KS-2"}
+                    ],
+                    "pagination": {"hasNextPage": False},
+                },
+            )
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        body = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={
+                "id": "v2",
+                "name": body.get("name", "m"),
+                "size": body["size"],
+                "dataCenter": "US-KS-2",
+            },
+        )
+
+    client = _rp(handler)
+    vols = await client.list_volumes()
+    assert vols[0]["size_gb"] == 100 and vols[0]["usd_per_month"] == 7.0
+    vol = await client.create_volume("models", 80, "US-KS-2")
+    assert vol["id"] == "v2" and vol["data_center"] == "US-KS-2"
+    await client.resize_volume("v2", 120)
+    await client.delete_volume("v2")
+    dcs = await client.data_centers()
+    await client.aclose()
+    assert [d["id"] for d in dcs] == ["US-KS-2"]  # no volumes there → left out
+    assert dcs[0]["gpus"] == [{"id": "4090", "name": "RTX 4090", "availability": "HIGH"}]
+    assert (
+        "POST",
+        "/v2/network-volumes",
+        {"name": "models", "size": 80, "dataCenter": "US-KS-2"},
+    ) in calls
+    assert ("PATCH", "/v2/network-volumes/v2", {"size": 120}) in calls
+    assert any(m == "DELETE" and pth == "/v2/network-volumes/v2" for m, pth, _ in calls)
+
+
+@requires_db
+async def test_volume_is_used_by_one_live_node_and_not_deleted_under_it(hub):  # noqa: F811
+    fm, fake = hub
+    vol = await fm.cloud.create_volume("models", 100, "EU-RO-1")
+    node = await fm.cloud.launch(gpu_type_id="4090", cloud_type="COMMUNITY", volume_id=vol["id"])
+    spec = fake.created[-1]
+    assert spec.network_volume_id == vol["id"] and spec.data_center_id == "EU-RO-1"
+    assert spec.cloud_type == "SECURE"
+    assert node["network_volume_id"] == vol["id"] and node["data_center_id"] == "EU-RO-1"
+
+    listed = {v["id"]: v for v in await fm.cloud.volumes()}
+    assert listed[vol["id"]]["in_use_by"] == node["name"]
+    with pytest.raises(CloudError) as exc:
+        await fm.cloud.launch(gpu_type_id="4090", volume_id=vol["id"])
+    assert exc.value.status == 409  # one pod per volume
+    with pytest.raises(CloudError) as exc:
+        await fm.cloud.delete_volume(vol["id"])
+    assert exc.value.status == 409
+
+    await fm.cloud.terminate(node["id"])
+    await fm.cloud.delete_volume(vol["id"])
+    assert vol["id"] not in fake.volumes
+    with pytest.raises(CloudError):
+        await fm.cloud.create_volume("x", 5, "EU-RO-1")  # under the 10 GB minimum
+
+
+def test_volume_cost_counts_towards_the_month():
+    from datetime import UTC, datetime
+
+    from ocabra.core.cloud.manager import CloudNodeManager
+
+    mgr = object.__new__(CloudNodeManager)
+    mgr._volume_cache = (0.0, [{"usd_per_month": 7.0}, {"usd_per_month": 3.0}])
+    # Halfway through a 30-day month: half of $10.
+    assert mgr.volumes_month_cost(datetime(2026, 11, 16, 0, 0, tzinfo=UTC)) == pytest.approx(
+        5.0, rel=0.01
+    )

@@ -21,6 +21,10 @@ logger = structlog.get_logger(__name__)
 BASE_URL = "https://api.runpod.io/v2"
 # Must match the CUDA the ocabra-node image is built with (Dockerfile.node).
 MIN_CUDA_VERSION = "12.8"
+# Where a node mounts its network volume (see node-entrypoint.sh).
+PERSIST_PATH = "/persist"
+# Standard network volume price, $/GB·month (first TB; $0.05 beyond).
+VOLUME_USD_PER_GB_MONTH = 0.07
 
 
 def _max_cuda(a: str, b: str | None) -> str:
@@ -64,6 +68,18 @@ def _status_for(resp: httpx.Response) -> int:
     if resp.status_code in (400, 404, 409, 422):
         return 400
     return 502
+
+
+def volume_info(data: dict[str, Any]) -> dict[str, Any]:
+    size = int(data.get("size") or 0)
+    return {
+        "id": str(data.get("id") or ""),
+        "name": str(data.get("name") or ""),
+        "size_gb": size,
+        "data_center": str(data.get("dataCenter") or ""),
+        "type": data.get("type"),
+        "usd_per_month": round(size * VOLUME_USD_PER_GB_MONTH, 2),
+    }
 
 
 def pod_info(data: dict[str, Any]) -> PodInfo:
@@ -156,6 +172,15 @@ class RunPodClient:
             # The node needs no inbound port: it dials us. No SSH either.
             "ports": [],
         }
+        if spec.network_volume_id:
+            # The model cache: same data center as the volume, Secure Cloud
+            # (the only one with network volumes), mounted where the node
+            # entrypoint links its model and backend folders.
+            body["mounts"] = {"network": [{"volumeId": spec.network_volume_id, "path": PERSIST_PATH}]}
+            body["cloud"] = "SECURE"
+            if spec.data_center_id:
+                body["dataCenterIds"] = [spec.data_center_id]
+            body["env"] = {**spec.env, "OCABRA_PERSIST_DIR": PERSIST_PATH}
         try:
             resp = await self._request("POST", "/pods", json=body)
         except CloudError as exc:
@@ -189,6 +214,71 @@ class RunPodClient:
             if not cursor:
                 break
         return pods
+
+    # ── network volumes ──────────────────────────────────────────
+
+    async def list_volumes(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(20):
+            params = {"cursor": cursor} if cursor else None
+            data = (await self._request("GET", "/network-volumes", params=params)).json()
+            out.extend(v for v in data.get("networkVolumes", []) if isinstance(v, dict))
+            pagination = data.get("pagination") or {}
+            if not pagination.get("hasNextPage") or not pagination.get("nextCursor"):
+                break
+            cursor = pagination.get("nextCursor")
+        return [volume_info(v) for v in out]
+
+    async def create_volume(self, name: str, size_gb: int, data_center: str) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            "/network-volumes",
+            json={"name": name, "size": int(size_gb), "dataCenter": data_center},
+        )
+        return volume_info(resp.json())
+
+    async def resize_volume(self, volume_id: str, size_gb: int) -> dict[str, Any]:
+        resp = await self._request(
+            "PATCH", f"/network-volumes/{volume_id}", json={"size": int(size_gb)}
+        )
+        return volume_info(resp.json())
+
+    async def delete_volume(self, volume_id: str) -> None:
+        try:
+            await self._request("DELETE", f"/network-volumes/{volume_id}")
+        except CloudError as exc:
+            if "404" not in str(exc):
+                raise
+
+    async def data_centers(self) -> list[dict[str, Any]]:
+        """Data centers that take network volumes, with their GPU stock."""
+        resp = await self._request(
+            "GET", "/catalog/datacenters", params={"include": "GPU_AVAILABILITY"}
+        )
+        out = []
+        for dc in resp.json().get("dataCenters", []):
+            if not dc.get("networkVolumeTypes"):
+                continue  # no network volumes there
+            gpus = [
+                {
+                    "id": g.get("id"),
+                    "name": g.get("name") or g.get("id"),
+                    "availability": str(g.get("availability") or "NONE").upper(),
+                }
+                for g in dc.get("gpuAvailability") or []
+                if isinstance(g, dict)
+            ]
+            out.append(
+                {
+                    "id": dc.get("id"),
+                    "name": dc.get("name") or dc.get("id"),
+                    "region": dc.get("region"),
+                    "gpus": [g for g in gpus if g["availability"] != "NONE"],
+                }
+            )
+        out.sort(key=lambda d: (-len(d["gpus"]), str(d["id"])))
+        return out
 
     async def terminate_pod(self, pod_id: str) -> None:
         try:

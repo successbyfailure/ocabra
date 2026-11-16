@@ -52,6 +52,30 @@ class CloudNodeLaunch(BaseModel):
         max_length=10,
         description="Our model ids to download and load on the node once it joins",
     )
+    volume_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Network volume to mount as the node's model/backend cache. Pins the pod "
+            "to the volume's data center and Secure Cloud."
+        ),
+    )
+
+
+class CloudVolumeCreate(BaseModel):
+    """A network volume for models and backends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(default="ocabra-models", min_length=1, max_length=60)
+    size_gb: int = Field(..., ge=10, le=4096)
+    data_center: str = Field(..., min_length=1, max_length=64)
+
+
+class CloudVolumeResize(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    size_gb: int = Field(..., ge=10, le=4096, description="New size; volumes only grow")
 
 
 class CloudNodeModels(BaseModel):

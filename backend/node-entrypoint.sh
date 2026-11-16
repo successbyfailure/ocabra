@@ -10,6 +10,37 @@ set -euo pipefail
 # start, not only after the first download.
 mkdir -p /data/models /data/hf_cache /data/ollama_models
 
+# Network volume (OCABRA_PERSIST_DIR, mounted by the hub when it launches the
+# pod with one): models, HF cache, Ollama store and backends live there, so a
+# new pod finds them already downloaded/installed. Nothing else goes there —
+# the database, Redis, batches and outputs stay on the ephemeral disk.
+if [ -n "${OCABRA_PERSIST_DIR:-}" ] && [ -d "${OCABRA_PERSIST_DIR}" ]; then
+    P="${OCABRA_PERSIST_DIR}"
+    mkdir -p "$P/models" "$P/hf_cache" "$P/ollama_models" "$P/backends"
+    for d in models hf_cache ollama_models; do
+        if [ -d "/data/$d" ] && [ ! -L "/data/$d" ]; then
+            cp -an "/data/$d/." "$P/$d/" 2>/dev/null || true
+            rm -rf "/data/$d"
+        fi
+        ln -sfn "$P/$d" "/data/$d"
+    done
+    if [ ! -L /data/backends ]; then
+        # Backends the image ships (llama.cpp) win over an older copy on the
+        # volume; the rest (installed on demand) stay as they are there.
+        for b in /data/backends/*/; do
+            [ -d "$b" ] || continue
+            name="$(basename "$b")"
+            if ! cmp -s "$b/metadata.json" "$P/backends/$name/metadata.json"; then
+                rm -rf "$P/backends/$name"
+                cp -a "$b" "$P/backends/$name"
+            fi
+        done
+        rm -rf /data/backends
+        ln -s "$P/backends" /data/backends
+    fi
+    echo "[ocabra-node] models and backends on the network volume at $P ($(du -sh "$P" 2>/dev/null | cut -f1))"
+fi
+
 PG_BIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
 PGDATA=/var/lib/postgresql/data
 
