@@ -1048,6 +1048,31 @@ class FederationManager:
             timeout=proxy_timeout,
         )
 
+    async def proxy_raw(
+        self,
+        peer: PeerState,
+        method: str,
+        path: str,
+        content: bytes,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Forward an arbitrary request to a peer; the response is *streamed*.
+
+        Used by the remote panel (our UI showing another node). Deliberately
+        does not count as traffic: an open panel polling every few seconds
+        would otherwise keep an idle cloud node alive forever. The caller must
+        ``aclose()`` the response.
+        """
+        client = self._require_client(peer)
+        request = client.build_request(
+            method,
+            f"{peer.base_url}{path}",
+            content=content or None,
+            headers=self._build_proxy_headers(peer, headers),
+            timeout=self._settings.federation_proxy_timeout_s,
+        )
+        return await client.send(request, stream=True)
+
     async def proxy_get(
         self,
         peer: PeerState,

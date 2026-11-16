@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.86.0 — 2026-11-16
+
+### Novedades
+
+- **Panel remoto.** Desde la página Federación, "Abrir panel" en un nodo
+  muestra en este mismo interfaz el dashboard, los modelos, las estadísticas,
+  etc. de ese nodo, y permite gestionarlo; funciona también con nodos sin URL
+  pública ni interfaz propio (como los de la nube). Por debajo es el nuevo
+  `/ocabra/federation/peers/{id}/proxy/{ruta}`, que reenvía la petición a ese
+  nodo por el enlace de la federación.
+
+### Cambios de comportamiento
+
+- **Un nodo "enjambre" deja gestionar más cosas al otro.** Con acceso
+  completo, el otro nodo puede llegar a toda la API de gestión salvo usuarios,
+  grupos, claves, la propia federación, la nube y los cambios de ajustes (que
+  sí puede leer). Antes solo podía cargar, descargar y bajar modelos. Hace
+  falta que el nodo remoto tenga esta versión.
+
+---
+
 ## 0.85.1 — 2026-11-16
 
 ### Correcciones

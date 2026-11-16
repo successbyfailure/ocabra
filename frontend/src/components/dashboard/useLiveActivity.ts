@@ -1,3 +1,4 @@
+import { getRemoteNode } from "@/lib/remoteNode"
 import { useEffect, useRef, useState } from "react"
 import { api } from "@/api/client"
 import type { ModelActivityMap } from "@/types"
@@ -38,7 +39,9 @@ export function useLiveActivity(): { data: ModelActivityMap; live: boolean; rece
     }
 
     const connect = () => {
-      if (cancelled) return
+      // Remote panel: this socket would carry *our* activity; the REST poll
+      // below goes through the panel proxy instead.
+      if (cancelled || getRemoteNode()) return
       try {
         ws = new WebSocket(wsUrl())
       } catch {

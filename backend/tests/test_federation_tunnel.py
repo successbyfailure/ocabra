@@ -200,23 +200,39 @@ def test_frame_too_short():
 
 
 @pytest.mark.parametrize(
-    ("path", "level", "allowed"),
+    ("path", "level", "method", "allowed"),
     [
-        ("/v1/chat/completions", "inference", True),
-        ("/api/chat", "inference", True),
-        ("/ocabra/federation/heartbeat", "inference", True),
-        ("/ocabra/models/x/load", "inference", False),
-        ("/ocabra/models/x/load", "full", True),
-        ("/ocabra/downloads", "full", True),
-        ("/ocabra/users", "full", False),
-        ("/ocabra/config", "full", False),
-        ("/ocabra/federation/invites", "full", False),
-        ("/v1/../ocabra/users", "full", False),
-        ("/v1//x", "full", False),
+        ("/v1/chat/completions", "inference", "POST", True),
+        ("/api/chat", "inference", "POST", True),
+        ("/ocabra/federation/heartbeat", "inference", "GET", True),
+        ("/ocabra/models/x/load", "inference", "POST", False),
+        ("/ocabra/stats/overview", "inference", "GET", False),
+        # full (swarm): the other node's admins can manage this one remotely...
+        ("/ocabra/models/x/load", "full", "POST", True),
+        ("/ocabra/downloads", "full", "POST", True),
+        ("/ocabra/stats/overview", "full", "GET", True),
+        ("/ocabra/profiles", "full", "GET", True),
+        ("/ocabra/status", "full", "GET", True),
+        ("/ocabra/federation/heartbeat", "full", "GET", True),
+        # ...but who-can-access-what and the federation stay local.
+        ("/ocabra/users", "full", "GET", False),
+        ("/ocabra/groups/g1/models", "full", "PUT", False),
+        ("/ocabra/auth/keys", "full", "POST", False),
+        ("/ocabra/federation/invites", "full", "POST", False),
+        ("/ocabra/federation/peers", "full", "GET", False),
+        ("/ocabra/cloud/nodes", "full", "POST", False),
+        ("/ocabra/host/power", "full", "POST", False),
+        ("/ocabra/ws", "full", "GET", False),
+        ("/ocabra/config", "full", "GET", True),
+        ("/ocabra/config", "full", "PATCH", False),
+        ("/ocabra/usersx", "full", "GET", True),  # prefix match is per path segment
+        ("/v1/../ocabra/users", "full", "GET", False),
+        ("/v1//x", "full", "GET", False),
+        ("/etc/passwd", "full", "GET", False),
     ],
 )
-def test_path_allowed(path, level, allowed):
-    assert path_allowed(path, level) is allowed
+def test_path_allowed(path, level, method, allowed):
+    assert path_allowed(path, level, method) is allowed
 
 
 def test_ws_url_for():

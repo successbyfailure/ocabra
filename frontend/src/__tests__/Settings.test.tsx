@@ -201,6 +201,10 @@ describe("Settings", () => {
       )
     })
 
-    expect(getItemSpy).not.toHaveBeenCalled()
+    // The legacy keys must not be read. (Other storage reads are fine: e.g.
+    // the remote-panel selection lives in sessionStorage, which shares
+    // Storage.prototype with localStorage.)
+    expect(getItemSpy).not.toHaveBeenCalledWith("ocabra.downloadDir")
+    expect(getItemSpy).not.toHaveBeenCalledWith("ocabra.maxTemperatureC")
   })
 })

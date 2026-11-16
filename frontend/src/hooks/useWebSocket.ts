@@ -8,6 +8,9 @@ import { useBackendsStore } from "@/stores/backendsStore"
 import { useAgentsStore } from "@/stores/agentsStore"
 import { useMCPStore } from "@/stores/mcpStore"
 import { api } from "@/api/client"
+import { getRemoteNode } from "@/lib/remoteNode"
+
+const REMOTE_POLL_MS = 5_000
 
 const getWebSocketUrl = () =>
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ocabra/ws`
@@ -156,7 +159,32 @@ export function useWebSocket() {
   const handleAgentEvent = useAgentsStore((state) => state.handleWSEvent)
   const handleMCPEvent = useMCPStore((state) => state.handleWSEvent)
 
+  const setModels = useModelStore((state) => state.setModels)
+
   useEffect(() => {
+    // Remote panel: our /ocabra/ws only carries *this* server's events, so
+    // poll the remote node's GPUs and models through the panel proxy instead.
+    if (getRemoteNode()) {
+      let stopped = false
+      const poll = async () => {
+        try {
+          const [gpus, models] = await Promise.all([api.gpus.list(), api.models.list()])
+          if (stopped) return
+          setGpus(gpus)
+          setModels(models)
+          setConnected(true)
+        } catch {
+          if (!stopped) setConnected(false)
+        }
+      }
+      void poll()
+      const timer = window.setInterval(() => void poll(), REMOTE_POLL_MS)
+      return () => {
+        stopped = true
+        window.clearInterval(timer)
+      }
+    }
+
     let cancelled = false
 
     function connect() {
@@ -229,7 +257,7 @@ export function useWebSocket() {
       }
       wsRef.current?.close()
     }
-  }, [setGpus, updateJob, updateModel, updateService, handleBackendEvent, handleAgentEvent, handleMCPEvent])
+  }, [setGpus, setModels, updateJob, updateModel, updateService, handleBackendEvent, handleAgentEvent, handleMCPEvent])
 
   return { connected, lastEvent }
 }

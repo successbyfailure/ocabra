@@ -244,3 +244,38 @@ async def test_public_request_guards(two_nodes):
     await svc.create_request({"node_id": "n0", "node_name": "n0"}, source_ip="8.8.8.8")
     names = [r["remote_node_name"] for r in await svc.list_requests()]
     assert names.count("n0") == 1
+
+
+@requires_db
+async def test_remote_panel_reaches_the_node_api_but_not_its_access_control(two_nodes):
+    fm_a, fm_b, url_a, _, local_b = two_nodes
+    invite = await fm_a.join_service.create_invite(label="panel")
+    peer_on_b = await fm_b.join_service.join(url_a, invite_code=invite["code"])
+    peer_on_a = _only_peer(fm_a)
+    assert await _wait(lambda: peer_on_a.online and peer_on_b.online)
+    before = peer_on_a.requests_proxied
+
+    # A management page of B, as A's UI would ask for it.
+    resp = await fm_a.proxy_raw(
+        peer_on_a, "POST", "/v1/echo?x=1", b'{"a":1}', {"content-type": "application/json"}
+    )
+    body = await resp.aread()
+    await resp.aclose()
+    assert resp.status_code == 201 and body == b'{"a":1}'
+    assert local_b.seen[-1].url.params["x"] == "1"
+
+    # Who can access what stays B's business: refused on B, never reaches its API.
+    seen_before = len(local_b.seen)
+    for method, path in (
+        ("GET", "/ocabra/users"),
+        ("POST", "/ocabra/auth/keys"),
+        ("PATCH", "/ocabra/config"),
+    ):
+        resp = await fm_a.proxy_raw(peer_on_a, method, path, b"", {})
+        await resp.aread()
+        await resp.aclose()
+        assert resp.status_code == 403, (method, path)
+    assert len(local_b.seen) == seen_before
+
+    # Looking at a node's panel is not traffic: it must not keep it from idling.
+    assert peer_on_a.requests_proxied == before

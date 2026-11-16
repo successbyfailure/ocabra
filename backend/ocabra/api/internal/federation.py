@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
+from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
@@ -1055,3 +1056,67 @@ async def join_check(
     if peer.join_state == "pending" and fm.join_service is not None:
         await fm.join_service.check_outgoing(peer)
     return _peer_out(peer)
+
+
+# ── Remote panel: our UI showing another node ───────────────────
+
+_PANEL_PASS_HEADERS = ("content-type", "accept")
+_PANEL_RETURN_HEADERS = ("content-type", "content-disposition", "cache-control")
+
+
+@router.api_route(
+    "/federation/peers/{peer_id}/proxy/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    summary="Remote panel proxy",
+    description=(
+        "Forward a request to a federated node's API through the federation "
+        "link, so this node's UI can show and manage it. Requires full access "
+        "to the peer; the peer itself refuses users, groups, keys, its "
+        "federation and config changes."
+    ),
+    responses={
+        400: {"description": "Path outside the node's API"},
+        403: {"description": "Peer does not have full access"},
+        502: {"description": "Peer is offline or unreachable"},
+    },
+)
+async def remote_panel_proxy(
+    peer_id: str,
+    path: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+):
+    """Proxy one request of the remote panel to *peer_id*.
+
+    Returns:
+        The peer's response (status, content type and body, streamed).
+    """
+    from starlette.background import BackgroundTask
+
+    peer = await _get_full_access_peer(peer_id, request)
+    fm = _get_federation_manager(request)
+    target = "/" + path.lstrip("/")
+    if not target.startswith(("/ocabra/", "/v1/", "/api/")) and target not in (
+        "/health",
+        "/ready",
+        "/version",
+    ):
+        raise HTTPException(status_code=400, detail="Path outside the node's API")
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() in _PANEL_PASS_HEADERS}
+    try:
+        resp = await fm.proxy_raw(peer, request.method, target, await request.body(), headers)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Peer '{peer.name}' unreachable: {exc}"
+        ) from exc
+    out_headers = {
+        k: v for k, v in resp.headers.items() if k.lower() in _PANEL_RETURN_HEADERS
+    }
+    return StreamingResponse(
+        resp.aiter_raw(),
+        status_code=resp.status_code,
+        headers=out_headers,
+        background=BackgroundTask(resp.aclose),
+    )

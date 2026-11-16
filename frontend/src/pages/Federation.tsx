@@ -10,6 +10,7 @@ import {
   Inbox,
   Link2,
   Loader2,
+  MonitorSmartphone,
   Network,
   Plus,
   RefreshCw,
@@ -24,6 +25,7 @@ import {
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { CloudSection } from "@/components/federation/CloudSection"
+import { enterRemoteNode } from "@/lib/remoteNode"
 import type {
   FederationInvite,
   FederationJoinRequest,
@@ -730,6 +732,16 @@ function PeerCard({ peer, onChanged }: { peer: FederationPeer; onChanged: () => 
         >
           {peer.enabled ? "Desactivar" : "Activar"}
         </button>
+        {peer.access_level === "full" && peer.online && (
+          <button
+            type="button"
+            className={btnCls}
+            title="Ver y gestionar ese nodo desde aquí"
+            onClick={() => enterRemoteNode({ id: peer.peer_id, name: peer.name })}
+          >
+            <MonitorSmartphone size={12} /> Abrir panel
+          </button>
+        )}
         <button type="button" className={`${btnCls} text-red-600 dark:text-red-300`} disabled={busy !== null} onClick={remove}>
           <Trash2 size={12} /> Quitar
         </button>

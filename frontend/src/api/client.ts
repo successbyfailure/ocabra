@@ -2,6 +2,7 @@
 // Stream 1-D fills in the method implementations.
 // Streams 4-A/B/C/D consume this client.
 
+import { remotePath } from "@/lib/remoteNode";
 import type {
   ContextProbeJob,
   BackendType,
@@ -1873,7 +1874,7 @@ export async function request<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${BASE}${remotePath(path)}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
@@ -2740,7 +2741,7 @@ export const api = {
       const form = new FormData();
       form.append("file", file);
       const res = await fetch(
-        `${BASE}/ocabra/profiles/${encodeURIComponent(profileId)}/assets`,
+        `${BASE}${remotePath(`/ocabra/profiles/${encodeURIComponent(profileId)}/assets`)}`,
         {
           method: "POST",
           body: form,
@@ -3092,7 +3093,7 @@ export const api = {
       const form = new FormData();
       form.append("file", file);
       form.append("purpose", purpose);
-      const res = await fetch(`${BASE}/v1/files`, {
+      const res = await fetch(`${BASE}${remotePath("/v1/files")}`, {
         method: "POST",
         body: form,
       });
@@ -3183,7 +3184,7 @@ export const api = {
     },
     logs: async (backendType: string): Promise<string> => {
       const res = await fetch(
-        `${BASE}/ocabra/backends/${encodeURIComponent(backendType)}/logs`,
+        `${BASE}${remotePath(`/ocabra/backends/${encodeURIComponent(backendType)}/logs`)}`,
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));

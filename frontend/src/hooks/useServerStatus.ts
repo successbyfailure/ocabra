@@ -1,3 +1,4 @@
+import { remotePath } from "@/lib/remoteNode"
 import { useEffect, useState } from "react"
 
 export interface ServerStatus {
@@ -24,7 +25,7 @@ export function useServerStatus(intervalMs = 5000): ServerStatus | null {
 
     const poll = async () => {
       try {
-        const r = await fetch("/ocabra/status", {
+        const r = await fetch(remotePath("/ocabra/status"), {
           signal: controller.signal,
           credentials: "include",
         })

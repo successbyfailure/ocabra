@@ -252,10 +252,9 @@ class _ServedStream:
 
 
 # What a peer can ask our local API for. The service key's role is the real
-# access control; this is defence in depth so a peer can never reach admin
-# endpoints (users, config, keys...) whatever the key's role.
+# access control; this is defence in depth so a peer can never reach who-can-
+# access-what (users, groups, keys, federation) whatever the key's role.
 _PATHS_INFERENCE = ("/v1/", "/api/", "/ocabra/federation/heartbeat")
-_PATHS_FULL = _PATHS_INFERENCE + ("/ocabra/models", "/ocabra/downloads", "/ocabra/gpus")
 # Stripped before replaying the peer's request on our API: its credentials mean
 # nothing here, the service key is injected instead.
 _SERVER_STRIP = _HOP_BY_HOP | {
@@ -269,13 +268,43 @@ _SERVER_STRIP = _HOP_BY_HOP | {
 }
 
 
-def path_allowed(path: str, access_level: str) -> bool:
+# "full" (swarm: full control) reaches all of our API — the other node's admins
+# can manage this one from their own UI — except who-can-access-what and the
+# federation itself, which stay local decisions.
+_FULL_DENY = (
+    "/ocabra/auth",
+    "/ocabra/users",
+    "/ocabra/groups",
+    "/ocabra/federation",
+    "/ocabra/cloud",
+    "/ocabra/host",
+    "/ocabra/ws",
+)
+_FULL_READ_ONLY = ("/ocabra/config",)
+
+
+def _under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def path_allowed(path: str, access_level: str, method: str = "GET") -> bool:
     """Whether a tunnelled request may reach *path* on our local API."""
     clean = path.split("?", 1)[0]
     if ".." in clean or "//" in clean:
         return False
-    prefixes = _PATHS_FULL if access_level == "full" else _PATHS_INFERENCE
-    return any(clean == p.rstrip("/") or clean.startswith(p) for p in prefixes)
+    if access_level == "full":
+        if clean == "/ocabra/federation/heartbeat":
+            return True
+        if any(_under(clean, p) for p in _FULL_DENY):
+            return False
+        if any(_under(clean, p) for p in _FULL_READ_ONLY):
+            return method.upper() == "GET"
+        return any(clean.startswith(p) for p in ("/v1/", "/api/", "/ocabra/")) or clean in (
+            "/health",
+            "/ready",
+            "/version",
+        )
+    return any(clean == p.rstrip("/") or clean.startswith(p) for p in _PATHS_INFERENCE)
 
 
 @dataclass
@@ -434,7 +463,7 @@ class TunnelConnection:
                     stream_id, 403, {"detail": "this node does not serve requests from you"}
                 )
                 return
-            if not path_allowed(path, server.access_level()):
+            if not path_allowed(path, server.access_level(), method):
                 await self._reply(
                     stream_id, 403, {"detail": f"path not offered to the federation: {path}"}
                 )

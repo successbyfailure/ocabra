@@ -28,6 +28,7 @@ import {
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { clsx } from "clsx"
 import { useAuthStore } from "@/stores/authStore"
+import { getRemoteNode, REMOTE_HIDDEN_ROUTES } from "@/lib/remoteNode"
 
 interface SidebarProps {
   open: boolean
@@ -147,12 +148,16 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
   const user = useAuthStore((s) => s.user)
   const hasRole = useAuthStore((s) => s.hasRole)
 
+  // Remote panel: hide what is refused on (or meaningless for) another node.
+  const remote = getRemoteNode()
+  const shownRemotely = (item: NavItem) => !remote || !REMOTE_HIDDEN_ROUTES.has(item.to)
+
   const visibleItems = NAV_ITEMS.filter(
-    (item) => !item.minRole || hasRole(item.minRole),
+    (item) => (!item.minRole || hasRole(item.minRole)) && shownRemotely(item),
   )
 
   const visibleAdminItems = ADMIN_NAV_ITEMS.filter(
-    (item) => !item.minRole || hasRole(item.minRole),
+    (item) => (!item.minRole || hasRole(item.minRole)) && shownRemotely(item),
   )
 
   return (
